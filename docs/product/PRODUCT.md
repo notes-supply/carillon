@@ -12,8 +12,8 @@ For the first useful release, an operator can:
 
 1. install Carillon without a development toolchain;
 2. create an agent from a plainly named system-prompt file and runtime resources;
-3. pair their Discord identity and hold a continuing private DM conversation through Pi;
-4. add an externally implemented Discord command or interface feature without rebuilding the Discord adapter;
+3. configure one private Discord server by immutable guild ID, pair their Discord identity within it, and hold a continuing conversation through Pi only inside that server;
+4. add an externally implemented guild-scoped Discord command or interface feature without rebuilding the Discord adapter;
 5. enable a Pi-native extension and an external agent capability;
 6. use those additions on subsequent turns while unrelated parts remain available;
 7. restart the Discord adapter, Pi runtime adapter, an interface extension, or a capability independently and continue safely;
@@ -59,6 +59,8 @@ External capabilities use the system-level boundary when they need independent l
 
 ### Identity and audience
 
+Discord admission is fail-closed to one configured private guild. The adapter rejects direct messages, events without guild identity, and events from every other guild before routing, model work, or extension and capability activity. Knowing, mentioning, or discovering the bot never grants authority.
+
 Authorization and routing use immutable platform identities. Human-readable names remain presentation metadata. An accepted event stays associated with its source audience, selected agent, interface adapter, runtime adapter, native continuation, and selected extensions and capabilities.
 
 Repeated delivery of the same external event does not create repeated model work or repeated replies.
@@ -87,6 +89,6 @@ Carillon runs as a small one-host service with durable local state and no extern
 
 ## First-release experience
 
-The first release demonstrates the composition model with a Discord interface adapter, one external Discord command extension, a Pi runtime adapter, one Pi-native extension, one Agent Skill, and one harmless external capability. It supports live activation, independent component restart, private DM continuity, and stopped-service backup and restore.
+The first release demonstrates the composition model with a Discord interface adapter, one external guild-scoped Discord command extension, a Pi runtime adapter, one Pi-native extension, one Agent Skill, and one harmless external capability. It supports live activation, independent component restart, private-server conversation continuity, and stopped-service backup and restore.
 
 It is successful when someone outside the design process can install it and complete the whole user journey without understanding the repository or manually repairing state.

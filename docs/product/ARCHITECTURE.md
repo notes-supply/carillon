@@ -33,6 +33,8 @@ An interface adapter owns its platform credential, authenticated connection, nat
 
 External interface extensions add commands and other features through a public adapter extension surface. They receive authorized, routed events or interaction handles and return typed responses or requested actions. The adapter validates and performs native side effects, so extensions do not need the platform token or unrestricted platform access.
 
+The first Discord installation is guild-scoped to one configured private server. Commands are registered there rather than globally, DM access is disabled, and `interface-discord` independently rejects DMs, missing guild identity, and nonmatching immutable guild IDs before core, extensions, capabilities, or model work. An absent allowlist fails closed, and every ingress path applies the same check.
+
 The first adapter is a separately supervised Rust Discord component using Twilight. Discord-specific hierarchy, interactions, and payloads remain Discord-native; immutable identity, audience, routing, causality, and delivery status remain understandable to Carillon.
 
 ## Runtime adapters
