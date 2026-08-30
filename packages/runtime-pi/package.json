@@ -8,8 +8,10 @@
     "carillon-runtime-pi": "./src/index.ts"
   },
   "dependencies": {
+    "@earendil-works/pi-ai": "0.84.4",
     "@earendil-works/pi-coding-agent": "0.84.4",
     "smol-toml": "1.6.0",
-    "typebox": "1.0.65"
+    "typebox": "1.0.65",
+    "ws": "8.21.3"
   }
 }

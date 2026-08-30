@@ -58,6 +58,7 @@ chmod 0750 /var/lib/carillon/agents/default/sessions
 chmod 0640 /var/lib/carillon/carillon.toml /var/lib/carillon/agents/default/SYSTEM.md /var/lib/carillon/agents/default/AGENTS.md /var/lib/carillon/agents/default/settings.json
 chown -R carillon-core:carillon-core /var/lib/carillon/state
 install -d -o carillon-core -g carillon -m 2750 /var/lib/carillon/state/resource-snapshots
+chown -R carillon-core:carillon /var/lib/carillon/state/resource-snapshots
 chown -R carillon-runtime:carillon-runtime /var/lib/carillon/state/components/runtime-pi
 chown -R carillon-capability:carillon-capability /var/lib/carillon/state/components/echo-capability
 chown root:carillon-core /var/lib/carillon/credentials/*.token

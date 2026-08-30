@@ -7,6 +7,7 @@ import {
   SettingsManager,
   type AgentSessionEvent,
 } from "@earendil-works/pi-coding-agent";
+import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
@@ -14,6 +15,8 @@ import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { Type } from "typebox";
 import { Parse } from "typebox/value";
+
+registerBunOAuthFlows();
 
 interface RuntimeConfig {
   readonly id: string;
