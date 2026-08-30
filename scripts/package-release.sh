@@ -14,7 +14,9 @@ mkdir -p "$STAGE/bin/theme" "$STAGE/bin/assets" "$STAGE/licenses" "$STAGE/system
 cd "$ROOT"
 cargo build --release --locked --bin carillon
 bun build --compile packages/runtime-pi/src/index.ts --outfile "$STAGE/bin/carillon-runtime-pi"
-bun build --compile "$PI_DIST/bundle/cli.js" --outfile "$STAGE/bin/pi"
+bun build --compile --no-compile-autoload-bunfig \
+  "$PI_DIST/bun/cli.js" "$PI_DIST/utils/image-resize-worker.js" \
+  --outfile "$STAGE/bin/pi"
 install -m 0755 target/release/carillon "$STAGE/bin/carillon"
 install -m 0755 scripts/install-release.sh "$STAGE/install.sh"
 install -m 0644 deploy/systemd/*.service "$STAGE/systemd/"
