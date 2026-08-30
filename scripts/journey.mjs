@@ -22,8 +22,16 @@ try {
     installation,
     "--guild-id",
     "100",
+    "--bot-user-id",
+    "201",
     "--user-id",
     "200",
+    "--route",
+    "300:always:channel",
+    "--route",
+    "301:mention:thread",
+    "--route",
+    "302:always:thread",
     "--base-port",
     String(basePort),
   );
@@ -55,9 +63,23 @@ try {
   const denied = await fetch(`http://127.0.0.1:${String(basePort + 1)}/v1/simulate`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(event("denied", "999", "200", "should not run")),
+    body: JSON.stringify(event("denied", "999", "200", "300", null, "should not run")),
   });
   assert.equal(denied.status, 403, "other guilds must fail closed");
+
+  const deniedRoute = await fetch(`http://127.0.0.1:${String(basePort + 1)}/v1/simulate`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(event("denied-route", "100", "200", "399", null, "should not run")),
+  });
+  assert.equal(deniedRoute.status, 403, "unconfigured channels must fail closed");
+
+  const ignoredMention = await fetch(`http://127.0.0.1:${String(basePort + 1)}/v1/simulate`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(event("ignored", "100", "200", "301", null, "no activation")),
+  });
+  assert.equal(ignoredMention.status, 204, "mention routes must ignore unmentioned messages");
 
   const first = await simulate("event-1", "hello");
   assert.match(first.delivery.content, /Local provider response 1/u);
@@ -102,6 +124,66 @@ try {
   const afterCapabilityRestart = await simulate("event-5", "use capability after its restart");
   assert.match(afterCapabilityRestart.delivery.content, /Local provider response 5/u);
   assert.match(afterCapabilityRestart.delivery.content, /external echo/u);
+
+  const channelFirst = JSON.parse(run("inspect", "--config", configPath(), first.receipt.turn_id));
+  const channelLater = JSON.parse(
+    run("inspect", "--config", configPath(), additions.receipt.turn_id),
+  );
+  assert.equal(
+    channelFirst.audience_id,
+    channelLater.audience_id,
+    "channel routes must share one continuation",
+  );
+
+  const threadParent = await simulateRoute(
+    "401",
+    "301",
+    null,
+    "<@201> start a thread while preserving <@999>",
+  );
+  assert.equal(threadParent.conversation_id, "discord-100-401");
+  assert.deepEqual(threadParent.feedback, ["processing", "delivered"]);
+  const threadChild = await simulateRoute("thread-child-1", "401", "301", "continue");
+  assert.equal(threadChild.conversation_id, threadParent.conversation_id);
+
+  await restart("discord");
+  const persistedThread = await simulateRoute(
+    "thread-child-2",
+    "401",
+    "301",
+    "continue after adapter restart",
+  );
+  assert.equal(
+    persistedThread.conversation_id,
+    threadParent.conversation_id,
+    "Discord-owned thread participation must survive restart",
+  );
+
+  const adopted = await simulateRoute("thread-adopt", "402", "301", "<@201> adopt this thread");
+  const adoptedLater = await simulateRoute(
+    "thread-adopt-later",
+    "402",
+    "301",
+    "continue adopted thread",
+  );
+  assert.equal(adopted.conversation_id, adoptedLater.conversation_id);
+
+  const alwaysParent = await simulateRoute("403", "302", null, "always-active parent");
+  const alwaysChild = await simulateRoute("always-child", "404", "302", "always-active child");
+  assert.notEqual(alwaysParent.conversation_id, alwaysChild.conversation_id);
+
+  const channelChild = await fetch(`http://127.0.0.1:${String(basePort + 1)}/v1/simulate`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(event("channel-child", "100", "200", "405", "300", "reject child")),
+  });
+  assert.equal(channelChild.status, 403, "channel conversations must not inherit child threads");
+
+  run("component", "--config", configPath(), "runtime-pi", "disable");
+  const failed = await simulateRoute("failed-before-delivery", "300", null, "cannot run");
+  assert.equal(failed.receipt.state, "interrupted");
+  assert.deepEqual(failed.feedback, ["processing", "failed"]);
+  run("component", "--config", configPath(), "runtime-pi", "enable");
 
   await stop("discord");
   const abandoned = await submitCoreEvent("event-delivery-crash", "claim then crash");
@@ -178,7 +260,7 @@ try {
 
   const status = JSON.parse(run("status", "--config", configPath()));
   assert.ok(status.components.every((component) => component.status === "ready"));
-  assert.equal(status.turns.interrupted, 0);
+  assert.equal(status.turns.interrupted, 1);
   assert.equal(status.deliveries.uncertain, 1);
 
   await stopAll();
@@ -195,7 +277,10 @@ try {
   process.stdout.write(
     `${JSON.stringify(
       {
-        admission: "fail-closed",
+        admission: "guild, user, and immutable routes fail closed",
+        activation: ["mention", "always"],
+        conversations: ["thread adoption persisted", "channel continuity"],
+        feedback: ["processing", "delivered", "failed", "uncertain"],
         duplicate: "deduplicated",
         command_extension: "active",
         pi_resources: "active",
@@ -205,7 +290,7 @@ try {
         native_runtime_reconciliation: "completed from session evidence",
         diagnostics: "authenticated and discoverable by event",
         inspected_turn: afterCapabilityRestart.receipt.turn_id,
-        backup_restore: "continued at turn 7",
+        backup_restore: "continued safely",
       },
       null,
       2,
@@ -235,15 +320,26 @@ function run(...args) {
   return execFileSync(binary, args, { encoding: "utf8" }).trim();
 }
 
-function event(eventId, guildId, userId, content) {
-  return { event_id: eventId, guild_id: guildId, user_id: userId, channel_id: "300", content };
+function event(eventId, guildId, userId, channelId, parentChannelId, content) {
+  return {
+    event_id: eventId,
+    guild_id: guildId,
+    user_id: userId,
+    channel_id: channelId,
+    parent_channel_id: parentChannelId,
+    content,
+  };
 }
 
 async function simulate(eventId, content) {
+  return simulateRoute(eventId, "300", null, content);
+}
+
+async function simulateRoute(eventId, channelId, parentChannelId, content) {
   const response = await fetch(`http://127.0.0.1:${String(basePort + 1)}/v1/simulate`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(event(eventId, "100", "200", content)),
+    body: JSON.stringify(event(eventId, "100", "200", channelId, parentChannelId, content)),
   });
   const body = await response.text();
   assert.equal(response.status, 200, body);
@@ -257,7 +353,15 @@ async function submitCoreEvent(eventId, content) {
       authorization: `Bearer ${await credentialValue("discord-private")}`,
       "content-type": "application/json",
     },
-    body: JSON.stringify(event(eventId, "100", "200", content)),
+    body: JSON.stringify({
+      event_id: eventId,
+      guild_id: "100",
+      user_id: "200",
+      audience_id: "discord-100-300",
+      delivery_target_id: "300",
+      feedback_target_id: `300:${eventId}`,
+      content,
+    }),
   });
   const body = await response.text();
   assert.equal(response.status, 200, body);

@@ -14,16 +14,26 @@ use tar::{Archive, Builder};
 
 use crate::{
     config::{
-        AgentConfig, Component, ComponentRole, Config, CoreConfig, DiscordConfig, LoadedConfig,
-        RELEASE_VERSION, hash_token, new_token,
+        AgentConfig, Component, ComponentRole, Config, CoreConfig, DiscordConfig, DiscordRoute,
+        LoadedConfig, RELEASE_VERSION, hash_token, new_token,
     },
     db::Database,
 };
 
-const DEFAULT_SYSTEM: &str =
-    "You are a private Carillon agent. Help the operator directly and concisely.\n";
-const DEFAULT_CONTEXT: &str =
-    "Treat Discord messages as private operator requests. Never expose credentials.\n";
+const DEFAULT_SYSTEM: &str = r"You are Carillon, a capable general-purpose agent.
+
+Help the user understand, decide, create, and act. Think independently, speak plainly, and recommend the best course when one is clear. Identify flawed assumptions and important consequences.
+
+Use available tools when useful. Act on clear, sufficiently authorized requests; ask before consequential actions whose scope is unclear. Prefer the smallest complete solution. Be honest about uncertainty and failure, and never claim unverified success.
+";
+const DEFAULT_CONTEXT: &str = r"Use only capabilities and resources available in the current environment.
+
+Lead with the result, decision, blocker, or required action. Keep operational narration proportional.
+
+Never expose credentials or place secrets in messages, prompts, sessions, ordinary logs, or commands.
+
+Treat each conversation according to context supplied by its interface. Do not import assumptions from unrelated conversations.
+";
 const NATIVE_EXTENSION: &str = r#"export default function carillonContext(pi) {
   pi.on("before_agent_start", async (event) => ({
     systemPrompt: `${event.systemPrompt}\n\nCarillon native extension active: preserve audience and turn continuity.`,
@@ -55,28 +65,18 @@ impl ServiceLock {
 pub fn initialize(
     root: &Path,
     guild_id: &str,
+    bot_user_id: &str,
     users: &[String],
+    routes: &[DiscordRoute],
     base_port: u16,
 ) -> Result<PathBuf> {
-    if guild_id.is_empty() || users.is_empty() {
-        bail!("a Discord guild ID and at least one immutable user ID are required");
+    if guild_id.is_empty() || bot_user_id.is_empty() || users.is_empty() || routes.is_empty() {
+        bail!("Discord guild, bot, user, and channel route IDs are required");
     }
     if root.exists() && fs::read_dir(root)?.next().is_some() {
         bail!("installation root {} is not empty", root.display());
     }
-    fs::create_dir_all(root)?;
-    for directory in [
-        "state",
-        "credentials",
-        "state/components/runtime-pi",
-        "state/components/echo-capability",
-        "agents/default/extensions",
-        "agents/default/skills",
-        "agents/default/sessions",
-        "examples",
-    ] {
-        fs::create_dir_all(root.join(directory))?;
-    }
+    create_installation_directories(root)?;
     let discord_token = new_token();
     let operator_token = new_token();
     let runtime_token = new_token();
@@ -95,7 +95,15 @@ pub fn initialize(
             version: RELEASE_VERSION.to_owned(),
             listen: SocketAddr::new(loopback, checked_port(base_port, 1)?),
             guild_id: guild_id.to_owned(),
+            bot_user_id: bot_user_id.to_owned(),
             allowed_user_ids: users.to_vec(),
+            routes: routes.to_vec(),
+            typing: true,
+            reactions: true,
+            processing_emoji: "👀".to_owned(),
+            delivered_emoji: "✅".to_owned(),
+            failed_emoji: "❌".to_owned(),
+            uncertain_emoji: "⚠️".to_owned(),
             token_hash: hash_token(&discord_token),
         },
         agent: AgentConfig {
@@ -128,6 +136,7 @@ pub fn initialize(
             enabled: false,
         },
     };
+    config.validate()?;
     let config_path = root.join("carillon.toml");
     atomic_write(
         &config_path,
@@ -158,6 +167,24 @@ pub fn initialize(
     Ok(config_path)
 }
 
+fn create_installation_directories(root: &Path) -> Result<()> {
+    fs::create_dir_all(root)?;
+    for directory in [
+        "state",
+        "credentials",
+        "state/components/discord",
+        "state/components/runtime-pi",
+        "state/components/echo-capability",
+        "agents/default/extensions",
+        "agents/default/skills",
+        "agents/default/sessions",
+        "examples",
+    ] {
+        fs::create_dir_all(root.join(directory))?;
+    }
+    Ok(())
+}
+
 fn write_credentials(root: &Path, credentials: &[(&str, &str)]) -> Result<()> {
     for (id, token) in credentials {
         atomic_write(
@@ -181,10 +208,31 @@ pub fn set_component(config_path: &Path, id: &str, enabled: bool) -> Result<()> 
     .find(|component| component.id == id)
     .with_context(|| format!("component {id} is not configured"))?;
     component.enabled = enabled;
+    write_config(config_path, &config)
+}
+
+pub fn configure_discord(
+    config_path: &Path,
+    guild_id: &str,
+    bot_user_id: &str,
+    users: &[String],
+    routes: &[DiscordRoute],
+) -> Result<()> {
+    let text = fs::read_to_string(config_path)?;
+    let mut config: Config = toml::from_str(&text)?;
+    guild_id.clone_into(&mut config.discord.guild_id);
+    bot_user_id.clone_into(&mut config.discord.bot_user_id);
+    config.discord.allowed_user_ids = users.to_vec();
+    config.discord.routes = routes.to_vec();
+    config.validate()?;
+    write_config(config_path, &config)
+}
+
+fn write_config(config_path: &Path, config: &Config) -> Result<()> {
     let mode = fs::metadata(config_path)?.permissions().mode() & 0o777;
     atomic_write(
         config_path,
-        toml::to_string_pretty(&config)?.as_bytes(),
+        toml::to_string_pretty(config)?.as_bytes(),
         mode,
     )
 }

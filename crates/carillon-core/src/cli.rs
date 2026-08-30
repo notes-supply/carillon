@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -6,13 +6,16 @@ use tracing_subscriber::EnvFilter;
 
 use crate::{
     components::{serve_capability, serve_discord, serve_extension},
-    config::LoadedConfig,
+    config::{DiscordRoute, LoadedConfig},
     core::{
         fetch_inspection, fetch_models, fetch_recent, fetch_status, select_runtime_model,
         serialize_pretty, serve,
     },
     model::RuntimeModelSelection,
-    operations::{ServiceLock, backup, enable_demo_resources, initialize, restore, set_component},
+    operations::{
+        ServiceLock, backup, configure_discord, enable_demo_resources, initialize, restore,
+        set_component,
+    },
 };
 
 #[derive(Debug, Parser)]
@@ -33,10 +36,26 @@ enum Command {
         root: PathBuf,
         #[arg(long)]
         guild_id: String,
+        #[arg(long)]
+        bot_user_id: String,
         #[arg(long, required = true)]
         user_id: Vec<String>,
+        #[arg(long, required = true)]
+        route: Vec<DiscordRoute>,
         #[arg(long, default_value_t = 43_800)]
         base_port: u16,
+    },
+    ConfigureDiscord {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        guild_id: String,
+        #[arg(long)]
+        bot_user_id: String,
+        #[arg(long, required = true)]
+        user_id: Vec<String>,
+        #[arg(long, required = true)]
+        route: Vec<DiscordRoute>,
     },
     Core {
         #[arg(long)]
@@ -124,12 +143,21 @@ pub(crate) async fn run() -> Result<()> {
         Command::Init {
             root,
             guild_id,
+            bot_user_id,
             user_id,
+            route,
             base_port,
         } => {
-            let path = initialize(&root, &guild_id, &user_id, base_port)?;
+            let path = initialize(&root, &guild_id, &bot_user_id, &user_id, &route, base_port)?;
             println!("{}", path.display());
         }
+        Command::ConfigureDiscord {
+            config,
+            guild_id,
+            bot_user_id,
+            user_id,
+            route,
+        } => configure_discord_command(&config, &guild_id, &bot_user_id, &user_id, &route)?,
         Command::Core { config } => {
             let loaded = LoadedConfig::load(&config)?;
             let _lock = ServiceLock::acquire(&loaded.value.data_dir)?;
@@ -159,10 +187,7 @@ pub(crate) async fn run() -> Result<()> {
             set_component(&config, &id, action == "enable")?;
             println!("{id} {action}d");
         }
-        Command::EnableDemoResources { config } => {
-            enable_demo_resources(&LoadedConfig::load(&config)?)?;
-            println!("Pi-native extension and Agent Skill enabled");
-        }
+        Command::EnableDemoResources { config } => enable_demo_resources_command(&config)?,
         Command::Status { config } => {
             println!(
                 "{}",
@@ -203,6 +228,24 @@ pub(crate) async fn run() -> Result<()> {
             println!("{}", restore(&input, &target)?.display());
         }
     }
+    Ok(())
+}
+
+fn enable_demo_resources_command(config: &Path) -> Result<()> {
+    enable_demo_resources(&LoadedConfig::load(config)?)?;
+    println!("Pi-native extension and Agent Skill enabled");
+    Ok(())
+}
+
+fn configure_discord_command(
+    config: &Path,
+    guild_id: &str,
+    bot_user_id: &str,
+    user_id: &[String],
+    route: &[DiscordRoute],
+) -> Result<()> {
+    configure_discord(config, guild_id, bot_user_id, user_id, route)?;
+    println!("{}", config.display());
     Ok(())
 }
 

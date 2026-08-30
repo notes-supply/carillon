@@ -13,7 +13,7 @@ mise run check
 mise run package
 ```
 
-`mise run journey` uses local loopback services and a deterministic provider substitute. It exercises fail-closed Discord admission, continuing and recovered runtime state, duplicate event suppression, abandoned-delivery reconciliation, authenticated diagnostics, live interface-extension/capability/resource activation, independent component restarts, turn inspection, and stopped-service backup/restore.
+`mise run journey` uses local loopback services and a deterministic provider substitute. It exercises fail-closed Discord guild, user, and immutable-channel routing; mention and always activation; thread adoption and channel continuity; processing feedback; duplicate event suppression; continuing and recovered runtime state; abandoned-delivery reconciliation; authenticated diagnostics; live interface-extension/capability/resource activation; independent component restarts; turn inspection; and stopped-service backup/restore.
 
 `mise run package` creates `dist/carillon-0.0.0-linux-x86_64.tar.gz`. The archive contains three toolchain-free Linux executables, Pi's required interface assets and license notice, systemd service definitions, and an installer. The target host needs systemd and standard Linux administration tools, not Rust, Node, Bun, Mise, or a source checkout.
 
@@ -24,10 +24,14 @@ Extract the release archive, then run its installer as root:
 ```text
 sudo ./carillon-0.0.0/install.sh \
   --guild-id 123456789012345678 \
-  --user-id 234567890123456789
+  --bot-user-id 345678901234567890 \
+  --user-id 234567890123456789 \
+  --route 456789012345678901:mention:thread \
+  --route 567890123456789012:always:channel
+
 ```
 
-The installer creates scoped service users, `/opt/carillon/bin`, `/var/lib/carillon`, Pi-private `/var/lib/pi-carillon`, the Discord credential placeholder, and five independent systemd units. It does not start or enable them.
+The installer creates scoped service users, `/opt/carillon/bin`, `/var/lib/carillon`, Pi-private `/var/lib/pi-carillon`, the Discord credential placeholder, explicit Discord routing and feedback defaults, and five independent systemd units. It does not start or enable them and performs no network access.
 
 1. Put the Discord bot token in `/etc/carillon/discord.token`; keep mode `0600`.
 2. Open Pi against its private state directory:
@@ -40,7 +44,7 @@ sudo runuser -u carillon-runtime -- \
 
 Run `/login` in Pi and complete the provider's native login flow.
 
-3. Enable the Discord bot's Guilds, Guild Messages, and privileged Message Content intents.
+3. Enable the Discord bot's Guilds, Guild Messages, and privileged Message Content intents. Grant each routed channel View Channel, Send Messages, Send Messages in Threads, Create Public Threads, Read Message History, and Add Reactions.
 4. Start the services:
 
 ```text
@@ -58,9 +62,28 @@ sudo /opt/carillon/bin/carillon model \
   --config /var/lib/carillon/carillon.toml PROVIDER/MODEL
 ```
 
-An allowlisted guild member can make the same selection with Discord's native `/model` picker. The selection applies to subsequent turns; it does not alter an in-flight turn.
+An allowlisted guild member can make the same selection with Discord's native `/model` picker. `/model` is explicit activation but is accepted only in a configured route (or an eligible child thread). The selection applies to subsequent turns; it does not alter an in-flight turn.
 
-The Discord adapter rejects direct messages, other guilds, and users outside the immutable ID allowlist before contacting core. Ordinary guild messages go to the selected Pi continuation. `!carillon <argument>` is the external guild command surface; the credential-owning adapter performs delivery.
+The Discord adapter rejects direct messages, other guilds, users outside the immutable ID allowlist, and channels outside `[[discord.routes]]` before contacting core or discovering models. Each route explicitly sets `activation = "mention" | "always"` and `conversation = "thread" | "channel"`. Mention routes strip only the configured bot user's immutable `<@ID>` mention. Thread routes create or adopt thread-scoped continuations; channel routes keep one continuation in the configured channel and reject child threads.
+
+Generated configuration enables typing and reactions independently and names every terminal emoji explicitly:
+
+```toml
+[discord]
+typing = true
+reactions = true
+processing_emoji = "👀"
+delivered_emoji = "✅"
+failed_emoji = "❌"
+uncertain_emoji = "⚠️"
+
+[[discord.routes]]
+channel_id = "456789012345678901"
+activation = "mention"
+conversation = "thread"
+```
+
+Emoji values accept Unicode or canonical Discord custom `name:id` syntax and are validated at service startup. Ignored traffic produces no typing, reactions, core work, or replies. Accepted messages receive processing feedback; it transitions to delivered, failed before delivery, or uncertain delivery without changing the underlying turn truth if Discord rejects a feedback operation. `!carillon <argument>` remains the external guild command surface inside the same routes.
 
 ## Operate and extend
 

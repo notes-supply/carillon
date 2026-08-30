@@ -59,11 +59,11 @@ External capabilities use the system-level boundary when they need independent l
 
 ### Identity and audience
 
-Discord is fail-closed to one configured private guild and explicitly allowlisted immutable user identities. Direct messages, events from other guilds, and events from users outside the allowlist—even inside the private guild—are rejected before model or capability work.
+Discord is fail-closed to one configured private guild, explicitly allowlisted immutable user identities, and explicit immutable channel routes. Every route selects mention or always activation and thread- or channel-scoped conversation continuity. Direct messages and traffic outside any of these identities are rejected before core, model discovery, extensions, capabilities, sessions, or runtime work.
 
-Authorization and routing use immutable platform identities. Human-readable names remain presentation metadata. An accepted event stays associated with its source audience, selected agent, interface adapter, runtime adapter, native continuation, and selected extensions and capabilities.
+Authorization and routing use immutable platform identities. Human-readable names remain presentation metadata. Discord owns thread adoption and persists it across adapter restarts; the core receives an opaque adapter-selected audience identity separately from its delivery target. An accepted event stays associated with its source audience, selected agent, interface adapter, runtime adapter, native continuation, and selected extensions and capabilities.
 
-Repeated delivery of the same external event does not create repeated model work or repeated replies.
+Repeated delivery of the same external event, including Discord's thread-starter event, does not create repeated model work or repeated replies.
 
 ### Agent configuration
 
@@ -89,6 +89,6 @@ Carillon runs as a small one-host service with durable local state and no extern
 
 ## First-release experience
 
-The first release demonstrates the composition model with a Discord interface adapter, one external guild-scoped Discord command extension, a Pi runtime adapter, one Pi-native extension, one Agent Skill, and one harmless external capability. It supports live activation, independent component restart, private-server conversation continuity, and stopped-service backup and restore.
+The first release demonstrates the composition model with a routed Discord interface adapter, one external guild-scoped Discord command extension, a Pi runtime adapter, one Pi-native extension, one Agent Skill, and one harmless external capability. It supports mention and always activation, thread and channel continuity, best-effort processing feedback, live activation, independent component restart, private-server conversation continuity, and stopped-service backup and restore.
 
 It is successful when someone outside the design process can install it and complete the whole user journey without understanding the repository or manually repairing state.

@@ -2,23 +2,29 @@
 set -eu
 
 usage() {
-  echo "usage: install.sh --guild-id ID --user-id ID [--user-id ID ...] [--base-port PORT]" >&2
+  echo "usage: install.sh --guild-id ID --bot-user-id ID --user-id ID [--user-id ID ...] --route CHANNEL_ID:mention|always:thread|channel [--route ...] [--base-port PORT]" >&2
   exit 2
 }
 
 GUILD_ID=
+BOT_USER_ID=
 USER_IDS=
+ROUTES=
 BASE_PORT=43800
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --guild-id) [ "$#" -ge 2 ] || usage; GUILD_ID=$2; shift 2 ;;
+    --bot-user-id) [ "$#" -ge 2 ] || usage; BOT_USER_ID=$2; shift 2 ;;
     --user-id) [ "$#" -ge 2 ] || usage; USER_IDS="$USER_IDS --user-id $2"; shift 2 ;;
+    --route) [ "$#" -ge 2 ] || usage; ROUTES="$ROUTES --route $2"; shift 2 ;;
     --base-port) [ "$#" -ge 2 ] || usage; BASE_PORT=$2; shift 2 ;;
     *) usage ;;
   esac
 done
 [ -n "$GUILD_ID" ] || usage
+[ -n "$BOT_USER_ID" ] || usage
 [ -n "$USER_IDS" ] || usage
+[ -n "$ROUTES" ] || usage
 [ "$(id -u)" -eq 0 ] || { echo "installer must run as root" >&2; exit 1; }
 
 SOURCE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -43,9 +49,15 @@ install -m 0644 "$SOURCE/licenses/pi-coding-agent.txt" /opt/carillon/licenses/
 install -m 0644 "$SOURCE"/systemd/*.service /etc/systemd/system/
 
 if [ ! -f /var/lib/carillon/carillon.toml ]; then
-  # USER_IDS intentionally expands into repeated, validated CLI arguments.
+  # USER_IDS and ROUTES intentionally expand into repeated, validated CLI arguments.
   # shellcheck disable=SC2086
-  /opt/carillon/bin/carillon init --root /var/lib/carillon --guild-id "$GUILD_ID" $USER_IDS --base-port "$BASE_PORT"
+  /opt/carillon/bin/carillon init --root /var/lib/carillon --guild-id "$GUILD_ID" \
+    --bot-user-id "$BOT_USER_ID" $USER_IDS $ROUTES --base-port "$BASE_PORT"
+else
+  # Existing installations retain credentials and state while admission is updated.
+  # shellcheck disable=SC2086
+  /opt/carillon/bin/carillon configure-discord --config /var/lib/carillon/carillon.toml \
+    --guild-id "$GUILD_ID" --bot-user-id "$BOT_USER_ID" $USER_IDS $ROUTES
 fi
 
 if [ ! -e /etc/carillon/discord.token ]; then install -m 0600 /dev/null /etc/carillon/discord.token; fi
@@ -61,6 +73,7 @@ install -d -o carillon-core -g carillon -m 2750 /var/lib/carillon/state/resource
 chown -R carillon-core:carillon /var/lib/carillon/state/resource-snapshots
 chown -R carillon-runtime:carillon-runtime /var/lib/carillon/state/components/runtime-pi
 chown -R carillon-capability:carillon-capability /var/lib/carillon/state/components/echo-capability
+install -d -o carillon-discord -g carillon-discord -m 0750 /var/lib/carillon/state/components/discord
 chown root:carillon-core /var/lib/carillon/credentials/*.token
 chmod 0640 /var/lib/carillon/credentials/*.token
 if [ "${CARILLON_SKIP_SYSTEMD_RELOAD:-0}" != "1" ]; then systemctl daemon-reload; fi

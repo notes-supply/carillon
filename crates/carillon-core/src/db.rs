@@ -30,7 +30,8 @@ pub struct PendingTurn {
     pub audience: String,
     pub runtime: String,
     pub interface: String,
-    pub channel: String,
+    pub target: String,
+    pub feedback_target: String,
     pub agent: String,
 }
 
@@ -65,6 +66,7 @@ impl Database {
                 audience_id TEXT NOT NULL,
                 user_id TEXT NOT NULL,
                 channel_id TEXT NOT NULL,
+                feedback_target_id TEXT NOT NULL,
                 input TEXT NOT NULL,
                 native_json TEXT NOT NULL,
                 accepted_at INTEGER NOT NULL,
@@ -103,6 +105,7 @@ impl Database {
                 turn_id TEXT NOT NULL UNIQUE,
                 interface_id TEXT NOT NULL,
                 channel_id TEXT NOT NULL,
+                feedback_target_id TEXT NOT NULL,
                 content TEXT NOT NULL,
                 state TEXT NOT NULL,
                 native_ref TEXT,
@@ -116,12 +119,32 @@ impl Database {
             );",
         )?;
         let has_claim_owner: bool = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('deliveries') WHERE name = 'claim_owner')",
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info('deliveries') WHERE name = 'claim_owner'
+            )",
             [],
             |row| row.get(0),
         )?;
         if !has_claim_owner {
             connection.execute("ALTER TABLE deliveries ADD COLUMN claim_owner TEXT", [])?;
+        }
+        for (table, column) in [
+            ("events", "feedback_target_id"),
+            ("deliveries", "feedback_target_id"),
+        ] {
+            let exists: bool = connection.query_row(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1)"
+                ),
+                [column],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                connection.execute(
+                    &format!("ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"),
+                    [],
+                )?;
+            }
         }
         Ok(())
     }
@@ -135,10 +158,7 @@ impl Database {
         components: &Value,
         resources: &ResourceSnapshot,
     ) -> Result<AcceptedTurn> {
-        let audience_id = event
-            .guild_id
-            .as_deref()
-            .context("accepted event lacks a guild audience")?;
+        let audience_id = &event.audience_id;
         let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
         let existing = transaction
@@ -160,14 +180,16 @@ impl Database {
         let turn_id = uuid::Uuid::now_v7().to_string();
         let now = timestamp()?;
         transaction.execute(
-            "INSERT INTO events(interface_id, event_id, audience_id, user_id, channel_id, input, native_json, accepted_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO events(interface_id, event_id, audience_id, user_id, channel_id,
+                 feedback_target_id, input, native_json, accepted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 interface_id,
                 event.event_id,
                 audience_id,
                 event.user_id,
-                event.channel_id,
+                event.delivery_target_id,
+                event.feedback_target_id,
                 event.content,
                 serde_json::to_string(&event.native)?,
                 now,
@@ -210,7 +232,8 @@ impl Database {
         &self,
         turn_id: &str,
         interface_id: &str,
-        channel_id: &str,
+        target_id: &str,
+        feedback_target_id: &str,
         response: &RuntimeTurnResponse,
     ) -> Result<()> {
         let mut connection = self.connect()?;
@@ -232,9 +255,17 @@ impl Database {
             bail!("turn {turn_id} was not active");
         }
         transaction.execute(
-            "INSERT INTO deliveries(turn_id, interface_id, channel_id, content, state, updated_at)
-             VALUES (?1, ?2, ?3, ?4, 'pending', ?5)",
-            params![turn_id, interface_id, channel_id, response.output, now],
+            "INSERT INTO deliveries(
+                turn_id, interface_id, channel_id, feedback_target_id, content, state, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6)",
+            params![
+                turn_id,
+                interface_id,
+                target_id,
+                feedback_target_id,
+                response.output,
+                now
+            ],
         )?;
         transaction.commit()?;
         Ok(())
@@ -285,7 +316,8 @@ impl Database {
     pub fn pending_turns(&self) -> Result<Vec<PendingTurn>> {
         let connection = self.connect()?;
         let mut statement = connection.prepare(
-            "SELECT t.id, t.audience_id, t.runtime_id, t.interface_id, e.channel_id, t.agent_id
+            "SELECT t.id, t.audience_id, t.runtime_id, t.interface_id, e.channel_id,
+                    e.feedback_target_id, t.agent_id
              FROM turns t
              JOIN events e ON e.interface_id = t.interface_id AND e.event_id = t.event_id
              WHERE t.state IN ('accepted', 'processing') ORDER BY t.started_at",
@@ -296,8 +328,9 @@ impl Database {
                 audience: row.get(1)?,
                 runtime: row.get(2)?,
                 interface: row.get(3)?,
-                channel: row.get(4)?,
-                agent: row.get(5)?,
+                target: row.get(4)?,
+                feedback_target: row.get(5)?,
+                agent: row.get(6)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -311,13 +344,30 @@ impl Database {
         )?)
     }
 
-    pub fn reconcile_delivery_claims(&self, interface_id: &str, owner: &str) -> Result<usize> {
-        Ok(self.connect()?.execute(
+    pub fn reconcile_delivery_claims(
+        &self,
+        interface_id: &str,
+        owner: &str,
+    ) -> Result<Vec<String>> {
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
             "UPDATE deliveries SET state = 'uncertain', claim_owner = NULL, updated_at = ?3
              WHERE interface_id = ?1 AND state = 'delivering'
                AND (claim_owner IS NULL OR claim_owner <> ?2)",
             params![interface_id, owner, timestamp()?],
-        )?)
+        )?;
+        let feedback_target_ids = {
+            let mut statement = transaction.prepare(
+                "SELECT DISTINCT feedback_target_id FROM deliveries
+                 WHERE interface_id = ?1 AND state = 'uncertain' AND feedback_target_id <> ''",
+            )?;
+            statement
+                .query_map([interface_id], |row| row.get(0))?
+                .collect::<Result<Vec<String>, _>>()?
+        };
+        transaction.commit()?;
+        Ok(feedback_target_ids)
     }
 
     pub fn claim_delivery(&self, interface_id: &str, owner: &str) -> Result<Option<Delivery>> {
@@ -325,15 +375,16 @@ impl Database {
         let transaction = connection.transaction()?;
         let delivery = transaction
             .query_row(
-                "SELECT id, turn_id, channel_id, content FROM deliveries
+                "SELECT id, turn_id, channel_id, feedback_target_id, content FROM deliveries
                  WHERE interface_id = ?1 AND state = 'pending' ORDER BY id LIMIT 1",
                 [interface_id],
                 |row| {
                     Ok(Delivery {
                         id: row.get(0)?,
                         turn_id: row.get(1)?,
-                        channel_id: row.get(2)?,
-                        content: row.get(3)?,
+                        target_id: row.get(2)?,
+                        feedback_target_id: row.get(3)?,
+                        content: row.get(4)?,
                     })
                 },
             )
@@ -523,7 +574,9 @@ mod tests {
             event_id: "external-1".to_owned(),
             guild_id: Some("guild-1".to_owned()),
             user_id: "user-1".to_owned(),
-            channel_id: "channel-1".to_owned(),
+            audience_id: "conversation-1".to_owned(),
+            delivery_target_id: "channel-1".to_owned(),
+            feedback_target_id: "channel-1:message-1".to_owned(),
             content: "hello".to_owned(),
             native: json!({}),
         };
@@ -560,6 +613,7 @@ mod tests {
             &first.turn_id,
             "discord",
             "channel-1",
+            "channel-1:message-1",
             &RuntimeTurnResponse {
                 correlation_id: first.turn_id.clone(),
                 output: "reply".to_owned(),
@@ -574,7 +628,7 @@ mod tests {
         assert_eq!(delivery.content, "reply");
         assert_eq!(
             database.reconcile_delivery_claims("discord", "instance-b")?,
-            1
+            vec!["channel-1:message-1"]
         );
         let inspection = database
             .inspect_turn(&first.turn_id)?

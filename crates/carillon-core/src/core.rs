@@ -25,8 +25,8 @@ use crate::{
     config::{Component, LoadedConfig, RELEASE_VERSION, token_matches},
     db::{AcceptedTurn, Database},
     model::{
-        CapabilitySelection, Delivery, DeliveryAck, DeliveryOutcome, EventReceipt,
-        ExtensionRequest, ExtensionResponse, ExternalEvent, Health, ResourceSnapshot,
+        CapabilitySelection, Delivery, DeliveryAck, DeliveryOutcome, DeliveryReconciliation,
+        EventReceipt, ExtensionRequest, ExtensionResponse, ExternalEvent, Health, ResourceSnapshot,
         RuntimeEvidence, RuntimeModelSelection, RuntimeModels, RuntimeTurnRequest,
         RuntimeTurnResponse, SelectedComponent, StatusReport, TurnInspection, TurnSummary,
     },
@@ -137,7 +137,7 @@ async fn accept_event(
 ) -> Result<Json<EventReceipt>, ApiError> {
     let config = LoadedConfig::load(&state.config_path)?;
     authorize(&headers, &config.value.discord.token_hash)?;
-    admit(&config, &event)?;
+    admit(&event)?;
     let _guard = state.turns.lock().await;
     Ok(Json(process_event(&state, &config, event).await?))
 }
@@ -174,7 +174,8 @@ async fn process_event(
             state.database.complete_turn(
                 &accepted.turn_id,
                 &config.value.discord.id,
-                &event.channel_id,
+                &event.delivery_target_id,
+                &event.feedback_target_id,
                 &response,
             )?;
             Ok(EventReceipt {
@@ -211,10 +212,7 @@ async fn run_runtime(
     if !runtime.enabled {
         bail!("selected runtime adapter is disabled");
     }
-    let audience = event
-        .guild_id
-        .as_deref()
-        .context("event audience missing")?;
+    let audience = &event.audience_id;
     let continuation =
         state
             .database
@@ -230,7 +228,7 @@ async fn run_runtime(
     let request = RuntimeTurnRequest {
         correlation_id: turn_id.to_owned(),
         agent_id: config.value.agent.id.clone(),
-        audience_id: audience.to_owned(),
+        audience_id: audience.clone(),
         input: event.content.clone(),
         continuation_ref: continuation,
         resources,
@@ -319,16 +317,17 @@ async fn claim_delivery(
 async fn reconcile_delivery_claims(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<DeliveryReconciliation>, ApiError> {
     let config = LoadedConfig::load(&state.config_path)?;
     authorize(&headers, &config.value.discord.token_hash)?;
     let owner = adapter_instance(&headers)?;
-    let uncertain = state
+    let feedback_target_ids = state
         .database
         .reconcile_delivery_claims(&config.value.discord.id, owner)?;
-    Ok(Json(json!({ "uncertain": uncertain })))
+    Ok(Json(DeliveryReconciliation {
+        feedback_target_ids,
+    }))
 }
-
 async fn acknowledge_delivery(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -618,7 +617,8 @@ async fn reconcile_pending_turns(state: &AppState) -> Result<usize> {
                 state.database.complete_turn(
                     &pending.turn,
                     &pending.interface,
-                    &pending.channel,
+                    &pending.target,
+                    &pending.feedback_target,
                     &result,
                 )?;
                 info!(turn_id = %pending.turn, "recovered completed runtime work");
@@ -679,29 +679,17 @@ fn authorize_model_access(headers: &HeaderMap, config: &LoadedConfig) -> Result<
     Err(ApiError::forbidden("component authentication failed"))
 }
 
-fn admit(config: &LoadedConfig, event: &ExternalEvent) -> Result<(), ApiError> {
-    let guild = event
-        .guild_id
-        .as_deref()
-        .ok_or_else(|| ApiError::forbidden("direct messages are not accepted"))?;
-    if guild != config.value.discord.guild_id {
-        return Err(ApiError::forbidden(
-            "event is outside the configured private guild",
-        ));
-    }
-    if !config
-        .value
-        .discord
-        .allowed_user_ids
-        .iter()
-        .any(|user| user == &event.user_id)
+fn admit(event: &ExternalEvent) -> Result<(), ApiError> {
+    if event.event_id.is_empty()
+        || event.user_id.is_empty()
+        || event.audience_id.is_empty()
+        || event.delivery_target_id.is_empty()
+        || event.feedback_target_id.is_empty()
+        || event.content.trim().is_empty()
     {
-        return Err(ApiError::forbidden("user is not allowlisted"));
-    }
-    if event.event_id.is_empty() || event.channel_id.is_empty() || event.content.trim().is_empty() {
         return Err(ApiError {
             status: StatusCode::BAD_REQUEST,
-            message: "event ID, channel ID, and content are required".to_owned(),
+            message: "event identity, audience, targets, user, and content are required".to_owned(),
         });
     }
     Ok(())

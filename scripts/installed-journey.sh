@@ -13,7 +13,7 @@ fi
 
 podman run --rm --network host --env CARILLON_TEST_BASE_PORT="$BASE_PORT" -v "$RELEASE:/release:ro" "$IMAGE" /bin/sh -euxc '
   pacman -Sy --noconfirm curl shadow
-  CARILLON_SKIP_SYSTEMD_RELOAD=1 /release/install.sh --guild-id 100 --user-id 200 --base-port "$CARILLON_TEST_BASE_PORT"
+  CARILLON_SKIP_SYSTEMD_RELOAD=1 /release/install.sh --guild-id 100 --bot-user-id 201 --user-id 200 --route 300:always:channel --base-port "$CARILLON_TEST_BASE_PORT"
   /opt/carillon/bin/carillon component --config /var/lib/carillon/carillon.toml guild-command enable
   /opt/carillon/bin/carillon component --config /var/lib/carillon/carillon.toml echo-capability enable
   /opt/carillon/bin/carillon enable-demo-resources --config /var/lib/carillon/carillon.toml
@@ -47,12 +47,17 @@ podman run --rm --network host --env CARILLON_TEST_BASE_PORT="$BASE_PORT" -v "$R
   /opt/carillon/bin/carillon model --config /var/lib/carillon/carillon.toml deterministic/steady >/dev/null
   discord_port=$((CARILLON_TEST_BASE_PORT + 1))
   response=$(curl --fail --silent --show-error -X POST -H "content-type: application/json" --data "{\"event_id\":\"installed-event\",\"guild_id\":\"100\",\"user_id\":\"200\",\"channel_id\":\"300\",\"content\":\"installed identity turn\"}" "http://127.0.0.1:$discord_port/v1/simulate")
-  case "$response" in *"Local provider response 1"*) ;; *) printf "%s\n" "$response" >&2; exit 1;; esac
+  case "$response" in *"Local provider response 1"*"processing"*"delivered"*) ;; *) printf "%s\n" "$response" >&2; exit 1;; esac
 
   recent=$(/opt/carillon/bin/carillon recent --config /var/lib/carillon/carillon.toml --event-id installed-event)
   case "$recent" in *installed-event*) ;; *) printf "%s\n" "$recent" >&2; exit 1;; esac
 
-  CARILLON_SKIP_SYSTEMD_RELOAD=1 /release/install.sh --guild-id 100 --user-id 200 --base-port "$CARILLON_TEST_BASE_PORT" >/dev/null
+  CARILLON_SKIP_SYSTEMD_RELOAD=1 /release/install.sh --guild-id 100 --bot-user-id 201 --user-id 200 --route 300:always:channel --base-port "$CARILLON_TEST_BASE_PORT" >/dev/null
+  grep -q "typing = true" /var/lib/carillon/carillon.toml
+  grep -q "reactions = true" /var/lib/carillon/carillon.toml
+  grep -q "processing_emoji = " /var/lib/carillon/carillon.toml
+  grep -q "activation = \"always\"" /var/lib/carillon/carillon.toml
+  grep -q "conversation = \"channel\"" /var/lib/carillon/carillon.toml
   session_owner=$(stat -c %U /var/lib/carillon/agents/default/sessions/*.json)
   [ "$session_owner" = carillon-runtime ]
   snapshot_owner=$(stat -c %U /var/lib/carillon/state/resource-snapshots/*)

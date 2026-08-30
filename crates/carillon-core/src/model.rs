@@ -14,7 +14,9 @@ pub struct ExternalEvent {
     pub event_id: String,
     pub guild_id: Option<String>,
     pub user_id: String,
-    pub channel_id: String,
+    pub audience_id: String,
+    pub delivery_target_id: String,
+    pub feedback_target_id: String,
     pub content: String,
     #[serde(default)]
     pub native: Value,
@@ -132,8 +134,14 @@ pub struct CapabilityResponse {
 pub struct Delivery {
     pub id: i64,
     pub turn_id: String,
-    pub channel_id: String,
+    pub target_id: String,
+    pub feedback_target_id: String,
     pub content: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct DeliveryReconciliation {
+    pub feedback_target_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -202,6 +210,8 @@ pub struct SimulateRequest {
     pub guild_id: Option<String>,
     pub user_id: String,
     pub channel_id: String,
+    #[serde(default)]
+    pub parent_channel_id: Option<String>,
     pub content: String,
 }
 
@@ -209,4 +219,6 @@ pub struct SimulateRequest {
 pub struct SimulateResponse {
     pub receipt: EventReceipt,
     pub delivery: Option<Delivery>,
+    pub conversation_id: String,
+    pub feedback: Vec<String>,
 }
