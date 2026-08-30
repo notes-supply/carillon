@@ -84,22 +84,74 @@ pub struct RuntimeEvidence {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct RuntimeModel {
+pub struct RuntimeExecutionProfileModel {
     pub key: String,
     pub provider: String,
+    pub provider_name: String,
     pub id: String,
     pub name: String,
+    pub reasoning: Vec<String>,
+    pub service_tiers: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct RuntimeModels {
-    pub models: Vec<RuntimeModel>,
-    pub selected: Option<String>,
+pub struct ExecutionProfile {
+    pub model: String,
+    pub reasoning: Option<String>,
+    pub service_tier: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct RuntimeModelSelection {
+pub struct ExecutionProfileEvidence {
+    pub requested: ExecutionProfile,
+    pub effective: Option<ExecutionProfile>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeExecutionProfiles {
+    pub models: Vec<RuntimeExecutionProfileModel>,
+    pub selected: Option<ExecutionProfileEvidence>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionProfileScope {
+    CurrentConversation,
+    NewConversations,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ExecutionProfileSelection {
     pub key: String,
+    pub reasoning: Option<String>,
+    pub service_tier: Option<String>,
+    pub scope: ExecutionProfileScope,
+    pub audience_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeExecutionProfileSelection {
+    pub key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+    pub scope: ExecutionProfileScope,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continuation_ref: Option<String>,
+    pub agent_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audience_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ResourceSnapshot>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ExecutionProfileApplication {
+    pub scope: ExecutionProfileScope,
+    pub requested: ExecutionProfile,
+    pub effective: ExecutionProfile,
+    pub continuation_ref: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -193,6 +245,7 @@ pub struct StatusReport {
     pub deliveries: StateCounts,
     pub latest_backup: Option<String>,
     pub recent_turns: Vec<TurnSummary>,
+    pub execution_profile: Option<ExecutionProfileEvidence>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

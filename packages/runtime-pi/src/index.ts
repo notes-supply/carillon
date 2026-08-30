@@ -6,7 +6,9 @@ import {
   SessionManager,
   SettingsManager,
   type AgentSessionEvent,
+  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -15,6 +17,14 @@ import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { Type } from "typebox";
 import { Parse } from "typebox/value";
+import {
+  type ExecutionProfile,
+  type ExecutionProfileEvidence,
+  profileEvidence,
+  profileModel,
+  type RuntimeExecutionProfileModel,
+  type ServiceTier,
+} from "./profile.ts";
 
 registerBunOAuthFlows();
 
@@ -69,18 +79,25 @@ interface TurnResponse {
   readonly native: unknown;
   readonly capability_activity: readonly unknown[];
 }
-interface RuntimeModel {
-  readonly key: string;
-  readonly provider: string;
-  readonly id: string;
-  readonly name: string;
+interface RuntimeExecutionProfiles {
+  readonly models: readonly RuntimeExecutionProfileModel[];
+  readonly selected?: ExecutionProfileEvidence;
 }
-interface RuntimeModels {
-  readonly models: readonly RuntimeModel[];
-  readonly selected?: string;
-}
-interface RuntimeModelSelection {
+interface RuntimeExecutionProfileSelection {
   readonly key: string;
+  readonly reasoning?: ModelThinkingLevel;
+  readonly service_tier?: ServiceTier;
+  readonly scope: "current_conversation" | "new_conversations";
+  readonly continuation_ref?: string | null;
+  readonly agent_id: string;
+  readonly audience_id?: string | null;
+  readonly resources?: ResourceSnapshot | null;
+}
+interface ExecutionProfileApplication {
+  readonly scope: RuntimeExecutionProfileSelection["scope"];
+  readonly requested: ExecutionProfile;
+  readonly effective: ExecutionProfile;
+  readonly continuation_ref?: string;
 }
 
 interface Evidence {
@@ -98,6 +115,7 @@ interface CapabilityResponse {
   readonly native: unknown;
 }
 interface DeterministicSession {
+  readonly profile?: ExecutionProfile;
   readonly turns: readonly {
     readonly correlation_id: string;
     readonly input: string;
@@ -105,18 +123,24 @@ interface DeterministicSession {
   }[];
 }
 
-const DETERMINISTIC_MODELS: readonly RuntimeModel[] = [
+const DETERMINISTIC_MODELS: readonly RuntimeExecutionProfileModel[] = [
   {
     key: modelKey("deterministic", "steady"),
     provider: "deterministic",
+    provider_name: "Deterministic",
     id: "steady",
     name: "Steady",
+    reasoning: [],
+    service_tiers: [],
   },
   {
     key: modelKey("deterministic", "concise"),
     provider: "deterministic",
+    provider_name: "Deterministic",
     id: "concise",
     name: "Concise",
+    reasoning: [],
+    service_tiers: [],
   },
 ];
 
@@ -167,12 +191,37 @@ const EvidenceSchema = Type.Object({
   result: Type.Optional(TurnResponseSchema),
   error: Type.Optional(Type.String()),
 });
-const RuntimeModelSelectionSchema = Type.Object({ key: Type.String() });
+const ThinkingLevelSchema = Type.Union([
+  Type.Literal("off"),
+  Type.Literal("minimal"),
+  Type.Literal("low"),
+  Type.Literal("medium"),
+  Type.Literal("high"),
+  Type.Literal("xhigh"),
+  Type.Literal("max"),
+]);
+const ServiceTierSchema = Type.Union([Type.Literal("standard"), Type.Literal("fast")]);
+const ExecutionProfileSchema = Type.Object({
+  model: Type.String(),
+  reasoning: Type.Optional(ThinkingLevelSchema),
+  service_tier: Type.Optional(ServiceTierSchema),
+});
+const RuntimeExecutionProfileSelectionSchema = Type.Object({
+  key: Type.String(),
+  reasoning: Type.Optional(ThinkingLevelSchema),
+  service_tier: Type.Optional(ServiceTierSchema),
+  scope: Type.Union([Type.Literal("current_conversation"), Type.Literal("new_conversations")]),
+  continuation_ref: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  agent_id: Type.String(),
+  audience_id: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  resources: Type.Optional(Type.Union([ResourceSnapshotSchema, Type.Null()])),
+});
 const CapabilityResponseSchema = Type.Object({
   output: Type.String(),
   native: Type.Unknown(),
 });
 const DeterministicSessionSchema = Type.Object({
+  profile: Type.Optional(ExecutionProfileSchema),
   turns: Type.Array(
     Type.Object({
       correlation_id: Type.String(),
@@ -208,6 +257,7 @@ let token: string;
 let deterministic: boolean;
 let evidenceDirectory: string;
 let sessionDirectory: string;
+
 let privateSettings: SettingsManager;
 let modelRuntime: ModelRuntime | undefined;
 let runtimeInstance: string;
@@ -221,6 +271,7 @@ async function startRuntime(values: readonly string[]): Promise<void> {
   const privateStateDirectory = resolve(requiredArgument(args, "state-dir"));
   evidenceDirectory = join(config.dataDir, "components", config.runtime.id, "evidence");
   sessionDirectory = join(config.resourceRoot, "sessions");
+
   await mkdir(evidenceDirectory, { recursive: true });
   await mkdir(sessionDirectory, { recursive: true });
   await mkdir(privateStateDirectory, { recursive: true, mode: 0o700 });
@@ -263,8 +314,8 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
         "skills",
         "capability-tools",
         "durable-evidence",
-        "model-discovery",
-        "model-selection",
+        "execution-profile-discovery",
+        "execution-profile-selection",
       ],
       provider: deterministic ? "deterministic-local-substitute" : "pi",
     });
@@ -274,28 +325,32 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     writeJson(response, 403, { error: "component authentication failed" });
     return;
   }
-  if (request.method === "GET" && request.url === "/v1/models") {
-    writeJson(response, 200, await serialize(listModels));
+  if (request.method === "GET" && request.url === "/v1/execution-profiles") {
+    writeJson(response, 200, await serialize(listExecutionProfiles));
     return;
   }
-  if (request.method === "POST" && request.url === "/v1/models/refresh") {
-    const result = await serialize(refreshModels);
+  if (request.method === "POST" && request.url === "/v1/execution-profiles/refresh") {
+    const result = await serialize(refreshExecutionProfiles);
     writeJson(response, 200, result);
     return;
   }
-  if (request.method === "PUT" && request.url === "/v1/model") {
-    let selection: RuntimeModelSelection;
+  if (request.method === "PUT" && request.url === "/v1/execution-profile") {
+    let selection: RuntimeExecutionProfileSelection;
     try {
-      selection = Parse(RuntimeModelSelectionSchema, await readJson(request));
+      selection = Parse(RuntimeExecutionProfileSelectionSchema, await readJson(request));
     } catch {
-      writeJson(response, 400, { error: "invalid model selection" });
+      writeJson(response, 400, { error: "invalid execution-profile selection" });
       return;
     }
-    const result = await serialize(() => selectModel(selection.key));
-    if (result === undefined) {
-      writeJson(response, 400, { error: "model is not available" });
-    } else {
-      writeJson(response, 200, result);
+    try {
+      const result = await serialize(() => applyExecutionProfile(selection));
+      if (result === undefined) {
+        writeJson(response, 400, { error: "model is not available" });
+      } else {
+        writeJson(response, 200, result);
+      }
+    } catch (failure: unknown) {
+      writeJson(response, 400, { error: errorMessage(failure) });
     }
     return;
   }
@@ -325,20 +380,41 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
   writeJson(response, 404, { error: "not found" });
 }
 
-async function listModels(): Promise<RuntimeModels> {
-  const models: readonly RuntimeModel[] = deterministic
-    ? DETERMINISTIC_MODELS
-    : (await availablePiModels()).map((model) => ({
-        key: modelKey(model.provider, model.id),
-        provider: model.provider,
-        id: model.id,
-        name: model.name,
-      }));
-  const selected = selectedKey();
-  return { models, ...(selected === undefined ? {} : { selected }) };
+async function listExecutionProfiles(): Promise<RuntimeExecutionProfiles> {
+  if (deterministic) {
+    const selectedModel = DETERMINISTIC_MODELS.find((model) => model.key === selectedKey());
+    const selected =
+      selectedModel === undefined
+        ? unavailableProfileEvidence()
+        : {
+            requested: { model: `${selectedModel.provider}/${selectedModel.id}` },
+            effective: { model: `${selectedModel.provider}/${selectedModel.id}` },
+          };
+    return { models: DETERMINISTIC_MODELS, ...(selected === undefined ? {} : { selected }) };
+  }
+  const piModels = await availablePiModels();
+  const models = piModels.map((model) =>
+    profileModel(model, modelKey(model.provider, model.id), providerName(model.provider)),
+  );
+  const selectedModel = piModels.find(
+    (model) => modelKey(model.provider, model.id) === selectedKey(),
+  );
+  if (selectedModel === undefined) {
+    const selected = unavailableProfileEvidence();
+    return { models, ...(selected === undefined ? {} : { selected }) };
+  }
+  const requestedReasoning = selectedModel.reasoning
+    ? (privateSettings.getModelThinkingLevel(selectedModel.provider, selectedModel.id) ??
+      privateSettings.getDefaultThinkingLevel() ??
+      "medium")
+    : undefined;
+  return {
+    models,
+    selected: profileEvidence(selectedModel, requestedReasoning),
+  };
 }
 
-async function refreshModels(): Promise<RuntimeModels> {
+async function refreshExecutionProfiles(): Promise<RuntimeExecutionProfiles> {
   if (modelRuntime !== undefined) {
     await modelRuntime.refresh({
       allowNetwork: true,
@@ -346,19 +422,47 @@ async function refreshModels(): Promise<RuntimeModels> {
       signal: AbortSignal.timeout(15_000),
     });
   }
-  return listModels();
+  return listExecutionProfiles();
 }
 
-async function selectModel(key: string): Promise<RuntimeModels | undefined> {
-  const models = await listModels();
-  const selected = models.models.find((model) => model.key === key);
+async function applyExecutionProfile(
+  selection: RuntimeExecutionProfileSelection,
+): Promise<ExecutionProfileApplication | undefined> {
+  const profiles = await listExecutionProfiles();
+  const selected = profiles.models.find((model) => model.key === selection.key);
   if (selected === undefined) return undefined;
+  if (selection.reasoning !== undefined && !selected.reasoning.includes(selection.reasoning))
+    throw new Error(
+      `${selected.provider}/${selected.id} does not support ${selection.reasoning} reasoning`,
+    );
+  if (
+    selection.service_tier !== undefined &&
+    !selected.service_tiers.includes(selection.service_tier)
+  )
+    throw new Error(`${selected.provider}/${selected.id} does not support service tiers`);
+
+  if (selection.scope === "current_conversation")
+    return deterministic
+      ? applyDeterministicConversationProfile(selection, selected)
+      : applyPiConversationProfile(selection, selected);
+
   privateSettings.setDefaultModelAndProvider(selected.provider, selected.id);
-  await privateSettings.flush();
-  const [error] = privateSettings.drainErrors();
-  if (error !== undefined)
-    throw new Error(`Pi model selection could not be persisted: ${error.error.message}`);
-  return { ...models, selected: key };
+  if (selection.reasoning !== undefined)
+    privateSettings.setModelThinkingLevel(selected.provider, selected.id, selection.reasoning);
+  await flushPrivateSettings();
+  const evidence = deterministic
+    ? {
+        requested: { model: `${selected.provider}/${selected.id}` },
+        effective: { model: `${selected.provider}/${selected.id}` },
+      }
+    : profileEvidence(
+        await selectedPiModel(),
+        selection.reasoning ??
+          privateSettings.getModelThinkingLevel(selected.provider, selected.id) ??
+          privateSettings.getDefaultThinkingLevel() ??
+          "medium",
+      );
+  return { scope: selection.scope, ...evidence };
 }
 
 async function availablePiModels() {
@@ -373,6 +477,11 @@ async function availablePiModels() {
   return models;
 }
 
+function providerName(providerId: string): string {
+  const provider = modelRuntime?.getProvider(providerId);
+  return provider?.auth.oauth?.name ?? provider?.name ?? providerId;
+}
+
 async function selectedPiModel() {
   const provider = privateSettings.getDefaultProvider();
   const id = privateSettings.getDefaultModel();
@@ -384,11 +493,106 @@ async function selectedPiModel() {
     throw new Error(`selected Pi model ${provider}/${id} is not available`);
   return selected;
 }
+function unavailableProfileEvidence(): ExecutionProfileEvidence | undefined {
+  const provider = privateSettings.getDefaultProvider();
+  const id = privateSettings.getDefaultModel();
+  if (provider === undefined || id === undefined) return undefined;
+  const reasoning =
+    privateSettings.getModelThinkingLevel(provider, id) ??
+    privateSettings.getDefaultThinkingLevel();
+  return {
+    requested: {
+      model: `${provider}/${id}`,
+      ...(reasoning === undefined ? {} : { reasoning }),
+    },
+    effective: null,
+  };
+}
 
 function selectedKey(): string | undefined {
   const provider = privateSettings.getDefaultProvider();
   const id = privateSettings.getDefaultModel();
   return provider === undefined || id === undefined ? undefined : modelKey(provider, id);
+}
+async function flushPrivateSettings(): Promise<void> {
+  await privateSettings.flush();
+  const [error] = privateSettings.drainErrors();
+  if (error !== undefined)
+    throw new Error(`Pi execution profile could not be persisted: ${error.error.message}`);
+}
+
+async function applyDeterministicConversationProfile(
+  selection: RuntimeExecutionProfileSelection,
+  model: RuntimeExecutionProfileModel,
+): Promise<ExecutionProfileApplication> {
+  const sessionPath = profileContinuationPath(selection);
+  const session = await readDeterministicSession(sessionPath);
+  const profile = { model: `${model.provider}/${model.id}` };
+  await atomicJson(sessionPath, { ...session, profile });
+  return {
+    scope: selection.scope,
+    requested: profile,
+    effective: profile,
+    continuation_ref: sessionPath,
+  };
+}
+
+async function applyPiConversationProfile(
+  selection: RuntimeExecutionProfileSelection,
+  selected: RuntimeExecutionProfileModel,
+): Promise<ExecutionProfileApplication> {
+  const resources = selection.resources;
+  if (resources === null || resources === undefined)
+    throw new Error("current conversation scope needs resources");
+  const model = (await availablePiModels()).find(
+    (candidate) => candidate.provider === selected.provider && candidate.id === selected.id,
+  );
+  if (model === undefined) throw new Error("selected Pi model is unavailable");
+  const manager =
+    selection.continuation_ref === null || selection.continuation_ref === undefined
+      ? SessionManager.create(resolve(resources.root), sessionDirectory)
+      : SessionManager.open(validateContinuation(selection.continuation_ref));
+  const created = await createPiExecutionSession(
+    resolve(resources.root),
+    manager,
+    selection.continuation_ref === null || selection.continuation_ref === undefined
+      ? model
+      : undefined,
+  );
+  const { session, extensionsResult } = created;
+  try {
+    assertExtensionsLoaded(extensionsResult.errors);
+    await session.setModel(model);
+    if (selection.reasoning !== undefined) session.setThinkingLevel(selection.reasoning);
+    const requested: ExecutionProfile = {
+      model: `${model.provider}/${model.id}`,
+      ...(selection.reasoning === undefined ? {} : { reasoning: selection.reasoning }),
+    };
+    session.sessionManager.appendCustomEntry("carillon-execution-profile", requested);
+    const sessionFile = session.sessionFile;
+    if (sessionFile === undefined) throw new Error("Pi did not create durable session evidence");
+    const effective = profileEvidence(
+      session.model ?? model,
+      session.supportsThinking() ? session.thinkingLevel : undefined,
+    ).effective;
+    return {
+      scope: selection.scope,
+      requested,
+      effective,
+      continuation_ref: sessionFile,
+    };
+  } finally {
+    session.dispose();
+  }
+}
+
+function profileContinuationPath(selection: RuntimeExecutionProfileSelection): string {
+  if (selection.continuation_ref !== null && selection.continuation_ref !== undefined)
+    return validateContinuation(selection.continuation_ref);
+  const audience = selection.audience_id;
+  if (audience === null || audience === undefined || audience.length === 0)
+    throw new Error("current conversation scope needs an audience");
+  return join(sessionDirectory, `${safeName(selection.agent_id)}--${safeName(audience)}.json`);
 }
 
 async function executeTurn(request: TurnRequest): Promise<TurnResponse> {
@@ -415,9 +619,18 @@ async function executeTurn(request: TurnRequest): Promise<TurnResponse> {
 
 async function executeDeterministic(request: TurnRequest): Promise<TurnResponse> {
   const sessionPath = continuationPath(request);
-  const models = await listModels();
-  const selectedModel = models.models.find((model) => model.key === models.selected);
+  const prior = await readDeterministicSession(sessionPath);
+  const selectedModel = DETERMINISTIC_MODELS.find((model) => {
+    const reference = prior.profile?.model;
+    return reference === undefined
+      ? model.key === selectedKey()
+      : `${model.provider}/${model.id}` === reference;
+  });
   if (selectedModel === undefined) throw new Error("deterministic model selection is unavailable");
+  const executionProfile = {
+    requested: { model: `${selectedModel.provider}/${selectedModel.id}` },
+    effective: { model: `${selectedModel.provider}/${selectedModel.id}` },
+  };
   await writeEvidence({
     correlation_id: request.correlation_id,
     state: "processing",
@@ -426,10 +639,9 @@ async function executeDeterministic(request: TurnRequest): Promise<TurnResponse>
     native: {
       runtime_instance: runtimeInstance,
       resource_snapshot: toJsonResource(request.resources),
-      model: `${selectedModel.provider}/${selectedModel.id}`,
+      execution_profile: executionProfile,
     },
   });
-  const prior = await readDeterministicSession(sessionPath);
   const capabilityActivity: unknown[] = [];
   let capabilityText = "";
   if (
@@ -457,6 +669,7 @@ async function executeDeterministic(request: TurnRequest): Promise<TurnResponse>
   ];
   const output = `Local provider response ${String(prior.turns.length + 1)}: ${request.input}. ${markers.join("; ")}.${capabilityText}`;
   const next: DeterministicSession = {
+    profile: executionProfile.requested,
     turns: [
       ...prior.turns,
       { correlation_id: request.correlation_id, input: request.input, output },
@@ -470,7 +683,7 @@ async function executeDeterministic(request: TurnRequest): Promise<TurnResponse>
     native: {
       owner: "runtime-pi",
       provider: "deterministic-local-substitute",
-      model: `${selectedModel.provider}/${selectedModel.id}`,
+      execution_profile: executionProfile,
       message_count: next.turns.length * 2,
       resource_snapshot: toJsonResource(request.resources),
     },
@@ -479,19 +692,19 @@ async function executeDeterministic(request: TurnRequest): Promise<TurnResponse>
 }
 
 async function executePi(request: TurnRequest): Promise<TurnResponse> {
-  const runtime = modelRuntime;
-  if (runtime === undefined) throw new Error("Pi model runtime is unavailable");
   const root = resolve(request.resources.root);
-  const systemPrompt = await readFile(join(root, "SYSTEM.md"), "utf8");
-  const settingsManager = SettingsManager.create(root, root);
-  const loader = new DefaultResourceLoader({
-    cwd: root,
-    agentDir: root,
-    settingsManager,
-    systemPromptOverride: () => systemPrompt,
-  });
-  await loader.reload();
-  const model = await selectedPiModel();
+  const isNew = request.continuation_ref === null || request.continuation_ref === undefined;
+  const manager = isNew
+    ? SessionManager.create(root, sessionDirectory)
+    : SessionManager.open(validateContinuation(request.continuation_ref));
+  const persistedProfile = latestExecutionProfile(manager);
+  const defaultModel = isNew ? await selectedPiModel() : undefined;
+  const defaultReasoning =
+    defaultModel?.reasoning === true
+      ? (privateSettings.getModelThinkingLevel(defaultModel.provider, defaultModel.id) ??
+        privateSettings.getDefaultThinkingLevel() ??
+        "medium")
+      : undefined;
   const capabilityActivity: unknown[] = [];
   const capability = request.capability;
   const customTools =
@@ -517,73 +730,127 @@ async function executePi(request: TurnRequest): Promise<TurnResponse> {
             },
           }),
         ];
-  const manager =
-    request.continuation_ref === null || request.continuation_ref === undefined
-      ? SessionManager.create(root, sessionDirectory)
-      : SessionManager.open(validateContinuation(request.continuation_ref));
-  const { session, extensionsResult } = await createAgentSession({
+  const created = await createPiExecutionSession(
+    root,
+    manager,
+    defaultModel,
+    defaultReasoning,
+    customTools,
+  );
+  const { session, extensionsResult } = created;
+  try {
+    assertExtensionsLoaded(extensionsResult.errors);
+    const model = session.model;
+    if (model === undefined) throw new Error("Pi did not resolve a session model");
+    const requested: ExecutionProfile =
+      persistedProfile ??
+      ({
+        model: `${model.provider}/${model.id}`,
+        ...(model.reasoning ? { reasoning: defaultReasoning ?? session.thinkingLevel } : {}),
+      } satisfies ExecutionProfile);
+    const executionProfile = {
+      requested,
+      effective: profileEvidence(model, model.reasoning ? session.thinkingLevel : undefined)
+        .effective,
+    };
+    if (persistedProfile === undefined)
+      session.sessionManager.appendCustomEntry("carillon-execution-profile", requested);
+    session.sessionManager.appendCustomEntry("carillon-turn", {
+      correlation_id: request.correlation_id,
+      resource_snapshot: toJsonResource(request.resources),
+    });
+    const sessionFile = session.sessionFile;
+    if (sessionFile === undefined) throw new Error("Pi did not create durable session evidence");
+    await writeEvidence({
+      correlation_id: request.correlation_id,
+      state: "processing",
+      engine: "pi",
+      continuation_ref: sessionFile,
+      native: {
+        runtime_instance: runtimeInstance,
+        session_id: session.sessionId,
+        execution_profile: executionProfile,
+        resource_snapshot: toJsonResource(request.resources),
+      },
+    });
+    let output = "";
+    const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
+      if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta")
+        output += event.assistantMessageEvent.delta;
+    });
+    try {
+      await session.prompt(request.input);
+      session.sessionManager.appendCustomEntry("carillon-turn-complete", {
+        correlation_id: request.correlation_id,
+      });
+      return {
+        correlation_id: request.correlation_id,
+        output,
+        continuation_ref: sessionFile,
+        native: {
+          owner: "runtime-pi",
+          provider: "pi",
+          execution_profile: executionProfile,
+          session_id: session.sessionId,
+          session_file: sessionFile,
+          message_count: session.messages.length,
+          resource_snapshot: toJsonResource(request.resources),
+        },
+        capability_activity: capabilityActivity,
+      };
+    } finally {
+      unsubscribe();
+    }
+  } finally {
+    session.dispose();
+  }
+}
+
+async function createPiExecutionSession(
+  root: string,
+  manager: SessionManager,
+  model?: Model<Api>,
+  thinkingLevel?: ModelThinkingLevel,
+  customTools: ToolDefinition[] = [],
+) {
+  const runtime = modelRuntime;
+  if (runtime === undefined) throw new Error("Pi model runtime is unavailable");
+  const systemPrompt = await readFile(join(root, "SYSTEM.md"), "utf8");
+  const settingsManager = SettingsManager.create(root, root);
+  const loader = new DefaultResourceLoader({
+    cwd: root,
+    agentDir: root,
+    settingsManager,
+    systemPromptOverride: () => systemPrompt,
+  });
+  await loader.reload();
+  const created = await createAgentSession({
     cwd: root,
     agentDir: root,
     modelRuntime: runtime,
-    model,
+    ...(model === undefined ? {} : { model }),
+    ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
     resourceLoader: loader,
     sessionManager: manager,
     settingsManager,
     customTools,
   });
-  if (extensionsResult.errors.length > 0) {
-    session.dispose();
+  return created;
+}
+
+function latestExecutionProfile(manager: SessionManager): ExecutionProfile | undefined {
+  for (const entry of manager.getBranch().toReversed()) {
+    if (entry.type === "custom" && entry.customType === "carillon-execution-profile")
+      return Parse(ExecutionProfileSchema, entry.data);
+  }
+  return undefined;
+}
+
+function assertExtensionsLoaded(errors: readonly { readonly error: string }[]): void {
+  if (errors.length > 0)
     throw new Error(
-      `Pi extension loading failed: ${extensionsResult.errors.map((entry) => entry.error).join("; ")}`,
+      `Pi extension loading failed: ${errors.map((entry) => entry.error).join("; ")}`,
     );
-  }
-  session.sessionManager.appendCustomEntry("carillon-turn", {
-    correlation_id: request.correlation_id,
-    resource_snapshot: toJsonResource(request.resources),
-  });
-  const sessionFile = session.sessionFile;
-  if (sessionFile === undefined) throw new Error("Pi did not create durable session evidence");
-  await writeEvidence({
-    correlation_id: request.correlation_id,
-    state: "processing",
-    engine: "pi",
-    continuation_ref: sessionFile,
-    native: {
-      runtime_instance: runtimeInstance,
-      session_id: session.sessionId,
-      model: `${model.provider}/${model.id}`,
-      resource_snapshot: toJsonResource(request.resources),
-    },
-  });
-  let output = "";
-  const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
-    if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta")
-      output += event.assistantMessageEvent.delta;
-  });
-  try {
-    await session.prompt(request.input);
-    session.sessionManager.appendCustomEntry("carillon-turn-complete", {
-      correlation_id: request.correlation_id,
-    });
-    return {
-      correlation_id: request.correlation_id,
-      output,
-      continuation_ref: sessionFile,
-      native: {
-        owner: "runtime-pi",
-        provider: "pi",
-        model: `${model.provider}/${model.id}`,
-        session_id: session.sessionId,
-        session_file: sessionFile,
-        message_count: session.messages.length,
-        resource_snapshot: toJsonResource(request.resources),
-      },
-      capability_activity: capabilityActivity,
-    };
-  } finally {
-    unsubscribe();
-    session.dispose();
-  }
 }
 
 async function callCapability(

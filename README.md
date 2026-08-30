@@ -53,16 +53,19 @@ sudo systemctl start \
   carillon-interface-extension carillon-capability
 ```
 
-5. List or refresh Pi's available models, then persist a selection:
+5. List or refresh Pi's execution profiles, then set defaults for new conversations:
 
 ```text
 sudo /opt/carillon/bin/carillon model \
   --config /var/lib/carillon/carillon.toml --refresh
 sudo /opt/carillon/bin/carillon model \
-  --config /var/lib/carillon/carillon.toml PROVIDER/MODEL
+  --config /var/lib/carillon/carillon.toml \
+  --reasoning high PROVIDER/MODEL
 ```
 
-An allowlisted guild member can make the same selection with Discord's native `/model` picker. `/model` is explicit activation but is accepted only in a configured route (or an eligible child thread). The selection applies to subsequent turns; it does not alter an in-flight turn.
+Use `--scope current-conversation --audience AUDIENCE_ID` to change one native continuation instead. The catalog reports only settings safely supported by each Pi provider/model. Service-tier choices remain hidden unless the runtime can apply and account for them through Pi's native session API.
+
+An allowlisted guild member can use Discord's native `/model` flow: provider, model, supported settings, then `this conversation` or `new conversations`. `/model` is accepted only in a configured route (or an eligible child thread), applies after the interaction, and does not alter an in-flight turn.
 
 The Discord adapter rejects direct messages, other guilds, users outside the immutable ID allowlist, and channels outside `[[discord.routes]]` before contacting core or discovering models. Each route explicitly sets `activation = "mention" | "always"` and `conversation = "thread" | "channel"`. Mention routes strip only the configured bot user's immutable `<@ID>` mention. Thread routes create or adopt thread-scoped continuations; channel routes keep one continuation in the configured channel and reject child threads.
 

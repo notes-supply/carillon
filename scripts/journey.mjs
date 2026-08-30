@@ -36,29 +36,27 @@ try {
     String(basePort),
   );
   await startAll();
-  const discoveredModels = JSON.parse(run("model", "--config", configPath()));
-  assert.equal(discoveredModels.models.length, 2);
-  assert.equal(discoveredModels.selected, null, "an unset model must remain unset");
+  const discoveredProfiles = JSON.parse(run("model", "--config", configPath()));
+  assert.equal(discoveredProfiles.models.length, 2);
+  assert.equal(discoveredProfiles.selected, null, "an unset model must remain unset");
   await stop("runtime");
   await writeFile(
     join(piState, "settings.json"),
     JSON.stringify({ defaultProvider: "missing-provider", defaultModel: "missing-model" }),
   );
   await start("runtime");
-  const unavailableModels = JSON.parse(run("model", "--config", configPath()));
-  assert.equal(typeof unavailableModels.selected, "string");
+  const unavailableProfiles = JSON.parse(run("model", "--config", configPath()));
+  assert.equal(unavailableProfiles.selected.requested.model, "missing-provider/missing-model");
   assert.equal(
-    unavailableModels.models.some((model) => model.key === unavailableModels.selected),
-    false,
-    "an unavailable selection must remain selected",
+    unavailableProfiles.selected.effective,
+    null,
+    "an unavailable requested model must not fabricate an effective model",
   );
-  const selectedModels = JSON.parse(
+  const appliedProfile = JSON.parse(
     run("model", "--config", configPath(), "deterministic/concise"),
   );
-  assert.equal(
-    selectedModels.models.find((model) => model.key === selectedModels.selected).id,
-    "concise",
-  );
+  assert.equal(appliedProfile.requested.model, "deterministic/concise");
+  assert.equal(appliedProfile.effective.model, "deterministic/concise");
 
   const denied = await fetch(`http://127.0.0.1:${String(basePort + 1)}/v1/simulate`, {
     method: "POST",
@@ -84,6 +82,19 @@ try {
   const first = await simulate("event-1", "hello");
   assert.match(first.delivery.content, /Local provider response 1/u);
   assert.match(first.delivery.content, /native extension inactive; skill inactive/u);
+  const currentProfile = JSON.parse(
+    run(
+      "model",
+      "--config",
+      configPath(),
+      "--scope",
+      "current-conversation",
+      "--audience",
+      "discord-100-300",
+      "deterministic/steady",
+    ),
+  );
+  assert.equal(currentProfile.effective.model, "deterministic/steady");
 
   const duplicate = await simulate("event-1", "hello");
   assert.equal(duplicate.receipt.duplicate, true, "redelivery must not repeat runtime work");
@@ -133,6 +144,14 @@ try {
     channelFirst.audience_id,
     channelLater.audience_id,
     "channel routes must share one continuation",
+  );
+  assert.equal(
+    channelLater.native_evidence.execution_profile.requested.model,
+    "deterministic/steady",
+  );
+  assert.equal(
+    channelLater.native_evidence.execution_profile.effective.model,
+    "deterministic/steady",
   );
 
   const threadParent = await simulateRoute(
@@ -262,6 +281,8 @@ try {
   assert.ok(status.components.every((component) => component.status === "ready"));
   assert.equal(status.turns.interrupted, 1);
   assert.equal(status.deliveries.uncertain, 1);
+  assert.equal(status.execution_profile.requested.model, "deterministic/concise");
+  assert.equal(status.execution_profile.effective.model, "deterministic/concise");
 
   await stopAll();
   run("backup", "--config", configPath(), "--output", backup);

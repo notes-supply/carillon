@@ -52,8 +52,9 @@ use crate::{
     },
     model::{
         CapabilityRequest, CapabilityResponse, Delivery, DeliveryAck, DeliveryOutcome,
-        DeliveryReconciliation, EventReceipt, ExtensionRequest, ExtensionResponse, ExternalEvent,
-        Health, RuntimeModelSelection, RuntimeModels, SimulateRequest, SimulateResponse,
+        DeliveryReconciliation, EventReceipt, ExecutionProfileApplication, ExecutionProfileScope,
+        ExecutionProfileSelection, ExtensionRequest, ExtensionResponse, ExternalEvent, Health,
+        RuntimeExecutionProfileModel, RuntimeExecutionProfiles, SimulateRequest, SimulateResponse,
     },
 };
 
@@ -318,7 +319,7 @@ pub async fn serve_discord(
             .context("configured Discord guild ID is invalid")?;
         http.interaction(application_id)
             .create_guild_command(guild_id)
-            .chat_input("model", "Select the model for subsequent agent turns")
+            .chat_input("model", "Choose provider, model, and supported settings")
             .await?;
         let (messages, receiver) = mpsc::channel(64);
         let gateway_state = state.clone();
@@ -958,9 +959,15 @@ async fn start_typing(
     }))
 }
 
-const MODEL_SELECT_ID: &str = "carillon:model:select";
-const MODEL_PAGE_PREFIX: &str = "carillon:model:page:";
-const MODEL_PAGE_SIZE: usize = 25;
+const PROFILE_PREFIX: &str = "carillon:profile:";
+const PROVIDER_SELECT_ID: &str = "carillon:profile:provider";
+const PROVIDER_PAGE_PREFIX: &str = "carillon:profile:provider-page:";
+const MODEL_SELECT_ID: &str = "carillon:profile:model";
+const MODEL_PAGE_PREFIX: &str = "carillon:profile:model-page:";
+const REASONING_SELECT_ID: &str = "carillon:profile:reasoning";
+const TIER_SELECT_ID: &str = "carillon:profile:tier";
+const SCOPE_SELECT_ID: &str = "carillon:profile:scope";
+const PROFILE_PAGE_SIZE: usize = 25;
 
 async fn handle_model_interaction(
     state: &DiscordState,
@@ -973,8 +980,7 @@ async fn handle_model_interaction(
     let relevant = match data {
         InteractionData::ApplicationCommand(command) => command.name == "model",
         InteractionData::MessageComponent(component) => {
-            component.custom_id == MODEL_SELECT_ID
-                || component.custom_id.starts_with(MODEL_PAGE_PREFIX)
+            component.custom_id.starts_with(PROFILE_PREFIX)
         }
         _ => false,
     };
@@ -1016,20 +1022,32 @@ async fn handle_model_interaction(
             .context("respond to unauthorized Discord model interaction")?;
         return Ok(());
     }
-
+    let audience = format!(
+        "discord-{}-{}",
+        guild
+            .as_deref()
+            .context("Discord model interaction has no guild")?,
+        channel
+            .as_deref()
+            .context("Discord model interaction has no channel")?
+    );
+    let current_conversation = channel.as_deref().is_some_and(|channel| {
+        current_conversation_available(&config.value.discord, channel, parent.as_deref())
+    });
     let deferred = deferred_model_response(component);
     http.interaction(interaction.application_id)
         .create_response(interaction.id, &interaction.token, &deferred)
         .await
         .context("defer Discord model interaction")?;
 
-    let response = match model_interaction_response(state, data).await {
-        Ok(response) => response,
-        Err(failure) => {
-            warn!(error = %failure, "model interaction operation failed");
-            interaction_data("Models are currently unavailable.", Vec::new())
-        }
-    };
+    let response =
+        match model_interaction_response(state, data, &audience, current_conversation).await {
+            Ok(response) => response,
+            Err(failure) => {
+                warn!(error = %failure, "model interaction operation failed");
+                interaction_data("Execution profiles are currently unavailable.", Vec::new())
+            }
+        };
     http.interaction(interaction.application_id)
         .update_response(&interaction.token)
         .content(response.content.as_deref())
@@ -1042,120 +1060,432 @@ async fn handle_model_interaction(
 async fn model_interaction_response(
     state: &DiscordState,
     data: &InteractionData,
+    audience: &str,
+    current_conversation: bool,
 ) -> Result<InteractionResponseData> {
+    let profiles = fetch_runtime_execution_profiles(state).await?;
     match data {
-        InteractionData::ApplicationCommand(_) => {
-            let models = fetch_runtime_models(state).await?;
-            Ok(model_picker(&models, 0))
+        InteractionData::ApplicationCommand(_) => Ok(provider_picker(&profiles, 0)),
+        InteractionData::MessageComponent(component)
+            if component.custom_id == PROVIDER_SELECT_ID =>
+        {
+            let provider = selected_component_value(component)?;
+            Ok(model_picker(&profiles, provider, 0))
         }
-        InteractionData::MessageComponent(component) if component.custom_id == MODEL_SELECT_ID => {
-            let key = component
-                .values
-                .first()
-                .context("model selection is empty")?;
-            let models = select_runtime_model(state, key).await?;
-            let selected = models
-                .models
-                .iter()
-                .find(|model| model.key == models.selected.as_deref().unwrap_or_default())
-                .context("runtime did not return the selected model")?;
-            Ok(interaction_data(
-                &format!(
-                    "Selected **{}/{}** for subsequent turns.",
-                    selected.provider, selected.id
-                ),
-                Vec::new(),
-            ))
-        }
-        InteractionData::MessageComponent(component) => {
+        InteractionData::MessageComponent(component)
+            if component.custom_id.starts_with(PROVIDER_PAGE_PREFIX) =>
+        {
             let page = component
                 .custom_id
-                .strip_prefix(MODEL_PAGE_PREFIX)
-                .context("unknown model component")?
+                .strip_prefix(PROVIDER_PAGE_PREFIX)
+                .context("unknown provider page component")?
                 .parse::<usize>()
-                .context("invalid model page")?;
-            let models = fetch_runtime_models(state).await?;
-            Ok(model_picker(&models, page))
+                .context("invalid provider page")?;
+            Ok(provider_picker(&profiles, page))
+        }
+        InteractionData::MessageComponent(component)
+            if component.custom_id.starts_with(MODEL_PAGE_PREFIX) =>
+        {
+            let state = component
+                .custom_id
+                .strip_prefix(MODEL_PAGE_PREFIX)
+                .context("unknown model page component")?;
+            let (provider, page) = state
+                .rsplit_once(':')
+                .context("invalid model page component")?;
+            Ok(model_picker(
+                &profiles,
+                provider,
+                page.parse::<usize>().context("invalid model page")?,
+            ))
+        }
+        InteractionData::MessageComponent(component) if component.custom_id == MODEL_SELECT_ID => {
+            let key = selected_component_value(component)?;
+            let model = profile_model(&profiles, key)?;
+            Ok(next_setting_picker(
+                &profiles,
+                model,
+                None,
+                None,
+                current_conversation,
+            ))
+        }
+        InteractionData::MessageComponent(component)
+            if component.custom_id == REASONING_SELECT_ID =>
+        {
+            let values = profile_selection_parts(selected_component_value(component)?, 2)?;
+            let model = profile_model(&profiles, values[0])?;
+            Ok(next_setting_picker(
+                &profiles,
+                model,
+                Some(values[1]),
+                None,
+                current_conversation,
+            ))
+        }
+        InteractionData::MessageComponent(component) if component.custom_id == TIER_SELECT_ID => {
+            let values = profile_selection_parts(selected_component_value(component)?, 3)?;
+            let model = profile_model(&profiles, values[0])?;
+            Ok(scope_picker(
+                model,
+                optional_profile_value(values[1]),
+                Some(values[2]),
+                current_conversation,
+            ))
+        }
+        InteractionData::MessageComponent(component) if component.custom_id == SCOPE_SELECT_ID => {
+            let values = profile_selection_parts(selected_component_value(component)?, 4)?;
+            let model = profile_model(&profiles, values[0])?;
+            let scope = match values[3] {
+                "c" if current_conversation => ExecutionProfileScope::CurrentConversation,
+                "c" => bail!("this route parent is not a durable conversation"),
+                "n" => ExecutionProfileScope::NewConversations,
+                _ => bail!("invalid execution-profile scope"),
+            };
+            let applied = apply_runtime_execution_profile(
+                state,
+                &ExecutionProfileSelection {
+                    key: model.key.clone(),
+                    reasoning: optional_profile_value(values[1]).map(str::to_owned),
+                    service_tier: optional_profile_value(values[2]).map(str::to_owned),
+                    scope,
+                    audience_id: matches!(scope, ExecutionProfileScope::CurrentConversation)
+                        .then(|| audience.to_owned()),
+                },
+            )
+            .await?;
+            Ok(applied_profile_response(&applied))
         }
         _ => bail!("unsupported model interaction"),
     }
 }
 
-fn model_picker(models: &RuntimeModels, requested_page: usize) -> InteractionResponseData {
-    if models.models.is_empty() {
+fn provider_picker(
+    profiles: &RuntimeExecutionProfiles,
+    requested_page: usize,
+) -> InteractionResponseData {
+    if profiles.models.is_empty() {
         return interaction_data(
             "Pi has no available models. Log in through Pi first.",
             Vec::new(),
         );
     }
-    let pages = models.models.len().div_ceil(MODEL_PAGE_SIZE);
+    let providers = profiles
+        .models
+        .iter()
+        .map(|model| (model.provider.as_str(), model.provider_name.as_str()))
+        .collect::<BTreeMap<_, _>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let pages = providers.len().div_ceil(PROFILE_PAGE_SIZE);
     let page = requested_page.min(pages - 1);
-    let start = page * MODEL_PAGE_SIZE;
-    let options = models.models[start..models.models.len().min(start + MODEL_PAGE_SIZE)]
+    let start = page * PROFILE_PAGE_SIZE;
+    let selected_provider = profiles
+        .selected
+        .as_ref()
+        .and_then(|selected| selected.requested.model.split_once('/'))
+        .map(|(provider, _)| provider);
+    let options = providers[start..providers.len().min(start + PROFILE_PAGE_SIZE)]
+        .iter()
+        .map(|(provider, provider_name)| SelectMenuOption {
+            default: selected_provider == Some(*provider),
+            description: None,
+            emoji: None,
+            label: limit_discord_text(provider_name, 100),
+            value: (*provider).to_owned(),
+        })
+        .collect();
+    let mut components = vec![text_select(
+        PROVIDER_SELECT_ID,
+        "Choose a provider",
+        options,
+    )];
+    if pages > 1 {
+        components.push(page_buttons(
+            format!("{PROVIDER_PAGE_PREFIX}{}", page.saturating_sub(1)),
+            format!("{PROVIDER_PAGE_PREFIX}{}", page + 1),
+            page == 0,
+            page + 1 == pages,
+        ));
+    }
+    interaction_data("Choose a provider.", components)
+}
+
+fn model_picker(
+    profiles: &RuntimeExecutionProfiles,
+    provider: &str,
+    requested_page: usize,
+) -> InteractionResponseData {
+    let models = profiles
+        .models
+        .iter()
+        .filter(|model| model.provider == provider)
+        .collect::<Vec<_>>();
+    if models.is_empty() {
+        return interaction_data("That provider has no available models.", Vec::new());
+    }
+    let pages = models.len().div_ceil(PROFILE_PAGE_SIZE);
+    let page = requested_page.min(pages - 1);
+    let start = page * PROFILE_PAGE_SIZE;
+    let selected = profiles
+        .selected
+        .as_ref()
+        .map(|selection| selection.requested.model.as_str());
+    let options = models[start..models.len().min(start + PROFILE_PAGE_SIZE)]
         .iter()
         .map(|model| SelectMenuOption {
-            default: models.selected.as_deref() == Some(model.key.as_str()),
-            description: Some(limit_discord_text(
-                &format!("{}/{}", model.provider, model.id),
-                100,
-            )),
+            default: selected == Some(format!("{}/{}", model.provider, model.id).as_str()),
+            description: Some(limit_discord_text(&model.id, 100)),
             emoji: None,
             label: limit_discord_text(&model.name, 100),
             value: model.key.clone(),
         })
         .collect();
-    let mut components = vec![Component::ActionRow(ActionRow {
+    let mut components = vec![text_select(MODEL_SELECT_ID, "Choose a model", options)];
+    if pages > 1 {
+        components.push(page_buttons(
+            format!("{MODEL_PAGE_PREFIX}{provider}:{}", page.saturating_sub(1)),
+            format!("{MODEL_PAGE_PREFIX}{provider}:{}", page + 1),
+            page == 0,
+            page + 1 == pages,
+        ));
+    }
+    interaction_data(
+        &format!("Provider: **{}**. Choose a model.", models[0].provider_name),
+        components,
+    )
+}
+
+fn next_setting_picker(
+    profiles: &RuntimeExecutionProfiles,
+    model: &RuntimeExecutionProfileModel,
+    reasoning: Option<&str>,
+    service_tier: Option<&str>,
+    current_conversation: bool,
+) -> InteractionResponseData {
+    if reasoning.is_none() && !model.reasoning.is_empty() {
+        let selected = profiles
+            .selected
+            .as_ref()
+            .filter(|selected| {
+                selected.requested.model == format!("{}/{}", model.provider, model.id)
+            })
+            .and_then(|selected| selected.requested.reasoning.as_deref());
+        let options = model
+            .reasoning
+            .iter()
+            .map(|level| SelectMenuOption {
+                default: selected == Some(level.as_str()),
+                description: None,
+                emoji: None,
+                label: title_case_profile_value(level),
+                value: format!("{}|{level}", model.key),
+            })
+            .collect();
+        return interaction_data(
+            &format!(
+                "Model: **{}/{}**. Choose reasoning effort.",
+                model.provider, model.id
+            ),
+            vec![text_select(
+                REASONING_SELECT_ID,
+                "Choose reasoning effort",
+                options,
+            )],
+        );
+    }
+    if service_tier.is_none() && !model.service_tiers.is_empty() {
+        let reasoning_value = reasoning.unwrap_or("-");
+        let options = model
+            .service_tiers
+            .iter()
+            .map(|tier| SelectMenuOption {
+                default: tier == "standard",
+                description: Some(if tier == "fast" {
+                    "OpenAI priority service tier".to_owned()
+                } else {
+                    "OpenAI standard service tier".to_owned()
+                }),
+                emoji: None,
+                label: title_case_profile_value(tier),
+                value: format!("{}|{reasoning_value}|{tier}", model.key),
+            })
+            .collect();
+        return interaction_data(
+            &format!(
+                "Model: **{}/{}**. Choose service tier.",
+                model.provider, model.id
+            ),
+            vec![text_select(
+                TIER_SELECT_ID,
+                "Choose Standard or Fast",
+                options,
+            )],
+        );
+    }
+    scope_picker(model, reasoning, service_tier, current_conversation)
+}
+
+fn scope_picker(
+    model: &RuntimeExecutionProfileModel,
+    reasoning: Option<&str>,
+    service_tier: Option<&str>,
+    current_conversation: bool,
+) -> InteractionResponseData {
+    let reasoning_value = reasoning.unwrap_or("-");
+    let tier_value = service_tier.unwrap_or("-");
+    let profile = format!(
+        "Model: **{}/{}**{}{}. Choose where to apply it.",
+        model.provider,
+        model.id,
+        reasoning.map_or_else(String::new, |value| format!(", reasoning: **{value}**")),
+        service_tier.map_or_else(String::new, |value| format!(", tier: **{value}**")),
+    );
+    let mut options = Vec::with_capacity(2);
+    if current_conversation {
+        options.push(SelectMenuOption {
+            default: false,
+            description: Some("Persist with this native Pi continuation".to_owned()),
+            emoji: None,
+            label: "This conversation".to_owned(),
+            value: format!("{}|{reasoning_value}|{tier_value}|c", model.key),
+        });
+    }
+    options.push(SelectMenuOption {
+        default: false,
+        description: Some("Use as the default for new conversations".to_owned()),
+        emoji: None,
+        label: "New conversations".to_owned(),
+        value: format!("{}|{reasoning_value}|{tier_value}|n", model.key),
+    });
+    interaction_data(
+        &profile,
+        vec![text_select(SCOPE_SELECT_ID, "Choose scope", options)],
+    )
+}
+
+fn applied_profile_response(applied: &ExecutionProfileApplication) -> InteractionResponseData {
+    let scope = match applied.scope {
+        ExecutionProfileScope::CurrentConversation => "this conversation",
+        ExecutionProfileScope::NewConversations => "new conversations",
+    };
+    interaction_data(
+        &format!(
+            "Execution profile set for **{scope}**: model **{}**{}{}.",
+            applied.effective.model,
+            applied
+                .effective
+                .reasoning
+                .as_deref()
+                .map_or_else(String::new, |value| format!(", reasoning **{value}**")),
+            applied
+                .requested
+                .service_tier
+                .as_deref()
+                .map_or_else(String::new, |value| format!(", requested tier **{value}**")),
+        ),
+        Vec::new(),
+    )
+}
+
+fn text_select(custom_id: &str, placeholder: &str, options: Vec<SelectMenuOption>) -> Component {
+    Component::ActionRow(ActionRow {
         id: None,
         components: vec![Component::SelectMenu(SelectMenu {
             id: None,
             channel_types: None,
-            custom_id: MODEL_SELECT_ID.to_owned(),
+            custom_id: custom_id.to_owned(),
             default_values: None,
             disabled: false,
             kind: SelectMenuType::Text,
             max_values: Some(1),
             min_values: Some(1),
             options: Some(options),
-            placeholder: Some("Choose a model".to_owned()),
+            placeholder: Some(placeholder.to_owned()),
             required: None,
         })],
-    })];
-    if pages > 1 {
-        components.push(Component::ActionRow(ActionRow {
-            id: None,
-            components: vec![
-                model_page_button("Previous", page.saturating_sub(1), page == 0),
-                model_page_button("Next", page + 1, page + 1 == pages),
-            ],
-        }));
-    }
-    let selected = match models.selected.as_deref() {
-        None => "No model is selected.".to_owned(),
-        Some(key) => models
-            .models
-            .iter()
-            .find(|model| model.key == key)
-            .map_or_else(
-                || "The selected model is unavailable.".to_owned(),
-                |model| format!("Current model: **{}/{}**.", model.provider, model.id),
-            ),
-    };
-    interaction_data(
-        &format!("{selected} Choose a model for subsequent turns."),
-        components,
-    )
+    })
 }
 
-fn model_page_button(label: &str, page: usize, disabled: bool) -> Component {
+fn page_buttons(
+    previous_id: String,
+    next_id: String,
+    previous_disabled: bool,
+    next_disabled: bool,
+) -> Component {
+    Component::ActionRow(ActionRow {
+        id: None,
+        components: vec![
+            profile_page_button("Previous", previous_id, previous_disabled),
+            profile_page_button("Next", next_id, next_disabled),
+        ],
+    })
+}
+
+fn profile_page_button(label: &str, custom_id: String, disabled: bool) -> Component {
     Component::Button(Button {
         id: None,
-        custom_id: Some(format!("{MODEL_PAGE_PREFIX}{page}")),
+        custom_id: Some(custom_id),
         disabled,
         emoji: None,
         label: Some(label.to_owned()),
         style: ButtonStyle::Secondary,
         url: None,
         sku_id: None,
+    })
+}
+
+fn selected_component_value(
+    component: &twilight_model::application::interaction::message_component::MessageComponentInteractionData,
+) -> Result<&str> {
+    component
+        .values
+        .first()
+        .map(String::as_str)
+        .context("profile selection is empty")
+}
+
+fn profile_selection_parts(value: &str, expected: usize) -> Result<Vec<&str>> {
+    let parts = value.split('|').collect::<Vec<_>>();
+    if parts.len() != expected {
+        bail!("invalid execution-profile selection");
+    }
+    Ok(parts)
+}
+
+fn optional_profile_value(value: &str) -> Option<&str> {
+    (value != "-").then_some(value)
+}
+
+fn profile_model<'a>(
+    profiles: &'a RuntimeExecutionProfiles,
+    key: &str,
+) -> Result<&'a RuntimeExecutionProfileModel> {
+    profiles
+        .models
+        .iter()
+        .find(|model| model.key == key)
+        .context("selected model is unavailable")
+}
+
+fn title_case_profile_value(value: &str) -> String {
+    let mut characters = value.chars();
+    characters.next().map_or_else(String::new, |first| {
+        first.to_uppercase().collect::<String>() + characters.as_str()
+    })
+}
+
+fn current_conversation_available(
+    config: &DiscordConfig,
+    channel_id: &str,
+    parent_channel_id: Option<&str>,
+) -> bool {
+    parent_channel_id.is_some_and(|parent| {
+        config.routes.iter().any(|route| {
+            route.channel_id == parent && route.conversation == DiscordConversation::Thread
+        })
+    }) || config.routes.iter().any(|route| {
+        route.channel_id == channel_id && route.conversation == DiscordConversation::Channel
     })
 }
 
@@ -1199,37 +1529,40 @@ fn limit_discord_text(value: &str, limit: usize) -> String {
     value.chars().take(limit).collect()
 }
 
-async fn fetch_runtime_models(state: &DiscordState) -> Result<RuntimeModels> {
+async fn fetch_runtime_execution_profiles(
+    state: &DiscordState,
+) -> Result<RuntimeExecutionProfiles> {
     state
         .client
-        .get(format!("{}/v1/models", state.core_url))
+        .get(format!("{}/v1/execution-profiles", state.core_url))
         .bearer_auth(&state.token)
         .send()
         .await
-        .context("fetch available runtime models")?
+        .context("fetch runtime execution profiles")?
         .error_for_status()
-        .context("core rejected runtime model listing")?
+        .context("core rejected execution-profile listing")?
         .json()
         .await
-        .context("decode runtime models")
+        .context("decode runtime execution profiles")
 }
 
-async fn select_runtime_model(state: &DiscordState, key: &str) -> Result<RuntimeModels> {
+async fn apply_runtime_execution_profile(
+    state: &DiscordState,
+    selection: &ExecutionProfileSelection,
+) -> Result<ExecutionProfileApplication> {
     state
         .client
-        .put(format!("{}/v1/model", state.core_url))
+        .put(format!("{}/v1/execution-profile", state.core_url))
         .bearer_auth(&state.token)
-        .json(&RuntimeModelSelection {
-            key: key.to_owned(),
-        })
+        .json(selection)
         .send()
         .await
-        .context("select runtime model")?
+        .context("apply runtime execution profile")?
         .error_for_status()
-        .context("core rejected runtime model selection")?
+        .context("core rejected execution-profile selection")?
         .json()
         .await
-        .context("decode selected runtime model")
+        .context("decode applied execution profile")
 }
 
 async fn delivery_loop(state: DiscordState, http: Arc<DiscordHttp>) {
@@ -1461,11 +1794,14 @@ mod tests {
 
     use super::{
         DiscordParticipation, MessagePlan, ServiceError, deferred_model_response, model_picker,
-        resolve_message, resolved_message, thread_title,
+        next_setting_picker, resolve_message, resolved_message, thread_title,
     };
     use crate::{
         config::{DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute},
-        model::{RuntimeModel, RuntimeModels, SimulateRequest},
+        model::{
+            ExecutionProfile, ExecutionProfileEvidence, RuntimeExecutionProfileModel,
+            RuntimeExecutionProfiles, SimulateRequest,
+        },
     };
 
     #[test]
@@ -1483,18 +1819,32 @@ mod tests {
     #[test]
     fn discord_model_picker_pages_every_available_model() -> serde_json::Result<()> {
         let models = (0..26)
-            .map(|index| RuntimeModel {
+            .map(|index| RuntimeExecutionProfileModel {
                 key: format!("key-{index}"),
                 provider: "provider".to_owned(),
+                provider_name: "Provider".to_owned(),
                 id: format!("model-{index}"),
                 name: format!("Model {index}"),
+                reasoning: Vec::new(),
+                service_tiers: Vec::new(),
             })
             .collect::<Vec<_>>();
-        let first_models = RuntimeModels {
-            models: models.clone(),
-            selected: Some("key-25".to_owned()),
+        let profiles = RuntimeExecutionProfiles {
+            models,
+            selected: Some(ExecutionProfileEvidence {
+                requested: ExecutionProfile {
+                    model: "provider/model-25".to_owned(),
+                    reasoning: None,
+                    service_tier: None,
+                },
+                effective: Some(ExecutionProfile {
+                    model: "provider/model-25".to_owned(),
+                    reasoning: None,
+                    service_tier: None,
+                }),
+            }),
         };
-        let first = serde_json::to_value(model_picker(&first_models, 0))?;
+        let first = serde_json::to_value(model_picker(&profiles, "provider", 0))?;
         assert_eq!(
             first["components"][0]["components"][0]["options"]
                 .as_array()
@@ -1508,11 +1858,7 @@ mod tests {
             Some(2)
         );
 
-        let second_models = RuntimeModels {
-            models,
-            selected: Some("key-25".to_owned()),
-        };
-        let second = serde_json::to_value(model_picker(&second_models, 1))?;
+        let second = serde_json::to_value(model_picker(&profiles, "provider", 1))?;
         assert_eq!(
             second["components"][0]["components"][0]["options"]
                 .as_array()
@@ -1522,6 +1868,72 @@ mod tests {
         assert_eq!(
             second["components"][0]["components"][0]["options"][0]["default"],
             Value::Bool(true)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn discord_profile_picker_skips_unsupported_settings() -> serde_json::Result<()> {
+        let supported = RuntimeExecutionProfileModel {
+            key: "supported".to_owned(),
+            provider: "openai-codex".to_owned(),
+            provider_name: "OpenAI (ChatGPT Plus/Pro)".to_owned(),
+            id: "gpt".to_owned(),
+            name: "GPT".to_owned(),
+            reasoning: vec!["low".to_owned(), "high".to_owned()],
+            service_tiers: vec!["standard".to_owned(), "fast".to_owned()],
+        };
+        let unsupported = RuntimeExecutionProfileModel {
+            key: "unsupported".to_owned(),
+            provider: "other".to_owned(),
+            provider_name: "Other".to_owned(),
+            id: "plain".to_owned(),
+            name: "Plain".to_owned(),
+            reasoning: Vec::new(),
+            service_tiers: Vec::new(),
+        };
+        let profiles = RuntimeExecutionProfiles {
+            models: vec![supported.clone(), unsupported.clone()],
+            selected: None,
+        };
+        let reasoning =
+            serde_json::to_value(next_setting_picker(&profiles, &supported, None, None, true))?;
+        assert_eq!(
+            reasoning["components"][0]["components"][0]["custom_id"],
+            "carillon:profile:reasoning"
+        );
+        let tier = serde_json::to_value(next_setting_picker(
+            &profiles,
+            &supported,
+            Some("low"),
+            None,
+            true,
+        ))?;
+        assert_eq!(
+            tier["components"][0]["components"][0]["custom_id"],
+            "carillon:profile:tier"
+        );
+        let scope = serde_json::to_value(next_setting_picker(
+            &profiles,
+            &unsupported,
+            None,
+            None,
+            false,
+        ))?;
+        assert_eq!(
+            scope["components"][0]["components"][0]["custom_id"],
+            "carillon:profile:scope"
+        );
+        assert_eq!(
+            scope["components"][0]["components"][0]["options"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        let providers = serde_json::to_value(super::provider_picker(&profiles, 0))?;
+        assert_eq!(
+            providers["components"][0]["components"][0]["options"][0]["label"],
+            "OpenAI (ChatGPT Plus/Pro)"
         );
         Ok(())
     }

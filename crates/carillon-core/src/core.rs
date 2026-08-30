@@ -26,8 +26,9 @@ use crate::{
     db::{AcceptedTurn, Database},
     model::{
         CapabilitySelection, Delivery, DeliveryAck, DeliveryOutcome, DeliveryReconciliation,
-        EventReceipt, ExtensionRequest, ExtensionResponse, ExternalEvent, Health, ResourceSnapshot,
-        RuntimeEvidence, RuntimeModelSelection, RuntimeModels, RuntimeTurnRequest,
+        EventReceipt, ExecutionProfileApplication, ExecutionProfileSelection, ExtensionRequest,
+        ExtensionResponse, ExternalEvent, Health, ResourceSnapshot, RuntimeEvidence,
+        RuntimeExecutionProfileSelection, RuntimeExecutionProfiles, RuntimeTurnRequest,
         RuntimeTurnResponse, SelectedComponent, StatusReport, TurnInspection, TurnSummary,
     },
 };
@@ -109,9 +110,12 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
         .route("/v1/turns", get(recent_turns))
         .route("/v1/turns/{id}", get(inspect_turn))
         .route("/v1/status", get(status))
-        .route("/v1/models", get(models))
-        .route("/v1/models/refresh", post(refresh_models))
-        .route("/v1/model", put(select_model))
+        .route("/v1/execution-profiles", get(execution_profiles))
+        .route(
+            "/v1/execution-profiles/refresh",
+            post(refresh_execution_profiles),
+        )
+        .route("/v1/execution-profile", put(apply_execution_profile))
         .with_state(state);
     let listener = TcpListener::bind(config.value.core.listen).await?;
     info!(listen = %config.value.core.listen, "Carillon core ready");
@@ -387,89 +391,175 @@ async fn status(
     let config = LoadedConfig::load(&state.config_path)?;
     authorize(&headers, &config.value.core.operator_token_hash)?;
     let components = component_health(&state.client, &config).await;
+    let execution_profile = if config.value.runtime.enabled {
+        runtime_execution_profiles_request(&state.client, &config, false)
+            .await
+            .ok()
+            .and_then(|profiles| profiles.selected)
+    } else {
+        None
+    };
     Ok(Json(StatusReport {
         release: config.value.release.clone(),
-        agent_id: config.value.agent.id,
+        agent_id: config.value.agent.id.clone(),
         components,
         turns: state.database.state_counts("turns")?,
         deliveries: state.database.state_counts("deliveries")?,
         latest_backup: state.database.latest_backup()?,
         recent_turns: state.database.recent_turns(None, 10)?,
+        execution_profile,
     }))
 }
 
-async fn models(
+async fn execution_profiles(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<RuntimeModels>, ApiError> {
+) -> Result<Json<RuntimeExecutionProfiles>, ApiError> {
     let config = LoadedConfig::load(&state.config_path)?;
     authorize_model_access(&headers, &config)?;
     Ok(Json(
-        runtime_models_request(&state.client, &config, reqwest::Method::GET, None).await?,
+        runtime_execution_profiles_request(&state.client, &config, false).await?,
     ))
 }
 
-async fn refresh_models(
+async fn refresh_execution_profiles(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<RuntimeModels>, ApiError> {
+) -> Result<Json<RuntimeExecutionProfiles>, ApiError> {
     let config = LoadedConfig::load(&state.config_path)?;
     authorize(&headers, &config.value.core.operator_token_hash)?;
     Ok(Json(
-        runtime_models_request(&state.client, &config, reqwest::Method::POST, None).await?,
+        runtime_execution_profiles_request(&state.client, &config, true).await?,
     ))
 }
 
-async fn select_model(
+async fn apply_execution_profile(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(selection): Json<RuntimeModelSelection>,
-) -> Result<Json<RuntimeModels>, ApiError> {
+    Json(selection): Json<ExecutionProfileSelection>,
+) -> Result<Json<ExecutionProfileApplication>, ApiError> {
     let config = LoadedConfig::load(&state.config_path)?;
     authorize_model_access(&headers, &config)?;
-    Ok(Json(
-        runtime_models_request(
-            &state.client,
-            &config,
-            reqwest::Method::PUT,
-            Some(&selection),
+    let current = matches!(
+        selection.scope,
+        crate::model::ExecutionProfileScope::CurrentConversation
+    );
+    let _turn_guard = if current {
+        Some(state.turns.lock().await)
+    } else {
+        None
+    };
+    let audience_id = if current {
+        Some(
+            selection
+                .audience_id
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    ApiError::from(anyhow!("current conversation scope needs an audience"))
+                })?
+                .to_owned(),
         )
-        .await?,
-    ))
+    } else {
+        None
+    };
+    let continuation_ref = audience_id
+        .as_deref()
+        .map(|audience| {
+            state
+                .database
+                .continuation(&config.value.agent.id, audience, &config.value.runtime.id)
+        })
+        .transpose()?
+        .flatten();
+    let resources = if current {
+        Some(materialize_resources(
+            &config.value.agent.resource_root,
+            &config.value.data_dir.join("resource-snapshots"),
+        )?)
+    } else {
+        None
+    };
+    let runtime_selection = RuntimeExecutionProfileSelection {
+        key: selection.key,
+        reasoning: selection.reasoning,
+        service_tier: selection.service_tier,
+        scope: selection.scope,
+        continuation_ref,
+        agent_id: config.value.agent.id.clone(),
+        audience_id: audience_id.clone(),
+        resources,
+    };
+    let applied =
+        runtime_execution_profile_selection(&state.client, &config, &runtime_selection).await?;
+    if let (Some(audience), Some(continuation)) =
+        (audience_id.as_deref(), applied.continuation_ref.as_deref())
+    {
+        state.database.save_continuation(
+            &config.value.agent.id,
+            audience,
+            &config.value.runtime.id,
+            continuation,
+        )?;
+    }
+    Ok(Json(applied))
 }
 
-async fn runtime_models_request(
+async fn runtime_execution_profiles_request(
     client: &Client,
     config: &LoadedConfig,
-    method: reqwest::Method,
-    selection: Option<&RuntimeModelSelection>,
-) -> Result<RuntimeModels> {
+    refresh: bool,
+) -> Result<RuntimeExecutionProfiles> {
     let runtime = &config.value.runtime;
     if !runtime.enabled {
         bail!("selected runtime adapter is disabled");
     }
-    let endpoint = if method == reqwest::Method::POST {
-        "models/refresh"
-    } else if method == reqwest::Method::PUT {
-        "model"
+    let endpoint = if refresh {
+        "execution-profiles/refresh"
     } else {
-        "models"
+        "execution-profiles"
     };
-    let mut request = client
-        .request(method, format!("{}/v1/{endpoint}", runtime.url))
-        .bearer_auth(config.credential(&runtime.id)?);
-    if let Some(value) = selection {
-        request = request.json(value);
-    }
-    request
+    client
+        .request(
+            if refresh {
+                reqwest::Method::POST
+            } else {
+                reqwest::Method::GET
+            },
+            format!("{}/v1/{endpoint}", runtime.url),
+        )
+        .bearer_auth(config.credential(&runtime.id)?)
         .send()
         .await
-        .context("contact runtime model service")?
+        .context("contact runtime execution-profile service")?
         .error_for_status()
-        .context("runtime adapter rejected model operation")?
+        .context("runtime adapter rejected execution-profile catalog operation")?
         .json()
         .await
-        .context("decode runtime models")
+        .context("decode runtime execution profiles")
+}
+
+async fn runtime_execution_profile_selection(
+    client: &Client,
+    config: &LoadedConfig,
+    selection: &RuntimeExecutionProfileSelection,
+) -> Result<ExecutionProfileApplication> {
+    let runtime = &config.value.runtime;
+    if !runtime.enabled {
+        bail!("selected runtime adapter is disabled");
+    }
+    client
+        .put(format!("{}/v1/execution-profile", runtime.url))
+        .bearer_auth(config.credential(&runtime.id)?)
+        .json(selection)
+        .send()
+        .await
+        .context("contact runtime execution-profile service")?
+        .error_for_status()
+        .context("runtime adapter rejected execution-profile selection")?
+        .json()
+        .await
+        .context("decode applied execution profile")
 }
 
 async fn component_health(client: &Client, config: &LoadedConfig) -> Vec<Health> {
@@ -881,11 +971,14 @@ pub async fn fetch_status(config: &LoadedConfig) -> Result<StatusReport> {
         .map_err(Into::into)
 }
 
-pub async fn fetch_models(config: &LoadedConfig, refresh: bool) -> Result<RuntimeModels> {
+pub async fn fetch_execution_profiles(
+    config: &LoadedConfig,
+    refresh: bool,
+) -> Result<RuntimeExecutionProfiles> {
     let path = if refresh {
-        "/v1/models/refresh"
+        "/v1/execution-profiles/refresh"
     } else {
-        "/v1/models"
+        "/v1/execution-profiles"
     };
     let client = Client::new();
     let mut request = if refresh {
@@ -903,12 +996,15 @@ pub async fn fetch_models(config: &LoadedConfig, refresh: bool) -> Result<Runtim
         .map_err(Into::into)
 }
 
-pub async fn select_runtime_model(
+pub async fn select_execution_profile(
     config: &LoadedConfig,
-    selection: &RuntimeModelSelection,
-) -> Result<RuntimeModels> {
+    selection: &ExecutionProfileSelection,
+) -> Result<ExecutionProfileApplication> {
     Client::new()
-        .put(format!("http://{}/v1/model", config.value.core.listen))
+        .put(format!(
+            "http://{}/v1/execution-profile",
+            config.value.core.listen
+        ))
         .bearer_auth(config.credential("operator")?)
         .json(selection)
         .send()

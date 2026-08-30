@@ -8,10 +8,10 @@ use crate::{
     components::{serve_capability, serve_discord, serve_extension},
     config::{DiscordRoute, LoadedConfig},
     core::{
-        fetch_inspection, fetch_models, fetch_recent, fetch_status, select_runtime_model,
-        serialize_pretty, serve,
+        fetch_execution_profiles, fetch_inspection, fetch_recent, fetch_status,
+        select_execution_profile, serialize_pretty, serve,
     },
-    model::RuntimeModelSelection,
+    model::{ExecutionProfileScope, ExecutionProfileSelection},
     operations::{
         ServiceLock, backup, configure_discord, enable_demo_resources, initialize, restore,
         set_component,
@@ -116,6 +116,18 @@ enum Command {
         config: PathBuf,
         #[arg(long)]
         refresh: bool,
+        #[arg(long)]
+        reasoning: Option<String>,
+        #[arg(long, value_parser = ["standard", "fast"])]
+        service_tier: Option<String>,
+        #[arg(
+            long,
+            value_parser = ["current-conversation", "new-conversations"],
+            default_value = "new-conversations"
+        )]
+        scope: String,
+        #[arg(long)]
+        audience: Option<String>,
         selection: Option<String>,
     },
     Backup {
@@ -215,11 +227,7 @@ pub(crate) async fn run() -> Result<()> {
                 )?
             );
         }
-        Command::Model {
-            config,
-            refresh,
-            selection,
-        } => run_model_command(config, refresh, selection).await?,
+        command @ Command::Model { .. } => run_model_command(command).await?,
         Command::Backup { config, output } => {
             backup(&LoadedConfig::load(&config)?, &output)?;
             println!("{}", output.display());
@@ -249,29 +257,46 @@ fn configure_discord_command(
     Ok(())
 }
 
-async fn run_model_command(
-    config: PathBuf,
-    refresh: bool,
-    selection: Option<String>,
-) -> Result<()> {
-    let config = LoadedConfig::load(&config)?;
-    let models = fetch_models(&config, refresh).await?;
-    let models = if let Some(reference) = selection {
-        let model = models
-            .models
-            .iter()
-            .find(|model| format!("{}/{}", model.provider, model.id) == reference)
-            .with_context(|| format!("model {reference} is not available"))?;
-        select_runtime_model(
-            &config,
-            &RuntimeModelSelection {
-                key: model.key.clone(),
-            },
-        )
-        .await?
-    } else {
-        models
+async fn run_model_command(command: Command) -> Result<()> {
+    let Command::Model {
+        config,
+        refresh,
+        reasoning,
+        service_tier,
+        scope,
+        audience: audience_id,
+        selection,
+    } = command
+    else {
+        unreachable!("model command dispatcher passed another command");
     };
-    println!("{}", serialize_pretty(&models)?);
+    let config = LoadedConfig::load(&config)?;
+    let profiles = fetch_execution_profiles(&config, refresh).await?;
+    let Some(reference) = selection else {
+        println!("{}", serialize_pretty(&profiles)?);
+        return Ok(());
+    };
+    let model = profiles
+        .models
+        .iter()
+        .find(|model| format!("{}/{}", model.provider, model.id) == reference)
+        .with_context(|| format!("model {reference} is not available"))?;
+    let scope = if scope == "current-conversation" {
+        ExecutionProfileScope::CurrentConversation
+    } else {
+        ExecutionProfileScope::NewConversations
+    };
+    let applied = select_execution_profile(
+        &config,
+        &ExecutionProfileSelection {
+            key: model.key.clone(),
+            reasoning,
+            service_tier,
+            scope,
+            audience_id,
+        },
+    )
+    .await?;
+    println!("{}", serialize_pretty(&applied)?);
     Ok(())
 }
