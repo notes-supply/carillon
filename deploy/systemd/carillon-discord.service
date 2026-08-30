@@ -1,0 +1,22 @@
+[Unit]
+Description=Carillon Discord interface adapter
+After=network-online.target carillon-core.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=carillon-discord
+Group=carillon-discord
+SupplementaryGroups=carillon
+LoadCredential=component-token:/var/lib/carillon/credentials/discord-private.token
+LoadCredential=discord-token:/etc/carillon/discord.token
+ExecStart=/opt/carillon/bin/carillon discord --config /var/lib/carillon/carillon.toml --token-file %d/component-token --discord-token-file %d/discord-token
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target

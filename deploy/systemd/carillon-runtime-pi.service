@@ -1,0 +1,23 @@
+[Unit]
+Description=Carillon Pi runtime adapter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=carillon-runtime
+Group=carillon-runtime
+SupplementaryGroups=carillon
+LoadCredential=component-token:/var/lib/carillon/credentials/runtime-pi.token
+LoadCredential=provider-key:/etc/carillon/provider.key
+ExecStart=/opt/carillon/bin/carillon-runtime-pi --config /var/lib/carillon/carillon.toml --token-file %d/component-token --provider anthropic --provider-key-file %d/provider-key
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/carillon/state/components/runtime-pi /var/lib/carillon/agents/default/sessions
+
+[Install]
+WantedBy=multi-user.target

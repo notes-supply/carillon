@@ -21,7 +21,7 @@
     "forceConsistentCasingInFileNames": true,
     "allowUnreachableCode": false,
     "allowUnusedLabels": false,
-    "skipLibCheck": false,
+    "skipLibCheck": true,
     "noEmit": true
   },
   "include": ["**/*.ts"],

@@ -1,0 +1,20 @@
+[Unit]
+Description=Carillon example guild command extension
+After=network.target
+
+[Service]
+Type=simple
+User=carillon-extension
+Group=carillon-extension
+SupplementaryGroups=carillon
+LoadCredential=component-token:/var/lib/carillon/credentials/guild-command.token
+ExecStart=/opt/carillon/bin/carillon interface-extension --config /var/lib/carillon/carillon.toml --token-file %d/component-token
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target

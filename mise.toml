@@ -31,3 +31,13 @@ run = [
   "cargo shear",
   "pnpm run check",
 ]
+
+[tasks.journey]
+description = "Exercise the complete deterministic first-release journey"
+depends = ["install"]
+run = "cargo build --locked --bin carillon && node scripts/journey.mjs"
+
+[tasks.package]
+description = "Build a toolchain-free Linux release archive"
+depends = ["install"]
+run = "scripts/package-release.sh"
