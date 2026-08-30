@@ -68,7 +68,7 @@ cat <<'EOF'
 Carillon installed but not started.
 1. Put the Discord bot token in /etc/carillon/discord.token (mode 0600).
 2. Open Pi and run /login:
-   runuser -u carillon-runtime -- env --chdir=/var/lib/pi-carillon PI_CODING_AGENT_DIR=/var/lib/pi-carillon /opt/carillon/bin/pi --no-session --no-tools
+   runuser -u carillon-runtime -- env --chdir=/var/lib/pi-carillon PI_CODING_AGENT_DIR=/var/lib/pi-carillon /opt/carillon/bin/pi --no-session --no-tools --no-approve
 3. Start the five carillon-*.service units deliberately, then select a model with:
    /opt/carillon/bin/carillon model --config /var/lib/carillon/carillon.toml PROVIDER/MODEL
 EOF

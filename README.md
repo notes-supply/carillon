@@ -35,7 +35,7 @@ The installer creates scoped service users, `/opt/carillon/bin`, `/var/lib/caril
 ```text
 sudo runuser -u carillon-runtime -- \
   env --chdir=/var/lib/pi-carillon PI_CODING_AGENT_DIR=/var/lib/pi-carillon \
-  /opt/carillon/bin/pi --no-session --no-tools
+  /opt/carillon/bin/pi --no-session --no-tools --no-approve
 ```
 
 Run `/login` in Pi and complete the provider's native login flow.
