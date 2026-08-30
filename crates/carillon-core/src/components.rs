@@ -961,12 +961,12 @@ async fn start_typing(
 
 const PROFILE_PREFIX: &str = "carillon:profile:";
 const PROVIDER_SELECT_ID: &str = "carillon:profile:provider";
-const PROVIDER_PAGE_PREFIX: &str = "carillon:profile:provider-page:";
 const MODEL_SELECT_ID: &str = "carillon:profile:model";
-const MODEL_PAGE_PREFIX: &str = "carillon:profile:model-page:";
+const MODEL_PAGE_PREFIX: &str = "carillon:profile:p:";
 const REASONING_SELECT_ID: &str = "carillon:profile:reasoning";
 const TIER_SELECT_ID: &str = "carillon:profile:tier";
-const SCOPE_SELECT_ID: &str = "carillon:profile:scope";
+const APPLY_CURRENT_PREFIX: &str = "carillon:profile:c:";
+const APPLY_NEW_PREFIX: &str = "carillon:profile:n:";
 const PROFILE_PAGE_SIZE: usize = 25;
 
 async fn handle_model_interaction(
@@ -1064,104 +1064,145 @@ async fn model_interaction_response(
     current_conversation: bool,
 ) -> Result<InteractionResponseData> {
     let profiles = fetch_runtime_execution_profiles(state).await?;
-    match data {
-        InteractionData::ApplicationCommand(_) => Ok(provider_picker(&profiles, 0)),
-        InteractionData::MessageComponent(component)
-            if component.custom_id == PROVIDER_SELECT_ID =>
-        {
-            let provider = selected_component_value(component)?;
-            Ok(model_picker(&profiles, provider, 0))
+    let InteractionData::MessageComponent(component) = data else {
+        let model = initial_profile_model(&profiles)?;
+        return Ok(selected_profile_panel(
+            &profiles,
+            model,
+            current_conversation,
+        ));
+    };
+    if component.custom_id.starts_with(APPLY_CURRENT_PREFIX) {
+        if !current_conversation {
+            bail!("this route parent is not a durable conversation");
         }
-        InteractionData::MessageComponent(component)
-            if component.custom_id.starts_with(PROVIDER_PAGE_PREFIX) =>
-        {
-            let page = component
+        return apply_profile_selection(
+            state,
+            &profiles,
+            component
                 .custom_id
-                .strip_prefix(PROVIDER_PAGE_PREFIX)
-                .context("unknown provider page component")?
-                .parse::<usize>()
-                .context("invalid provider page")?;
-            Ok(provider_picker(&profiles, page))
-        }
-        InteractionData::MessageComponent(component)
-            if component.custom_id.starts_with(MODEL_PAGE_PREFIX) =>
-        {
-            let state = component
-                .custom_id
-                .strip_prefix(MODEL_PAGE_PREFIX)
-                .context("unknown model page component")?;
-            let (provider, page) = state
-                .rsplit_once(':')
-                .context("invalid model page component")?;
-            Ok(model_picker(
-                &profiles,
-                provider,
-                page.parse::<usize>().context("invalid model page")?,
-            ))
-        }
-        InteractionData::MessageComponent(component) if component.custom_id == MODEL_SELECT_ID => {
-            let key = selected_component_value(component)?;
-            let model = profile_model(&profiles, key)?;
-            Ok(next_setting_picker(
-                &profiles,
-                model,
-                None,
-                None,
-                current_conversation,
-            ))
-        }
-        InteractionData::MessageComponent(component)
-            if component.custom_id == REASONING_SELECT_ID =>
-        {
-            let values = profile_selection_parts(selected_component_value(component)?, 2)?;
-            let model = profile_model(&profiles, values[0])?;
-            Ok(next_setting_picker(
-                &profiles,
-                model,
-                Some(values[1]),
-                None,
-                current_conversation,
-            ))
-        }
-        InteractionData::MessageComponent(component) if component.custom_id == TIER_SELECT_ID => {
-            let values = profile_selection_parts(selected_component_value(component)?, 3)?;
-            let model = profile_model(&profiles, values[0])?;
-            Ok(scope_picker(
-                model,
-                optional_profile_value(values[1]),
-                Some(values[2]),
-                current_conversation,
-            ))
-        }
-        InteractionData::MessageComponent(component) if component.custom_id == SCOPE_SELECT_ID => {
-            let values = profile_selection_parts(selected_component_value(component)?, 4)?;
-            let model = profile_model(&profiles, values[0])?;
-            let scope = match values[3] {
-                "c" if current_conversation => ExecutionProfileScope::CurrentConversation,
-                "c" => bail!("this route parent is not a durable conversation"),
-                "n" => ExecutionProfileScope::NewConversations,
-                _ => bail!("invalid execution-profile scope"),
-            };
-            let applied = apply_runtime_execution_profile(
-                state,
-                &ExecutionProfileSelection {
-                    key: model.key.clone(),
-                    reasoning: optional_profile_value(values[1]).map(str::to_owned),
-                    service_tier: optional_profile_value(values[2]).map(str::to_owned),
-                    scope,
-                    audience_id: matches!(scope, ExecutionProfileScope::CurrentConversation)
-                        .then(|| audience.to_owned()),
-                },
-            )
-            .await?;
-            Ok(applied_profile_response(&applied))
-        }
-        _ => bail!("unsupported model interaction"),
+                .strip_prefix(APPLY_CURRENT_PREFIX)
+                .context("invalid current-conversation profile")?,
+            ExecutionProfileScope::CurrentConversation,
+            Some(audience.to_owned()),
+        )
+        .await;
     }
+    if let Some(value) = component.custom_id.strip_prefix(APPLY_NEW_PREFIX) {
+        return apply_profile_selection(
+            state,
+            &profiles,
+            value,
+            ExecutionProfileScope::NewConversations,
+            None,
+        )
+        .await;
+    }
+    profile_draft_response(&profiles, component, current_conversation)
 }
 
-fn provider_picker(
+fn profile_draft_response(
     profiles: &RuntimeExecutionProfiles,
+    component: &twilight_model::application::interaction::message_component::MessageComponentInteractionData,
+    current_conversation: bool,
+) -> Result<InteractionResponseData> {
+    let custom_id = component.custom_id.as_str();
+    if custom_id == PROVIDER_SELECT_ID {
+        let model = provider_profile_model(profiles, selected_component_value(component)?)?;
+        return Ok(selected_profile_panel(
+            profiles,
+            model,
+            current_conversation,
+        ));
+    }
+    if let Some(value) = custom_id.strip_prefix(MODEL_PAGE_PREFIX) {
+        let (provider, page) = value
+            .rsplit_once(':')
+            .context("invalid model page component")?;
+        let page = page.parse::<usize>().context("invalid model page")?;
+        let model = profiles
+            .models
+            .iter()
+            .filter(|model| model.provider == provider)
+            .nth(page * PROFILE_PAGE_SIZE)
+            .context("model page is unavailable")?;
+        return Ok(profile_panel(
+            profiles,
+            model,
+            None,
+            None,
+            current_conversation,
+            page,
+        ));
+    }
+    if custom_id == MODEL_SELECT_ID {
+        let model = profile_model(profiles, selected_component_value(component)?)?;
+        return Ok(selected_profile_panel(
+            profiles,
+            model,
+            current_conversation,
+        ));
+    }
+    if custom_id == REASONING_SELECT_ID || custom_id == TIER_SELECT_ID {
+        let values = profile_selection_parts(selected_component_value(component)?, 3)?;
+        let model = profile_model(profiles, values[0])?;
+        return Ok(profile_panel(
+            profiles,
+            model,
+            optional_profile_value(values[1]),
+            optional_profile_value(values[2]),
+            current_conversation,
+            model_page(profiles, model),
+        ));
+    }
+    bail!("unsupported model interaction")
+}
+
+fn selected_profile_panel(
+    profiles: &RuntimeExecutionProfiles,
+    model: &RuntimeExecutionProfileModel,
+    current_conversation: bool,
+) -> InteractionResponseData {
+    let (reasoning, tier) = selected_profile_values(profiles, model);
+    profile_panel(
+        profiles,
+        model,
+        reasoning,
+        tier,
+        current_conversation,
+        model_page(profiles, model),
+    )
+}
+
+async fn apply_profile_selection(
+    state: &DiscordState,
+    profiles: &RuntimeExecutionProfiles,
+    value: &str,
+    scope: ExecutionProfileScope,
+    audience_id: Option<String>,
+) -> Result<InteractionResponseData> {
+    let values = profile_selection_parts(value, 3)?;
+    let model = profile_model(profiles, values[0])?;
+    let applied = apply_runtime_execution_profile(
+        state,
+        &ExecutionProfileSelection {
+            key: model.key.clone(),
+            reasoning: optional_profile_value(values[1]).map(str::to_owned),
+            service_tier: optional_profile_value(values[2]).map(str::to_owned),
+            scope,
+            audience_id,
+        },
+    )
+    .await?;
+    Ok(applied_profile_response(&applied))
+}
+
+fn profile_panel(
+    profiles: &RuntimeExecutionProfiles,
+    model: &RuntimeExecutionProfileModel,
+    reasoning: Option<&str>,
+    service_tier: Option<&str>,
+    current_conversation: bool,
     requested_page: usize,
 ) -> InteractionResponseData {
     if profiles.models.is_empty() {
@@ -1174,194 +1215,240 @@ fn provider_picker(
         .models
         .iter()
         .map(|model| (model.provider.as_str(), model.provider_name.as_str()))
-        .collect::<BTreeMap<_, _>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let pages = providers.len().div_ceil(PROFILE_PAGE_SIZE);
-    let page = requested_page.min(pages - 1);
-    let start = page * PROFILE_PAGE_SIZE;
-    let selected_provider = profiles
-        .selected
-        .as_ref()
-        .and_then(|selected| selected.requested.model.split_once('/'))
-        .map(|(provider, _)| provider);
-    let options = providers[start..providers.len().min(start + PROFILE_PAGE_SIZE)]
-        .iter()
-        .map(|(provider, provider_name)| SelectMenuOption {
-            default: selected_provider == Some(*provider),
-            description: None,
-            emoji: None,
-            label: limit_discord_text(provider_name, 100),
-            value: (*provider).to_owned(),
-        })
-        .collect();
-    let mut components = vec![text_select(
-        PROVIDER_SELECT_ID,
-        "Choose a provider",
-        options,
-    )];
-    if pages > 1 {
-        components.push(page_buttons(
-            format!("{PROVIDER_PAGE_PREFIX}{}", page.saturating_sub(1)),
-            format!("{PROVIDER_PAGE_PREFIX}{}", page + 1),
-            page == 0,
-            page + 1 == pages,
+        .collect::<BTreeMap<_, _>>();
+    if providers.len() > PROFILE_PAGE_SIZE {
+        return interaction_data(
+            "Pi exposed more providers than Discord can display.",
+            Vec::new(),
+        );
+    }
+
+    let mut components = Vec::with_capacity(5);
+    if providers.len() > 1 {
+        let options = providers
+            .into_iter()
+            .map(|(provider, name)| SelectMenuOption {
+                default: provider == model.provider,
+                description: None,
+                emoji: None,
+                label: limit_discord_text(name, 100),
+                value: provider.to_owned(),
+            })
+            .collect();
+        components.push(text_select(
+            PROVIDER_SELECT_ID,
+            "Choose a provider",
+            options,
         ));
     }
-    interaction_data("Choose a provider.", components)
-}
 
-fn model_picker(
-    profiles: &RuntimeExecutionProfiles,
-    provider: &str,
-    requested_page: usize,
-) -> InteractionResponseData {
     let models = profiles
         .models
         .iter()
-        .filter(|model| model.provider == provider)
+        .filter(|candidate| candidate.provider == model.provider)
         .collect::<Vec<_>>();
-    if models.is_empty() {
-        return interaction_data("That provider has no available models.", Vec::new());
-    }
     let pages = models.len().div_ceil(PROFILE_PAGE_SIZE);
-    let page = requested_page.min(pages - 1);
+    let page = requested_page.min(pages.saturating_sub(1));
     let start = page * PROFILE_PAGE_SIZE;
-    let selected = profiles
-        .selected
-        .as_ref()
-        .map(|selection| selection.requested.model.as_str());
     let options = models[start..models.len().min(start + PROFILE_PAGE_SIZE)]
         .iter()
-        .map(|model| SelectMenuOption {
-            default: selected == Some(format!("{}/{}", model.provider, model.id).as_str()),
-            description: Some(limit_discord_text(&model.id, 100)),
+        .map(|candidate| SelectMenuOption {
+            default: candidate.key == model.key,
+            description: Some(limit_discord_text(&candidate.id, 100)),
             emoji: None,
-            label: limit_discord_text(&model.name, 100),
-            value: model.key.clone(),
+            label: limit_discord_text(&candidate.name, 100),
+            value: candidate.key.clone(),
         })
         .collect();
-    let mut components = vec![text_select(MODEL_SELECT_ID, "Choose a model", options)];
-    if pages > 1 {
-        components.push(page_buttons(
-            format!("{MODEL_PAGE_PREFIX}{provider}:{}", page.saturating_sub(1)),
-            format!("{MODEL_PAGE_PREFIX}{provider}:{}", page + 1),
-            page == 0,
-            page + 1 == pages,
-        ));
-    }
+    components.push(text_select(MODEL_SELECT_ID, "Choose a model", options));
+    components.extend(profile_setting_selects(model, reasoning, service_tier));
+    components.push(profile_action_row(
+        model,
+        reasoning,
+        service_tier,
+        current_conversation,
+        page,
+        pages,
+    ));
+
     interaction_data(
-        &format!("Provider: **{}**. Choose a model.", models[0].provider_name),
+        &format!(
+            "**{} / {}**\nChange any setting, then choose where to apply it.",
+            model.provider_name, model.name
+        ),
         components,
     )
 }
 
-fn next_setting_picker(
-    profiles: &RuntimeExecutionProfiles,
+fn profile_setting_selects(
     model: &RuntimeExecutionProfileModel,
     reasoning: Option<&str>,
     service_tier: Option<&str>,
-    current_conversation: bool,
-) -> InteractionResponseData {
-    if reasoning.is_none() && !model.reasoning.is_empty() {
-        let selected = profiles
-            .selected
-            .as_ref()
-            .filter(|selected| {
-                selected.requested.model == format!("{}/{}", model.provider, model.id)
-            })
-            .and_then(|selected| selected.requested.reasoning.as_deref());
-        let options = model
-            .reasoning
-            .iter()
-            .map(|level| SelectMenuOption {
-                default: selected == Some(level.as_str()),
-                description: None,
-                emoji: None,
-                label: title_case_profile_value(level),
-                value: format!("{}|{level}", model.key),
-            })
-            .collect();
-        return interaction_data(
-            &format!(
-                "Model: **{}/{}**. Choose reasoning effort.",
-                model.provider, model.id
-            ),
-            vec![text_select(
-                REASONING_SELECT_ID,
-                "Choose reasoning effort",
-                options,
-            )],
-        );
-    }
-    if service_tier.is_none() && !model.service_tiers.is_empty() {
-        let reasoning_value = reasoning.unwrap_or("-");
-        let options = model
-            .service_tiers
-            .iter()
-            .map(|tier| SelectMenuOption {
-                default: tier == "standard",
-                description: Some(if tier == "fast" {
-                    "OpenAI priority service tier".to_owned()
-                } else {
-                    "OpenAI standard service tier".to_owned()
-                }),
-                emoji: None,
-                label: title_case_profile_value(tier),
-                value: format!("{}|{reasoning_value}|{tier}", model.key),
-            })
-            .collect();
-        return interaction_data(
-            &format!(
-                "Model: **{}/{}**. Choose service tier.",
-                model.provider, model.id
-            ),
-            vec![text_select(
-                TIER_SELECT_ID,
-                "Choose Standard or Fast",
-                options,
-            )],
-        );
-    }
-    scope_picker(model, reasoning, service_tier, current_conversation)
-}
-
-fn scope_picker(
-    model: &RuntimeExecutionProfileModel,
-    reasoning: Option<&str>,
-    service_tier: Option<&str>,
-    current_conversation: bool,
-) -> InteractionResponseData {
+) -> Vec<Component> {
+    let mut components = Vec::with_capacity(2);
     let reasoning_value = reasoning.unwrap_or("-");
     let tier_value = service_tier.unwrap_or("-");
-    let profile = format!(
-        "Model: **{}/{}**{}{}. Choose where to apply it.",
-        model.provider,
-        model.id,
-        reasoning.map_or_else(String::new, |value| format!(", reasoning: **{value}**")),
-        service_tier.map_or_else(String::new, |value| format!(", tier: **{value}**")),
-    );
-    let mut options = Vec::with_capacity(2);
-    if current_conversation {
-        options.push(SelectMenuOption {
-            default: false,
-            description: Some("Persist with this native Pi continuation".to_owned()),
+    if !model.reasoning.is_empty() {
+        let mut options = vec![SelectMenuOption {
+            default: reasoning.is_none(),
+            description: Some("Use the provider or model default".to_owned()),
             emoji: None,
-            label: "This conversation".to_owned(),
-            value: format!("{}|{reasoning_value}|{tier_value}|c", model.key),
-        });
+            label: "Default".to_owned(),
+            value: format!("{}|-|{tier_value}", model.key),
+        }];
+        options.extend(model.reasoning.iter().map(|level| SelectMenuOption {
+            default: reasoning == Some(level.as_str()),
+            description: None,
+            emoji: None,
+            label: title_case_profile_value(level),
+            value: format!("{}|{level}|{tier_value}", model.key),
+        }));
+        components.push(text_select(
+            REASONING_SELECT_ID,
+            "Reasoning effort",
+            options,
+        ));
     }
-    options.push(SelectMenuOption {
-        default: false,
-        description: Some("Use as the default for new conversations".to_owned()),
-        emoji: None,
-        label: "New conversations".to_owned(),
-        value: format!("{}|{reasoning_value}|{tier_value}|n", model.key),
-    });
-    interaction_data(
-        &profile,
-        vec![text_select(SCOPE_SELECT_ID, "Choose scope", options)],
-    )
+    if !model.service_tiers.is_empty() {
+        let mut options = vec![SelectMenuOption {
+            default: service_tier.is_none(),
+            description: Some("Use the provider default".to_owned()),
+            emoji: None,
+            label: "Default".to_owned(),
+            value: format!("{}|{reasoning_value}|-", model.key),
+        }];
+        options.extend(model.service_tiers.iter().map(|tier| SelectMenuOption {
+            default: service_tier == Some(tier.as_str()),
+            description: None,
+            emoji: None,
+            label: title_case_profile_value(tier),
+            value: format!("{}|{reasoning_value}|{tier}", model.key),
+        }));
+        components.push(text_select(TIER_SELECT_ID, "Service tier", options));
+    }
+    components
+}
+
+fn profile_action_row(
+    model: &RuntimeExecutionProfileModel,
+    reasoning: Option<&str>,
+    service_tier: Option<&str>,
+    current_conversation: bool,
+    page: usize,
+    pages: usize,
+) -> Component {
+    let reasoning_value = reasoning.unwrap_or("-");
+    let tier_value = service_tier.unwrap_or("-");
+    let selection = format!("{}|{reasoning_value}|{tier_value}", model.key);
+    let mut buttons = Vec::with_capacity(4);
+    if pages > 1 {
+        buttons.push(profile_action_button(
+            "Previous",
+            format!(
+                "{MODEL_PAGE_PREFIX}{}:{}",
+                model.provider,
+                page.saturating_sub(1)
+            ),
+            ButtonStyle::Secondary,
+            page == 0,
+        ));
+        buttons.push(profile_action_button(
+            "Next",
+            format!("{MODEL_PAGE_PREFIX}{}:{}", model.provider, page + 1),
+            ButtonStyle::Secondary,
+            page + 1 == pages,
+        ));
+    }
+    if current_conversation {
+        buttons.push(profile_action_button(
+            "Apply to this conversation",
+            format!("{APPLY_CURRENT_PREFIX}{selection}"),
+            ButtonStyle::Primary,
+            false,
+        ));
+    }
+    buttons.push(profile_action_button(
+        "Use for new conversations",
+        format!("{APPLY_NEW_PREFIX}{selection}"),
+        if current_conversation {
+            ButtonStyle::Secondary
+        } else {
+            ButtonStyle::Primary
+        },
+        false,
+    ));
+    Component::ActionRow(ActionRow {
+        id: None,
+        components: buttons,
+    })
+}
+
+fn initial_profile_model(
+    profiles: &RuntimeExecutionProfiles,
+) -> Result<&RuntimeExecutionProfileModel> {
+    profiles
+        .selected
+        .as_ref()
+        .and_then(|selected| {
+            profiles.models.iter().find(|model| {
+                selected.requested.model == format!("{}/{}", model.provider, model.id)
+            })
+        })
+        .or_else(|| profiles.models.first())
+        .context("Pi has no available models")
+}
+
+fn provider_profile_model<'a>(
+    profiles: &'a RuntimeExecutionProfiles,
+    provider: &str,
+) -> Result<&'a RuntimeExecutionProfileModel> {
+    let selected = profiles
+        .selected
+        .as_ref()
+        .map(|profile| profile.requested.model.as_str());
+    profiles
+        .models
+        .iter()
+        .find(|model| {
+            model.provider == provider
+                && selected == Some(format!("{}/{}", model.provider, model.id).as_str())
+        })
+        .or_else(|| {
+            profiles
+                .models
+                .iter()
+                .find(|model| model.provider == provider)
+        })
+        .context("selected provider has no available models")
+}
+
+fn selected_profile_values<'a>(
+    profiles: &'a RuntimeExecutionProfiles,
+    model: &RuntimeExecutionProfileModel,
+) -> (Option<&'a str>, Option<&'a str>) {
+    profiles
+        .selected
+        .as_ref()
+        .filter(|selected| selected.requested.model == format!("{}/{}", model.provider, model.id))
+        .map_or((None, None), |selected| {
+            (
+                selected.requested.reasoning.as_deref(),
+                selected.requested.service_tier.as_deref(),
+            )
+        })
+}
+
+fn model_page(
+    profiles: &RuntimeExecutionProfiles,
+    selected: &RuntimeExecutionProfileModel,
+) -> usize {
+    profiles
+        .models
+        .iter()
+        .filter(|model| model.provider == selected.provider)
+        .position(|model| model.key == selected.key)
+        .unwrap_or_default()
+        / PROFILE_PAGE_SIZE
 }
 
 fn applied_profile_response(applied: &ExecutionProfileApplication) -> InteractionResponseData {
@@ -1407,29 +1494,19 @@ fn text_select(custom_id: &str, placeholder: &str, options: Vec<SelectMenuOption
     })
 }
 
-fn page_buttons(
-    previous_id: String,
-    next_id: String,
-    previous_disabled: bool,
-    next_disabled: bool,
+fn profile_action_button(
+    label: &str,
+    custom_id: String,
+    style: ButtonStyle,
+    disabled: bool,
 ) -> Component {
-    Component::ActionRow(ActionRow {
-        id: None,
-        components: vec![
-            profile_page_button("Previous", previous_id, previous_disabled),
-            profile_page_button("Next", next_id, next_disabled),
-        ],
-    })
-}
-
-fn profile_page_button(label: &str, custom_id: String, disabled: bool) -> Component {
     Component::Button(Button {
         id: None,
         custom_id: Some(custom_id),
         disabled,
         emoji: None,
         label: Some(label.to_owned()),
-        style: ButtonStyle::Secondary,
+        style,
         url: None,
         sku_id: None,
     })
@@ -1793,15 +1870,12 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        DiscordParticipation, MessagePlan, ServiceError, deferred_model_response, model_picker,
-        next_setting_picker, resolve_message, resolved_message, thread_title,
+        DiscordParticipation, MessagePlan, ServiceError, deferred_model_response, profile_panel,
+        resolve_message, resolved_message, thread_title,
     };
     use crate::{
         config::{DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute},
-        model::{
-            ExecutionProfile, ExecutionProfileEvidence, RuntimeExecutionProfileModel,
-            RuntimeExecutionProfiles, SimulateRequest,
-        },
+        model::{RuntimeExecutionProfileModel, RuntimeExecutionProfiles, SimulateRequest},
     };
 
     #[test]
@@ -1817,7 +1891,7 @@ mod tests {
     }
 
     #[test]
-    fn discord_model_picker_pages_every_available_model() -> serde_json::Result<()> {
+    fn discord_profile_panel_pages_models_and_keeps_apply_visible() -> serde_json::Result<()> {
         let models = (0..26)
             .map(|index| RuntimeExecutionProfileModel {
                 key: format!("key-{index}"),
@@ -1831,20 +1905,16 @@ mod tests {
             .collect::<Vec<_>>();
         let profiles = RuntimeExecutionProfiles {
             models,
-            selected: Some(ExecutionProfileEvidence {
-                requested: ExecutionProfile {
-                    model: "provider/model-25".to_owned(),
-                    reasoning: None,
-                    service_tier: None,
-                },
-                effective: Some(ExecutionProfile {
-                    model: "provider/model-25".to_owned(),
-                    reasoning: None,
-                    service_tier: None,
-                }),
-            }),
+            selected: None,
         };
-        let first = serde_json::to_value(model_picker(&profiles, "provider", 0))?;
+        let first = serde_json::to_value(profile_panel(
+            &profiles,
+            &profiles.models[0],
+            None,
+            None,
+            false,
+            0,
+        ))?;
         assert_eq!(
             first["components"][0]["components"][0]["options"]
                 .as_array()
@@ -1855,10 +1925,17 @@ mod tests {
             first["components"][1]["components"]
                 .as_array()
                 .map(Vec::len),
-            Some(2)
+            Some(3)
         );
 
-        let second = serde_json::to_value(model_picker(&profiles, "provider", 1))?;
+        let second = serde_json::to_value(profile_panel(
+            &profiles,
+            &profiles.models[25],
+            None,
+            None,
+            false,
+            1,
+        ))?;
         assert_eq!(
             second["components"][0]["components"][0]["options"]
                 .as_array()
@@ -1873,9 +1950,9 @@ mod tests {
     }
 
     #[test]
-    fn discord_profile_picker_skips_unsupported_settings() -> serde_json::Result<()> {
+    fn discord_profile_panel_shows_supported_settings_together() -> anyhow::Result<()> {
         let supported = RuntimeExecutionProfileModel {
-            key: "supported".to_owned(),
+            key: "a".repeat(64),
             provider: "openai-codex".to_owned(),
             provider_name: "OpenAI (ChatGPT Plus/Pro)".to_owned(),
             id: "gpt".to_owned(),
@@ -1896,47 +1973,47 @@ mod tests {
             models: vec![supported.clone(), unsupported.clone()],
             selected: None,
         };
-        let reasoning =
-            serde_json::to_value(next_setting_picker(&profiles, &supported, None, None, true))?;
-        assert_eq!(
-            reasoning["components"][0]["components"][0]["custom_id"],
-            "carillon:profile:reasoning"
-        );
-        let tier = serde_json::to_value(next_setting_picker(
+        let panel = serde_json::to_value(profile_panel(
             &profiles,
             &supported,
-            Some("low"),
-            None,
+            Some("high"),
+            Some("fast"),
             true,
+            0,
         ))?;
+        assert_eq!(panel["components"].as_array().map(Vec::len), Some(5));
         assert_eq!(
-            tier["components"][0]["components"][0]["custom_id"],
+            panel["components"][0]["components"][0]["custom_id"],
+            "carillon:profile:provider"
+        );
+        assert_eq!(
+            panel["components"][1]["components"][0]["custom_id"],
+            "carillon:profile:model"
+        );
+        assert_eq!(
+            panel["components"][2]["components"][0]["custom_id"],
+            "carillon:profile:reasoning"
+        );
+        assert_eq!(
+            panel["components"][3]["components"][0]["custom_id"],
             "carillon:profile:tier"
         );
-        let scope = serde_json::to_value(next_setting_picker(
-            &profiles,
-            &unsupported,
-            None,
-            None,
-            false,
-        ))?;
-        assert_eq!(
-            scope["components"][0]["components"][0]["custom_id"],
-            "carillon:profile:scope"
-        );
-        assert_eq!(
-            scope["components"][0]["components"][0]["options"]
-                .as_array()
-                .map(Vec::len),
-            Some(1)
-        );
-        let providers = serde_json::to_value(super::provider_picker(&profiles, 0))?;
-        assert_eq!(
-            providers["components"][0]["components"][0]["options"][0]["label"],
-            "OpenAI (ChatGPT Plus/Pro)"
-        );
+        let buttons = panel["components"][4]["components"]
+            .as_array()
+            .context("profile buttons missing")?;
+        assert_eq!(buttons.len(), 2);
+        assert!(buttons.iter().all(|button| {
+            button["custom_id"]
+                .as_str()
+                .is_some_and(|custom_id| custom_id.len() <= 100)
+        }));
+
+        let minimal =
+            serde_json::to_value(profile_panel(&profiles, &unsupported, None, None, false, 0))?;
+        assert_eq!(minimal["components"].as_array().map(Vec::len), Some(3));
         Ok(())
     }
+
     #[test]
     fn thread_titles_are_deterministic_and_bounded() {
         let title = thread_title(
