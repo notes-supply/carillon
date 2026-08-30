@@ -8,7 +8,7 @@ Core, interface adapters, runtime adapters, interface extensions, and capabiliti
 
 ## Setup and everyday operation
 
-Setup establishes service identities, durable state, credentials, initial components, and an agent resource root. It requires the immutable ID of the private Discord guild and the paired operator identity; until those are configured, Discord admission remains closed.
+Setup establishes service identities, durable state, credentials, initial components, and an agent resource root. It requires the immutable ID of the private Discord guild and at least one allowlisted immutable operator identity; until those are configured, Discord admission remains closed.
 
 The operator can see the health and selected identity of the core, adapters, extensions, capabilities, agents, native continuations, queued work, storage, and latest backup. Turn inspection connects the external event, participating components and resources, runtime-native evidence, capability activity, and delivery result without unnecessarily exposing prompts or credentials.
 

@@ -12,7 +12,7 @@ For the first useful release, an operator can:
 
 1. install Carillon without a development toolchain;
 2. create an agent from a plainly named system-prompt file and runtime resources;
-3. configure one private Discord server by immutable guild ID, pair their Discord identity within it, and hold a continuing conversation through Pi only inside that server;
+3. configure one private Discord server by immutable guild ID, allowlist their immutable Discord user ID, and hold a continuing conversation through Pi only inside that server;
 4. add an externally implemented guild-scoped Discord command or interface feature without rebuilding the Discord adapter;
 5. enable a Pi-native extension and an external agent capability;
 6. use those additions on subsequent turns while unrelated parts remain available;
@@ -59,7 +59,7 @@ External capabilities use the system-level boundary when they need independent l
 
 ### Identity and audience
 
-Discord is fail-closed to one configured private guild and paired operator identity. Direct messages and events outside that authorized scope are rejected before model or capability work.
+Discord is fail-closed to one configured private guild and explicitly allowlisted immutable user identities. Direct messages, events from other guilds, and events from users outside the allowlist—even inside the private guild—are rejected before model or capability work.
 
 Authorization and routing use immutable platform identities. Human-readable names remain presentation metadata. An accepted event stays associated with its source audience, selected agent, interface adapter, runtime adapter, native continuation, and selected extensions and capabilities.
 
