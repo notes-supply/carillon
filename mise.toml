@@ -1,0 +1,33 @@
+[tools]
+rust = { version = "1.98.0", profile = "minimal", components = ["clippy", "rustfmt"] }
+node = "26.8.1"
+bun = "1.4.0"
+pnpm = "12.0.0"
+"cargo:cargo-deny" = "0.20.2"
+"cargo:cargo-shear" = "1.13.4"
+
+[env]
+_.path = ["{{config_root}}/node_modules/.bin"]
+
+[tasks.install]
+description = "Install JavaScript dependencies from the lockfile"
+run = "pnpm install --frozen-lockfile"
+sources = ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"]
+outputs = ["node_modules/.pnpm/lock.yaml"]
+
+[tasks.format]
+description = "Format first-party Rust and TypeScript files"
+run = ["cargo fmt --all", "pnpm run format"]
+
+[tasks.check]
+description = "Run the complete non-mutating repository quality gate"
+depends = ["install"]
+run = [
+  "cargo fmt --all -- --check",
+  "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
+  "cargo test --locked --workspace --all-features",
+  "RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --all-features --no-deps",
+  "cargo deny check advisories bans sources",
+  "cargo shear",
+  "pnpm run check",
+]
