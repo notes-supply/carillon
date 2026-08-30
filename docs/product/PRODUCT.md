@@ -59,7 +59,7 @@ External capabilities use the system-level boundary when they need independent l
 
 ### Identity and audience
 
-Discord admission is fail-closed to one configured private guild. The adapter rejects direct messages, events without guild identity, and events from every other guild before routing, model work, or extension and capability activity. Knowing, mentioning, or discovering the bot never grants authority.
+Discord is fail-closed to one configured private guild and paired operator identity. Direct messages and events outside that authorized scope are rejected before model or capability work.
 
 Authorization and routing use immutable platform identities. Human-readable names remain presentation metadata. An accepted event stays associated with its source audience, selected agent, interface adapter, runtime adapter, native continuation, and selected extensions and capabilities.
 
