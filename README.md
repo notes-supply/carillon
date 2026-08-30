@@ -15,7 +15,7 @@ mise run package
 
 `mise run journey` uses local loopback services and a deterministic provider substitute. It exercises fail-closed Discord admission, continuing and recovered runtime state, duplicate event suppression, abandoned-delivery reconciliation, authenticated diagnostics, live interface-extension/capability/resource activation, independent component restarts, turn inspection, and stopped-service backup/restore.
 
-`mise run package` creates `dist/carillon-0.0.0-linux-x86_64.tar.gz`. The archive contains two self-contained Linux executables, systemd service definitions, and an installer. The target host needs systemd and standard Linux administration tools, not Rust, Node, Bun, Mise, or a source checkout.
+`mise run package` creates `dist/carillon-0.0.0-linux-x86_64.tar.gz`. The archive contains three toolchain-free Linux executables, Pi's required interface assets and license notice, systemd service definitions, and an installer. The target host needs systemd and standard Linux administration tools, not Rust, Node, Bun, Mise, or a source checkout.
 
 ## Install
 
@@ -27,19 +27,38 @@ sudo ./carillon-0.0.0/install.sh \
   --user-id 234567890123456789
 ```
 
-The installer creates scoped service users, `/opt/carillon/bin`, `/var/lib/carillon`, credential placeholders in `/etc/carillon`, and five independent systemd units. It does not start or enable them.
+The installer creates scoped service users, `/opt/carillon/bin`, `/var/lib/carillon`, Pi-private `/var/lib/pi-carillon`, the Discord credential placeholder, and five independent systemd units. It does not start or enable them.
 
 1. Put the Discord bot token in `/etc/carillon/discord.token`; keep mode `0600`.
-2. Put an Anthropic API key in `/etc/carillon/provider.key`; keep mode `0600`.
-3. Select a Pi model in `/var/lib/carillon/agents/default/settings.json`.
-4. Enable the Discord bot's Guilds, Guild Messages, and privileged Message Content intents.
-5. Start the services:
+2. Open Pi against its private state directory:
+
+```text
+sudo runuser -u carillon-runtime -- \
+  env --chdir=/var/lib/pi-carillon PI_CODING_AGENT_DIR=/var/lib/pi-carillon \
+  /opt/carillon/bin/pi --no-session --no-tools
+```
+
+Run `/login` in Pi and complete the provider's native login flow.
+
+3. Enable the Discord bot's Guilds, Guild Messages, and privileged Message Content intents.
+4. Start the services:
 
 ```text
 sudo systemctl start \
   carillon-core carillon-runtime-pi carillon-discord \
   carillon-interface-extension carillon-capability
 ```
+
+5. List or refresh Pi's available models, then persist a selection:
+
+```text
+sudo /opt/carillon/bin/carillon model \
+  --config /var/lib/carillon/carillon.toml --refresh
+sudo /opt/carillon/bin/carillon model \
+  --config /var/lib/carillon/carillon.toml PROVIDER/MODEL
+```
+
+An allowlisted guild member can make the same selection with Discord's native `/model` picker. The selection applies to subsequent turns; it does not alter an in-flight turn.
 
 The Discord adapter rejects direct messages, other guilds, and users outside the immutable ID allowlist before contacting core. Ordinary guild messages go to the selected Pi continuation. `!carillon <argument>` is the external guild command surface; the credential-owning adapter performs delivery.
 
@@ -93,7 +112,7 @@ sudo /opt/carillon/bin/carillon backup \
   --output /srv/backup/carillon.tar.gz
 ```
 
-Backup refuses to run while the core lock or any component listener is active. It includes core SQLite state, configuration, common agent files, Pi resources and sessions, component evidence/state, internal component credentials, and release identity.
+Backup refuses to run while the core lock or any component listener is active. It includes core SQLite state, configuration, common agent files, Pi resources and sessions, component evidence/state, internal component credentials, and release identity. Pi provider credentials, model catalogs, and selected model remain in `/var/lib/pi-carillon`; they are deliberately excluded from Carillon backups, resources, diagnostics, and logs.
 
 Restore into an empty installation root:
 

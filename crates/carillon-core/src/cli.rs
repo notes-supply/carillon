@@ -1,13 +1,17 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use crate::{
     components::{serve_capability, serve_discord, serve_extension},
     config::LoadedConfig,
-    core::{fetch_inspection, fetch_recent, fetch_status, serialize_pretty, serve},
+    core::{
+        fetch_inspection, fetch_models, fetch_recent, fetch_status, select_runtime_model,
+        serialize_pretty, serve,
+    },
+    model::RuntimeModelSelection,
     operations::{ServiceLock, backup, enable_demo_resources, initialize, restore, set_component},
 };
 
@@ -87,6 +91,13 @@ enum Command {
         #[arg(long)]
         config: PathBuf,
         turn_id: String,
+    },
+    Model {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        refresh: bool,
+        selection: Option<String>,
     },
     Backup {
         #[arg(long)]
@@ -179,6 +190,11 @@ pub(crate) async fn run() -> Result<()> {
                 )?
             );
         }
+        Command::Model {
+            config,
+            refresh,
+            selection,
+        } => run_model_command(config, refresh, selection).await?,
         Command::Backup { config, output } => {
             backup(&LoadedConfig::load(&config)?, &output)?;
             println!("{}", output.display());
@@ -187,5 +203,32 @@ pub(crate) async fn run() -> Result<()> {
             println!("{}", restore(&input, &target)?.display());
         }
     }
+    Ok(())
+}
+
+async fn run_model_command(
+    config: PathBuf,
+    refresh: bool,
+    selection: Option<String>,
+) -> Result<()> {
+    let config = LoadedConfig::load(&config)?;
+    let models = fetch_models(&config, refresh).await?;
+    let models = if let Some(reference) = selection {
+        let model = models
+            .models
+            .iter()
+            .find(|model| format!("{}/{}", model.provider, model.id) == reference)
+            .with_context(|| format!("model {reference} is not available"))?;
+        select_runtime_model(
+            &config,
+            &RuntimeModelSelection {
+                key: model.key.clone(),
+            },
+        )
+        .await?
+    } else {
+        models
+    };
+    println!("{}", serialize_pretty(&models)?);
     Ok(())
 }

@@ -16,9 +16,9 @@ For the Pi runtime adapter, the resource root remains an ordinary Pi-compatible 
 
 - `SYSTEM.md` is the plainly named operator-authored system prompt.
 - `AGENTS.md` contains optional contextual instructions.
-- `settings.json`, `extensions/`, `skills/`, and `sessions/` retain their native Pi meanings.
+- `settings.json`, `extensions/`, `skills/`, and `sessions/` retain their native Pi meanings. Provider authentication, discovered catalogs, and the service's selected model are not agent resources; Pi persists them in its private state directory.
 
-The Pi adapter loads this directory explicitly rather than inheriting an operator's unrelated global environment. Pi composes the final prompt, including context, tool guidance, skill inventory, and extension changes.
+The Pi adapter loads this directory explicitly rather than inheriting an operator's unrelated global environment. Pi composes the final prompt, including context, tool guidance, skill inventory, and extension changes. An explicit private model selection takes precedence over a model default in snapshotted agent settings.
 
 Pi extensions use Pi's own hooks to append prompt material, register tools, contribute resources, and preserve extension state. Carillon does not introduce another extension manifest or prompt-composition language.
 

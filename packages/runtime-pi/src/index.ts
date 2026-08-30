@@ -66,6 +66,20 @@ interface TurnResponse {
   readonly native: unknown;
   readonly capability_activity: readonly unknown[];
 }
+interface RuntimeModel {
+  readonly key: string;
+  readonly provider: string;
+  readonly id: string;
+  readonly name: string;
+}
+interface RuntimeModels {
+  readonly models: readonly RuntimeModel[];
+  readonly selected?: string;
+}
+interface RuntimeModelSelection {
+  readonly key: string;
+}
+
 interface Evidence {
   readonly correlation_id: string;
   readonly state: "processing" | "completed" | "interrupted";
@@ -87,6 +101,21 @@ interface DeterministicSession {
     readonly output: string;
   }[];
 }
+
+const DETERMINISTIC_MODELS: readonly RuntimeModel[] = [
+  {
+    key: modelKey("deterministic", "steady"),
+    provider: "deterministic",
+    id: "steady",
+    name: "Steady",
+  },
+  {
+    key: modelKey("deterministic", "concise"),
+    provider: "deterministic",
+    id: "concise",
+    name: "Concise",
+  },
+];
 
 const ResourceSnapshotSchema = Type.Object({
   root: Type.String(),
@@ -135,6 +164,7 @@ const EvidenceSchema = Type.Object({
   result: Type.Optional(TurnResponseSchema),
   error: Type.Optional(Type.String()),
 });
+const RuntimeModelSelectionSchema = Type.Object({ key: Type.String() });
 const CapabilityResponseSchema = Type.Object({
   output: Type.String(),
   native: Type.Unknown(),
@@ -170,37 +200,52 @@ const AssistantMessageSchema = Type.Object({
 });
 const TextBlockSchema = Type.Object({ type: Type.Literal("text"), text: Type.String() });
 
-const args = parseArguments(process.argv.slice(2));
-const config = await loadConfig(requiredArgument(args, "config"));
-const token = (await readFile(requiredArgument(args, "token-file"), "utf8")).trim();
-const deterministic = args.has("deterministic");
-const provider = args.get("provider");
-const providerKeyFile = args.get("provider-key-file");
-if ((provider === undefined) !== (providerKeyFile === undefined))
-  throw new Error("--provider and --provider-key-file must be supplied together");
-const providerKey =
-  providerKeyFile === undefined ? undefined : (await readFile(providerKeyFile, "utf8")).trim();
-const evidenceDirectory = join(config.dataDir, "components", config.runtime.id, "evidence");
-const sessionDirectory = join(config.resourceRoot, "sessions");
-await mkdir(evidenceDirectory, { recursive: true });
-await mkdir(sessionDirectory, { recursive: true });
-const runtimeInstance = randomUUID();
-
+let config: Config;
+let token: string;
+let deterministic: boolean;
+let evidenceDirectory: string;
+let sessionDirectory: string;
+let privateSettings: SettingsManager;
+let modelRuntime: ModelRuntime | undefined;
+let runtimeInstance: string;
 let queue: Promise<void> = Promise.resolve();
 
-const server = createServer((request, response) => {
-  void route(request, response).catch((failure: unknown) => {
-    const message = errorMessage(failure);
-    writeJson(response, 500, { error: message });
-  });
-});
+async function startRuntime(values: readonly string[]): Promise<void> {
+  const args = parseArguments(values);
+  config = await loadConfig(requiredArgument(args, "config"));
+  token = (await readFile(requiredArgument(args, "token-file"), "utf8")).trim();
+  deterministic = args.has("deterministic");
+  const privateStateDirectory = resolve(requiredArgument(args, "state-dir"));
+  evidenceDirectory = join(config.dataDir, "components", config.runtime.id, "evidence");
+  sessionDirectory = join(config.resourceRoot, "sessions");
+  await mkdir(evidenceDirectory, { recursive: true });
+  await mkdir(sessionDirectory, { recursive: true });
+  await mkdir(privateStateDirectory, { recursive: true, mode: 0o700 });
+  privateSettings = SettingsManager.create(privateStateDirectory, privateStateDirectory);
+  modelRuntime = deterministic
+    ? undefined
+    : await ModelRuntime.create({
+        authPath: join(privateStateDirectory, "auth.json"),
+        modelsPath: join(privateStateDirectory, "models.json"),
+        modelsStorePath: join(privateStateDirectory, "models-store.json"),
+        allowModelNetwork: true,
+        modelRefreshTimeoutMs: 15_000,
+      });
+  runtimeInstance = randomUUID();
 
-const listenUrl = new URL(config.runtime.url);
-server.listen(Number(listenUrl.port), listenUrl.hostname, () => {
-  process.stdout.write(
-    `runtime-pi ready at ${config.runtime.url}${deterministic ? " (deterministic provider substitute)" : ""}\n`,
-  );
-});
+  const server = createServer((request, response) => {
+    void route(request, response).catch((failure: unknown) => {
+      const message = errorMessage(failure);
+      writeJson(response, 500, { error: message });
+    });
+  });
+  const listenUrl = new URL(config.runtime.url);
+  server.listen(Number(listenUrl.port), listenUrl.hostname, () => {
+    process.stdout.write(
+      `runtime-pi ready at ${config.runtime.url}${deterministic ? " (deterministic provider substitute)" : ""}\n`,
+    );
+  });
+}
 
 async function route(request: IncomingMessage, response: ServerResponse): Promise<void> {
   if (request.method === "GET" && request.url === "/health") {
@@ -215,6 +260,8 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
         "skills",
         "capability-tools",
         "durable-evidence",
+        "model-discovery",
+        "model-selection",
       ],
       provider: deterministic ? "deterministic-local-substitute" : "pi",
     });
@@ -222,6 +269,31 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
   }
   if (!authorized(request)) {
     writeJson(response, 403, { error: "component authentication failed" });
+    return;
+  }
+  if (request.method === "GET" && request.url === "/v1/models") {
+    writeJson(response, 200, await serialize(listModels));
+    return;
+  }
+  if (request.method === "POST" && request.url === "/v1/models/refresh") {
+    const result = await serialize(refreshModels);
+    writeJson(response, 200, result);
+    return;
+  }
+  if (request.method === "PUT" && request.url === "/v1/model") {
+    let selection: RuntimeModelSelection;
+    try {
+      selection = Parse(RuntimeModelSelectionSchema, await readJson(request));
+    } catch {
+      writeJson(response, 400, { error: "invalid model selection" });
+      return;
+    }
+    const result = await serialize(() => selectModel(selection.key));
+    if (result === undefined) {
+      writeJson(response, 400, { error: "model is not available" });
+    } else {
+      writeJson(response, 200, result);
+    }
     return;
   }
   if (request.method === "POST" && request.url === "/v1/turns") {
@@ -250,6 +322,72 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
   writeJson(response, 404, { error: "not found" });
 }
 
+async function listModels(): Promise<RuntimeModels> {
+  const models: readonly RuntimeModel[] = deterministic
+    ? DETERMINISTIC_MODELS
+    : (await availablePiModels()).map((model) => ({
+        key: modelKey(model.provider, model.id),
+        provider: model.provider,
+        id: model.id,
+        name: model.name,
+      }));
+  const selected = selectedKey();
+  return { models, ...(selected === undefined ? {} : { selected }) };
+}
+
+async function refreshModels(): Promise<RuntimeModels> {
+  if (modelRuntime !== undefined) {
+    await modelRuntime.refresh({
+      allowNetwork: true,
+      force: true,
+      signal: AbortSignal.timeout(15_000),
+    });
+  }
+  return listModels();
+}
+
+async function selectModel(key: string): Promise<RuntimeModels | undefined> {
+  const models = await listModels();
+  const selected = models.models.find((model) => model.key === key);
+  if (selected === undefined) return undefined;
+  privateSettings.setDefaultModelAndProvider(selected.provider, selected.id);
+  await privateSettings.flush();
+  const [error] = privateSettings.drainErrors();
+  if (error !== undefined)
+    throw new Error(`Pi model selection could not be persisted: ${error.error.message}`);
+  return { ...models, selected: key };
+}
+
+async function availablePiModels() {
+  if (modelRuntime === undefined) throw new Error("Pi model runtime is unavailable");
+  const models = [...(await modelRuntime.getAvailable())];
+  models.sort(
+    (left, right) =>
+      left.provider.localeCompare(right.provider) ||
+      left.name.localeCompare(right.name) ||
+      left.id.localeCompare(right.id),
+  );
+  return models;
+}
+
+async function selectedPiModel() {
+  const provider = privateSettings.getDefaultProvider();
+  const id = privateSettings.getDefaultModel();
+  if (provider === undefined || id === undefined) throw new Error("no Pi model is selected");
+  const selected = (await availablePiModels()).find(
+    (model) => model.provider === provider && model.id === id,
+  );
+  if (selected === undefined)
+    throw new Error(`selected Pi model ${provider}/${id} is not available`);
+  return selected;
+}
+
+function selectedKey(): string | undefined {
+  const provider = privateSettings.getDefaultProvider();
+  const id = privateSettings.getDefaultModel();
+  return provider === undefined || id === undefined ? undefined : modelKey(provider, id);
+}
+
 async function executeTurn(request: TurnRequest): Promise<TurnResponse> {
   const existing = await readEvidence(request.correlation_id);
   if (existing?.state === "completed" && existing.result !== undefined) return existing.result;
@@ -274,6 +412,9 @@ async function executeTurn(request: TurnRequest): Promise<TurnResponse> {
 
 async function executeDeterministic(request: TurnRequest): Promise<TurnResponse> {
   const sessionPath = continuationPath(request);
+  const models = await listModels();
+  const selectedModel = models.models.find((model) => model.key === models.selected);
+  if (selectedModel === undefined) throw new Error("deterministic model selection is unavailable");
   await writeEvidence({
     correlation_id: request.correlation_id,
     state: "processing",
@@ -282,6 +423,7 @@ async function executeDeterministic(request: TurnRequest): Promise<TurnResponse>
     native: {
       runtime_instance: runtimeInstance,
       resource_snapshot: toJsonResource(request.resources),
+      model: `${selectedModel.provider}/${selectedModel.id}`,
     },
   });
   const prior = await readDeterministicSession(sessionPath);
@@ -325,6 +467,7 @@ async function executeDeterministic(request: TurnRequest): Promise<TurnResponse>
     native: {
       owner: "runtime-pi",
       provider: "deterministic-local-substitute",
+      model: `${selectedModel.provider}/${selectedModel.id}`,
       message_count: next.turns.length * 2,
       resource_snapshot: toJsonResource(request.resources),
     },
@@ -333,6 +476,8 @@ async function executeDeterministic(request: TurnRequest): Promise<TurnResponse>
 }
 
 async function executePi(request: TurnRequest): Promise<TurnResponse> {
+  const runtime = modelRuntime;
+  if (runtime === undefined) throw new Error("Pi model runtime is unavailable");
   const root = resolve(request.resources.root);
   const systemPrompt = await readFile(join(root, "SYSTEM.md"), "utf8");
   const settingsManager = SettingsManager.create(root, root);
@@ -343,12 +488,7 @@ async function executePi(request: TurnRequest): Promise<TurnResponse> {
     systemPromptOverride: () => systemPrompt,
   });
   await loader.reload();
-  const modelRuntime = await ModelRuntime.create({
-    authPath: join(root, "auth.json"),
-    modelsPath: join(root, "models.json"),
-  });
-  if (provider !== undefined && providerKey !== undefined)
-    await modelRuntime.setRuntimeApiKey(provider, providerKey);
+  const model = await selectedPiModel();
   const capabilityActivity: unknown[] = [];
   const capability = request.capability;
   const customTools =
@@ -381,7 +521,8 @@ async function executePi(request: TurnRequest): Promise<TurnResponse> {
   const { session, extensionsResult } = await createAgentSession({
     cwd: root,
     agentDir: root,
-    modelRuntime,
+    modelRuntime: runtime,
+    model,
     resourceLoader: loader,
     sessionManager: manager,
     settingsManager,
@@ -407,6 +548,7 @@ async function executePi(request: TurnRequest): Promise<TurnResponse> {
     native: {
       runtime_instance: runtimeInstance,
       session_id: session.sessionId,
+      model: `${model.provider}/${model.id}`,
       resource_snapshot: toJsonResource(request.resources),
     },
   });
@@ -427,6 +569,7 @@ async function executePi(request: TurnRequest): Promise<TurnResponse> {
       native: {
         owner: "runtime-pi",
         provider: "pi",
+        model: `${model.provider}/${model.id}`,
         session_id: session.sessionId,
         session_file: sessionFile,
         message_count: session.messages.length,
@@ -721,6 +864,10 @@ function errorMessage(value: unknown): string {
   return value instanceof Error ? value.message : String(value);
 }
 
+function modelKey(provider: string, id: string): string {
+  return createHash("sha256").update(provider).update("\0").update(id).digest("hex");
+}
+
 function safeName(value: string): string {
   if (!/^[A-Za-z0-9._-]+$/u.test(value))
     throw new Error("identifier contains unsupported characters");
@@ -737,3 +884,5 @@ function toJsonResource(value: ResourceSnapshot): Readonly<Record<string, string
     skills_sha256: value.skills_sha256,
   };
 }
+
+await startRuntime(process.argv.slice(2));

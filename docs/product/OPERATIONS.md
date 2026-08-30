@@ -22,11 +22,11 @@ Interface extensions can add commands or interactions without receiving the plat
 
 ## Credentials
 
-Credentials are scoped to their consumers: platform credentials to interface adapters, provider credentials to runtime adapters, and extension or capability credentials to the relevant component. They remain outside normal state, session history, diagnostics, and logs. Storage should use the host's encrypted service-credential mechanism where available.
+Credentials are scoped to their consumers: platform credentials to interface adapters, provider credentials to runtime adapters, and extension or capability credentials to the relevant component. They remain outside normal state, session history, diagnostics, and logs. Operators authenticate through Pi's own login surface, which persists and refreshes provider credentials in Pi-private state.
 
 ## Backup and restore
 
-A backup captures a consistent view of Carillon's database and configuration, common agent files, runtime-owned resources and sessions, selected component identities and configuration, component-owned durable state, and the release information needed to interpret them. Portable encrypted credentials can be included when the host credential mechanism permits it.
+A backup captures a consistent view of Carillon's database and configuration, common agent files, runtime-owned continuation resources and sessions, selected component identities and configuration, component-owned durable evidence, and the release information needed to interpret them. Pi's provider credentials, discovered catalog, and selected model stay outside Carillon's backup root; a restore to another host must authenticate Pi and select a model there.
 
 Restore reconstructs a coherent installation and reconciles core and component state before accepting new work. The operator can continue from the next safe action without repeating completed runtime work or an external delivery whose outcome is uncertain.
 

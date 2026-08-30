@@ -12,7 +12,7 @@ use axum::{
     extract::{Path as AxumPath, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -27,8 +27,8 @@ use crate::{
     model::{
         CapabilitySelection, Delivery, DeliveryAck, DeliveryOutcome, EventReceipt,
         ExtensionRequest, ExtensionResponse, ExternalEvent, Health, ResourceSnapshot,
-        RuntimeEvidence, RuntimeTurnRequest, RuntimeTurnResponse, SelectedComponent, StatusReport,
-        TurnInspection, TurnSummary,
+        RuntimeEvidence, RuntimeModelSelection, RuntimeModels, RuntimeTurnRequest,
+        RuntimeTurnResponse, SelectedComponent, StatusReport, TurnInspection, TurnSummary,
     },
 };
 
@@ -109,6 +109,9 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
         .route("/v1/turns", get(recent_turns))
         .route("/v1/turns/{id}", get(inspect_turn))
         .route("/v1/status", get(status))
+        .route("/v1/models", get(models))
+        .route("/v1/models/refresh", post(refresh_models))
+        .route("/v1/model", put(select_model))
         .with_state(state);
     let listener = TcpListener::bind(config.value.core.listen).await?;
     info!(listen = %config.value.core.listen, "Carillon core ready");
@@ -396,6 +399,80 @@ async fn status(
     }))
 }
 
+async fn models(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<RuntimeModels>, ApiError> {
+    let config = LoadedConfig::load(&state.config_path)?;
+    authorize_model_access(&headers, &config)?;
+    Ok(Json(
+        runtime_models_request(&state.client, &config, reqwest::Method::GET, None).await?,
+    ))
+}
+
+async fn refresh_models(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<RuntimeModels>, ApiError> {
+    let config = LoadedConfig::load(&state.config_path)?;
+    authorize(&headers, &config.value.core.operator_token_hash)?;
+    Ok(Json(
+        runtime_models_request(&state.client, &config, reqwest::Method::POST, None).await?,
+    ))
+}
+
+async fn select_model(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(selection): Json<RuntimeModelSelection>,
+) -> Result<Json<RuntimeModels>, ApiError> {
+    let config = LoadedConfig::load(&state.config_path)?;
+    authorize_model_access(&headers, &config)?;
+    Ok(Json(
+        runtime_models_request(
+            &state.client,
+            &config,
+            reqwest::Method::PUT,
+            Some(&selection),
+        )
+        .await?,
+    ))
+}
+
+async fn runtime_models_request(
+    client: &Client,
+    config: &LoadedConfig,
+    method: reqwest::Method,
+    selection: Option<&RuntimeModelSelection>,
+) -> Result<RuntimeModels> {
+    let runtime = &config.value.runtime;
+    if !runtime.enabled {
+        bail!("selected runtime adapter is disabled");
+    }
+    let endpoint = if method == reqwest::Method::POST {
+        "models/refresh"
+    } else if method == reqwest::Method::PUT {
+        "model"
+    } else {
+        "models"
+    };
+    let mut request = client
+        .request(method, format!("{}/v1/{endpoint}", runtime.url))
+        .bearer_auth(config.credential(&runtime.id)?);
+    if let Some(value) = selection {
+        request = request.json(value);
+    }
+    request
+        .send()
+        .await
+        .context("contact runtime model service")?
+        .error_for_status()
+        .context("runtime adapter rejected model operation")?
+        .json()
+        .await
+        .context("decode runtime models")
+}
+
 async fn component_health(client: &Client, config: &LoadedConfig) -> Vec<Health> {
     let mut reports = vec![Health {
         id: "core".to_owned(),
@@ -586,6 +663,20 @@ fn authorize(headers: &HeaderMap, expected_hash: &str) -> Result<(), ApiError> {
         return Err(ApiError::forbidden("component authentication failed"));
     }
     Ok(())
+}
+
+fn authorize_model_access(headers: &HeaderMap, config: &LoadedConfig) -> Result<(), ApiError> {
+    let candidate = headers
+        .get(http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .ok_or_else(|| ApiError::forbidden("component authentication required"))?;
+    if token_matches(&config.value.core.operator_token_hash, candidate)
+        || token_matches(&config.value.discord.token_hash, candidate)
+    {
+        return Ok(());
+    }
+    Err(ApiError::forbidden("component authentication failed"))
 }
 
 fn admit(config: &LoadedConfig, event: &ExternalEvent) -> Result<(), ApiError> {
@@ -794,6 +885,44 @@ pub async fn fetch_status(config: &LoadedConfig) -> Result<StatusReport> {
     Client::new()
         .get(format!("http://{}/v1/status", config.value.core.listen))
         .bearer_auth(config.credential("operator")?)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await
+        .map_err(Into::into)
+}
+
+pub async fn fetch_models(config: &LoadedConfig, refresh: bool) -> Result<RuntimeModels> {
+    let path = if refresh {
+        "/v1/models/refresh"
+    } else {
+        "/v1/models"
+    };
+    let client = Client::new();
+    let mut request = if refresh {
+        client.post(format!("http://{}{path}", config.value.core.listen))
+    } else {
+        client.get(format!("http://{}{path}", config.value.core.listen))
+    };
+    request = request.bearer_auth(config.credential("operator")?);
+    request
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await
+        .map_err(Into::into)
+}
+
+pub async fn select_runtime_model(
+    config: &LoadedConfig,
+    selection: &RuntimeModelSelection,
+) -> Result<RuntimeModels> {
+    Client::new()
+        .put(format!("http://{}/v1/model", config.value.core.listen))
+        .bearer_auth(config.credential("operator")?)
+        .json(selection)
         .send()
         .await?
         .error_for_status()?

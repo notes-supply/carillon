@@ -23,7 +23,7 @@ podman run --rm --network host -v "$RELEASE:/release:ro" "$IMAGE" /bin/sh -euxc 
   install -o carillon-extension -g carillon-extension -m 0600 /var/lib/carillon/credentials/guild-command.token /run/carillon-test/extension.token
   install -o carillon-capability -g carillon-capability -m 0600 /var/lib/carillon/credentials/echo-capability.token /run/carillon-test/capability.token
 
-  runuser -u carillon-runtime -g carillon-runtime -G carillon -- /opt/carillon/bin/carillon-runtime-pi --config /var/lib/carillon/carillon.toml --token-file /run/carillon-test/runtime.token --deterministic >/tmp/runtime.log 2>&1 & runtime_pid=$!
+  runuser -u carillon-runtime -g carillon-runtime -G carillon -- /opt/carillon/bin/carillon-runtime-pi --config /var/lib/carillon/carillon.toml --token-file /run/carillon-test/runtime.token --state-dir /var/lib/pi-carillon --deterministic >/tmp/runtime.log 2>&1 & runtime_pid=$!
   runuser -u carillon-extension -g carillon-extension -G carillon -- /opt/carillon/bin/carillon interface-extension --config /var/lib/carillon/carillon.toml --token-file /run/carillon-test/extension.token >/tmp/extension.log 2>&1 & extension_pid=$!
   runuser -u carillon-capability -g carillon-capability -G carillon -- /opt/carillon/bin/carillon capability --config /var/lib/carillon/carillon.toml --token-file /run/carillon-test/capability.token >/tmp/capability.log 2>&1 & capability_pid=$!
   runuser -u carillon-core -g carillon-core -G carillon -- /opt/carillon/bin/carillon core --config /var/lib/carillon/carillon.toml >/tmp/core.log 2>&1 & core_pid=$!
@@ -42,6 +42,7 @@ podman run --rm --network host -v "$RELEASE:/release:ro" "$IMAGE" /bin/sh -euxc 
     done
   done
 
+  /opt/carillon/bin/carillon model --config /var/lib/carillon/carillon.toml deterministic/steady >/dev/null
   response=$(curl --fail --silent --show-error -X POST -H "content-type: application/json" --data "{\"event_id\":\"installed-event\",\"guild_id\":\"100\",\"user_id\":\"200\",\"channel_id\":\"300\",\"content\":\"installed identity turn\"}" http://127.0.0.1:43801/v1/simulate)
   case "$response" in *"Local provider response 1"*) ;; *) printf "%s\n" "$response" >&2; exit 1;; esac
 

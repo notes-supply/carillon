@@ -82,6 +82,25 @@ pub struct RuntimeEvidence {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeModel {
+    pub key: String,
+    pub provider: String,
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeModels {
+    pub models: Vec<RuntimeModel>,
+    pub selected: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeModelSelection {
+    pub key: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ExtensionRequest {
     pub correlation_id: String,
     pub command: String,

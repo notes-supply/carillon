@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 
 const root = await mkdtemp(join(tmpdir(), "carillon-journey-"));
 const restoredRoot = await mkdtemp(join(tmpdir(), "carillon-restored-"));
+const piState = await mkdtemp(join(tmpdir(), "pi-carillon-"));
 const backup = join(tmpdir(), `carillon-backup-${crypto.randomUUID()}.tar.gz`);
 const binary = resolve("target/debug/carillon");
 const runtimeEntry = resolve("packages/runtime-pi/src/index.ts");
@@ -27,6 +28,29 @@ try {
     String(basePort),
   );
   await startAll();
+  const discoveredModels = JSON.parse(run("model", "--config", configPath()));
+  assert.equal(discoveredModels.models.length, 2);
+  assert.equal(discoveredModels.selected, null, "an unset model must remain unset");
+  await stop("runtime");
+  await writeFile(
+    join(piState, "settings.json"),
+    JSON.stringify({ defaultProvider: "missing-provider", defaultModel: "missing-model" }),
+  );
+  await start("runtime");
+  const unavailableModels = JSON.parse(run("model", "--config", configPath()));
+  assert.equal(typeof unavailableModels.selected, "string");
+  assert.equal(
+    unavailableModels.models.some((model) => model.key === unavailableModels.selected),
+    false,
+    "an unavailable selection must remain selected",
+  );
+  const selectedModels = JSON.parse(
+    run("model", "--config", configPath(), "deterministic/concise"),
+  );
+  assert.equal(
+    selectedModels.models.find((model) => model.key === selectedModels.selected).id,
+    "concise",
+  );
 
   const denied = await fetch(`http://127.0.0.1:${String(basePort + 1)}/v1/simulate`, {
     method: "POST",
@@ -192,6 +216,7 @@ try {
   await rm(root, { recursive: true, force: true });
   await rm(restoredRoot, { recursive: true, force: true });
   await rm(backup, { force: true });
+  await rm(piState, { recursive: true, force: true });
 }
 
 function configPath() {
@@ -248,6 +273,8 @@ function serviceArguments(name) {
       "--token-file",
       credential("runtime-pi"),
       "--deterministic",
+      "--state-dir",
+      piState,
     ];
     return packagedRuntime === undefined
       ? [process.execPath, [runtimeEntry, ...args]]

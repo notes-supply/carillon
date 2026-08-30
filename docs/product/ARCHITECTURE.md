@@ -52,9 +52,9 @@ The contract describes what Carillon needs to operate, not a universal agent mes
 
 ### Pi runtime adapter
 
-The first runtime adapter is a TypeScript component embedding the public `@earendil-works/pi-coding-agent` SDK. It creates headless Pi sessions from explicit resources and credentials.
+The first runtime adapter is a TypeScript component embedding the public `@earendil-works/pi-coding-agent` SDK. It creates headless Pi sessions from explicit resources. Operators authenticate through Pi's own login surface against the same private state that Pi's `ModelRuntime` uses for credential refresh, model discovery, and inference.
 
-Pi owns model execution and native session history, including messages, tools, skills, extensions, compaction, usage, and terminal evidence. The adapter translates the small Carillon lifecycle to those native APIs and keeps Pi persistence behind its boundary.
+Pi owns model execution and native session history, including messages, tools, skills, extensions, compaction, usage, and terminal evidence. Its credentials, discovered catalogs, and selected model live in stable Pi-private state outside Carillon resources and backups. The adapter translates the small Carillon lifecycle to public Pi APIs and exposes runtime-neutral model discovery and selection through Carillon.
 
 ### Other runtimes
 
