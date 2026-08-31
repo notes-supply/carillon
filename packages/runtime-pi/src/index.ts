@@ -30,11 +30,12 @@ import {
   serviceTierForModel,
   type ServiceTierDefault,
 } from "./profile.ts";
+import { nativeSessionId } from "./namespace.ts";
 import { createPiExecutionSession } from "./session.ts";
 
 registerBunOAuthFlows();
 
-interface RuntimeConfig {
+interface RuntimeProviderConfig {
   readonly id: string;
   readonly version: string;
   readonly url: string;
@@ -45,7 +46,7 @@ interface Config {
   readonly dataDir: string;
   readonly resourceRoot: string;
   readonly workspace: string;
-  readonly runtime: RuntimeConfig;
+  readonly runtime: RuntimeProviderConfig;
 }
 
 interface ResourceSnapshot {
@@ -57,7 +58,7 @@ interface ResourceSnapshot {
   readonly skills_sha256: string;
 }
 
-interface SelectedComponent {
+interface SelectedProvider {
   readonly id: string;
   readonly role: string;
   readonly version: string;
@@ -65,12 +66,13 @@ interface SelectedComponent {
 }
 
 interface CapabilitySelection {
-  readonly component: SelectedComponent;
+  readonly provider: SelectedProvider;
   readonly token: string;
 }
 
 interface TurnRequest {
   readonly correlation_id: string;
+  readonly interface_id: string;
   readonly agent_id: string;
   readonly audience_id: string;
   readonly input: string;
@@ -96,6 +98,7 @@ interface RuntimeExecutionProfileSelection {
   readonly service_tier?: ServiceTier;
   readonly scope: "current_conversation" | "new_conversations";
   readonly continuation_ref?: string | null;
+  readonly interface_id?: string | null;
   readonly agent_id: string;
   readonly audience_id?: string | null;
   readonly resources?: ResourceSnapshot | null;
@@ -159,18 +162,24 @@ const ResourceSnapshotSchema = Type.Object({
   extensions_sha256: Type.String(),
   skills_sha256: Type.String(),
 });
-const ComponentSchema = Type.Object({
-  id: Type.String(),
-  role: Type.String(),
-  version: Type.String(),
-  url: Type.String(),
+const ProviderIdentitySchema = Type.String({
+  minLength: 1,
+  maxLength: 128,
+  pattern: "^[A-Za-z0-9_-]+$",
+});
+const ProviderSchema = Type.Object({
+  id: ProviderIdentitySchema,
+  role: Type.String({ minLength: 1 }),
+  version: Type.String({ minLength: 1 }),
+  url: Type.String({ minLength: 1 }),
 });
 const CapabilitySelectionSchema = Type.Object({
-  component: ComponentSchema,
+  provider: ProviderSchema,
   token: Type.String(),
 });
 const TurnRequestSchema = Type.Object({
   correlation_id: Type.String(),
+  interface_id: ProviderIdentitySchema,
   agent_id: Type.String(),
   audience_id: Type.String(),
   input: Type.String(),
@@ -214,6 +223,7 @@ const RuntimeExecutionProfileSelectionSchema = Type.Object({
   service_tier: Type.Optional(ServiceTierSchema),
   scope: Type.Union([Type.Literal("current_conversation"), Type.Literal("new_conversations")]),
   continuation_ref: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  interface_id: Type.Optional(Type.Union([ProviderIdentitySchema, Type.Null()])),
   agent_id: Type.String(),
   audience_id: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   resources: Type.Optional(Type.Union([ResourceSnapshotSchema, Type.Null()])),
@@ -235,7 +245,7 @@ const DeterministicSessionSchema = Type.Object({
 const FileConfigSchema = Type.Object({
   data_dir: Type.String(),
   agent: Type.Object({ resource_root: Type.String(), workspace: Type.String() }),
-  runtime: Type.Object({ id: Type.String(), version: Type.String(), url: Type.String() }),
+  providers: Type.Array(ProviderSchema),
 });
 const NativeExecutionSchema = Type.Object({ runtime_instance: Type.String() });
 const SessionEntrySchema = Type.Object({
@@ -269,7 +279,8 @@ let queue: Promise<void> = Promise.resolve();
 
 async function startRuntime(values: readonly string[]): Promise<void> {
   const args = parseArguments(values);
-  config = await loadConfig(requiredArgument(args, "config"));
+  const providerId = requiredArgument(args, "provider");
+  config = await loadConfig(requiredArgument(args, "config"), providerId);
   token = (await readFile(requiredArgument(args, "token-file"), "utf8")).trim();
   deterministic = args.has("deterministic");
   const privateStateDirectory = resolve(requiredArgument(args, "state-dir"));
@@ -311,7 +322,7 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
   if (request.method === "GET" && request.url === "/health") {
     writeJson(response, 200, {
       id: config.runtime.id,
-      role: "runtime-adapter",
+      role: "runtime",
       version: config.runtime.version,
       status: "ready",
       features: [
@@ -583,7 +594,9 @@ async function applyPiConversationProfile(
   if (model === undefined) throw new Error("selected Pi model is unavailable");
   const requested = profileEvidence(model, selection.reasoning, selection.service_tier).requested;
   if (selection.continuation_ref === null || selection.continuation_ref === undefined) {
-    const manager = SessionManager.create(config.workspace, sessionDirectory);
+    const manager = SessionManager.create(config.workspace, sessionDirectory, {
+      id: profileNativeSessionId(selection),
+    });
     const continuation = persistExecutionProfile(manager, requested);
     return {
       scope: selection.scope,
@@ -631,10 +644,32 @@ async function applyPiConversationProfile(
 function profileContinuationPath(selection: RuntimeExecutionProfileSelection): string {
   if (selection.continuation_ref !== null && selection.continuation_ref !== undefined)
     return validateContinuation(selection.continuation_ref);
+  return join(
+    sessionDirectory,
+    `${safeName(requiredProfileInterface(selection))}--${safeName(selection.agent_id)}--${safeName(requiredProfileAudience(selection))}.json`,
+  );
+}
+
+function profileNativeSessionId(selection: RuntimeExecutionProfileSelection): string {
+  return nativeSessionId(
+    requiredProfileInterface(selection),
+    selection.agent_id,
+    requiredProfileAudience(selection),
+  );
+}
+
+function requiredProfileInterface(selection: RuntimeExecutionProfileSelection): string {
+  const interfaceId = selection.interface_id;
+  if (interfaceId === null || interfaceId === undefined)
+    throw new Error("current conversation scope needs an interface");
+  return interfaceId;
+}
+
+function requiredProfileAudience(selection: RuntimeExecutionProfileSelection): string {
   const audience = selection.audience_id;
   if (audience === null || audience === undefined || audience.length === 0)
     throw new Error("current conversation scope needs an audience");
-  return join(sessionDirectory, `${safeName(selection.agent_id)}--${safeName(audience)}.json`);
+  return audience;
 }
 
 async function executeTurn(request: TurnRequest): Promise<TurnResponse> {
@@ -735,7 +770,9 @@ async function executePi(request: TurnRequest): Promise<TurnResponse> {
   const root = resolve(request.resources.root);
   const isNew = request.continuation_ref === null || request.continuation_ref === undefined;
   const manager = isNew
-    ? SessionManager.create(config.workspace, sessionDirectory)
+    ? SessionManager.create(config.workspace, sessionDirectory, {
+        id: nativeSessionId(request.interface_id, request.agent_id, request.audience_id),
+      })
     : SessionManager.open(
         validateContinuation(request.continuation_ref),
         sessionDirectory,
@@ -885,15 +922,13 @@ async function callCapability(
   correlationId: string,
   input: string,
 ): Promise<CapabilityResponse> {
-  const response = await fetch(`${selection.component.url}/v1/execute`, {
+  const response = await fetch(`${selection.provider.url}/v1/execute`, {
     method: "POST",
     headers: { authorization: `Bearer ${selection.token}`, "content-type": "application/json" },
     body: JSON.stringify({ correlation_id: correlationId, operation: "echo", input }),
   });
   if (!response.ok)
-    throw new Error(
-      `capability ${selection.component.id} returned HTTP ${String(response.status)}`,
-    );
+    throw new Error(`capability ${selection.provider.id} returned HTTP ${String(response.status)}`);
   return Parse(CapabilityResponseSchema, await response.json());
 }
 
@@ -902,7 +937,7 @@ function continuationPath(request: TurnRequest): string {
     return validateContinuation(request.continuation_ref);
   return join(
     sessionDirectory,
-    `${safeName(request.agent_id)}--${safeName(request.audience_id)}.json`,
+    `${safeName(request.interface_id)}--${safeName(request.agent_id)}--${safeName(request.audience_id)}.json`,
   );
 }
 
@@ -1064,15 +1099,20 @@ async function atomicJson(path: string, value: unknown): Promise<void> {
   await rename(temporary, path);
 }
 
-async function loadConfig(path: string): Promise<Config> {
+async function loadConfig(path: string, providerId: string): Promise<Config> {
+  Parse(ProviderIdentitySchema, providerId);
   const root = resolve(path, "..");
   const parsed = Parse(FileConfigSchema, parseToml(await readFile(path, "utf8")));
+  const runtime = parsed.providers.find(
+    (provider) => provider.id === providerId && provider.role === "runtime",
+  );
+  if (runtime === undefined) throw new Error(`runtime provider ${providerId} is not configured`);
   return {
     root,
     dataDir: resolve(root, parsed.data_dir),
     resourceRoot: resolve(root, parsed.agent.resource_root),
     workspace: resolve(root, parsed.agent.workspace),
-    runtime: parsed.runtime,
+    runtime,
   };
 }
 

@@ -30,9 +30,7 @@ for unit in \
   carillon.target \
   carillon-core.service \
   carillon-runtime-pi.service \
-  carillon-discord.service \
-  carillon-interface-extension.service \
-  carillon-capability.service
+  carillon-discord.service
 do
   rm -f "$UNIT_DIR/$unit"
 done

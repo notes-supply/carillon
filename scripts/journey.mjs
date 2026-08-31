@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -38,6 +39,7 @@ try {
     "--base-port",
     String(basePort),
   );
+  await configureOptionalProviderFixtures();
   await startAll();
   const discoveredProfiles = JSON.parse(run("model", "--config", configPath()));
   assert.equal(discoveredProfiles.models.length, 2);
@@ -110,12 +112,15 @@ try {
     "operator diagnostics must require authentication",
   );
 
-  run("component", "--config", configPath(), "guild-command", "enable");
-  run("component", "--config", configPath(), "echo-capability", "enable");
+  run("provider", "--config", configPath(), "guild-command", "enable");
+  run("provider", "--config", configPath(), "echo-capability", "enable");
   run("enable-demo-resources", "--config", configPath());
 
   const command = await simulate("event-command-1", "!carillon status");
-  assert.match(command.delivery.content, /Carillon 0\.0\.0 \(status\); guild 100; operator 200/u);
+  assert.match(
+    command.delivery.content,
+    /Carillon 0\.0\.0 \(status\); audience discord-100-300; operator 200/u,
+  );
 
   const additions = await simulate("event-2", "use the additions and capability");
   assert.match(additions.delivery.content, /Local provider response 2/u);
@@ -201,17 +206,18 @@ try {
   });
   assert.equal(channelChild.status, 403, "channel conversations must not inherit child threads");
 
-  run("component", "--config", configPath(), "runtime-pi", "disable");
+  run("provider", "--config", configPath(), "runtime-pi", "disable");
   const failed = await simulateRoute("failed-before-delivery", "300", null, "cannot run");
   assert.equal(failed.receipt.state, "interrupted");
   assert.deepEqual(failed.feedback, ["processing", "failed"]);
-  run("component", "--config", configPath(), "runtime-pi", "enable");
+  run("provider", "--config", configPath(), "runtime-pi", "enable");
 
   await stop("discord");
   const abandoned = await submitCoreEvent("event-delivery-crash", "claim then crash");
   const claimed = await fetch(`http://127.0.0.1:${String(basePort)}/v1/deliveries`, {
     headers: {
       authorization: `Bearer ${await credentialValue("discord-private")}`,
+      "x-carillon-provider": "discord-private",
       "x-carillon-instance": "crashed-discord",
     },
   });
@@ -270,7 +276,7 @@ try {
   );
   assert.equal(inspected.state, "completed");
   assert.equal(inspected.delivery_state, "delivered");
-  assert.ok(inspected.components.some((component) => component.id === "echo-capability"));
+  assert.ok(inspected.providers.some((provider) => provider.id === "echo-capability"));
   assert.equal(inspected.capability_activity.length, 1);
   assert.equal(typeof inspected.resources.extensions_sha256, "string");
 
@@ -281,7 +287,7 @@ try {
   assert.equal(recent[0].turn_id, afterCapabilityRestart.receipt.turn_id);
 
   const status = JSON.parse(run("status", "--config", configPath()));
-  assert.ok(status.components.every((component) => component.status === "ready"));
+  assert.ok(status.providers.every((provider) => provider.status === "ready"));
   assert.equal(status.turns.interrupted, 1);
   assert.equal(status.deliveries.uncertain, 1);
   assert.equal(status.execution_profile.requested.model, "deterministic/concise");
@@ -341,6 +347,53 @@ async function credentialValue(name) {
   return (await readFile(credential(name), "utf8")).trim();
 }
 
+async function configureOptionalProviderFixtures() {
+  const extensionToken = "journey-guild-command-token";
+  const capabilityToken = "journey-echo-capability-token";
+  await writeFile(credential("guild-command"), `${extensionToken}\n`, { mode: 0o600 });
+  await writeFile(credential("echo-capability"), `${capabilityToken}\n`, { mode: 0o600 });
+  await mkdir(join(installation, "state/components/echo-capability"), {
+    recursive: true,
+    mode: 0o700,
+  });
+
+  const config = await readFile(configPath(), "utf8");
+  const releaseMatch = /^release = "([^"]+)"$/mu.exec(config);
+  assert.notEqual(releaseMatch, null, "generated configuration must declare its release");
+  const emptyBindings = "interface_extensions = []";
+  assert.equal(
+    config.split(emptyBindings).length,
+    2,
+    "fresh configuration must have exactly one empty extension binding list",
+  );
+  const providerFixture = `
+[[providers]]
+id = "guild-command"
+role = "interface-extension"
+version = "${releaseMatch[1]}"
+url = "http://127.0.0.1:${String(basePort + 3)}"
+token_hash = "${createHash("sha256").update(extensionToken).digest("hex")}"
+enabled = false
+
+[[providers]]
+id = "echo-capability"
+role = "capability"
+version = "${releaseMatch[1]}"
+url = "http://127.0.0.1:${String(basePort + 4)}"
+token_hash = "${createHash("sha256").update(capabilityToken).digest("hex")}"
+enabled = false
+
+[[agent.interface_extensions]]
+interface_provider = "discord-private"
+extension_provider = "guild-command"
+`;
+  await writeFile(
+    configPath(),
+    `${config.replace(emptyBindings, 'capability_provider = "echo-capability"')}${providerFixture}`,
+    { mode: 0o600 },
+  );
+}
+
 function run(...args) {
   return execFileSync(binary, args, { encoding: "utf8" }).trim();
 }
@@ -376,11 +429,12 @@ async function submitCoreEvent(eventId, content) {
     method: "POST",
     headers: {
       authorization: `Bearer ${await credentialValue("discord-private")}`,
+      "x-carillon-provider": "discord-private",
       "content-type": "application/json",
     },
     body: JSON.stringify({
       event_id: eventId,
-      guild_id: "100",
+      agent_id: "default",
       user_id: "200",
       audience_id: "discord-100-300",
       delivery_target_id: "300",
@@ -401,6 +455,8 @@ function serviceArguments(name) {
       configPath(),
       "--token-file",
       credential("runtime-pi"),
+      "--provider",
+      "runtime-pi",
       "--deterministic",
       "--state-dir",
       piState,
@@ -418,12 +474,20 @@ function serviceArguments(name) {
         configPath(),
         "--token-file",
         credential("guild-command"),
+        "guild-command",
       ],
     ];
   if (name === "capability")
     return [
       binary,
-      ["capability", "--config", configPath(), "--token-file", credential("echo-capability")],
+      [
+        "capability",
+        "--config",
+        configPath(),
+        "--token-file",
+        credential("echo-capability"),
+        "echo-capability",
+      ],
     ];
   return [
     binary,

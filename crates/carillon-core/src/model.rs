@@ -14,7 +14,7 @@ pub struct Health {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ExternalEvent {
     pub event_id: String,
-    pub guild_id: Option<String>,
+    pub agent_id: String,
     pub user_id: String,
     pub audience_id: String,
     pub delivery_target_id: String,
@@ -43,7 +43,7 @@ pub struct ResourceSnapshot {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct SelectedComponent {
+pub struct SelectedProvider {
     pub id: String,
     pub role: String,
     pub version: String,
@@ -52,7 +52,7 @@ pub struct SelectedComponent {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CapabilitySelection {
-    pub component: SelectedComponent,
+    pub provider: SelectedProvider,
     pub token: String,
 }
 
@@ -93,6 +93,7 @@ impl FromStr for ServiceTier {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RuntimeTurnRequest {
     pub correlation_id: String,
+    pub interface_id: String,
     pub agent_id: String,
     pub audience_id: String,
     pub input: String,
@@ -163,6 +164,8 @@ pub struct ExecutionProfileSelection {
     pub service_tier: Option<ServiceTier>,
     pub scope: ExecutionProfileScope,
     pub audience_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interface_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -175,6 +178,8 @@ pub struct RuntimeExecutionProfileSelection {
     pub scope: ExecutionProfileScope,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub continuation_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interface_id: Option<String>,
     pub agent_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audience_id: Option<String>,
@@ -195,7 +200,7 @@ pub struct ExtensionRequest {
     pub correlation_id: String,
     pub command: String,
     pub arguments: String,
-    pub guild_id: String,
+    pub audience_id: String,
     pub user_id: String,
 }
 
@@ -254,7 +259,7 @@ pub struct TurnInspection {
     pub input: String,
     pub state: String,
     pub output: Option<String>,
-    pub components: Value,
+    pub providers: Value,
     pub resources: ResourceSnapshot,
     pub native_evidence: Option<Value>,
     pub capability_activity: Vec<Value>,
@@ -276,7 +281,7 @@ pub struct TurnSummary {
 pub struct StatusReport {
     pub release: String,
     pub agent_id: String,
-    pub components: Vec<Health>,
+    pub providers: Vec<Health>,
     pub turns: StateCounts,
     pub deliveries: StateCounts,
     pub latest_backup: Option<String>,

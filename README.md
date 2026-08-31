@@ -13,7 +13,7 @@ mise run check
 mise run package
 ```
 
-`mise run journey` uses local loopback services and a deterministic provider substitute. It exercises fail-closed Discord guild, user, and immutable-channel routing; mention and always activation; thread adoption and channel continuity; processing feedback; duplicate event suppression; continuing and recovered runtime state; abandoned-delivery reconciliation; authenticated diagnostics; live interface-extension/capability/resource activation; independent component restarts; turn inspection; and stopped-service backup/restore.
+`mise run journey` uses local loopback services and a deterministic runtime provider substitute. It exercises fail-closed Discord guild, user, and immutable-channel routing; mention and always activation; thread adoption and channel continuity; processing feedback; duplicate event suppression; continuing and recovered runtime state; abandoned-delivery reconciliation; authenticated diagnostics; live interface-extension/capability/resource activation; independent provider restarts; turn inspection; and stopped-service backup/restore.
 
 `mise run package` creates `dist/carillon-0.0.0-linux-x86_64.tar.gz`. The archive contains the toolchain-free core and Pi runtime, a private pinned Pi CLI, user-systemd definitions, install/uninstall scripts, Pi interface assets, and the Pi license notice. The target host needs systemd and standard Linux user tools, not Rust, Node, Bun, Mise, a source checkout, or root installation.
 
@@ -62,16 +62,20 @@ An administrator may explicitly enable boot-without-login persistence with `logi
   --reasoning high --service-tier fast PROVIDER/MODEL
 ```
 
-Use `--scope current-conversation --audience AUDIENCE_ID` to change one native continuation instead. Authenticated OpenAI Codex models expose **Standard** (normal processing) and **Fast** (OpenAI priority processing); other providers omit the speed selector. Pi persists the default beneath `CARILLON_HOME/pi`.
+Use `--scope current-conversation --audience AUDIENCE_ID` to change one native continuation instead. Add `--interface PROVIDER_ID` when more than one interface is enabled; a single enabled interface remains the default. Catalog discovery, refresh, and application use that conversation's pinned runtime. Authenticated OpenAI Codex models expose **Standard** (normal processing) and **Fast** (OpenAI priority processing); other providers omit the speed selector. Pi persists the default beneath `CARILLON_HOME/pi`.
 
 An allowlisted guild member can use Discord's native `/model` flow: provider, model, supported settings, then `this conversation` or `new conversations`. `/model` is accepted only in a configured route (or an eligible child thread), applies after the interaction, and does not alter an in-flight turn.
 
-The Discord adapter rejects direct messages, other guilds, users outside the immutable ID allowlist, and channels outside `[[discord.routes]]` before contacting core or discovering models. Each route explicitly sets `activation = "mention" | "always"` and `conversation = "thread" | "channel"`. Mention routes strip only the configured bot user's immutable `<@ID>` mention. Thread routes create or adopt thread-scoped continuations; channel routes keep one continuation in the configured channel and reject child threads.
+The Discord interface provider rejects direct messages, other guilds, users outside the immutable ID allowlist, and channels outside `[[discord.routes]]` before contacting core or discovering models. Each route explicitly sets `activation = "mention" | "always"` and `conversation = "thread" | "channel"`. Mention routes strip only the configured bot user's immutable `<@ID>` mention. Thread routes create or adopt thread-scoped continuations; channel routes keep one continuation in the configured channel and reject child threads.
+
+Core configuration declares stable provider instances in `[[providers]]`. Each instance has one role (`interface`, `runtime`, `interface-extension`, or `capability`); `[agent].runtime_provider` selects the default runtime for new conversations and each `[[agent.interface_extensions]]` entry binds one extension to one interface. Existing conversations remain pinned to the runtime provider that owns their opaque continuation. The Discord adapter owns its optional `[discord]` block and refuses to launch when that block is absent or invalid; core and other interface providers do not require Discord fields.
 
 Generated configuration enables typing and reactions independently and names every terminal emoji explicitly:
 
 ```toml
 [discord]
+provider = "discord-private"
+agent = "default"
 typing = true
 reactions = true
 processing_emoji = "👀"
@@ -100,13 +104,11 @@ skills/
 sessions/
 ```
 
-Activate the included first-release additions without rebuilding a component:
+The release installs only the core, Discord interface, and Pi runtime services. External interface-extension and capability providers require explicit `[[providers]]` records, agent bindings, credentials, binaries, and user-service packaging supplied by their operator; the release does not include example external providers.
+
+The included Pi-native example resources are independent of those external providers and can be activated explicitly:
 
 ```text
-~/.carillon/app/bin/carillon component \
-  --config ~/.carillon/carillon.toml guild-command enable
-~/.carillon/app/bin/carillon component \
-  --config ~/.carillon/carillon.toml echo-capability enable
 ~/.carillon/app/bin/carillon enable-demo-resources \
   --config ~/.carillon/carillon.toml
 ```
@@ -124,7 +126,7 @@ Redacted `/health` endpoints remain unauthenticated for service supervision. Ope
   --config ~/.carillon/carillon.toml TURN_ID
 ```
 
-Restart one component with `systemctl --user restart carillon-discord`, `carillon-runtime-pi`, `carillon-interface-extension`, or `carillon-capability`. All are ordinary processes owned by the same user and grouped by `carillon.target`; restarting one does not restart its siblings. Runtime correlation evidence prevents completed model work from being rerun; a delivery claimed before interruption becomes `uncertain` rather than being repeated.
+Restart a default provider with `systemctl --user restart carillon-discord` or `carillon-runtime-pi`; core is supervised separately by `carillon-core`. All three services are ordinary processes owned by the same user and grouped by `carillon.target`; restarting one does not restart its siblings. Explicitly packaged optional providers can be supervised independently in the same way. Runtime correlation evidence prevents completed model work from being rerun; a delivery claimed before interruption becomes `uncertain` rather than being repeated.
 
 `~/.carillon/app/bin/carillon-uninstall` stops and removes Carillon's user units and application files. It deliberately preserves `CARILLON_HOME` configuration and data and never touches unrelated owner files or `~/.pi`.
 
@@ -139,7 +141,7 @@ systemctl --user stop carillon.target
   --output ~/backups/carillon.tar.gz
 ```
 
-Backup refuses to run while the core lock or any component listener is active. It includes core SQLite state, configuration, common agent files, Pi resource snapshots and sessions, component evidence/state, internal component credentials, and release identity. Pi provider credentials, model catalogs, and selected model remain in `CARILLON_HOME/pi`; copy that private directory separately when moving the complete installation.
+Backup refuses to run while the core lock or any provider listener is active. It includes core SQLite state, configuration, common agent files, Pi resource snapshots and sessions, provider evidence/state, internal provider credentials, and release identity. Pi provider credentials, model catalogs, and selected model remain in `CARILLON_HOME/pi`; copy that private directory separately when moving the complete installation.
 
 Restore into an empty owner-controlled root:
 
@@ -149,4 +151,4 @@ Restore into an empty owner-controlled root:
   --target ~/.carillon-restored
 ```
 
-Restore runs as the owner. Runtime-owned continuation references are relocated by the runtime adapter, and the next safe turn continues without repeating completed work or an uncertain delivery.
+Restore runs as the owner. Runtime-owned continuation references are relocated by the runtime provider, and the next safe turn continues without repeating completed work or an uncertain delivery.

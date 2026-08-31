@@ -13,10 +13,16 @@ for artifact in \
   install.sh \
   uninstall.sh \
   systemd/carillon.target \
+  systemd/carillon-core.service \
+  systemd/carillon-discord.service \
   systemd/carillon-runtime-pi.service
 do
   [ -e "$RELEASE/$artifact" ] || { printf 'release artifact missing: %s\n' "$artifact" >&2; exit 1; }
 done
+[ "$(find "$RELEASE/systemd" -maxdepth 1 -type f | wc -l)" -eq 4 ] || {
+  printf '%s\n' "release must contain exactly the target and three default service units" >&2
+  exit 1
+}
 
 TEST_ROOT=$(mktemp -d)
 OWNER_HOME="$TEST_ROOT/owner home"
@@ -66,6 +72,10 @@ install_release() {
 
 verify_units() {
   verify_dir=$1
+  [ "$(find "$verify_dir" -maxdepth 1 -type f -name 'carillon*' | wc -l)" -eq 4 ] || {
+    printf '%s\n' "installation must contain exactly the target and three default service units" >&2
+    exit 1
+  }
   systemd-analyze verify "$verify_dir"/carillon.target "$verify_dir"/carillon-*.service
 }
 
@@ -145,6 +155,8 @@ install_release "$OWNER_HOME" "$WORKSPACE" "$CARILLON_HOME" "$XDG_CONFIG_HOME" \
   "$BASE_PORT" >/dev/null
 verify_units "$XDG_CONFIG_HOME/systemd/user"
 assert_service_identity "$XDG_CONFIG_HOME/systemd/user"
+[ ! -e "$CARILLON_HOME/credentials/guild-command.token" ]
+[ ! -e "$CARILLON_HOME/credentials/echo-capability.token" ]
 
 [ "$(stat -c %u "$CARILLON_HOME")" -eq "$(id -u)" ]
 [ "$(stat -c %a "$CARILLON_HOME")" = 700 ]
@@ -174,7 +186,7 @@ CONFIG=$CARILLON_HOME/carillon.toml
 start_runtime() {
   env HOME="$OWNER_HOME" USER="$OWNER" LOGNAME="$OWNER" SHELL="$OWNER_SHELL" PATH="$PATH" \
     CARILLON_HOME="$CARILLON_HOME" PI_CODING_AGENT_DIR="$CARILLON_HOME/pi" \
-    "$APP/carillon-runtime-pi" --config "$CONFIG" \
+    "$APP/carillon-runtime-pi" --config "$CONFIG" --provider runtime-pi \
       --token-file "$CARILLON_HOME/credentials/runtime-pi.token" \
       --state-dir "$CARILLON_HOME/pi" --deterministic \
       >>"$CARILLON_HOME/logs/runtime-pi.log" 2>&1 &
