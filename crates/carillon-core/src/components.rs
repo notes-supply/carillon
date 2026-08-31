@@ -54,7 +54,8 @@ use crate::{
         CapabilityRequest, CapabilityResponse, Delivery, DeliveryAck, DeliveryOutcome,
         DeliveryReconciliation, EventReceipt, ExecutionProfileApplication, ExecutionProfileScope,
         ExecutionProfileSelection, ExtensionRequest, ExtensionResponse, ExternalEvent, Health,
-        RuntimeExecutionProfileModel, RuntimeExecutionProfiles, SimulateRequest, SimulateResponse,
+        RuntimeExecutionProfileModel, RuntimeExecutionProfiles, ServiceTier, SimulateRequest,
+        SimulateResponse,
     },
 };
 
@@ -1146,11 +1147,15 @@ fn profile_draft_response(
     if custom_id == REASONING_SELECT_ID || custom_id == TIER_SELECT_ID {
         let values = profile_selection_parts(selected_component_value(component)?, 3)?;
         let model = profile_model(profiles, values[0])?;
+        let tier = optional_profile_value(values[2])
+            .map(str::parse)
+            .transpose()
+            .map_err(anyhow::Error::msg)?;
         return Ok(profile_panel(
             profiles,
             model,
             optional_profile_value(values[1]),
-            optional_profile_value(values[2]),
+            tier,
             current_conversation,
             model_page(profiles, model),
         ));
@@ -1188,7 +1193,10 @@ async fn apply_profile_selection(
         &ExecutionProfileSelection {
             key: model.key.clone(),
             reasoning: optional_profile_value(values[1]).map(str::to_owned),
-            service_tier: optional_profile_value(values[2]).map(str::to_owned),
+            service_tier: optional_profile_value(values[2])
+                .map(str::parse)
+                .transpose()
+                .map_err(anyhow::Error::msg)?,
             scope,
             audience_id,
         },
@@ -1201,7 +1209,7 @@ fn profile_panel(
     profiles: &RuntimeExecutionProfiles,
     model: &RuntimeExecutionProfileModel,
     reasoning: Option<&str>,
-    service_tier: Option<&str>,
+    service_tier: Option<ServiceTier>,
     current_conversation: bool,
     requested_page: usize,
 ) -> InteractionResponseData {
@@ -1283,25 +1291,25 @@ fn profile_panel(
 fn profile_setting_selects(
     model: &RuntimeExecutionProfileModel,
     reasoning: Option<&str>,
-    service_tier: Option<&str>,
+    service_tier: Option<ServiceTier>,
 ) -> Vec<Component> {
     let mut components = Vec::with_capacity(2);
     let reasoning_value = reasoning.unwrap_or("-");
-    let tier_value = service_tier.unwrap_or("-");
+    let selected_tier = service_tier.unwrap_or(ServiceTier::Standard);
     if !model.reasoning.is_empty() {
         let mut options = vec![SelectMenuOption {
             default: reasoning.is_none(),
             description: Some("Use the provider or model default".to_owned()),
             emoji: None,
             label: "Default".to_owned(),
-            value: format!("{}|-|{tier_value}", model.key),
+            value: format!("{}|-|{selected_tier}", model.key),
         }];
         options.extend(model.reasoning.iter().map(|level| SelectMenuOption {
             default: reasoning == Some(level.as_str()),
             description: None,
             emoji: None,
             label: title_case_profile_value(level),
-            value: format!("{}|{level}|{tier_value}", model.key),
+            value: format!("{}|{level}|{selected_tier}", model.key),
         }));
         components.push(text_select(
             REASONING_SELECT_ID,
@@ -1310,21 +1318,21 @@ fn profile_setting_selects(
         ));
     }
     if !model.service_tiers.is_empty() {
-        let mut options = vec![SelectMenuOption {
-            default: service_tier.is_none(),
-            description: Some("Use the provider default".to_owned()),
-            emoji: None,
-            label: "Default".to_owned(),
-            value: format!("{}|{reasoning_value}|-", model.key),
-        }];
-        options.extend(model.service_tiers.iter().map(|tier| SelectMenuOption {
-            default: service_tier == Some(tier.as_str()),
-            description: None,
-            emoji: None,
-            label: title_case_profile_value(tier),
-            value: format!("{}|{reasoning_value}|{tier}", model.key),
-        }));
-        components.push(text_select(TIER_SELECT_ID, "Service tier", options));
+        let options = model
+            .service_tiers
+            .iter()
+            .map(|tier| SelectMenuOption {
+                default: *tier == selected_tier,
+                description: match tier {
+                    ServiceTier::Standard => Some("Normal processing".to_owned()),
+                    ServiceTier::Fast => Some("OpenAI priority processing".to_owned()),
+                },
+                emoji: None,
+                label: title_case_profile_value(tier.as_str()),
+                value: format!("{}|{reasoning_value}|{tier}", model.key),
+            })
+            .collect();
+        components.push(text_select(TIER_SELECT_ID, "Speed", options));
     }
     components
 }
@@ -1332,13 +1340,13 @@ fn profile_setting_selects(
 fn profile_action_row(
     model: &RuntimeExecutionProfileModel,
     reasoning: Option<&str>,
-    service_tier: Option<&str>,
+    service_tier: Option<ServiceTier>,
     current_conversation: bool,
     page: usize,
     pages: usize,
 ) -> Component {
     let reasoning_value = reasoning.unwrap_or("-");
-    let tier_value = service_tier.unwrap_or("-");
+    let tier_value = service_tier.unwrap_or(ServiceTier::Standard);
     let selection = format!("{}|{reasoning_value}|{tier_value}", model.key);
     let mut buttons = Vec::with_capacity(4);
     if pages > 1 {
@@ -1425,7 +1433,7 @@ fn provider_profile_model<'a>(
 fn selected_profile_values<'a>(
     profiles: &'a RuntimeExecutionProfiles,
     model: &RuntimeExecutionProfileModel,
-) -> (Option<&'a str>, Option<&'a str>) {
+) -> (Option<&'a str>, Option<ServiceTier>) {
     profiles
         .selected
         .as_ref()
@@ -1433,7 +1441,7 @@ fn selected_profile_values<'a>(
         .map_or((None, None), |selected| {
             (
                 selected.requested.reasoning.as_deref(),
-                selected.requested.service_tier.as_deref(),
+                selected.requested.service_tier,
             )
         })
 }
@@ -1466,10 +1474,9 @@ fn applied_profile_response(applied: &ExecutionProfileApplication) -> Interactio
                 .as_deref()
                 .map_or_else(String::new, |value| format!(", reasoning **{value}**")),
             applied
-                .requested
+                .effective
                 .service_tier
-                .as_deref()
-                .map_or_else(String::new, |value| format!(", requested tier **{value}**")),
+                .map_or_else(String::new, |value| format!(", speed **{value}**")),
         ),
         Vec::new(),
     )
@@ -1875,7 +1882,9 @@ mod tests {
     };
     use crate::{
         config::{DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute},
-        model::{RuntimeExecutionProfileModel, RuntimeExecutionProfiles, SimulateRequest},
+        model::{
+            RuntimeExecutionProfileModel, RuntimeExecutionProfiles, ServiceTier, SimulateRequest,
+        },
     };
 
     #[test]
@@ -1958,7 +1967,7 @@ mod tests {
             id: "gpt".to_owned(),
             name: "GPT".to_owned(),
             reasoning: vec!["low".to_owned(), "high".to_owned()],
-            service_tiers: vec!["standard".to_owned(), "fast".to_owned()],
+            service_tiers: vec![ServiceTier::Standard, ServiceTier::Fast],
         };
         let unsupported = RuntimeExecutionProfileModel {
             key: "unsupported".to_owned(),
@@ -1977,7 +1986,7 @@ mod tests {
             &profiles,
             &supported,
             Some("high"),
-            Some("fast"),
+            Some(ServiceTier::Fast),
             true,
             0,
         ))?;
@@ -1998,6 +2007,12 @@ mod tests {
             panel["components"][3]["components"][0]["custom_id"],
             "carillon:profile:tier"
         );
+        let speed_options = panel["components"][3]["components"][0]["options"]
+            .as_array()
+            .context("speed options missing")?;
+        assert_eq!(speed_options.len(), 2);
+        assert_eq!(speed_options[0]["label"], "Standard");
+        assert_eq!(speed_options[1]["label"], "Fast");
         let buttons = panel["components"][4]["components"]
             .as_array()
             .context("profile buttons missing")?;

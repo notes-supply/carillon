@@ -64,6 +64,7 @@ impl ServiceLock {
 
 pub fn initialize(
     root: &Path,
+    workspace: &Path,
     guild_id: &str,
     bot_user_id: &str,
     users: &[String],
@@ -110,6 +111,7 @@ pub fn initialize(
             id: "default".to_owned(),
             name: "Default agent".to_owned(),
             resource_root: PathBuf::from("agents/default"),
+            workspace: workspace.to_path_buf(),
         },
         runtime: Component {
             id: "runtime-pi".to_owned(),
@@ -169,9 +171,12 @@ pub fn initialize(
 
 fn create_installation_directories(root: &Path) -> Result<()> {
     fs::create_dir_all(root)?;
+    fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
     for directory in [
         "state",
         "credentials",
+        "pi",
+        "logs",
         "state/components/discord",
         "state/components/runtime-pi",
         "state/components/echo-capability",
@@ -180,7 +185,9 @@ fn create_installation_directories(root: &Path) -> Result<()> {
         "agents/default/sessions",
         "examples",
     ] {
-        fs::create_dir_all(root.join(directory))?;
+        let path = root.join(directory);
+        fs::create_dir_all(&path)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
 }

@@ -13,6 +13,8 @@ other interfaces <-> adapters          |         <-> runtime-codex <-> Codex
 
 Carillon is a durable composition layer. The core keeps product identity and continuity coherent while interface adapters, runtime adapters, interface extensions, and capabilities remain replaceable parts with their own lifecycle.
 
+Carillon is also the owner's general-purpose personal agent. A normal installation has one operating-system principal: the ordinary Unix user who installs it. Every component runs as that user through native user-service supervision and therefore has exactly that user's filesystem, process, executable, Git/SSH, local-application, user-session, group, and passwordless-sudo authority. Core does not add a second permission model, broker commands, constrain paths, proxy privilege, or mediate Pi extensions. Authenticated remote ingress remains a separate product boundary.
+
 ## Carillon core
 
 The core is a Rust service and the authority for platform identities, agents, routes, selected components, admission of external events, conversation continuity, turn correlation, and delivery intent.
@@ -52,9 +54,13 @@ The contract describes what Carillon needs to operate, not a universal agent mes
 
 ### Pi runtime adapter
 
-The first runtime adapter is a TypeScript component embedding the public `@earendil-works/pi-coding-agent` SDK. It creates headless Pi sessions from explicit resources. Operators authenticate through Pi's own login surface against the same private state that Pi's `ModelRuntime` uses for credential refresh, model discovery, and inference.
+The first runtime adapter is a TypeScript component embedding the public `@earendil-works/pi-coding-agent` SDK. It creates headless Pi sessions from explicit immutable resources while setting Pi's `cwd` to the configured real owner workspace. Native `read`, `bash`, `edit`, and `write` tools therefore retain ordinary Pi semantics and the owner's authority, including ordinary absolute paths.
 
-Pi owns model execution and native session history, including messages, tools, skills, extensions, compaction, usage, and terminal evidence. Its credentials, discovered catalogs, and selected model live in stable Pi-private state outside Carillon resources and backups. The adapter translates the small Carillon lifecycle to public Pi APIs and exposes runtime-neutral model discovery and selection through Carillon.
+Operators authenticate through Pi's packaged login surface. Pi's global agent directory is `CARILLON_HOME/pi`, isolated from the owner's ordinary `~/.pi/agent`; the same private directory supplies `ModelRuntime` credential refresh, model discovery, inference, and Carillon service-tier defaults. An intentionally selected workspace still retains Pi-native project-local discovery and behavior.
+
+Pi owns model execution and native session history, including messages, tools, skills, extensions, compaction, usage, and terminal evidence. Sessions remain under the Carillon agent directory; credentials, discovered catalogs, and selected models remain under Pi-private state outside immutable resource snapshots and normal Carillon backups. The adapter translates the small Carillon lifecycle to public Pi APIs and exposes runtime-neutral model discovery and selection through Carillon.
+
+Pi session data and Pi extensions own usage and timing presentation or export. Extensions load and run through Pi's native lifecycle with the owner environment, subprocess access, and ordinary user-scoped persistence. Carillon core retains runtime evidence as opaque operational data and does not define extension permissions or statistics semantics.
 
 ### Other runtimes
 
@@ -68,7 +74,7 @@ Each runtime adapter presents selected capabilities through its engine's natural
 
 ## Agent resources
 
-Each agent has common human-readable instructions and a runtime-owned resource root. The runtime adapter decides how native settings, extensions, skills, sessions, and prompt composition work. Carillon locates and identifies those resources but does not reinterpret them into a competing format.
+Each agent has common human-readable instructions, a runtime-owned resource root, and an independently configured real workspace. Carillon snapshots instruction/settings/extension/skill resources for turn identity, but the runtime adapter decides how native settings, project resources, extensions, skills, sessions, tools, and prompt composition work. Carillon does not reinterpret them into a competing format or make the immutable snapshot the tool working directory.
 
 ## Conversation flow
 

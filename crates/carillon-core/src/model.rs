@@ -1,3 +1,5 @@
+use std::{fmt, str::FromStr};
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -54,6 +56,40 @@ pub struct CapabilitySelection {
     pub token: String,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceTier {
+    Standard,
+    Fast,
+}
+
+impl ServiceTier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Fast => "fast",
+        }
+    }
+}
+
+impl fmt::Display for ServiceTier {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ServiceTier {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "standard" => Ok(Self::Standard),
+            "fast" => Ok(Self::Fast),
+            _ => Err(format!("unsupported service tier {value}")),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RuntimeTurnRequest {
     pub correlation_id: String,
@@ -91,14 +127,14 @@ pub struct RuntimeExecutionProfileModel {
     pub id: String,
     pub name: String,
     pub reasoning: Vec<String>,
-    pub service_tiers: Vec<String>,
+    pub service_tiers: Vec<ServiceTier>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ExecutionProfile {
     pub model: String,
     pub reasoning: Option<String>,
-    pub service_tier: Option<String>,
+    pub service_tier: Option<ServiceTier>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -124,7 +160,7 @@ pub enum ExecutionProfileScope {
 pub struct ExecutionProfileSelection {
     pub key: String,
     pub reasoning: Option<String>,
-    pub service_tier: Option<String>,
+    pub service_tier: Option<ServiceTier>,
     pub scope: ExecutionProfileScope,
     pub audience_id: Option<String>,
 }
@@ -135,7 +171,7 @@ pub struct RuntimeExecutionProfileSelection {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub service_tier: Option<String>,
+    pub service_tier: Option<ServiceTier>,
     pub scope: ExecutionProfileScope,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub continuation_ref: Option<String>,

@@ -10,15 +10,16 @@ Carillon should feel like a service rather than a development environment: insta
 
 For the first useful release, an operator can:
 
-1. install Carillon without a development toolchain;
-2. create an agent from a plainly named system-prompt file and runtime resources;
+1. install Carillon as their ordinary Unix user without root or a development toolchain;
+2. create an agent from plainly named resources while selecting a real owner workspace;
 3. configure one private Discord server by immutable guild ID, allowlist their immutable Discord user ID, and hold a continuing conversation through Pi only inside that server;
 4. add an externally implemented guild-scoped Discord command or interface feature without rebuilding the Discord adapter;
 5. enable a Pi-native extension and an external agent capability;
 6. use those additions on subsequent turns while unrelated parts remain available;
 7. restart the Discord adapter, Pi runtime adapter, an interface extension, or a capability independently and continue safely;
-8. inspect which resources and component versions shaped a turn; and
-9. back up the installation, restore it, and continue the conversation.
+8. inspect which resources and component versions shaped a turn;
+9. back up the installation, restore it, and continue the conversation; and
+10. use Pi's native tools, extensions, subprocesses, user applications, and ordinary absolute paths with the same operating-system authority as that owner.
 
 That continuous journey is the definition of the first product. The implementation may reach it in whatever sequence and internal shape proves simplest.
 
@@ -67,9 +68,9 @@ Repeated delivery of the same external event, including Discord's thread-starter
 
 ### Agent configuration
 
-An agent has readable common files and a resource root interpreted by its selected runtime adapter. The operator can edit the system prompt and contextual instructions as files. Runtime-native settings, extensions, skills, and sessions remain owned by that runtime adapter.
+An agent has readable common files, a resource root interpreted by its selected runtime adapter, and a separate real workspace. The operator can edit the system prompt and contextual instructions as files. Runtime-native settings, extensions, skills, sessions, project-local resources, and tools remain owned by that runtime adapter.
 
-Carillon provides composition, lifecycle, explicit resource selection, and inspection. It does not need a prompt database or another prompt-composition language to expose facilities the runtime already has.
+Carillon provides composition, lifecycle, explicit resource/workspace selection, and inspection. It does not need a prompt database, tool wrapper, filesystem policy, or another prompt-composition language to expose facilities the runtime and operating system already provide.
 
 ### Durability and honest recovery
 
@@ -79,13 +80,13 @@ Completed runtime work is not rerun merely because a notification was lost. An e
 
 ### Trust boundaries
 
-Each component receives the credentials and files needed for its role. Platform credentials belong to interface adapters; provider credentials belong to runtime adapters; extension or capability credentials belong to their consumer. They do not belong in prompts, conversation history, ordinary application state, or logs.
+Remote ingress and local execution are distinct trust boundaries. Discord remains fail-closed by immutable guild, user, and route before runtime work. After admission, a normal Carillon installation runs every process as the installing ordinary Unix user with exactly that user's OS authority, including primary/supplementary groups, filesystem access, executables, Git/SSH, local applications, user-session services, and passwordless sudo. Carillon does not define another permission framework, command broker, path ACL, approval database, privilege proxy, or sandbox.
 
-Runtime-native extensions are trusted within their runtime's operating-system permissions. Separately supervised components provide the stronger boundary when code needs separate trust, language, credentials, or lifecycle.
+Platform credentials belong to interface adapters; provider credentials belong to runtime adapters; internal component credentials stay out of prompts, conversation history, ordinary application state, and logs. Pi-native extensions receive the owner's environment, subprocess access, and user-scoped persistence through Pi's native lifecycle. A user may deliberately install Pi extensions that add approval or confinement; core does not mediate them.
 
 ### Operation
 
-Carillon runs as a small one-host service with durable local state and no external database or queue. The operator can understand component health, inspect a turn without exposing secrets, change or restart a part deliberately, and make a restorable backup covering Carillon-owned and component-owned durable state.
+Carillon runs as one owner's small user service with durable private local state and no external database or queue. The operator can understand component health, inspect a turn without exposing secrets, change or restart a part deliberately, and make a restorable backup covering Carillon-owned and component-owned durable state. Installation, status, restart, and uninstall use native user-service management; persistent boot without login remains an explicit administrator-owned linger decision.
 
 ## First-release experience
 

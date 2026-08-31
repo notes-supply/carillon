@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 VERSION=${1:-0.0.0}
 OUTPUT=${2:-"$ROOT/dist/carillon-$VERSION-linux-x86_64.tar.gz"}
 STAGE="$ROOT/target/package/carillon-$VERSION"
@@ -18,8 +18,10 @@ bun build --compile --no-compile-autoload-bunfig \
   "$PI_DIST/bun/cli.js" "$PI_DIST/utils/image-resize-worker.js" \
   --outfile "$STAGE/bin/pi"
 install -m 0755 target/release/carillon "$STAGE/bin/carillon"
+install -m 0755 scripts/carillon-pi.sh "$STAGE/bin/carillon-pi"
 install -m 0755 scripts/install-release.sh "$STAGE/install.sh"
-install -m 0644 deploy/systemd/*.service "$STAGE/systemd/"
+install -m 0755 scripts/uninstall-release.sh "$STAGE/uninstall.sh"
+install -m 0644 deploy/systemd/* "$STAGE/systemd/"
 install -m 0644 "$PI_DIST"/modes/interactive/theme/*.json "$STAGE/bin/theme/"
 install -m 0644 "$PI_DIST"/modes/interactive/assets/*.png "$STAGE/bin/assets/"
 install -m 0644 "$PI_PACKAGE/package.json" "$PI_PACKAGE/README.md" "$PI_PACKAGE/CHANGELOG.md" "$STAGE/bin/"

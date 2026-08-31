@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 const root = await mkdtemp(join(tmpdir(), "carillon-journey-"));
 const restoredRoot = await mkdtemp(join(tmpdir(), "carillon-restored-"));
 const piState = await mkdtemp(join(tmpdir(), "pi-carillon-"));
+const workspace = await mkdtemp(join(tmpdir(), "carillon-workspace-"));
 const backup = join(tmpdir(), `carillon-backup-${crypto.randomUUID()}.tar.gz`);
 const binary = resolve("target/debug/carillon");
 const runtimeEntry = resolve("packages/runtime-pi/src/index.ts");
@@ -20,6 +21,8 @@ try {
     "init",
     "--root",
     installation,
+    "--workspace",
+    workspace,
     "--guild-id",
     "100",
     "--bot-user-id",
@@ -323,6 +326,7 @@ try {
   await rm(restoredRoot, { recursive: true, force: true });
   await rm(backup, { force: true });
   await rm(piState, { recursive: true, force: true });
+  await rm(workspace, { recursive: true, force: true });
 }
 
 function configPath() {

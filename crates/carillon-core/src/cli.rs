@@ -11,9 +11,9 @@ use crate::{
         fetch_execution_profiles, fetch_inspection, fetch_recent, fetch_status,
         select_execution_profile, serialize_pretty, serve,
     },
-    model::{ExecutionProfileScope, ExecutionProfileSelection},
+    model::{ExecutionProfileScope, ExecutionProfileSelection, ServiceTier},
     operations::{
-        ServiceLock, backup, configure_discord, enable_demo_resources, initialize, restore,
+        ServiceLock, backup, configure_discord, enable_demo_resources, initialize as init, restore,
         set_component,
     },
 };
@@ -34,6 +34,8 @@ enum Command {
     Init {
         #[arg(long)]
         root: PathBuf,
+        #[arg(long)]
+        workspace: PathBuf,
         #[arg(long)]
         guild_id: String,
         #[arg(long)]
@@ -118,8 +120,8 @@ enum Command {
         refresh: bool,
         #[arg(long)]
         reasoning: Option<String>,
-        #[arg(long, value_parser = ["standard", "fast"])]
-        service_tier: Option<String>,
+        #[arg(long)]
+        service_tier: Option<ServiceTier>,
         #[arg(
             long,
             value_parser = ["current-conversation", "new-conversations"],
@@ -144,23 +146,36 @@ enum Command {
     },
 }
 
-pub(crate) async fn run() -> Result<()> {
+fn initialize_tracing() {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("carillon=info")),
         )
         .with_target(false)
         .init();
+}
+
+pub(crate) async fn run() -> Result<()> {
+    initialize_tracing();
     match Cli::parse().command {
         Command::Init {
             root,
+            workspace,
             guild_id,
             bot_user_id,
             user_id,
             route,
             base_port,
         } => {
-            let path = initialize(&root, &guild_id, &bot_user_id, &user_id, &route, base_port)?;
+            let path = init(
+                &root,
+                &workspace,
+                &guild_id,
+                &bot_user_id,
+                &user_id,
+                &route,
+                base_port,
+            )?;
             println!("{}", path.display());
         }
         Command::ConfigureDiscord {

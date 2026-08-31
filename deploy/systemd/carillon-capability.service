@@ -1,21 +1,24 @@
 [Unit]
 Description=Carillon example external capability
 After=network.target
+PartOf=carillon.target
 
 [Service]
 Type=simple
-User=carillon-capability
-Group=carillon-capability
-SupplementaryGroups=carillon
-LoadCredential=component-token:/var/lib/carillon/credentials/echo-capability.token
-ExecStart=/opt/carillon/bin/carillon capability --config /var/lib/carillon/carillon.toml --token-file %d/component-token
+WorkingDirectory=@OWNER_HOME@
+Environment="HOME=@OWNER_HOME@"
+Environment="USER=@OWNER@"
+Environment="LOGNAME=@OWNER@"
+Environment="SHELL=@OWNER_SHELL@"
+Environment="PATH=@OWNER_PATH@"
+Environment="CARILLON_HOME=@CARILLON_HOME@"
+Environment="PI_CODING_AGENT_DIR=@CARILLON_HOME@/pi"
+ExecStart="@CARILLON_HOME@/app/bin/carillon" capability --config "@CARILLON_HOME@/carillon.toml" --token-file "@CARILLON_HOME@/credentials/echo-capability.token"
 Restart=on-failure
 RestartSec=2s
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectHome=yes
-ProtectSystem=strict
-ReadWritePaths=/var/lib/carillon/state/components/echo-capability
+UMask=0077
+StandardOutput=append:@CARILLON_HOME@/logs/capability.log
+StandardError=append:@CARILLON_HOME@/logs/capability.log
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=carillon.target

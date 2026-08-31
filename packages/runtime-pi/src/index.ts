@@ -1,14 +1,11 @@
 import {
-  createAgentSession,
-  DefaultResourceLoader,
   defineTool,
   ModelRuntime,
   SessionManager,
   SettingsManager,
   type AgentSessionEvent,
-  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -19,12 +16,21 @@ import { Type } from "typebox";
 import { Parse } from "typebox/value";
 import {
   type ExecutionProfile,
+  ExecutionProfileSchema,
   type ExecutionProfileEvidence,
+  latestExecutionProfile,
+  loadServiceTierDefault,
+  persistExecutionProfile,
   profileEvidence,
   profileModel,
   type RuntimeExecutionProfileModel,
+  saveServiceTierDefault,
   type ServiceTier,
+  serviceTierDefault,
+  serviceTierForModel,
+  type ServiceTierDefault,
 } from "./profile.ts";
+import { createPiExecutionSession } from "./session.ts";
 
 registerBunOAuthFlows();
 
@@ -38,6 +44,7 @@ interface Config {
   readonly root: string;
   readonly dataDir: string;
   readonly resourceRoot: string;
+  readonly workspace: string;
   readonly runtime: RuntimeConfig;
 }
 
@@ -201,11 +208,6 @@ const ThinkingLevelSchema = Type.Union([
   Type.Literal("max"),
 ]);
 const ServiceTierSchema = Type.Union([Type.Literal("standard"), Type.Literal("fast")]);
-const ExecutionProfileSchema = Type.Object({
-  model: Type.String(),
-  reasoning: Type.Optional(ThinkingLevelSchema),
-  service_tier: Type.Optional(ServiceTierSchema),
-});
 const RuntimeExecutionProfileSelectionSchema = Type.Object({
   key: Type.String(),
   reasoning: Type.Optional(ThinkingLevelSchema),
@@ -232,7 +234,7 @@ const DeterministicSessionSchema = Type.Object({
 });
 const FileConfigSchema = Type.Object({
   data_dir: Type.String(),
-  agent: Type.Object({ resource_root: Type.String() }),
+  agent: Type.Object({ resource_root: Type.String(), workspace: Type.String() }),
   runtime: Type.Object({ id: Type.String(), version: Type.String(), url: Type.String() }),
 });
 const NativeExecutionSchema = Type.Object({ runtime_instance: Type.String() });
@@ -257,10 +259,12 @@ let token: string;
 let deterministic: boolean;
 let evidenceDirectory: string;
 let sessionDirectory: string;
+let serviceTierDefaultPath: string;
 
 let privateSettings: SettingsManager;
 let modelRuntime: ModelRuntime | undefined;
 let runtimeInstance: string;
+let defaultServiceTier: ServiceTierDefault | undefined;
 let queue: Promise<void> = Promise.resolve();
 
 async function startRuntime(values: readonly string[]): Promise<void> {
@@ -269,12 +273,14 @@ async function startRuntime(values: readonly string[]): Promise<void> {
   token = (await readFile(requiredArgument(args, "token-file"), "utf8")).trim();
   deterministic = args.has("deterministic");
   const privateStateDirectory = resolve(requiredArgument(args, "state-dir"));
+  serviceTierDefaultPath = join(privateStateDirectory, "service-tier.json");
   evidenceDirectory = join(config.dataDir, "components", config.runtime.id, "evidence");
   sessionDirectory = join(config.resourceRoot, "sessions");
 
   await mkdir(evidenceDirectory, { recursive: true });
   await mkdir(sessionDirectory, { recursive: true });
   await mkdir(privateStateDirectory, { recursive: true, mode: 0o700 });
+  defaultServiceTier = await loadServiceTierDefault(serviceTierDefaultPath);
   privateSettings = SettingsManager.create(privateStateDirectory, privateStateDirectory);
   modelRuntime = deterministic
     ? undefined
@@ -323,6 +329,18 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
   }
   if (!authorized(request)) {
     writeJson(response, 403, { error: "component authentication failed" });
+    return;
+  }
+  if (request.method === "GET" && request.url === "/v1/environment") {
+    const identity = unixIdentity();
+    writeJson(response, 200, {
+      ...identity,
+      user: process.env["USER"],
+      home: process.env["HOME"],
+      shell: process.env["SHELL"],
+      path: process.env["PATH"],
+      workspace: config.workspace,
+    });
     return;
   }
   if (request.method === "GET" && request.url === "/v1/execution-profiles") {
@@ -408,9 +426,14 @@ async function listExecutionProfiles(): Promise<RuntimeExecutionProfiles> {
       privateSettings.getDefaultThinkingLevel() ??
       "medium")
     : undefined;
+  const modelReference = `${selectedModel.provider}/${selectedModel.id}`;
   return {
     models,
-    selected: profileEvidence(selectedModel, requestedReasoning),
+    selected: profileEvidence(
+      selectedModel,
+      requestedReasoning,
+      serviceTierForModel(defaultServiceTier, modelReference),
+    ),
   };
 }
 
@@ -461,7 +484,11 @@ async function applyExecutionProfile(
           privateSettings.getModelThinkingLevel(selected.provider, selected.id) ??
           privateSettings.getDefaultThinkingLevel() ??
           "medium",
+        selection.service_tier,
       );
+  const nextDefault = serviceTierDefault(evidence.requested);
+  await saveServiceTierDefault(serviceTierDefaultPath, nextDefault);
+  defaultServiceTier = nextDefault;
   return { scope: selection.scope, ...evidence };
 }
 
@@ -486,12 +513,15 @@ async function selectedPiModel() {
   const provider = privateSettings.getDefaultProvider();
   const id = privateSettings.getDefaultModel();
   if (provider === undefined || id === undefined) throw new Error("no Pi model is selected");
-  const selected = (await availablePiModels()).find(
-    (model) => model.provider === provider && model.id === id,
+  return piModelForReference(`${provider}/${id}`);
+}
+
+async function piModelForReference(reference: string) {
+  const model = (await availablePiModels()).find(
+    (candidate) => `${candidate.provider}/${candidate.id}` === reference,
   );
-  if (selected === undefined)
-    throw new Error(`selected Pi model ${provider}/${id} is not available`);
-  return selected;
+  if (model === undefined) throw new Error(`selected Pi model ${reference} is not available`);
+  return model;
 }
 function unavailableProfileEvidence(): ExecutionProfileEvidence | undefined {
   const provider = privateSettings.getDefaultProvider();
@@ -500,10 +530,13 @@ function unavailableProfileEvidence(): ExecutionProfileEvidence | undefined {
   const reasoning =
     privateSettings.getModelThinkingLevel(provider, id) ??
     privateSettings.getDefaultThinkingLevel();
+  const model = `${provider}/${id}`;
+  const tier = serviceTierForModel(defaultServiceTier, model);
   return {
     requested: {
-      model: `${provider}/${id}`,
+      model,
       ...(reasoning === undefined ? {} : { reasoning }),
+      ...(tier === undefined ? {} : { service_tier: tier }),
     },
     effective: null,
   };
@@ -548,32 +581,41 @@ async function applyPiConversationProfile(
     (candidate) => candidate.provider === selected.provider && candidate.id === selected.id,
   );
   if (model === undefined) throw new Error("selected Pi model is unavailable");
-  const manager =
-    selection.continuation_ref === null || selection.continuation_ref === undefined
-      ? SessionManager.create(resolve(resources.root), sessionDirectory)
-      : SessionManager.open(validateContinuation(selection.continuation_ref));
-  const created = await createPiExecutionSession(
-    resolve(resources.root),
-    manager,
-    selection.continuation_ref === null || selection.continuation_ref === undefined
-      ? model
-      : undefined,
+  const requested = profileEvidence(model, selection.reasoning, selection.service_tier).requested;
+  if (selection.continuation_ref === null || selection.continuation_ref === undefined) {
+    const manager = SessionManager.create(config.workspace, sessionDirectory);
+    const continuation = persistExecutionProfile(manager, requested);
+    return {
+      scope: selection.scope,
+      requested,
+      effective: profileEvidence(model, selection.reasoning, requested.service_tier).effective,
+      continuation_ref: continuation,
+    };
+  }
+  const manager = SessionManager.open(
+    validateContinuation(selection.continuation_ref),
+    sessionDirectory,
+    config.workspace,
   );
+  const runtime = modelRuntime;
+  if (runtime === undefined) throw new Error("Pi model runtime is unavailable");
+  const created = await createPiExecutionSession({
+    resourceRoot: resolve(resources.root),
+    workspace: config.workspace,
+    manager,
+    ...(requested.service_tier === undefined ? {} : { serviceTier: requested.service_tier }),
+    modelRuntime: runtime,
+  });
   const { session, extensionsResult } = created;
   try {
     assertExtensionsLoaded(extensionsResult.errors);
     await session.setModel(model);
     if (selection.reasoning !== undefined) session.setThinkingLevel(selection.reasoning);
-    const requested: ExecutionProfile = {
-      model: `${model.provider}/${model.id}`,
-      ...(selection.reasoning === undefined ? {} : { reasoning: selection.reasoning }),
-    };
-    session.sessionManager.appendCustomEntry("carillon-execution-profile", requested);
-    const sessionFile = session.sessionFile;
-    if (sessionFile === undefined) throw new Error("Pi did not create durable session evidence");
+    const sessionFile = persistExecutionProfile(session.sessionManager, requested);
     const effective = profileEvidence(
       session.model ?? model,
       session.supportsThinking() ? session.thinkingLevel : undefined,
+      requested.service_tier,
     ).effective;
     return {
       scope: selection.scope,
@@ -638,7 +680,6 @@ async function executeDeterministic(request: TurnRequest): Promise<TurnResponse>
     continuation_ref: sessionPath,
     native: {
       runtime_instance: runtimeInstance,
-      resource_snapshot: toJsonResource(request.resources),
       execution_profile: executionProfile,
     },
   });
@@ -685,7 +726,6 @@ async function executeDeterministic(request: TurnRequest): Promise<TurnResponse>
       provider: "deterministic-local-substitute",
       execution_profile: executionProfile,
       message_count: next.turns.length * 2,
-      resource_snapshot: toJsonResource(request.resources),
     },
     capability_activity: capabilityActivity,
   };
@@ -695,16 +735,34 @@ async function executePi(request: TurnRequest): Promise<TurnResponse> {
   const root = resolve(request.resources.root);
   const isNew = request.continuation_ref === null || request.continuation_ref === undefined;
   const manager = isNew
-    ? SessionManager.create(root, sessionDirectory)
-    : SessionManager.open(validateContinuation(request.continuation_ref));
+    ? SessionManager.create(config.workspace, sessionDirectory)
+    : SessionManager.open(
+        validateContinuation(request.continuation_ref),
+        sessionDirectory,
+        config.workspace,
+      );
   const persistedProfile = latestExecutionProfile(manager);
-  const defaultModel = isNew ? await selectedPiModel() : undefined;
+  const defaultModel = isNew
+    ? await selectedPiModel()
+    : persistedProfile !== undefined && manager.buildSessionContext().model === null
+      ? await piModelForReference(persistedProfile.model)
+      : undefined;
   const defaultReasoning =
-    defaultModel?.reasoning === true
+    persistedProfile?.reasoning ??
+    (defaultModel?.reasoning === true
       ? (privateSettings.getModelThinkingLevel(defaultModel.provider, defaultModel.id) ??
         privateSettings.getDefaultThinkingLevel() ??
         "medium")
+      : undefined);
+  const selectedDefaultTier =
+    isNew && defaultModel !== undefined
+      ? serviceTierForModel(defaultServiceTier, `${defaultModel.provider}/${defaultModel.id}`)
       : undefined;
+  const initialProfile =
+    isNew && defaultModel !== undefined
+      ? profileEvidence(defaultModel, defaultReasoning, selectedDefaultTier).requested
+      : undefined;
+  if (initialProfile !== undefined) persistExecutionProfile(manager, initialProfile);
   const capabilityActivity: unknown[] = [];
   const capability = request.capability;
   const customTools =
@@ -730,31 +788,42 @@ async function executePi(request: TurnRequest): Promise<TurnResponse> {
             },
           }),
         ];
-  const created = await createPiExecutionSession(
-    root,
+  const serviceTier = persistedProfile?.service_tier ?? selectedDefaultTier;
+  const runtime = modelRuntime;
+  if (runtime === undefined) throw new Error("Pi model runtime is unavailable");
+  const created = await createPiExecutionSession({
+    resourceRoot: root,
+    workspace: config.workspace,
     manager,
-    defaultModel,
-    defaultReasoning,
+    modelRuntime: runtime,
+    ...(defaultModel === undefined ? {} : { model: defaultModel }),
+    ...(defaultReasoning === undefined ? {} : { thinkingLevel: defaultReasoning }),
+    ...(serviceTier === undefined ? {} : { serviceTier }),
     customTools,
-  );
+  });
   const { session, extensionsResult } = created;
   try {
     assertExtensionsLoaded(extensionsResult.errors);
     const model = session.model;
     if (model === undefined) throw new Error("Pi did not resolve a session model");
-    const requested: ExecutionProfile =
+    const requested =
       persistedProfile ??
-      ({
-        model: `${model.provider}/${model.id}`,
-        ...(model.reasoning ? { reasoning: defaultReasoning ?? session.thinkingLevel } : {}),
-      } satisfies ExecutionProfile);
+      initialProfile ??
+      profileEvidence(
+        model,
+        model.reasoning ? (defaultReasoning ?? session.thinkingLevel) : undefined,
+        selectedDefaultTier,
+      ).requested;
     const executionProfile = {
       requested,
-      effective: profileEvidence(model, model.reasoning ? session.thinkingLevel : undefined)
-        .effective,
+      effective: profileEvidence(
+        model,
+        model.reasoning ? session.thinkingLevel : undefined,
+        requested.service_tier,
+      ).effective,
     };
-    if (persistedProfile === undefined)
-      session.sessionManager.appendCustomEntry("carillon-execution-profile", requested);
+    if (persistedProfile === undefined && initialProfile === undefined)
+      persistExecutionProfile(session.sessionManager, requested);
     session.sessionManager.appendCustomEntry("carillon-turn", {
       correlation_id: request.correlation_id,
       resource_snapshot: toJsonResource(request.resources),
@@ -770,7 +839,6 @@ async function executePi(request: TurnRequest): Promise<TurnResponse> {
         runtime_instance: runtimeInstance,
         session_id: session.sessionId,
         execution_profile: executionProfile,
-        resource_snapshot: toJsonResource(request.resources),
       },
     });
     let output = "";
@@ -794,7 +862,6 @@ async function executePi(request: TurnRequest): Promise<TurnResponse> {
           session_id: session.sessionId,
           session_file: sessionFile,
           message_count: session.messages.length,
-          resource_snapshot: toJsonResource(request.resources),
         },
         capability_activity: capabilityActivity,
       };
@@ -804,46 +871,6 @@ async function executePi(request: TurnRequest): Promise<TurnResponse> {
   } finally {
     session.dispose();
   }
-}
-
-async function createPiExecutionSession(
-  root: string,
-  manager: SessionManager,
-  model?: Model<Api>,
-  thinkingLevel?: ModelThinkingLevel,
-  customTools: ToolDefinition[] = [],
-) {
-  const runtime = modelRuntime;
-  if (runtime === undefined) throw new Error("Pi model runtime is unavailable");
-  const systemPrompt = await readFile(join(root, "SYSTEM.md"), "utf8");
-  const settingsManager = SettingsManager.create(root, root);
-  const loader = new DefaultResourceLoader({
-    cwd: root,
-    agentDir: root,
-    settingsManager,
-    systemPromptOverride: () => systemPrompt,
-  });
-  await loader.reload();
-  const created = await createAgentSession({
-    cwd: root,
-    agentDir: root,
-    modelRuntime: runtime,
-    ...(model === undefined ? {} : { model }),
-    ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
-    resourceLoader: loader,
-    sessionManager: manager,
-    settingsManager,
-    customTools,
-  });
-  return created;
-}
-
-function latestExecutionProfile(manager: SessionManager): ExecutionProfile | undefined {
-  for (const entry of manager.getBranch().toReversed()) {
-    if (entry.type === "custom" && entry.customType === "carillon-execution-profile")
-      return Parse(ExecutionProfileSchema, entry.data);
-  }
-  return undefined;
 }
 
 function assertExtensionsLoaded(errors: readonly { readonly error: string }[]): void {
@@ -1044,6 +1071,7 @@ async function loadConfig(path: string): Promise<Config> {
     root,
     dataDir: resolve(root, parsed.data_dir),
     resourceRoot: resolve(root, parsed.agent.resource_root),
+    workspace: resolve(root, parsed.agent.workspace),
     runtime: parsed.runtime,
   };
 }
@@ -1124,6 +1152,12 @@ async function exists(path: string): Promise<boolean> {
     if (isNodeError(failure) && failure.code === "ENOENT") return false;
     throw failure;
   }
+}
+
+function unixIdentity(): { readonly uid: number; readonly groups: number[] } {
+  if (process.getuid === undefined || process.getgroups === undefined)
+    throw new Error("Carillon Pi runtime requires Unix process identity APIs");
+  return { uid: process.getuid(), groups: process.getgroups() };
 }
 
 function isNodeError(value: unknown): value is NodeJS.ErrnoException {

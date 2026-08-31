@@ -26,10 +26,11 @@ use crate::{
     db::{AcceptedTurn, Database},
     model::{
         CapabilitySelection, Delivery, DeliveryAck, DeliveryOutcome, DeliveryReconciliation,
-        EventReceipt, ExecutionProfileApplication, ExecutionProfileSelection, ExtensionRequest,
-        ExtensionResponse, ExternalEvent, Health, ResourceSnapshot, RuntimeEvidence,
-        RuntimeExecutionProfileSelection, RuntimeExecutionProfiles, RuntimeTurnRequest,
-        RuntimeTurnResponse, SelectedComponent, StatusReport, TurnInspection, TurnSummary,
+        EventReceipt, ExecutionProfileApplication, ExecutionProfileScope,
+        ExecutionProfileSelection, ExtensionRequest, ExtensionResponse, ExternalEvent, Health,
+        ResourceSnapshot, RuntimeEvidence, RuntimeExecutionProfileSelection,
+        RuntimeExecutionProfiles, RuntimeTurnRequest, RuntimeTurnResponse, SelectedComponent,
+        StatusReport, TurnInspection, TurnSummary,
     },
 };
 
@@ -440,10 +441,7 @@ async fn apply_execution_profile(
 ) -> Result<Json<ExecutionProfileApplication>, ApiError> {
     let config = LoadedConfig::load(&state.config_path)?;
     authorize_model_access(&headers, &config)?;
-    let current = matches!(
-        selection.scope,
-        crate::model::ExecutionProfileScope::CurrentConversation
-    );
+    let current = matches!(selection.scope, ExecutionProfileScope::CurrentConversation);
     let _turn_guard = if current {
         Some(state.turns.lock().await)
     } else {

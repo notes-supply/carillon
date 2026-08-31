@@ -2,22 +2,24 @@
 Description=Carillon Discord interface adapter
 After=network-online.target carillon-core.service
 Wants=network-online.target
+PartOf=carillon.target
 
 [Service]
 Type=simple
-User=carillon-discord
-Group=carillon-discord
-SupplementaryGroups=carillon
-LoadCredential=component-token:/var/lib/carillon/credentials/discord-private.token
-LoadCredential=discord-token:/etc/carillon/discord.token
-ExecStart=/opt/carillon/bin/carillon discord --config /var/lib/carillon/carillon.toml --token-file %d/component-token --discord-token-file %d/discord-token
+WorkingDirectory=@OWNER_HOME@
+Environment="HOME=@OWNER_HOME@"
+Environment="USER=@OWNER@"
+Environment="LOGNAME=@OWNER@"
+Environment="SHELL=@OWNER_SHELL@"
+Environment="PATH=@OWNER_PATH@"
+Environment="CARILLON_HOME=@CARILLON_HOME@"
+Environment="PI_CODING_AGENT_DIR=@CARILLON_HOME@/pi"
+ExecStart="@CARILLON_HOME@/app/bin/carillon" discord --config "@CARILLON_HOME@/carillon.toml" --token-file "@CARILLON_HOME@/credentials/discord-private.token" --discord-token-file "@CARILLON_HOME@/credentials/discord-bot.token"
 Restart=on-failure
 RestartSec=2s
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectHome=yes
-ProtectSystem=strict
-ReadWritePaths=/var/lib/carillon/state/components/discord
+UMask=0077
+StandardOutput=append:@CARILLON_HOME@/logs/discord.log
+StandardError=append:@CARILLON_HOME@/logs/discord.log
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=carillon.target

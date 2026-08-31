@@ -1,8 +1,9 @@
 #!/bin/sh
 set -eu
+umask 077
 
 usage() {
-  echo "usage: install.sh --guild-id ID --bot-user-id ID --user-id ID [--user-id ID ...] --route CHANNEL_ID:mention|always:thread|channel [--route ...] [--base-port PORT]" >&2
+  echo "usage: install.sh --guild-id ID --bot-user-id ID --user-id ID [--user-id ID ...] --route CHANNEL_ID:mention|always:thread|channel [--route ...] [--base-port PORT] [--workspace PATH]" >&2
   exit 2
 }
 
@@ -11,6 +12,7 @@ BOT_USER_ID=
 USER_IDS=
 ROUTES=
 BASE_PORT=43800
+WORKSPACE=${HOME:-}
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --guild-id) [ "$#" -ge 2 ] || usage; GUILD_ID=$2; shift 2 ;;
@@ -18,6 +20,7 @@ while [ "$#" -gt 0 ]; do
     --user-id) [ "$#" -ge 2 ] || usage; USER_IDS="$USER_IDS --user-id $2"; shift 2 ;;
     --route) [ "$#" -ge 2 ] || usage; ROUTES="$ROUTES --route $2"; shift 2 ;;
     --base-port) [ "$#" -ge 2 ] || usage; BASE_PORT=$2; shift 2 ;;
+    --workspace) [ "$#" -ge 2 ] || usage; WORKSPACE=$2; shift 2 ;;
     *) usage ;;
   esac
 done
@@ -25,64 +28,123 @@ done
 [ -n "$BOT_USER_ID" ] || usage
 [ -n "$USER_IDS" ] || usage
 [ -n "$ROUTES" ] || usage
-[ "$(id -u)" -eq 0 ] || { echo "installer must run as root" >&2; exit 1; }
+[ "$(id -u)" -ne 0 ] || { echo "installer must run as the intended non-root owner; root ownership is ambiguous" >&2; exit 1; }
+[ -n "${HOME:-}" ] && [ -d "$HOME" ] || { echo "HOME must name the installing user's existing home directory" >&2; exit 1; }
+[ "$(stat -c %u "$HOME")" -eq "$(id -u)" ] || { echo "HOME is not owned by the installing user" >&2; exit 1; }
 
-SOURCE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-getent group carillon >/dev/null 2>&1 || groupadd --system carillon
-for account in carillon-core carillon-discord carillon-runtime carillon-extension carillon-capability; do
-  getent group "$account" >/dev/null 2>&1 || groupadd --system "$account"
-  if id "$account" >/dev/null 2>&1; then
-    usermod --gid "$account" --append --groups carillon "$account"
-  else
-    useradd --system --home-dir /nonexistent --shell /usr/bin/nologin --gid "$account" --groups carillon "$account"
-  fi
-done
+case "$HOME:$WORKSPACE:${CARILLON_HOME:-}" in
+  *'
+'*) echo "HOME, workspace, and CARILLON_HOME must not contain newlines" >&2; exit 1 ;;
+esac
+case "$WORKSPACE" in /*) ;; *) echo "workspace must be an absolute path" >&2; exit 1 ;; esac
+[ -d "$WORKSPACE" ] || { echo "workspace does not exist: $WORKSPACE" >&2; exit 1; }
 
-install -d -m 0755 /opt/carillon/bin /opt/carillon/licenses /etc/carillon /var/lib/carillon
-install -m 0755 "$SOURCE/bin/carillon" /opt/carillon/bin/carillon
-install -m 0755 "$SOURCE/bin/carillon-runtime-pi" /opt/carillon/bin/carillon-runtime-pi
-install -m 0755 "$SOURCE/bin/pi" /opt/carillon/bin/pi
-rm -rf /opt/carillon/bin/theme /opt/carillon/bin/assets /opt/carillon/bin/docs
-cp -R "$SOURCE/bin/theme" "$SOURCE/bin/assets" "$SOURCE/bin/docs" /opt/carillon/bin/
-install -m 0644 "$SOURCE/bin/package.json" "$SOURCE/bin/README.md" "$SOURCE/bin/CHANGELOG.md" /opt/carillon/bin/
-install -m 0644 "$SOURCE/licenses/pi-coding-agent.txt" /opt/carillon/licenses/
-install -m 0644 "$SOURCE"/systemd/*.service /etc/systemd/system/
+CARILLON_HOME=${CARILLON_HOME:-"$HOME/.carillon"}
+case "$CARILLON_HOME" in /*) ;; *) echo "CARILLON_HOME must be an absolute path" >&2; exit 1 ;; esac
+case "$CARILLON_HOME/" in "$HOME/.pi/"*) echo "CARILLON_HOME must not overlap the owner's global ~/.pi directory" >&2; exit 1 ;; esac
 
-if [ ! -f /var/lib/carillon/carillon.toml ]; then
+SOURCE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+OWNER=$(id -un)
+OWNER_SHELL=$(getent passwd "$OWNER" | cut -d: -f7)
+[ -n "$OWNER_SHELL" ] && [ -x "$OWNER_SHELL" ] || { echo "cannot resolve the installing user's login shell" >&2; exit 1; }
+OWNER_PATH=${PATH:-/usr/local/bin:/usr/bin:/bin}
+UNIT_DIR=${XDG_CONFIG_HOME:-"$HOME/.config"}/systemd/user
+APP="$CARILLON_HOME/app"
+APP_NEW=
+APP_MARKER=.carillon-managed
+APP_MARKER_VALUE=carillon-managed-application-v1
+
+is_managed_app() {
+  candidate=$1
+  [ -d "$candidate" ] &&
+    [ ! -L "$candidate" ] &&
+    [ -f "$candidate/$APP_MARKER" ] &&
+    [ ! -L "$candidate/$APP_MARKER" ] &&
+    [ "$(cat "$candidate/$APP_MARKER")" = "$APP_MARKER_VALUE" ]
+}
+
+if [ -e "$APP" ] || [ -L "$APP" ]; then
+  is_managed_app "$APP" || {
+    echo "refusing to replace unowned application path: $APP" >&2
+    exit 1
+  }
+fi
+
+if [ ! -f "$CARILLON_HOME/carillon.toml" ]; then
   # USER_IDS and ROUTES intentionally expand into repeated, validated CLI arguments.
   # shellcheck disable=SC2086
-  /opt/carillon/bin/carillon init --root /var/lib/carillon --guild-id "$GUILD_ID" \
-    --bot-user-id "$BOT_USER_ID" $USER_IDS $ROUTES --base-port "$BASE_PORT"
+  "$SOURCE/bin/carillon" init --root "$CARILLON_HOME" --workspace "$WORKSPACE" \
+    --guild-id "$GUILD_ID" --bot-user-id "$BOT_USER_ID" $USER_IDS $ROUTES --base-port "$BASE_PORT"
 else
-  # Existing installations retain credentials and state while admission is updated.
+  # Existing per-user installations retain credentials and durable state.
   # shellcheck disable=SC2086
-  /opt/carillon/bin/carillon configure-discord --config /var/lib/carillon/carillon.toml \
+  "$SOURCE/bin/carillon" configure-discord --config "$CARILLON_HOME/carillon.toml" \
     --guild-id "$GUILD_ID" --bot-user-id "$BOT_USER_ID" $USER_IDS $ROUTES
 fi
 
-if [ ! -e /etc/carillon/discord.token ]; then install -m 0600 /dev/null /etc/carillon/discord.token; fi
-chown -R root:carillon /var/lib/carillon
-install -d -o carillon-runtime -g carillon-runtime -m 0700 /var/lib/pi-carillon
-chmod 2750 /var/lib/carillon /var/lib/carillon/agents /var/lib/carillon/credentials
-chmod 2750 /var/lib/carillon/agents/default /var/lib/carillon/agents/default/extensions /var/lib/carillon/agents/default/skills
-chown -R carillon-runtime:carillon-runtime /var/lib/carillon/agents/default/sessions
-chmod 0750 /var/lib/carillon/agents/default/sessions
-chmod 0640 /var/lib/carillon/carillon.toml /var/lib/carillon/agents/default/SYSTEM.md /var/lib/carillon/agents/default/AGENTS.md /var/lib/carillon/agents/default/settings.json
-chown -R carillon-core:carillon-core /var/lib/carillon/state
-install -d -o carillon-core -g carillon -m 2750 /var/lib/carillon/state/resource-snapshots
-chown -R carillon-core:carillon /var/lib/carillon/state/resource-snapshots
-chown -R carillon-runtime:carillon-runtime /var/lib/carillon/state/components/runtime-pi
-chown -R carillon-capability:carillon-capability /var/lib/carillon/state/components/echo-capability
-install -d -o carillon-discord -g carillon-discord -m 0750 /var/lib/carillon/state/components/discord
-chown root:carillon-core /var/lib/carillon/credentials/*.token
-chmod 0640 /var/lib/carillon/credentials/*.token
-if [ "${CARILLON_SKIP_SYSTEMD_RELOAD:-0}" != "1" ]; then systemctl daemon-reload; fi
+install -d -m 0700 "$CARILLON_HOME" "$CARILLON_HOME/credentials" "$CARILLON_HOME/pi" \
+  "$CARILLON_HOME/logs" "$UNIT_DIR"
+APP_NEW=$(mktemp -d "$CARILLON_HOME/.app-new.XXXXXX")
+cleanup_staging() {
+  [ -z "$APP_NEW" ] || rm -rf -- "$APP_NEW"
+}
+trap cleanup_staging EXIT
+install -d -m 0700 "$APP_NEW/bin" "$APP_NEW/licenses" "$APP_NEW/systemd"
+cp -R "$SOURCE/bin/." "$APP_NEW/bin/"
+cp -R "$SOURCE/licenses/." "$APP_NEW/licenses/"
+cp -R "$SOURCE/systemd/." "$APP_NEW/systemd/"
+install -m 0755 "$SOURCE/uninstall.sh" "$APP_NEW/bin/carillon-uninstall"
+printf '%s\n' "$APP_MARKER_VALUE" >"$APP_NEW/$APP_MARKER"
+chmod -R go-rwx "$APP_NEW"
+find "$APP_NEW/bin" -maxdepth 1 -type f -perm -0100 -exec chmod 0755 {} \;
+if [ -e "$APP" ] || [ -L "$APP" ]; then
+  is_managed_app "$APP" || {
+    echo "refusing to replace application path after ownership changed: $APP" >&2
+    exit 1
+  }
+  rm -rf -- "$APP"
+fi
+mv "$APP_NEW" "$APP"
+APP_NEW=
+[ -e "$CARILLON_HOME/credentials/discord-bot.token" ] || install -m 0600 /dev/null "$CARILLON_HOME/credentials/discord-bot.token"
+chmod 0700 "$CARILLON_HOME" "$CARILLON_HOME/credentials" "$CARILLON_HOME/pi" "$CARILLON_HOME/logs"
+chmod 0600 "$CARILLON_HOME/carillon.toml" "$CARILLON_HOME/credentials"/*.token
 
-cat <<'EOF'
-Carillon installed but not started.
-1. Put the Discord bot token in /etc/carillon/discord.token (mode 0600).
-2. Open Pi and run /login:
-   runuser -u carillon-runtime -- env --chdir=/var/lib/pi-carillon PI_CODING_AGENT_DIR=/var/lib/pi-carillon /opt/carillon/bin/pi --no-session --no-tools --no-approve
-3. Start the five carillon-*.service units deliberately, then select a model with:
-   /opt/carillon/bin/carillon model --config /var/lib/carillon/carillon.toml PROVIDER/MODEL
+unit_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/%/%%/g'
+}
+sed_replacement() {
+  printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'
+}
+HOME_UNIT=$(sed_replacement "$(unit_escape "$HOME")")
+OWNER_UNIT=$(sed_replacement "$(unit_escape "$OWNER")")
+ROOT_UNIT=$(sed_replacement "$(unit_escape "$CARILLON_HOME")")
+SHELL_UNIT=$(sed_replacement "$(unit_escape "$OWNER_SHELL")")
+PATH_UNIT=$(sed_replacement "$(unit_escape "$OWNER_PATH")")
+for template in "$SOURCE"/systemd/*; do
+  unit=$UNIT_DIR/$(basename "$template")
+  sed \
+    -e "s|@OWNER_HOME@|$HOME_UNIT|g" \
+    -e "s|@OWNER@|$OWNER_UNIT|g" \
+    -e "s|@CARILLON_HOME@|$ROOT_UNIT|g" \
+    -e "s|@OWNER_SHELL@|$SHELL_UNIT|g" \
+    -e "s|@OWNER_PATH@|$PATH_UNIT|g" \
+    "$template" >"$unit"
+  chmod 0600 "$unit"
+done
+
+if [ "${CARILLON_SKIP_SYSTEMD_RELOAD:-0}" != "1" ]; then
+  systemctl --user daemon-reload
+  systemctl --user enable carillon.target
+fi
+
+cat <<EOF
+Carillon installed for $OWNER at $CARILLON_HOME and enabled for this user's service manager.
+1. Put the Discord bot token in $CARILLON_HOME/credentials/discord-bot.token (mode 0600).
+2. Authenticate packaged Pi state with:
+   $APP/bin/carillon-pi --no-session --no-tools --no-approve
+3. Start deliberately with: systemctl --user start carillon.target
+4. Inspect services with: systemctl --user status carillon.target
+   Inspect the running product with: $APP/bin/carillon status --config $CARILLON_HOME/carillon.toml
+For boot without an interactive login, an administrator may run: loginctl enable-linger $OWNER
 EOF

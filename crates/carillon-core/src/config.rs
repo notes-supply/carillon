@@ -161,6 +161,7 @@ pub struct AgentConfig {
     pub id: String,
     pub name: String,
     pub resource_root: PathBuf,
+    pub workspace: PathBuf,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -202,6 +203,7 @@ impl LoadedConfig {
             toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
         value.data_dir = absolutize(&root, &value.data_dir);
         value.agent.resource_root = absolutize(&root, &value.agent.resource_root);
+        value.agent.workspace = absolutize(&root, &value.agent.workspace);
         value.validate()?;
         Ok(Self { path, root, value })
     }

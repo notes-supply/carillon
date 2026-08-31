@@ -15,55 +15,54 @@ mise run package
 
 `mise run journey` uses local loopback services and a deterministic provider substitute. It exercises fail-closed Discord guild, user, and immutable-channel routing; mention and always activation; thread adoption and channel continuity; processing feedback; duplicate event suppression; continuing and recovered runtime state; abandoned-delivery reconciliation; authenticated diagnostics; live interface-extension/capability/resource activation; independent component restarts; turn inspection; and stopped-service backup/restore.
 
-`mise run package` creates `dist/carillon-0.0.0-linux-x86_64.tar.gz`. The archive contains three toolchain-free Linux executables, Pi's required interface assets and license notice, systemd service definitions, and an installer. The target host needs systemd and standard Linux administration tools, not Rust, Node, Bun, Mise, or a source checkout.
+`mise run package` creates `dist/carillon-0.0.0-linux-x86_64.tar.gz`. The archive contains the toolchain-free core and Pi runtime, a private pinned Pi CLI, user-systemd definitions, install/uninstall scripts, Pi interface assets, and the Pi license notice. The target host needs systemd and standard Linux user tools, not Rust, Node, Bun, Mise, a source checkout, or root installation.
 
 ## Install
 
-Extract the release archive, then run its installer as root:
+Extract the release archive. As the ordinary Unix user who will own and run Carillon:
 
 ```text
-sudo ./carillon-0.0.0/install.sh \
+./carillon-0.0.0/install.sh \
   --guild-id 123456789012345678 \
   --bot-user-id 345678901234567890 \
   --user-id 234567890123456789 \
   --route 456789012345678901:mention:thread \
   --route 567890123456789012:always:channel
-
 ```
 
-The installer creates scoped service users, `/opt/carillon/bin`, `/var/lib/carillon`, Pi-private `/var/lib/pi-carillon`, the Discord credential placeholder, explicit Discord routing and feedback defaults, and five independent systemd units. It does not start or enable them and performs no network access.
+The installer rejects root. `CARILLON_HOME` overrides the default `~/.carillon`; configuration, credentials, agents, Pi-private state, sessions, runtime state, application files, and logs stay beneath it with private modes. `--workspace PATH` overrides the default owner home used by Pi's native tools and project-local discovery. Relative configuration paths resolve from `CARILLON_HOME`.
 
-1. Put the Discord bot token in `/etc/carillon/discord.token`; keep mode `0600`.
-2. Open Pi against its private state directory:
+The installer writes and enables user units in `${XDG_CONFIG_HOME:-~/.config}/systemd/user` but does not start them. Every process runs directly as the installing user with that user's UID and primary/supplementary groups. The units set HOME, USER, LOGNAME, shell, and PATH deterministically from the installing owner while retaining ordinary user-manager session variables. There are no Carillon service users, permission brokers, path ACLs, containers, privilege proxies, or tool approval databases.
+
+1. Put the Discord bot token in `~/.carillon/credentials/discord-bot.token`; keep mode `0600` (substitute `CARILLON_HOME` when overridden).
+2. Authenticate the packaged Pi CLI against Carillon-private state:
 
 ```text
-sudo runuser -u carillon-runtime -- \
-  env --chdir=/var/lib/pi-carillon PI_CODING_AGENT_DIR=/var/lib/pi-carillon \
-  /opt/carillon/bin/pi --no-session --no-tools --no-approve
+~/.carillon/app/bin/carillon-pi --no-session --no-tools --no-approve
 ```
 
-Run `/login` in Pi and complete the provider's native login flow.
+Run `/login`. This helper sets `PI_CODING_AGENT_DIR` to `CARILLON_HOME/pi`; it neither reads nor registers the owner's global `~/.pi` agent directory and does not install a global `pi` command.
 
 3. Enable the Discord bot's Guilds, Guild Messages, and privileged Message Content intents. Grant each routed channel View Channel, Send Messages, Send Messages in Threads, Create Public Threads, Read Message History, and Add Reactions.
-4. Start the services:
+4. Start Carillon:
 
 ```text
-sudo systemctl start \
-  carillon-core carillon-runtime-pi carillon-discord \
-  carillon-interface-extension carillon-capability
+systemctl --user start carillon.target
 ```
+
+An administrator may explicitly enable boot-without-login persistence with `loginctl enable-linger OWNER`. Carillon does not perform that privileged host mutation.
 
 5. List or refresh Pi's execution profiles, then set defaults for new conversations:
 
 ```text
-sudo /opt/carillon/bin/carillon model \
-  --config /var/lib/carillon/carillon.toml --refresh
-sudo /opt/carillon/bin/carillon model \
-  --config /var/lib/carillon/carillon.toml \
-  --reasoning high PROVIDER/MODEL
+~/.carillon/app/bin/carillon model \
+  --config ~/.carillon/carillon.toml --refresh
+~/.carillon/app/bin/carillon model \
+  --config ~/.carillon/carillon.toml \
+  --reasoning high --service-tier fast PROVIDER/MODEL
 ```
 
-Use `--scope current-conversation --audience AUDIENCE_ID` to change one native continuation instead. The catalog reports only settings safely supported by each Pi provider/model. Service-tier choices remain hidden unless the runtime can apply and account for them through Pi's native session API.
+Use `--scope current-conversation --audience AUDIENCE_ID` to change one native continuation instead. Authenticated OpenAI Codex models expose **Standard** (normal processing) and **Fast** (OpenAI priority processing); other providers omit the speed selector. Pi persists the default beneath `CARILLON_HOME/pi`.
 
 An allowlisted guild member can use Discord's native `/model` flow: provider, model, supported settings, then `this conversation` or `new conversations`. `/model` is accepted only in a configured route (or an eligible child thread), applies after the interaction, and does not alter an in-flight turn.
 
@@ -90,7 +89,7 @@ Emoji values accept Unicode or canonical Discord custom `name:id` syntax and are
 
 ## Operate and extend
 
-The agent directory is `/var/lib/carillon/agents/default`:
+The agent resource directory is `CARILLON_HOME/agents/default`; the configured workspace is separate:
 
 ```text
 SYSTEM.md
@@ -104,12 +103,12 @@ sessions/
 Activate the included first-release additions without rebuilding a component:
 
 ```text
-sudo /opt/carillon/bin/carillon component \
-  --config /var/lib/carillon/carillon.toml guild-command enable
-sudo /opt/carillon/bin/carillon component \
-  --config /var/lib/carillon/carillon.toml echo-capability enable
-sudo /opt/carillon/bin/carillon enable-demo-resources \
-  --config /var/lib/carillon/carillon.toml
+~/.carillon/app/bin/carillon component \
+  --config ~/.carillon/carillon.toml guild-command enable
+~/.carillon/app/bin/carillon component \
+  --config ~/.carillon/carillon.toml echo-capability enable
+~/.carillon/app/bin/carillon enable-demo-resources \
+  --config ~/.carillon/carillon.toml
 ```
 
 New turns copy `SYSTEM.md`, `AGENTS.md`, `settings.json`, `extensions/`, and `skills/` into a read-only content-addressed snapshot before dispatch. The recorded hashes and runtime inputs therefore describe the same immutable bytes.
@@ -117,35 +116,37 @@ New turns copy `SYSTEM.md`, `AGENTS.md`, `settings.json`, `extensions/`, and `sk
 Redacted `/health` endpoints remain unauthenticated for service supervision. Operator diagnostics use the installation's scoped operator credential through the CLI:
 
 ```text
-sudo /opt/carillon/bin/carillon status \
-  --config /var/lib/carillon/carillon.toml
-sudo /opt/carillon/bin/carillon recent \
-  --config /var/lib/carillon/carillon.toml --event-id EVENT_ID
-sudo /opt/carillon/bin/carillon inspect \
-  --config /var/lib/carillon/carillon.toml TURN_ID
+~/.carillon/app/bin/carillon status \
+  --config ~/.carillon/carillon.toml
+~/.carillon/app/bin/carillon recent \
+  --config ~/.carillon/carillon.toml --event-id EVENT_ID
+~/.carillon/app/bin/carillon inspect \
+  --config ~/.carillon/carillon.toml TURN_ID
 ```
 
-Restart one component with `systemctl restart carillon-discord`, `carillon-runtime-pi`, `carillon-interface-extension`, or `carillon-capability`. The units have no shared `PartOf` lifecycle. Runtime correlation evidence prevents completed model work from being rerun; a delivery claimed before interruption becomes `uncertain` rather than being repeated.
+Restart one component with `systemctl --user restart carillon-discord`, `carillon-runtime-pi`, `carillon-interface-extension`, or `carillon-capability`. All are ordinary processes owned by the same user and grouped by `carillon.target`; restarting one does not restart its siblings. Runtime correlation evidence prevents completed model work from being rerun; a delivery claimed before interruption becomes `uncertain` rather than being repeated.
+
+`~/.carillon/app/bin/carillon-uninstall` stops and removes Carillon's user units and application files. It deliberately preserves `CARILLON_HOME` configuration and data and never touches unrelated owner files or `~/.pi`.
 
 ## Backup and restore
 
-Stop all five units before backup:
+Stop the user target before backup:
 
 ```text
-sudo systemctl stop 'carillon-*'
-sudo /opt/carillon/bin/carillon backup \
-  --config /var/lib/carillon/carillon.toml \
-  --output /srv/backup/carillon.tar.gz
+systemctl --user stop carillon.target
+~/.carillon/app/bin/carillon backup \
+  --config ~/.carillon/carillon.toml \
+  --output ~/backups/carillon.tar.gz
 ```
 
-Backup refuses to run while the core lock or any component listener is active. It includes core SQLite state, configuration, common agent files, Pi resources and sessions, component evidence/state, internal component credentials, and release identity. Pi provider credentials, model catalogs, and selected model remain in `/var/lib/pi-carillon`; they are deliberately excluded from Carillon backups, resources, diagnostics, and logs.
+Backup refuses to run while the core lock or any component listener is active. It includes core SQLite state, configuration, common agent files, Pi resource snapshots and sessions, component evidence/state, internal component credentials, and release identity. Pi provider credentials, model catalogs, and selected model remain in `CARILLON_HOME/pi`; copy that private directory separately when moving the complete installation.
 
-Restore into an empty installation root:
+Restore into an empty owner-controlled root:
 
 ```text
-sudo /opt/carillon/bin/carillon restore \
-  --input /srv/backup/carillon.tar.gz \
-  --target /var/lib/carillon
+~/.carillon/app/bin/carillon restore \
+  --input ~/backups/carillon.tar.gz \
+  --target ~/.carillon-restored
 ```
 
-Run restore as root so archived service ownership is preserved, then start the units. Runtime-owned continuation references are relocated by the runtime adapter, and the next safe turn continues without repeating completed work or an uncertain delivery.
+Restore runs as the owner. Runtime-owned continuation references are relocated by the runtime adapter, and the next safe turn continues without repeating completed work or an uncertain delivery.

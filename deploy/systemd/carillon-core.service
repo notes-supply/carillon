@@ -1,20 +1,24 @@
 [Unit]
 Description=Carillon durable composition core
 After=network.target
+PartOf=carillon.target
 
 [Service]
 Type=simple
-User=carillon-core
-Group=carillon-core
-SupplementaryGroups=carillon
-ExecStart=/opt/carillon/bin/carillon core --config /var/lib/carillon/carillon.toml
+WorkingDirectory=@OWNER_HOME@
+Environment="HOME=@OWNER_HOME@"
+Environment="USER=@OWNER@"
+Environment="LOGNAME=@OWNER@"
+Environment="SHELL=@OWNER_SHELL@"
+Environment="PATH=@OWNER_PATH@"
+Environment="CARILLON_HOME=@CARILLON_HOME@"
+Environment="PI_CODING_AGENT_DIR=@CARILLON_HOME@/pi"
+ExecStart="@CARILLON_HOME@/app/bin/carillon" core --config "@CARILLON_HOME@/carillon.toml"
 Restart=on-failure
 RestartSec=2s
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectHome=yes
-ProtectSystem=strict
-ReadWritePaths=/var/lib/carillon/state
+UMask=0077
+StandardOutput=append:@CARILLON_HOME@/logs/core.log
+StandardError=append:@CARILLON_HOME@/logs/core.log
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=carillon.target

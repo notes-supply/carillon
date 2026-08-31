@@ -2,23 +2,24 @@
 Description=Carillon Pi runtime adapter
 After=network-online.target
 Wants=network-online.target
+PartOf=carillon.target
 
 [Service]
 Type=simple
-User=carillon-runtime
-Group=carillon-runtime
-SupplementaryGroups=carillon
-LoadCredential=component-token:/var/lib/carillon/credentials/runtime-pi.token
-ExecStart=/opt/carillon/bin/carillon-runtime-pi --config /var/lib/carillon/carillon.toml --token-file %d/component-token --state-dir /var/lib/pi-carillon
+WorkingDirectory=@OWNER_HOME@
+Environment="HOME=@OWNER_HOME@"
+Environment="USER=@OWNER@"
+Environment="LOGNAME=@OWNER@"
+Environment="SHELL=@OWNER_SHELL@"
+Environment="PATH=@OWNER_PATH@"
+Environment="CARILLON_HOME=@CARILLON_HOME@"
+Environment="PI_CODING_AGENT_DIR=@CARILLON_HOME@/pi"
+ExecStart="@CARILLON_HOME@/app/bin/carillon-runtime-pi" --config "@CARILLON_HOME@/carillon.toml" --token-file "@CARILLON_HOME@/credentials/runtime-pi.token" --state-dir "@CARILLON_HOME@/pi"
 Restart=on-failure
 RestartSec=2s
-NoNewPrivileges=yes
-StateDirectory=pi-carillon
-StateDirectoryMode=0700
-PrivateTmp=yes
-ProtectHome=yes
-ProtectSystem=strict
-ReadWritePaths=/var/lib/carillon/state/components/runtime-pi /var/lib/carillon/agents/default/sessions
+UMask=0077
+StandardOutput=append:@CARILLON_HOME@/logs/runtime-pi.log
+StandardError=append:@CARILLON_HOME@/logs/runtime-pi.log
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=carillon.target
