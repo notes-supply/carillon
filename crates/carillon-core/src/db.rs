@@ -354,6 +354,24 @@ impl Database {
         Ok(pending != 0)
     }
 
+    pub fn has_pending_turn(
+        &self,
+        interface_id: &str,
+        agent_id: &str,
+        audience_id: &str,
+    ) -> Result<bool> {
+        let pending = self.connect()?.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM turns
+                WHERE interface_id = ?1 AND agent_id = ?2 AND audience_id = ?3
+                  AND state IN ('accepted', 'processing')
+            )",
+            params![interface_id, agent_id, audience_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(pending != 0)
+    }
+
     pub fn pending_turns(&self) -> Result<Vec<PendingTurn>> {
         let connection = self.connect()?;
         let mut statement = connection.prepare(

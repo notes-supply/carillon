@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -272,6 +272,8 @@ struct ResolvedMessage {
     event: ExternalEvent,
     conversation_id: String,
 }
+
+type AudienceMessageQueues = Arc<Mutex<BTreeMap<String, VecDeque<ResolvedMessage>>>>;
 
 pub async fn serve_discord(
     config: LoadedConfig,
@@ -758,6 +760,7 @@ async fn message_worker(
     http: Arc<DiscordHttp>,
     mut messages: mpsc::Receiver<InboundMessage>,
 ) {
+    let queues = Arc::new(Mutex::new(BTreeMap::new()));
     while let Some(mut inbound) = messages.recv().await {
         let config = match LoadedConfig::load(&state.config_path) {
             Ok(config) => config,
@@ -807,27 +810,94 @@ async fn message_worker(
                 continue;
             }
         };
-        processing_feedback(&http, discord, &resolved.event.feedback_target_id).await;
-        let typing = start_typing(http.clone(), discord, &resolved.event.delivery_target_id).await;
-        let receipt = submit_event(&state, &resolved.event).await;
-        if let Some(task) = typing {
-            task.abort();
+        let audience = resolved.event.audience_id.clone();
+        if queue_resolved_message(&mut *queues.lock().await, resolved) {
+            tokio::spawn(audience_message_worker(
+                state.clone(),
+                http.clone(),
+                queues.clone(),
+                audience,
+            ));
         }
-        match receipt {
-            Ok(receipt) if receipt.duplicate && receipt.state != "processing" => {
-                clear_processing_feedback(&http, discord, &resolved.event.feedback_target_id).await;
+    }
+}
+
+fn queue_resolved_message(
+    queues: &mut BTreeMap<String, VecDeque<ResolvedMessage>>,
+    resolved: ResolvedMessage,
+) -> bool {
+    let audience = resolved.event.audience_id.clone();
+    if let Some(queue) = queues.get_mut(&audience) {
+        queue.push_back(resolved);
+        false
+    } else {
+        queues.insert(audience, VecDeque::from([resolved]));
+        true
+    }
+}
+
+async fn audience_message_worker(
+    state: DiscordState,
+    http: Arc<DiscordHttp>,
+    queues: AudienceMessageQueues,
+    audience: String,
+) {
+    loop {
+        let resolved = {
+            let mut queues = queues.lock().await;
+            let Some(queue) = queues.get_mut(&audience) else {
+                return;
+            };
+            if let Some(resolved) = queue.pop_front() {
+                resolved
+            } else {
+                queues.remove(&audience);
+                return;
             }
-            Ok(_) => {}
-            Err(failure) => {
-                warn!(error = %failure.message, "Discord event submission failed");
-                terminal_feedback(
-                    &http,
-                    discord,
-                    &resolved.event.feedback_target_id,
-                    Feedback::Failed,
-                )
-                .await;
-            }
+        };
+        submit_resolved_message(&state, &http, resolved).await;
+    }
+}
+
+async fn submit_resolved_message(
+    state: &DiscordState,
+    http: &Arc<DiscordHttp>,
+    resolved: ResolvedMessage,
+) {
+    let config = match LoadedConfig::load(&state.config_path) {
+        Ok(config) => config,
+        Err(failure) => {
+            warn!(error = %failure, "reload Discord configuration for event submission");
+            return;
+        }
+    };
+    let discord = match config.discord() {
+        Ok(discord) => discord,
+        Err(failure) => {
+            warn!(error = %failure, "validate Discord configuration for event submission");
+            return;
+        }
+    };
+    processing_feedback(http, discord, &resolved.event.feedback_target_id).await;
+    let typing = start_typing(http.clone(), discord, &resolved.event.delivery_target_id).await;
+    let receipt = submit_event(state, &resolved.event).await;
+    if let Some(task) = typing {
+        task.abort();
+    }
+    match receipt {
+        Ok(receipt) if receipt.duplicate && receipt.state != "processing" => {
+            clear_processing_feedback(http, discord, &resolved.event.feedback_target_id).await;
+        }
+        Ok(_) => {}
+        Err(failure) => {
+            warn!(error = %failure.message, "Discord event submission failed");
+            terminal_feedback(
+                http,
+                discord,
+                &resolved.event.feedback_target_id,
+                Feedback::Failed,
+            )
+            .await;
         }
     }
 }
@@ -1818,6 +1888,12 @@ async fn submit_event(
             sleep(Duration::from_millis(250)).await;
             continue;
         }
+        if response.status().is_server_error() {
+            retrying = true;
+            warn!(status = %response.status(), event_id = %event.event_id, "event submission outcome uncertain; retrying");
+            sleep(Duration::from_millis(250)).await;
+            continue;
+        }
         let response = response.error_for_status().context("core rejected event")?;
         match response.json().await {
             Ok(receipt) => return Ok(receipt),
@@ -2023,9 +2099,9 @@ mod tests {
     use tokio::{net::TcpListener, sync::Mutex};
 
     use super::{
-        DISCORD_MESSAGE_LIMIT, DiscordParticipation, DiscordState, MessagePlan, ServiceError,
-        deferred_model_response, profile_panel, resolve_message, resolved_message,
-        split_discord_message, submit_event, thread_title,
+        DISCORD_MESSAGE_LIMIT, DiscordParticipation, DiscordState, MessagePlan, ResolvedMessage,
+        ServiceError, deferred_model_response, profile_panel, queue_resolved_message,
+        resolve_message, resolved_message, split_discord_message, submit_event, thread_title,
     };
     use crate::{
         config::{DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute},
@@ -2046,7 +2122,8 @@ mod tests {
     ) -> Response {
         match state.attempts.fetch_add(1, Ordering::SeqCst) {
             0 => StatusCode::CONFLICT.into_response(),
-            1 => (StatusCode::OK, "not JSON").into_response(),
+            1 => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            2 => (StatusCode::OK, "not JSON").into_response(),
             _ => Json(EventReceipt {
                 event_id: event.event_id,
                 turn_id: "turn".to_owned(),
@@ -2241,7 +2318,58 @@ mod tests {
         .map_err(|failure| anyhow!(failure.message))?;
         server.abort();
         assert!(receipt.duplicate);
-        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        assert_eq!(attempts.load(Ordering::SeqCst), 4);
+        Ok(())
+    }
+
+    #[test]
+    fn audience_submission_queues_are_independent_and_fifo() -> anyhow::Result<()> {
+        let resolved = |event_id: &str, audience: &str| ResolvedMessage {
+            event: ExternalEvent {
+                event_id: event_id.to_owned(),
+                agent_id: "default".to_owned(),
+                user_id: "user".to_owned(),
+                audience_id: audience.to_owned(),
+                delivery_target_id: "channel".to_owned(),
+                feedback_target_id: "channel:message".to_owned(),
+                content: "hello".to_owned(),
+                native: json!({}),
+            },
+            conversation_id: audience.to_owned(),
+        };
+        let mut queues = BTreeMap::new();
+
+        assert!(queue_resolved_message(&mut queues, resolved("a-1", "a")));
+        assert!(!queue_resolved_message(&mut queues, resolved("a-2", "a")));
+        assert!(queue_resolved_message(&mut queues, resolved("b-1", "b")));
+        assert_eq!(queues.len(), 2);
+        let audience_a = queues.get_mut("a").context("audience a queue")?;
+        assert_eq!(
+            audience_a
+                .pop_front()
+                .context("first audience a event")?
+                .event
+                .event_id,
+            "a-1"
+        );
+        assert_eq!(
+            audience_a
+                .pop_front()
+                .context("second audience a event")?
+                .event
+                .event_id,
+            "a-2"
+        );
+        assert_eq!(
+            queues
+                .get_mut("b")
+                .context("audience b queue")?
+                .pop_front()
+                .context("audience b event")?
+                .event
+                .event_id,
+            "b-1"
+        );
         Ok(())
     }
 

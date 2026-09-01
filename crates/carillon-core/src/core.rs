@@ -599,6 +599,15 @@ async fn apply_execution_profile(
     if let Some(id) = interface_id.as_deref() {
         config.provider(id, ProviderRole::Interface)?;
     }
+    if let (Some(interface), Some(audience)) = (interface_id.as_deref(), audience_id.as_deref())
+        && state
+            .database
+            .has_pending_turn(interface, &config.value.agent.id, audience)?
+    {
+        return Err(ApiError::conflict(
+            "the conversation has a turn that is still being reconciled",
+        ));
+    }
     let continuation = match (interface_id.as_deref(), audience_id.as_deref()) {
         (Some(interface), Some(audience)) => {
             state
@@ -2079,6 +2088,39 @@ mod tests {
         .err()
         .context("interface queried another interface conversation")?;
         assert_eq!(cross_interface.status, StatusCode::FORBIDDEN);
+
+        harness
+            .primary_state
+            .corrupt_response
+            .store(true, Ordering::SeqCst);
+        let pending = process_event(
+            &harness.state,
+            &harness.config,
+            "interface-a",
+            event("profile-pending", "profile-audience", "still running"),
+        )
+        .await?;
+        assert_eq!(pending.state, "processing");
+        let blocked = apply_execution_profile(
+            State(harness.state.clone()),
+            operator_headers(),
+            Json(ExecutionProfileSelection {
+                key: catalog.models[0].key.clone(),
+                reasoning: None,
+                service_tier: Some(ServiceTier::Standard),
+                scope: ExecutionProfileScope::CurrentConversation,
+                audience_id: Some("profile-audience".to_owned()),
+                interface_id: Some("interface-a".to_owned()),
+            }),
+        )
+        .await
+        .err()
+        .context("pending conversation accepted a profile mutation")?;
+        assert_eq!(blocked.status, StatusCode::CONFLICT);
+        assert_eq!(
+            harness.primary_state.profile_selections.lock().await.len(),
+            1
+        );
         Ok(())
     }
 
