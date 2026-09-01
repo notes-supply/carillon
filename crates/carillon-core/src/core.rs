@@ -195,6 +195,12 @@ async fn accept_event(
     let config = LoadedConfig::load(&state.config_path)?;
     let interface_id = authorize_interface(&headers, &config)?;
     admit(&event)?;
+    if let Some(existing) = state
+        .database
+        .turn_for_event(&interface_id, &event.event_id)?
+    {
+        return Ok(Json(receipt(&event.event_id, existing)));
+    }
     let _guard = state
         .turns
         .lock(&interface_id, &event.agent_id, &event.audience_id)
@@ -1954,6 +1960,42 @@ mod tests {
                 server.abort();
             }
         }
+    }
+
+    #[tokio::test]
+    async fn duplicate_event_does_not_resolve_changed_resources() -> Result<()> {
+        let harness = ProviderHarness::new().await?;
+        let headers = interface_headers("interface-a", "Bearer interface-a-token");
+        let original = accept_event(
+            State(harness.state.clone()),
+            headers.clone(),
+            Json(event("duplicate", "conversation", "first")),
+        )
+        .await
+        .map_err(|failure| anyhow::anyhow!(failure.message))?
+        .0;
+
+        std::os::unix::fs::symlink(
+            "SYSTEM.md",
+            harness
+                .config
+                .value
+                .agent
+                .resource_root
+                .join("invalid-link"),
+        )?;
+        let duplicate = accept_event(
+            State(harness.state.clone()),
+            headers,
+            Json(event("duplicate", "conversation", "first")),
+        )
+        .await
+        .map_err(|failure| anyhow::anyhow!(failure.message))?
+        .0;
+
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.turn_id, original.turn_id);
+        Ok(())
     }
 
     #[tokio::test]

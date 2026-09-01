@@ -134,6 +134,28 @@ impl Database {
         Ok(())
     }
 
+    pub fn turn_for_event(
+        &self,
+        interface_id: &str,
+        event_id: &str,
+    ) -> Result<Option<AcceptedTurn>> {
+        let connection = self.connect()?;
+        connection
+            .query_row(
+                "SELECT id, state FROM turns WHERE interface_id = ?1 AND event_id = ?2",
+                params![interface_id, event_id],
+                |row| {
+                    Ok(AcceptedTurn {
+                        turn_id: row.get(0)?,
+                        duplicate: true,
+                        state: row.get(1)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn accept_event(
         &self,
         interface_id: &str,

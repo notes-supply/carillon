@@ -9,7 +9,7 @@ import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { Type } from "typebox";
@@ -30,6 +30,7 @@ import {
   serviceTierForModel,
   type ServiceTierDefault,
 } from "./profile.ts";
+import { atomicJson } from "./atomic-json.ts";
 import { capabilityCallId, nativeSessionId } from "./namespace.ts";
 import { createPiExecutionSession, recoverPiTurn } from "./session.ts";
 
@@ -264,6 +265,7 @@ let modelRuntime: ModelRuntime | undefined;
 let runtimeInstance: string;
 let defaultServiceTier: ServiceTierDefault | undefined;
 let queue: Promise<void> = Promise.resolve();
+const activeTurns = new Set<string>();
 
 async function startRuntime(values: readonly string[]): Promise<void> {
   const args = parseArguments(values);
@@ -379,7 +381,7 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
       writeJson(response, 400, { error: "invalid runtime turn request" });
       return;
     }
-    const result = await serialize(() => executeTurn(parsed));
+    const result = await queueTurn(parsed);
     writeJson(response, 200, result);
     return;
   }
@@ -660,17 +662,34 @@ function requiredProfileAudience(selection: RuntimeExecutionProfileSelection): s
   return audience;
 }
 
+async function queueTurn(request: TurnRequest): Promise<TurnResponse> {
+  if (activeTurns.has(request.correlation_id))
+    throw new Error(`turn ${request.correlation_id} is already queued`);
+  activeTurns.add(request.correlation_id);
+  try {
+    const existing = await readEvidence(request.correlation_id);
+    if (existing?.state === "completed" && existing.result !== undefined) return existing.result;
+    if (existing !== undefined)
+      throw new Error(`turn ${request.correlation_id} has non-terminal runtime evidence`);
+    await writeEvidence({
+      correlation_id: request.correlation_id,
+      state: "processing",
+      native: { runtime_instance: runtimeInstance, phase: "queued" },
+    });
+    return await serialize(() => executeTurn(request));
+  } finally {
+    activeTurns.delete(request.correlation_id);
+  }
+}
+
 async function executeTurn(request: TurnRequest): Promise<TurnResponse> {
-  const existing = await readEvidence(request.correlation_id);
-  if (existing?.state === "completed" && existing.result !== undefined) return existing.result;
-  if (existing !== undefined)
-    throw new Error(`turn ${request.correlation_id} has non-terminal runtime evidence`);
   try {
     const result = deterministic ? await executeDeterministic(request) : await executePi(request);
     await writeEvidence({ correlation_id: request.correlation_id, state: "completed", result });
     return result;
   } catch (failure: unknown) {
     const current = await readEvidence(request.correlation_id);
+    if (current?.state === "completed" && current.result !== undefined) return current.result;
     await writeEvidence({
       ...current,
       correlation_id: request.correlation_id,
@@ -961,12 +980,7 @@ async function readEvidence(correlationId: string): Promise<Evidence | undefined
 }
 
 async function reconcileEvidence(evidence: Evidence | undefined): Promise<Evidence | undefined> {
-  if (
-    evidence?.state !== "processing" ||
-    evidence.engine === undefined ||
-    evidence.continuation_ref === undefined
-  )
-    return evidence;
+  if (evidence?.state !== "processing") return evidence;
 
   let owner: string | undefined;
   try {
@@ -975,6 +989,17 @@ async function reconcileEvidence(evidence: Evidence | undefined): Promise<Eviden
     owner = undefined;
   }
   const currentExecution = owner === runtimeInstance;
+  if (evidence.engine === undefined || evidence.continuation_ref === undefined) {
+    if (currentExecution) return evidence;
+    const interrupted: Evidence = {
+      ...evidence,
+      state: "interrupted",
+      error: "runtime restarted before queued work began",
+    };
+    await writeEvidence(interrupted);
+    return interrupted;
+  }
+
   if (evidence.engine === "deterministic") {
     const session = await readDeterministicSession(validateContinuation(evidence.continuation_ref));
     const turn = session.turns.find(
@@ -1062,12 +1087,6 @@ async function reconcileEvidence(evidence: Evidence | undefined): Promise<Eviden
 
 async function writeEvidence(evidence: Evidence): Promise<void> {
   await atomicJson(join(evidenceDirectory, `${safeName(evidence.correlation_id)}.json`), evidence);
-}
-
-async function atomicJson(path: string, value: unknown): Promise<void> {
-  const temporary = `${path}.${String(process.pid)}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-  await rename(temporary, path);
 }
 
 async function loadConfig(path: string, providerId: string): Promise<Config> {

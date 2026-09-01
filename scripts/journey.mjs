@@ -271,6 +271,34 @@ try {
   assert.equal(reconciledEvidence.status, 200, reconciledBody);
   assert.equal(JSON.parse(reconciledBody).result.output, "native result");
 
+  const queuedCorrelation = crypto.randomUUID();
+  await writeFile(
+    join(
+      installation,
+      "state",
+      "components",
+      "runtime-pi",
+      "evidence",
+      `${queuedCorrelation}.json`,
+    ),
+    `${JSON.stringify({
+      correlation_id: queuedCorrelation,
+      state: "processing",
+      native: { runtime_instance: "crashed-runtime", phase: "queued" },
+    })}\n`,
+  );
+  const queuedEvidence = await fetch(
+    `http://127.0.0.1:${String(basePort + 2)}/v1/evidence/${queuedCorrelation}`,
+    { headers: { authorization: `Bearer ${await credentialValue("runtime-pi")}` } },
+  );
+  const queuedBody = await queuedEvidence.text();
+  assert.equal(queuedEvidence.status, 200, queuedBody);
+  assert.equal(
+    JSON.parse(queuedBody).state,
+    "interrupted",
+    "queued work owned by a stopped runtime must terminalize",
+  );
+
   const inspected = JSON.parse(
     run("inspect", "--config", configPath(), afterCapabilityRestart.receipt.turn_id),
   );
@@ -318,6 +346,7 @@ try {
         restarts: ["discord", "runtime-pi", "interface-extension", "capability"],
         abandoned_delivery_claim: "uncertain",
         native_runtime_reconciliation: "completed from session evidence",
+        queued_runtime_reconciliation: "interrupted after runtime restart",
         diagnostics: "authenticated and discoverable by event",
         inspected_turn: afterCapabilityRestart.receipt.turn_id,
         backup_restore: "continued safely",
