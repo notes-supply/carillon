@@ -385,7 +385,7 @@ fn validate_restored_installation(root: &Path) -> Result<()> {
             database.display()
         );
     }
-    Database::open(&database)?;
+    Database::validate(&database)?;
 
     let operator = read_token_file(&config.root.join("credentials/operator.token"))?;
     if !token_matches(&config.value.core.operator_token_hash, &operator) {
@@ -641,6 +641,7 @@ mod tests {
                 "state/carillon.sqlite3",
                 Some("not a database"),
             ),
+            ("empty-database", "state/carillon.sqlite3", Some("")),
             (
                 "missing-provider-credential",
                 "credentials/runtime-pi.token",

@@ -769,20 +769,25 @@ async fn remember_thread_creation(state: &DiscordState, plan: &MessagePlan) -> R
     {
         return Ok(());
     }
-    participation
+    let mut updated = participation.clone();
+    updated
         .pending_thread_creations
         .insert(plan.source_message_id.clone(), plan.clone());
-    persist_json(&state.participation_path, &*participation)
+    persist_json(&state.participation_path, &updated)?;
+    *participation = updated;
+    Ok(())
 }
 
 async fn clear_thread_creation(state: &DiscordState, message_id: &str) -> Result<()> {
     let mut participation = state.participation.lock().await;
-    if participation
+    let mut updated = participation.clone();
+    if updated
         .pending_thread_creations
         .remove(message_id)
         .is_some()
     {
-        persist_json(&state.participation_path, &*participation)?;
+        persist_json(&state.participation_path, &updated)?;
+        *participation = updated;
     }
     Ok(())
 }
@@ -2819,6 +2824,46 @@ mod tests {
         let completed: DiscordParticipation =
             serde_json::from_slice(&fs::read(&participation_path)?)?;
         assert!(completed.pending_thread_creations.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_thread_intent_write_does_not_change_live_participation() -> anyhow::Result<()> {
+        let directory = tempdir()?;
+        let state = DiscordState {
+            config_path: PathBuf::new(),
+            core_url: String::new(),
+            provider_id: "discord".to_owned(),
+            token: "token".to_owned(),
+            instance_id: "instance".to_owned(),
+            client: reqwest::Client::new(),
+            participation_path: directory.path().join("missing/participation.json"),
+            participation: Arc::new(Mutex::new(DiscordParticipation::default())),
+        };
+        let plan = MessagePlan {
+            event_id: "message".to_owned(),
+            guild_id: "guild".to_owned(),
+            user_id: "user".to_owned(),
+            agent_id: "default".to_owned(),
+            source_channel_id: "channel".to_owned(),
+            source_message_id: "message".to_owned(),
+            route_channel_id: "channel".to_owned(),
+            current_channel_id: "channel".to_owned(),
+            content: "hello".to_owned(),
+            create_thread: true,
+            adopt_thread: false,
+            native: json!({}),
+        };
+
+        assert!(remember_thread_creation(&state, &plan).await.is_err());
+        assert!(
+            state
+                .participation
+                .lock()
+                .await
+                .pending_thread_creations
+                .is_empty()
+        );
         Ok(())
     }
 

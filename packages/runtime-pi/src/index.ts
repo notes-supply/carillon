@@ -673,10 +673,9 @@ async function queueTurn(request: TurnRequest): Promise<TurnResponse> {
 }
 
 async function executeTurn(request: TurnRequest): Promise<TurnResponse> {
+  let result: TurnResponse;
   try {
-    const result = deterministic ? await executeDeterministic(request) : await executePi(request);
-    await writeEvidence({ correlation_id: request.correlation_id, state: "completed", result });
-    return result;
+    result = deterministic ? await executeDeterministic(request) : await executePi(request);
   } catch (failure: unknown) {
     const current = await readEvidence(request.correlation_id);
     if (current?.state === "completed" && current.result !== undefined) return current.result;
@@ -688,6 +687,8 @@ async function executeTurn(request: TurnRequest): Promise<TurnResponse> {
     });
     throw failure;
   }
+  await writeEvidence({ correlation_id: request.correlation_id, state: "completed", result });
+  return result;
 }
 
 async function executeDeterministic(request: TurnRequest): Promise<TurnResponse> {

@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde_json::Value;
 
 use crate::model::{
@@ -53,6 +53,25 @@ impl Database {
         };
         database.initialize()?;
         Ok(database)
+    }
+
+    pub fn validate(path: &Path) -> Result<()> {
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .with_context(|| format!("open {} read-only", path.display()))?;
+        let integrity: String = connection.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+        if integrity != "ok" {
+            bail!("database integrity check failed: {integrity}");
+        }
+        for query in [
+            "SELECT interface_id, event_id, audience_id, user_id, delivery_target_id, feedback_target_id, input, native_json, accepted_at FROM events LIMIT 0",
+            "SELECT id, interface_id, event_id, audience_id, user_id, agent_id, execution_provider_id, state, provider_snapshot_json, resource_snapshot_json, output, native_evidence_json, capability_activity_json, error, started_at, finished_at FROM turns LIMIT 0",
+            "SELECT interface_id, agent_id, audience_id, runtime_id, native_ref, updated_at FROM continuations LIMIT 0",
+            "SELECT id, turn_id, interface_id, target_id, feedback_target_id, content, state, native_ref, claim_owner, updated_at FROM deliveries LIMIT 0",
+            "SELECT path, created_at FROM backups LIMIT 0",
+        ] {
+            connection.prepare(query)?;
+        }
+        Ok(())
     }
 
     fn connect(&self) -> Result<Connection> {
