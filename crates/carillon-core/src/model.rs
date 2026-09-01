@@ -103,7 +103,7 @@ pub struct RuntimeTurnRequest {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct RuntimeTurnResponse {
+pub struct ProviderTurnResponse {
     pub correlation_id: String,
     pub output: String,
     pub continuation_ref: String,
@@ -113,11 +113,11 @@ pub struct RuntimeTurnResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct RuntimeEvidence {
+pub struct ProviderEvidence {
     pub correlation_id: String,
     pub state: String,
     pub error: Option<String>,
-    pub result: Option<RuntimeTurnResponse>,
+    pub result: Option<ProviderTurnResponse>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -202,12 +202,6 @@ pub struct ExtensionRequest {
     pub arguments: String,
     pub audience_id: String,
     pub user_id: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ExtensionResponse {
-    pub content: String,
-    pub native: Value,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

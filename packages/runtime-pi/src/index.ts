@@ -30,7 +30,7 @@ import {
   serviceTierForModel,
   type ServiceTierDefault,
 } from "./profile.ts";
-import { nativeSessionId } from "./namespace.ts";
+import { capabilityCallId, nativeSessionId } from "./namespace.ts";
 import { createPiExecutionSession, recoverPiTurn } from "./session.ts";
 
 registerBunOAuthFlows();
@@ -798,10 +798,10 @@ async function executePi(request: TurnRequest): Promise<TurnResponse> {
             label: "Carillon Echo",
             description: "Use the independently supervised harmless echo capability.",
             parameters: Type.Object({ input: Type.String() }),
-            execute: async (_toolCallId, parameters) => {
+            execute: async (toolCallId, parameters) => {
               const result = await callCapability(
                 capability,
-                request.correlation_id,
+                capabilityCallId(request.correlation_id, toolCallId),
                 parameters.input,
               );
               capabilityActivity.push(result.native);

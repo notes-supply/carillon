@@ -9,7 +9,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Path as AxumPath, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -53,9 +53,9 @@ use crate::{
     model::{
         CapabilityRequest, CapabilityResponse, Delivery, DeliveryAck, DeliveryOutcome,
         DeliveryReconciliation, EventReceipt, ExecutionProfileApplication, ExecutionProfileScope,
-        ExecutionProfileSelection, ExtensionRequest, ExtensionResponse, ExternalEvent, Health,
-        RuntimeExecutionProfileModel, RuntimeExecutionProfiles, ServiceTier, SimulateRequest,
-        SimulateResponse,
+        ExecutionProfileSelection, ExtensionRequest, ExternalEvent, Health, ProviderEvidence,
+        ProviderTurnResponse, RuntimeExecutionProfileModel, RuntimeExecutionProfiles, ServiceTier,
+        SimulateRequest, SimulateResponse,
     },
 };
 
@@ -88,6 +88,8 @@ struct ExtensionState {
     token_hash: String,
     id: String,
     version: String,
+    path: PathBuf,
+    evidence: Arc<Mutex<BTreeMap<String, ProviderEvidence>>>,
 }
 
 pub async fn serve_extension(
@@ -102,14 +104,25 @@ pub async fn serve_extension(
     if !token_matches(&provider.token_hash, &token) {
         bail!("interface extension token does not match configuration");
     }
+    let state_dir = config.value.data_dir.join("components").join(&provider.id);
+    fs::create_dir_all(&state_dir)?;
+    let path = state_dir.join("evidence.json");
+    let evidence = if path.exists() {
+        serde_json::from_slice(&fs::read(&path)?)?
+    } else {
+        BTreeMap::new()
+    };
     let state = ExtensionState {
         token_hash: provider.token_hash,
         id: provider.id,
         version: provider.version,
+        path,
+        evidence: Arc::new(Mutex::new(evidence)),
     };
     let router = Router::new()
         .route("/health", get(extension_health))
         .route("/v1/invoke", post(invoke_extension))
+        .route("/v1/evidence/{id}", get(extension_evidence))
         .with_state(state);
     serve_component(provider.url, router, "interface extension").await
 }
@@ -127,7 +140,7 @@ async fn invoke_extension(
     State(state): State<ExtensionState>,
     headers: HeaderMap,
     Json(request): Json<ExtensionRequest>,
-) -> Result<Json<ExtensionResponse>, ServiceError> {
+) -> Result<Json<ProviderTurnResponse>, ServiceError> {
     authorize(&headers, &state.token_hash)?;
     if request.command != "carillon" {
         return Err(ServiceError {
@@ -135,18 +148,66 @@ async fn invoke_extension(
             message: "unknown command".to_owned(),
         });
     }
+    let mut evidence = state.evidence.lock().await;
+    if let Some(existing) = evidence.get(&request.correlation_id) {
+        return existing
+            .result
+            .clone()
+            .map(Json)
+            .ok_or_else(|| ServiceError {
+                status: StatusCode::CONFLICT,
+                message: "extension operation is not terminal".to_owned(),
+            });
+    }
     let detail = if request.arguments.is_empty() {
         "ready"
     } else {
         request.arguments.as_str()
     };
-    Ok(Json(ExtensionResponse {
-        content: format!(
+    let response = ProviderTurnResponse {
+        correlation_id: request.correlation_id.clone(),
+        output: format!(
             "Carillon {} ({detail}); audience {}; operator {}",
             state.version, request.audience_id, request.user_id
         ),
+        continuation_ref: format!("extension:{}", request.correlation_id),
         native: json!({ "command": request.command, "arguments": request.arguments, "extension": state.id }),
-    }))
+        capability_activity: Vec::new(),
+    };
+    let correlation_id = request.correlation_id;
+    evidence.insert(
+        correlation_id.clone(),
+        ProviderEvidence {
+            correlation_id: correlation_id.clone(),
+            state: "completed".to_owned(),
+            error: None,
+            result: Some(response.clone()),
+        },
+    );
+    if let Err(failure) = persist_json(&state.path, &*evidence) {
+        evidence.remove(&correlation_id);
+        return Err(failure.into());
+    }
+    Ok(Json(response))
+}
+
+async fn extension_evidence(
+    State(state): State<ExtensionState>,
+    AxumPath(id): AxumPath<String>,
+    headers: HeaderMap,
+) -> Result<Json<ProviderEvidence>, ServiceError> {
+    authorize(&headers, &state.token_hash)?;
+    state
+        .evidence
+        .lock()
+        .await
+        .get(&id)
+        .cloned()
+        .map(Json)
+        .ok_or_else(|| ServiceError {
+            status: StatusCode::NOT_FOUND,
+            message: "extension evidence not found".to_owned(),
+        })
 }
 
 #[derive(Clone)]

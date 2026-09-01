@@ -8,7 +8,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 
 use crate::model::{
-    Delivery, ExternalEvent, ResourceSnapshot, RuntimeTurnResponse, StateCounts, TurnInspection,
+    Delivery, ExternalEvent, ProviderTurnResponse, ResourceSnapshot, StateCounts, TurnInspection,
     TurnSummary,
 };
 
@@ -34,7 +34,7 @@ pub struct Continuation {
 pub struct PendingTurn {
     pub turn: String,
     pub audience: String,
-    pub runtime: String,
+    pub provider: String,
     pub interface: String,
     pub target: String,
     pub feedback_target: String,
@@ -90,7 +90,7 @@ impl Database {
                 audience_id TEXT NOT NULL,
                 user_id TEXT NOT NULL,
                 agent_id TEXT NOT NULL,
-                runtime_id TEXT NOT NULL,
+                execution_provider_id TEXT NOT NULL,
                 state TEXT NOT NULL,
                 provider_snapshot_json TEXT NOT NULL,
                 resource_snapshot_json TEXT NOT NULL,
@@ -138,7 +138,7 @@ impl Database {
         &self,
         interface_id: &str,
         agent_id: &str,
-        runtime_id: &str,
+        execution_provider_id: &str,
         event: &ExternalEvent,
         providers: &Value,
         resources: &ResourceSnapshot,
@@ -181,7 +181,7 @@ impl Database {
             ],
         )?;
         transaction.execute(
-            "INSERT INTO turns(id, interface_id, event_id, audience_id, user_id, agent_id, runtime_id, state,
+            "INSERT INTO turns(id, interface_id, event_id, audience_id, user_id, agent_id, execution_provider_id, state,
                  provider_snapshot_json, resource_snapshot_json, started_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'accepted', ?8, ?9, ?10)",
             params![
@@ -191,7 +191,7 @@ impl Database {
                 audience_id,
                 event.user_id,
                 agent_id,
-                runtime_id,
+                execution_provider_id,
                 serde_json::to_string(providers)?,
                 serde_json::to_string(resources)?,
                 now,
@@ -219,7 +219,7 @@ impl Database {
         interface_id: &str,
         target_id: &str,
         feedback_target_id: &str,
-        response: &RuntimeTurnResponse,
+        response: &ProviderTurnResponse,
     ) -> Result<()> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
@@ -358,7 +358,7 @@ impl Database {
     pub fn pending_turns(&self) -> Result<Vec<PendingTurn>> {
         let connection = self.connect()?;
         let mut statement = connection.prepare(
-            "SELECT t.id, t.audience_id, t.runtime_id, t.interface_id, e.delivery_target_id,
+            "SELECT t.id, t.audience_id, t.execution_provider_id, t.interface_id, e.delivery_target_id,
                     e.feedback_target_id, t.agent_id
              FROM turns t
              JOIN events e ON e.interface_id = t.interface_id AND e.event_id = t.event_id
@@ -368,7 +368,7 @@ impl Database {
             Ok(PendingTurn {
                 turn: row.get(0)?,
                 audience: row.get(1)?,
-                runtime: row.get(2)?,
+                provider: row.get(2)?,
                 interface: row.get(3)?,
                 target: row.get(4)?,
                 feedback_target: row.get(5)?,
@@ -615,7 +615,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::Database;
-    use crate::model::{ExternalEvent, ResourceSnapshot, RuntimeTurnResponse};
+    use crate::model::{ExternalEvent, ProviderTurnResponse, ResourceSnapshot};
 
     #[test]
     fn duplicate_event_has_one_turn_and_one_delivery() -> Result<()> {
@@ -665,7 +665,7 @@ mod tests {
             "discord",
             "channel-1",
             "channel-1:message-1",
-            &RuntimeTurnResponse {
+            &ProviderTurnResponse {
                 correlation_id: first.turn_id.clone(),
                 output: "reply".to_owned(),
                 continuation_ref: "native-1".to_owned(),

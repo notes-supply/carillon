@@ -4,7 +4,13 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { nativeSessionId } from "./namespace.ts";
+import { capabilityCallId, nativeSessionId } from "./namespace.ts";
+
+it("namespaces capability operations by turn and native tool call", () => {
+  expect(capabilityCallId("turn-a", "call-1")).toBe("turn-a:call-1");
+  expect(capabilityCallId("turn-a", "call-1")).not.toBe(capabilityCallId("turn-a", "call-2"));
+  expect(capabilityCallId("turn-a", "call-1")).not.toBe(capabilityCallId("turn-b", "call-1"));
+});
 
 function assistantMessage(text: string, timestamp: number): AssistantMessage {
   return {

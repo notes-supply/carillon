@@ -78,7 +78,6 @@ pub fn initialize(
     if root.exists() && fs::read_dir(root)?.next().is_some() {
         bail!("installation root {} is not empty", root.display());
     }
-    create_installation_directories(root)?;
     let discord_token = new_token();
     let operator_token = new_token();
     let runtime_token = new_token();
@@ -118,6 +117,7 @@ pub fn initialize(
     };
     config.validate()?;
     config.discord()?;
+    create_installation_directories(root)?;
     let config_path = root.join("carillon.toml");
     atomic_write(
         &config_path,
@@ -512,6 +512,31 @@ mod tests {
             ]
         );
         assert!(!root.join("state/components/echo-capability").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn failed_initialization_validation_does_not_create_installation() -> Result<()> {
+        let directory = tempdir()?;
+        for (name, guild_id, base_port) in [
+            ("invalid-discord", "0100", 44_000),
+            ("invalid-port", "100", u16::MAX),
+        ] {
+            let root = directory.path().join(name);
+            assert!(
+                initialize(
+                    &root,
+                    directory.path(),
+                    guild_id,
+                    "101",
+                    &["200".to_owned()],
+                    &[route()],
+                    base_port,
+                )
+                .is_err()
+            );
+            assert!(!root.exists());
+        }
         Ok(())
     }
 

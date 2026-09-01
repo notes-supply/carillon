@@ -34,15 +34,16 @@ use crate::{
     model::{
         CapabilitySelection, Delivery, DeliveryAck, DeliveryOutcome, DeliveryReconciliation,
         EventReceipt, ExecutionProfileApplication, ExecutionProfileScope,
-        ExecutionProfileSelection, ExtensionRequest, ExtensionResponse, ExternalEvent, Health,
-        ResourceSnapshot, RuntimeEvidence, RuntimeExecutionProfileSelection,
-        RuntimeExecutionProfiles, RuntimeTurnRequest, RuntimeTurnResponse, SelectedProvider,
-        StatusReport, TurnInspection, TurnSummary,
+        ExecutionProfileSelection, ExtensionRequest, ExternalEvent, Health, ProviderEvidence,
+        ProviderTurnResponse, ResourceSnapshot, RuntimeExecutionProfileSelection,
+        RuntimeExecutionProfiles, RuntimeTurnRequest, SelectedProvider, StatusReport,
+        TurnInspection, TurnSummary,
     },
 };
 
 const PROVIDER_HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 const RUNTIME_PROFILE_TIMEOUT: Duration = Duration::from_secs(5);
+const EXTENSION_TIMEOUT: Duration = Duration::from_secs(5);
 
 type AudienceKey = (String, String, String);
 
@@ -237,10 +238,14 @@ async fn process_event(
         &config.value.data_dir.join("resource-snapshots"),
     )?;
     let providers = provider_snapshot(config, interface, runtime)?;
+    let extension =
+        command_arguments(&event.content).zip(config.value.interface_extension(interface_id)?);
+    let execution_provider_id =
+        extension.map_or(runtime_id, |(_, extension)| extension.id.as_str());
     let accepted = state.database.accept_event(
         interface_id,
         &event.agent_id,
-        runtime_id,
+        execution_provider_id,
         &event,
         &providers,
         &resources,
@@ -249,8 +254,6 @@ async fn process_event(
         return Ok(receipt(&event.event_id, accepted));
     }
     state.database.mark_processing(&accepted.turn_id)?;
-    let extension =
-        command_arguments(&event.content).zip(config.value.interface_extension(interface_id)?);
     let result = if let Some((arguments, extension)) = extension {
         run_extension(
             state,
@@ -261,7 +264,6 @@ async fn process_event(
             arguments,
         )
         .await
-        .map_err(TurnFailure::Interrupted)
     } else {
         run_runtime(
             state,
@@ -288,7 +290,7 @@ async fn process_event(
             )?;
             Ok(fresh_receipt(event.event_id, accepted.turn_id, "completed"))
         }
-        Err(TurnFailure::RuntimeUncertain(failure)) => {
+        Err(TurnFailure::ExecutionUncertain(failure)) => {
             warn!(
                 turn_id = %accepted.turn_id,
                 error = %failure,
@@ -323,7 +325,7 @@ struct RuntimeSelection<'a> {
 
 enum TurnFailure {
     Interrupted(anyhow::Error),
-    RuntimeUncertain(anyhow::Error),
+    ExecutionUncertain(anyhow::Error),
 }
 
 impl From<anyhow::Error> for TurnFailure {
@@ -339,7 +341,7 @@ async fn run_runtime(
     turn_id: &str,
     event: &ExternalEvent,
     resources: ResourceSnapshot,
-) -> std::result::Result<RuntimeTurnResponse, TurnFailure> {
+) -> std::result::Result<ProviderTurnResponse, TurnFailure> {
     if !selected.provider.enabled {
         return Err(TurnFailure::Interrupted(anyhow!(
             "selected runtime provider is disabled"
@@ -383,28 +385,28 @@ async fn run_runtime(
             if interrupted {
                 TurnFailure::Interrupted(error)
             } else {
-                TurnFailure::RuntimeUncertain(error)
+                TurnFailure::ExecutionUncertain(error)
             }
         })?;
     let status = response.status();
     let response = response.error_for_status().map_err(|error| {
         let error = anyhow::Error::new(error).context("runtime provider rejected turn");
         if status.is_server_error() {
-            TurnFailure::RuntimeUncertain(error)
+            TurnFailure::ExecutionUncertain(error)
         } else {
             TurnFailure::Interrupted(error)
         }
     })?;
     let response = response
-        .json::<RuntimeTurnResponse>()
+        .json::<ProviderTurnResponse>()
         .await
         .map_err(|error| {
-            TurnFailure::RuntimeUncertain(
+            TurnFailure::ExecutionUncertain(
                 anyhow::Error::new(error).context("decode runtime response"),
             )
         })?;
     if response.correlation_id != turn_id {
-        return Err(TurnFailure::RuntimeUncertain(anyhow!(
+        return Err(TurnFailure::ExecutionUncertain(anyhow!(
             "runtime returned a mismatched correlation ID"
         )));
     }
@@ -418,7 +420,7 @@ async fn run_runtime(
             &response.continuation_ref,
         )
         .map_err(|error| {
-            TurnFailure::RuntimeUncertain(error.context("save runtime continuation"))
+            TurnFailure::ExecutionUncertain(error.context("save runtime continuation"))
         })?;
     Ok(response)
 }
@@ -430,9 +432,11 @@ async fn run_extension(
     turn_id: &str,
     event: &ExternalEvent,
     arguments: &str,
-) -> Result<RuntimeTurnResponse> {
+) -> std::result::Result<ProviderTurnResponse, TurnFailure> {
     if !extension.enabled {
-        bail!("Carillon command extension is not active");
+        return Err(TurnFailure::Interrupted(anyhow!(
+            "Carillon command extension is not active"
+        )));
     }
     let request = ExtensionRequest {
         correlation_id: turn_id.to_owned(),
@@ -446,21 +450,41 @@ async fn run_extension(
         .post(format!("{}/v1/invoke", extension.url))
         .bearer_auth(config.credential(&extension.id)?)
         .json(&request)
+        .timeout(EXTENSION_TIMEOUT)
         .send()
         .await
-        .context("contact interface extension")?
-        .error_for_status()
-        .context("interface extension rejected command")?
-        .json::<ExtensionResponse>()
+        .map_err(|error| {
+            let interrupted = error.is_connect() || error.is_builder();
+            let error = anyhow::Error::new(error).context("contact interface extension");
+            if interrupted {
+                TurnFailure::Interrupted(error)
+            } else {
+                TurnFailure::ExecutionUncertain(error)
+            }
+        })?;
+    let status = response.status();
+    let response = response.error_for_status().map_err(|error| {
+        let error = anyhow::Error::new(error).context("interface extension rejected command");
+        if status.is_server_error() {
+            TurnFailure::ExecutionUncertain(error)
+        } else {
+            TurnFailure::Interrupted(error)
+        }
+    })?;
+    let response = response
+        .json::<ProviderTurnResponse>()
         .await
-        .context("decode interface extension response")?;
-    Ok(RuntimeTurnResponse {
-        correlation_id: turn_id.to_owned(),
-        output: response.content,
-        continuation_ref: format!("extension:{turn_id}"),
-        native: json!({ "owner": extension.id, "evidence": response.native }),
-        capability_activity: Vec::new(),
-    })
+        .map_err(|error| {
+            TurnFailure::ExecutionUncertain(
+                anyhow::Error::new(error).context("decode interface extension response"),
+            )
+        })?;
+    if response.correlation_id != turn_id {
+        return Err(TurnFailure::ExecutionUncertain(anyhow!(
+            "interface extension returned a mismatched correlation ID"
+        )));
+    }
+    Ok(response)
 }
 
 async fn claim_delivery(
@@ -552,10 +576,16 @@ async fn status(
     let providers = provider_health(&state.client, &config).await;
     let runtime = agent_runtime(&config)?;
     let execution_profile = if runtime.enabled {
-        runtime_execution_profiles_request(&state.client, &config, runtime, false)
-            .await
-            .ok()
-            .and_then(|profiles| profiles.selected)
+        runtime_execution_profiles_request(
+            &state.client,
+            &config,
+            runtime,
+            false,
+            RUNTIME_PROFILE_TIMEOUT,
+        )
+        .await
+        .ok()
+        .and_then(|profiles| profiles.selected)
     } else {
         None
     };
@@ -592,7 +622,14 @@ async fn execution_profiles(
         query.audience_id.as_deref(),
     )?;
     Ok(Json(
-        runtime_execution_profiles_request(&state.client, &config, runtime, false).await?,
+        runtime_execution_profiles_request(
+            &state.client,
+            &config,
+            runtime,
+            false,
+            RUNTIME_PROFILE_TIMEOUT,
+        )
+        .await?,
     ))
 }
 
@@ -611,7 +648,14 @@ async fn refresh_execution_profiles(
         query.audience_id.as_deref(),
     )?;
     Ok(Json(
-        runtime_execution_profiles_request(&state.client, &config, runtime, true).await?,
+        runtime_execution_profiles_request(
+            &state.client,
+            &config,
+            runtime,
+            true,
+            RUNTIME_PROFILE_TIMEOUT,
+        )
+        .await?,
     ))
 }
 
@@ -725,6 +769,7 @@ async fn runtime_execution_profiles_request(
     config: &LoadedConfig,
     runtime: &Provider,
     refresh: bool,
+    timeout: Duration,
 ) -> Result<RuntimeExecutionProfiles> {
     if !runtime.enabled {
         bail!("selected runtime provider is disabled");
@@ -744,6 +789,7 @@ async fn runtime_execution_profiles_request(
             format!("{}/v1/{endpoint}", runtime.url),
         )
         .bearer_auth(config.credential(&runtime.id)?)
+        .timeout(timeout)
         .send()
         .await
         .context("contact runtime execution-profile service")?
@@ -847,7 +893,7 @@ fn unavailable(id: &str, role: &str, version: &str) -> Health {
     }
 }
 
-fn recovery_evidence_matches(evidence: Option<&RuntimeEvidence>, turn_id: &str) -> bool {
+fn recovery_evidence_matches(evidence: Option<&ProviderEvidence>, turn_id: &str) -> bool {
     let Some(evidence) = evidence else {
         return true;
     };
@@ -861,10 +907,26 @@ fn recovery_evidence_matches(evidence: Option<&RuntimeEvidence>, turn_id: &str) 
             turn_id,
             evidence_correlation_id = %evidence.correlation_id,
             result_correlation_id = ?evidence.result.as_ref().map(|result| &result.correlation_id),
-            "runtime returned mismatched recovery evidence"
+            "execution provider returned mismatched recovery evidence"
         );
     }
     matches
+}
+
+fn recovery_provider<'a>(config: &'a LoadedConfig, id: &str) -> Result<&'a Provider> {
+    let provider = config
+        .value
+        .providers
+        .iter()
+        .find(|provider| provider.id == id)
+        .with_context(|| format!("execution provider {id} is not configured"))?;
+    if !matches!(
+        provider.role,
+        ProviderRole::Runtime | ProviderRole::InterfaceExtension
+    ) {
+        bail!("provider {id} cannot own turn execution");
+    }
+    Ok(provider)
 }
 
 async fn reconcile_pending_turns(state: &AppState) -> Result<usize> {
@@ -873,41 +935,37 @@ async fn reconcile_pending_turns(state: &AppState) -> Result<usize> {
         let Some(_guard) = state.turns.try_lock_pending(&pending).await else {
             continue;
         };
-        let runtime = match config.provider(&pending.runtime, ProviderRole::Runtime) {
-            Ok(runtime) if runtime.enabled => runtime,
-            Ok(_) => {
-                state.database.fail_turn(
-                    &pending.turn,
-                    "interrupted",
-                    "runtime provider disabled during recovery",
-                )?;
-                continue;
-            }
-            Err(failure) => {
-                state.database.fail_turn(
-                    &pending.turn,
-                    "interrupted",
-                    &format!("runtime provider unavailable during recovery: {failure}"),
-                )?;
+        let provider = match recovery_provider(&config, &pending.provider) {
+            Ok(provider) if provider.enabled => provider,
+            outcome => {
+                let reason = match outcome {
+                    Ok(_) => "execution provider disabled during recovery".to_owned(),
+                    Err(failure) => {
+                        format!("execution provider unavailable during recovery: {failure}")
+                    }
+                };
+                state
+                    .database
+                    .fail_turn(&pending.turn, "interrupted", &reason)?;
                 continue;
             }
         };
         let evidence = state
             .client
-            .get(format!("{}/v1/evidence/{}", runtime.url, pending.turn))
-            .bearer_auth(config.credential(&runtime.id)?)
+            .get(format!("{}/v1/evidence/{}", provider.url, pending.turn))
+            .bearer_auth(config.credential(&provider.id)?)
             .timeout(Duration::from_secs(5))
             .send()
             .await;
         let recovered = match evidence {
             Ok(response) if response.status() == StatusCode::OK => {
-                response.json::<RuntimeEvidence>().await.ok()
+                response.json::<ProviderEvidence>().await.ok()
             }
             Ok(response) if response.status() == StatusCode::NOT_FOUND => {
                 state.database.fail_turn(
                     &pending.turn,
                     "interrupted",
-                    "runtime has no durable correlation evidence",
+                    "execution provider has no durable correlation evidence",
                 )?;
                 None
             }
@@ -917,18 +975,20 @@ async fn reconcile_pending_turns(state: &AppState) -> Result<usize> {
             continue;
         }
         match recovered {
-            Some(RuntimeEvidence {
+            Some(ProviderEvidence {
                 state: evidence_state,
                 result: Some(result),
                 ..
             }) if evidence_state == "completed" => {
-                state.database.save_continuation(
-                    &pending.interface,
-                    &pending.agent,
-                    &pending.audience,
-                    &pending.runtime,
-                    &result.continuation_ref,
-                )?;
+                if provider.role == ProviderRole::Runtime {
+                    state.database.save_continuation(
+                        &pending.interface,
+                        &pending.agent,
+                        &pending.audience,
+                        &pending.provider,
+                        &result.continuation_ref,
+                    )?;
+                }
                 state.database.complete_turn(
                     &pending.turn,
                     &pending.interface,
@@ -936,9 +996,9 @@ async fn reconcile_pending_turns(state: &AppState) -> Result<usize> {
                     &pending.feedback_target,
                     &result,
                 )?;
-                info!(turn_id = %pending.turn, "recovered completed runtime work");
+                info!(turn_id = %pending.turn, provider = %pending.provider, "recovered completed provider work");
             }
-            Some(RuntimeEvidence {
+            Some(ProviderEvidence {
                 state: evidence_state,
                 error,
                 ..
@@ -948,10 +1008,10 @@ async fn reconcile_pending_turns(state: &AppState) -> Result<usize> {
                     "interrupted",
                     error
                         .as_deref()
-                        .unwrap_or("runtime reported interrupted work"),
+                        .unwrap_or("execution provider reported interrupted work"),
                 )?;
             }
-            Some(RuntimeEvidence {
+            Some(ProviderEvidence {
                 state: evidence_state,
                 result: None,
                 ..
@@ -959,7 +1019,7 @@ async fn reconcile_pending_turns(state: &AppState) -> Result<usize> {
                 state.database.fail_turn(
                     &pending.turn,
                     "interrupted",
-                    "runtime completion evidence lacked a result",
+                    "execution provider completion evidence lacked a result",
                 )?;
             }
             _ => {}
@@ -1453,6 +1513,7 @@ mod tests {
         apply_execution_profile, authorize_interface, execution_profiles, fetch_health,
         materialize_resources, process_event, provider_snapshot, recent_turns,
         reconcile_pending_turns, refresh_execution_profiles, runtime_execution_profile_selection,
+        runtime_execution_profiles_request,
     };
     use crate::{
         config::{
@@ -1463,9 +1524,9 @@ mod tests {
         db::Database,
         model::{
             ExecutionProfile, ExecutionProfileApplication, ExecutionProfileScope,
-            ExecutionProfileSelection, ExtensionRequest, ExtensionResponse, ExternalEvent,
-            RuntimeEvidence, RuntimeExecutionProfileModel, RuntimeExecutionProfileSelection,
-            RuntimeExecutionProfiles, RuntimeTurnRequest, RuntimeTurnResponse, ServiceTier,
+            ExecutionProfileSelection, ExtensionRequest, ExternalEvent, ProviderEvidence,
+            ProviderTurnResponse, RuntimeExecutionProfileModel, RuntimeExecutionProfileSelection,
+            RuntimeExecutionProfiles, RuntimeTurnRequest, ServiceTier,
         },
     };
 
@@ -1473,7 +1534,7 @@ mod tests {
     struct TestRuntime {
         id: String,
         requests: Arc<Mutex<Vec<RuntimeTurnRequest>>>,
-        evidence: Arc<Mutex<BTreeMap<String, RuntimeEvidence>>>,
+        evidence: Arc<Mutex<BTreeMap<String, ProviderEvidence>>>,
         profile_selections: Arc<Mutex<Vec<ExecutionProfileSelection>>>,
         corrupt_response: Arc<AtomicBool>,
     }
@@ -1481,17 +1542,49 @@ mod tests {
     #[derive(Clone)]
     struct TestExtension {
         requests: Arc<Mutex<Vec<ExtensionRequest>>>,
+        evidence: Arc<Mutex<BTreeMap<String, ProviderEvidence>>>,
+        corrupt_response: Arc<AtomicBool>,
     }
 
     async fn invoke_test_extension(
         State(state): State<TestExtension>,
         Json(request): Json<ExtensionRequest>,
-    ) -> Json<ExtensionResponse> {
-        state.requests.lock().await.push(request);
-        Json(ExtensionResponse {
-            content: "extension reply".to_owned(),
+    ) -> Response {
+        state.requests.lock().await.push(request.clone());
+        let response = ProviderTurnResponse {
+            correlation_id: request.correlation_id.clone(),
+            output: "extension reply".to_owned(),
+            continuation_ref: format!("extension:{}", request.correlation_id),
             native: json!({ "extension": true }),
-        })
+            capability_activity: Vec::new(),
+        };
+        state.evidence.lock().await.insert(
+            request.correlation_id.clone(),
+            ProviderEvidence {
+                correlation_id: request.correlation_id,
+                state: "completed".to_owned(),
+                error: None,
+                result: Some(response.clone()),
+            },
+        );
+        if state.corrupt_response.load(Ordering::SeqCst) {
+            return (StatusCode::OK, "not JSON").into_response();
+        }
+        Json(response).into_response()
+    }
+
+    async fn test_extension_evidence(
+        State(state): State<TestExtension>,
+        AxumPath(id): AxumPath<String>,
+    ) -> Result<Json<ProviderEvidence>, StatusCode> {
+        state
+            .evidence
+            .lock()
+            .await
+            .get(&id)
+            .cloned()
+            .map(Json)
+            .ok_or(StatusCode::NOT_FOUND)
     }
 
     async fn start_test_extension(
@@ -1505,9 +1598,12 @@ mod tests {
         let address = listener.local_addr()?;
         let state = TestExtension {
             requests: Arc::new(Mutex::new(Vec::new())),
+            evidence: Arc::new(Mutex::new(BTreeMap::new())),
+            corrupt_response: Arc::new(AtomicBool::new(false)),
         };
         let router = Router::new()
             .route("/v1/invoke", post(invoke_test_extension))
+            .route("/v1/evidence/{id}", get(test_extension_evidence))
             .with_state(state.clone());
         let server = tokio::spawn(async move { axum::serve(listener, router).await });
         Ok((
@@ -1529,7 +1625,7 @@ mod tests {
         Json(request): Json<RuntimeTurnRequest>,
     ) -> Response {
         state.requests.lock().await.push(request.clone());
-        let response = RuntimeTurnResponse {
+        let response = ProviderTurnResponse {
             correlation_id: request.correlation_id.clone(),
             output: format!("{}:{}", state.id, request.input),
             continuation_ref: format!(
@@ -1541,7 +1637,7 @@ mod tests {
         };
         state.evidence.lock().await.insert(
             request.correlation_id.clone(),
-            RuntimeEvidence {
+            ProviderEvidence {
                 correlation_id: request.correlation_id,
                 state: "completed".to_owned(),
                 error: None,
@@ -1557,7 +1653,7 @@ mod tests {
     async fn test_evidence(
         State(state): State<TestRuntime>,
         AxumPath(id): AxumPath<String>,
-    ) -> Result<Json<RuntimeEvidence>, StatusCode> {
+    ) -> Result<Json<ProviderEvidence>, StatusCode> {
         state
             .evidence
             .lock()
@@ -2081,6 +2177,65 @@ mod tests {
         Ok(())
     }
     #[tokio::test]
+    async fn ambiguous_extension_response_reconciles_with_its_execution_provider() -> Result<()> {
+        let mut harness = ProviderHarness::new().await?;
+        let (extension, extension_state, extension_server) =
+            start_test_extension("extension-token").await?;
+        extension_state
+            .corrupt_response
+            .store(true, Ordering::SeqCst);
+        harness.config.value.providers.push(extension.clone());
+        harness
+            .config
+            .value
+            .agent
+            .interface_extensions
+            .push(InterfaceExtensionBinding {
+                interface_provider: "interface-a".to_owned(),
+                extension_provider: extension.id.clone(),
+            });
+        harness.config.value.validate()?;
+        fs::write(
+            harness.config.root.join("credentials/extension-a.token"),
+            "extension-token",
+        )?;
+        fs::write(
+            &harness.config.path,
+            toml::to_string_pretty(&harness.config.value)?,
+        )?;
+
+        let receipt = process_event(
+            &harness.state,
+            &harness.config,
+            "interface-a",
+            event("extension-ambiguous", "extension", "!carillon status"),
+        )
+        .await?;
+        assert_eq!(receipt.state, "processing");
+        let pending = harness.state.database.pending_turns()?;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].provider, extension.id);
+
+        assert_eq!(reconcile_pending_turns(&harness.state).await?, 0);
+        let inspection = harness
+            .state
+            .database
+            .inspect_turn(&receipt.turn_id)?
+            .context("reconciled extension turn missing")?;
+        assert_eq!(inspection.state, "completed");
+        assert_eq!(inspection.output.as_deref(), Some("extension reply"));
+        assert!(
+            harness
+                .state
+                .database
+                .continuation("interface-a", "default", "extension")?
+                .is_none()
+        );
+        extension_server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn conversation_profile_catalog_and_application_use_the_pinned_runtime() -> Result<()> {
         let mut harness = ProviderHarness::new().await?;
         harness
@@ -2235,6 +2390,32 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(primary_inputs, ["first", "continued"]);
         assert_eq!(alternate_inputs, ["new conversation", "other interface"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stalled_execution_profile_catalog_is_bounded() -> Result<()> {
+        let harness = ProviderHarness::new().await?;
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let Ok(_connection) = listener.accept().await else {
+                return;
+            };
+            std::future::pending::<()>().await;
+        });
+        let mut runtime = harness.primary_runtime.clone();
+        runtime.url = format!("http://{address}");
+        let result = runtime_execution_profiles_request(
+            &harness.state.client,
+            &harness.config,
+            &runtime,
+            false,
+            Duration::from_millis(25),
+        )
+        .await;
+        server.abort();
+        assert!(result.is_err());
         Ok(())
     }
 
@@ -2510,7 +2691,7 @@ mod tests {
         assert_eq!(receipt.state, "processing");
         harness.primary_state.evidence.lock().await.insert(
             receipt.turn_id.clone(),
-            RuntimeEvidence {
+            ProviderEvidence {
                 correlation_id: receipt.turn_id.clone(),
                 state: "interrupted".to_owned(),
                 error: Some("runtime interrupted".to_owned()),
@@ -2556,7 +2737,7 @@ mod tests {
             .await?;
             assert_eq!(receipt.state, "processing");
 
-            let result = RuntimeTurnResponse {
+            let result = ProviderTurnResponse {
                 correlation_id: if nested_mismatch {
                     "other-turn".to_owned()
                 } else {
@@ -2569,7 +2750,7 @@ mod tests {
             };
             harness.primary_state.evidence.lock().await.insert(
                 receipt.turn_id.clone(),
-                RuntimeEvidence {
+                ProviderEvidence {
                     correlation_id: if nested_mismatch {
                         receipt.turn_id.clone()
                     } else {
@@ -2624,7 +2805,7 @@ mod tests {
             &resources,
         )?;
         harness.state.database.mark_processing(&accepted.turn_id)?;
-        let recovered_response = RuntimeTurnResponse {
+        let recovered_response = ProviderTurnResponse {
             correlation_id: accepted.turn_id.clone(),
             output: "runtime-a:recovered".to_owned(),
             continuation_ref: "runtime-a:restart".to_owned(),
@@ -2633,7 +2814,7 @@ mod tests {
         };
         harness.primary_state.evidence.lock().await.insert(
             accepted.turn_id.clone(),
-            RuntimeEvidence {
+            ProviderEvidence {
                 correlation_id: accepted.turn_id.clone(),
                 state: "completed".to_owned(),
                 error: None,
