@@ -313,9 +313,13 @@ async fn run_runtime(
         .send()
         .await
         .map_err(|error| {
-            TurnFailure::RuntimeUncertain(
-                anyhow::Error::new(error).context("contact runtime provider"),
-            )
+            let interrupted = error.is_connect() || error.is_builder();
+            let error = anyhow::Error::new(error).context("contact runtime provider");
+            if interrupted {
+                TurnFailure::Interrupted(error)
+            } else {
+                TurnFailure::RuntimeUncertain(error)
+            }
         })?;
     let status = response.status();
     let response = response.error_for_status().map_err(|error| {
@@ -2088,6 +2092,30 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(primary_inputs, ["first", "continued"]);
         assert_eq!(alternate_inputs, ["new conversation", "other interface"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_connect_failure_interrupts_immediately() -> Result<()> {
+        let harness = ProviderHarness::new().await?;
+        harness.servers[0].abort();
+        tokio::task::yield_now().await;
+
+        let receipt = process_event(
+            &harness.state,
+            &harness.config,
+            "interface-a",
+            event("offline", "conversation", "never submitted"),
+        )
+        .await?;
+        assert_eq!(receipt.state, "interrupted");
+        assert!(harness.state.database.pending_turns()?.is_empty());
+        let delivery = harness
+            .state
+            .database
+            .claim_delivery("interface-a", "adapter")?
+            .context("terminal feedback delivery missing")?;
+        assert!(delivery.content.is_none());
         Ok(())
     }
 
