@@ -358,14 +358,6 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    pub fn recover_deliveries(&self) -> Result<usize> {
-        Ok(self.connect()?.execute(
-            "UPDATE deliveries SET state = 'uncertain', claim_owner = NULL, updated_at = ?1
-             WHERE state = 'delivering'",
-            [timestamp()?],
-        )?)
-    }
-
     pub fn reconcile_delivery_claims(
         &self,
         interface_id: &str,
@@ -433,15 +425,31 @@ impl Database {
         if state != "delivered" && state != "uncertain" {
             bail!("invalid delivery state {state}");
         }
-        let changed = self.connect()?.execute(
+        let connection = self.connect()?;
+        let changed = connection.execute(
             "UPDATE deliveries SET state = ?4, native_ref = ?5, claim_owner = NULL, updated_at = ?6
              WHERE id = ?1 AND interface_id = ?2 AND claim_owner = ?3 AND state = 'delivering'",
             params![id, interface_id, owner, state, native_ref, timestamp()?],
         )?;
-        if changed != 1 {
-            bail!("delivery {id} is not claimed by interface instance {owner}");
+        if changed == 1 {
+            return Ok(());
         }
-        Ok(())
+        let recorded = connection
+            .query_row(
+                "SELECT state, native_ref FROM deliveries WHERE id = ?1 AND interface_id = ?2",
+                params![id, interface_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?;
+        if recorded
+            .as_ref()
+            .is_some_and(|(recorded_state, recorded_ref)| {
+                recorded_state == state && recorded_ref.as_deref() == native_ref
+            })
+        {
+            return Ok(());
+        }
+        bail!("delivery {id} is not claimed by interface instance {owner}")
     }
 
     pub fn inspect_turn(&self, turn_id: &str) -> Result<Option<TurnInspection>> {
@@ -657,6 +665,12 @@ mod tests {
             .inspect_turn(&first.turn_id)?
             .context("turn inspection missing")?;
         assert_eq!(inspection.delivery_state.as_deref(), Some("uncertain"));
+        database.acknowledge_delivery(delivery.id, "discord", "instance-a", "uncertain", None)?;
+        assert!(
+            database
+                .acknowledge_delivery(delivery.id, "discord", "instance-a", "delivered", None,)
+                .is_err()
+        );
         Ok(())
     }
 }

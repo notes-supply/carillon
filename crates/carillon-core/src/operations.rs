@@ -324,7 +324,6 @@ pub fn restore(archive_path: &Path, target: &Path) -> Result<PathBuf> {
     let decoder = GzDecoder::new(BufReader::new(file));
     let mut archive = Archive::new(decoder);
     archive.set_preserve_permissions(true);
-    archive.set_preserve_ownerships(true);
     for entry in archive.entries()? {
         let mut entry = entry?;
         let path = entry.path()?;

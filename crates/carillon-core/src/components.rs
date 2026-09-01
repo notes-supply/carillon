@@ -1757,11 +1757,8 @@ async fn delivery_loop(state: DiscordState, http: Arc<DiscordHttp>) {
                 } else {
                     (DeliveryOutcome::Delivered, None, Feedback::Failed)
                 };
-                if let Err(failure) =
-                    acknowledge_core_delivery(&state, delivery.id, outcome, native_ref).await
-                {
-                    warn!(error = %failure.message, "delivery acknowledgement failed");
-                }
+                acknowledge_core_delivery_until_recorded(&state, delivery.id, outcome, native_ref)
+                    .await;
                 match LoadedConfig::load(&state.config_path)
                     .and_then(|config| config.discord().cloned())
                 {
@@ -1842,6 +1839,27 @@ async fn acknowledge_core_delivery(
         .error_for_status()
         .context("core rejected delivery acknowledgement")?;
     Ok(())
+}
+
+async fn acknowledge_core_delivery_until_recorded(
+    state: &DiscordState,
+    id: i64,
+    outcome: DeliveryOutcome,
+    native_ref: Option<String>,
+) {
+    loop {
+        match acknowledge_core_delivery(state, id, outcome, native_ref.clone()).await {
+            Ok(()) => return,
+            Err(failure) => {
+                warn!(
+                    error = %failure.message,
+                    delivery_id = id,
+                    "retrying delivery acknowledgement"
+                );
+                sleep(Duration::from_secs(1)).await;
+            }
+        }
+    }
 }
 
 async fn reconcile_core_deliveries(

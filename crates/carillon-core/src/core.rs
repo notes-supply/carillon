@@ -4,6 +4,7 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -91,14 +92,13 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
         client: Client::new(),
         turns: Arc::new(Mutex::new(())),
     };
-    recover(&state).await?;
     let reconciliation = state.clone();
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             if let Err(failure) = reconcile_pending_turns(&reconciliation).await {
                 warn!(error = %failure, "runtime reconciliation retry failed");
             }
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
     });
     let router = Router::new()
@@ -755,18 +755,6 @@ fn unavailable(id: &str, role: &str, version: &str) -> Health {
     }
 }
 
-async fn recover(state: &AppState) -> Result<()> {
-    let uncertain = state.database.recover_deliveries()?;
-    if uncertain > 0 {
-        warn!(
-            uncertain,
-            "delivery outcomes became uncertain after restart"
-        );
-    }
-    reconcile_pending_turns(state).await?;
-    Ok(())
-}
-
 async fn reconcile_pending_turns(state: &AppState) -> Result<usize> {
     let config = LoadedConfig::load(&state.config_path)?;
     for pending in state.database.pending_turns()? {
@@ -793,6 +781,7 @@ async fn reconcile_pending_turns(state: &AppState) -> Result<usize> {
             .client
             .get(format!("{}/v1/evidence/{}", runtime.url, pending.turn))
             .bearer_auth(config.credential(&runtime.id)?)
+            .timeout(Duration::from_secs(5))
             .send()
             .await;
         let recovered = match evidence {
