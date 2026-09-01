@@ -334,6 +334,7 @@ struct ResolvedMessage {
     conversation_id: String,
 }
 
+type InboundMessageQueues = Arc<Mutex<BTreeMap<String, VecDeque<InboundMessage>>>>;
 type AudienceMessageQueues = Arc<Mutex<BTreeMap<String, VecDeque<ResolvedMessage>>>>;
 
 pub async fn serve_discord(
@@ -841,10 +842,81 @@ async fn discord_parent_channel(
 async fn message_worker(
     state: DiscordState,
     http: Arc<DiscordHttp>,
+    inbound_queues: InboundMessageQueues,
     queues: AudienceMessageQueues,
     mut messages: mpsc::Receiver<InboundMessage>,
 ) {
-    while let Some(mut inbound) = messages.recv().await {
+    while let Some(inbound) = messages.recv().await {
+        let discord = loop {
+            match LoadedConfig::load(&state.config_path) {
+                Ok(config) => match config.discord() {
+                    Ok(discord) => break discord.clone(),
+                    Err(failure) => {
+                        warn!(error = %failure, "validate Discord configuration for received message");
+                    }
+                },
+                Err(failure) => {
+                    warn!(error = %failure, "reload Discord configuration for received message");
+                }
+            }
+            sleep(Duration::from_secs(1)).await;
+        };
+        if adapter_identity_admit(
+            &discord,
+            inbound.request.guild_id.as_deref(),
+            &inbound.request.user_id,
+        )
+        .is_err()
+        {
+            continue;
+        }
+        let channel = inbound.request.channel_id.clone();
+        if queue_inbound_message(&mut *inbound_queues.lock().await, inbound) {
+            tokio::spawn(channel_message_worker(
+                state.clone(),
+                http.clone(),
+                inbound_queues.clone(),
+                queues.clone(),
+                channel,
+            ));
+        }
+    }
+}
+
+fn queue_inbound_message(
+    queues: &mut BTreeMap<String, VecDeque<InboundMessage>>,
+    inbound: InboundMessage,
+) -> bool {
+    let channel = inbound.request.channel_id.clone();
+    if let Some(queue) = queues.get_mut(&channel) {
+        queue.push_back(inbound);
+        false
+    } else {
+        queues.insert(channel, VecDeque::from([inbound]));
+        true
+    }
+}
+
+async fn channel_message_worker(
+    state: DiscordState,
+    http: Arc<DiscordHttp>,
+    inbound_queues: InboundMessageQueues,
+    queues: AudienceMessageQueues,
+    channel: String,
+) {
+    loop {
+        let mut inbound = {
+            let mut inbound_queues = inbound_queues.lock().await;
+            let Some(queue) = inbound_queues.get_mut(&channel) else {
+                return;
+            };
+            if let Some(inbound) = queue.pop_front() {
+                inbound
+            } else {
+                inbound_queues.remove(&channel);
+                return;
+            }
+        };
         let discord = loop {
             match LoadedConfig::load(&state.config_path) {
                 Ok(config) => match config.discord() {
@@ -914,7 +986,14 @@ fn start_message_worker(
 ) {
     tokio::spawn(async move {
         resume_thread_creations(&state, &http, &queues).await;
-        message_worker(state, http, queues, receiver).await;
+        message_worker(
+            state,
+            http,
+            Arc::new(Mutex::new(BTreeMap::new())),
+            queues,
+            receiver,
+        )
+        .await;
     });
 }
 
@@ -1044,7 +1123,20 @@ async fn submit_resolved_message(
     };
     processing_feedback(http, &discord, &resolved.event.feedback_target_id).await;
     let typing = start_typing(http.clone(), &discord, &resolved.event.delivery_target_id).await;
-    let receipt = submit_event(state, &resolved.event).await;
+    let receipt = loop {
+        match submit_event(state, &resolved.event).await {
+            Ok(receipt) => break Ok(receipt),
+            Err(failure) if pending_thread_creation(state, &resolved.event.event_id).await => {
+                warn!(
+                    error = %failure.message,
+                    event_id = %resolved.event.event_id,
+                    "retrying persisted Discord event submission"
+                );
+                sleep(Duration::from_secs(1)).await;
+            }
+            Err(failure) => break Err(failure),
+        }
+    };
     if let Some(task) = typing {
         task.abort();
     }
@@ -2279,9 +2371,9 @@ mod tests {
     use super::{
         DISCORD_MESSAGE_LIMIT, DiscordHttp, DiscordParticipation, DiscordState, InboundMessage,
         MessagePlan, ResolvedMessage, ServiceError, clear_thread_creation, deferred_model_response,
-        message_worker, pending_thread_creation, profile_panel, queue_resolved_message,
-        remember_thread_creation, resolve_message, resolved_message, split_discord_message,
-        submit_event, submit_resolved_message, thread_title,
+        message_worker, pending_thread_creation, profile_panel, queue_inbound_message,
+        queue_resolved_message, remember_thread_creation, resolve_message, resolved_message,
+        split_discord_message, submit_event, submit_resolved_message, thread_title,
     };
     use crate::{
         config::{
@@ -2647,6 +2739,7 @@ mod tests {
             state,
             Arc::new(DiscordHttp::new("token".to_owned())),
             Arc::new(Mutex::new(BTreeMap::new())),
+            Arc::new(Mutex::new(BTreeMap::new())),
             receiver,
         ));
         sender
@@ -2723,6 +2816,146 @@ mod tests {
         let completed: DiscordParticipation =
             serde_json::from_slice(&fs::read(&participation_path)?)?;
         assert!(completed.pending_thread_creations.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn persisted_thread_submission_retries_live_after_core_recovers() -> anyhow::Result<()> {
+        let directory = tempdir()?;
+        let root = directory.path().join("install");
+        let config_path = initialize(
+            &root,
+            directory.path(),
+            "100",
+            "101",
+            &["102".to_owned()],
+            &[DiscordRoute {
+                channel_id: "103".to_owned(),
+                activation: DiscordActivation::Always,
+                conversation: DiscordConversation::Thread,
+            }],
+            49_300,
+        )?;
+        let mut config = LoadedConfig::load(&config_path)?;
+        let discord = config
+            .value
+            .discord
+            .as_mut()
+            .context("Discord configuration missing")?;
+        discord.typing = false;
+        discord.reactions = false;
+        fs::write(&config_path, toml::to_string_pretty(&config.value)?)?;
+
+        let probe = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+        let address = probe.local_addr()?;
+        drop(probe);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let participation_path = directory.path().join("participation.json");
+        let state = DiscordState {
+            config_path,
+            core_url: format!("http://{address}"),
+            provider_id: "discord-private".to_owned(),
+            token: "token".to_owned(),
+            instance_id: "instance".to_owned(),
+            client: reqwest::Client::new(),
+            participation_path,
+            participation: Arc::new(Mutex::new(DiscordParticipation::default())),
+        };
+        let plan = MessagePlan {
+            event_id: "104".to_owned(),
+            guild_id: "100".to_owned(),
+            user_id: "102".to_owned(),
+            agent_id: "default".to_owned(),
+            source_channel_id: "103".to_owned(),
+            source_message_id: "104".to_owned(),
+            route_channel_id: "103".to_owned(),
+            current_channel_id: "103".to_owned(),
+            content: "hello".to_owned(),
+            create_thread: true,
+            adopt_thread: false,
+            native: json!({}),
+        };
+        remember_thread_creation(&state, &plan).await?;
+        let submission_state = state.clone();
+        let submission = tokio::spawn(async move {
+            submit_resolved_message(
+                &submission_state,
+                &Arc::new(DiscordHttp::new("token".to_owned())),
+                resolved_message(plan, "104".to_owned()),
+            )
+            .await;
+        });
+        sleep(Duration::from_millis(100)).await;
+        assert!(pending_thread_creation(&state, "104").await);
+
+        let listener = TcpListener::bind(address).await?;
+        let router = Router::new()
+            .route("/v1/events", post(successful_submission))
+            .with_state(SubmissionTestState {
+                attempts: attempts.clone(),
+            });
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+        timeout(Duration::from_secs(3), submission).await??;
+        server.abort();
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert!(!pending_thread_creation(&state, "104").await);
+        Ok(())
+    }
+
+    #[test]
+    fn discord_parent_resolution_queues_are_channel_isolated_and_fifo() -> anyhow::Result<()> {
+        let inbound = |event_id: &str, channel_id: &str| InboundMessage {
+            request: SimulateRequest {
+                event_id: event_id.to_owned(),
+                guild_id: Some("guild".to_owned()),
+                user_id: "user".to_owned(),
+                channel_id: channel_id.to_owned(),
+                parent_channel_id: None,
+                content: "hello".to_owned(),
+            },
+            native: json!({}),
+        };
+        let mut queues = BTreeMap::new();
+
+        assert!(queue_inbound_message(
+            &mut queues,
+            inbound("a-1", "thread-a")
+        ));
+        assert!(!queue_inbound_message(
+            &mut queues,
+            inbound("a-2", "thread-a")
+        ));
+        assert!(queue_inbound_message(
+            &mut queues,
+            inbound("b-1", "thread-b")
+        ));
+        let first_a = queues
+            .get_mut("thread-a")
+            .context("thread a queue")?
+            .pop_front()
+            .context("first thread a message")?;
+        assert_eq!(first_a.request.event_id, "a-1");
+        assert_eq!(
+            queues
+                .get_mut("thread-b")
+                .context("thread b queue")?
+                .pop_front()
+                .context("thread b message")?
+                .request
+                .event_id,
+            "b-1"
+        );
+        assert_eq!(
+            queues
+                .get_mut("thread-a")
+                .context("thread a queue")?
+                .pop_front()
+                .context("second thread a message")?
+                .request
+                .event_id,
+            "a-2"
+        );
         Ok(())
     }
 
