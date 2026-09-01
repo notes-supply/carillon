@@ -1640,19 +1640,36 @@ fn split_discord_message(value: &str) -> Vec<&str> {
         return vec![value];
     }
     let mut chunks = Vec::new();
-    let mut start = 0;
+    let mut remaining = value;
+    while !remaining.is_empty() {
+        let end = discord_chunk_end(remaining);
+        chunks.push(&remaining[..end]);
+        remaining = &remaining[end..];
+    }
+    chunks
+}
+
+fn discord_chunk_end(value: &str) -> usize {
     let mut length = 0;
+    let mut line_break = None;
+    let mut word_break = None;
     for (index, character) in value.char_indices() {
         let character_length = character.len_utf16();
         if length + character_length > DISCORD_MESSAGE_LIMIT {
-            chunks.push(&value[start..index]);
-            start = index;
-            length = 0;
+            let clean_break = line_break
+                .filter(|(_, length)| *length >= DISCORD_MESSAGE_LIMIT / 2)
+                .or_else(|| word_break.filter(|(_, length)| *length >= DISCORD_MESSAGE_LIMIT / 2));
+            return clean_break.map_or(index, |(boundary, _)| boundary);
         }
         length += character_length;
+        let boundary = index + character.len_utf8();
+        if character == '\n' {
+            line_break = Some((boundary, length));
+        } else if character.is_whitespace() {
+            word_break = Some((boundary, length));
+        }
     }
-    chunks.push(&value[start..]);
-    chunks
+    value.len()
 }
 
 async fn fetch_runtime_execution_profiles(
@@ -1942,8 +1959,9 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        DiscordParticipation, MessagePlan, ServiceError, deferred_model_response, profile_panel,
-        resolve_message, resolved_message, split_discord_message, thread_title,
+        DISCORD_MESSAGE_LIMIT, DiscordParticipation, MessagePlan, ServiceError,
+        deferred_model_response, profile_panel, resolve_message, resolved_message,
+        split_discord_message, thread_title,
     };
     use crate::{
         config::{DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute},
@@ -2095,17 +2113,22 @@ mod tests {
     }
 
     #[test]
-    fn discord_messages_are_split_without_losing_unicode() {
-        let content = format!("{}🦀🦀", "a".repeat(1_999));
-        let chunks = split_discord_message(&content);
+    fn discord_messages_split_on_clean_boundaries() {
+        let prose = format!("{}\n{}", "a".repeat(1_200), "word ".repeat(300));
+        let prose_chunks = split_discord_message(&prose);
+        let unicode = "🦀".repeat(1_001);
+        let unicode_chunks = split_discord_message(&unicode);
 
-        assert_eq!(chunks.len(), 2);
+        assert_eq!(prose_chunks.len(), 2);
+        assert!(prose_chunks[0].ends_with('\n'));
+        assert_eq!(prose_chunks.concat(), prose);
+        assert_eq!(unicode_chunks.concat(), unicode);
         assert!(
-            chunks
+            prose_chunks
                 .iter()
-                .all(|chunk| chunk.encode_utf16().count() <= 2_000)
+                .chain(unicode_chunks.iter())
+                .all(|chunk| chunk.encode_utf16().count() <= DISCORD_MESSAGE_LIMIT)
         );
-        assert_eq!(chunks.concat(), content);
     }
 
     #[test]
