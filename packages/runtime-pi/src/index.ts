@@ -33,6 +33,7 @@ import {
   setModelReasoningOverride,
 } from "./profile.ts";
 import { atomicJson } from "./atomic-json.ts";
+import { callCapability, type CapabilitySelection } from "./capability.ts";
 import { capabilityCallId, nativeSessionId } from "./namespace.ts";
 import { serialize } from "./serial.ts";
 import { createPiExecutionSession, recoverPiTurn } from "./session.ts";
@@ -60,18 +61,6 @@ interface ResourceSnapshot {
   readonly settings_sha256: string;
   readonly extensions_sha256: string;
   readonly skills_sha256: string;
-}
-
-interface SelectedProvider {
-  readonly id: string;
-  readonly role: string;
-  readonly version: string;
-  readonly url: string;
-}
-
-interface CapabilitySelection {
-  readonly provider: SelectedProvider;
-  readonly token: string;
 }
 
 interface TurnRequest {
@@ -124,10 +113,6 @@ interface Evidence {
   readonly error?: string;
 }
 
-interface CapabilityResponse {
-  readonly output: string;
-  readonly native: unknown;
-}
 interface DeterministicSession {
   readonly profile?: ExecutionProfile;
   readonly turns: readonly {
@@ -136,8 +121,6 @@ interface DeterministicSession {
     readonly output: string;
   }[];
 }
-
-const CAPABILITY_REQUEST_TIMEOUT_MS = 15_000;
 
 const DETERMINISTIC_MODELS: readonly RuntimeExecutionProfileModel[] = [
   {
@@ -234,10 +217,7 @@ const RuntimeExecutionProfileSelectionSchema = Type.Object({
   audience_id: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   resources: Type.Optional(Type.Union([ResourceSnapshotSchema, Type.Null()])),
 });
-const CapabilityResponseSchema = Type.Object({
-  output: Type.String(),
-  native: Type.Unknown(),
-});
+
 const DeterministicSessionSchema = Type.Object({
   profile: Type.Optional(ExecutionProfileSchema),
   turns: Type.Array(
@@ -929,22 +909,6 @@ function assertExtensionsLoaded(errors: readonly { readonly error: string }[]): 
     throw new Error(
       `Pi extension loading failed: ${errors.map((entry) => entry.error).join("; ")}`,
     );
-}
-
-async function callCapability(
-  selection: CapabilitySelection,
-  correlationId: string,
-  input: string,
-): Promise<CapabilityResponse> {
-  const response = await fetch(`${selection.provider.url}/v1/execute`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${selection.token}`, "content-type": "application/json" },
-    body: JSON.stringify({ correlation_id: correlationId, operation: "echo", input }),
-    signal: AbortSignal.timeout(CAPABILITY_REQUEST_TIMEOUT_MS),
-  });
-  if (!response.ok)
-    throw new Error(`capability ${selection.provider.id} returned HTTP ${String(response.status)}`);
-  return Parse(CapabilityResponseSchema, await response.json());
 }
 
 function continuationPath(request: TurnRequest): string {

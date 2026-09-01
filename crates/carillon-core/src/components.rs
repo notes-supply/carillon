@@ -526,17 +526,7 @@ async fn gateway_loop(
                 if message.author.bot || message.kind == MessageType::ThreadStarterMessage {
                     continue;
                 }
-                let config = LoadedConfig::load(&state.config_path)?;
                 let guild = message.guild_id.map(|id| id.to_string());
-                if adapter_identity_admit(
-                    config.discord()?,
-                    guild.as_deref(),
-                    &message.author.id.to_string(),
-                )
-                .is_err()
-                {
-                    continue;
-                }
                 let request = SimulateRequest {
                     event_id: message.id.to_string(),
                     guild_id: guild,
@@ -855,22 +845,22 @@ async fn message_worker(
     mut messages: mpsc::Receiver<InboundMessage>,
 ) {
     while let Some(mut inbound) = messages.recv().await {
-        let config = match LoadedConfig::load(&state.config_path) {
-            Ok(config) => config,
-            Err(failure) => {
-                warn!(error = %failure, "reload Discord configuration for received message");
-                continue;
+        let discord = loop {
+            match LoadedConfig::load(&state.config_path) {
+                Ok(config) => match config.discord() {
+                    Ok(discord) => break discord.clone(),
+                    Err(failure) => {
+                        warn!(error = %failure, "validate Discord configuration for received message");
+                    }
+                },
+                Err(failure) => {
+                    warn!(error = %failure, "reload Discord configuration for received message");
+                }
             }
-        };
-        let discord = match config.discord() {
-            Ok(discord) => discord,
-            Err(failure) => {
-                warn!(error = %failure, "validate Discord configuration for received message");
-                continue;
-            }
+            sleep(Duration::from_secs(1)).await;
         };
         if adapter_identity_admit(
-            discord,
+            &discord,
             inbound.request.guild_id.as_deref(),
             &inbound.request.user_id,
         )
@@ -879,7 +869,7 @@ async fn message_worker(
             continue;
         }
         inbound.request.parent_channel_id =
-            match discord_parent_channel(&http, discord, &inbound.request.channel_id).await {
+            match discord_parent_channel(&http, &discord, &inbound.request.channel_id).await {
                 Ok(parent) => parent,
                 Err(failure) => {
                     warn!(error = %failure, "resolve Discord message route");
@@ -887,7 +877,7 @@ async fn message_worker(
                 }
             };
         let Ok(Some(plan)) = resolve_message(
-            discord,
+            &discord,
             inbound.request,
             inbound.native,
             &*state.participation.lock().await,
@@ -898,7 +888,7 @@ async fn message_worker(
         match queue_message_plan(&state, &http, &queues, plan).await {
             Ok(()) => {}
             Err(failure) => {
-                terminal_feedback(&http, discord, &source, Feedback::Failed).await;
+                terminal_feedback(&http, &discord, &source, Feedback::Failed).await;
                 warn!(error = %failure, "Discord conversation resolution failed");
             }
         }
@@ -2262,16 +2252,16 @@ mod tests {
     use tempfile::tempdir;
     use tokio::{
         net::TcpListener,
-        sync::Mutex,
+        sync::{Mutex, mpsc},
         time::{sleep, timeout},
     };
 
     use super::{
-        DISCORD_MESSAGE_LIMIT, DiscordHttp, DiscordParticipation, DiscordState, MessagePlan,
-        ResolvedMessage, ServiceError, clear_thread_creation, deferred_model_response,
-        profile_panel, queue_resolved_message, remember_thread_creation, resolve_message,
-        resolved_message, split_discord_message, submit_event, submit_resolved_message,
-        thread_title,
+        DISCORD_MESSAGE_LIMIT, DiscordHttp, DiscordParticipation, DiscordState, InboundMessage,
+        MessagePlan, ResolvedMessage, ServiceError, clear_thread_creation, deferred_model_response,
+        message_worker, profile_panel, queue_resolved_message, remember_thread_creation,
+        resolve_message, resolved_message, split_discord_message, submit_event,
+        submit_resolved_message, thread_title,
     };
     use crate::{
         config::{
@@ -2580,6 +2570,88 @@ mod tests {
         assert_eq!(attempts.load(Ordering::SeqCst), 0);
         fs::write(&config_path, valid_config)?;
         timeout(Duration::from_secs(3), submission).await??;
+        server.abort();
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn discord_inbound_waits_for_configuration_recovery() -> anyhow::Result<()> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let address = listener.local_addr()?;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let router = Router::new()
+            .route("/v1/events", post(successful_submission))
+            .with_state(SubmissionTestState {
+                attempts: attempts.clone(),
+            });
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+        let directory = tempdir()?;
+        let root = directory.path().join("install");
+        let config_path = initialize(
+            &root,
+            directory.path(),
+            "100",
+            "101",
+            &["102".to_owned()],
+            &[DiscordRoute {
+                channel_id: "103".to_owned(),
+                activation: DiscordActivation::Always,
+                conversation: DiscordConversation::Channel,
+            }],
+            49_200,
+        )?;
+        let mut config = LoadedConfig::load(&config_path)?;
+        let discord = config
+            .value
+            .discord
+            .as_mut()
+            .context("Discord configuration missing")?;
+        discord.typing = false;
+        discord.reactions = false;
+        let valid_config = toml::to_string_pretty(&config.value)?;
+        fs::write(&config_path, "invalid = [")?;
+
+        let state = DiscordState {
+            config_path: config_path.clone(),
+            core_url: format!("http://{address}"),
+            provider_id: "discord-private".to_owned(),
+            token: "token".to_owned(),
+            instance_id: "instance".to_owned(),
+            client: reqwest::Client::new(),
+            participation_path: root.join("state/participation.json"),
+            participation: Arc::new(Mutex::new(DiscordParticipation::default())),
+        };
+        let (sender, receiver) = mpsc::channel(1);
+        let worker = tokio::spawn(message_worker(
+            state,
+            Arc::new(DiscordHttp::new("token".to_owned())),
+            Arc::new(Mutex::new(BTreeMap::new())),
+            receiver,
+        ));
+        sender
+            .send(InboundMessage {
+                request: SimulateRequest {
+                    event_id: "104".to_owned(),
+                    guild_id: Some("100".to_owned()),
+                    user_id: "102".to_owned(),
+                    channel_id: "103".to_owned(),
+                    parent_channel_id: None,
+                    content: "hello".to_owned(),
+                },
+                native: json!({}),
+            })
+            .await?;
+        sleep(Duration::from_millis(1_100)).await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
+        fs::write(&config_path, valid_config)?;
+        timeout(Duration::from_secs(3), async {
+            while attempts.load(Ordering::SeqCst) == 0 {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        worker.abort();
         server.abort();
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
         Ok(())
