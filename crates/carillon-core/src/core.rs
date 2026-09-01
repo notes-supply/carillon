@@ -92,19 +92,15 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
         turns: Arc::new(Mutex::new(())),
     };
     recover(&state).await?;
-    if !state.database.pending_turns()?.is_empty() {
-        let reconciliation = state.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                match reconcile_pending_turns(&reconciliation).await {
-                    Ok(0) => break,
-                    Ok(_) => {}
-                    Err(failure) => warn!(error = %failure, "runtime reconciliation retry failed"),
-                }
+    let reconciliation = state.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            if let Err(failure) = reconcile_pending_turns(&reconciliation).await {
+                warn!(error = %failure, "runtime reconciliation retry failed");
             }
-        });
-    }
+        }
+    });
     let router = Router::new()
         .route("/health", get(health))
         .route("/v1/events", post(accept_event))
@@ -188,10 +184,9 @@ async fn process_event(
         return Ok(receipt(&event.event_id, accepted));
     }
     state.database.mark_processing(&accepted.turn_id)?;
-    let extension = config.value.interface_extension(interface_id)?;
-    let result = if let (Some(arguments), Some(extension)) =
-        (command_arguments(&event.content), extension)
-    {
+    let extension =
+        command_arguments(&event.content).zip(config.value.interface_extension(interface_id)?);
+    let result = if let Some((arguments, extension)) = extension {
         run_extension(
             state,
             config,
@@ -201,6 +196,7 @@ async fn process_event(
             arguments,
         )
         .await
+        .map_err(TurnFailure::Interrupted)
     } else {
         run_runtime(
             state,
@@ -225,25 +221,31 @@ async fn process_event(
                 &event.feedback_target_id,
                 &response,
             )?;
-            Ok(EventReceipt {
-                event_id: event.event_id,
-                turn_id: accepted.turn_id,
-                state: "completed".to_owned(),
-                duplicate: false,
-            })
+            Ok(fresh_receipt(event.event_id, accepted.turn_id, "completed"))
         }
-        Err(failure) => {
+        Err(TurnFailure::RuntimeUncertain(failure)) => {
+            warn!(
+                turn_id = %accepted.turn_id,
+                error = %failure,
+                "runtime outcome uncertain; awaiting durable evidence"
+            );
+            Ok(fresh_receipt(
+                event.event_id,
+                accepted.turn_id,
+                "processing",
+            ))
+        }
+        Err(TurnFailure::Interrupted(failure)) => {
             let message = failure.to_string();
             state
                 .database
                 .fail_turn(&accepted.turn_id, "interrupted", &message)?;
             warn!(turn_id = %accepted.turn_id, error = %message, "turn interrupted");
-            Ok(EventReceipt {
-                event_id: event.event_id,
-                turn_id: accepted.turn_id,
-                state: "interrupted".to_owned(),
-                duplicate: false,
-            })
+            Ok(fresh_receipt(
+                event.event_id,
+                accepted.turn_id,
+                "interrupted",
+            ))
         }
     }
 }
@@ -254,6 +256,17 @@ struct RuntimeSelection<'a> {
     continuation: Option<Continuation>,
 }
 
+enum TurnFailure {
+    Interrupted(anyhow::Error),
+    RuntimeUncertain(anyhow::Error),
+}
+
+impl From<anyhow::Error> for TurnFailure {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Interrupted(error)
+    }
+}
+
 async fn run_runtime(
     state: &AppState,
     config: &LoadedConfig,
@@ -261,9 +274,11 @@ async fn run_runtime(
     turn_id: &str,
     event: &ExternalEvent,
     resources: ResourceSnapshot,
-) -> Result<RuntimeTurnResponse> {
+) -> std::result::Result<RuntimeTurnResponse, TurnFailure> {
     if !selected.provider.enabled {
-        bail!("selected runtime provider is disabled");
+        return Err(TurnFailure::Interrupted(anyhow!(
+            "selected runtime provider is disabled"
+        )));
     }
     let capability = config
         .value
@@ -297,14 +312,32 @@ async fn run_runtime(
         .json(&request)
         .send()
         .await
-        .context("contact runtime provider")?
-        .error_for_status()
-        .context("runtime provider rejected turn")?
+        .map_err(|error| {
+            TurnFailure::RuntimeUncertain(
+                anyhow::Error::new(error).context("contact runtime provider"),
+            )
+        })?;
+    let status = response.status();
+    let response = response.error_for_status().map_err(|error| {
+        let error = anyhow::Error::new(error).context("runtime provider rejected turn");
+        if status.is_server_error() {
+            TurnFailure::RuntimeUncertain(error)
+        } else {
+            TurnFailure::Interrupted(error)
+        }
+    })?;
+    let response = response
         .json::<RuntimeTurnResponse>()
         .await
-        .context("decode runtime response")?;
+        .map_err(|error| {
+            TurnFailure::RuntimeUncertain(
+                anyhow::Error::new(error).context("decode runtime response"),
+            )
+        })?;
     if response.correlation_id != turn_id {
-        bail!("runtime returned a mismatched correlation ID");
+        return Err(TurnFailure::RuntimeUncertain(anyhow!(
+            "runtime returned a mismatched correlation ID"
+        )));
     }
     state.database.save_continuation(
         selected.interface_id,
@@ -950,6 +983,15 @@ fn receipt(event_id: &str, accepted: AcceptedTurn) -> EventReceipt {
     }
 }
 
+fn fresh_receipt(event_id: String, turn_id: String, state: &str) -> EventReceipt {
+    EventReceipt {
+        event_id,
+        turn_id,
+        state: state.to_owned(),
+        duplicate: false,
+    }
+}
+
 fn command_arguments(content: &str) -> Option<&str> {
     content.strip_prefix("!carillon").map(str::trim)
 }
@@ -1275,7 +1317,10 @@ mod tests {
         fs,
         net::{IpAddr, Ipv4Addr, SocketAddr},
         path::Path,
-        sync::Arc,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
     };
 
     use anyhow::{Context, Result};
@@ -1283,6 +1328,7 @@ mod tests {
         Json, Router,
         extract::{Path as AxumPath, Query, State},
         http::{HeaderMap, HeaderValue, StatusCode},
+        response::{IntoResponse as _, Response},
         routing::{get, post, put},
     };
     use serde_json::json;
@@ -1315,6 +1361,7 @@ mod tests {
         requests: Arc<Mutex<Vec<RuntimeTurnRequest>>>,
         evidence: Arc<Mutex<BTreeMap<String, RuntimeEvidence>>>,
         profile_selections: Arc<Mutex<Vec<ExecutionProfileSelection>>>,
+        corrupt_response: Arc<AtomicBool>,
     }
 
     #[derive(Clone)]
@@ -1366,7 +1413,7 @@ mod tests {
     async fn execute_test_turn(
         State(state): State<TestRuntime>,
         Json(request): Json<RuntimeTurnRequest>,
-    ) -> Json<RuntimeTurnResponse> {
+    ) -> Response {
         state.requests.lock().await.push(request.clone());
         let response = RuntimeTurnResponse {
             correlation_id: request.correlation_id.clone(),
@@ -1387,7 +1434,10 @@ mod tests {
                 result: Some(response.clone()),
             },
         );
-        Json(response)
+        if state.corrupt_response.load(Ordering::SeqCst) {
+            return (StatusCode::OK, "not JSON").into_response();
+        }
+        Json(response).into_response()
     }
 
     async fn test_evidence(
@@ -1468,6 +1518,7 @@ mod tests {
             requests: Arc::new(Mutex::new(Vec::new())),
             evidence: Arc::new(Mutex::new(BTreeMap::new())),
             profile_selections: Arc::new(Mutex::new(Vec::new())),
+            corrupt_response: Arc::new(AtomicBool::new(false)),
         };
         let router = Router::new()
             .route("/v1/turns", post(execute_test_turn))
@@ -2037,6 +2088,33 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(primary_inputs, ["first", "continued"]);
         assert_eq!(alternate_inputs, ["new conversation", "other interface"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_transport_failure_reconciles_completed_evidence() -> Result<()> {
+        let harness = ProviderHarness::new().await?;
+        harness
+            .primary_state
+            .corrupt_response
+            .store(true, Ordering::SeqCst);
+
+        let receipt = process_event(
+            &harness.state,
+            &harness.config,
+            "interface-a",
+            event("ambiguous", "conversation", "completed remotely"),
+        )
+        .await?;
+        assert_eq!(receipt.state, "processing");
+
+        assert_eq!(reconcile_pending_turns(&harness.state).await?, 0);
+        let delivery = harness
+            .state
+            .database
+            .claim_delivery("interface-a", "adapter")?
+            .context("reconciled delivery missing")?;
+        assert_eq!(delivery.content, "runtime-a:completed remotely");
         Ok(())
     }
 

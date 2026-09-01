@@ -296,6 +296,7 @@ pub fn restore(archive_path: &Path, target: &Path) -> Result<PathBuf> {
         bail!("restore target {} is not empty", target.display());
     }
     fs::create_dir_all(target)?;
+    fs::set_permissions(target, fs::Permissions::from_mode(0o700))?;
     let file = fs::File::open(archive_path)
         .with_context(|| format!("open backup {}", archive_path.display()))?;
     let decoder = GzDecoder::new(BufReader::new(file));
@@ -396,12 +397,12 @@ fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, os::unix::fs::PermissionsExt as _};
 
     use anyhow::Result;
     use tempfile::tempdir;
 
-    use super::{initialize, set_provider};
+    use super::{backup, initialize, restore, set_provider};
     use crate::config::{
         DiscordActivation, DiscordConversation, DiscordRoute, LoadedConfig, ProviderRole,
     };
@@ -477,6 +478,29 @@ mod tests {
         let before = fs::read(&config_path)?;
         assert!(set_provider(&config_path, "../escape", false).is_err());
         assert_eq!(fs::read(&config_path)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn restore_makes_the_installation_root_private() -> Result<()> {
+        let directory = tempdir()?;
+        let root = directory.path().join("installation");
+        let config_path = initialize(
+            &root,
+            directory.path(),
+            "100",
+            "101",
+            &["200".to_owned()],
+            &[route()],
+            44_000,
+        )?;
+        let archive = directory.path().join("backup.tar.gz");
+        backup(&LoadedConfig::load(&config_path)?, &archive)?;
+
+        let restored = directory.path().join("restored");
+        restore(&archive, &restored)?;
+
+        assert_eq!(fs::metadata(restored)?.permissions().mode() & 0o777, 0o700);
         Ok(())
     }
 }

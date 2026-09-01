@@ -322,59 +322,59 @@ pub async fn serve_discord(
             }
         }
     };
-    let router = Router::new()
-        .route("/health", get(discord_health))
-        .route("/v1/simulate", post(simulate))
-        .with_state(state.clone());
-    if !deterministic {
-        let discord_token_path = discord_token_file
-            .context("--discord-token-file is required outside deterministic mode")?;
-        let discord_token = read_token_file(discord_token_path)?;
-        let http = Arc::new(DiscordHttp::new(discord_token.clone()));
-        let current_user = http.current_user().await?.model().await?;
-        if current_user.id.to_string() != config.discord()?.bot_user_id {
-            bail!("configured Discord bot user ID does not match the token");
-        }
-        for target in reconciled.feedback_target_ids {
-            terminal_feedback(&http, config.discord()?, &target, Feedback::Uncertain).await;
-        }
-        let application_id = http.current_user_application().await?.model().await?.id;
-        let guild_id = config
-            .discord()?
-            .guild_id
-            .parse::<Id<GuildMarker>>()
-            .context("configured Discord guild ID is invalid")?;
-        http.interaction(application_id)
-            .create_guild_command(guild_id)
-            .chat_input("model", "Choose provider, model, and supported settings")
-            .await?;
-        let (messages, receiver) = mpsc::channel(64);
-        let gateway_state = state.clone();
-        let gateway_http = http.clone();
-        let delivery_state = state.clone();
-        let worker_state = state.clone();
-        let worker_http = http.clone();
-        tokio::spawn(async move {
-            if let Err(failure) = Box::pin(gateway_loop(
-                gateway_state,
-                discord_token,
-                gateway_http,
-                messages,
-            ))
-            .await
-            {
-                error!(error = %failure, "Discord gateway stopped");
-            }
-        });
-        tokio::spawn(async move {
-            message_worker(worker_state, worker_http, receiver).await;
-        });
-        tokio::spawn(async move {
-            delivery_loop(delivery_state, http).await;
-        });
+    let router = Router::new().route("/health", get(discord_health));
+    let router = if deterministic {
+        router.route("/v1/simulate", post(simulate))
+    } else {
+        router
+    };
+    let router = router.with_state(state.clone());
+    if deterministic {
+        info!(url = %provider.url, deterministic, "Discord interface provider ready");
+        return serve_component(provider.url, router, "Discord interface provider").await;
     }
+
+    let discord_token_path = discord_token_file
+        .context("--discord-token-file is required outside deterministic mode")?;
+    let discord_token = read_token_file(discord_token_path)?;
+    let http = Arc::new(DiscordHttp::new(discord_token.clone()));
+    let current_user = http.current_user().await?.model().await?;
+    if current_user.id.to_string() != config.discord()?.bot_user_id {
+        bail!("configured Discord bot user ID does not match the token");
+    }
+    for target in reconciled.feedback_target_ids {
+        terminal_feedback(&http, config.discord()?, &target, Feedback::Uncertain).await;
+    }
+    let application_id = http.current_user_application().await?.model().await?.id;
+    let guild_id = config
+        .discord()?
+        .guild_id
+        .parse::<Id<GuildMarker>>()
+        .context("configured Discord guild ID is invalid")?;
+    http.interaction(application_id)
+        .create_guild_command(guild_id)
+        .chat_input("model", "Choose provider, model, and supported settings")
+        .await?;
+    let (messages, receiver) = mpsc::channel(64);
+    let gateway_http = http.clone();
+    let delivery_state = state.clone();
+    let worker_state = state.clone();
+    let worker_http = http.clone();
+    tokio::spawn(async move {
+        message_worker(worker_state, worker_http, receiver).await;
+    });
+    tokio::spawn(async move {
+        delivery_loop(delivery_state, http).await;
+    });
+
     info!(url = %provider.url, deterministic, "Discord interface provider ready");
-    serve_component(provider.url, router, "Discord interface provider").await
+    tokio::select! {
+        result = gateway_loop(state, discord_token, gateway_http, messages) => {
+            result?;
+            bail!("Discord gateway stopped");
+        }
+        result = serve_component(provider.url, router, "Discord interface provider") => result,
+    }
 }
 
 async fn discord_health(State(state): State<DiscordState>) -> Result<Json<Health>, ServiceError> {

@@ -677,7 +677,6 @@ async function executeTurn(request: TurnRequest): Promise<TurnResponse> {
   if (existing?.state === "completed" && existing.result !== undefined) return existing.result;
   if (existing !== undefined)
     throw new Error(`turn ${request.correlation_id} has non-terminal runtime evidence`);
-  await writeEvidence({ correlation_id: request.correlation_id, state: "processing" });
   try {
     const result = deterministic ? await executeDeterministic(request) : await executePi(request);
     await writeEvidence({ correlation_id: request.correlation_id, state: "completed", result });
