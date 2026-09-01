@@ -152,11 +152,11 @@ async fn accept_event(
     let interface_id = authorize_interface(&headers, &config)?;
     admit(&event)?;
     let _guard = state.turns.lock().await;
-    if state.database.has_pending_predecessor(
+    if state.database.has_pending_turn(
         &interface_id,
         &event.agent_id,
         &event.audience_id,
-        &event.event_id,
+        Some(&event.event_id),
     )? {
         return Err(ApiError::conflict(
             "an earlier turn for this audience is still being reconciled",
@@ -602,7 +602,7 @@ async fn apply_execution_profile(
     if let (Some(interface), Some(audience)) = (interface_id.as_deref(), audience_id.as_deref())
         && state
             .database
-            .has_pending_turn(interface, &config.value.agent.id, audience)?
+            .has_pending_turn(interface, &config.value.agent.id, audience, None)?
     {
         return Err(ApiError::conflict(
             "the conversation has a turn that is still being reconciled",
