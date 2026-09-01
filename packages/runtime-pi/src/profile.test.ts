@@ -1,4 +1,4 @@
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import type { Api, Model, ModelsApiStreamOptions } from "@earendil-works/pi-ai";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -14,6 +14,7 @@ import {
   saveServiceTierDefault,
   serviceTierDefault,
   serviceTierForModel,
+  setModelReasoningOverride,
   streamSimpleForServiceTier,
 } from "./profile.ts";
 
@@ -58,6 +59,24 @@ describe("execution profiles", () => {
     expect(
       profileEvidence(unsupportedModel, undefined, "fast").requested.service_tier,
     ).toBeUndefined();
+  });
+
+  it("clears a model reasoning override when Default is selected", async () => {
+    const root = await mkdtemp(join(tmpdir(), "carillon-profile-"));
+    try {
+      const settings = SettingsManager.create(root, root);
+      settings.setDefaultThinkingLevel("low");
+      setModelReasoningOverride(settings, "openai-codex", "gpt-test", "high");
+      await settings.flush();
+      expect(settings.getModelThinkingLevel("openai-codex", "gpt-test")).toBe("high");
+
+      setModelReasoningOverride(settings, "openai-codex", "gpt-test", undefined);
+      await settings.flush();
+      expect(settings.getModelThinkingLevel("openai-codex", "gpt-test")).toBeUndefined();
+      expect(settings.getDefaultThinkingLevel()).toBe("low");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("uses Pi's native priority stream only for Fast and preserves its accounting", async () => {

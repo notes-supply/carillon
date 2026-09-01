@@ -29,6 +29,7 @@ import {
   serviceTierDefault,
   serviceTierForModel,
   type ServiceTierDefault,
+  setModelReasoningOverride,
 } from "./profile.ts";
 import { atomicJson } from "./atomic-json.ts";
 import { capabilityCallId, nativeSessionId } from "./namespace.ts";
@@ -345,11 +346,13 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     return;
   }
   if (request.method === "GET" && request.url === "/v1/execution-profiles") {
-    writeJson(response, 200, await serialize(listExecutionProfiles));
+    const signal = requestSignal(response);
+    writeJson(response, 200, await serialize(() => listExecutionProfiles(signal), signal));
     return;
   }
   if (request.method === "POST" && request.url === "/v1/execution-profiles/refresh") {
-    const result = await serialize(refreshExecutionProfiles);
+    const signal = requestSignal(response);
+    const result = await serialize(() => refreshExecutionProfiles(signal), signal);
     writeJson(response, 200, result);
     return;
   }
@@ -400,7 +403,8 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
   writeJson(response, 404, { error: "not found" });
 }
 
-async function listExecutionProfiles(): Promise<RuntimeExecutionProfiles> {
+async function listExecutionProfiles(signal?: AbortSignal): Promise<RuntimeExecutionProfiles> {
+  signal?.throwIfAborted();
   if (deterministic) {
     const selectedModel = DETERMINISTIC_MODELS.find((model) => model.key === selectedKey());
     const selected =
@@ -413,6 +417,7 @@ async function listExecutionProfiles(): Promise<RuntimeExecutionProfiles> {
     return { models: DETERMINISTIC_MODELS, ...(selected === undefined ? {} : { selected }) };
   }
   const piModels = await availablePiModels();
+  signal?.throwIfAborted();
   const models = piModels.map((model) =>
     profileModel(model, modelKey(model.provider, model.id), providerName(model.provider)),
   );
@@ -439,22 +444,22 @@ async function listExecutionProfiles(): Promise<RuntimeExecutionProfiles> {
   };
 }
 
-async function refreshExecutionProfiles(): Promise<RuntimeExecutionProfiles> {
+async function refreshExecutionProfiles(signal: AbortSignal): Promise<RuntimeExecutionProfiles> {
   if (modelRuntime !== undefined) {
     await modelRuntime.refresh({
       allowNetwork: true,
       force: true,
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
     });
   }
-  return listExecutionProfiles();
+  return listExecutionProfiles(signal);
 }
 
 async function applyExecutionProfile(
   selection: RuntimeExecutionProfileSelection,
   signal: AbortSignal,
 ): Promise<ExecutionProfileApplication | undefined> {
-  const profiles = await listExecutionProfiles();
+  const profiles = await listExecutionProfiles(signal);
   signal.throwIfAborted();
   const selected = profiles.models.find((model) => model.key === selection.key);
   if (selected === undefined) return undefined;
@@ -475,8 +480,7 @@ async function applyExecutionProfile(
 
   signal.throwIfAborted();
   privateSettings.setDefaultModelAndProvider(selected.provider, selected.id);
-  if (selection.reasoning !== undefined)
-    privateSettings.setModelThinkingLevel(selected.provider, selected.id, selection.reasoning);
+  setModelReasoningOverride(privateSettings, selected.provider, selected.id, selection.reasoning);
   await flushPrivateSettings();
   const evidence = deterministic
     ? {

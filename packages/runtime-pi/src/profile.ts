@@ -1,7 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, writeFileSync } from "node:fs";
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
-import type { ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import type {
+  ModelRuntime,
+  SessionManager,
+  SettingsManager,
+} from "@earendil-works/pi-coding-agent";
 import {
   clampThinkingLevel,
   getSupportedThinkingLevels,
@@ -78,6 +82,16 @@ export function serviceTierForModel(
   model: string,
 ): ServiceTier | undefined {
   return selection?.model === model ? selection.tier : undefined;
+}
+
+export function setModelReasoningOverride(
+  settings: Pick<SettingsManager, "setModelThinkingLevel" | "removeModelThinkingLevel">,
+  provider: string,
+  model: string,
+  reasoning: ModelThinkingLevel | undefined,
+): void {
+  if (reasoning === undefined) settings.removeModelThinkingLevel(provider, model);
+  else settings.setModelThinkingLevel(provider, model, reasoning);
 }
 
 export async function loadServiceTierDefault(
