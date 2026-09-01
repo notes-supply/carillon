@@ -800,10 +800,12 @@ async fn adopt_thread(
     {
         return Ok(());
     }
-    participation
+    let mut updated = participation.clone();
+    updated
         .threads
         .insert(thread_id.to_owned(), route_channel_id.to_owned());
-    persist_json(&state.participation_path, &*participation)?;
+    persist_json(&state.participation_path, &updated)?;
+    *participation = updated;
     Ok(())
 }
 
@@ -2370,10 +2372,11 @@ mod tests {
 
     use super::{
         DISCORD_MESSAGE_LIMIT, DiscordHttp, DiscordParticipation, DiscordState, InboundMessage,
-        MessagePlan, ResolvedMessage, ServiceError, clear_thread_creation, deferred_model_response,
-        message_worker, pending_thread_creation, profile_panel, queue_inbound_message,
-        queue_resolved_message, remember_thread_creation, resolve_message, resolved_message,
-        split_discord_message, submit_event, submit_resolved_message, thread_title,
+        MessagePlan, ResolvedMessage, ServiceError, adopt_thread, clear_thread_creation,
+        deferred_model_response, message_worker, pending_thread_creation, profile_panel,
+        queue_inbound_message, queue_resolved_message, remember_thread_creation, resolve_message,
+        resolved_message, split_discord_message, submit_event, submit_resolved_message,
+        thread_title,
     };
     use crate::{
         config::{
@@ -2816,6 +2819,25 @@ mod tests {
         let completed: DiscordParticipation =
             serde_json::from_slice(&fs::read(&participation_path)?)?;
         assert!(completed.pending_thread_creations.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_thread_adoption_does_not_change_live_participation() -> anyhow::Result<()> {
+        let directory = tempdir()?;
+        let state = DiscordState {
+            config_path: PathBuf::new(),
+            core_url: String::new(),
+            provider_id: "discord".to_owned(),
+            token: "token".to_owned(),
+            instance_id: "instance".to_owned(),
+            client: reqwest::Client::new(),
+            participation_path: directory.path().join("missing/participation.json"),
+            participation: Arc::new(Mutex::new(DiscordParticipation::default())),
+        };
+
+        assert!(adopt_thread(&state, "thread", "parent").await.is_err());
+        assert!(state.participation.lock().await.threads.is_empty());
         Ok(())
     }
 

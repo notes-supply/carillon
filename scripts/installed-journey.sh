@@ -63,10 +63,15 @@ install_release() {
   install_root=$3
   install_config_home=$4
   install_port=$5
+  install_guild=${6:-100}
+  install_bot=${7:-201}
+  install_user=${8:-200}
+  install_route=${9:-300:always:channel}
   env HOME="$install_home" XDG_CONFIG_HOME="$install_config_home" \
     CARILLON_HOME="$install_root" CARILLON_SKIP_SYSTEMD_RELOAD=1 \
     "$RELEASE/install.sh" \
-    --guild-id 100 --bot-user-id 201 --user-id 200 --route 300:always:channel \
+    --guild-id "$install_guild" --bot-user-id "$install_bot" \
+    --user-id "$install_user" --route "$install_route" \
     --workspace "$install_workspace" --base-port "$install_port"
 }
 
@@ -133,13 +138,15 @@ exec /usr/bin/mv "$@"
 FAIL_MV
 chmod 0755 "$FAIL_BIN/mv"
 if PATH="$FAIL_BIN:$PATH" install_release "$ORDINARY_HOME" "$ORDINARY_WORKSPACE" "$ORDINARY_ROOT" \
-  "$ORDINARY_CONFIG_HOME" "$((BASE_PORT + 10))" >/dev/null 2>&1
+  "$ORDINARY_CONFIG_HOME" "$((BASE_PORT + 10))" \
+  110 211 210 310:mention:thread >/dev/null 2>&1
 then
   echo "upgrade succeeded after application publication failed" >&2
   exit 1
 fi
 [ "$(sha256sum "$ORDINARY_ROOT/app/bin/carillon" | cut -d' ' -f1)" = "$ORDINARY_APP_HASH" ]
-[ -z "$(find "$ORDINARY_ROOT" -maxdepth 1 \( -name '.app-new.*' -o -name '.app-old.*' \) -print -quit)" ]
+[ "$(sha256sum "$ORDINARY_ROOT/carillon.toml" | cut -d' ' -f1)" = "$ORDINARY_CONFIG_HASH" ]
+[ -z "$(find "$ORDINARY_ROOT" -maxdepth 1 \( -name '.app-new.*' -o -name '.app-old.*' -o -name '.carillon-old.*' \) -print -quit)" ]
 mv "$ORDINARY_ROOT/app/.carillon-managed" "$ORDINARY_ROOT/app/.carillon-managed.saved"
 if install_release "$ORDINARY_HOME" "$ORDINARY_WORKSPACE" "$ORDINARY_ROOT" \
   "$ORDINARY_CONFIG_HOME" "$((BASE_PORT + 10))" >/dev/null 2>&1

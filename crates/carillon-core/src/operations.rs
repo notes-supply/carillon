@@ -16,7 +16,8 @@ use uuid::Uuid;
 use crate::{
     config::{
         AgentConfig, Config, CoreConfig, DiscordConfig, DiscordRoute, LoadedConfig, Provider,
-        ProviderRole, RELEASE_VERSION, hash_token, new_token, validate_provider_identity,
+        ProviderRole, RELEASE_VERSION, hash_token, new_token, read_token_file, token_matches,
+        validate_provider_identity,
     },
     db::Database,
 };
@@ -364,8 +365,51 @@ fn restore_into(archive_path: &Path, target: &Path) -> Result<()> {
         }
         entry.unpack_in(target)?;
     }
-    LoadedConfig::load(&target.join("carillon.toml"))
+    validate_restored_installation(target)
         .context("restored backup is not a valid Carillon installation")?;
+    Ok(())
+}
+
+fn validate_restored_installation(root: &Path) -> Result<()> {
+    let config = LoadedConfig::load(&root.join("carillon.toml"))?;
+    if !config.value.data_dir.starts_with(&config.root)
+        || !config.value.agent.resource_root.starts_with(&config.root)
+    {
+        bail!("restored data and agent resources must belong to the installation");
+    }
+
+    let database = config.value.data_dir.join("carillon.sqlite3");
+    if !database.is_file() {
+        bail!(
+            "restored installation is missing database {}",
+            database.display()
+        );
+    }
+    Database::open(&database)?;
+
+    let operator = read_token_file(&config.root.join("credentials/operator.token"))?;
+    if !token_matches(&config.value.core.operator_token_hash, &operator) {
+        bail!("restored operator credential does not match configuration");
+    }
+    for provider in &config.value.providers {
+        let credential = config.credential(&provider.id)?;
+        if !token_matches(&provider.token_hash, &credential) {
+            bail!(
+                "restored provider credential for {} does not match configuration",
+                provider.id
+            );
+        }
+    }
+
+    for name in ["SYSTEM.md", "AGENTS.md", "settings.json"] {
+        let resource = config.value.agent.resource_root.join(name);
+        if !resource.is_file() {
+            bail!(
+                "restored installation is missing agent resource {}",
+                resource.display()
+            );
+        }
+    }
     Ok(())
 }
 
@@ -584,6 +628,53 @@ mod tests {
                         .starts_with(".restored.restore-")
                 })
         );
+        Ok(())
+    }
+
+    #[test]
+    fn incomplete_restore_does_not_publish_installation() -> Result<()> {
+        let directory = tempdir()?;
+        for (index, (name, path, replacement)) in [
+            ("missing-database", "state/carillon.sqlite3", None),
+            (
+                "corrupt-database",
+                "state/carillon.sqlite3",
+                Some("not a database"),
+            ),
+            (
+                "missing-provider-credential",
+                "credentials/runtime-pi.token",
+                None,
+            ),
+            ("missing-agent-resource", "agents/default/SYSTEM.md", None),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let root = directory.path().join(format!("{name}-source"));
+            initialize(
+                &root,
+                directory.path(),
+                "100",
+                "101",
+                &["200".to_owned()],
+                &[route()],
+                45_000 + u16::try_from(index)? * 10,
+            )?;
+            let required = root.join(path);
+            if let Some(contents) = replacement {
+                fs::write(required, contents)?;
+            } else {
+                fs::remove_file(required)?;
+            }
+            let archive = directory.path().join(format!("{name}.tar.gz"));
+            write_backup_archive(&root, &archive)?;
+
+            let restored = directory.path().join(format!("{name}-restored"));
+            fs::create_dir(&restored)?;
+            assert!(restore(&archive, &restored).is_err(), "{name}");
+            assert!(fs::read_dir(&restored)?.next().is_none(), "{name}");
+        }
         Ok(())
     }
 
