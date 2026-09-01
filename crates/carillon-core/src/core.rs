@@ -42,6 +42,7 @@ use crate::{
 };
 
 const PROVIDER_HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
+const RUNTIME_PROFILE_TIMEOUT: Duration = Duration::from_secs(5);
 
 type AudienceKey = (String, String, String);
 
@@ -56,26 +57,29 @@ impl TurnLocks {
             .await
     }
 
-    async fn lock_pending(&self, pending: &PendingTurn) -> OwnedMutexGuard<()> {
-        self.lock_key((
+    async fn try_lock_pending(&self, pending: &PendingTurn) -> Option<OwnedMutexGuard<()>> {
+        self.turn_for_key((
             pending.interface.clone(),
             pending.agent.clone(),
             pending.audience.clone(),
         ))
         .await
+        .try_lock_owned()
+        .ok()
     }
 
     async fn lock_key(&self, key: AudienceKey) -> OwnedMutexGuard<()> {
-        let turn = {
-            let mut locks = self.locks.lock().await;
-            locks.retain(|_, lock| lock.strong_count() > 0);
-            locks.get(&key).and_then(Weak::upgrade).unwrap_or_else(|| {
-                let turn = Arc::new(Mutex::new(()));
-                locks.insert(key, Arc::downgrade(&turn));
-                turn
-            })
-        };
-        turn.lock_owned().await
+        self.turn_for_key(key).await.lock_owned().await
+    }
+
+    async fn turn_for_key(&self, key: AudienceKey) -> Arc<Mutex<()>> {
+        let mut locks = self.locks.lock().await;
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        locks.get(&key).and_then(Weak::upgrade).unwrap_or_else(|| {
+            let turn = Arc::new(Mutex::new(()));
+            locks.insert(key, Arc::downgrade(&turn));
+            turn
+        })
     }
 }
 
@@ -404,13 +408,18 @@ async fn run_runtime(
             "runtime returned a mismatched correlation ID"
         )));
     }
-    state.database.save_continuation(
-        selected.interface_id,
-        &event.agent_id,
-        &event.audience_id,
-        &selected.provider.id,
-        &response.continuation_ref,
-    )?;
+    state
+        .database
+        .save_continuation(
+            selected.interface_id,
+            &event.agent_id,
+            &event.audience_id,
+            &selected.provider.id,
+            &response.continuation_ref,
+        )
+        .map_err(|error| {
+            TurnFailure::RuntimeUncertain(error.context("save runtime continuation"))
+        })?;
     Ok(response)
 }
 
@@ -687,9 +696,14 @@ async fn apply_execution_profile(
         audience_id: audience_id.clone(),
         resources,
     };
-    let applied =
-        runtime_execution_profile_selection(&state.client, &config, runtime, &runtime_selection)
-            .await?;
+    let applied = runtime_execution_profile_selection(
+        &state.client,
+        &config,
+        runtime,
+        &runtime_selection,
+        RUNTIME_PROFILE_TIMEOUT,
+    )
+    .await?;
     if let (Some(interface), Some(audience), Some(continuation)) = (
         interface_id.as_deref(),
         audience_id.as_deref(),
@@ -745,6 +759,7 @@ async fn runtime_execution_profile_selection(
     config: &LoadedConfig,
     runtime: &Provider,
     selection: &RuntimeExecutionProfileSelection,
+    timeout: Duration,
 ) -> Result<ExecutionProfileApplication> {
     if !runtime.enabled {
         bail!("selected runtime provider is disabled");
@@ -753,6 +768,7 @@ async fn runtime_execution_profile_selection(
         .put(format!("{}/v1/execution-profile", runtime.url))
         .bearer_auth(config.credential(&runtime.id)?)
         .json(selection)
+        .timeout(timeout)
         .send()
         .await
         .context("contact runtime execution-profile service")?
@@ -854,7 +870,9 @@ fn recovery_evidence_matches(evidence: Option<&RuntimeEvidence>, turn_id: &str) 
 async fn reconcile_pending_turns(state: &AppState) -> Result<usize> {
     let config = LoadedConfig::load(&state.config_path)?;
     for pending in state.database.pending_turns()? {
-        let _guard = state.turns.lock_pending(&pending).await;
+        let Some(_guard) = state.turns.try_lock_pending(&pending).await else {
+            continue;
+        };
         let runtime = match config.provider(&pending.runtime, ProviderRole::Runtime) {
             Ok(runtime) if runtime.enabled => runtime,
             Ok(_) => {
@@ -1434,7 +1452,7 @@ mod tests {
         AppState, ExecutionProfilesQuery, RecentQuery, TurnLocks, accept_event,
         apply_execution_profile, authorize_interface, execution_profiles, fetch_health,
         materialize_resources, process_event, provider_snapshot, recent_turns,
-        reconcile_pending_turns, refresh_execution_profiles,
+        reconcile_pending_turns, refresh_execution_profiles, runtime_execution_profile_selection,
     };
     use crate::{
         config::{
@@ -1446,8 +1464,8 @@ mod tests {
         model::{
             ExecutionProfile, ExecutionProfileApplication, ExecutionProfileScope,
             ExecutionProfileSelection, ExtensionRequest, ExtensionResponse, ExternalEvent,
-            RuntimeEvidence, RuntimeExecutionProfileModel, RuntimeExecutionProfiles,
-            RuntimeTurnRequest, RuntimeTurnResponse, ServiceTier,
+            RuntimeEvidence, RuntimeExecutionProfileModel, RuntimeExecutionProfileSelection,
+            RuntimeExecutionProfiles, RuntimeTurnRequest, RuntimeTurnResponse, ServiceTier,
         },
     };
 
@@ -2221,6 +2239,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stalled_execution_profile_mutation_is_bounded() -> Result<()> {
+        let harness = ProviderHarness::new().await?;
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let Ok(_connection) = listener.accept().await else {
+                return;
+            };
+            std::future::pending::<()>().await;
+        });
+        let mut runtime = harness.primary_runtime.clone();
+        runtime.url = format!("http://{address}");
+        let result = runtime_execution_profile_selection(
+            &harness.state.client,
+            &harness.config,
+            &runtime,
+            &RuntimeExecutionProfileSelection {
+                key: "runtime-a-profile".to_owned(),
+                reasoning: None,
+                service_tier: Some(ServiceTier::Standard),
+                scope: ExecutionProfileScope::CurrentConversation,
+                continuation_ref: None,
+                interface_id: Some("interface-a".to_owned()),
+                agent_id: "default".to_owned(),
+                audience_id: Some("conversation".to_owned()),
+                resources: None,
+            },
+            Duration::from_millis(25),
+        )
+        .await;
+        server.abort();
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn stalled_provider_health_is_bounded() -> Result<()> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
         let address = listener.local_addr()?;
@@ -2324,9 +2378,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconciliation_waits_for_the_live_turn_guard() -> Result<()> {
+    async fn reconciliation_skips_a_live_audience_and_recovers_another() -> Result<()> {
         let harness = ProviderHarness::new().await?;
-        let pending_event = event("live", "conversation", "still running");
+        let pending_event = event("live", "live-audience", "still running");
         let resources = materialize_resources(
             &harness.config.value.agent.resource_root,
             &harness.config.value.data_dir.join("resource-snapshots"),
@@ -2344,23 +2398,44 @@ mod tests {
             &resources,
         )?;
         harness.state.database.mark_processing(&accepted.turn_id)?;
+        harness
+            .primary_state
+            .corrupt_response
+            .store(true, Ordering::SeqCst);
+        let recoverable = process_event(
+            &harness.state,
+            &harness.config,
+            "interface-a",
+            event("recoverable", "other-audience", "completed remotely"),
+        )
+        .await?;
+        assert_eq!(recoverable.state, "processing");
 
         let live_turn = harness
             .state
             .turns
-            .lock("interface-a", "default", "conversation")
+            .lock("interface-a", "default", "live-audience")
             .await;
-        let state = harness.state.clone();
-        let mut reconciliation = tokio::spawn(async move { reconcile_pending_turns(&state).await });
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), &mut reconciliation)
-                .await
-                .is_err()
+        assert_eq!(reconcile_pending_turns(&harness.state).await?, 1);
+        assert_eq!(
+            harness
+                .state
+                .database
+                .inspect_turn(&recoverable.turn_id)?
+                .context("recovered turn missing")?
+                .state,
+            "completed"
         );
-        assert_eq!(harness.state.database.pending_turns()?.len(), 1);
-
+        assert_eq!(
+            harness
+                .state
+                .database
+                .inspect_turn(&accepted.turn_id)?
+                .context("live turn missing")?
+                .state,
+            "processing"
+        );
         drop(live_turn);
-        assert_eq!(reconciliation.await??, 0);
         Ok(())
     }
 
