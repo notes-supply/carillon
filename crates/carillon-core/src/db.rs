@@ -434,8 +434,10 @@ impl Database {
         let delivery = transaction
             .query_row(
                 "SELECT id, turn_id, target_id, feedback_target_id, content FROM deliveries
-                 WHERE interface_id = ?1 AND state = 'pending' ORDER BY id LIMIT 1",
-                [interface_id],
+                 WHERE interface_id = ?1
+                   AND (state = 'pending' OR (state = 'delivering' AND claim_owner = ?2))
+                 ORDER BY CASE WHEN state = 'delivering' THEN 0 ELSE 1 END, id LIMIT 1",
+                params![interface_id, owner],
                 |row| {
                     Ok(Delivery {
                         id: row.get(0)?,
@@ -701,6 +703,14 @@ mod tests {
             .claim_delivery("discord", "instance-a")?
             .context("completed turn did not create a delivery")?;
         assert_eq!(delivery.content.as_deref(), Some("reply"));
+        assert_eq!(
+            database
+                .claim_delivery("discord", "instance-a")?
+                .context("claim owner could not recover its delivery")?
+                .id,
+            delivery.id
+        );
+        assert!(database.claim_delivery("discord", "instance-b")?.is_none());
         assert_eq!(
             database.reconcile_delivery_claims("discord", "instance-b")?,
             vec!["channel-1:message-1"]

@@ -868,14 +868,15 @@ async fn message_worker(
         {
             continue;
         }
-        inbound.request.parent_channel_id =
+        inbound.request.parent_channel_id = loop {
             match discord_parent_channel(&http, &discord, &inbound.request.channel_id).await {
-                Ok(parent) => parent,
+                Ok(parent) => break parent,
                 Err(failure) => {
-                    warn!(error = %failure, "resolve Discord message route");
-                    continue;
+                    warn!(error = %failure, "resolve Discord message route; retrying received message");
+                    sleep(Duration::from_secs(1)).await;
                 }
-            };
+            }
+        };
         let Ok(Some(plan)) = resolve_message(
             &discord,
             inbound.request,
@@ -885,11 +886,21 @@ async fn message_worker(
             continue;
         };
         let source = format!("{}:{}", plan.source_channel_id, plan.source_message_id);
-        match queue_message_plan(&state, &http, &queues, plan).await {
+        match queue_message_plan(&state, &http, &queues, plan.clone()).await {
             Ok(()) => {}
             Err(failure) => {
-                terminal_feedback(&http, &discord, &source, Feedback::Failed).await;
-                warn!(error = %failure, "Discord conversation resolution failed");
+                if pending_thread_creation(&state, &plan.event_id).await {
+                    warn!(error = %failure, event_id = %plan.event_id, "retrying persisted Discord thread creation");
+                    tokio::spawn(replay_thread_creation(
+                        state.clone(),
+                        http.clone(),
+                        queues.clone(),
+                        plan,
+                    ));
+                } else {
+                    terminal_feedback(&http, &discord, &source, Feedback::Failed).await;
+                    warn!(error = %failure, "Discord conversation resolution failed");
+                }
             }
         }
     }
@@ -928,6 +939,15 @@ async fn resume_thread_creations(
             replay_thread_creation(state, http, queues, plan).await;
         });
     }
+}
+
+async fn pending_thread_creation(state: &DiscordState, event_id: &str) -> bool {
+    state
+        .participation
+        .lock()
+        .await
+        .pending_thread_creations
+        .contains_key(event_id)
 }
 
 async fn replay_thread_creation(
@@ -2259,9 +2279,9 @@ mod tests {
     use super::{
         DISCORD_MESSAGE_LIMIT, DiscordHttp, DiscordParticipation, DiscordState, InboundMessage,
         MessagePlan, ResolvedMessage, ServiceError, clear_thread_creation, deferred_model_response,
-        message_worker, profile_panel, queue_resolved_message, remember_thread_creation,
-        resolve_message, resolved_message, split_discord_message, submit_event,
-        submit_resolved_message, thread_title,
+        message_worker, pending_thread_creation, profile_panel, queue_resolved_message,
+        remember_thread_creation, resolve_message, resolved_message, split_discord_message,
+        submit_event, submit_resolved_message, thread_title,
     };
     use crate::{
         config::{
@@ -2687,6 +2707,7 @@ mod tests {
         };
 
         remember_thread_creation(&state, &plan).await?;
+        assert!(pending_thread_creation(&state, "message").await);
         let persisted: DiscordParticipation =
             serde_json::from_slice(&fs::read(&participation_path)?)?;
         assert_eq!(

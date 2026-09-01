@@ -51,6 +51,7 @@ OWNER_PATH=${PATH:-/usr/local/bin:/usr/bin:/bin}
 UNIT_DIR=${XDG_CONFIG_HOME:-"$HOME/.config"}/systemd/user
 APP="$CARILLON_HOME/app"
 APP_NEW=
+APP_OLD=
 APP_MARKER=.carillon-managed
 APP_MARKER_VALUE=carillon-managed-application-v1
 
@@ -87,6 +88,13 @@ install -d -m 0700 "$CARILLON_HOME" "$CARILLON_HOME/credentials" "$CARILLON_HOME
 APP_NEW=$(mktemp -d "$CARILLON_HOME/.app-new.XXXXXX")
 cleanup_staging() {
   [ -z "$APP_NEW" ] || rm -rf -- "$APP_NEW"
+  if [ -n "$APP_OLD" ]; then
+    if [ ! -e "$APP" ] && [ ! -L "$APP" ]; then
+      mv "$APP_OLD" "$APP"
+    else
+      rm -rf -- "$APP_OLD"
+    fi
+  fi
 }
 trap cleanup_staging EXIT
 install -d -m 0700 "$APP_NEW/bin" "$APP_NEW/licenses" "$APP_NEW/systemd"
@@ -102,10 +110,14 @@ if [ -e "$APP" ] || [ -L "$APP" ]; then
     echo "refusing to replace application path after ownership changed: $APP" >&2
     exit 1
   }
-  rm -rf -- "$APP"
+  APP_OLD=$(mktemp -d "$CARILLON_HOME/.app-old.XXXXXX")
+  rmdir "$APP_OLD"
+  mv "$APP" "$APP_OLD"
 fi
 mv "$APP_NEW" "$APP"
 APP_NEW=
+[ -z "$APP_OLD" ] || rm -rf -- "$APP_OLD"
+APP_OLD=
 [ -e "$CARILLON_HOME/credentials/discord-bot.token" ] || install -m 0600 /dev/null "$CARILLON_HOME/credentials/discord-bot.token"
 chmod 0700 "$CARILLON_HOME" "$CARILLON_HOME/credentials" "$CARILLON_HOME/pi" "$CARILLON_HOME/logs"
 chmod 0600 "$CARILLON_HOME/carillon.toml" "$CARILLON_HOME/credentials"/*.token

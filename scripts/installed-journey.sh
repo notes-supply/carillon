@@ -122,6 +122,24 @@ install_release "$ORDINARY_HOME" "$ORDINARY_WORKSPACE" "$ORDINARY_ROOT" \
 [ "$(sha256sum "$ORDINARY_ROOT/credentials/runtime-pi.token" | cut -d' ' -f1)" = "$ORDINARY_TOKEN_HASH" ]
 ORDINARY_APP_HASH=$(sha256sum "$ORDINARY_ROOT/app/bin/carillon" | cut -d' ' -f1)
 ORDINARY_CONFIG_HASH=$(sha256sum "$ORDINARY_ROOT/carillon.toml" | cut -d' ' -f1)
+FAIL_BIN=$TEST_ROOT/fail-bin
+mkdir -p "$FAIL_BIN"
+cat >"$FAIL_BIN/mv" <<'FAIL_MV'
+#!/bin/sh
+case "$1" in
+  */.app-new.*) exit 1 ;;
+esac
+exec /usr/bin/mv "$@"
+FAIL_MV
+chmod 0755 "$FAIL_BIN/mv"
+if PATH="$FAIL_BIN:$PATH" install_release "$ORDINARY_HOME" "$ORDINARY_WORKSPACE" "$ORDINARY_ROOT" \
+  "$ORDINARY_CONFIG_HOME" "$((BASE_PORT + 10))" >/dev/null 2>&1
+then
+  echo "upgrade succeeded after application publication failed" >&2
+  exit 1
+fi
+[ "$(sha256sum "$ORDINARY_ROOT/app/bin/carillon" | cut -d' ' -f1)" = "$ORDINARY_APP_HASH" ]
+[ -z "$(find "$ORDINARY_ROOT" -maxdepth 1 \( -name '.app-new.*' -o -name '.app-old.*' \) -print -quit)" ]
 mv "$ORDINARY_ROOT/app/.carillon-managed" "$ORDINARY_ROOT/app/.carillon-managed.saved"
 if install_release "$ORDINARY_HOME" "$ORDINARY_WORKSPACE" "$ORDINARY_ROOT" \
   "$ORDINARY_CONFIG_HOME" "$((BASE_PORT + 10))" >/dev/null 2>&1
