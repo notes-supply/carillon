@@ -814,7 +814,7 @@ async fn message_worker(
             task.abort();
         }
         match receipt {
-            Ok(receipt) if receipt.duplicate => {
+            Ok(receipt) if receipt.duplicate && receipt.state != "processing" => {
                 clear_processing_feedback(&http, discord, &resolved.event.feedback_target_id).await;
             }
             Ok(_) => {}
@@ -1366,7 +1366,11 @@ fn profile_action_row(
     pages: usize,
 ) -> Component {
     let reasoning_value = reasoning.unwrap_or("-");
-    let tier_value = service_tier.unwrap_or(ServiceTier::Standard);
+    let tier_value = if model.service_tiers.is_empty() {
+        "-"
+    } else {
+        service_tier.unwrap_or(ServiceTier::Standard).as_str()
+    };
     let selection = format!("{}|{reasoning_value}|{tier_value}", model.key);
     let mut buttons = Vec::with_capacity(4);
     if pages > 1 {
@@ -1784,20 +1788,46 @@ async fn submit_event(
     state: &DiscordState,
     event: &ExternalEvent,
 ) -> Result<EventReceipt, ServiceError> {
-    Ok(state
-        .client
-        .post(format!("{}/v1/events", state.core_url))
-        .bearer_auth(&state.token)
-        .header("x-carillon-provider", &state.provider_id)
-        .json(event)
-        .send()
-        .await
-        .context("submit event to core")?
-        .error_for_status()
-        .context("core rejected event")?
-        .json()
-        .await
-        .context("decode event receipt")?)
+    let mut retrying = false;
+    loop {
+        let response = state
+            .client
+            .post(format!("{}/v1/events", state.core_url))
+            .bearer_auth(&state.token)
+            .header("x-carillon-provider", &state.provider_id)
+            .json(event)
+            .send()
+            .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(failure) if !retrying && (failure.is_connect() || failure.is_builder()) => {
+                return Err(anyhow::Error::new(failure)
+                    .context("submit event to core")
+                    .into());
+            }
+            Err(failure) => {
+                retrying = true;
+                warn!(error = %failure, event_id = %event.event_id, "event submission outcome uncertain; retrying");
+                sleep(Duration::from_millis(250)).await;
+                continue;
+            }
+        };
+        if response.status() == StatusCode::CONFLICT {
+            retrying = true;
+            warn!(event_id = %event.event_id, "earlier audience turn is pending; retrying event submission");
+            sleep(Duration::from_millis(250)).await;
+            continue;
+        }
+        let response = response.error_for_status().context("core rejected event")?;
+        match response.json().await {
+            Ok(receipt) => return Ok(receipt),
+            Err(failure) => {
+                retrying = true;
+                warn!(error = %failure, event_id = %event.event_id, "event receipt was ambiguous; retrying");
+                sleep(Duration::from_millis(250)).await;
+            }
+        }
+    }
 }
 
 async fn claim_core_delivery(state: &DiscordState) -> Result<Option<Delivery>, ServiceError> {
@@ -1972,22 +2002,60 @@ fn persist_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{
+        collections::BTreeMap,
+        path::PathBuf,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
 
     use anyhow::{Context as _, anyhow};
-    use serde_json::Value;
+    use axum::{
+        Json, Router,
+        extract::State,
+        http::StatusCode,
+        response::{IntoResponse as _, Response},
+        routing::post,
+    };
+    use serde_json::{Value, json};
+    use tokio::{net::TcpListener, sync::Mutex};
 
     use super::{
-        DISCORD_MESSAGE_LIMIT, DiscordParticipation, MessagePlan, ServiceError,
+        DISCORD_MESSAGE_LIMIT, DiscordParticipation, DiscordState, MessagePlan, ServiceError,
         deferred_model_response, profile_panel, resolve_message, resolved_message,
-        split_discord_message, thread_title,
+        split_discord_message, submit_event, thread_title,
     };
     use crate::{
         config::{DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute},
         model::{
-            RuntimeExecutionProfileModel, RuntimeExecutionProfiles, ServiceTier, SimulateRequest,
+            EventReceipt, ExternalEvent, RuntimeExecutionProfileModel, RuntimeExecutionProfiles,
+            ServiceTier, SimulateRequest,
         },
     };
+
+    #[derive(Clone)]
+    struct SubmissionTestState {
+        attempts: Arc<AtomicUsize>,
+    }
+
+    async fn pending_then_ambiguous_submission(
+        State(state): State<SubmissionTestState>,
+        Json(event): Json<ExternalEvent>,
+    ) -> Response {
+        match state.attempts.fetch_add(1, Ordering::SeqCst) {
+            0 => StatusCode::CONFLICT.into_response(),
+            1 => (StatusCode::OK, "not JSON").into_response(),
+            _ => Json(EventReceipt {
+                event_id: event.event_id,
+                turn_id: "turn".to_owned(),
+                state: "completed".to_owned(),
+                duplicate: true,
+            })
+            .into_response(),
+        }
+    }
 
     #[test]
     fn discord_model_deferral_payloads_match_interaction_kinds() -> serde_json::Result<()> {
@@ -2128,6 +2196,52 @@ mod tests {
         let minimal =
             serde_json::to_value(profile_panel(&profiles, &unsupported, None, None, false, 0))?;
         assert_eq!(minimal["components"].as_array().map(Vec::len), Some(3));
+        assert_eq!(
+            minimal["components"][2]["components"][0]["custom_id"],
+            "carillon:profile:n:unsupported|-|-"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn event_submission_retries_pending_and_ambiguous_attempts() -> anyhow::Result<()> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let address = listener.local_addr()?;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let router = Router::new()
+            .route("/v1/events", post(pending_then_ambiguous_submission))
+            .with_state(SubmissionTestState {
+                attempts: attempts.clone(),
+            });
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+        let state = DiscordState {
+            config_path: PathBuf::new(),
+            core_url: format!("http://{address}"),
+            provider_id: "discord".to_owned(),
+            token: "token".to_owned(),
+            instance_id: "instance".to_owned(),
+            client: reqwest::Client::new(),
+            participation_path: PathBuf::new(),
+            participation: Arc::new(Mutex::new(DiscordParticipation::default())),
+        };
+        let receipt = submit_event(
+            &state,
+            &ExternalEvent {
+                event_id: "event".to_owned(),
+                agent_id: "default".to_owned(),
+                user_id: "user".to_owned(),
+                audience_id: "audience".to_owned(),
+                delivery_target_id: "channel".to_owned(),
+                feedback_target_id: "channel:message".to_owned(),
+                content: "hello".to_owned(),
+                native: json!({}),
+            },
+        )
+        .await
+        .map_err(|failure| anyhow!(failure.message))?;
+        server.abort();
+        assert!(receipt.duplicate);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
         Ok(())
     }
 

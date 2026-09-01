@@ -60,6 +60,13 @@ impl ApiError {
         }
     }
 
+    fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            message: message.into(),
+        }
+    }
+
     fn not_found(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
@@ -143,6 +150,16 @@ async fn accept_event(
     let interface_id = authorize_interface(&headers, &config)?;
     admit(&event)?;
     let _guard = state.turns.lock().await;
+    if state.database.has_pending_predecessor(
+        &interface_id,
+        &event.agent_id,
+        &event.audience_id,
+        &event.event_id,
+    )? {
+        return Err(ApiError::conflict(
+            "an earlier turn for this audience is still being reconciled",
+        ));
+    }
     Ok(Json(
         process_event(&state, &config, &interface_id, event).await?,
     ))
@@ -756,6 +773,7 @@ fn unavailable(id: &str, role: &str, version: &str) -> Health {
 }
 
 async fn reconcile_pending_turns(state: &AppState) -> Result<usize> {
+    let _guard = state.turns.lock().await;
     let config = LoadedConfig::load(&state.config_path)?;
     for pending in state.database.pending_turns()? {
         let runtime = match config.provider(&pending.runtime, ProviderRole::Runtime) {
@@ -1329,7 +1347,7 @@ mod tests {
     use tokio::{net::TcpListener, sync::Mutex, task::JoinHandle};
 
     use super::{
-        AppState, ExecutionProfilesQuery, RecentQuery, apply_execution_profile,
+        AppState, ExecutionProfilesQuery, RecentQuery, accept_event, apply_execution_profile,
         authorize_interface, execution_profiles, materialize_resources, process_event,
         provider_snapshot, recent_turns, reconcile_pending_turns, refresh_execution_profiles,
     };
@@ -2134,6 +2152,96 @@ mod tests {
         assert_eq!(
             delivery.content.as_deref(),
             Some("runtime-a:completed remotely")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reconciliation_waits_for_the_live_turn_guard() -> Result<()> {
+        let harness = ProviderHarness::new().await?;
+        let pending_event = event("live", "conversation", "still running");
+        let resources = materialize_resources(
+            &harness.config.value.agent.resource_root,
+            &harness.config.value.data_dir.join("resource-snapshots"),
+        )?;
+        let accepted = harness.state.database.accept_event(
+            "interface-a",
+            "default",
+            "runtime-a",
+            &pending_event,
+            &provider_snapshot(
+                &harness.config,
+                &harness.first_interface,
+                &harness.primary_runtime,
+            )?,
+            &resources,
+        )?;
+        harness.state.database.mark_processing(&accepted.turn_id)?;
+
+        let live_turn = harness.state.turns.lock().await;
+        let state = harness.state.clone();
+        let mut reconciliation = tokio::spawn(async move { reconcile_pending_turns(&state).await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut reconciliation)
+                .await
+                .is_err()
+        );
+        assert_eq!(harness.state.database.pending_turns()?.len(), 1);
+
+        drop(live_turn);
+        assert_eq!(reconciliation.await??, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn later_audience_turn_waits_for_uncertain_predecessor() -> Result<()> {
+        let harness = ProviderHarness::new().await?;
+        harness
+            .primary_state
+            .corrupt_response
+            .store(true, Ordering::SeqCst);
+        let first = process_event(
+            &harness.state,
+            &harness.config,
+            "interface-a",
+            event("first", "conversation", "uncertain"),
+        )
+        .await?;
+        assert_eq!(first.state, "processing");
+
+        let Err(blocked) = accept_event(
+            State(harness.state.clone()),
+            interface_headers("interface-a", "Bearer interface-a-token"),
+            Json(event("second", "conversation", "must wait")),
+        )
+        .await
+        else {
+            return Err(anyhow::anyhow!(
+                "later audience turn was accepted before reconciliation"
+            ));
+        };
+        assert_eq!(blocked.status, StatusCode::CONFLICT);
+        assert_eq!(harness.primary_state.requests.lock().await.len(), 1);
+
+        assert_eq!(reconcile_pending_turns(&harness.state).await?, 0);
+        harness
+            .primary_state
+            .corrupt_response
+            .store(false, Ordering::SeqCst);
+        let resumed = accept_event(
+            State(harness.state.clone()),
+            interface_headers("interface-a", "Bearer interface-a-token"),
+            Json(event("second", "conversation", "must wait")),
+        )
+        .await
+        .map_err(|failure| anyhow::anyhow!(failure.message))?
+        .0;
+        assert_eq!(resumed.state, "completed");
+        let requests = harness.primary_state.requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[1].continuation_ref.as_deref(),
+            Some("runtime-a:interface-a:conversation")
         );
         Ok(())
     }
