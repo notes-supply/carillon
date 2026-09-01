@@ -303,7 +303,7 @@ struct DiscordState {
 struct DiscordParticipation {
     threads: BTreeMap<String, String>,
     #[serde(default)]
-    pending_thread_creations: BTreeMap<String, MessagePlan>,
+    pending_messages: Vec<MessagePlan>,
 }
 
 #[derive(Clone, Debug)]
@@ -658,7 +658,6 @@ async fn prepare_discord_conversation(
 ) -> Result<ResolvedMessage> {
     let target = if plan.create_thread {
         let thread = plan.source_message_id.clone();
-        remember_thread_creation(state, &plan).await?;
         if !discord_message_thread_exists(http, &plan).await? {
             let channel = plan
                 .source_channel_id
@@ -760,32 +759,33 @@ fn resolved_message(plan: MessagePlan, target: String) -> ResolvedMessage {
     }
 }
 
-async fn remember_thread_creation(state: &DiscordState, plan: &MessagePlan) -> Result<()> {
+async fn remember_pending_message(state: &DiscordState, plan: &MessagePlan) -> Result<()> {
     let mut participation = state.participation.lock().await;
-    if participation
-        .pending_thread_creations
-        .get(&plan.source_message_id)
-        .is_some_and(|pending| pending == plan)
+    if let Some(pending) = participation
+        .pending_messages
+        .iter()
+        .find(|pending| pending.event_id == plan.event_id)
     {
-        return Ok(());
+        if pending == plan {
+            return Ok(());
+        }
+        bail!("Discord event changed while its submission was pending");
     }
     let mut updated = participation.clone();
-    updated
-        .pending_thread_creations
-        .insert(plan.source_message_id.clone(), plan.clone());
+    updated.pending_messages.push(plan.clone());
     persist_json(&state.participation_path, &updated)?;
     *participation = updated;
     Ok(())
 }
 
-async fn clear_thread_creation(state: &DiscordState, message_id: &str) -> Result<()> {
+async fn clear_pending_message(state: &DiscordState, event_id: &str) -> Result<()> {
     let mut participation = state.participation.lock().await;
     let mut updated = participation.clone();
-    if updated
-        .pending_thread_creations
-        .remove(message_id)
-        .is_some()
-    {
+    let prior_len = updated.pending_messages.len();
+    updated
+        .pending_messages
+        .retain(|pending| pending.event_id != event_id);
+    if updated.pending_messages.len() != prior_len {
         persist_json(&state.participation_path, &updated)?;
         *participation = updated;
     }
@@ -968,9 +968,9 @@ async fn channel_message_worker(
         match queue_message_plan(&state, &http, &queues, plan.clone()).await {
             Ok(()) => {}
             Err(failure) => {
-                if pending_thread_creation(&state, &plan.event_id).await {
-                    warn!(error = %failure, event_id = %plan.event_id, "retrying persisted Discord thread creation");
-                    tokio::spawn(replay_thread_creation(
+                if pending_message(&state, &plan.event_id).await {
+                    warn!(error = %failure, event_id = %plan.event_id, "retrying persisted Discord message");
+                    tokio::spawn(replay_pending_message(
                         state.clone(),
                         http.clone(),
                         queues.clone(),
@@ -992,7 +992,7 @@ fn start_message_worker(
     receiver: mpsc::Receiver<InboundMessage>,
 ) {
     tokio::spawn(async move {
-        resume_thread_creations(&state, &http, &queues).await;
+        resume_pending_messages(&state, &http, &queues).await;
         message_worker(
             state,
             http,
@@ -1004,39 +1004,36 @@ fn start_message_worker(
     });
 }
 
-async fn resume_thread_creations(
+async fn resume_pending_messages(
     state: &DiscordState,
     http: &Arc<DiscordHttp>,
     queues: &AudienceMessageQueues,
 ) {
-    let plans = state
-        .participation
-        .lock()
-        .await
-        .pending_thread_creations
-        .values()
-        .cloned()
-        .collect::<Vec<_>>();
+    let plans = state.participation.lock().await.pending_messages.clone();
     for plan in plans {
-        let state = state.clone();
-        let http = http.clone();
-        let queues = queues.clone();
-        tokio::spawn(async move {
-            replay_thread_creation(state, http, queues, plan).await;
-        });
+        if let Err(failure) = queue_message_plan(state, http, queues, plan.clone()).await {
+            warn!(error = %failure, event_id = %plan.event_id, "retrying persisted Discord message");
+            tokio::spawn(replay_pending_message(
+                state.clone(),
+                http.clone(),
+                queues.clone(),
+                plan,
+            ));
+        }
     }
 }
 
-async fn pending_thread_creation(state: &DiscordState, event_id: &str) -> bool {
+async fn pending_message(state: &DiscordState, event_id: &str) -> bool {
     state
         .participation
         .lock()
         .await
-        .pending_thread_creations
-        .contains_key(event_id)
+        .pending_messages
+        .iter()
+        .any(|pending| pending.event_id == event_id)
 }
 
-async fn replay_thread_creation(
+async fn replay_pending_message(
     state: DiscordState,
     http: Arc<DiscordHttp>,
     queues: AudienceMessageQueues,
@@ -1046,7 +1043,7 @@ async fn replay_thread_creation(
         match queue_message_plan(&state, &http, &queues, plan.clone()).await {
             Ok(()) => return,
             Err(failure) => {
-                warn!(error = %failure, event_id = %plan.event_id, "retrying persisted Discord thread creation");
+                warn!(error = %failure, event_id = %plan.event_id, "retrying persisted Discord message");
                 sleep(Duration::from_secs(1)).await;
             }
         }
@@ -1059,6 +1056,7 @@ async fn queue_message_plan(
     queues: &AudienceMessageQueues,
     plan: MessagePlan,
 ) -> Result<()> {
+    remember_pending_message(state, &plan).await?;
     let resolved = prepare_discord_conversation(state, http, plan).await?;
     let audience = resolved.event.audience_id.clone();
     if queue_resolved_message(&mut *queues.lock().await, resolved) {
@@ -1133,7 +1131,7 @@ async fn submit_resolved_message(
     let receipt = loop {
         match submit_event(state, &resolved.event).await {
             Ok(receipt) => break Ok(receipt),
-            Err(failure) if pending_thread_creation(state, &resolved.event.event_id).await => {
+            Err(failure) if pending_message(state, &resolved.event.event_id).await => {
                 warn!(
                     error = %failure.message,
                     event_id = %resolved.event.event_id,
@@ -1149,14 +1147,14 @@ async fn submit_resolved_message(
     }
     match receipt {
         Ok(receipt) if receipt.duplicate && receipt.state != "processing" => {
-            if let Err(failure) = clear_thread_creation(state, &resolved.event.event_id).await {
-                warn!(error = %failure, "clear submitted Discord thread creation intent");
+            if let Err(failure) = clear_pending_message(state, &resolved.event.event_id).await {
+                warn!(error = %failure, "clear submitted Discord message intent");
             }
             clear_processing_feedback(http, &discord, &resolved.event.feedback_target_id).await;
         }
         Ok(_) => {
-            if let Err(failure) = clear_thread_creation(state, &resolved.event.event_id).await {
-                warn!(error = %failure, "clear submitted Discord thread creation intent");
+            if let Err(failure) = clear_pending_message(state, &resolved.event.event_id).await {
+                warn!(error = %failure, "clear submitted Discord message intent");
             }
         }
         Err(failure) => {
@@ -2377,11 +2375,11 @@ mod tests {
 
     use super::{
         DISCORD_MESSAGE_LIMIT, DiscordHttp, DiscordParticipation, DiscordState, InboundMessage,
-        MessagePlan, ResolvedMessage, ServiceError, adopt_thread, clear_thread_creation,
-        deferred_model_response, message_worker, pending_thread_creation, profile_panel,
-        queue_inbound_message, queue_resolved_message, remember_thread_creation, resolve_message,
-        resolved_message, split_discord_message, submit_event, submit_resolved_message,
-        thread_title,
+        MessagePlan, ResolvedMessage, ServiceError, adopt_thread, clear_pending_message,
+        deferred_model_response, message_worker, pending_message, profile_panel,
+        queue_inbound_message, queue_resolved_message, remember_pending_message, resolve_message,
+        resolved_message, resume_pending_messages, split_discord_message, submit_event,
+        submit_resolved_message, thread_title,
     };
     use crate::{
         config::{
@@ -2779,7 +2777,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn thread_creation_intent_survives_restart_until_submission() -> anyhow::Result<()> {
+    async fn pending_message_survives_restart_until_submission() -> anyhow::Result<()> {
         let directory = tempdir()?;
         let participation_path = directory.path().join("participation.json");
         let state = DiscordState {
@@ -2802,33 +2800,31 @@ mod tests {
             route_channel_id: "channel".to_owned(),
             current_channel_id: "channel".to_owned(),
             content: "hello".to_owned(),
-            create_thread: true,
+            create_thread: false,
             adopt_thread: false,
             native: json!({ "message": "message" }),
         };
 
-        remember_thread_creation(&state, &plan).await?;
-        assert!(pending_thread_creation(&state, "message").await);
+        remember_pending_message(&state, &plan).await?;
+        assert!(pending_message(&state, "message").await);
         let persisted: DiscordParticipation =
             serde_json::from_slice(&fs::read(&participation_path)?)?;
-        assert_eq!(
-            persisted.pending_thread_creations.get("message"),
-            Some(&plan)
-        );
+        assert_eq!(persisted.pending_messages.first(), Some(&plan));
 
         let restarted = DiscordState {
             participation: Arc::new(Mutex::new(persisted)),
             ..state
         };
-        clear_thread_creation(&restarted, "message").await?;
+        clear_pending_message(&restarted, "message").await?;
         let completed: DiscordParticipation =
             serde_json::from_slice(&fs::read(&participation_path)?)?;
-        assert!(completed.pending_thread_creations.is_empty());
+        assert!(completed.pending_messages.is_empty());
         Ok(())
     }
 
     #[tokio::test]
-    async fn failed_thread_intent_write_does_not_change_live_participation() -> anyhow::Result<()> {
+    async fn failed_message_intent_write_does_not_change_live_participation() -> anyhow::Result<()>
+    {
         let directory = tempdir()?;
         let state = DiscordState {
             config_path: PathBuf::new(),
@@ -2855,15 +2851,8 @@ mod tests {
             native: json!({}),
         };
 
-        assert!(remember_thread_creation(&state, &plan).await.is_err());
-        assert!(
-            state
-                .participation
-                .lock()
-                .await
-                .pending_thread_creations
-                .is_empty()
-        );
+        assert!(remember_pending_message(&state, &plan).await.is_err());
+        assert!(state.participation.lock().await.pending_messages.is_empty());
         Ok(())
     }
 
@@ -2887,7 +2876,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persisted_thread_submission_retries_live_after_core_recovers() -> anyhow::Result<()> {
+    async fn persisted_message_submission_recovers_after_restart() -> anyhow::Result<()> {
         let directory = tempdir()?;
         let root = directory.path().join("install");
         let config_path = initialize(
@@ -2899,7 +2888,7 @@ mod tests {
             &[DiscordRoute {
                 channel_id: "103".to_owned(),
                 activation: DiscordActivation::Always,
-                conversation: DiscordConversation::Thread,
+                conversation: DiscordConversation::Channel,
             }],
             49_300,
         )?;
@@ -2938,22 +2927,25 @@ mod tests {
             route_channel_id: "103".to_owned(),
             current_channel_id: "103".to_owned(),
             content: "hello".to_owned(),
-            create_thread: true,
+            create_thread: false,
             adopt_thread: false,
             native: json!({}),
         };
-        remember_thread_creation(&state, &plan).await?;
-        let submission_state = state.clone();
-        let submission = tokio::spawn(async move {
-            submit_resolved_message(
-                &submission_state,
-                &Arc::new(DiscordHttp::new("token".to_owned())),
-                resolved_message(plan, "104".to_owned()),
-            )
-            .await;
-        });
+        remember_pending_message(&state, &plan).await?;
+        let persisted: DiscordParticipation =
+            serde_json::from_slice(&fs::read(&state.participation_path)?)?;
+        let restarted = DiscordState {
+            participation: Arc::new(Mutex::new(persisted)),
+            ..state
+        };
+        resume_pending_messages(
+            &restarted,
+            &Arc::new(DiscordHttp::new("token".to_owned())),
+            &Arc::new(Mutex::new(BTreeMap::new())),
+        )
+        .await;
         sleep(Duration::from_millis(100)).await;
-        assert!(pending_thread_creation(&state, "104").await);
+        assert!(pending_message(&restarted, "104").await);
 
         let listener = TcpListener::bind(address).await?;
         let router = Router::new()
@@ -2962,11 +2954,15 @@ mod tests {
                 attempts: attempts.clone(),
             });
         let server = tokio::spawn(async move { axum::serve(listener, router).await });
-        timeout(Duration::from_secs(3), submission).await??;
+        timeout(Duration::from_secs(3), async {
+            while pending_message(&restarted, "104").await {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
         server.abort();
 
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
-        assert!(!pending_thread_creation(&state, "104").await);
         Ok(())
     }
 

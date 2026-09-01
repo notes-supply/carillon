@@ -40,11 +40,6 @@ export const ExecutionProfileSchema = Type.Object({
   service_tier: Type.Optional(ServiceTierSchema),
 });
 
-const ServiceTierDefaultSchema = Type.Object({
-  model: Type.String(),
-  tier: ServiceTierSchema,
-});
-
 export interface RuntimeExecutionProfileModel {
   readonly key: string;
   readonly provider: string;
@@ -64,24 +59,6 @@ export interface ExecutionProfile {
 export interface ExecutionProfileEvidence {
   readonly requested: ExecutionProfile;
   readonly effective: ExecutionProfile | null;
-}
-
-export interface ServiceTierDefault {
-  readonly model: string;
-  readonly tier: ServiceTier;
-}
-
-export function serviceTierDefault(profile: ExecutionProfile): ServiceTierDefault | undefined {
-  return profile.service_tier === undefined
-    ? undefined
-    : { model: profile.model, tier: profile.service_tier };
-}
-
-export function serviceTierForModel(
-  selection: ServiceTierDefault | undefined,
-  model: string,
-): ServiceTier | undefined {
-  return selection?.model === model ? selection.tier : undefined;
 }
 
 export function reasoningForModel(
@@ -113,38 +90,24 @@ export async function applyPiSessionProfile(
   if (reasoning !== undefined) session.setThinkingLevel(reasoning);
 }
 
-export function setModelReasoningOverride(
-  settings: Pick<SettingsManager, "setModelThinkingLevel" | "removeModelThinkingLevel">,
-  provider: string,
-  model: string,
-  reasoning: ModelThinkingLevel | undefined,
-): void {
-  if (reasoning === undefined) settings.removeModelThinkingLevel(provider, model);
-  else settings.setModelThinkingLevel(provider, model, reasoning);
-}
-
-export async function loadServiceTierDefault(
+export async function loadExecutionProfileDefault(
   path: string,
-): Promise<ServiceTierDefault | undefined> {
+): Promise<ExecutionProfile | undefined> {
   try {
-    return await Parse(ServiceTierDefaultSchema, JSON.parse(await readFile(path, "utf8")));
+    return await Parse(ExecutionProfileSchema, JSON.parse(await readFile(path, "utf8")));
   } catch (failure: unknown) {
     if (isNodeError(failure) && failure.code === "ENOENT") return undefined;
     throw failure;
   }
 }
 
-export async function saveServiceTierDefault(
+export async function saveExecutionProfileDefault(
   path: string,
-  selection: ServiceTierDefault | undefined,
+  profile: ExecutionProfile,
 ): Promise<void> {
-  if (selection === undefined) {
-    await rm(path, { force: true });
-    return;
-  }
   const temporary = `${path}.${randomUUID()}.tmp`;
   try {
-    await writeFile(temporary, `${JSON.stringify(selection)}\n`, { mode: 0o600 });
+    await writeFile(temporary, `${JSON.stringify(profile)}\n`, { mode: 0o600 });
     await rename(temporary, path);
   } finally {
     await rm(temporary, { force: true });

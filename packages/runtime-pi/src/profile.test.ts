@@ -7,16 +7,13 @@ import { describe, expect, it } from "vitest";
 import {
   applyPiSessionProfile,
   latestExecutionProfile,
-  loadServiceTierDefault,
+  loadExecutionProfileDefault,
   type PiServiceTierStreams,
   persistExecutionProfile,
   profileEvidence,
   profileModel,
   reasoningForModel,
-  saveServiceTierDefault,
-  serviceTierDefault,
-  serviceTierForModel,
-  setModelReasoningOverride,
+  saveExecutionProfileDefault,
   streamSimpleForServiceTier,
 } from "./profile.ts";
 
@@ -103,24 +100,6 @@ describe("execution profiles", () => {
     expect(changes).toEqual(["model"]);
   });
 
-  it("clears a model reasoning override when Default is selected", async () => {
-    const root = await mkdtemp(join(tmpdir(), "carillon-profile-"));
-    try {
-      const settings = SettingsManager.create(root, root);
-      settings.setDefaultThinkingLevel("low");
-      setModelReasoningOverride(settings, "openai-codex", "gpt-test", "high");
-      await settings.flush();
-      expect(settings.getModelThinkingLevel("openai-codex", "gpt-test")).toBe("high");
-
-      setModelReasoningOverride(settings, "openai-codex", "gpt-test", undefined);
-      await settings.flush();
-      expect(settings.getModelThinkingLevel("openai-codex", "gpt-test")).toBeUndefined();
-      expect(settings.getDefaultThinkingLevel()).toBe("low");
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
   it("restores the applicable reasoning default for an existing conversation", async () => {
     const root = await mkdtemp(join(tmpdir(), "carillon-profile-"));
     try {
@@ -203,7 +182,7 @@ describe("execution profiles", () => {
   it("keeps the new-conversation default across restart without changing existing sessions", async () => {
     const root = await mkdtemp(join(tmpdir(), "carillon-profile-"));
     const sessions = join(root, "sessions");
-    const defaultPath = join(root, "service-tier.json");
+    const defaultPath = join(root, "execution-profile.json");
     await mkdir(sessions);
     try {
       const existing = SessionManager.create(root, sessions);
@@ -211,14 +190,11 @@ describe("execution profiles", () => {
         existing,
         profileEvidence(codexModel, "medium", "standard").requested,
       );
-      await saveServiceTierDefault(
-        defaultPath,
-        serviceTierDefault(profileEvidence(codexModel, "high", "fast").requested),
-      );
+      const nextDefault = profileEvidence(codexModel, "high", "fast").requested;
+      await saveExecutionProfileDefault(defaultPath, nextDefault);
 
-      const restoredDefault = await loadServiceTierDefault(defaultPath);
-      expect(serviceTierForModel(restoredDefault, "openai-codex/gpt-test")).toBe("fast");
-      expect(serviceTierForModel(restoredDefault, "openai-codex/other")).toBeUndefined();
+      const restoredDefault = await loadExecutionProfileDefault(defaultPath);
+      expect(restoredDefault).toEqual(nextDefault);
       expect(latestExecutionProfile(SessionManager.open(existingFile))?.service_tier).toBe(
         "standard",
       );

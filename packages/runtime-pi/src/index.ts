@@ -20,18 +20,14 @@ import {
   ExecutionProfileSchema,
   type ExecutionProfileEvidence,
   latestExecutionProfile,
-  loadServiceTierDefault,
+  loadExecutionProfileDefault,
   persistExecutionProfile,
   profileEvidence,
   profileModel,
   reasoningForModel,
   type RuntimeExecutionProfileModel,
-  saveServiceTierDefault,
+  saveExecutionProfileDefault,
   type ServiceTier,
-  serviceTierDefault,
-  serviceTierForModel,
-  type ServiceTierDefault,
-  setModelReasoningOverride,
 } from "./profile.ts";
 import { atomicJson } from "./atomic-json.ts";
 import { callCapability, type CapabilitySelection } from "./capability.ts";
@@ -242,12 +238,12 @@ let token: string;
 let deterministic: boolean;
 let evidenceDirectory: string;
 let sessionDirectory: string;
-let serviceTierDefaultPath: string;
+let executionProfileDefaultPath: string;
 
 let privateSettings: SettingsManager;
 let modelRuntime: ModelRuntime | undefined;
 let runtimeInstance: string;
-let defaultServiceTier: ServiceTierDefault | undefined;
+let defaultExecutionProfile: ExecutionProfile | undefined;
 const activeTurns = new Set<string>();
 
 async function startRuntime(values: readonly string[]): Promise<void> {
@@ -257,14 +253,14 @@ async function startRuntime(values: readonly string[]): Promise<void> {
   token = (await readFile(requiredArgument(args, "token-file"), "utf8")).trim();
   deterministic = args.has("deterministic");
   const privateStateDirectory = resolve(requiredArgument(args, "state-dir"));
-  serviceTierDefaultPath = join(privateStateDirectory, "service-tier.json");
+  executionProfileDefaultPath = join(privateStateDirectory, "execution-profile.json");
   evidenceDirectory = join(config.dataDir, "components", config.runtime.id, "evidence");
   sessionDirectory = join(config.resourceRoot, "sessions");
 
   await mkdir(evidenceDirectory, { recursive: true });
   await mkdir(sessionDirectory, { recursive: true });
   await mkdir(privateStateDirectory, { recursive: true, mode: 0o700 });
-  defaultServiceTier = await loadServiceTierDefault(serviceTierDefaultPath);
+  defaultExecutionProfile = await loadExecutionProfileDefault(executionProfileDefaultPath);
   privateSettings = SettingsManager.create(privateStateDirectory, privateStateDirectory);
   modelRuntime = deterministic
     ? undefined
@@ -410,15 +406,14 @@ async function listExecutionProfiles(signal?: AbortSignal): Promise<RuntimeExecu
     const selected = unavailableProfileEvidence();
     return { models, ...(selected === undefined ? {} : { selected }) };
   }
-  const requestedReasoning = reasoningForModel(privateSettings, selectedModel, undefined);
   const modelReference = `${selectedModel.provider}/${selectedModel.id}`;
+  const persistedDefault =
+    defaultExecutionProfile?.model === modelReference ? defaultExecutionProfile : undefined;
+  const requestedReasoning =
+    persistedDefault?.reasoning ?? reasoningForModel(privateSettings, selectedModel, undefined);
   return {
     models,
-    selected: profileEvidence(
-      selectedModel,
-      requestedReasoning,
-      serviceTierForModel(defaultServiceTier, modelReference),
-    ),
+    selected: profileEvidence(selectedModel, requestedReasoning, persistedDefault?.service_tier),
   };
 }
 
@@ -457,10 +452,9 @@ async function applyExecutionProfile(
       : applyPiConversationProfile(selection, selected, signal);
 
   signal.throwIfAborted();
-  privateSettings.setDefaultModelAndProvider(selected.provider, selected.id);
-  setModelReasoningOverride(privateSettings, selected.provider, selected.id, selection.reasoning);
-  await flushPrivateSettings();
-  const selectedPi = deterministic ? undefined : await selectedPiModel();
+  const selectedPi = deterministic
+    ? undefined
+    : await piModelForReference(`${selected.provider}/${selected.id}`);
   const evidence =
     selectedPi === undefined
       ? {
@@ -472,9 +466,8 @@ async function applyExecutionProfile(
           reasoningForModel(privateSettings, selectedPi, selection.reasoning),
           selection.service_tier,
         );
-  const nextDefault = serviceTierDefault(evidence.requested);
-  await saveServiceTierDefault(serviceTierDefaultPath, nextDefault);
-  defaultServiceTier = nextDefault;
+  await saveExecutionProfileDefault(executionProfileDefaultPath, evidence.requested);
+  defaultExecutionProfile = evidence.requested;
   return { scope: selection.scope, ...evidence };
 }
 
@@ -496,6 +489,8 @@ function providerName(providerId: string): string {
 }
 
 async function selectedPiModel() {
+  if (defaultExecutionProfile !== undefined)
+    return piModelForReference(defaultExecutionProfile.model);
   const provider = privateSettings.getDefaultProvider();
   const id = privateSettings.getDefaultModel();
   if (provider === undefined || id === undefined) throw new Error("no Pi model is selected");
@@ -510,34 +505,35 @@ async function piModelForReference(reference: string) {
   return model;
 }
 function unavailableProfileEvidence(): ExecutionProfileEvidence | undefined {
+  if (defaultExecutionProfile !== undefined)
+    return { requested: defaultExecutionProfile, effective: null };
   const provider = privateSettings.getDefaultProvider();
   const id = privateSettings.getDefaultModel();
   if (provider === undefined || id === undefined) return undefined;
   const reasoning =
     privateSettings.getModelThinkingLevel(provider, id) ??
     privateSettings.getDefaultThinkingLevel();
-  const model = `${provider}/${id}`;
-  const tier = serviceTierForModel(defaultServiceTier, model);
   return {
     requested: {
-      model,
+      model: `${provider}/${id}`,
       ...(reasoning === undefined ? {} : { reasoning }),
-      ...(tier === undefined ? {} : { service_tier: tier }),
     },
     effective: null,
   };
 }
 
 function selectedKey(): string | undefined {
+  if (defaultExecutionProfile !== undefined) {
+    const separator = defaultExecutionProfile.model.indexOf("/");
+    if (separator > 0)
+      return modelKey(
+        defaultExecutionProfile.model.slice(0, separator),
+        defaultExecutionProfile.model.slice(separator + 1),
+      );
+  }
   const provider = privateSettings.getDefaultProvider();
   const id = privateSettings.getDefaultModel();
   return provider === undefined || id === undefined ? undefined : modelKey(provider, id);
-}
-async function flushPrivateSettings(): Promise<void> {
-  await privateSettings.flush();
-  const [error] = privateSettings.drainErrors();
-  if (error !== undefined)
-    throw new Error(`Pi execution profile could not be persisted: ${error.error.message}`);
 }
 
 async function applyDeterministicConversationProfile(
@@ -785,11 +781,9 @@ async function executePi(request: TurnRequest): Promise<TurnResponse> {
     persistedProfile?.reasoning ??
     (defaultModel === undefined
       ? undefined
-      : reasoningForModel(privateSettings, defaultModel, undefined));
-  const selectedDefaultTier =
-    isNew && defaultModel !== undefined
-      ? serviceTierForModel(defaultServiceTier, `${defaultModel.provider}/${defaultModel.id}`)
-      : undefined;
+      : (defaultExecutionProfile?.reasoning ??
+        reasoningForModel(privateSettings, defaultModel, undefined)));
+  const selectedDefaultTier = isNew ? defaultExecutionProfile?.service_tier : undefined;
   const initialProfile =
     isNew && defaultModel !== undefined
       ? profileEvidence(defaultModel, defaultReasoning, selectedDefaultTier).requested
@@ -880,9 +874,6 @@ async function executePi(request: TurnRequest): Promise<TurnResponse> {
     });
     try {
       await session.prompt(request.input);
-      session.sessionManager.appendCustomEntry("carillon-turn-complete", {
-        correlation_id: request.correlation_id,
-      });
       return {
         correlation_id: request.correlation_id,
         output,
