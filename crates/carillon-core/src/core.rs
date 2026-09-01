@@ -38,6 +38,8 @@ use crate::{
     },
 };
 
+const PROVIDER_HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Clone)]
 struct AppState {
     config_path: PathBuf,
@@ -724,6 +726,7 @@ async fn provider_health(client: &Client, config: &LoadedConfig) -> Vec<Health> 
                     &provider.id,
                     provider.role.as_str(),
                     &provider.version,
+                    PROVIDER_HEALTH_TIMEOUT,
                 )
                 .await,
             );
@@ -746,12 +749,13 @@ async fn fetch_health(
     id: &str,
     role: &str,
     version: &str,
+    timeout: Duration,
 ) -> Health {
     let mut request = client.get(url);
     if let Some(value) = token {
         request = request.bearer_auth(value);
     }
-    match request.send().await {
+    match request.timeout(timeout).send().await {
         Ok(response) => match response.error_for_status() {
             Ok(response) => response
                 .json::<Health>()
@@ -770,6 +774,26 @@ fn unavailable(id: &str, role: &str, version: &str) -> Health {
         version: version.to_owned(),
         status: "unavailable".to_owned(),
     }
+}
+
+fn recovery_evidence_matches(evidence: Option<&RuntimeEvidence>, turn_id: &str) -> bool {
+    let Some(evidence) = evidence else {
+        return true;
+    };
+    let matches = evidence.correlation_id == turn_id
+        && evidence
+            .result
+            .as_ref()
+            .is_none_or(|result| result.correlation_id == turn_id);
+    if !matches {
+        warn!(
+            turn_id,
+            evidence_correlation_id = %evidence.correlation_id,
+            result_correlation_id = ?evidence.result.as_ref().map(|result| &result.correlation_id),
+            "runtime returned mismatched recovery evidence"
+        );
+    }
+    matches
 }
 
 async fn reconcile_pending_turns(state: &AppState) -> Result<usize> {
@@ -816,6 +840,9 @@ async fn reconcile_pending_turns(state: &AppState) -> Result<usize> {
             }
             _ => None,
         };
+        if !recovery_evidence_matches(recovered.as_ref(), &pending.turn) {
+            continue;
+        }
         match recovered {
             Some(RuntimeEvidence {
                 state: evidence_state,
@@ -1332,6 +1359,7 @@ mod tests {
             Arc,
             atomic::{AtomicBool, Ordering},
         },
+        time::Duration,
     };
 
     use anyhow::{Context, Result};
@@ -1342,14 +1370,16 @@ mod tests {
         response::{IntoResponse as _, Response},
         routing::{get, post, put},
     };
+    use reqwest::Client;
     use serde_json::json;
     use tempfile::{TempDir, tempdir};
     use tokio::{net::TcpListener, sync::Mutex, task::JoinHandle};
 
     use super::{
         AppState, ExecutionProfilesQuery, RecentQuery, accept_event, apply_execution_profile,
-        authorize_interface, execution_profiles, materialize_resources, process_event,
-        provider_snapshot, recent_turns, reconcile_pending_turns, refresh_execution_profiles,
+        authorize_interface, execution_profiles, fetch_health, materialize_resources,
+        process_event, provider_snapshot, recent_turns, reconcile_pending_turns,
+        refresh_execution_profiles,
     };
     use crate::{
         config::{
@@ -2103,6 +2133,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stalled_provider_health_is_bounded() -> Result<()> {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let Ok(_connection) = listener.accept().await else {
+                return;
+            };
+            std::future::pending::<()>().await;
+        });
+
+        let health = fetch_health(
+            &Client::new(),
+            &format!("http://{address}/health"),
+            None,
+            "stalled",
+            "runtime",
+            "test",
+            Duration::from_millis(25),
+        )
+        .await;
+        server.abort();
+        assert_eq!(health.id, "stalled");
+        assert_eq!(health.status, "unavailable");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn runtime_connect_failure_interrupts_immediately() -> Result<()> {
         let harness = ProviderHarness::new().await?;
         harness.servers[0].abort();
@@ -2285,6 +2342,74 @@ mod tests {
             .inspect_turn(&receipt.turn_id)?
             .context("reconciled turn missing")?;
         assert_eq!(inspection.state, "interrupted");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recovery_rejects_mismatched_correlation_evidence() -> Result<()> {
+        let harness = ProviderHarness::new().await?;
+        harness
+            .primary_state
+            .corrupt_response
+            .store(true, Ordering::SeqCst);
+        let mut turns = Vec::new();
+
+        for (event_id, audience, nested_mismatch) in [
+            ("mismatched-evidence", "top-level", false),
+            ("mismatched-result", "nested", true),
+        ] {
+            let receipt = process_event(
+                &harness.state,
+                &harness.config,
+                "interface-a",
+                event(event_id, audience, "completed remotely"),
+            )
+            .await?;
+            assert_eq!(receipt.state, "processing");
+
+            let result = RuntimeTurnResponse {
+                correlation_id: if nested_mismatch {
+                    "other-turn".to_owned()
+                } else {
+                    receipt.turn_id.clone()
+                },
+                output: "must not be delivered".to_owned(),
+                continuation_ref: "must-not-be-saved".to_owned(),
+                native: json!({ "corrupt": true }),
+                capability_activity: Vec::new(),
+            };
+            harness.primary_state.evidence.lock().await.insert(
+                receipt.turn_id.clone(),
+                RuntimeEvidence {
+                    correlation_id: if nested_mismatch {
+                        receipt.turn_id.clone()
+                    } else {
+                        "other-turn".to_owned()
+                    },
+                    state: "completed".to_owned(),
+                    error: None,
+                    result: Some(result),
+                },
+            );
+            turns.push((receipt.turn_id, audience));
+        }
+
+        assert_eq!(reconcile_pending_turns(&harness.state).await?, 2);
+        for (turn_id, audience) in turns {
+            let inspection = harness
+                .state
+                .database
+                .inspect_turn(&turn_id)?
+                .context("pending turn missing")?;
+            assert_eq!(inspection.state, "processing");
+            assert!(
+                harness
+                    .state
+                    .database
+                    .continuation("interface-a", "default", audience)?
+                    .is_none()
+            );
+        }
         Ok(())
     }
 

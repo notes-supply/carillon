@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { persistExecutionProfile } from "./profile.ts";
-import { createPiExecutionSession } from "./session.ts";
+import { createPiExecutionSession, recoverPiTurn } from "./session.ts";
 
 const model: Model<"openai-responses"> = {
   id: "observer-model",
@@ -44,6 +44,36 @@ const assistantMessage: AssistantMessage = {
   stopReason: "stop",
   timestamp: 1_787_846_400_000,
 };
+
+it("reconstructs capability activity from native Pi tool results", async () => {
+  const root = await mkdtemp(join(tmpdir(), "carillon-recovery-"));
+  const sessions = join(root, "sessions");
+  await mkdir(sessions);
+  try {
+    const manager = SessionManager.create(root, sessions);
+    manager.appendMessage({
+      role: "toolResult",
+      toolCallId: "capability-call",
+      toolName: "carillon_echo",
+      content: [{ type: "text", text: "echoed" }],
+      details: { provider: "echo-capability", operation: "echo", native_ref: "capability-1" },
+      isError: false,
+      timestamp: 1_787_846_399_000,
+    });
+    manager.appendMessage(assistantMessage);
+
+    expect(recoverPiTurn(manager.getEntries())).toEqual({
+      output: "observed",
+      stopReason: "stop",
+      error: undefined,
+      capabilityActivity: [
+        { provider: "echo-capability", operation: "echo", native_ref: "capability-1" },
+      ],
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 it("preserves data extensions and native assistant metadata through the headless Pi path", async () => {
   const resourceRoot = await mkdtemp(join(tmpdir(), "carillon-headless-pi-"));

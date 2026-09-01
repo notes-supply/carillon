@@ -31,7 +31,7 @@ import {
   type ServiceTierDefault,
 } from "./profile.ts";
 import { nativeSessionId } from "./namespace.ts";
-import { createPiExecutionSession } from "./session.ts";
+import { createPiExecutionSession, recoverPiTurn } from "./session.ts";
 
 registerBunOAuthFlows();
 
@@ -248,21 +248,7 @@ const FileConfigSchema = Type.Object({
   providers: Type.Array(ProviderSchema),
 });
 const NativeExecutionSchema = Type.Object({ runtime_instance: Type.String() });
-const SessionEntrySchema = Type.Object({
-  type: Type.String(),
-  customType: Type.Optional(Type.String()),
-  data: Type.Optional(Type.Unknown()),
-  message: Type.Optional(Type.Unknown()),
-});
 const CorrelationMarkerSchema = Type.Object({ correlation_id: Type.String() });
-const SessionEntriesSchema = Type.Array(SessionEntrySchema);
-const AssistantMessageSchema = Type.Object({
-  role: Type.Literal("assistant"),
-  content: Type.Array(Type.Unknown()),
-  stopReason: Type.String(),
-  errorMessage: Type.Optional(Type.String()),
-});
-const TextBlockSchema = Type.Object({ type: Type.Literal("text"), text: Type.String() });
 
 let config: Config;
 let token: string;
@@ -1013,7 +999,7 @@ async function reconcileEvidence(evidence: Evidence | undefined): Promise<Eviden
     }
   } else {
     const manager = SessionManager.open(validateContinuation(evidence.continuation_ref));
-    const entries = Parse(SessionEntriesSchema, manager.getEntries());
+    const entries = manager.getEntries();
     let markerIndex = -1;
     for (const [index, entry] of entries.entries()) {
       if (entry.type !== "custom" || entry.customType !== "carillon-turn") continue;
@@ -1025,26 +1011,9 @@ async function reconcileEvidence(evidence: Evidence | undefined): Promise<Eviden
       }
     }
     if (markerIndex >= 0) {
-      let output = "";
-      let stopReason: string | undefined;
-      let error: string | undefined;
-      for (const entry of entries.slice(markerIndex + 1)) {
-        if (entry.type !== "message" || entry.message === undefined) continue;
-        try {
-          const message = Parse(AssistantMessageSchema, entry.message);
-          stopReason = message.stopReason;
-          error = message.errorMessage;
-          for (const content of message.content) {
-            try {
-              output += Parse(TextBlockSchema, content).text;
-            } catch {
-              // Non-text assistant content is native evidence, not Discord output.
-            }
-          }
-        } catch {
-          // User, tool, and custom messages are not terminal assistant evidence.
-        }
-      }
+      const { output, stopReason, error, capabilityActivity } = recoverPiTurn(
+        entries.slice(markerIndex + 1),
+      );
       if (stopReason !== undefined && stopReason !== "toolUse") {
         if (stopReason === "error" || stopReason === "aborted") {
           const interrupted: Evidence = {
@@ -1069,7 +1038,7 @@ async function reconcileEvidence(evidence: Evidence | undefined): Promise<Eviden
               message_count: entries.length,
               prior_evidence: evidence.native,
             },
-            capability_activity: [],
+            capability_activity: capabilityActivity,
           },
         };
         await writeEvidence(completed);

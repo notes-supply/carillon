@@ -2,6 +2,7 @@ import {
   createAgentSession,
   DefaultResourceLoader,
   type ModelRuntime,
+  type SessionEntry,
   type SessionManager,
   SettingsManager,
   type ToolDefinition,
@@ -20,6 +21,34 @@ interface PiExecutionSessionOptions {
   readonly thinkingLevel?: ModelThinkingLevel;
   readonly serviceTier?: ServiceTier;
   readonly customTools?: ToolDefinition[];
+}
+
+export interface RecoveredPiTurn {
+  readonly output: string;
+  readonly stopReason: string | undefined;
+  readonly error: string | undefined;
+  readonly capabilityActivity: readonly unknown[];
+}
+
+export function recoverPiTurn(entries: readonly SessionEntry[]): RecoveredPiTurn {
+  let output = "";
+  let stopReason: string | undefined;
+  let error: string | undefined;
+  const capabilityActivity: unknown[] = [];
+  for (const entry of entries) {
+    if (entry.type !== "message") continue;
+    const message = entry.message;
+    if (message.role === "toolResult") {
+      if (message.toolName === "carillon_echo" && !message.isError && message.details !== undefined)
+        capabilityActivity.push(message.details);
+      continue;
+    }
+    if (message.role !== "assistant") continue;
+    stopReason = message.stopReason;
+    error = message.errorMessage;
+    for (const content of message.content) if (content.type === "text") output += content.text;
+  }
+  return { output, stopReason, error, capabilityActivity };
 }
 
 export async function createPiExecutionSession(options: PiExecutionSessionOptions) {
