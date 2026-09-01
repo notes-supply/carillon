@@ -303,7 +303,7 @@ struct DiscordState {
 struct DiscordParticipation {
     threads: BTreeMap<String, String>,
     #[serde(default)]
-    created_threads: BTreeMap<String, String>,
+    pending_thread_creations: BTreeMap<String, MessagePlan>,
 }
 
 #[derive(Clone, Debug)]
@@ -312,7 +312,7 @@ struct InboundMessage {
     native: Value,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 struct MessagePlan {
     event_id: String,
     guild_id: String,
@@ -421,17 +421,13 @@ pub async fn serve_discord(
         .chat_input("model", "Choose provider, model, and supported settings")
         .await?;
     let (messages, receiver) = mpsc::channel(64);
+    let queues = Arc::new(Mutex::new(BTreeMap::new()));
     let gateway_http = http.clone();
     let delivery_state = state.clone();
-    let worker_state = state.clone();
-    let worker_http = http.clone();
-    tokio::spawn(async move {
-        message_worker(worker_state, worker_http, receiver).await;
-    });
+    start_message_worker(state.clone(), http.clone(), queues.clone(), receiver);
     tokio::spawn(async move {
         delivery_loop(delivery_state, http).await;
     });
-
     info!(url = %provider.url, deterministic, "Discord interface provider ready");
     tokio::select! {
         result = gateway_loop(state, discord_token, gateway_http, messages) => {
@@ -671,7 +667,7 @@ async fn prepare_discord_conversation(
 ) -> Result<ResolvedMessage> {
     let target = if plan.create_thread {
         let thread = plan.source_message_id.clone();
-        remember_thread_creation(state, &plan.source_message_id, &thread).await?;
+        remember_thread_creation(state, &plan).await?;
         if !discord_message_thread_exists(http, &plan).await? {
             let channel = plan
                 .source_channel_id
@@ -773,23 +769,31 @@ fn resolved_message(plan: MessagePlan, target: String) -> ResolvedMessage {
     }
 }
 
-async fn remember_thread_creation(
-    state: &DiscordState,
-    message_id: &str,
-    thread_id: &str,
-) -> Result<()> {
+async fn remember_thread_creation(state: &DiscordState, plan: &MessagePlan) -> Result<()> {
     let mut participation = state.participation.lock().await;
     if participation
-        .created_threads
-        .get(message_id)
-        .is_some_and(|created| created == thread_id)
+        .pending_thread_creations
+        .get(&plan.source_message_id)
+        .is_some_and(|pending| pending == plan)
     {
         return Ok(());
     }
     participation
-        .created_threads
-        .insert(message_id.to_owned(), thread_id.to_owned());
+        .pending_thread_creations
+        .insert(plan.source_message_id.clone(), plan.clone());
     persist_json(&state.participation_path, &*participation)
+}
+
+async fn clear_thread_creation(state: &DiscordState, message_id: &str) -> Result<()> {
+    let mut participation = state.participation.lock().await;
+    if participation
+        .pending_thread_creations
+        .remove(message_id)
+        .is_some()
+    {
+        persist_json(&state.participation_path, &*participation)?;
+    }
+    Ok(())
 }
 
 async fn adopt_thread(
@@ -847,9 +851,9 @@ async fn discord_parent_channel(
 async fn message_worker(
     state: DiscordState,
     http: Arc<DiscordHttp>,
+    queues: AudienceMessageQueues,
     mut messages: mpsc::Receiver<InboundMessage>,
 ) {
-    let queues = Arc::new(Mutex::new(BTreeMap::new()));
     while let Some(mut inbound) = messages.recv().await {
         let config = match LoadedConfig::load(&state.config_path) {
             Ok(config) => config,
@@ -891,24 +895,85 @@ async fn message_worker(
             continue;
         };
         let source = format!("{}:{}", plan.source_channel_id, plan.source_message_id);
-        let resolved = match prepare_discord_conversation(&state, &http, plan).await {
-            Ok(resolved) => resolved,
+        match queue_message_plan(&state, &http, &queues, plan).await {
+            Ok(()) => {}
             Err(failure) => {
                 terminal_feedback(&http, discord, &source, Feedback::Failed).await;
                 warn!(error = %failure, "Discord conversation resolution failed");
-                continue;
             }
-        };
-        let audience = resolved.event.audience_id.clone();
-        if queue_resolved_message(&mut *queues.lock().await, resolved) {
-            tokio::spawn(audience_message_worker(
-                state.clone(),
-                http.clone(),
-                queues.clone(),
-                audience,
-            ));
         }
     }
+}
+
+fn start_message_worker(
+    state: DiscordState,
+    http: Arc<DiscordHttp>,
+    queues: AudienceMessageQueues,
+    receiver: mpsc::Receiver<InboundMessage>,
+) {
+    tokio::spawn(async move {
+        resume_thread_creations(&state, &http, &queues).await;
+        message_worker(state, http, queues, receiver).await;
+    });
+}
+
+async fn resume_thread_creations(
+    state: &DiscordState,
+    http: &Arc<DiscordHttp>,
+    queues: &AudienceMessageQueues,
+) {
+    let plans = state
+        .participation
+        .lock()
+        .await
+        .pending_thread_creations
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    for plan in plans {
+        let state = state.clone();
+        let http = http.clone();
+        let queues = queues.clone();
+        tokio::spawn(async move {
+            replay_thread_creation(state, http, queues, plan).await;
+        });
+    }
+}
+
+async fn replay_thread_creation(
+    state: DiscordState,
+    http: Arc<DiscordHttp>,
+    queues: AudienceMessageQueues,
+    plan: MessagePlan,
+) {
+    loop {
+        match queue_message_plan(&state, &http, &queues, plan.clone()).await {
+            Ok(()) => return,
+            Err(failure) => {
+                warn!(error = %failure, event_id = %plan.event_id, "retrying persisted Discord thread creation");
+                sleep(Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+
+async fn queue_message_plan(
+    state: &DiscordState,
+    http: &Arc<DiscordHttp>,
+    queues: &AudienceMessageQueues,
+    plan: MessagePlan,
+) -> Result<()> {
+    let resolved = prepare_discord_conversation(state, http, plan).await?;
+    let audience = resolved.event.audience_id.clone();
+    if queue_resolved_message(&mut *queues.lock().await, resolved) {
+        tokio::spawn(audience_message_worker(
+            state.clone(),
+            http.clone(),
+            queues.clone(),
+            audience,
+        ));
+    }
+    Ok(())
 }
 
 fn queue_resolved_message(
@@ -975,9 +1040,16 @@ async fn submit_resolved_message(
     }
     match receipt {
         Ok(receipt) if receipt.duplicate && receipt.state != "processing" => {
+            if let Err(failure) = clear_thread_creation(state, &resolved.event.event_id).await {
+                warn!(error = %failure, "clear submitted Discord thread creation intent");
+            }
             clear_processing_feedback(http, discord, &resolved.event.feedback_target_id).await;
         }
-        Ok(_) => {}
+        Ok(_) => {
+            if let Err(failure) = clear_thread_creation(state, &resolved.event.event_id).await {
+                warn!(error = %failure, "clear submitted Discord thread creation intent");
+            }
+        }
         Err(failure) => {
             warn!(error = %failure.message, "Discord event submission failed");
             terminal_feedback(
@@ -2169,6 +2241,7 @@ fn persist_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 mod tests {
     use std::{
         collections::BTreeMap,
+        fs,
         path::PathBuf,
         sync::{
             Arc,
@@ -2185,12 +2258,14 @@ mod tests {
         routing::post,
     };
     use serde_json::{Value, json};
+    use tempfile::tempdir;
     use tokio::{net::TcpListener, sync::Mutex};
 
     use super::{
         DISCORD_MESSAGE_LIMIT, DiscordParticipation, DiscordState, MessagePlan, ResolvedMessage,
-        ServiceError, deferred_model_response, profile_panel, queue_resolved_message,
-        resolve_message, resolved_message, split_discord_message, submit_event, thread_title,
+        ServiceError, clear_thread_creation, deferred_model_response, profile_panel,
+        queue_resolved_message, remember_thread_creation, resolve_message, resolved_message,
+        split_discord_message, submit_event, thread_title,
     };
     use crate::{
         config::{DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute},
@@ -2408,6 +2483,54 @@ mod tests {
         server.abort();
         assert!(receipt.duplicate);
         assert_eq!(attempts.load(Ordering::SeqCst), 4);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn thread_creation_intent_survives_restart_until_submission() -> anyhow::Result<()> {
+        let directory = tempdir()?;
+        let participation_path = directory.path().join("participation.json");
+        let state = DiscordState {
+            config_path: PathBuf::new(),
+            core_url: String::new(),
+            provider_id: "discord".to_owned(),
+            token: "token".to_owned(),
+            instance_id: "instance".to_owned(),
+            client: reqwest::Client::new(),
+            participation_path: participation_path.clone(),
+            participation: Arc::new(Mutex::new(DiscordParticipation::default())),
+        };
+        let plan = MessagePlan {
+            event_id: "message".to_owned(),
+            guild_id: "guild".to_owned(),
+            user_id: "user".to_owned(),
+            agent_id: "default".to_owned(),
+            source_channel_id: "channel".to_owned(),
+            source_message_id: "message".to_owned(),
+            route_channel_id: "channel".to_owned(),
+            current_channel_id: "channel".to_owned(),
+            content: "hello".to_owned(),
+            create_thread: true,
+            adopt_thread: false,
+            native: json!({ "message": "message" }),
+        };
+
+        remember_thread_creation(&state, &plan).await?;
+        let persisted: DiscordParticipation =
+            serde_json::from_slice(&fs::read(&participation_path)?)?;
+        assert_eq!(
+            persisted.pending_thread_creations.get("message"),
+            Some(&plan)
+        );
+
+        let restarted = DiscordState {
+            participation: Arc::new(Mutex::new(persisted)),
+            ..state
+        };
+        clear_thread_creation(&restarted, "message").await?;
+        let completed: DiscordParticipation =
+            serde_json::from_slice(&fs::read(&participation_path)?)?;
+        assert!(completed.pending_thread_creations.is_empty());
         Ok(())
     }
 

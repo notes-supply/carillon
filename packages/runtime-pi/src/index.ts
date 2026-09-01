@@ -32,6 +32,7 @@ import {
 } from "./profile.ts";
 import { atomicJson } from "./atomic-json.ts";
 import { capabilityCallId, nativeSessionId } from "./namespace.ts";
+import { serialize } from "./serial.ts";
 import { createPiExecutionSession, recoverPiTurn } from "./session.ts";
 
 registerBunOAuthFlows();
@@ -264,7 +265,6 @@ let privateSettings: SettingsManager;
 let modelRuntime: ModelRuntime | undefined;
 let runtimeInstance: string;
 let defaultServiceTier: ServiceTierDefault | undefined;
-let queue: Promise<void> = Promise.resolve();
 const activeTurns = new Set<string>();
 
 async function startRuntime(values: readonly string[]): Promise<void> {
@@ -362,7 +362,8 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
       return;
     }
     try {
-      const result = await serialize(() => applyExecutionProfile(selection));
+      const signal = requestSignal(response);
+      const result = await serialize(() => applyExecutionProfile(selection, signal), signal);
       if (result === undefined) {
         writeJson(response, 400, { error: "model is not available" });
       } else {
@@ -451,8 +452,10 @@ async function refreshExecutionProfiles(): Promise<RuntimeExecutionProfiles> {
 
 async function applyExecutionProfile(
   selection: RuntimeExecutionProfileSelection,
+  signal: AbortSignal,
 ): Promise<ExecutionProfileApplication | undefined> {
   const profiles = await listExecutionProfiles();
+  signal.throwIfAborted();
   const selected = profiles.models.find((model) => model.key === selection.key);
   if (selected === undefined) return undefined;
   if (selection.reasoning !== undefined && !selected.reasoning.includes(selection.reasoning))
@@ -467,9 +470,10 @@ async function applyExecutionProfile(
 
   if (selection.scope === "current_conversation")
     return deterministic
-      ? applyDeterministicConversationProfile(selection, selected)
-      : applyPiConversationProfile(selection, selected);
+      ? applyDeterministicConversationProfile(selection, selected, signal)
+      : applyPiConversationProfile(selection, selected, signal);
 
+  signal.throwIfAborted();
   privateSettings.setDefaultModelAndProvider(selected.provider, selected.id);
   if (selection.reasoning !== undefined)
     privateSettings.setModelThinkingLevel(selected.provider, selected.id, selection.reasoning);
@@ -558,10 +562,12 @@ async function flushPrivateSettings(): Promise<void> {
 async function applyDeterministicConversationProfile(
   selection: RuntimeExecutionProfileSelection,
   model: RuntimeExecutionProfileModel,
+  signal: AbortSignal,
 ): Promise<ExecutionProfileApplication> {
   const sessionPath = profileContinuationPath(selection);
   const session = await readDeterministicSession(sessionPath);
   const profile = { model: `${model.provider}/${model.id}` };
+  signal.throwIfAborted();
   await atomicJson(sessionPath, { ...session, profile });
   return {
     scope: selection.scope,
@@ -574,6 +580,7 @@ async function applyDeterministicConversationProfile(
 async function applyPiConversationProfile(
   selection: RuntimeExecutionProfileSelection,
   selected: RuntimeExecutionProfileModel,
+  signal: AbortSignal,
 ): Promise<ExecutionProfileApplication> {
   const resources = selection.resources;
   if (resources === null || resources === undefined)
@@ -584,6 +591,7 @@ async function applyPiConversationProfile(
   if (model === undefined) throw new Error("selected Pi model is unavailable");
   const requested = profileEvidence(model, selection.reasoning, selection.service_tier).requested;
   if (selection.continuation_ref === null || selection.continuation_ref === undefined) {
+    signal.throwIfAborted();
     const manager = SessionManager.create(config.workspace, sessionDirectory, {
       id: profileNativeSessionId(selection),
     });
@@ -614,6 +622,7 @@ async function applyPiConversationProfile(
     assertExtensionsLoaded(extensionsResult.errors);
     await session.setModel(model);
     if (selection.reasoning !== undefined) session.setThinkingLevel(selection.reasoning);
+    signal.throwIfAborted();
     const sessionFile = persistExecutionProfile(session.sessionManager, requested);
     const effective = profileEvidence(
       session.model ?? model,
@@ -1141,18 +1150,10 @@ function authorized(request: IncomingMessage): boolean {
   return timingSafeEqual(expected, actual);
 }
 
-async function serialize<T>(operation: () => Promise<T>): Promise<T> {
-  const prior = queue;
-  let release = (): void => undefined;
-  queue = new Promise<void>((resolveQueue) => {
-    release = resolveQueue;
-  });
-  await prior;
-  try {
-    return await operation();
-  } finally {
-    release();
-  }
+function requestSignal(response: ServerResponse): AbortSignal {
+  const controller = new AbortController();
+  response.once("close", () => controller.abort());
+  return controller.signal;
 }
 
 async function readJson(request: IncomingMessage): Promise<unknown> {

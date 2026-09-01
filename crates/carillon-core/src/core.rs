@@ -956,13 +956,10 @@ async fn reconcile_pending_turns(state: &AppState) -> Result<usize> {
                 continue;
             }
         };
-        let evidence = state
-            .client
-            .get(format!("{}/v1/evidence/{}", provider.url, pending.turn))
-            .bearer_auth(config.credential(&provider.id)?)
-            .timeout(Duration::from_secs(5))
-            .send()
-            .await;
+        let Some(evidence) = recovery_evidence_request(state, &config, &pending, provider).await
+        else {
+            continue;
+        };
         let recovered = match evidence {
             Ok(response) if response.status() == StatusCode::OK => {
                 response.json::<ProviderEvidence>().await.ok()
@@ -1032,6 +1029,35 @@ async fn reconcile_pending_turns(state: &AppState) -> Result<usize> {
         }
     }
     Ok(state.database.pending_turns()?.len())
+}
+
+async fn recovery_evidence_request(
+    state: &AppState,
+    config: &LoadedConfig,
+    pending: &PendingTurn,
+    provider: &Provider,
+) -> Option<reqwest::Result<reqwest::Response>> {
+    let credential = match config.credential(&provider.id) {
+        Ok(credential) => credential,
+        Err(failure) => {
+            warn!(
+                turn_id = %pending.turn,
+                provider = %provider.id,
+                error = %failure,
+                "execution provider credential unavailable during recovery"
+            );
+            return None;
+        }
+    };
+    Some(
+        state
+            .client
+            .get(format!("{}/v1/evidence/{}", provider.url, pending.turn))
+            .bearer_auth(credential)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await,
+    )
 }
 
 fn authorize(headers: &HeaderMap, expected_hash: &str) -> Result<(), ApiError> {
@@ -2872,6 +2898,40 @@ mod tests {
             .context("reconciled turn missing")?;
         assert_eq!(inspection.state, "completed");
         assert_eq!(inspection.output.as_deref(), Some("runtime-a:recovered"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recovery_skips_a_provider_with_missing_credentials() -> Result<()> {
+        let mut harness = ProviderHarness::new().await?;
+        harness
+            .primary_state
+            .corrupt_response
+            .store(true, Ordering::SeqCst);
+        harness
+            .send("interface-a", "missing-credential-a", "one", "first")
+            .await?;
+        harness.select_alternate_runtime()?;
+        harness
+            .alternate_state
+            .corrupt_response
+            .store(true, Ordering::SeqCst);
+        harness
+            .send("interface-a", "missing-credential-b", "two", "second")
+            .await?;
+        fs::remove_file(harness.config.root.join("credentials/runtime-a.token"))?;
+
+        assert_eq!(reconcile_pending_turns(&harness.state).await?, 1);
+        let pending = harness.state.database.pending_turns()?;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].provider, "runtime-a");
+        let recovered = harness
+            .state
+            .database
+            .recent_turns(Some("missing-credential-b"), 1)?
+            .pop()
+            .context("second pending turn missing")?;
+        assert_eq!(recovered.state, "completed");
         Ok(())
     }
 }
