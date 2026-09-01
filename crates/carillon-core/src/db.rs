@@ -118,7 +118,7 @@ impl Database {
                 interface_id TEXT NOT NULL,
                 target_id TEXT NOT NULL,
                 feedback_target_id TEXT NOT NULL,
-                content TEXT NOT NULL,
+                content TEXT,
                 state TEXT NOT NULL,
                 native_ref TEXT,
                 claim_owner TEXT,
@@ -260,11 +260,30 @@ impl Database {
         if state != "failed" && state != "interrupted" {
             bail!("invalid terminal turn state {state}");
         }
-        self.connect()?.execute(
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let now = timestamp()?;
+        let changed = transaction.execute(
             "UPDATE turns SET state = ?2, error = ?3, finished_at = ?4
              WHERE id = ?1 AND state IN ('accepted', 'processing')",
-            params![turn_id, state, error, timestamp()?],
+            params![turn_id, state, error, now],
         )?;
+        if changed == 1 {
+            let inserted = transaction.execute(
+                "INSERT INTO deliveries(
+                    turn_id, interface_id, target_id, feedback_target_id, content, state, updated_at
+                 ) SELECT t.id, t.interface_id, e.delivery_target_id, e.feedback_target_id,
+                          NULL, 'pending', ?2
+                 FROM turns t
+                 JOIN events e ON e.interface_id = t.interface_id AND e.event_id = t.event_id
+                 WHERE t.id = ?1",
+                params![turn_id, now],
+            )?;
+            if inserted != 1 {
+                bail!("terminal turn {turn_id} has no event for interface feedback");
+            }
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -629,7 +648,7 @@ mod tests {
         let delivery = database
             .claim_delivery("discord", "instance-a")?
             .context("completed turn did not create a delivery")?;
-        assert_eq!(delivery.content, "reply");
+        assert_eq!(delivery.content.as_deref(), Some("reply"));
         assert_eq!(
             database.reconcile_delivery_claims("discord", "instance-b")?,
             vec!["channel-1:message-1"]

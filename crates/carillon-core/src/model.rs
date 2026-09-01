@@ -229,7 +229,7 @@ pub struct Delivery {
     pub turn_id: String,
     pub target_id: String,
     pub feedback_target_id: String,
-    pub content: String,
+    pub content: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

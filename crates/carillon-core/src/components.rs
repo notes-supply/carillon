@@ -415,25 +415,32 @@ async fn simulate(
         feedback.push("processing".to_owned());
     }
     let receipt = submit_event(&state, &resolved.event).await?;
-    let delivery = if receipt.state == "completed" && !receipt.duplicate {
+    let delivery = if !receipt.duplicate && receipt.state != "processing" {
         let delivery = claim_core_delivery(&state).await?;
         if let Some(value) = &delivery {
             acknowledge_core_delivery(
                 &state,
                 value.id,
                 DeliveryOutcome::Delivered,
-                Some(format!("local:{}", resolved.event.event_id)),
+                value
+                    .content
+                    .as_ref()
+                    .map(|_| format!("local:{}", resolved.event.event_id)),
             )
             .await?;
             if config.discord()?.reactions {
-                feedback.push("delivered".to_owned());
+                feedback.push(
+                    if value.content.is_some() {
+                        "delivered"
+                    } else {
+                        "failed"
+                    }
+                    .to_owned(),
+                );
             }
         }
         delivery
     } else {
-        if receipt.state == "interrupted" && config.discord()?.reactions {
-            feedback.push("failed".to_owned());
-        }
         None
     };
     Ok(Json(SimulateResponse {
@@ -809,15 +816,6 @@ async fn message_worker(
         match receipt {
             Ok(receipt) if receipt.duplicate => {
                 clear_processing_feedback(&http, discord, &resolved.event.feedback_target_id).await;
-            }
-            Ok(receipt) if receipt.state == "interrupted" => {
-                terminal_feedback(
-                    &http,
-                    discord,
-                    &resolved.event.feedback_target_id,
-                    Feedback::Failed,
-                )
-                .await;
             }
             Ok(_) => {}
             Err(failure) => {
@@ -1722,39 +1720,42 @@ async fn delivery_loop(state: DiscordState, http: Arc<DiscordHttp>) {
     loop {
         match claim_core_delivery(&state).await {
             Ok(Some(delivery)) => {
-                let target = delivery.target_id.parse::<Id<ChannelMarker>>();
-                let (outcome, native_ref, feedback) = match target {
-                    Ok(channel_id) => {
-                        let mut native_ref = None;
-                        let mut failure = None;
-                        for chunk in split_discord_message(&delivery.content) {
-                            match http.create_message(channel_id).content(chunk).await {
-                                Ok(message) => {
-                                    if native_ref.is_none() {
-                                        native_ref = message
-                                            .model()
-                                            .await
-                                            .map(|value| value.id.to_string())
-                                            .ok();
+                let (outcome, native_ref, feedback) = if let Some(content) = &delivery.content {
+                    match delivery.target_id.parse::<Id<ChannelMarker>>() {
+                        Ok(channel_id) => {
+                            let mut native_ref = None;
+                            let mut failure = None;
+                            for chunk in split_discord_message(content) {
+                                match http.create_message(channel_id).content(chunk).await {
+                                    Ok(message) => {
+                                        if native_ref.is_none() {
+                                            native_ref = message
+                                                .model()
+                                                .await
+                                                .map(|value| value.id.to_string())
+                                                .ok();
+                                        }
+                                    }
+                                    Err(error) => {
+                                        failure = Some(error);
+                                        break;
                                     }
                                 }
-                                Err(error) => {
-                                    failure = Some(error);
-                                    break;
-                                }
+                            }
+                            if let Some(failure) = failure {
+                                warn!(error = %failure, delivery_id = delivery.id, "Discord delivery outcome uncertain");
+                                (DeliveryOutcome::Uncertain, native_ref, Feedback::Uncertain)
+                            } else {
+                                (DeliveryOutcome::Delivered, native_ref, Feedback::Delivered)
                             }
                         }
-                        if let Some(failure) = failure {
-                            warn!(error = %failure, delivery_id = delivery.id, "Discord delivery outcome uncertain");
-                            (DeliveryOutcome::Uncertain, native_ref, Feedback::Uncertain)
-                        } else {
-                            (DeliveryOutcome::Delivered, native_ref, Feedback::Delivered)
+                        Err(failure) => {
+                            warn!(error = %failure, "invalid Discord delivery target");
+                            (DeliveryOutcome::Uncertain, None, Feedback::Uncertain)
                         }
                     }
-                    Err(failure) => {
-                        warn!(error = %failure, "invalid Discord delivery target");
-                        (DeliveryOutcome::Uncertain, None, Feedback::Uncertain)
-                    }
+                } else {
+                    (DeliveryOutcome::Delivered, None, Feedback::Failed)
                 };
                 if let Err(failure) =
                     acknowledge_core_delivery(&state, delivery.id, outcome, native_ref).await

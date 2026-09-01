@@ -1779,7 +1779,7 @@ mod tests {
             .database
             .claim_delivery("interface-a", "first-process")?
             .context("first interface delivery missing")?;
-        assert_eq!(delivery.content, "runtime-a:first");
+        assert_eq!(delivery.content.as_deref(), Some("runtime-a:first"));
         harness.state.database.acknowledge_delivery(
             delivery.id,
             "interface-a",
@@ -1797,7 +1797,7 @@ mod tests {
             .database
             .claim_delivery("interface-b", "second-process")?
             .context("second interface delivery missing")?;
-        assert_eq!(delivery.content, "runtime-b:second");
+        assert_eq!(delivery.content.as_deref(), Some("runtime-b:second"));
         Ok(())
     }
 
@@ -2114,7 +2114,52 @@ mod tests {
             .database
             .claim_delivery("interface-a", "adapter")?
             .context("reconciled delivery missing")?;
-        assert_eq!(delivery.content, "runtime-a:completed remotely");
+        assert_eq!(
+            delivery.content.as_deref(),
+            Some("runtime-a:completed remotely")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn runtime_reconciliation_publishes_interrupted_feedback() -> Result<()> {
+        let harness = ProviderHarness::new().await?;
+        harness
+            .primary_state
+            .corrupt_response
+            .store(true, Ordering::SeqCst);
+
+        let receipt = process_event(
+            &harness.state,
+            &harness.config,
+            "interface-a",
+            event("interrupted", "conversation", "lost remotely"),
+        )
+        .await?;
+        assert_eq!(receipt.state, "processing");
+        harness.primary_state.evidence.lock().await.insert(
+            receipt.turn_id.clone(),
+            RuntimeEvidence {
+                correlation_id: receipt.turn_id.clone(),
+                state: "interrupted".to_owned(),
+                error: Some("runtime interrupted".to_owned()),
+                result: None,
+            },
+        );
+
+        assert_eq!(reconcile_pending_turns(&harness.state).await?, 0);
+        let delivery = harness
+            .state
+            .database
+            .claim_delivery("interface-a", "adapter")?
+            .context("terminal feedback delivery missing")?;
+        assert!(delivery.content.is_none());
+        let inspection = harness
+            .state
+            .database
+            .inspect_turn(&receipt.turn_id)?
+            .context("reconciled turn missing")?;
+        assert_eq!(inspection.state, "interrupted");
         Ok(())
     }
 

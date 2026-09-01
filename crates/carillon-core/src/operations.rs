@@ -11,6 +11,7 @@ use anyhow::{Context, Result, bail};
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use fs2::FileExt;
 use tar::{Archive, Builder};
+use uuid::Uuid;
 
 use crate::{
     config::{
@@ -275,15 +276,35 @@ pub fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
         );
     }
     let database = Database::open(&config.value.data_dir.join("carillon.sqlite3"))?;
-    database.record_backup(&destination)?;
+    let file_name = destination
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("carillon-backup");
+    let temporary = destination.with_file_name(format!(".{file_name}.partial-{}", Uuid::now_v7()));
+    if let Err(failure) = write_backup_archive(&config.root, &temporary) {
+        let _ = fs::remove_file(&temporary);
+        return Err(failure);
+    }
+    if let Err(failure) = fs::rename(&temporary, &destination) {
+        let _ = fs::remove_file(&temporary);
+        return Err(failure.into());
+    }
+    if let Err(failure) = database.record_backup(&destination) {
+        let _ = fs::remove_file(&destination);
+        return Err(failure);
+    }
+    Ok(())
+}
+
+fn write_backup_archive(root: &Path, destination: &Path) -> Result<()> {
     let file = fs::OpenOptions::new()
         .create_new(true)
         .write(true)
         .mode(0o600)
-        .open(&destination)?;
+        .open(destination)?;
     let encoder = GzEncoder::new(BufWriter::new(file), Compression::default());
     let mut archive = Builder::new(encoder);
-    append_directory(&mut archive, &config.root, &config.root)?;
+    append_directory(&mut archive, root, root)?;
     archive.finish()?;
     let encoder = archive.into_inner()?;
     let mut writer = encoder.finish()?;
@@ -398,7 +419,10 @@ fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, os::unix::fs::PermissionsExt as _};
+    use std::{
+        fs,
+        os::unix::fs::{PermissionsExt as _, symlink},
+    };
 
     use anyhow::Result;
     use tempfile::tempdir;
@@ -407,6 +431,7 @@ mod tests {
     use crate::config::{
         DiscordActivation, DiscordConversation, DiscordRoute, LoadedConfig, ProviderRole,
     };
+    use crate::db::Database;
 
     fn route() -> DiscordRoute {
         DiscordRoute {
@@ -496,8 +521,19 @@ mod tests {
             44_000,
         )?;
         fs::write(root.join("pi/auth.json"), "private runtime credential")?;
+        let unsupported = root.join("unsupported-link");
+        symlink(root.join("pi/auth.json"), &unsupported)?;
         let archive = directory.path().join("backup.tar.gz");
-        backup(&LoadedConfig::load(&config_path)?, &archive)?;
+        let config = LoadedConfig::load(&config_path)?;
+        assert!(backup(&config, &archive).is_err());
+        assert!(!archive.exists());
+        assert!(
+            Database::open(&config.value.data_dir.join("carillon.sqlite3"))?
+                .latest_backup()?
+                .is_none()
+        );
+        fs::remove_file(unsupported)?;
+        backup(&config, &archive)?;
 
         assert_eq!(fs::metadata(&archive)?.permissions().mode() & 0o777, 0o600);
 
