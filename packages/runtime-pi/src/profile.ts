@@ -98,6 +98,21 @@ export function reasoningForModel(
   );
 }
 
+export async function applyPiSessionProfile(
+  session: {
+    setModel(model: Model<Api>): Promise<unknown>;
+    setThinkingLevel(level: ModelThinkingLevel): void;
+  },
+  model: Model<Api>,
+  reasoning: ModelThinkingLevel | undefined,
+  signal: AbortSignal,
+): Promise<void> {
+  signal.throwIfAborted();
+  await session.setModel(model);
+  signal.throwIfAborted();
+  if (reasoning !== undefined) session.setThinkingLevel(reasoning);
+}
+
 export function setModelReasoningOverride(
   settings: Pick<SettingsManager, "setModelThinkingLevel" | "removeModelThinkingLevel">,
   provider: string,

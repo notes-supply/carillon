@@ -15,6 +15,7 @@ import { parse as parseToml } from "smol-toml";
 import { Type } from "typebox";
 import { Parse } from "typebox/value";
 import {
+  applyPiSessionProfile,
   type ExecutionProfile,
   ExecutionProfileSchema,
   type ExecutionProfileEvidence,
@@ -600,9 +601,8 @@ async function applyPiConversationProfile(
   const { session, extensionsResult } = created;
   try {
     assertExtensionsLoaded(extensionsResult.errors);
-    await session.setModel(model);
     const reasoning = reasoningForModel(privateSettings, model, selection.reasoning);
-    if (reasoning !== undefined) session.setThinkingLevel(reasoning);
+    await applyPiSessionProfile(session, model, reasoning, signal);
     signal.throwIfAborted();
     const sessionFile = persistExecutionProfile(session.sessionManager, requested);
     const effective = profileEvidence(

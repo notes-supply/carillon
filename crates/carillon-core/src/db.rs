@@ -39,6 +39,7 @@ pub struct PendingTurn {
     pub target: String,
     pub feedback_target: String,
     pub agent: String,
+    pub started_at: i64,
 }
 
 impl Database {
@@ -381,7 +382,7 @@ impl Database {
         let connection = self.connect()?;
         let mut statement = connection.prepare(
             "SELECT t.id, t.audience_id, t.execution_provider_id, t.interface_id, e.delivery_target_id,
-                    e.feedback_target_id, t.agent_id
+                    e.feedback_target_id, t.agent_id, t.started_at
              FROM turns t
              JOIN events e ON e.interface_id = t.interface_id AND e.event_id = t.event_id
              WHERE t.state IN ('accepted', 'processing') ORDER BY t.started_at",
@@ -395,6 +396,7 @@ impl Database {
                 target: row.get(4)?,
                 feedback_target: row.get(5)?,
                 agent: row.get(6)?,
+                started_at: row.get(7)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)

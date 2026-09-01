@@ -4,7 +4,7 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::{Arc, Weak},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -44,6 +44,7 @@ use crate::{
 const PROVIDER_HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 const RUNTIME_PROFILE_TIMEOUT: Duration = Duration::from_secs(5);
 const EXTENSION_TIMEOUT: Duration = Duration::from_secs(5);
+const RUNTIME_EVIDENCE_ADMISSION_GRACE: Duration = Duration::from_secs(5);
 
 type AudienceKey = (String, String, String);
 
@@ -919,6 +920,16 @@ fn recovery_evidence_matches(evidence: Option<&ProviderEvidence>, turn_id: &str)
     matches
 }
 
+fn pending_within_evidence_admission_grace(pending: &PendingTurn) -> bool {
+    let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+        return true;
+    };
+    let Ok(started_at) = u64::try_from(pending.started_at) else {
+        return false;
+    };
+    now.as_secs().saturating_sub(started_at) < RUNTIME_EVIDENCE_ADMISSION_GRACE.as_secs()
+}
+
 fn recovery_provider<'a>(config: &'a LoadedConfig, id: &str) -> Result<&'a Provider> {
     let provider = config
         .value
@@ -965,11 +976,13 @@ async fn reconcile_pending_turns(state: &AppState) -> Result<usize> {
                 response.json::<ProviderEvidence>().await.ok()
             }
             Ok(response) if response.status() == StatusCode::NOT_FOUND => {
-                state.database.fail_turn(
-                    &pending.turn,
-                    "interrupted",
-                    "execution provider has no durable correlation evidence",
-                )?;
+                if !pending_within_evidence_admission_grace(&pending) {
+                    state.database.fail_turn(
+                        &pending.turn,
+                        "interrupted",
+                        "execution provider has no durable correlation evidence",
+                    )?;
+                }
                 None
             }
             _ => None,
@@ -2861,6 +2874,69 @@ mod tests {
                     .is_none()
             );
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recovery_retries_initially_missing_runtime_evidence() -> Result<()> {
+        let harness = ProviderHarness::new().await?;
+        let pending_event = event("evidence-admission", "restart", "recover");
+        let resources = materialize_resources(
+            &harness.config.value.agent.resource_root,
+            &harness.config.value.data_dir.join("resource-snapshots"),
+        )?;
+        let accepted = harness.state.database.accept_event(
+            "interface-a",
+            "default",
+            "runtime-a",
+            &pending_event,
+            &provider_snapshot(
+                &harness.config,
+                &harness.first_interface,
+                &harness.primary_runtime,
+            )?,
+            &resources,
+        )?;
+        harness.state.database.mark_processing(&accepted.turn_id)?;
+
+        assert_eq!(reconcile_pending_turns(&harness.state).await?, 1);
+        assert_eq!(
+            harness
+                .state
+                .database
+                .inspect_turn(&accepted.turn_id)?
+                .context("pending turn missing")?
+                .state,
+            "processing"
+        );
+
+        let response = ProviderTurnResponse {
+            correlation_id: accepted.turn_id.clone(),
+            output: "runtime-a:recovered".to_owned(),
+            continuation_ref: "runtime-a:restart".to_owned(),
+            native: json!({ "owner": "runtime-a", "recovered": true }),
+            capability_activity: Vec::new(),
+        };
+        harness.primary_state.evidence.lock().await.insert(
+            accepted.turn_id.clone(),
+            ProviderEvidence {
+                correlation_id: accepted.turn_id.clone(),
+                state: "completed".to_owned(),
+                error: None,
+                result: Some(response),
+            },
+        );
+
+        assert_eq!(reconcile_pending_turns(&harness.state).await?, 0);
+        assert_eq!(
+            harness
+                .state
+                .database
+                .inspect_turn(&accepted.turn_id)?
+                .context("recovered turn missing")?
+                .state,
+            "completed"
+        );
         Ok(())
     }
 
