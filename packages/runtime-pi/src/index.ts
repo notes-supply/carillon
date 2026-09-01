@@ -23,6 +23,7 @@ import {
   persistExecutionProfile,
   profileEvidence,
   profileModel,
+  reasoningForModel,
   type RuntimeExecutionProfileModel,
   saveServiceTierDefault,
   type ServiceTier,
@@ -428,11 +429,7 @@ async function listExecutionProfiles(signal?: AbortSignal): Promise<RuntimeExecu
     const selected = unavailableProfileEvidence();
     return { models, ...(selected === undefined ? {} : { selected }) };
   }
-  const requestedReasoning = selectedModel.reasoning
-    ? (privateSettings.getModelThinkingLevel(selectedModel.provider, selectedModel.id) ??
-      privateSettings.getDefaultThinkingLevel() ??
-      "medium")
-    : undefined;
+  const requestedReasoning = reasoningForModel(privateSettings, selectedModel, undefined);
   const modelReference = `${selectedModel.provider}/${selectedModel.id}`;
   return {
     models,
@@ -482,19 +479,18 @@ async function applyExecutionProfile(
   privateSettings.setDefaultModelAndProvider(selected.provider, selected.id);
   setModelReasoningOverride(privateSettings, selected.provider, selected.id, selection.reasoning);
   await flushPrivateSettings();
-  const evidence = deterministic
-    ? {
-        requested: { model: `${selected.provider}/${selected.id}` },
-        effective: { model: `${selected.provider}/${selected.id}` },
-      }
-    : profileEvidence(
-        await selectedPiModel(),
-        selection.reasoning ??
-          privateSettings.getModelThinkingLevel(selected.provider, selected.id) ??
-          privateSettings.getDefaultThinkingLevel() ??
-          "medium",
-        selection.service_tier,
-      );
+  const selectedPi = deterministic ? undefined : await selectedPiModel();
+  const evidence =
+    selectedPi === undefined
+      ? {
+          requested: { model: `${selected.provider}/${selected.id}` },
+          effective: { model: `${selected.provider}/${selected.id}` },
+        }
+      : profileEvidence(
+          selectedPi,
+          reasoningForModel(privateSettings, selectedPi, selection.reasoning),
+          selection.service_tier,
+        );
   const nextDefault = serviceTierDefault(evidence.requested);
   await saveServiceTierDefault(serviceTierDefaultPath, nextDefault);
   defaultServiceTier = nextDefault;
@@ -625,7 +621,8 @@ async function applyPiConversationProfile(
   try {
     assertExtensionsLoaded(extensionsResult.errors);
     await session.setModel(model);
-    if (selection.reasoning !== undefined) session.setThinkingLevel(selection.reasoning);
+    const reasoning = reasoningForModel(privateSettings, model, selection.reasoning);
+    if (reasoning !== undefined) session.setThinkingLevel(reasoning);
     signal.throwIfAborted();
     const sessionFile = persistExecutionProfile(session.sessionManager, requested);
     const effective = profileEvidence(
@@ -805,11 +802,9 @@ async function executePi(request: TurnRequest): Promise<TurnResponse> {
       : undefined;
   const defaultReasoning =
     persistedProfile?.reasoning ??
-    (defaultModel?.reasoning === true
-      ? (privateSettings.getModelThinkingLevel(defaultModel.provider, defaultModel.id) ??
-        privateSettings.getDefaultThinkingLevel() ??
-        "medium")
-      : undefined);
+    (defaultModel === undefined
+      ? undefined
+      : reasoningForModel(privateSettings, defaultModel, undefined));
   const selectedDefaultTier =
     isNew && defaultModel !== undefined
       ? serviceTierForModel(defaultServiceTier, `${defaultModel.provider}/${defaultModel.id}`)

@@ -84,6 +84,20 @@ export function serviceTierForModel(
   return selection?.model === model ? selection.tier : undefined;
 }
 
+export function reasoningForModel(
+  settings: Pick<SettingsManager, "getDefaultThinkingLevel" | "getModelThinkingLevel">,
+  model: Pick<Model<Api>, "id" | "provider" | "reasoning">,
+  requested: ModelThinkingLevel | undefined,
+): ModelThinkingLevel | undefined {
+  if (!model.reasoning) return undefined;
+  return (
+    requested ??
+    settings.getModelThinkingLevel(model.provider, model.id) ??
+    settings.getDefaultThinkingLevel() ??
+    "medium"
+  );
+}
+
 export function setModelReasoningOverride(
   settings: Pick<SettingsManager, "setModelThinkingLevel" | "removeModelThinkingLevel">,
   provider: string,

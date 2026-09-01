@@ -11,6 +11,7 @@ import {
   persistExecutionProfile,
   profileEvidence,
   profileModel,
+  reasoningForModel,
   saveServiceTierDefault,
   serviceTierDefault,
   serviceTierForModel,
@@ -74,6 +75,20 @@ describe("execution profiles", () => {
       await settings.flush();
       expect(settings.getModelThinkingLevel("openai-codex", "gpt-test")).toBeUndefined();
       expect(settings.getDefaultThinkingLevel()).toBe("low");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("restores the applicable reasoning default for an existing conversation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "carillon-profile-"));
+    try {
+      const settings = SettingsManager.create(root, root);
+      settings.setDefaultThinkingLevel("low");
+
+      expect(reasoningForModel(settings, codexModel, "high")).toBe("high");
+      expect(reasoningForModel(settings, codexModel, undefined)).toBe("low");
+      expect(reasoningForModel(settings, unsupportedModel, undefined)).toBeUndefined();
     } finally {
       await rm(root, { recursive: true, force: true });
     }
