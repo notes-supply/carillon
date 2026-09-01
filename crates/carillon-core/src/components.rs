@@ -609,16 +609,9 @@ async fn prepare_discord_conversation(
     plan: MessagePlan,
 ) -> Result<ResolvedMessage> {
     let target = if plan.create_thread {
-        if let Some(thread) = state
-            .participation
-            .lock()
-            .await
-            .created_threads
-            .get(&plan.source_message_id)
-            .cloned()
-        {
-            thread
-        } else {
+        let thread = plan.source_message_id.clone();
+        remember_thread_creation(state, &plan.source_message_id, &thread).await?;
+        if !discord_message_thread_exists(http, &plan).await? {
             let channel = plan
                 .source_channel_id
                 .parse::<Id<ChannelMarker>>()
@@ -627,24 +620,30 @@ async fn prepare_discord_conversation(
                 .source_message_id
                 .parse::<Id<MessageMarker>>()
                 .context("source Discord message ID is invalid")?;
-            let thread = http
-                .create_thread_from_message(channel, message, &thread_title(&plan.content))
-                .await
-                .context("create Discord conversation thread")?
-                .model()
-                .await
-                .context("decode Discord conversation thread")?
-                .id
-                .to_string();
-            remember_created_thread(
-                state,
-                &plan.source_message_id,
-                &thread,
-                &plan.route_channel_id,
-            )
-            .await?;
-            thread
+            let created = async {
+                let created = http
+                    .create_thread_from_message(channel, message, &thread_title(&plan.content))
+                    .await
+                    .context("create Discord conversation thread")?
+                    .model()
+                    .await
+                    .context("decode Discord conversation thread")?;
+                if created.id.to_string() != thread {
+                    bail!("Discord conversation thread did not inherit its source message ID");
+                }
+                Ok::<(), anyhow::Error>(())
+            }
+            .await;
+            if let Err(failure) = created
+                && !discord_message_thread_exists(http, &plan).await?
+            {
+                return Err(failure);
+            }
         }
+        adopt_thread(state, &thread, &plan.route_channel_id)
+            .await
+            .map_err(|failure| anyhow::anyhow!(failure.message))?;
+        thread
     } else {
         plan.current_channel_id.clone()
     };
@@ -654,6 +653,32 @@ async fn prepare_discord_conversation(
             .map_err(|failure| anyhow::anyhow!(failure.message))?;
     }
     Ok(resolved_message(plan, target))
+}
+
+async fn discord_message_thread_exists(http: &DiscordHttp, plan: &MessagePlan) -> Result<bool> {
+    let thread = plan
+        .source_message_id
+        .parse::<Id<ChannelMarker>>()
+        .context("source Discord message ID is invalid")?;
+    let Ok(response) = http.channel(thread).await else {
+        return Ok(false);
+    };
+    let channel = response
+        .model()
+        .await
+        .context("decode existing Discord conversation thread")?;
+    let expected_parent = plan
+        .route_channel_id
+        .parse::<Id<ChannelMarker>>()
+        .context("route Discord channel ID is invalid")?;
+    if !matches!(
+        channel.kind,
+        ChannelType::AnnouncementThread | ChannelType::PrivateThread | ChannelType::PublicThread
+    ) || channel.parent_id != Some(expected_parent)
+    {
+        bail!("source Discord message ID belongs to an unexpected channel");
+    }
+    Ok(true)
 }
 
 fn thread_title(content: &str) -> String {
@@ -687,19 +712,22 @@ fn resolved_message(plan: MessagePlan, target: String) -> ResolvedMessage {
     }
 }
 
-async fn remember_created_thread(
+async fn remember_thread_creation(
     state: &DiscordState,
     message_id: &str,
     thread_id: &str,
-    route_channel_id: &str,
 ) -> Result<()> {
     let mut participation = state.participation.lock().await;
+    if participation
+        .created_threads
+        .get(message_id)
+        .is_some_and(|created| created == thread_id)
+    {
+        return Ok(());
+    }
     participation
         .created_threads
         .insert(message_id.to_owned(), thread_id.to_owned());
-    participation
-        .threads
-        .insert(thread_id.to_owned(), route_channel_id.to_owned());
     persist_json(&state.participation_path, &*participation)
 }
 

@@ -133,6 +133,8 @@ interface DeterministicSession {
   }[];
 }
 
+const CAPABILITY_REQUEST_TIMEOUT_MS = 15_000;
+
 const DETERMINISTIC_MODELS: readonly RuntimeExecutionProfileModel[] = [
   {
     key: modelKey("deterministic", "steady"),
@@ -911,6 +913,7 @@ async function callCapability(
     method: "POST",
     headers: { authorization: `Bearer ${selection.token}`, "content-type": "application/json" },
     body: JSON.stringify({ correlation_id: correlationId, operation: "echo", input }),
+    signal: AbortSignal.timeout(CAPABILITY_REQUEST_TIMEOUT_MS),
   });
   if (!response.ok)
     throw new Error(`capability ${selection.provider.id} returned HTTP ${String(response.status)}`);

@@ -3,7 +3,7 @@ use std::{
     fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Weak},
     time::Duration,
 };
 
@@ -19,7 +19,10 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio::{net::TcpListener, sync::Mutex};
+use tokio::{
+    net::TcpListener,
+    sync::{Mutex, OwnedMutexGuard},
+};
 use tracing::{error, info, warn};
 
 use crate::{
@@ -27,7 +30,7 @@ use crate::{
         LoadedConfig, Provider, ProviderRole, RELEASE_VERSION, token_matches,
         validate_provider_identity,
     },
-    db::{AcceptedTurn, Continuation, Database},
+    db::{AcceptedTurn, Continuation, Database, PendingTurn},
     model::{
         CapabilitySelection, Delivery, DeliveryAck, DeliveryOutcome, DeliveryReconciliation,
         EventReceipt, ExecutionProfileApplication, ExecutionProfileScope,
@@ -40,12 +43,48 @@ use crate::{
 
 const PROVIDER_HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 
+type AudienceKey = (String, String, String);
+
+#[derive(Clone, Default)]
+struct TurnLocks {
+    locks: Arc<Mutex<BTreeMap<AudienceKey, Weak<Mutex<()>>>>>,
+}
+
+impl TurnLocks {
+    async fn lock(&self, interface: &str, agent: &str, audience: &str) -> OwnedMutexGuard<()> {
+        self.lock_key((interface.to_owned(), agent.to_owned(), audience.to_owned()))
+            .await
+    }
+
+    async fn lock_pending(&self, pending: &PendingTurn) -> OwnedMutexGuard<()> {
+        self.lock_key((
+            pending.interface.clone(),
+            pending.agent.clone(),
+            pending.audience.clone(),
+        ))
+        .await
+    }
+
+    async fn lock_key(&self, key: AudienceKey) -> OwnedMutexGuard<()> {
+        let turn = {
+            let mut locks = self.locks.lock().await;
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            locks.get(&key).and_then(Weak::upgrade).unwrap_or_else(|| {
+                let turn = Arc::new(Mutex::new(()));
+                locks.insert(key, Arc::downgrade(&turn));
+                turn
+            })
+        };
+        turn.lock_owned().await
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     config_path: PathBuf,
     database: Database,
     client: Client,
-    turns: Arc<Mutex<()>>,
+    turns: TurnLocks,
 }
 
 #[derive(Debug)]
@@ -99,7 +138,7 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
         config_path: config.path.clone(),
         database,
         client: Client::new(),
-        turns: Arc::new(Mutex::new(())),
+        turns: TurnLocks::default(),
     };
     let reconciliation = state.clone();
     tokio::spawn(async move {
@@ -151,7 +190,10 @@ async fn accept_event(
     let config = LoadedConfig::load(&state.config_path)?;
     let interface_id = authorize_interface(&headers, &config)?;
     admit(&event)?;
-    let _guard = state.turns.lock().await;
+    let _guard = state
+        .turns
+        .lock(&interface_id, &event.agent_id, &event.audience_id)
+        .await;
     if state.database.has_pending_turn(
         &interface_id,
         &event.agent_id,
@@ -572,11 +614,6 @@ async fn apply_execution_profile(
     let config = LoadedConfig::load(&state.config_path)?;
     let access = authorize_model_access(&headers, &config)?;
     let current = matches!(selection.scope, ExecutionProfileScope::CurrentConversation);
-    let _turn_guard = if current {
-        Some(state.turns.lock().await)
-    } else {
-        None
-    };
     let audience_id = if current {
         Some(
             selection
@@ -599,6 +636,15 @@ async fn apply_execution_profile(
     if let Some(id) = interface_id.as_deref() {
         config.provider(id, ProviderRole::Interface)?;
     }
+    let _turn_guard = match (interface_id.as_deref(), audience_id.as_deref()) {
+        (Some(interface), Some(audience)) => Some(
+            state
+                .turns
+                .lock(interface, &config.value.agent.id, audience)
+                .await,
+        ),
+        _ => None,
+    };
     if let (Some(interface), Some(audience)) = (interface_id.as_deref(), audience_id.as_deref())
         && state
             .database
@@ -806,9 +852,9 @@ fn recovery_evidence_matches(evidence: Option<&RuntimeEvidence>, turn_id: &str) 
 }
 
 async fn reconcile_pending_turns(state: &AppState) -> Result<usize> {
-    let _guard = state.turns.lock().await;
     let config = LoadedConfig::load(&state.config_path)?;
     for pending in state.database.pending_turns()? {
+        let _guard = state.turns.lock_pending(&pending).await;
         let runtime = match config.provider(&pending.runtime, ProviderRole::Runtime) {
             Ok(runtime) if runtime.enabled => runtime,
             Ok(_) => {
@@ -1385,10 +1431,10 @@ mod tests {
     use tokio::{net::TcpListener, sync::Mutex, task::JoinHandle};
 
     use super::{
-        AppState, ExecutionProfilesQuery, RecentQuery, accept_event, apply_execution_profile,
-        authorize_interface, execution_profiles, fetch_health, materialize_resources,
-        process_event, provider_snapshot, recent_turns, reconcile_pending_turns,
-        refresh_execution_profiles,
+        AppState, ExecutionProfilesQuery, RecentQuery, TurnLocks, accept_event,
+        apply_execution_profile, authorize_interface, execution_profiles, fetch_health,
+        materialize_resources, process_event, provider_snapshot, recent_turns,
+        reconcile_pending_turns, refresh_execution_profiles,
     };
     use crate::{
         config::{
@@ -1753,7 +1799,7 @@ mod tests {
                 config_path,
                 database: Database::open(&root.join("state/carillon.sqlite3"))?,
                 client: reqwest::Client::new(),
-                turns: Arc::new(Mutex::new(())),
+                turns: TurnLocks::default(),
             };
             Ok(Self {
                 _directory: directory,
@@ -2256,6 +2302,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn turn_locks_isolate_unrelated_audiences() -> Result<()> {
+        let locks = TurnLocks::default();
+        let first = locks.lock("interface", "agent", "first").await;
+        let unrelated = tokio::time::timeout(
+            Duration::from_millis(50),
+            locks.lock("interface", "agent", "second"),
+        )
+        .await
+        .context("unrelated audience waited for the first audience")?;
+        drop(unrelated);
+        let mut same = Box::pin(locks.lock("interface", "agent", "first"));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut same)
+                .await
+                .is_err()
+        );
+        drop(first);
+        same.await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn reconciliation_waits_for_the_live_turn_guard() -> Result<()> {
         let harness = ProviderHarness::new().await?;
         let pending_event = event("live", "conversation", "still running");
@@ -2277,7 +2345,11 @@ mod tests {
         )?;
         harness.state.database.mark_processing(&accepted.turn_id)?;
 
-        let live_turn = harness.state.turns.lock().await;
+        let live_turn = harness
+            .state
+            .turns
+            .lock("interface-a", "default", "conversation")
+            .await;
         let state = harness.state.clone();
         let mut reconciliation = tokio::spawn(async move { reconcile_pending_turns(&state).await });
         assert!(

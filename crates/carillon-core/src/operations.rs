@@ -317,7 +317,35 @@ pub fn restore(archive_path: &Path, target: &Path) -> Result<PathBuf> {
     if target.exists() && fs::read_dir(target)?.next().is_some() {
         bail!("restore target {} is not empty", target.display());
     }
-    fs::create_dir_all(target)?;
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let name = target
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("carillon");
+    let staging = target.with_file_name(format!(".{name}.restore-{}", Uuid::now_v7()));
+    let result = restore_into(archive_path, &staging);
+    if let Err(failure) = result {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(failure);
+    }
+    let publish = (|| -> Result<()> {
+        if target.exists() {
+            fs::remove_dir(target)?;
+        }
+        fs::rename(&staging, target)?;
+        Ok(())
+    })();
+    if let Err(failure) = publish {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(failure);
+    }
+    Ok(target.join("carillon.toml"))
+}
+
+fn restore_into(archive_path: &Path, target: &Path) -> Result<()> {
+    fs::create_dir(target)?;
     fs::set_permissions(target, fs::Permissions::from_mode(0o700))?;
     let file = fs::File::open(archive_path)
         .with_context(|| format!("open backup {}", archive_path.display()))?;
@@ -336,9 +364,9 @@ pub fn restore(archive_path: &Path, target: &Path) -> Result<PathBuf> {
         }
         entry.unpack_in(target)?;
     }
-    let config = target.join("carillon.toml");
-    LoadedConfig::load(&config).context("restored backup is not a valid Carillon installation")?;
-    Ok(config)
+    LoadedConfig::load(&target.join("carillon.toml"))
+        .context("restored backup is not a valid Carillon installation")?;
+    Ok(())
 }
 
 fn ensure_stopped(config: &LoadedConfig) -> Result<ServiceLock> {
@@ -426,7 +454,7 @@ mod tests {
     use anyhow::Result;
     use tempfile::tempdir;
 
-    use super::{backup, initialize, restore, set_provider};
+    use super::{backup, initialize, restore, set_provider, write_backup_archive};
     use crate::config::{
         DiscordActivation, DiscordConversation, DiscordRoute, LoadedConfig, ProviderRole,
     };
@@ -503,6 +531,34 @@ mod tests {
         let before = fs::read(&config_path)?;
         assert!(set_provider(&config_path, "../escape", false).is_err());
         assert_eq!(fs::read(&config_path)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_restore_does_not_publish_partial_output() -> Result<()> {
+        let directory = tempdir()?;
+        let invalid = directory.path().join("invalid");
+        fs::create_dir(&invalid)?;
+        fs::write(invalid.join("carillon.toml"), "not valid toml")?;
+        fs::write(invalid.join("partial-state"), "must not escape staging")?;
+        let archive = directory.path().join("invalid.tar.gz");
+        write_backup_archive(&invalid, &archive)?;
+
+        let restored = directory.path().join("restored");
+        fs::create_dir(&restored)?;
+        assert!(restore(&archive, &restored).is_err());
+        assert!(restored.exists());
+        assert!(fs::read_dir(&restored)?.next().is_none());
+        assert!(
+            fs::read_dir(directory.path())?
+                .filter_map(Result::ok)
+                .all(|entry| {
+                    !entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".restored.restore-")
+                })
+        );
         Ok(())
     }
 
