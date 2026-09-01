@@ -2,7 +2,7 @@ use std::{
     fs,
     io::{BufReader, BufWriter, Write as _},
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream},
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -279,6 +279,7 @@ pub fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
     let file = fs::OpenOptions::new()
         .create_new(true)
         .write(true)
+        .mode(0o600)
         .open(&destination)?;
     let encoder = GzEncoder::new(BufWriter::new(file), Compression::default());
     let mut archive = Builder::new(encoder);
@@ -482,7 +483,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_makes_the_installation_root_private() -> Result<()> {
+    fn backup_and_restore_preserve_private_installation() -> Result<()> {
         let directory = tempdir()?;
         let root = directory.path().join("installation");
         let config_path = initialize(
@@ -494,13 +495,20 @@ mod tests {
             &[route()],
             44_000,
         )?;
+        fs::write(root.join("pi/auth.json"), "private runtime credential")?;
         let archive = directory.path().join("backup.tar.gz");
         backup(&LoadedConfig::load(&config_path)?, &archive)?;
+
+        assert_eq!(fs::metadata(&archive)?.permissions().mode() & 0o777, 0o600);
 
         let restored = directory.path().join("restored");
         restore(&archive, &restored)?;
 
-        assert_eq!(fs::metadata(restored)?.permissions().mode() & 0o777, 0o700);
+        assert_eq!(fs::metadata(&restored)?.permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            fs::read_to_string(restored.join("pi/auth.json"))?,
+            "private runtime credential"
+        );
         Ok(())
     }
 }

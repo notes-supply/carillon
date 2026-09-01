@@ -32,7 +32,7 @@ Credentials are scoped to their consumers: platform credentials to interface ada
 
 ## Backup and restore
 
-A backup captures a consistent view of Carillon's database and configuration, common agent files, runtime-owned continuation resources and sessions, selected component identities and configuration, component-owned durable evidence, and the release information needed to interpret them. Pi-private provider credentials, discovered catalogs, selected models, and service-tier defaults live under `CARILLON_HOME/pi` outside the normal backup archive; copy that private directory separately for a complete host move.
+A backup captures the complete Carillon installation, including its database and configuration, agent files, runtime-owned continuation resources and sessions, component-owned durable evidence, internal credentials, and Pi-private authentication and settings. The archive is created with owner-only permissions because it contains credentials; encrypt it before storing or transferring it outside the owner-controlled host.
 
 Restore reconstructs a coherent installation and reconciles core and component state before accepting new work. The operator can continue from the next safe action without repeating completed runtime work or an external delivery whose outcome is uncertain.
 

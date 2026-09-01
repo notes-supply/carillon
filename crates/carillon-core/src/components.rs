@@ -59,6 +59,8 @@ use crate::{
     },
 };
 
+const DISCORD_MESSAGE_LIMIT: usize = 2_000;
+
 #[derive(Debug)]
 struct ServiceError {
     status: StatusCode,
@@ -1633,6 +1635,26 @@ fn limit_discord_text(value: &str, limit: usize) -> String {
     value.chars().take(limit).collect()
 }
 
+fn split_discord_message(value: &str) -> Vec<&str> {
+    if value.is_empty() {
+        return vec![value];
+    }
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    let mut length = 0;
+    for (index, character) in value.char_indices() {
+        let character_length = character.len_utf16();
+        if length + character_length > DISCORD_MESSAGE_LIMIT {
+            chunks.push(&value[start..index]);
+            start = index;
+            length = 0;
+        }
+        length += character_length;
+    }
+    chunks.push(&value[start..]);
+    chunks
+}
+
 async fn fetch_runtime_execution_profiles(
     state: &DiscordState,
     audience_id: Option<&str>,
@@ -1685,21 +1707,33 @@ async fn delivery_loop(state: DiscordState, http: Arc<DiscordHttp>) {
             Ok(Some(delivery)) => {
                 let target = delivery.target_id.parse::<Id<ChannelMarker>>();
                 let (outcome, native_ref, feedback) = match target {
-                    Ok(channel_id) => match http
-                        .create_message(channel_id)
-                        .content(&delivery.content)
-                        .await
-                    {
-                        Ok(message) => (
-                            DeliveryOutcome::Delivered,
-                            message.model().await.map(|value| value.id.to_string()).ok(),
-                            Feedback::Delivered,
-                        ),
-                        Err(failure) => {
-                            warn!(error = %failure, delivery_id = delivery.id, "Discord delivery outcome uncertain");
-                            (DeliveryOutcome::Uncertain, None, Feedback::Uncertain)
+                    Ok(channel_id) => {
+                        let mut native_ref = None;
+                        let mut failure = None;
+                        for chunk in split_discord_message(&delivery.content) {
+                            match http.create_message(channel_id).content(chunk).await {
+                                Ok(message) => {
+                                    if native_ref.is_none() {
+                                        native_ref = message
+                                            .model()
+                                            .await
+                                            .map(|value| value.id.to_string())
+                                            .ok();
+                                    }
+                                }
+                                Err(error) => {
+                                    failure = Some(error);
+                                    break;
+                                }
+                            }
                         }
-                    },
+                        if let Some(failure) = failure {
+                            warn!(error = %failure, delivery_id = delivery.id, "Discord delivery outcome uncertain");
+                            (DeliveryOutcome::Uncertain, native_ref, Feedback::Uncertain)
+                        } else {
+                            (DeliveryOutcome::Delivered, native_ref, Feedback::Delivered)
+                        }
+                    }
                     Err(failure) => {
                         warn!(error = %failure, "invalid Discord delivery target");
                         (DeliveryOutcome::Uncertain, None, Feedback::Uncertain)
@@ -1909,7 +1943,7 @@ mod tests {
 
     use super::{
         DiscordParticipation, MessagePlan, ServiceError, deferred_model_response, profile_panel,
-        resolve_message, resolved_message, thread_title,
+        resolve_message, resolved_message, split_discord_message, thread_title,
     };
     use crate::{
         config::{DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute},
@@ -2058,6 +2092,20 @@ mod tests {
             serde_json::to_value(profile_panel(&profiles, &unsupported, None, None, false, 0))?;
         assert_eq!(minimal["components"].as_array().map(Vec::len), Some(3));
         Ok(())
+    }
+
+    #[test]
+    fn discord_messages_are_split_without_losing_unicode() {
+        let content = format!("{}🦀🦀", "a".repeat(1_999));
+        let chunks = split_discord_message(&content);
+
+        assert_eq!(chunks.len(), 2);
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.encode_utf16().count() <= 2_000)
+        );
+        assert_eq!(chunks.concat(), content);
     }
 
     #[test]
