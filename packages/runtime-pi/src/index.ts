@@ -989,6 +989,7 @@ async function reconcileEvidence(evidence: Evidence | undefined): Promise<Eviden
     owner = undefined;
   }
   const currentExecution = owner === runtimeInstance;
+  if (currentExecution && activeTurns.has(evidence.correlation_id)) return evidence;
   if (evidence.engine === undefined || evidence.continuation_ref === undefined) {
     if (currentExecution) return evidence;
     const interrupted: Evidence = {
