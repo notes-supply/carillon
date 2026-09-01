@@ -276,7 +276,9 @@ pub fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
             destination.display()
         );
     }
-    let database = Database::open(&config.value.data_dir.join("carillon.sqlite3"))?;
+    let database_path = config.value.data_dir.join("carillon.sqlite3");
+    Database::validate(&database_path)?;
+    let database = Database::open(&database_path)?;
     let file_name = destination
         .file_name()
         .and_then(|value| value.to_str())
@@ -675,6 +677,38 @@ mod tests {
             fs::create_dir(&restored)?;
             assert!(restore(&archive, &restored).is_err(), "{name}");
             assert!(fs::read_dir(&restored)?.next().is_none(), "{name}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn backup_rejects_invalid_database_without_initializing_it() -> Result<()> {
+        let directory = tempdir()?;
+        for (index, existing) in [false, true].into_iter().enumerate() {
+            let root = directory.path().join(format!("installation-{index}"));
+            let config_path = initialize(
+                &root,
+                directory.path(),
+                "100",
+                "101",
+                &["200".to_owned()],
+                &[route()],
+                43_000 + u16::try_from(index)? * 10,
+            )?;
+            let database = root.join("state/carillon.sqlite3");
+            fs::remove_file(&database)?;
+            if existing {
+                fs::write(&database, [])?;
+            }
+            let config = LoadedConfig::load(&config_path)?;
+            let archive = directory.path().join(format!("invalid-{index}.tar.gz"));
+
+            assert!(backup(&config, &archive).is_err());
+            assert!(!archive.exists());
+            assert_eq!(database.exists(), existing);
+            if existing {
+                assert_eq!(fs::metadata(&database)?.len(), 0);
+            }
         }
         Ok(())
     }

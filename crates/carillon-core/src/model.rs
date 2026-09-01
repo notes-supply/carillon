@@ -292,7 +292,7 @@ pub struct StateCounts {
     pub uncertain: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct SimulateRequest {
     pub event_id: String,
     pub guild_id: Option<String>,
