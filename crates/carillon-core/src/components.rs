@@ -1018,22 +1018,22 @@ async fn submit_resolved_message(
     http: &Arc<DiscordHttp>,
     resolved: ResolvedMessage,
 ) {
-    let config = match LoadedConfig::load(&state.config_path) {
-        Ok(config) => config,
-        Err(failure) => {
-            warn!(error = %failure, "reload Discord configuration for event submission");
-            return;
+    let discord = loop {
+        match LoadedConfig::load(&state.config_path) {
+            Ok(config) => match config.discord() {
+                Ok(discord) => break discord.clone(),
+                Err(failure) => {
+                    warn!(error = %failure, "validate Discord configuration for event submission");
+                }
+            },
+            Err(failure) => {
+                warn!(error = %failure, "reload Discord configuration for event submission");
+            }
         }
+        sleep(Duration::from_secs(1)).await;
     };
-    let discord = match config.discord() {
-        Ok(discord) => discord,
-        Err(failure) => {
-            warn!(error = %failure, "validate Discord configuration for event submission");
-            return;
-        }
-    };
-    processing_feedback(http, discord, &resolved.event.feedback_target_id).await;
-    let typing = start_typing(http.clone(), discord, &resolved.event.delivery_target_id).await;
+    processing_feedback(http, &discord, &resolved.event.feedback_target_id).await;
+    let typing = start_typing(http.clone(), &discord, &resolved.event.delivery_target_id).await;
     let receipt = submit_event(state, &resolved.event).await;
     if let Some(task) = typing {
         task.abort();
@@ -1043,7 +1043,7 @@ async fn submit_resolved_message(
             if let Err(failure) = clear_thread_creation(state, &resolved.event.event_id).await {
                 warn!(error = %failure, "clear submitted Discord thread creation intent");
             }
-            clear_processing_feedback(http, discord, &resolved.event.feedback_target_id).await;
+            clear_processing_feedback(http, &discord, &resolved.event.feedback_target_id).await;
         }
         Ok(_) => {
             if let Err(failure) = clear_thread_creation(state, &resolved.event.event_id).await {
@@ -1054,7 +1054,7 @@ async fn submit_resolved_message(
             warn!(error = %failure.message, "Discord event submission failed");
             terminal_feedback(
                 http,
-                discord,
+                &discord,
                 &resolved.event.feedback_target_id,
                 Feedback::Failed,
             )
@@ -2247,6 +2247,7 @@ mod tests {
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
+        time::Duration,
     };
 
     use anyhow::{Context as _, anyhow};
@@ -2259,20 +2260,28 @@ mod tests {
     };
     use serde_json::{Value, json};
     use tempfile::tempdir;
-    use tokio::{net::TcpListener, sync::Mutex};
+    use tokio::{
+        net::TcpListener,
+        sync::Mutex,
+        time::{sleep, timeout},
+    };
 
     use super::{
-        DISCORD_MESSAGE_LIMIT, DiscordParticipation, DiscordState, MessagePlan, ResolvedMessage,
-        ServiceError, clear_thread_creation, deferred_model_response, profile_panel,
-        queue_resolved_message, remember_thread_creation, resolve_message, resolved_message,
-        split_discord_message, submit_event, thread_title,
+        DISCORD_MESSAGE_LIMIT, DiscordHttp, DiscordParticipation, DiscordState, MessagePlan,
+        ResolvedMessage, ServiceError, clear_thread_creation, deferred_model_response,
+        profile_panel, queue_resolved_message, remember_thread_creation, resolve_message,
+        resolved_message, split_discord_message, submit_event, submit_resolved_message,
+        thread_title,
     };
     use crate::{
-        config::{DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute},
+        config::{
+            DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute, LoadedConfig,
+        },
         model::{
             EventReceipt, ExternalEvent, RuntimeExecutionProfileModel, RuntimeExecutionProfiles,
             ServiceTier, SimulateRequest,
         },
+        operations::initialize,
     };
 
     #[derive(Clone)]
@@ -2296,6 +2305,19 @@ mod tests {
             })
             .into_response(),
         }
+    }
+
+    async fn successful_submission(
+        State(state): State<SubmissionTestState>,
+        Json(event): Json<ExternalEvent>,
+    ) -> Json<EventReceipt> {
+        state.attempts.fetch_add(1, Ordering::SeqCst);
+        Json(EventReceipt {
+            event_id: event.event_id,
+            turn_id: "turn".to_owned(),
+            state: "completed".to_owned(),
+            duplicate: false,
+        })
     }
 
     #[test]
@@ -2483,6 +2505,83 @@ mod tests {
         server.abort();
         assert!(receipt.duplicate);
         assert_eq!(attempts.load(Ordering::SeqCst), 4);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn discord_submission_waits_for_configuration_recovery() -> anyhow::Result<()> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let address = listener.local_addr()?;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let router = Router::new()
+            .route("/v1/events", post(successful_submission))
+            .with_state(SubmissionTestState {
+                attempts: attempts.clone(),
+            });
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+        let directory = tempdir()?;
+        let root = directory.path().join("install");
+        let config_path = initialize(
+            &root,
+            directory.path(),
+            "100",
+            "101",
+            &["102".to_owned()],
+            &[DiscordRoute {
+                channel_id: "103".to_owned(),
+                activation: DiscordActivation::Always,
+                conversation: DiscordConversation::Channel,
+            }],
+            49_100,
+        )?;
+        let mut config = LoadedConfig::load(&config_path)?;
+        let discord = config
+            .value
+            .discord
+            .as_mut()
+            .context("Discord configuration missing")?;
+        discord.typing = false;
+        discord.reactions = false;
+        let valid_config = toml::to_string_pretty(&config.value)?;
+        fs::write(&config_path, "invalid = [")?;
+
+        let state = DiscordState {
+            config_path: config_path.clone(),
+            core_url: format!("http://{address}"),
+            provider_id: "discord-private".to_owned(),
+            token: "token".to_owned(),
+            instance_id: "instance".to_owned(),
+            client: reqwest::Client::new(),
+            participation_path: root.join("state/participation.json"),
+            participation: Arc::new(Mutex::new(DiscordParticipation::default())),
+        };
+        let http = Arc::new(DiscordHttp::new("token".to_owned()));
+        let submission = tokio::spawn(async move {
+            submit_resolved_message(
+                &state,
+                &http,
+                ResolvedMessage {
+                    event: ExternalEvent {
+                        event_id: "event".to_owned(),
+                        agent_id: "default".to_owned(),
+                        user_id: "102".to_owned(),
+                        audience_id: "audience".to_owned(),
+                        delivery_target_id: "103".to_owned(),
+                        feedback_target_id: "103:104".to_owned(),
+                        content: "hello".to_owned(),
+                        native: json!({}),
+                    },
+                    conversation_id: "audience".to_owned(),
+                },
+            )
+            .await;
+        });
+        sleep(Duration::from_millis(1_100)).await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
+        fs::write(&config_path, valid_config)?;
+        timeout(Duration::from_secs(3), submission).await??;
+        server.abort();
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
         Ok(())
     }
 

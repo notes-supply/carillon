@@ -1196,7 +1196,12 @@ fn fresh_receipt(event_id: String, turn_id: String, state: &str) -> EventReceipt
 }
 
 fn command_arguments(content: &str) -> Option<&str> {
-    content.strip_prefix("!carillon").map(str::trim)
+    let suffix = content.strip_prefix("!carillon")?;
+    match suffix.chars().next() {
+        None => Some(""),
+        Some(boundary) if boundary.is_whitespace() => Some(suffix.trim()),
+        Some(_) => None,
+    }
 }
 
 fn provider_snapshot(
@@ -2207,6 +2212,14 @@ mod tests {
                 "!carillon status",
             )
             .await?;
+        harness
+            .send(
+                "interface-a",
+                "extension-prefix",
+                "audience-prefix",
+                "!carillonnaise",
+            )
+            .await?;
 
         assert_eq!(extension_state.requests.lock().await.len(), 1);
         assert_eq!(
@@ -2218,7 +2231,7 @@ mod tests {
                 .iter()
                 .map(|request| request.input.as_str())
                 .collect::<Vec<_>>(),
-            ["!carillon status"]
+            ["!carillon status", "!carillonnaise"]
         );
         for (event_id, includes_extension) in [("extension-a", true), ("extension-b", false)] {
             let turn = harness
