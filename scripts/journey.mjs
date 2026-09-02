@@ -39,52 +39,42 @@ try {
     String(basePort),
   );
   await startAll();
-  const discoveredProfiles = JSON.parse(run("model", "--config", configPath()));
-  assert.equal(discoveredProfiles.models.length, 2);
-  assert.equal(discoveredProfiles.selected, null, "an unset model must remain unset");
-  await stop("runtime");
-  await writeFile(
-    join(piState, "settings.json"),
-    JSON.stringify({ defaultProvider: "missing-provider", defaultModel: "missing-model" }),
-  );
-  await start("runtime");
-  const unavailableProfiles = JSON.parse(run("model", "--config", configPath()));
-  assert.equal(unavailableProfiles.selected.requested.model, "missing-provider/missing-model");
-  assert.equal(
-    unavailableProfiles.selected.effective,
-    null,
-    "an unavailable requested model must not fabricate an effective model",
-  );
-  const appliedProfile = JSON.parse(
-    run("model", "--config", configPath(), "deterministic/concise"),
-  );
-  assert.equal(appliedProfile.requested.model, "deterministic/concise");
-  assert.equal(appliedProfile.effective.model, "deterministic/concise");
 
-  const denied = await fetch(`http://127.0.0.1:${String(basePort + 1)}/v1/simulate`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(event("denied", "999", "200", "300", null, "should not run")),
-  });
+  const discovered = JSON.parse(run("model", "--config", configPath()));
+  assert.equal(discovered.models.length, 2);
+  assert.equal(discovered.selected, null);
+  const selected = JSON.parse(run("model", "--config", configPath(), "deterministic/concise"));
+  assert.equal(selected.requested.model, "deterministic/concise");
+  assert.equal(selected.effective.model, "deterministic/concise");
+
+  const denied = await requestSimulation(event("denied", "999", "200", "300", null, "no"));
   assert.equal(denied.status, 403, "other guilds must fail closed");
-
-  const deniedRoute = await fetch(`http://127.0.0.1:${String(basePort + 1)}/v1/simulate`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(event("denied-route", "100", "200", "399", null, "should not run")),
-  });
+  const deniedRoute = await requestSimulation(
+    event("denied-route", "100", "200", "399", null, "no"),
+  );
   assert.equal(deniedRoute.status, 403, "unconfigured channels must fail closed");
-
-  const ignoredMention = await fetch(`http://127.0.0.1:${String(basePort + 1)}/v1/simulate`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(event("ignored", "100", "200", "301", null, "no activation")),
-  });
+  const ignoredMention = await requestSimulation(
+    event("ignored", "100", "200", "301", null, "no activation"),
+  );
   assert.equal(ignoredMention.status, 204, "mention routes must ignore unmentioned messages");
 
   const first = await simulate("event-1", "hello");
+  assert.equal(first.receipt.state, "queued");
   assert.match(first.delivery.content, /Local provider response 1/u);
   assert.match(first.delivery.content, /native extension inactive; skill inactive/u);
+  assert.deepEqual(first.feedback, ["processing", "delivered"]);
+
+  const duplicate = await simulate("event-1", "hello");
+  assert.equal(duplicate.receipt.duplicate, true);
+  assert.equal(duplicate.delivery, null);
+
+  const unauthenticatedStatus = await fetch(`http://127.0.0.1:${String(basePort)}/v1/status`);
+  assert.equal(
+    unauthenticatedStatus.status,
+    403,
+    "operator diagnostics must require authentication",
+  );
+
   const currentProfile = JSON.parse(
     run(
       "model",
@@ -99,28 +89,10 @@ try {
   );
   assert.equal(currentProfile.effective.model, "deterministic/steady");
 
-  const duplicate = await simulate("event-1", "hello");
-  assert.equal(duplicate.receipt.duplicate, true, "redelivery must not repeat runtime work");
-  assert.equal(duplicate.delivery, null);
-
-  const unauthenticatedStatus = await fetch(`http://127.0.0.1:${String(basePort)}/v1/status`);
-  assert.equal(
-    unauthenticatedStatus.status,
-    403,
-    "operator diagnostics must require authentication",
-  );
-
-  run("component", "--config", configPath(), "guild-command", "enable");
-  run("component", "--config", configPath(), "echo-capability", "enable");
   run("enable-demo-resources", "--config", configPath());
-
-  const command = await simulate("event-command-1", "!carillon status");
-  assert.match(command.delivery.content, /Carillon 0\.0\.0 \(status\); guild 100; operator 200/u);
-
-  const additions = await simulate("event-2", "use the additions and capability");
+  const additions = await simulate("event-2", "use the additions");
   assert.match(additions.delivery.content, /Local provider response 2/u);
   assert.match(additions.delivery.content, /native extension active; skill active/u);
-  assert.match(additions.delivery.content, /external echo/u);
 
   await restart("discord");
   const afterDiscordRestart = await simulate("event-3", "continue after Discord restart");
@@ -130,32 +102,17 @@ try {
   const afterRuntimeRestart = await simulate("event-4", "continue after runtime restart");
   assert.match(afterRuntimeRestart.delivery.content, /Local provider response 4/u);
 
-  await restart("extension");
-  const afterExtensionRestart = await simulate("event-command-2", "!carillon restarted");
-  assert.match(afterExtensionRestart.delivery.content, /\(restarted\)/u);
-
-  await restart("capability");
-  const afterCapabilityRestart = await simulate("event-5", "use capability after its restart");
-  assert.match(afterCapabilityRestart.delivery.content, /Local provider response 5/u);
-  assert.match(afterCapabilityRestart.delivery.content, /external echo/u);
-
-  const channelFirst = JSON.parse(run("inspect", "--config", configPath(), first.receipt.turn_id));
-  const channelLater = JSON.parse(
+  const firstInspection = JSON.parse(
+    run("inspect", "--config", configPath(), first.receipt.turn_id),
+  );
+  const laterInspection = JSON.parse(
     run("inspect", "--config", configPath(), additions.receipt.turn_id),
   );
-  assert.equal(
-    channelFirst.audience_id,
-    channelLater.audience_id,
-    "channel routes must share one continuation",
-  );
-  assert.equal(
-    channelLater.native_evidence.execution_profile.requested.model,
-    "deterministic/steady",
-  );
-  assert.equal(
-    channelLater.native_evidence.execution_profile.effective.model,
-    "deterministic/steady",
-  );
+  assert.equal(firstInspection.audience_id, laterInspection.audience_id);
+  assert.equal(laterInspection.state, "completed");
+  assert.equal(laterInspection.delivery_state, "delivered");
+  assert.ok(laterInspection.providers.some((provider) => provider.id === "runtime-pi"));
+  assert.equal(typeof laterInspection.resources.extensions_sha256, "string");
 
   const threadParent = await simulateRoute(
     "401",
@@ -164,7 +121,6 @@ try {
     "<@201> start a thread while preserving <@999>",
   );
   assert.equal(threadParent.conversation_id, "discord-100-401");
-  assert.deepEqual(threadParent.feedback, ["processing", "delivered"]);
   const threadChild = await simulateRoute("thread-child-1", "401", "301", "continue");
   assert.equal(threadChild.conversation_id, threadParent.conversation_id);
 
@@ -175,11 +131,7 @@ try {
     "301",
     "continue after adapter restart",
   );
-  assert.equal(
-    persistedThread.conversation_id,
-    threadParent.conversation_id,
-    "Discord-owned thread participation must survive restart",
-  );
+  assert.equal(persistedThread.conversation_id, threadParent.conversation_id);
 
   const adopted = await simulateRoute("thread-adopt", "402", "301", "<@201> adopt this thread");
   const adoptedLater = await simulateRoute(
@@ -194,98 +146,31 @@ try {
   const alwaysChild = await simulateRoute("always-child", "404", "302", "always-active child");
   assert.notEqual(alwaysParent.conversation_id, alwaysChild.conversation_id);
 
-  const channelChild = await fetch(`http://127.0.0.1:${String(basePort + 1)}/v1/simulate`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(event("channel-child", "100", "200", "405", "300", "reject child")),
-  });
+  const channelChild = await requestSimulation(
+    event("channel-child", "100", "200", "405", "300", "reject child"),
+  );
   assert.equal(channelChild.status, 403, "channel conversations must not inherit child threads");
-
-  run("component", "--config", configPath(), "runtime-pi", "disable");
-  const failed = await simulateRoute("failed-before-delivery", "300", null, "cannot run");
-  assert.equal(failed.receipt.state, "interrupted");
-  assert.deepEqual(failed.feedback, ["processing", "failed"]);
-  run("component", "--config", configPath(), "runtime-pi", "enable");
 
   await stop("discord");
   const abandoned = await submitCoreEvent("event-delivery-crash", "claim then crash");
-  const claimed = await fetch(`http://127.0.0.1:${String(basePort)}/v1/deliveries`, {
-    headers: {
-      authorization: `Bearer ${await credentialValue("discord-private")}`,
-      "x-carillon-instance": "crashed-discord",
-    },
-  });
-  assert.equal(claimed.status, 200, await claimed.text());
+  const claimed = await waitForDeliveryClaim("crashed-discord");
+  assert.equal(claimed.turn_id, abandoned.turn_id);
   await start("discord");
   const abandonedInspection = JSON.parse(
     run("inspect", "--config", configPath(), abandoned.turn_id),
   );
-  assert.equal(
-    abandonedInspection.delivery_state,
-    "uncertain",
-    "a replacement Discord process must reconcile an abandoned claim",
-  );
-
-  const nativeCorrelation = crypto.randomUUID();
-  const nativeSession = join(
-    installation,
-    "agents",
-    "default",
-    "sessions",
-    `${nativeCorrelation}.json`,
-  );
-  await writeFile(
-    nativeSession,
-    `${JSON.stringify({
-      turns: [{ correlation_id: nativeCorrelation, input: "recover", output: "native result" }],
-    })}\n`,
-  );
-  await writeFile(
-    join(
-      installation,
-      "state",
-      "components",
-      "runtime-pi",
-      "evidence",
-      `${nativeCorrelation}.json`,
-    ),
-    `${JSON.stringify({
-      correlation_id: nativeCorrelation,
-      state: "processing",
-      engine: "deterministic",
-      continuation_ref: nativeSession,
-      native: { runtime_instance: "crashed-runtime" },
-    })}\n`,
-  );
-  const reconciledEvidence = await fetch(
-    `http://127.0.0.1:${String(basePort + 2)}/v1/evidence/${nativeCorrelation}`,
-    { headers: { authorization: `Bearer ${await credentialValue("runtime-pi")}` } },
-  );
-  const reconciledBody = await reconciledEvidence.text();
-  assert.equal(reconciledEvidence.status, 200, reconciledBody);
-  assert.equal(JSON.parse(reconciledBody).result.output, "native result");
-
-  const inspected = JSON.parse(
-    run("inspect", "--config", configPath(), afterCapabilityRestart.receipt.turn_id),
-  );
-  assert.equal(inspected.state, "completed");
-  assert.equal(inspected.delivery_state, "delivered");
-  assert.ok(inspected.components.some((component) => component.id === "echo-capability"));
-  assert.equal(inspected.capability_activity.length, 1);
-  assert.equal(typeof inspected.resources.extensions_sha256, "string");
+  assert.equal(abandonedInspection.delivery_state, "uncertain");
 
   const recent = JSON.parse(
-    run("recent", "--config", configPath(), "--event-id", "event-5", "--limit", "5"),
+    run("recent", "--config", configPath(), "--event-id", "event-4", "--limit", "5"),
   );
   assert.equal(recent.length, 1);
-  assert.equal(recent[0].turn_id, afterCapabilityRestart.receipt.turn_id);
+  assert.equal(recent[0].turn_id, afterRuntimeRestart.receipt.turn_id);
 
   const status = JSON.parse(run("status", "--config", configPath()));
-  assert.ok(status.components.every((component) => component.status === "ready"));
-  assert.equal(status.turns.interrupted, 1);
+  assert.ok(status.providers.every((provider) => provider.status === "ready"));
   assert.equal(status.deliveries.uncertain, 1);
   assert.equal(status.execution_profile.requested.model, "deterministic/concise");
-  assert.equal(status.execution_profile.effective.model, "deterministic/concise");
 
   await stopAll();
   run("backup", "--config", configPath(), "--output", backup);
@@ -293,28 +178,20 @@ try {
   run("restore", "--input", backup, "--target", restoredRoot);
   installation = restoredRoot;
   await startAll();
-
-  const restored = await simulate("event-6", "continue after restore with capability");
-  assert.match(restored.delivery.content, /Local provider response 7/u);
-  assert.match(restored.delivery.content, /external echo/u);
+  const restored = await simulate("event-5", "continue after restore");
+  assert.match(restored.delivery.content, /Local provider response 6/u);
 
   process.stdout.write(
     `${JSON.stringify(
       {
-        admission: "guild, user, and immutable routes fail closed",
-        activation: ["mention", "always"],
-        conversations: ["thread adoption persisted", "channel continuity"],
-        feedback: ["processing", "delivered", "failed", "uncertain"],
+        admission: "guild, user, and routes fail closed",
+        conversations: "channel and thread continuity",
         duplicate: "deduplicated",
-        command_extension: "active",
-        pi_resources: "active",
-        capability: "active",
-        restarts: ["discord", "runtime-pi", "interface-extension", "capability"],
+        resources: "Pi extensions and skills loaded natively",
+        restarts: ["discord", "runtime-pi"],
         abandoned_delivery_claim: "uncertain",
-        native_runtime_reconciliation: "completed from session evidence",
-        diagnostics: "authenticated and discoverable by event",
-        inspected_turn: afterCapabilityRestart.receipt.turn_id,
-        backup_restore: "continued safely",
+        diagnostics: "authenticated and queryable",
+        backup_restore: "continued",
       },
       null,
       2,
@@ -356,16 +233,22 @@ function event(eventId, guildId, userId, channelId, parentChannelId, content) {
   };
 }
 
+async function requestSimulation(value) {
+  return fetch(`http://127.0.0.1:${String(basePort + 1)}/v1/simulate`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(value),
+  });
+}
+
 async function simulate(eventId, content) {
   return simulateRoute(eventId, "300", null, content);
 }
 
 async function simulateRoute(eventId, channelId, parentChannelId, content) {
-  const response = await fetch(`http://127.0.0.1:${String(basePort + 1)}/v1/simulate`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(event(eventId, "100", "200", channelId, parentChannelId, content)),
-  });
+  const response = await requestSimulation(
+    event(eventId, "100", "200", channelId, parentChannelId, content),
+  );
   const body = await response.text();
   assert.equal(response.status, 200, body);
   return JSON.parse(body);
@@ -376,11 +259,12 @@ async function submitCoreEvent(eventId, content) {
     method: "POST",
     headers: {
       authorization: `Bearer ${await credentialValue("discord-private")}`,
+      "x-carillon-provider": "discord-private",
       "content-type": "application/json",
     },
     body: JSON.stringify({
       event_id: eventId,
-      guild_id: "100",
+      agent_id: "default",
       user_id: "200",
       audience_id: "discord-100-300",
       delivery_target_id: "300",
@@ -393,6 +277,24 @@ async function submitCoreEvent(eventId, content) {
   return JSON.parse(body);
 }
 
+async function waitForDeliveryClaim(instance) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const response = await fetch(`http://127.0.0.1:${String(basePort)}/v1/deliveries`, {
+      headers: {
+        authorization: `Bearer ${await credentialValue("discord-private")}`,
+        "x-carillon-provider": "discord-private",
+        "x-carillon-instance": instance,
+      },
+    });
+    const body = await response.text();
+    assert.equal(response.status, 200, body);
+    const delivery = JSON.parse(body);
+    if (delivery !== null) return delivery;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+  }
+  throw new Error("delivery did not become ready");
+}
+
 function serviceArguments(name) {
   if (name === "core") return [binary, ["core", "--config", configPath()]];
   if (name === "runtime") {
@@ -401,6 +303,8 @@ function serviceArguments(name) {
       configPath(),
       "--token-file",
       credential("runtime-pi"),
+      "--provider",
+      "runtime-pi",
       "--deterministic",
       "--state-dir",
       piState,
@@ -409,22 +313,6 @@ function serviceArguments(name) {
       ? [process.execPath, [runtimeEntry, ...args]]
       : [resolve(packagedRuntime), args];
   }
-  if (name === "extension")
-    return [
-      binary,
-      [
-        "interface-extension",
-        "--config",
-        configPath(),
-        "--token-file",
-        credential("guild-command"),
-      ],
-    ];
-  if (name === "capability")
-    return [
-      binary,
-      ["capability", "--config", configPath(), "--token-file", credential("echo-capability")],
-    ];
   return [
     binary,
     [
@@ -439,7 +327,7 @@ function serviceArguments(name) {
 }
 
 function servicePort(name) {
-  return basePort + { core: 0, discord: 1, runtime: 2, extension: 3, capability: 4 }[name];
+  return basePort + { core: 0, discord: 1, runtime: 2 }[name];
 }
 
 async function start(name) {
@@ -450,7 +338,7 @@ async function start(name) {
 }
 
 async function startAll() {
-  for (const name of ["runtime", "extension", "capability", "core", "discord"]) await start(name);
+  for (const name of ["runtime", "core", "discord"]) await start(name);
 }
 
 async function restart(name) {

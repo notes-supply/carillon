@@ -1,5 +1,4 @@
 import {
-  defineTool,
   ModelRuntime,
   SessionManager,
   SettingsManager,
@@ -7,7 +6,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
@@ -30,11 +29,12 @@ import {
   serviceTierForModel,
   type ServiceTierDefault,
 } from "./profile.ts";
+import { nativeSessionId } from "./namespace.ts";
 import { createPiExecutionSession } from "./session.ts";
 
 registerBunOAuthFlows();
 
-interface RuntimeConfig {
+interface RuntimeProviderConfig {
   readonly id: string;
   readonly version: string;
   readonly url: string;
@@ -42,10 +42,9 @@ interface RuntimeConfig {
 
 interface Config {
   readonly root: string;
-  readonly dataDir: string;
   readonly resourceRoot: string;
   readonly workspace: string;
-  readonly runtime: RuntimeConfig;
+  readonly runtime: RuntimeProviderConfig;
 }
 
 interface ResourceSnapshot {
@@ -57,34 +56,20 @@ interface ResourceSnapshot {
   readonly skills_sha256: string;
 }
 
-interface SelectedComponent {
-  readonly id: string;
-  readonly role: string;
-  readonly version: string;
-  readonly url: string;
-}
-
-interface CapabilitySelection {
-  readonly component: SelectedComponent;
-  readonly token: string;
-}
-
 interface TurnRequest {
   readonly correlation_id: string;
+  readonly interface_id: string;
   readonly agent_id: string;
   readonly audience_id: string;
   readonly input: string;
   readonly continuation_ref?: string | null;
   readonly resources: ResourceSnapshot;
-  readonly capability?: CapabilitySelection | null;
 }
 
 interface TurnResponse {
   readonly correlation_id: string;
   readonly output: string;
   readonly continuation_ref: string;
-  readonly native: unknown;
-  readonly capability_activity: readonly unknown[];
 }
 interface RuntimeExecutionProfiles {
   readonly models: readonly RuntimeExecutionProfileModel[];
@@ -96,6 +81,7 @@ interface RuntimeExecutionProfileSelection {
   readonly service_tier?: ServiceTier;
   readonly scope: "current_conversation" | "new_conversations";
   readonly continuation_ref?: string | null;
+  readonly interface_id?: string | null;
   readonly agent_id: string;
   readonly audience_id?: string | null;
   readonly resources?: ResourceSnapshot | null;
@@ -107,20 +93,6 @@ interface ExecutionProfileApplication {
   readonly continuation_ref?: string;
 }
 
-interface Evidence {
-  readonly correlation_id: string;
-  readonly state: "processing" | "completed" | "interrupted";
-  readonly engine?: "deterministic" | "pi";
-  readonly continuation_ref?: string;
-  readonly native?: unknown;
-  readonly result?: TurnResponse;
-  readonly error?: string;
-}
-
-interface CapabilityResponse {
-  readonly output: string;
-  readonly native: unknown;
-}
 interface DeterministicSession {
   readonly profile?: ExecutionProfile;
   readonly turns: readonly {
@@ -159,44 +131,25 @@ const ResourceSnapshotSchema = Type.Object({
   extensions_sha256: Type.String(),
   skills_sha256: Type.String(),
 });
-const ComponentSchema = Type.Object({
-  id: Type.String(),
-  role: Type.String(),
-  version: Type.String(),
-  url: Type.String(),
+const ProviderIdentitySchema = Type.String({
+  minLength: 1,
+  maxLength: 128,
+  pattern: "^[A-Za-z0-9_-]+$",
 });
-const CapabilitySelectionSchema = Type.Object({
-  component: ComponentSchema,
-  token: Type.String(),
+const ProviderSchema = Type.Object({
+  id: ProviderIdentitySchema,
+  role: Type.String({ minLength: 1 }),
+  version: Type.String({ minLength: 1 }),
+  url: Type.String({ minLength: 1 }),
 });
 const TurnRequestSchema = Type.Object({
   correlation_id: Type.String(),
+  interface_id: ProviderIdentitySchema,
   agent_id: Type.String(),
   audience_id: Type.String(),
   input: Type.String(),
   continuation_ref: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   resources: ResourceSnapshotSchema,
-  capability: Type.Optional(Type.Union([CapabilitySelectionSchema, Type.Null()])),
-});
-const TurnResponseSchema = Type.Object({
-  correlation_id: Type.String(),
-  output: Type.String(),
-  continuation_ref: Type.String(),
-  native: Type.Unknown(),
-  capability_activity: Type.Array(Type.Unknown()),
-});
-const EvidenceSchema = Type.Object({
-  correlation_id: Type.String(),
-  state: Type.Union([
-    Type.Literal("processing"),
-    Type.Literal("completed"),
-    Type.Literal("interrupted"),
-  ]),
-  engine: Type.Optional(Type.Union([Type.Literal("deterministic"), Type.Literal("pi")])),
-  continuation_ref: Type.Optional(Type.String()),
-  native: Type.Optional(Type.Unknown()),
-  result: Type.Optional(TurnResponseSchema),
-  error: Type.Optional(Type.String()),
 });
 const ThinkingLevelSchema = Type.Union([
   Type.Literal("off"),
@@ -214,14 +167,12 @@ const RuntimeExecutionProfileSelectionSchema = Type.Object({
   service_tier: Type.Optional(ServiceTierSchema),
   scope: Type.Union([Type.Literal("current_conversation"), Type.Literal("new_conversations")]),
   continuation_ref: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  interface_id: Type.Optional(Type.Union([ProviderIdentitySchema, Type.Null()])),
   agent_id: Type.String(),
   audience_id: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   resources: Type.Optional(Type.Union([ResourceSnapshotSchema, Type.Null()])),
 });
-const CapabilityResponseSchema = Type.Object({
-  output: Type.String(),
-  native: Type.Unknown(),
-});
+
 const DeterministicSessionSchema = Type.Object({
   profile: Type.Optional(ExecutionProfileSchema),
   turns: Type.Array(
@@ -235,49 +186,29 @@ const DeterministicSessionSchema = Type.Object({
 const FileConfigSchema = Type.Object({
   data_dir: Type.String(),
   agent: Type.Object({ resource_root: Type.String(), workspace: Type.String() }),
-  runtime: Type.Object({ id: Type.String(), version: Type.String(), url: Type.String() }),
+  providers: Type.Array(ProviderSchema),
 });
-const NativeExecutionSchema = Type.Object({ runtime_instance: Type.String() });
-const SessionEntrySchema = Type.Object({
-  type: Type.String(),
-  customType: Type.Optional(Type.String()),
-  data: Type.Optional(Type.Unknown()),
-  message: Type.Optional(Type.Unknown()),
-});
-const CorrelationMarkerSchema = Type.Object({ correlation_id: Type.String() });
-const SessionEntriesSchema = Type.Array(SessionEntrySchema);
-const AssistantMessageSchema = Type.Object({
-  role: Type.Literal("assistant"),
-  content: Type.Array(Type.Unknown()),
-  stopReason: Type.String(),
-  errorMessage: Type.Optional(Type.String()),
-});
-const TextBlockSchema = Type.Object({ type: Type.Literal("text"), text: Type.String() });
-
 let config: Config;
 let token: string;
 let deterministic: boolean;
-let evidenceDirectory: string;
 let sessionDirectory: string;
 let serviceTierDefaultPath: string;
 
 let privateSettings: SettingsManager;
 let modelRuntime: ModelRuntime | undefined;
-let runtimeInstance: string;
 let defaultServiceTier: ServiceTierDefault | undefined;
 let queue: Promise<void> = Promise.resolve();
 
 async function startRuntime(values: readonly string[]): Promise<void> {
   const args = parseArguments(values);
-  config = await loadConfig(requiredArgument(args, "config"));
+  const providerId = requiredArgument(args, "provider");
+  config = await loadConfig(requiredArgument(args, "config"), providerId);
   token = (await readFile(requiredArgument(args, "token-file"), "utf8")).trim();
   deterministic = args.has("deterministic");
   const privateStateDirectory = resolve(requiredArgument(args, "state-dir"));
   serviceTierDefaultPath = join(privateStateDirectory, "service-tier.json");
-  evidenceDirectory = join(config.dataDir, "components", config.runtime.id, "evidence");
   sessionDirectory = join(config.resourceRoot, "sessions");
 
-  await mkdir(evidenceDirectory, { recursive: true });
   await mkdir(sessionDirectory, { recursive: true });
   await mkdir(privateStateDirectory, { recursive: true, mode: 0o700 });
   defaultServiceTier = await loadServiceTierDefault(serviceTierDefaultPath);
@@ -291,7 +222,6 @@ async function startRuntime(values: readonly string[]): Promise<void> {
         allowModelNetwork: true,
         modelRefreshTimeoutMs: 15_000,
       });
-  runtimeInstance = randomUUID();
 
   const server = createServer((request, response) => {
     void route(request, response).catch((failure: unknown) => {
@@ -311,15 +241,13 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
   if (request.method === "GET" && request.url === "/health") {
     writeJson(response, 200, {
       id: config.runtime.id,
-      role: "runtime-adapter",
+      role: "runtime",
       version: config.runtime.version,
       status: "ready",
       features: [
         "native-continuations",
         "native-extensions",
         "skills",
-        "capability-tools",
-        "durable-evidence",
         "execution-profile-discovery",
         "execution-profile-selection",
       ],
@@ -384,17 +312,7 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     writeJson(response, 200, result);
     return;
   }
-  const evidenceMatch =
-    request.method === "GET" ? /^\/v1\/evidence\/([A-Za-z0-9._-]+)$/.exec(request.url ?? "") : null;
-  if (evidenceMatch?.[1] !== undefined) {
-    const evidence = await reconcileEvidence(await readEvidence(evidenceMatch[1]));
-    if (evidence === undefined) {
-      writeJson(response, 404, { error: "evidence not found" });
-    } else {
-      writeJson(response, 200, evidence);
-    }
-    return;
-  }
+
   writeJson(response, 404, { error: "not found" });
 }
 
@@ -558,6 +476,8 @@ async function applyDeterministicConversationProfile(
   selection: RuntimeExecutionProfileSelection,
   model: RuntimeExecutionProfileModel,
 ): Promise<ExecutionProfileApplication> {
+  if (selection.continuation_ref === null || selection.continuation_ref === undefined)
+    throw new Error("current conversation does not exist");
   const sessionPath = profileContinuationPath(selection);
   const session = await readDeterministicSession(sessionPath);
   const profile = { model: `${model.provider}/${model.id}` };
@@ -582,16 +502,8 @@ async function applyPiConversationProfile(
   );
   if (model === undefined) throw new Error("selected Pi model is unavailable");
   const requested = profileEvidence(model, selection.reasoning, selection.service_tier).requested;
-  if (selection.continuation_ref === null || selection.continuation_ref === undefined) {
-    const manager = SessionManager.create(config.workspace, sessionDirectory);
-    const continuation = persistExecutionProfile(manager, requested);
-    return {
-      scope: selection.scope,
-      requested,
-      effective: profileEvidence(model, selection.reasoning, requested.service_tier).effective,
-      continuation_ref: continuation,
-    };
-  }
+  if (selection.continuation_ref === null || selection.continuation_ref === undefined)
+    throw new Error("current conversation does not exist");
   const manager = SessionManager.open(
     validateContinuation(selection.continuation_ref),
     sessionDirectory,
@@ -631,32 +543,28 @@ async function applyPiConversationProfile(
 function profileContinuationPath(selection: RuntimeExecutionProfileSelection): string {
   if (selection.continuation_ref !== null && selection.continuation_ref !== undefined)
     return validateContinuation(selection.continuation_ref);
+  return join(
+    sessionDirectory,
+    `${safeName(requiredProfileInterface(selection))}--${safeName(selection.agent_id)}--${safeName(requiredProfileAudience(selection))}.json`,
+  );
+}
+
+function requiredProfileInterface(selection: RuntimeExecutionProfileSelection): string {
+  const interfaceId = selection.interface_id;
+  if (interfaceId === null || interfaceId === undefined)
+    throw new Error("current conversation scope needs an interface");
+  return interfaceId;
+}
+
+function requiredProfileAudience(selection: RuntimeExecutionProfileSelection): string {
   const audience = selection.audience_id;
   if (audience === null || audience === undefined || audience.length === 0)
     throw new Error("current conversation scope needs an audience");
-  return join(sessionDirectory, `${safeName(selection.agent_id)}--${safeName(audience)}.json`);
+  return audience;
 }
 
 async function executeTurn(request: TurnRequest): Promise<TurnResponse> {
-  const existing = await readEvidence(request.correlation_id);
-  if (existing?.state === "completed" && existing.result !== undefined) return existing.result;
-  if (existing !== undefined)
-    throw new Error(`turn ${request.correlation_id} has non-terminal runtime evidence`);
-  await writeEvidence({ correlation_id: request.correlation_id, state: "processing" });
-  try {
-    const result = deterministic ? await executeDeterministic(request) : await executePi(request);
-    await writeEvidence({ correlation_id: request.correlation_id, state: "completed", result });
-    return result;
-  } catch (failure: unknown) {
-    const current = await readEvidence(request.correlation_id);
-    await writeEvidence({
-      ...current,
-      correlation_id: request.correlation_id,
-      state: "interrupted",
-      error: errorMessage(failure),
-    });
-    throw failure;
-  }
+  return deterministic ? executeDeterministic(request) : executePi(request);
 }
 
 async function executeDeterministic(request: TurnRequest): Promise<TurnResponse> {
@@ -669,35 +577,7 @@ async function executeDeterministic(request: TurnRequest): Promise<TurnResponse>
       : `${model.provider}/${model.id}` === reference;
   });
   if (selectedModel === undefined) throw new Error("deterministic model selection is unavailable");
-  const executionProfile = {
-    requested: { model: `${selectedModel.provider}/${selectedModel.id}` },
-    effective: { model: `${selectedModel.provider}/${selectedModel.id}` },
-  };
-  await writeEvidence({
-    correlation_id: request.correlation_id,
-    state: "processing",
-    engine: "deterministic",
-    continuation_ref: sessionPath,
-    native: {
-      runtime_instance: runtimeInstance,
-      execution_profile: executionProfile,
-    },
-  });
-  const capabilityActivity: unknown[] = [];
-  let capabilityText = "";
-  if (
-    request.capability !== null &&
-    request.capability !== undefined &&
-    /capability|additions|echo/iu.test(request.input)
-  ) {
-    const capability = await callCapability(
-      request.capability,
-      request.correlation_id,
-      request.input,
-    );
-    capabilityText = ` ${capability.output}.`;
-    capabilityActivity.push(capability.native);
-  }
+  const profile = { model: `${selectedModel.provider}/${selectedModel.id}` };
   const extensionActive = await exists(
     join(request.resources.root, "extensions", "carillon-context.js"),
   );
@@ -708,9 +588,9 @@ async function executeDeterministic(request: TurnRequest): Promise<TurnResponse>
     extensionActive ? "native extension active" : "native extension inactive",
     skillActive ? "skill active" : "skill inactive",
   ];
-  const output = `Local provider response ${String(prior.turns.length + 1)}: ${request.input}. ${markers.join("; ")}.${capabilityText}`;
+  const output = `Local provider response ${String(prior.turns.length + 1)}: ${request.input}. ${markers.join("; ")}.`;
   const next: DeterministicSession = {
-    profile: executionProfile.requested,
+    profile,
     turns: [
       ...prior.turns,
       { correlation_id: request.correlation_id, input: request.input, output },
@@ -721,13 +601,6 @@ async function executeDeterministic(request: TurnRequest): Promise<TurnResponse>
     correlation_id: request.correlation_id,
     output,
     continuation_ref: sessionPath,
-    native: {
-      owner: "runtime-pi",
-      provider: "deterministic-local-substitute",
-      execution_profile: executionProfile,
-      message_count: next.turns.length * 2,
-    },
-    capability_activity: capabilityActivity,
   };
 }
 
@@ -735,7 +608,9 @@ async function executePi(request: TurnRequest): Promise<TurnResponse> {
   const root = resolve(request.resources.root);
   const isNew = request.continuation_ref === null || request.continuation_ref === undefined;
   const manager = isNew
-    ? SessionManager.create(config.workspace, sessionDirectory)
+    ? SessionManager.create(config.workspace, sessionDirectory, {
+        id: nativeSessionId(request.interface_id, request.agent_id, request.audience_id),
+      })
     : SessionManager.open(
         validateContinuation(request.continuation_ref),
         sessionDirectory,
@@ -763,31 +638,7 @@ async function executePi(request: TurnRequest): Promise<TurnResponse> {
       ? profileEvidence(defaultModel, defaultReasoning, selectedDefaultTier).requested
       : undefined;
   if (initialProfile !== undefined) persistExecutionProfile(manager, initialProfile);
-  const capabilityActivity: unknown[] = [];
-  const capability = request.capability;
-  const customTools =
-    capability === null || capability === undefined
-      ? []
-      : [
-          defineTool({
-            name: "carillon_echo",
-            label: "Carillon Echo",
-            description: "Use the independently supervised harmless echo capability.",
-            parameters: Type.Object({ input: Type.String() }),
-            execute: async (_toolCallId, parameters) => {
-              const result = await callCapability(
-                capability,
-                request.correlation_id,
-                parameters.input,
-              );
-              capabilityActivity.push(result.native);
-              return {
-                content: [{ type: "text" as const, text: result.output }],
-                details: result.native,
-              };
-            },
-          }),
-        ];
+
   const serviceTier = persistedProfile?.service_tier ?? selectedDefaultTier;
   const runtime = modelRuntime;
   if (runtime === undefined) throw new Error("Pi model runtime is unavailable");
@@ -799,7 +650,6 @@ async function executePi(request: TurnRequest): Promise<TurnResponse> {
     ...(defaultModel === undefined ? {} : { model: defaultModel }),
     ...(defaultReasoning === undefined ? {} : { thinkingLevel: defaultReasoning }),
     ...(serviceTier === undefined ? {} : { serviceTier }),
-    customTools,
   });
   const { session, extensionsResult } = created;
   try {
@@ -814,33 +664,10 @@ async function executePi(request: TurnRequest): Promise<TurnResponse> {
         model.reasoning ? (defaultReasoning ?? session.thinkingLevel) : undefined,
         selectedDefaultTier,
       ).requested;
-    const executionProfile = {
-      requested,
-      effective: profileEvidence(
-        model,
-        model.reasoning ? session.thinkingLevel : undefined,
-        requested.service_tier,
-      ).effective,
-    };
     if (persistedProfile === undefined && initialProfile === undefined)
       persistExecutionProfile(session.sessionManager, requested);
-    session.sessionManager.appendCustomEntry("carillon-turn", {
-      correlation_id: request.correlation_id,
-      resource_snapshot: toJsonResource(request.resources),
-    });
     const sessionFile = session.sessionFile;
     if (sessionFile === undefined) throw new Error("Pi did not create durable session evidence");
-    await writeEvidence({
-      correlation_id: request.correlation_id,
-      state: "processing",
-      engine: "pi",
-      continuation_ref: sessionFile,
-      native: {
-        runtime_instance: runtimeInstance,
-        session_id: session.sessionId,
-        execution_profile: executionProfile,
-      },
-    });
     let output = "";
     const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
       if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta")
@@ -848,22 +675,10 @@ async function executePi(request: TurnRequest): Promise<TurnResponse> {
     });
     try {
       await session.prompt(request.input);
-      session.sessionManager.appendCustomEntry("carillon-turn-complete", {
-        correlation_id: request.correlation_id,
-      });
       return {
         correlation_id: request.correlation_id,
         output,
         continuation_ref: sessionFile,
-        native: {
-          owner: "runtime-pi",
-          provider: "pi",
-          execution_profile: executionProfile,
-          session_id: session.sessionId,
-          session_file: sessionFile,
-          message_count: session.messages.length,
-        },
-        capability_activity: capabilityActivity,
       };
     } finally {
       unsubscribe();
@@ -880,29 +695,12 @@ function assertExtensionsLoaded(errors: readonly { readonly error: string }[]): 
     );
 }
 
-async function callCapability(
-  selection: CapabilitySelection,
-  correlationId: string,
-  input: string,
-): Promise<CapabilityResponse> {
-  const response = await fetch(`${selection.component.url}/v1/execute`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${selection.token}`, "content-type": "application/json" },
-    body: JSON.stringify({ correlation_id: correlationId, operation: "echo", input }),
-  });
-  if (!response.ok)
-    throw new Error(
-      `capability ${selection.component.id} returned HTTP ${String(response.status)}`,
-    );
-  return Parse(CapabilityResponseSchema, await response.json());
-}
-
 function continuationPath(request: TurnRequest): string {
   if (request.continuation_ref !== null && request.continuation_ref !== undefined)
     return validateContinuation(request.continuation_ref);
   return join(
     sessionDirectory,
-    `${safeName(request.agent_id)}--${safeName(request.audience_id)}.json`,
+    `${safeName(request.interface_id)}--${safeName(request.agent_id)}--${safeName(request.audience_id)}.json`,
   );
 }
 
@@ -924,155 +722,25 @@ async function readDeterministicSession(path: string): Promise<DeterministicSess
   }
 }
 
-async function readEvidence(correlationId: string): Promise<Evidence | undefined> {
-  try {
-    const content = await readFile(
-      join(evidenceDirectory, `${safeName(correlationId)}.json`),
-      "utf8",
-    );
-    return await Parse(EvidenceSchema, JSON.parse(content));
-  } catch (failure: unknown) {
-    if (isNodeError(failure) && failure.code === "ENOENT") return undefined;
-    throw failure;
-  }
-}
-
-async function reconcileEvidence(evidence: Evidence | undefined): Promise<Evidence | undefined> {
-  if (
-    evidence?.state !== "processing" ||
-    evidence.engine === undefined ||
-    evidence.continuation_ref === undefined
-  )
-    return evidence;
-
-  let owner: string | undefined;
-  try {
-    owner = Parse(NativeExecutionSchema, evidence.native).runtime_instance;
-  } catch {
-    owner = undefined;
-  }
-  const currentExecution = owner === runtimeInstance;
-  if (evidence.engine === "deterministic") {
-    const session = await readDeterministicSession(validateContinuation(evidence.continuation_ref));
-    const turn = session.turns.find(
-      (candidate) => candidate.correlation_id === evidence.correlation_id,
-    );
-    if (turn !== undefined) {
-      const completed: Evidence = {
-        ...evidence,
-        state: "completed",
-        result: {
-          correlation_id: evidence.correlation_id,
-          output: turn.output,
-          continuation_ref: validateContinuation(evidence.continuation_ref),
-          native: {
-            owner: "runtime-pi",
-            provider: "deterministic-local-substitute",
-            reconciled: true,
-            prior_evidence: evidence.native,
-          },
-          capability_activity: [],
-        },
-      };
-      await writeEvidence(completed);
-      return completed;
-    }
-  } else {
-    const manager = SessionManager.open(validateContinuation(evidence.continuation_ref));
-    const entries = Parse(SessionEntriesSchema, manager.getEntries());
-    let markerIndex = -1;
-    for (const [index, entry] of entries.entries()) {
-      if (entry.type !== "custom" || entry.customType !== "carillon-turn") continue;
-      try {
-        const marker = Parse(CorrelationMarkerSchema, entry.data);
-        if (marker.correlation_id === evidence.correlation_id) markerIndex = index;
-      } catch {
-        // Ignore another extension's malformed custom entry.
-      }
-    }
-    if (markerIndex >= 0) {
-      let output = "";
-      let stopReason: string | undefined;
-      let error: string | undefined;
-      for (const entry of entries.slice(markerIndex + 1)) {
-        if (entry.type !== "message" || entry.message === undefined) continue;
-        try {
-          const message = Parse(AssistantMessageSchema, entry.message);
-          stopReason = message.stopReason;
-          error = message.errorMessage;
-          for (const content of message.content) {
-            try {
-              output += Parse(TextBlockSchema, content).text;
-            } catch {
-              // Non-text assistant content is native evidence, not Discord output.
-            }
-          }
-        } catch {
-          // User, tool, and custom messages are not terminal assistant evidence.
-        }
-      }
-      if (stopReason !== undefined && stopReason !== "toolUse") {
-        if (stopReason === "error" || stopReason === "aborted") {
-          const interrupted: Evidence = {
-            ...evidence,
-            state: "interrupted",
-            error: error ?? `Pi stopped with ${stopReason}`,
-          };
-          await writeEvidence(interrupted);
-          return interrupted;
-        }
-        const completed: Evidence = {
-          ...evidence,
-          state: "completed",
-          result: {
-            correlation_id: evidence.correlation_id,
-            output,
-            continuation_ref: validateContinuation(evidence.continuation_ref),
-            native: {
-              owner: "runtime-pi",
-              provider: "pi",
-              reconciled: true,
-              message_count: entries.length,
-              prior_evidence: evidence.native,
-            },
-            capability_activity: [],
-          },
-        };
-        await writeEvidence(completed);
-        return completed;
-      }
-    }
-  }
-
-  if (currentExecution) return evidence;
-  const interrupted: Evidence = {
-    ...evidence,
-    state: "interrupted",
-    error: "runtime restarted without terminal native evidence",
-  };
-  await writeEvidence(interrupted);
-  return interrupted;
-}
-
-async function writeEvidence(evidence: Evidence): Promise<void> {
-  await atomicJson(join(evidenceDirectory, `${safeName(evidence.correlation_id)}.json`), evidence);
-}
-
 async function atomicJson(path: string, value: unknown): Promise<void> {
   const temporary = `${path}.${String(process.pid)}.tmp`;
   await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
   await rename(temporary, path);
 }
 
-async function loadConfig(path: string): Promise<Config> {
+async function loadConfig(path: string, providerId: string): Promise<Config> {
+  Parse(ProviderIdentitySchema, providerId);
   const root = resolve(path, "..");
   const parsed = Parse(FileConfigSchema, parseToml(await readFile(path, "utf8")));
+  const runtime = parsed.providers.find(
+    (provider) => provider.id === providerId && provider.role === "runtime",
+  );
+  if (runtime === undefined) throw new Error(`runtime provider ${providerId} is not configured`);
   return {
     root,
-    dataDir: resolve(root, parsed.data_dir),
     resourceRoot: resolve(root, parsed.agent.resource_root),
     workspace: resolve(root, parsed.agent.workspace),
-    runtime: parsed.runtime,
+    runtime,
   };
 }
 
@@ -1176,17 +844,6 @@ function safeName(value: string): string {
   if (!/^[A-Za-z0-9._-]+$/u.test(value))
     throw new Error("identifier contains unsupported characters");
   return value;
-}
-
-function toJsonResource(value: ResourceSnapshot): Readonly<Record<string, string>> {
-  return {
-    root: value.root,
-    system_sha256: value.system_sha256,
-    context_sha256: value.context_sha256,
-    settings_sha256: value.settings_sha256,
-    extensions_sha256: value.extensions_sha256,
-    skills_sha256: value.skills_sha256,
-  };
 }
 
 await startRuntime(process.argv.slice(2));

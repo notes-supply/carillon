@@ -18,11 +18,10 @@ pub struct Config {
     pub release: String,
     pub data_dir: PathBuf,
     pub core: CoreConfig,
-    pub discord: DiscordConfig,
+    pub providers: Vec<Provider>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discord: Option<DiscordConfig>,
     pub agent: AgentConfig,
-    pub runtime: Component,
-    pub interface_extension: Component,
-    pub capability: Component,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -33,9 +32,8 @@ pub struct CoreConfig {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct DiscordConfig {
-    pub id: String,
-    pub version: String,
-    pub listen: SocketAddr,
+    pub provider: String,
+    pub agent: String,
     pub guild_id: String,
     #[serde(default)]
     pub bot_user_id: String,
@@ -54,7 +52,6 @@ pub struct DiscordConfig {
     pub failed_emoji: String,
     #[serde(default = "uncertain_emoji")]
     pub uncertain_emoji: String,
-    pub token_hash: String,
 }
 
 const fn enabled() -> bool {
@@ -162,29 +159,28 @@ pub struct AgentConfig {
     pub name: String,
     pub resource_root: PathBuf,
     pub workspace: PathBuf,
+    pub runtime_provider: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct Component {
+pub struct Provider {
     pub id: String,
-    pub role: ComponentRole,
+    pub role: ProviderRole,
     pub version: String,
     pub url: String,
     pub token_hash: String,
     pub enabled: bool,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum ComponentRole {
-    RuntimeAdapter,
-    InterfaceExtension,
-    Capability,
+pub enum ProviderRole {
+    Interface,
+    Runtime,
 }
 
 #[derive(Clone, Debug)]
 pub struct LoadedConfig {
-    pub path: PathBuf,
     pub root: PathBuf,
     pub value: Config,
 }
@@ -205,61 +201,135 @@ impl LoadedConfig {
         value.agent.resource_root = absolutize(&root, &value.agent.resource_root);
         value.agent.workspace = absolutize(&root, &value.agent.workspace);
         value.validate()?;
-        Ok(Self { path, root, value })
+        Ok(Self { root, value })
+    }
+    pub fn provider(&self, id: &str, role: ProviderRole) -> Result<&Provider> {
+        self.value.provider(id, role)
     }
 
-    pub fn credential_path(&self, id: &str) -> PathBuf {
-        self.root.join("credentials").join(format!("{id}.token"))
+    pub fn discord(&self) -> Result<&DiscordConfig> {
+        self.value.discord()
+    }
+
+    pub fn credential_path(&self, id: &str) -> Result<PathBuf> {
+        validate_provider_identity(id)?;
+        Ok(self.root.join("credentials").join(format!("{id}.token")))
     }
 
     pub fn credential(&self, id: &str) -> Result<String> {
-        let path = self.credential_path(id);
+        let path = self.credential_path(id)?;
         Ok(fs::read_to_string(&path)
-            .with_context(|| format!("read component credential {}", path.display()))?
+            .with_context(|| format!("read provider credential {}", path.display()))?
             .trim()
             .to_owned())
     }
 }
 
 impl Config {
+    pub fn provider(&self, id: &str, role: ProviderRole) -> Result<&Provider> {
+        let provider = self
+            .providers
+            .iter()
+            .find(|provider| provider.id == id)
+            .with_context(|| format!("provider {id} is not configured"))?;
+        if provider.role != role {
+            bail!("provider {id} does not have role {}", role.as_str());
+        }
+        Ok(provider)
+    }
+
     pub(crate) fn validate(&self) -> Result<()> {
-        let discord = &self.discord;
-        if !valid_snowflake(&discord.guild_id)
-            || !valid_snowflake(&discord.bot_user_id)
-            || discord.allowed_user_ids.is_empty()
-            || discord
+        if self.core.operator_token_hash.is_empty() {
+            bail!("operator diagnostics credential is not configured");
+        }
+        let mut provider_ids = BTreeSet::new();
+        for provider in &self.providers {
+            validate_provider_identity(&provider.id)?;
+            if provider.version.trim().is_empty()
+                || provider.url.trim().is_empty()
+                || provider.token_hash.trim().is_empty()
+                || !provider_ids.insert(&provider.id)
+            {
+                bail!("provider versions, URLs, credentials, and IDs must be explicit and unique");
+            }
+        }
+        self.provider(&self.agent.runtime_provider, ProviderRole::Runtime)?;
+        Ok(())
+    }
+
+    pub fn discord(&self) -> Result<&DiscordConfig> {
+        let discord = self
+            .discord
+            .as_ref()
+            .context("Discord interface configuration is absent")?;
+        discord.validate(self)?;
+        Ok(discord)
+    }
+
+    pub fn sole_enabled_interface(&self) -> Option<&str> {
+        let mut interfaces = self
+            .providers
+            .iter()
+            .filter(|provider| provider.role == ProviderRole::Interface && provider.enabled);
+        let interface = interfaces.next()?;
+        interfaces.next().is_none().then_some(interface.id.as_str())
+    }
+}
+
+impl DiscordConfig {
+    fn validate(&self, config: &Config) -> Result<()> {
+        if !valid_snowflake(&self.guild_id)
+            || !valid_snowflake(&self.bot_user_id)
+            || self.allowed_user_ids.is_empty()
+            || self
                 .allowed_user_ids
                 .iter()
                 .any(|user| !valid_snowflake(user))
-            || discord.routes.is_empty()
+            || self.routes.is_empty()
         {
             bail!("Discord admission requires immutable guild, bot, user, and channel route IDs");
         }
         let mut channels = BTreeSet::new();
-        for route in &discord.routes {
+        for route in &self.routes {
             if !valid_snowflake(&route.channel_id) || !channels.insert(&route.channel_id) {
                 bail!("Discord route channel IDs must be valid and unique");
             }
         }
         for emoji in [
-            &discord.processing_emoji,
-            &discord.delivered_emoji,
-            &discord.failed_emoji,
-            &discord.uncertain_emoji,
+            &self.processing_emoji,
+            &self.delivered_emoji,
+            &self.failed_emoji,
+            &self.uncertain_emoji,
         ] {
             DiscordEmoji::parse(emoji)?;
         }
-        if self.core.operator_token_hash.is_empty() {
-            bail!("operator diagnostics credential is not configured");
-        }
-        if self.runtime.role != ComponentRole::RuntimeAdapter
-            || self.interface_extension.role != ComponentRole::InterfaceExtension
-            || self.capability.role != ComponentRole::Capability
-        {
-            bail!("component roles do not match their configuration slots");
+        config.provider(&self.provider, ProviderRole::Interface)?;
+        if self.agent != config.agent.id {
+            bail!("Discord interface selects an unknown agent");
         }
         Ok(())
     }
+}
+
+impl ProviderRole {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Interface => "interface",
+            Self::Runtime => "runtime",
+        }
+    }
+}
+
+pub fn validate_provider_identity(value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        bail!("provider identity must be 1-128 bytes of ASCII letters, digits, '-' or '_'");
+    }
+    Ok(())
 }
 
 pub fn hash_token(token: &str) -> String {
@@ -301,18 +371,17 @@ mod tests {
 
     use super::{
         DiscordActivation, DiscordConfig, DiscordConversation, DiscordEmoji, DiscordRoute,
+        validate_provider_identity,
     };
 
     #[test]
-    fn legacy_discord_configuration_receives_ingress_defaults() -> anyhow::Result<()> {
+    fn discord_configuration_receives_ingress_defaults() -> anyhow::Result<()> {
         let config: DiscordConfig = toml::from_str(
             r#"
-id = "discord-private"
-version = "0.0.0"
-listen = "127.0.0.1:43801"
+provider = "discord-private"
+agent = "default"
 guild_id = "100"
 allowed_user_ids = ["200"]
-token_hash = "hash"
 "#,
         )?;
         assert!(config.bot_user_id.is_empty());
@@ -326,6 +395,34 @@ token_hash = "hash"
         Ok(())
     }
 
+    #[test]
+    fn provider_identity_uses_one_path_safe_slug_grammar() {
+        for valid in ["a", "runtime-pi", "interface_2", "A9"] {
+            assert!(
+                validate_provider_identity(valid).is_ok(),
+                "{valid:?} should be valid"
+            );
+        }
+        let overlong = "a".repeat(129);
+        for invalid in [
+            "",
+            ".",
+            "..",
+            "../escape",
+            "/absolute",
+            "with/slash",
+            r"with\backslash",
+            "with space",
+            "with\ttab",
+            "with\ncontrol",
+            &overlong,
+        ] {
+            assert!(
+                validate_provider_identity(invalid).is_err(),
+                "{invalid:?} should be invalid"
+            );
+        }
+    }
     #[test]
     fn route_requires_all_explicit_fields() -> anyhow::Result<()> {
         let route = DiscordRoute::from_str("300:mention:thread")?;

@@ -1,10 +1,4 @@
-use std::{
-    collections::BTreeMap,
-    fs,
-    os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, path::Path, time::Duration};
 
 use anyhow::{Context, Result, anyhow, bail};
 use axum::{
@@ -16,30 +10,28 @@ use axum::{
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 use sha2::{Digest, Sha256};
-use tokio::{net::TcpListener, sync::Mutex};
+use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 
 use crate::{
-    config::{Component, LoadedConfig, RELEASE_VERSION, token_matches},
-    db::{AcceptedTurn, Database},
+    config::{LoadedConfig, Provider, ProviderRole, RELEASE_VERSION, token_matches},
+    db::{AcceptedTurn, Database, QueuedTurn},
     model::{
-        CapabilitySelection, Delivery, DeliveryAck, DeliveryOutcome, DeliveryReconciliation,
-        EventReceipt, ExecutionProfileApplication, ExecutionProfileScope,
-        ExecutionProfileSelection, ExtensionRequest, ExtensionResponse, ExternalEvent, Health,
-        ResourceSnapshot, RuntimeEvidence, RuntimeExecutionProfileSelection,
-        RuntimeExecutionProfiles, RuntimeTurnRequest, RuntimeTurnResponse, SelectedComponent,
+        Delivery, DeliveryAck, DeliveryOutcome, DeliveryReconciliation, EventReceipt,
+        ExecutionProfileApplication, ExecutionProfileScope, ExecutionProfileSelection,
+        ExternalEvent, Health, ResourceSnapshot, RuntimeExecutionProfileSelection,
+        RuntimeExecutionProfiles, RuntimeTurnRequest, RuntimeTurnResponse, SelectedProvider,
         StatusReport, TurnInspection, TurnSummary,
     },
 };
 
 #[derive(Clone)]
 struct AppState {
-    config_path: PathBuf,
+    config: LoadedConfig,
     database: Database,
     client: Client,
-    turns: Arc<Mutex<()>>,
 }
 
 #[derive(Debug)]
@@ -49,28 +41,26 @@ struct ApiError {
 }
 
 impl ApiError {
-    fn forbidden(message: impl Into<String>) -> Self {
+    fn new(status: StatusCode, message: impl Into<String>) -> Self {
         Self {
-            status: StatusCode::FORBIDDEN,
+            status,
             message: message.into(),
         }
     }
 
+    fn forbidden(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::FORBIDDEN, message)
+    }
+
     fn not_found(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::NOT_FOUND,
-            message: message.into(),
-        }
+        Self::new(StatusCode::NOT_FOUND, message)
     }
 }
 
 impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
         error!(error = %error, "request failed");
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: error.to_string(),
-        }
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
     }
 }
 
@@ -82,26 +72,30 @@ impl IntoResponse for ApiError {
 
 pub async fn serve(config: LoadedConfig) -> Result<()> {
     let database = Database::open(&config.value.data_dir.join("carillon.sqlite3"))?;
+    let recovered_deliveries = database.recover_deliveries()?;
+    let recovered_turns = database.recover_running_turns()?;
+    if recovered_deliveries > 0 {
+        warn!(
+            recovered_deliveries,
+            "delivery outcomes became uncertain after restart"
+        );
+    }
+    if recovered_turns > 0 {
+        warn!(
+            recovered_turns,
+            "running turns became uncertain after restart"
+        );
+    }
+
     let state = AppState {
-        config_path: config.path.clone(),
+        config: config.clone(),
         database,
         client: Client::new(),
-        turns: Arc::new(Mutex::new(())),
     };
-    recover(&state).await?;
-    if !state.database.pending_turns()?.is_empty() {
-        let reconciliation = state.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                match reconcile_pending_turns(&reconciliation).await {
-                    Ok(0) => break,
-                    Ok(_) => {}
-                    Err(failure) => warn!(error = %failure, "runtime reconciliation retry failed"),
-                }
-            }
-        });
-    }
+    let runtime_id = config.value.agent.runtime_provider.clone();
+    let worker = state.clone();
+    tokio::spawn(async move { runtime_worker(worker, runtime_id).await });
+
     let router = Router::new()
         .route("/health", get(health))
         .route("/v1/events", post(accept_event))
@@ -140,207 +134,132 @@ async fn accept_event(
     headers: HeaderMap,
     Json(event): Json<ExternalEvent>,
 ) -> Result<Json<EventReceipt>, ApiError> {
-    let config = LoadedConfig::load(&state.config_path)?;
-    authorize(&headers, &config.value.discord.token_hash)?;
-    admit(&event)?;
-    let _guard = state.turns.lock().await;
-    Ok(Json(process_event(&state, &config, event).await?))
-}
-
-async fn process_event(
-    state: &AppState,
-    config: &LoadedConfig,
-    event: ExternalEvent,
-) -> Result<EventReceipt> {
+    let interface = interface_provider(&headers, &state.config)?.clone();
+    admit(&event, &state.config)?;
+    let runtime = selected_runtime(&state.config)?.clone();
     let resources = materialize_resources(
-        &config.value.agent.resource_root,
-        &config.value.data_dir.join("resource-snapshots"),
+        &state.config.value.agent.resource_root,
+        &state.config.value.data_dir.join("resource-snapshots"),
     )?;
-    let components = component_snapshot(config);
-    let accepted = state.database.accept_event(
-        &config.value.discord.id,
-        &config.value.agent.id,
-        &config.value.runtime.id,
-        &event,
-        &components,
-        &resources,
-    )?;
-    if accepted.duplicate {
-        return Ok(receipt(&event.event_id, accepted));
-    }
-    state.database.mark_processing(&accepted.turn_id)?;
-    let result = if let Some(arguments) = command_arguments(&event.content) {
-        run_extension(state, config, &accepted.turn_id, &event, arguments).await
-    } else {
-        run_runtime(state, config, &accepted.turn_id, &event, resources).await
-    };
-    match result {
-        Ok(response) => {
-            state.database.complete_turn(
-                &accepted.turn_id,
-                &config.value.discord.id,
-                &event.delivery_target_id,
-                &event.feedback_target_id,
-                &response,
-            )?;
-            Ok(EventReceipt {
-                event_id: event.event_id,
-                turn_id: accepted.turn_id,
-                state: "completed".to_owned(),
-                duplicate: false,
-            })
-        }
-        Err(failure) => {
-            let message = failure.to_string();
-            state
-                .database
-                .fail_turn(&accepted.turn_id, "interrupted", &message)?;
-            warn!(turn_id = %accepted.turn_id, error = %message, "turn interrupted");
-            Ok(EventReceipt {
-                event_id: event.event_id,
-                turn_id: accepted.turn_id,
-                state: "interrupted".to_owned(),
-                duplicate: false,
-            })
-        }
-    }
-}
-
-async fn run_runtime(
-    state: &AppState,
-    config: &LoadedConfig,
-    turn_id: &str,
-    event: &ExternalEvent,
-    resources: ResourceSnapshot,
-) -> Result<RuntimeTurnResponse> {
-    let runtime = &config.value.runtime;
-    if !runtime.enabled {
-        bail!("selected runtime adapter is disabled");
-    }
-    let audience = &event.audience_id;
-    let continuation =
+    let providers =
+        serde_json::to_value([selected_provider(&interface), selected_provider(&runtime)])
+            .map_err(anyhow::Error::from)?;
+    let accepted =
         state
             .database
-            .continuation(&config.value.agent.id, audience, &runtime.id)?;
-    let capability = if config.value.capability.enabled {
-        Some(CapabilitySelection {
-            component: selected_component(&config.value.capability),
-            token: config.credential(&config.value.capability.id)?,
-        })
-    } else {
-        None
+            .accept_event(&interface.id, &runtime.id, &event, &providers, &resources)?;
+    Ok(Json(receipt(&event.event_id, accepted)))
+}
+
+async fn runtime_worker(state: AppState, runtime_id: String) {
+    loop {
+        if let Err(failure) = run_next_turn(&state, &runtime_id).await {
+            warn!(runtime_id, error = %failure, "runtime worker failed");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+}
+
+async fn run_next_turn(state: &AppState, runtime_id: &str) -> Result<()> {
+    let runtime = state.config.provider(runtime_id, ProviderRole::Runtime)?;
+    if !runtime.enabled {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        return Ok(());
+    }
+    let token = state.config.credential(runtime_id)?;
+    let Some(turn) = state.database.claim_turn(runtime_id)? else {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        return Ok(());
     };
+    if let Err(failure) = execute_turn(state, runtime, &token, &turn).await {
+        let message = failure.to_string();
+        while let Err(persistence_failure) = state.database.mark_uncertain(&turn, &message) {
+            warn!(
+                turn_id = %turn.turn_id,
+                error = %persistence_failure,
+                "retrying uncertain turn persistence"
+            );
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        warn!(turn_id = %turn.turn_id, error = %message, "runtime outcome is uncertain");
+    }
+    Ok(())
+}
+
+async fn execute_turn(
+    state: &AppState,
+    runtime: &Provider,
+    token: &str,
+    turn: &QueuedTurn,
+) -> Result<()> {
+    let continuation_ref = state.database.continuation(
+        &turn.interface_id,
+        &turn.agent_id,
+        &turn.audience_id,
+        &runtime.id,
+    )?;
     let request = RuntimeTurnRequest {
-        correlation_id: turn_id.to_owned(),
-        agent_id: config.value.agent.id.clone(),
-        audience_id: audience.clone(),
-        input: event.content.clone(),
-        continuation_ref: continuation,
-        resources,
-        capability,
+        correlation_id: turn.turn_id.clone(),
+        interface_id: turn.interface_id.clone(),
+        agent_id: turn.agent_id.clone(),
+        audience_id: turn.audience_id.clone(),
+        input: turn.input.clone(),
+        continuation_ref,
+        resources: turn.resources.clone(),
     };
-    let token = config.credential(&runtime.id)?;
     let response = state
         .client
         .post(format!("{}/v1/turns", runtime.url))
         .bearer_auth(token)
+        .timeout(Duration::from_mins(30))
         .json(&request)
         .send()
         .await
-        .context("contact runtime adapter")?
+        .context("contact runtime provider")?
         .error_for_status()
-        .context("runtime adapter rejected turn")?
+        .context("runtime provider rejected turn")?
         .json::<RuntimeTurnResponse>()
         .await
         .context("decode runtime response")?;
-    if response.correlation_id != turn_id {
+    if response.correlation_id != turn.turn_id {
         bail!("runtime returned a mismatched correlation ID");
     }
-    state.database.save_continuation(
-        &config.value.agent.id,
-        audience,
-        &runtime.id,
-        &response.continuation_ref,
-    )?;
-    Ok(response)
-}
-
-async fn run_extension(
-    state: &AppState,
-    config: &LoadedConfig,
-    turn_id: &str,
-    event: &ExternalEvent,
-    arguments: &str,
-) -> Result<RuntimeTurnResponse> {
-    let extension = &config.value.interface_extension;
-    if !extension.enabled {
-        bail!("Carillon command extension is not active");
+    if response.continuation_ref.is_empty() {
+        bail!("runtime returned an empty continuation reference");
     }
-    let request = ExtensionRequest {
-        correlation_id: turn_id.to_owned(),
-        command: "carillon".to_owned(),
-        arguments: arguments.to_owned(),
-        guild_id: event.guild_id.clone().context("command audience missing")?,
-        user_id: event.user_id.clone(),
-    };
-    let response = state
-        .client
-        .post(format!("{}/v1/invoke", extension.url))
-        .bearer_auth(config.credential(&extension.id)?)
-        .json(&request)
-        .send()
-        .await
-        .context("contact interface extension")?
-        .error_for_status()
-        .context("interface extension rejected command")?
-        .json::<ExtensionResponse>()
-        .await
-        .context("decode interface extension response")?;
-    Ok(RuntimeTurnResponse {
-        correlation_id: turn_id.to_owned(),
-        output: response.content,
-        continuation_ref: format!("extension:{turn_id}"),
-        native: json!({ "owner": extension.id, "evidence": response.native }),
-        capability_activity: Vec::new(),
-    })
+    state.database.complete_turn(turn, &runtime.id, &response)
 }
 
 async fn claim_delivery(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Option<Delivery>>, ApiError> {
-    let config = LoadedConfig::load(&state.config_path)?;
-    authorize(&headers, &config.value.discord.token_hash)?;
+    let interface = interface_provider(&headers, &state.config)?;
     let owner = adapter_instance(&headers)?;
-    Ok(Json(
-        state
-            .database
-            .claim_delivery(&config.value.discord.id, owner)?,
-    ))
+    Ok(Json(state.database.claim_delivery(&interface.id, owner)?))
 }
 
 async fn reconcile_delivery_claims(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<DeliveryReconciliation>, ApiError> {
-    let config = LoadedConfig::load(&state.config_path)?;
-    authorize(&headers, &config.value.discord.token_hash)?;
+    let interface = interface_provider(&headers, &state.config)?;
     let owner = adapter_instance(&headers)?;
     let feedback_target_ids = state
         .database
-        .reconcile_delivery_claims(&config.value.discord.id, owner)?;
+        .reconcile_delivery_claims(&interface.id, owner)?;
     Ok(Json(DeliveryReconciliation {
         feedback_target_ids,
     }))
 }
+
 async fn acknowledge_delivery(
     State(state): State<AppState>,
     headers: HeaderMap,
     AxumPath(id): AxumPath<i64>,
     Json(ack): Json<DeliveryAck>,
 ) -> Result<StatusCode, ApiError> {
-    let config = LoadedConfig::load(&state.config_path)?;
-    authorize(&headers, &config.value.discord.token_hash)?;
+    interface_provider(&headers, &state.config)?;
     let owner = adapter_instance(&headers)?;
     let outcome = match ack.outcome {
         DeliveryOutcome::Delivered => "delivered",
@@ -357,8 +276,7 @@ async fn inspect_turn(
     headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<TurnInspection>, ApiError> {
-    let config = LoadedConfig::load(&state.config_path)?;
-    authorize(&headers, &config.value.core.operator_token_hash)?;
+    authorize(&headers, &state.config.value.core.operator_token_hash)?;
     state
         .database
         .inspect_turn(&id)?
@@ -377,8 +295,7 @@ async fn recent_turns(
     headers: HeaderMap,
     Query(query): Query<RecentQuery>,
 ) -> Result<Json<Vec<TurnSummary>>, ApiError> {
-    let config = LoadedConfig::load(&state.config_path)?;
-    authorize(&headers, &config.value.core.operator_token_hash)?;
+    authorize(&headers, &state.config.value.core.operator_token_hash)?;
     Ok(Json(state.database.recent_turns(
         query.event_id.as_deref(),
         query.limit.unwrap_or(20),
@@ -389,21 +306,16 @@ async fn status(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<StatusReport>, ApiError> {
-    let config = LoadedConfig::load(&state.config_path)?;
-    authorize(&headers, &config.value.core.operator_token_hash)?;
-    let components = component_health(&state.client, &config).await;
-    let execution_profile = if config.value.runtime.enabled {
-        runtime_execution_profiles_request(&state.client, &config, false)
-            .await
-            .ok()
-            .and_then(|profiles| profiles.selected)
-    } else {
-        None
-    };
+    authorize(&headers, &state.config.value.core.operator_token_hash)?;
+    let providers = provider_health(&state.client, &state.config).await;
+    let execution_profile = runtime_execution_profiles_request(&state.client, &state.config, false)
+        .await
+        .ok()
+        .and_then(|profiles| profiles.selected);
     Ok(Json(StatusReport {
-        release: config.value.release.clone(),
-        agent_id: config.value.agent.id.clone(),
-        components,
+        release: state.config.value.release.clone(),
+        agent_id: state.config.value.agent.id.clone(),
+        providers,
         turns: state.database.state_counts("turns")?,
         deliveries: state.database.state_counts("deliveries")?,
         latest_backup: state.database.latest_backup()?,
@@ -412,14 +324,26 @@ async fn status(
     }))
 }
 
+#[derive(Default, Deserialize)]
+struct ProfileQuery {
+    interface_id: Option<String>,
+    audience_id: Option<String>,
+}
+
 async fn execution_profiles(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<ProfileQuery>,
 ) -> Result<Json<RuntimeExecutionProfiles>, ApiError> {
-    let config = LoadedConfig::load(&state.config_path)?;
-    authorize_model_access(&headers, &config)?;
+    authorize_profile_access(&headers, &state.config, query.interface_id.as_deref())?;
+    if query.interface_id.is_some() != query.audience_id.is_some() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "interface and audience must be supplied together",
+        ));
+    }
     Ok(Json(
-        runtime_execution_profiles_request(&state.client, &config, false).await?,
+        runtime_execution_profiles_request(&state.client, &state.config, false).await?,
     ))
 }
 
@@ -427,10 +351,9 @@ async fn refresh_execution_profiles(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<RuntimeExecutionProfiles>, ApiError> {
-    let config = LoadedConfig::load(&state.config_path)?;
-    authorize(&headers, &config.value.core.operator_token_hash)?;
+    authorize(&headers, &state.config.value.core.operator_token_hash)?;
     Ok(Json(
-        runtime_execution_profiles_request(&state.client, &config, true).await?,
+        runtime_execution_profiles_request(&state.client, &state.config, true).await?,
     ))
 }
 
@@ -439,68 +362,80 @@ async fn apply_execution_profile(
     headers: HeaderMap,
     Json(selection): Json<ExecutionProfileSelection>,
 ) -> Result<Json<ExecutionProfileApplication>, ApiError> {
-    let config = LoadedConfig::load(&state.config_path)?;
-    authorize_model_access(&headers, &config)?;
+    authorize_profile_access(&headers, &state.config, selection.interface_id.as_deref())?;
+    let runtime = selected_runtime(&state.config)?;
     let current = matches!(selection.scope, ExecutionProfileScope::CurrentConversation);
-    let _turn_guard = if current {
-        Some(state.turns.lock().await)
-    } else {
-        None
-    };
-    let audience_id = if current {
-        Some(
-            selection
-                .audience_id
-                .as_deref()
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    ApiError::from(anyhow!("current conversation scope needs an audience"))
-                })?
-                .to_owned(),
+    let (interface_id, audience_id, continuation_ref, resources) = if current {
+        let interface_id = selection
+            .interface_id
+            .as_deref()
+            .or_else(|| state.config.value.sole_enabled_interface())
+            .ok_or_else(|| {
+                ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "current conversation scope needs an interface",
+                )
+            })?;
+        state
+            .config
+            .provider(interface_id, ProviderRole::Interface)?;
+        let audience_id = selection
+            .audience_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "current conversation scope needs an audience",
+                )
+            })?;
+        if state
+            .database
+            .audience_busy(interface_id, &state.config.value.agent.id, audience_id)?
+        {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "conversation has unfinished work",
+            ));
+        }
+        let continuation = state
+            .database
+            .continuation(
+                interface_id,
+                &state.config.value.agent.id,
+                audience_id,
+                &runtime.id,
+            )?
+            .ok_or_else(|| {
+                ApiError::not_found("current conversation does not have a runtime continuation")
+            })?;
+        let resources = materialize_resources(
+            &state.config.value.agent.resource_root,
+            &state.config.value.data_dir.join("resource-snapshots"),
+        )?;
+        (
+            Some(interface_id.to_owned()),
+            Some(audience_id.to_owned()),
+            Some(continuation),
+            Some(resources),
         )
     } else {
-        None
+        (None, None, None, None)
     };
-    let continuation_ref = audience_id
-        .as_deref()
-        .map(|audience| {
-            state
-                .database
-                .continuation(&config.value.agent.id, audience, &config.value.runtime.id)
-        })
-        .transpose()?
-        .flatten();
-    let resources = if current {
-        Some(materialize_resources(
-            &config.value.agent.resource_root,
-            &config.value.data_dir.join("resource-snapshots"),
-        )?)
-    } else {
-        None
-    };
-    let runtime_selection = RuntimeExecutionProfileSelection {
+    let request = RuntimeExecutionProfileSelection {
         key: selection.key,
         reasoning: selection.reasoning,
         service_tier: selection.service_tier,
         scope: selection.scope,
         continuation_ref,
-        agent_id: config.value.agent.id.clone(),
-        audience_id: audience_id.clone(),
+        interface_id,
+        agent_id: state.config.value.agent.id.clone(),
+        audience_id,
         resources,
     };
-    let applied =
-        runtime_execution_profile_selection(&state.client, &config, &runtime_selection).await?;
-    if let (Some(audience), Some(continuation)) =
-        (audience_id.as_deref(), applied.continuation_ref.as_deref())
-    {
-        state.database.save_continuation(
-            &config.value.agent.id,
-            audience,
-            &config.value.runtime.id,
-            continuation,
-        )?;
-    }
-    Ok(Json(applied))
+    Ok(Json(
+        runtime_execution_profile_selection(&state.client, &state.config, &request).await?,
+    ))
 }
 
 async fn runtime_execution_profiles_request(
@@ -508,10 +443,7 @@ async fn runtime_execution_profiles_request(
     config: &LoadedConfig,
     refresh: bool,
 ) -> Result<RuntimeExecutionProfiles> {
-    let runtime = &config.value.runtime;
-    if !runtime.enabled {
-        bail!("selected runtime adapter is disabled");
-    }
+    let runtime = selected_runtime(config)?;
     let endpoint = if refresh {
         "execution-profiles/refresh"
     } else {
@@ -527,11 +459,12 @@ async fn runtime_execution_profiles_request(
             format!("{}/v1/{endpoint}", runtime.url),
         )
         .bearer_auth(config.credential(&runtime.id)?)
+        .timeout(Duration::from_secs(5))
         .send()
         .await
         .context("contact runtime execution-profile service")?
         .error_for_status()
-        .context("runtime adapter rejected execution-profile catalog operation")?
+        .context("runtime provider rejected execution-profile operation")?
         .json()
         .await
         .context("decode runtime execution profiles")
@@ -542,69 +475,49 @@ async fn runtime_execution_profile_selection(
     config: &LoadedConfig,
     selection: &RuntimeExecutionProfileSelection,
 ) -> Result<ExecutionProfileApplication> {
-    let runtime = &config.value.runtime;
-    if !runtime.enabled {
-        bail!("selected runtime adapter is disabled");
-    }
+    let runtime = selected_runtime(config)?;
     client
         .put(format!("{}/v1/execution-profile", runtime.url))
         .bearer_auth(config.credential(&runtime.id)?)
+        .timeout(Duration::from_secs(5))
         .json(selection)
         .send()
         .await
         .context("contact runtime execution-profile service")?
         .error_for_status()
-        .context("runtime adapter rejected execution-profile selection")?
+        .context("runtime provider rejected execution-profile selection")?
         .json()
         .await
         .context("decode applied execution profile")
 }
 
-async fn component_health(client: &Client, config: &LoadedConfig) -> Vec<Health> {
+async fn provider_health(client: &Client, config: &LoadedConfig) -> Vec<Health> {
     let mut reports = vec![Health {
         id: "core".to_owned(),
         role: "core".to_owned(),
         version: RELEASE_VERSION.to_owned(),
         status: "ready".to_owned(),
     }];
-    let discord_url = format!("http://{}/health", config.value.discord.listen);
-    reports.push(
-        fetch_health(
-            client,
-            &discord_url,
-            None,
-            &config.value.discord.id,
-            "interface-adapter",
-            &config.value.discord.version,
-        )
-        .await,
-    );
-    for component in [
-        &config.value.runtime,
-        &config.value.interface_extension,
-        &config.value.capability,
-    ] {
-        if component.enabled {
-            let token = config.credential(&component.id).ok();
-            reports.push(
-                fetch_health(
-                    client,
-                    &format!("{}/health", component.url),
-                    token.as_deref(),
-                    &component.id,
-                    role_name(component),
-                    &component.version,
-                )
-                .await,
-            );
-        } else {
+    for provider in &config.value.providers {
+        if !provider.enabled {
             reports.push(Health {
-                id: component.id.clone(),
-                role: role_name(component).to_owned(),
-                version: component.version.clone(),
+                id: provider.id.clone(),
+                role: provider.role.as_str().to_owned(),
+                version: provider.version.clone(),
                 status: "disabled".to_owned(),
             });
+            continue;
         }
+        let token = config.credential(&provider.id).ok();
+        reports.push(
+            fetch_health(
+                client,
+                &format!("{}/health", provider.url),
+                token.as_deref(),
+                provider,
+            )
+            .await,
+        );
     }
     reports
 }
@@ -613,11 +526,9 @@ async fn fetch_health(
     client: &Client,
     url: &str,
     token: Option<&str>,
-    id: &str,
-    role: &str,
-    version: &str,
+    provider: &Provider,
 ) -> Health {
-    let mut request = client.get(url);
+    let mut request = client.get(url).timeout(Duration::from_secs(2));
     if let Some(value) = token {
         request = request.bearer_auth(value);
     }
@@ -626,159 +537,102 @@ async fn fetch_health(
             Ok(response) => response
                 .json::<Health>()
                 .await
-                .unwrap_or_else(|_| unavailable(id, role, version)),
-            Err(_) => unavailable(id, role, version),
+                .unwrap_or_else(|_| unavailable(&provider.id, provider.role, &provider.version)),
+            Err(_) => unavailable(&provider.id, provider.role, &provider.version),
         },
-        Err(_) => unavailable(id, role, version),
+        Err(_) => unavailable(&provider.id, provider.role, &provider.version),
     }
 }
 
-fn unavailable(id: &str, role: &str, version: &str) -> Health {
+fn unavailable(id: &str, role: ProviderRole, version: &str) -> Health {
     Health {
         id: id.to_owned(),
-        role: role.to_owned(),
+        role: role.as_str().to_owned(),
         version: version.to_owned(),
         status: "unavailable".to_owned(),
     }
 }
 
-async fn recover(state: &AppState) -> Result<()> {
-    let uncertain = state.database.recover_deliveries()?;
-    if uncertain > 0 {
-        warn!(
-            uncertain,
-            "delivery outcomes became uncertain after restart"
-        );
+fn selected_runtime(config: &LoadedConfig) -> Result<&Provider> {
+    let runtime = config.provider(&config.value.agent.runtime_provider, ProviderRole::Runtime)?;
+    if !runtime.enabled {
+        bail!("selected runtime provider is disabled");
     }
-    reconcile_pending_turns(state).await?;
+    Ok(runtime)
+}
+
+fn interface_provider<'a>(
+    headers: &HeaderMap,
+    config: &'a LoadedConfig,
+) -> Result<&'a Provider, ApiError> {
+    let id = provider_identity(headers)?;
+    let provider = config.provider(id, ProviderRole::Interface)?;
+    if !provider.enabled {
+        return Err(ApiError::forbidden("interface provider is disabled"));
+    }
+    authorize(headers, &provider.token_hash)?;
+    Ok(provider)
+}
+
+fn authorize_profile_access(
+    headers: &HeaderMap,
+    config: &LoadedConfig,
+    selected_interface: Option<&str>,
+) -> Result<(), ApiError> {
+    if bearer(headers)
+        .is_some_and(|token| token_matches(&config.value.core.operator_token_hash, token))
+    {
+        return Ok(());
+    }
+    let interface = interface_provider(headers, config)?;
+    if selected_interface.is_some_and(|selected| selected != interface.id) {
+        return Err(ApiError::forbidden(
+            "interface provider cannot mutate another interface conversation",
+        ));
+    }
     Ok(())
 }
 
-async fn reconcile_pending_turns(state: &AppState) -> Result<usize> {
-    let config = LoadedConfig::load(&state.config_path)?;
-    let runtime = &config.value.runtime;
-    let pending_turns = state.database.pending_turns()?;
-    if !runtime.enabled {
-        for pending in pending_turns {
-            state.database.fail_turn(
-                &pending.turn,
-                "interrupted",
-                "runtime disabled during recovery",
-            )?;
-        }
-        return Ok(0);
-    }
-    let token = config.credential(&runtime.id)?;
-    for pending in pending_turns {
-        let evidence = state
-            .client
-            .get(format!("{}/v1/evidence/{}", runtime.url, pending.turn))
-            .bearer_auth(&token)
-            .send()
-            .await;
-        let recovered = match evidence {
-            Ok(response) if response.status() == StatusCode::OK => {
-                response.json::<RuntimeEvidence>().await.ok()
-            }
-            Ok(response) if response.status() == StatusCode::NOT_FOUND => {
-                state.database.fail_turn(
-                    &pending.turn,
-                    "interrupted",
-                    "runtime has no durable correlation evidence",
-                )?;
-                None
-            }
-            _ => None,
-        };
-        match recovered {
-            Some(RuntimeEvidence {
-                state: evidence_state,
-                result: Some(result),
-                ..
-            }) if evidence_state == "completed" => {
-                state.database.save_continuation(
-                    &pending.agent,
-                    &pending.audience,
-                    &pending.runtime,
-                    &result.continuation_ref,
-                )?;
-                state.database.complete_turn(
-                    &pending.turn,
-                    &pending.interface,
-                    &pending.target,
-                    &pending.feedback_target,
-                    &result,
-                )?;
-                info!(turn_id = %pending.turn, "recovered completed runtime work");
-            }
-            Some(RuntimeEvidence {
-                state: evidence_state,
-                error,
-                ..
-            }) if evidence_state == "interrupted" => {
-                state.database.fail_turn(
-                    &pending.turn,
-                    "interrupted",
-                    error
-                        .as_deref()
-                        .unwrap_or("runtime reported interrupted work"),
-                )?;
-            }
-            Some(RuntimeEvidence {
-                state: evidence_state,
-                result: None,
-                ..
-            }) if evidence_state == "completed" => {
-                state.database.fail_turn(
-                    &pending.turn,
-                    "interrupted",
-                    "runtime completion evidence lacked a result",
-                )?;
-            }
-            _ => {}
-        }
-    }
-    Ok(state.database.pending_turns()?.len())
-}
-
 fn authorize(headers: &HeaderMap, expected_hash: &str) -> Result<(), ApiError> {
-    let candidate = headers
-        .get(http::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .ok_or_else(|| ApiError::forbidden("component authentication required"))?;
+    let candidate =
+        bearer(headers).ok_or_else(|| ApiError::forbidden("component authentication required"))?;
     if !token_matches(expected_hash, candidate) {
         return Err(ApiError::forbidden("component authentication failed"));
     }
     Ok(())
 }
 
-fn authorize_model_access(headers: &HeaderMap, config: &LoadedConfig) -> Result<(), ApiError> {
-    let candidate = headers
+fn bearer(headers: &HeaderMap) -> Option<&str> {
+    headers
         .get(http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .ok_or_else(|| ApiError::forbidden("component authentication required"))?;
-    if token_matches(&config.value.core.operator_token_hash, candidate)
-        || token_matches(&config.value.discord.token_hash, candidate)
-    {
-        return Ok(());
-    }
-    Err(ApiError::forbidden("component authentication failed"))
 }
 
-fn admit(event: &ExternalEvent) -> Result<(), ApiError> {
+fn provider_identity(headers: &HeaderMap) -> Result<&str, ApiError> {
+    headers
+        .get("x-carillon-provider")
+        .and_then(|header| header.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError::forbidden("provider identity required"))
+}
+
+fn admit(event: &ExternalEvent, config: &LoadedConfig) -> Result<(), ApiError> {
     if event.event_id.is_empty()
+        || event.agent_id.is_empty()
         || event.user_id.is_empty()
         || event.audience_id.is_empty()
         || event.delivery_target_id.is_empty()
         || event.feedback_target_id.is_empty()
         || event.content.trim().is_empty()
     {
-        return Err(ApiError {
-            status: StatusCode::BAD_REQUEST,
-            message: "event identity, audience, targets, user, and content are required".to_owned(),
-        });
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "event identity, agent, audience, targets, user, and content are required",
+        ));
+    }
+    if event.agent_id != config.value.agent.id {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "unknown agent"));
     }
     Ok(())
 }
@@ -788,42 +642,16 @@ fn receipt(event_id: &str, accepted: AcceptedTurn) -> EventReceipt {
         event_id: event_id.to_owned(),
         turn_id: accepted.turn_id,
         state: accepted.state,
-        duplicate: true,
+        duplicate: accepted.duplicate,
     }
 }
 
-fn command_arguments(content: &str) -> Option<&str> {
-    content.strip_prefix("!carillon").map(str::trim)
-}
-
-fn component_snapshot(config: &LoadedConfig) -> Value {
-    let mut selected = vec![
-        json!({ "id": config.value.discord.id, "role": "interface-adapter", "version": config.value.discord.version }),
-        serde_json::to_value(selected_component(&config.value.runtime)).unwrap_or(Value::Null),
-    ];
-    for component in [&config.value.interface_extension, &config.value.capability] {
-        if component.enabled {
-            selected
-                .push(serde_json::to_value(selected_component(component)).unwrap_or(Value::Null));
-        }
-    }
-    Value::Array(selected)
-}
-
-fn selected_component(component: &Component) -> SelectedComponent {
-    SelectedComponent {
-        id: component.id.clone(),
-        role: role_name(component).to_owned(),
-        version: component.version.clone(),
-        url: component.url.clone(),
-    }
-}
-
-fn role_name(component: &Component) -> &'static str {
-    match component.role {
-        crate::config::ComponentRole::RuntimeAdapter => "runtime-adapter",
-        crate::config::ComponentRole::InterfaceExtension => "interface-extension",
-        crate::config::ComponentRole::Capability => "capability",
+fn selected_provider(provider: &Provider) -> SelectedProvider {
+    SelectedProvider {
+        id: provider.id.clone(),
+        role: provider.role.as_str().to_owned(),
+        version: provider.version.clone(),
+        url: provider.url.clone(),
     }
 }
 
@@ -972,6 +800,8 @@ pub async fn fetch_status(config: &LoadedConfig) -> Result<StatusReport> {
 pub async fn fetch_execution_profiles(
     config: &LoadedConfig,
     refresh: bool,
+    interface_id: Option<&str>,
+    audience_id: Option<&str>,
 ) -> Result<RuntimeExecutionProfiles> {
     let path = if refresh {
         "/v1/execution-profiles/refresh"
@@ -979,10 +809,16 @@ pub async fn fetch_execution_profiles(
         "/v1/execution-profiles"
     };
     let client = Client::new();
+    let mut url = reqwest::Url::parse(&format!("http://{}{path}", config.value.core.listen))?;
+    if let (Some(interface), Some(audience)) = (interface_id, audience_id) {
+        url.query_pairs_mut()
+            .append_pair("interface_id", interface)
+            .append_pair("audience_id", audience);
+    }
     let mut request = if refresh {
-        client.post(format!("http://{}{path}", config.value.core.listen))
+        client.post(url)
     } else {
-        client.get(format!("http://{}{path}", config.value.core.listen))
+        client.get(url)
     };
     request = request.bearer_auth(config.credential("operator")?);
     request
@@ -1040,8 +876,9 @@ pub async fn fetch_recent(
     if let Some(event_id) = event_id {
         url.query_pairs_mut().append_pair("event_id", event_id);
     }
-    let request = client.get(url).bearer_auth(config.credential("operator")?);
-    request
+    client
+        .get(url)
+        .bearer_auth(config.credential("operator")?)
         .send()
         .await?
         .error_for_status()?
@@ -1075,6 +912,7 @@ fn adapter_instance(headers: &HeaderMap) -> Result<&str, ApiError> {
     }
     Ok(value)
 }
+
 #[cfg(test)]
 mod tests {
     use std::fs;

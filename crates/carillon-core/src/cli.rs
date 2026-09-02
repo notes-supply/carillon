@@ -5,25 +5,22 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use crate::{
-    components::{serve_capability, serve_discord, serve_extension},
+    components::serve_discord,
     config::{DiscordRoute, LoadedConfig},
     core::{
         fetch_execution_profiles, fetch_inspection, fetch_recent, fetch_status,
         select_execution_profile, serialize_pretty, serve,
     },
+    db::Database,
     model::{ExecutionProfileScope, ExecutionProfileSelection, ServiceTier},
     operations::{
         ServiceLock, backup, configure_discord, enable_demo_resources, initialize as init, restore,
-        set_component,
+        set_provider,
     },
 };
 
 #[derive(Debug, Parser)]
-#[command(
-    name = "carillon",
-    version,
-    about = "Durable private agent composition service"
-)]
+#[command(name = "carillon", version, about = "Self-hosted agent service")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -73,19 +70,8 @@ enum Command {
         #[arg(long)]
         deterministic: bool,
     },
-    InterfaceExtension {
-        #[arg(long)]
-        config: PathBuf,
-        #[arg(long)]
-        token_file: PathBuf,
-    },
-    Capability {
-        #[arg(long)]
-        config: PathBuf,
-        #[arg(long)]
-        token_file: PathBuf,
-    },
-    Component {
+
+    Provider {
         #[arg(long)]
         config: PathBuf,
         id: String,
@@ -113,6 +99,13 @@ enum Command {
         config: PathBuf,
         turn_id: String,
     },
+    Resolve {
+        #[arg(long)]
+        config: PathBuf,
+        turn_id: String,
+        #[arg(value_parser = ["retry", "skip"])]
+        action: String,
+    },
     Model {
         #[arg(long)]
         config: PathBuf,
@@ -130,6 +123,8 @@ enum Command {
         scope: String,
         #[arg(long)]
         audience: Option<String>,
+        #[arg(long)]
+        interface: Option<String>,
         selection: Option<String>,
     },
     Backup {
@@ -204,43 +199,28 @@ pub(crate) async fn run() -> Result<()> {
             )
             .await?;
         }
-        Command::InterfaceExtension { config, token_file } => {
-            serve_extension(LoadedConfig::load(&config)?, &token_file).await?;
-        }
-        Command::Capability { config, token_file } => {
-            serve_capability(LoadedConfig::load(&config)?, &token_file).await?;
-        }
-        Command::Component { config, id, action } => {
-            set_component(&config, &id, action == "enable")?;
+
+        Command::Provider { config, id, action } => {
+            set_provider(&config, &id, action == "enable")?;
             println!("{id} {action}d");
         }
         Command::EnableDemoResources { config } => enable_demo_resources_command(&config)?,
-        Command::Status { config } => {
-            println!(
-                "{}",
-                serialize_pretty(&fetch_status(&LoadedConfig::load(&config)?).await?)?
-            );
-        }
+        Command::Status { config } => print_status(&config).await?,
         Command::Recent {
             config,
             event_id,
             limit,
+        } => print_recent(&config, event_id.as_deref(), limit).await?,
+        Command::Inspect { config, turn_id } => print_inspection(&config, &turn_id).await?,
+        Command::Resolve {
+            config,
+            turn_id,
+            action,
         } => {
-            println!(
-                "{}",
-                serialize_pretty(
-                    &fetch_recent(&LoadedConfig::load(&config)?, event_id.as_deref(), limit)
-                        .await?
-                )?
-            );
-        }
-        Command::Inspect { config, turn_id } => {
-            println!(
-                "{}",
-                serialize_pretty(
-                    &fetch_inspection(&LoadedConfig::load(&config)?, &turn_id).await?
-                )?
-            );
+            let loaded = LoadedConfig::load(&config)?;
+            Database::open(&loaded.value.data_dir.join("carillon.sqlite3"))?
+                .resolve_uncertain_turn(&turn_id, action == "retry")?;
+            println!("{turn_id} {action}");
         }
         command @ Command::Model { .. } => run_model_command(command).await?,
         Command::Backup { config, output } => {
@@ -251,6 +231,30 @@ pub(crate) async fn run() -> Result<()> {
             println!("{}", restore(&input, &target)?.display());
         }
     }
+    Ok(())
+}
+
+async fn print_status(config: &Path) -> Result<()> {
+    println!(
+        "{}",
+        serialize_pretty(&fetch_status(&LoadedConfig::load(config)?).await?)?
+    );
+    Ok(())
+}
+
+async fn print_recent(config: &Path, event_id: Option<&str>, limit: u32) -> Result<()> {
+    println!(
+        "{}",
+        serialize_pretty(&fetch_recent(&LoadedConfig::load(config)?, event_id, limit).await?)?
+    );
+    Ok(())
+}
+
+async fn print_inspection(config: &Path, turn_id: &str) -> Result<()> {
+    println!(
+        "{}",
+        serialize_pretty(&fetch_inspection(&LoadedConfig::load(config)?, turn_id).await?)?
+    );
     Ok(())
 }
 
@@ -280,13 +284,48 @@ async fn run_model_command(command: Command) -> Result<()> {
         service_tier,
         scope,
         audience: audience_id,
+        interface,
         selection,
     } = command
     else {
         unreachable!("model command dispatcher passed another command");
     };
     let config = LoadedConfig::load(&config)?;
-    let profiles = fetch_execution_profiles(&config, refresh).await?;
+    let scope = if scope == "current-conversation" {
+        ExecutionProfileScope::CurrentConversation
+    } else {
+        ExecutionProfileScope::NewConversations
+    };
+    let current = matches!(scope, ExecutionProfileScope::CurrentConversation);
+    let interface_id = if current {
+        Some(
+            interface
+                .or_else(|| config.value.sole_enabled_interface().map(str::to_owned))
+                .context(
+                    "current conversation scope needs --interface when multiple interfaces are enabled",
+                )?,
+        )
+    } else {
+        None
+    };
+    let audience_id = if current {
+        Some(
+            audience_id
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .context("current conversation scope needs --audience")?
+                .to_owned(),
+        )
+    } else {
+        None
+    };
+    let profiles = fetch_execution_profiles(
+        &config,
+        refresh,
+        interface_id.as_deref(),
+        audience_id.as_deref(),
+    )
+    .await?;
     let Some(reference) = selection else {
         println!("{}", serialize_pretty(&profiles)?);
         return Ok(());
@@ -296,11 +335,6 @@ async fn run_model_command(command: Command) -> Result<()> {
         .iter()
         .find(|model| format!("{}/{}", model.provider, model.id) == reference)
         .with_context(|| format!("model {reference} is not available"))?;
-    let scope = if scope == "current-conversation" {
-        ExecutionProfileScope::CurrentConversation
-    } else {
-        ExecutionProfileScope::NewConversations
-    };
     let applied = select_execution_profile(
         &config,
         &ExecutionProfileSelection {
@@ -309,6 +343,7 @@ async fn run_model_command(command: Command) -> Result<()> {
             service_tier,
             scope,
             audience_id,
+            interface_id,
         },
     )
     .await?;

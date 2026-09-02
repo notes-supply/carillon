@@ -2,94 +2,56 @@
 
 ## Product
 
-Carillon lets an individual operator run durable private agents on one Linux host. New interfaces, agent engines, interface features, and capabilities can be added or restarted independently without turning every extension into a core rebuild or whole-service outage.
+Carillon connects external messaging systems to agent runtimes on one Linux host.
 
-Carillon should feel like a service rather than a development environment: install it, create an agent from readable files, connect an identity, converse, extend what the system can do, inspect what happened, and recover it.
+Discord and Pi are the first providers. They prove the provider boundaries but do not define every future interface or runtime. The core keeps only the shared work: admission, agent and conversation identity, operation state, runtime selection, and delivery intent.
 
-## User journey
+This structure lets the system gain new interfaces, runtimes, and runtime-native tools without putting all of their behavior in one service. It should also remain understandable enough for agents to modify safely.
 
-For the first useful release, an operator can:
+## First useful release
 
-1. install Carillon as their ordinary Unix user without root or a development toolchain;
-2. create an agent from plainly named resources while selecting a real owner workspace;
-3. configure one private Discord server by immutable guild ID, allowlist their immutable Discord user ID, and hold a continuing conversation through Pi only inside that server;
-4. add an externally implemented guild-scoped Discord command or interface feature without rebuilding the Discord adapter;
-5. enable a Pi-native extension and an external agent capability;
-6. use those additions on subsequent turns while unrelated parts remain available;
-7. restart the Discord adapter, Pi runtime adapter, an interface extension, or a capability independently and continue safely;
-8. inspect which resources and component versions shaped a turn;
-9. back up the installation, restore it, and continue the conversation; and
-10. use Pi's native tools, extensions, subprocesses, user applications, and ordinary absolute paths with the same operating-system authority as that owner.
+An operator can:
 
-That continuous journey is the definition of the first product. The implementation may reach it in whatever sequence and internal shape proves simplest.
+1. install Carillon as an ordinary Unix user;
+2. configure a private Discord guild, allowlisted users, and explicit channel routes;
+3. converse through Pi with channel- or thread-scoped continuity;
+4. use Pi-native tools, extensions, and skills with the owner's Unix authority;
+5. select supported model, reasoning, and service-tier options;
+6. restart the Discord or Pi provider independently;
+7. inspect recent turns and current provider/resource identity; and
+8. back up and restore the stopped installation.
 
-## Composition and extensibility
+## Provider model
 
-Carillon has four logical extension roles:
+Carillon has two provider roles:
 
-- **interface adapters** own connections to external platforms such as Discord;
-- **runtime adapters** translate Carillon's agent lifecycle into a native engine such as Pi or, later, Codex;
-- **interface extensions** contribute commands, interactions, presentation, or other interface features through an adapter's public extension surface; and
-- **capabilities** provide independently implemented operations agents can use.
+- **interface providers** own external-platform connections, admission, routing, and delivery;
+- **runtime providers** translate Carillon turns into a native agent engine and own its continuations and resources.
 
-These are separately supervised parts connected through public Carillon boundaries. They are not required to share a language or release cycle, and the core does not hardcode Discord or Pi as the only possible implementations.
+Provider instances have stable IDs. An agent selects a runtime provider. A conversation with a native continuation remains tied to the runtime that owns it.
 
-An operator can add, configure, activate, deactivate, replace, or restart one part without stopping unrelated parts. New work uses the selected configuration; work already in progress remains coherent or becomes honestly interrupted. Carillon retains enough component and resource identity to explain and recover a turn.
+Provider configuration is static during a process lifetime. Adding or replacing a provider is an explicit configuration and supervision change, followed by restarting the affected service. Carillon does not attempt hot plugin loading or automatic translation between unlike runtimes.
 
-### Interface extension
+## Requirements
 
-An interface adapter exposes the platform primitives external features need without giving those features the platform credential. An external interface extension can contribute commands or interactions and receive authorized routed invocations. The credential-owning adapter performs native registration, deadlines, rate limits, and platform side effects.
+### Admission
 
-Platform-neutral identity, routing, causality, and delivery remain visible to the core. Platform-native payloads remain available through the owning adapter rather than being flattened into text or promoted into universal Carillon concepts.
+Discord rejects direct messages and any event outside its configured guild, immutable user allowlist, and immutable channel routes before submitting work to core. Routes choose mention or always activation and thread- or channel-scoped continuity. Repeated submission of the same external event does not start another turn.
 
-### Runtime independence
+### Operation lifecycle
 
-Carillon core talks to a runtime-adapter contract, not directly to Pi. That contract covers the small lifecycle Carillon actually owns: selecting or opening a native continuation, submitting input, observing output and lifecycle events, cancellation or steering when supported, and reconciling durable native evidence after interruption.
+Once core accepts an event, it persists a queued turn. The selected runtime provider claims queued work and executes it once. Completion stores the output, continuation reference, and delivery intent atomically.
 
-Runtime adapters report their supported features and retain opaque native references and lossless native metadata. Carillon does not pretend every engine has Pi's tools, branches, compaction, extension hooks, or session format. Unsupported features remain explicit rather than being emulated badly through a lowest-common-denominator model.
+A running turn whose outcome can no longer be proved becomes uncertain. It is not automatically replayed, and later work for the same conversation waits for operator action. Delivery has a separate durable outbox so a lost interface connection does not require rerunning the model.
 
-A Pi runtime adapter owns Pi sessions, resources, tools, skills, extensions, compaction, usage, and terminal evidence. A later Codex runtime adapter can implement the same Carillon lifecycle using Codex-native concepts and storage. Runtime independence does not promise automatic transcript, extension, or configuration portability between unlike engines.
+### Runtime ownership
 
-### Native extensions and capabilities
+The runtime provider owns native sessions, model execution, tools, extensions, skills, and engine-specific settings. Core stores an opaque continuation reference and does not reinterpret native history or plugin state.
 
-Pi-native extensions remain native Pi extensions. They can alter prompts, register tools, contribute resources, and preserve Pi state through Pi's APIs. Carillon does not force them through another universal plugin abstraction.
+### Unix authority
 
-External capabilities use the system-level boundary when they need independent lifecycle, language, credentials, trust, or recovery. A runtime adapter presents selected Carillon capabilities to its engine through the engine's natural tool or MCP mechanism.
+All included services run as the installing Unix user. Carillon adds no command broker, path allowlist, approval database, privilege proxy, or general permission system. Optional confinement or approval belongs in the runtime or its extensions.
 
-## Product requirements
+### Beta policy
 
-### Identity and audience
-
-Discord is fail-closed to one configured private guild, explicitly allowlisted immutable user identities, and explicit immutable channel routes. Every route selects mention or always activation and thread- or channel-scoped conversation continuity. Direct messages and traffic outside any of these identities are rejected before core, model discovery, extensions, capabilities, sessions, or runtime work.
-
-Authorization and routing use immutable platform identities. Human-readable names remain presentation metadata. Discord owns thread adoption and persists it across adapter restarts; the core receives an opaque adapter-selected audience identity separately from its delivery target. An accepted event stays associated with its source audience, selected agent, interface adapter, runtime adapter, native continuation, and selected extensions and capabilities.
-
-Repeated delivery of the same external event, including Discord's thread-starter event, does not create repeated model work or repeated replies.
-
-### Agent configuration
-
-An agent has readable common files, a resource root interpreted by its selected runtime adapter, and a separate real workspace. The operator can edit the system prompt and contextual instructions as files. Runtime-native settings, extensions, skills, sessions, project-local resources, and tools remain owned by that runtime adapter.
-
-Carillon provides composition, lifecycle, explicit resource/workspace selection, and inspection. It does not need a prompt database, tool wrapper, filesystem policy, or another prompt-composition language to expose facilities the runtime and operating system already provide.
-
-### Durability and honest recovery
-
-Once Carillon accepts an external event, it preserves enough state to determine what may safely happen next after a component or host restart.
-
-Completed runtime work is not rerun merely because a notification was lost. An external side effect that may have succeeded is not reported as definitely failed or automatically repeated. Recovery prefers an honest operator-visible state over fabricated certainty.
-
-### Trust boundaries
-
-Remote ingress and local execution are distinct trust boundaries. Discord remains fail-closed by immutable guild, user, and route before runtime work. After admission, a normal Carillon installation runs every process as the installing ordinary Unix user with exactly that user's OS authority, including primary/supplementary groups, filesystem access, executables, Git/SSH, local applications, user-session services, and passwordless sudo. Carillon does not define another permission framework, command broker, path ACL, approval database, privilege proxy, or sandbox.
-
-Platform credentials belong to interface adapters; provider credentials belong to runtime adapters; internal component credentials stay out of prompts, conversation history, ordinary application state, and logs. Pi-native extensions receive the owner's environment, subprocess access, and user-scoped persistence through Pi's native lifecycle. A user may deliberately install Pi extensions that add approval or confinement; core does not mediate them.
-
-### Operation
-
-Carillon runs as one owner's small user service with durable private local state and no external database or queue. The operator can understand component health, inspect a turn without exposing secrets, change or restart a part deliberately, and make a restorable backup covering Carillon-owned and component-owned durable state. Installation, status, restart, and uninstall use native user-service management; persistent boot without login remains an explicit administrator-owned linger decision.
-
-## First-release experience
-
-The first release demonstrates the composition model with a routed Discord interface adapter, one external guild-scoped Discord command extension, a Pi runtime adapter, one Pi-native extension, one Agent Skill, and one harmless external capability. It supports mention and always activation, thread and channel continuity, best-effort processing feedback, live activation, independent component restart, private-server conversation continuity, and stopped-service backup and restore.
-
-It is successful when someone outside the design process can install it and complete the whole user journey without understanding the repository or manually repairing state.
+Carillon is currently a private beta. State and configuration use the current schema only. When those formats change, a fresh installation or explicit cutover is preferred over speculative compatibility and migration code.

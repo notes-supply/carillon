@@ -25,14 +25,15 @@ pub struct AcceptedTurn {
 }
 
 #[derive(Clone, Debug)]
-pub struct PendingTurn {
-    pub turn: String,
-    pub audience: String,
-    pub runtime: String,
-    pub interface: String,
-    pub target: String,
-    pub feedback_target: String,
-    pub agent: String,
+pub struct QueuedTurn {
+    pub turn_id: String,
+    pub interface_id: String,
+    pub agent_id: String,
+    pub audience_id: String,
+    pub target_id: String,
+    pub feedback_target_id: String,
+    pub input: String,
+    pub resources: ResourceSnapshot,
 }
 
 impl Database {
@@ -58,14 +59,14 @@ impl Database {
     }
 
     fn initialize(&self) -> Result<()> {
-        let connection = self.connect()?;
-        connection.execute_batch(
+        self.connect()?.execute_batch(
             "CREATE TABLE IF NOT EXISTS events (
                 interface_id TEXT NOT NULL,
                 event_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
                 audience_id TEXT NOT NULL,
                 user_id TEXT NOT NULL,
-                channel_id TEXT NOT NULL,
+                target_id TEXT NOT NULL,
                 feedback_target_id TEXT NOT NULL,
                 input TEXT NOT NULL,
                 native_json TEXT NOT NULL,
@@ -76,16 +77,14 @@ impl Database {
                 id TEXT PRIMARY KEY,
                 interface_id TEXT NOT NULL,
                 event_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
                 audience_id TEXT NOT NULL,
                 user_id TEXT NOT NULL,
-                agent_id TEXT NOT NULL,
                 runtime_id TEXT NOT NULL,
                 state TEXT NOT NULL,
-                component_snapshot_json TEXT NOT NULL,
+                provider_snapshot_json TEXT NOT NULL,
                 resource_snapshot_json TEXT NOT NULL,
                 output TEXT,
-                native_evidence_json TEXT,
-                capability_activity_json TEXT NOT NULL DEFAULT '[]',
                 error TEXT,
                 started_at INTEGER NOT NULL,
                 finished_at INTEGER,
@@ -93,18 +92,19 @@ impl Database {
                 FOREIGN KEY(interface_id, event_id) REFERENCES events(interface_id, event_id)
             );
             CREATE TABLE IF NOT EXISTS continuations (
+                interface_id TEXT NOT NULL,
                 agent_id TEXT NOT NULL,
                 audience_id TEXT NOT NULL,
                 runtime_id TEXT NOT NULL,
                 native_ref TEXT NOT NULL,
                 updated_at INTEGER NOT NULL,
-                PRIMARY KEY(agent_id, audience_id, runtime_id)
+                PRIMARY KEY(interface_id, agent_id, audience_id, runtime_id)
             );
             CREATE TABLE IF NOT EXISTS deliveries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 turn_id TEXT NOT NULL UNIQUE,
                 interface_id TEXT NOT NULL,
-                channel_id TEXT NOT NULL,
+                target_id TEXT NOT NULL,
                 feedback_target_id TEXT NOT NULL,
                 content TEXT NOT NULL,
                 state TEXT NOT NULL,
@@ -118,57 +118,27 @@ impl Database {
                 created_at INTEGER NOT NULL
             );",
         )?;
-        let has_claim_owner: bool = connection.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM pragma_table_info('deliveries') WHERE name = 'claim_owner'
-            )",
-            [],
-            |row| row.get(0),
-        )?;
-        if !has_claim_owner {
-            connection.execute("ALTER TABLE deliveries ADD COLUMN claim_owner TEXT", [])?;
-        }
-        for (table, column) in [
-            ("events", "feedback_target_id"),
-            ("deliveries", "feedback_target_id"),
-        ] {
-            let exists: bool = connection.query_row(
-                &format!(
-                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1)"
-                ),
-                [column],
-                |row| row.get(0),
-            )?;
-            if !exists {
-                connection.execute(
-                    &format!("ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"),
-                    [],
-                )?;
-            }
-        }
         Ok(())
     }
 
     pub fn accept_event(
         &self,
         interface_id: &str,
-        agent_id: &str,
         runtime_id: &str,
         event: &ExternalEvent,
-        components: &Value,
+        providers: &Value,
         resources: &ResourceSnapshot,
     ) -> Result<AcceptedTurn> {
-        let audience_id = &event.audience_id;
         let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
-        let existing = transaction
+        if let Some((turn_id, state)) = transaction
             .query_row(
                 "SELECT id, state FROM turns WHERE interface_id = ?1 AND event_id = ?2",
                 params![interface_id, event.event_id],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
-            .optional()?;
-        if let Some((turn_id, state)) = existing {
+            .optional()?
+        {
             transaction.commit()?;
             return Ok(AcceptedTurn {
                 turn_id,
@@ -180,13 +150,14 @@ impl Database {
         let turn_id = uuid::Uuid::now_v7().to_string();
         let now = timestamp()?;
         transaction.execute(
-            "INSERT INTO events(interface_id, event_id, audience_id, user_id, channel_id,
+            "INSERT INTO events(interface_id, event_id, agent_id, audience_id, user_id, target_id,
                  feedback_target_id, input, native_json, accepted_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 interface_id,
                 event.event_id,
-                audience_id,
+                event.agent_id,
+                event.audience_id,
                 event.user_id,
                 event.delivery_target_id,
                 event.feedback_target_id,
@@ -196,18 +167,18 @@ impl Database {
             ],
         )?;
         transaction.execute(
-            "INSERT INTO turns(id, interface_id, event_id, audience_id, user_id, agent_id, runtime_id, state,
-                 component_snapshot_json, resource_snapshot_json, started_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'accepted', ?8, ?9, ?10)",
+            "INSERT INTO turns(id, interface_id, event_id, agent_id, audience_id, user_id,
+                 runtime_id, state, provider_snapshot_json, resource_snapshot_json, started_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8, ?9, ?10)",
             params![
                 turn_id,
                 interface_id,
                 event.event_id,
-                audience_id,
+                event.agent_id,
+                event.audience_id,
                 event.user_id,
-                agent_id,
                 runtime_id,
-                serde_json::to_string(components)?,
+                serde_json::to_string(providers)?,
                 serde_json::to_string(resources)?,
                 now,
             ],
@@ -216,124 +187,254 @@ impl Database {
         Ok(AcceptedTurn {
             turn_id,
             duplicate: false,
-            state: "accepted".to_owned(),
+            state: "queued".to_owned(),
         })
     }
 
-    pub fn mark_processing(&self, turn_id: &str) -> Result<()> {
-        self.connect()?.execute(
-            "UPDATE turns SET state = 'processing' WHERE id = ?1 AND state = 'accepted'",
-            [turn_id],
+    pub fn claim_turn(&self, runtime_id: &str) -> Result<Option<QueuedTurn>> {
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let turn = transaction
+            .query_row(
+                "SELECT t.id, t.interface_id, t.agent_id, t.audience_id, e.target_id,
+                        e.feedback_target_id, e.input, t.resource_snapshot_json
+                 FROM turns t
+                 JOIN events e ON e.interface_id = t.interface_id AND e.event_id = t.event_id
+                 WHERE t.runtime_id = ?1 AND t.state = 'queued'
+                   AND NOT EXISTS (
+                     SELECT 1 FROM turns earlier
+                     WHERE earlier.interface_id = t.interface_id
+                       AND earlier.agent_id = t.agent_id
+                       AND earlier.audience_id = t.audience_id
+                       AND earlier.state IN ('queued', 'running', 'uncertain')
+                       AND (earlier.started_at < t.started_at
+                         OR (earlier.started_at = t.started_at AND earlier.id < t.id))
+                   )
+                 ORDER BY t.started_at, t.id LIMIT 1",
+                [runtime_id],
+                |row| {
+                    let resources: String = row.get(7)?;
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        resources,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some(row) = turn else {
+            transaction.commit()?;
+            return Ok(None);
+        };
+        let changed = transaction.execute(
+            "UPDATE turns SET state = 'running' WHERE id = ?1 AND state = 'queued'",
+            [&row.0],
         )?;
-        Ok(())
+        if changed != 1 {
+            bail!("turn {} could not be claimed", row.0);
+        }
+        transaction.commit()?;
+        Ok(Some(QueuedTurn {
+            turn_id: row.0,
+            interface_id: row.1,
+            agent_id: row.2,
+            audience_id: row.3,
+            target_id: row.4,
+            feedback_target_id: row.5,
+            input: row.6,
+            resources: serde_json::from_str(&row.7)?,
+        }))
+    }
+
+    pub fn continuation(
+        &self,
+        interface_id: &str,
+        agent_id: &str,
+        audience_id: &str,
+        runtime_id: &str,
+    ) -> Result<Option<String>> {
+        Ok(self
+            .connect()?
+            .query_row(
+                "SELECT native_ref FROM continuations
+                 WHERE interface_id = ?1 AND agent_id = ?2 AND audience_id = ?3 AND runtime_id = ?4",
+                params![interface_id, agent_id, audience_id, runtime_id],
+                |row| row.get(0),
+            )
+            .optional()?)
     }
 
     pub fn complete_turn(
         &self,
-        turn_id: &str,
-        interface_id: &str,
-        target_id: &str,
-        feedback_target_id: &str,
+        turn: &QueuedTurn,
+        runtime_id: &str,
         response: &RuntimeTurnResponse,
     ) -> Result<()> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
         let now = timestamp()?;
         let changed = transaction.execute(
-            "UPDATE turns SET state = 'completed', output = ?2, native_evidence_json = ?3,
-                 capability_activity_json = ?4, finished_at = ?5
-             WHERE id = ?1 AND state IN ('accepted', 'processing')",
+            "UPDATE turns SET state = 'completed', output = ?2, finished_at = ?3
+             WHERE id = ?1 AND state = 'running'",
+            params![turn.turn_id, response.output, now],
+        )?;
+        if changed != 1 {
+            bail!("turn {} was not running", turn.turn_id);
+        }
+        transaction.execute(
+            "INSERT INTO continuations(interface_id, agent_id, audience_id, runtime_id, native_ref, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(interface_id, agent_id, audience_id, runtime_id)
+             DO UPDATE SET native_ref = excluded.native_ref, updated_at = excluded.updated_at",
             params![
-                turn_id,
-                response.output,
-                serde_json::to_string(&response.native)?,
-                serde_json::to_string(&response.capability_activity)?,
+                turn.interface_id,
+                turn.agent_id,
+                turn.audience_id,
+                runtime_id,
+                response.continuation_ref,
                 now,
             ],
         )?;
-        if changed == 0 {
-            bail!("turn {turn_id} was not active");
-        }
         transaction.execute(
-            "INSERT INTO deliveries(
-                turn_id, interface_id, channel_id, feedback_target_id, content, state, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6)",
+            "INSERT INTO deliveries(turn_id, interface_id, target_id, feedback_target_id,
+                 content, state, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6)",
             params![
-                turn_id,
-                interface_id,
-                target_id,
-                feedback_target_id,
+                turn.turn_id,
+                turn.interface_id,
+                turn.target_id,
+                turn.feedback_target_id,
                 response.output,
-                now
+                now,
             ],
         )?;
         transaction.commit()?;
         Ok(())
     }
 
-    pub fn fail_turn(&self, turn_id: &str, state: &str, error: &str) -> Result<()> {
-        if state != "failed" && state != "interrupted" {
-            bail!("invalid terminal turn state {state}");
+    pub fn mark_uncertain(&self, turn: &QueuedTurn, error: &str) -> Result<()> {
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let now = timestamp()?;
+        let changed = transaction.execute(
+            "UPDATE turns SET state = 'uncertain', error = ?2, finished_at = ?3
+             WHERE id = ?1 AND state = 'running'",
+            params![turn.turn_id, error, now],
+        )?;
+        if changed == 1 {
+            transaction.execute(
+                "INSERT OR IGNORE INTO deliveries(turn_id, interface_id, target_id,
+                     feedback_target_id, content, state, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6)",
+                params![
+                    turn.turn_id,
+                    turn.interface_id,
+                    turn.target_id,
+                    turn.feedback_target_id,
+                    "I could not determine whether that turn completed. I will not run it again automatically.",
+                    now,
+                ],
+            )?;
         }
-        self.connect()?.execute(
-            "UPDATE turns SET state = ?2, error = ?3, finished_at = ?4
-             WHERE id = ?1 AND state IN ('accepted', 'processing')",
-            params![turn_id, state, error, timestamp()?],
-        )?;
+        transaction.commit()?;
         Ok(())
     }
 
-    pub fn continuation(
-        &self,
-        agent_id: &str,
-        audience_id: &str,
-        runtime_id: &str,
-    ) -> Result<Option<String>> {
-        Ok(self.connect()?.query_row(
-            "SELECT native_ref FROM continuations WHERE agent_id = ?1 AND audience_id = ?2 AND runtime_id = ?3",
-            params![agent_id, audience_id, runtime_id],
-            |row| row.get(0),
-        ).optional()?)
+    pub fn recover_running_turns(&self) -> Result<usize> {
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let now = timestamp()?;
+        let turns = {
+            let mut statement = transaction.prepare(
+                "SELECT t.id, t.interface_id, e.target_id, e.feedback_target_id
+                 FROM turns t
+                 JOIN events e ON e.interface_id = t.interface_id AND e.event_id = t.event_id
+                 WHERE t.state = 'running'",
+            )?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        for (turn_id, interface_id, target_id, feedback_target_id) in &turns {
+            transaction.execute(
+                "UPDATE turns SET state = 'uncertain', error = ?2, finished_at = ?3 WHERE id = ?1",
+                params![
+                    turn_id,
+                    "core restarted while the runtime was executing",
+                    now
+                ],
+            )?;
+            transaction.execute(
+                "INSERT OR IGNORE INTO deliveries(turn_id, interface_id, target_id,
+                     feedback_target_id, content, state, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6)",
+                params![
+                    turn_id,
+                    interface_id,
+                    target_id,
+                    feedback_target_id,
+                    "Carillon restarted during that turn. Its outcome is uncertain, so it was not run again.",
+                    now,
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(turns.len())
     }
 
-    pub fn save_continuation(
+    pub fn audience_busy(
         &self,
+        interface_id: &str,
         agent_id: &str,
         audience_id: &str,
-        runtime_id: &str,
-        native_ref: &str,
-    ) -> Result<()> {
-        self.connect()?.execute(
-            "INSERT INTO continuations(agent_id, audience_id, runtime_id, native_ref, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(agent_id, audience_id, runtime_id) DO UPDATE SET native_ref = excluded.native_ref,
-                 updated_at = excluded.updated_at",
-            params![agent_id, audience_id, runtime_id, native_ref, timestamp()?],
-        )?;
+    ) -> Result<bool> {
+        self.connect()?
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM turns
+                 WHERE interface_id = ?1 AND agent_id = ?2 AND audience_id = ?3
+                   AND state IN ('queued', 'running', 'uncertain'))",
+                params![interface_id, agent_id, audience_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn resolve_uncertain_turn(&self, turn_id: &str, retry: bool) -> Result<()> {
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let changed = if retry {
+            transaction.execute(
+                "UPDATE turns SET state = 'queued', error = NULL, finished_at = NULL
+                 WHERE id = ?1 AND state = 'uncertain'",
+                [turn_id],
+            )?
+        } else {
+            transaction.execute(
+                "UPDATE turns SET state = 'skipped', finished_at = ?2
+                 WHERE id = ?1 AND state = 'uncertain'",
+                params![turn_id, timestamp()?],
+            )?
+        };
+        if changed != 1 {
+            bail!("turn {turn_id} is not uncertain");
+        }
+        if retry {
+            transaction.execute("DELETE FROM deliveries WHERE turn_id = ?1", [turn_id])?;
+        }
+        transaction.commit()?;
         Ok(())
-    }
-
-    pub fn pending_turns(&self) -> Result<Vec<PendingTurn>> {
-        let connection = self.connect()?;
-        let mut statement = connection.prepare(
-            "SELECT t.id, t.audience_id, t.runtime_id, t.interface_id, e.channel_id,
-                    e.feedback_target_id, t.agent_id
-             FROM turns t
-             JOIN events e ON e.interface_id = t.interface_id AND e.event_id = t.event_id
-             WHERE t.state IN ('accepted', 'processing') ORDER BY t.started_at",
-        )?;
-        let rows = statement.query_map([], |row| {
-            Ok(PendingTurn {
-                turn: row.get(0)?,
-                audience: row.get(1)?,
-                runtime: row.get(2)?,
-                interface: row.get(3)?,
-                target: row.get(4)?,
-                feedback_target: row.get(5)?,
-                agent: row.get(6)?,
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     pub fn recover_deliveries(&self) -> Result<usize> {
@@ -357,7 +458,7 @@ impl Database {
                AND (claim_owner IS NULL OR claim_owner <> ?2)",
             params![interface_id, owner, timestamp()?],
         )?;
-        let feedback_target_ids = {
+        let targets = {
             let mut statement = transaction.prepare(
                 "SELECT DISTINCT feedback_target_id FROM deliveries
                  WHERE interface_id = ?1 AND state = 'uncertain' AND feedback_target_id <> ''",
@@ -367,7 +468,7 @@ impl Database {
                 .collect::<Result<Vec<String>, _>>()?
         };
         transaction.commit()?;
-        Ok(feedback_target_ids)
+        Ok(targets)
     }
 
     pub fn claim_delivery(&self, interface_id: &str, owner: &str) -> Result<Option<Delivery>> {
@@ -375,7 +476,7 @@ impl Database {
         let transaction = connection.transaction()?;
         let delivery = transaction
             .query_row(
-                "SELECT id, turn_id, channel_id, feedback_target_id, content FROM deliveries
+                "SELECT id, turn_id, target_id, feedback_target_id, content FROM deliveries
                  WHERE interface_id = ?1 AND state = 'pending' ORDER BY id LIMIT 1",
                 [interface_id],
                 |row| {
@@ -416,7 +517,7 @@ impl Database {
             params![id, owner, state, native_ref, timestamp()?],
         )?;
         if changed != 1 {
-            bail!("delivery {id} is not claimed by adapter instance {owner}");
+            bail!("delivery {id} is not claimed by interface instance {owner}");
         }
         Ok(())
     }
@@ -426,18 +527,13 @@ impl Database {
         connection
             .query_row(
                 "SELECT t.id, t.event_id, t.audience_id, t.user_id, e.input, t.state, t.output,
-                    t.component_snapshot_json, t.resource_snapshot_json, t.native_evidence_json,
-                    t.capability_activity_json, d.state, d.native_ref, t.error
-             FROM turns t
-             JOIN events e ON e.interface_id = t.interface_id AND e.event_id = t.event_id
-             LEFT JOIN deliveries d ON d.turn_id = t.id
-             WHERE t.id = ?1",
+                        t.provider_snapshot_json, t.resource_snapshot_json, d.state, d.native_ref, t.error
+                 FROM turns t
+                 JOIN events e ON e.interface_id = t.interface_id AND e.event_id = t.event_id
+                 LEFT JOIN deliveries d ON d.turn_id = t.id
+                 WHERE t.id = ?1",
                 [turn_id],
                 |row| {
-                    let components: String = row.get(7)?;
-                    let resources: String = row.get(8)?;
-                    let evidence: Option<String> = row.get(9)?;
-                    let activity: String = row.get(10)?;
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
@@ -446,13 +542,11 @@ impl Database {
                         row.get::<_, String>(4)?,
                         row.get::<_, String>(5)?,
                         row.get::<_, Option<String>>(6)?,
-                        components,
-                        resources,
-                        evidence,
-                        activity,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, Option<String>>(9)?,
+                        row.get::<_, Option<String>>(10)?,
                         row.get::<_, Option<String>>(11)?,
-                        row.get::<_, Option<String>>(12)?,
-                        row.get::<_, Option<String>>(13)?,
                     ))
                 },
             )
@@ -466,16 +560,11 @@ impl Database {
                     input: row.4,
                     state: row.5,
                     output: row.6,
-                    components: serde_json::from_str(&row.7)?,
+                    providers: serde_json::from_str(&row.7)?,
                     resources: serde_json::from_str(&row.8)?,
-                    native_evidence: row
-                        .9
-                        .map(|value| serde_json::from_str(&value))
-                        .transpose()?,
-                    capability_activity: serde_json::from_str(&row.10)?,
-                    delivery_state: row.11,
-                    delivery_native_ref: row.12,
-                    error: row.13,
+                    delivery_state: row.9,
+                    delivery_native_ref: row.10,
+                    error: row.11,
                 })
             })
             .transpose()
@@ -497,10 +586,10 @@ impl Database {
             let (state, count) = row?;
             let count = u64::from(count);
             match state.as_str() {
-                "accepted" | "pending" => counts.pending += count,
-                "processing" | "delivering" => counts.active += count,
+                "queued" | "pending" => counts.pending += count,
+                "running" | "delivering" => counts.active += count,
                 "completed" | "delivered" => counts.completed += count,
-                "failed" | "interrupted" => counts.interrupted += count,
+                "skipped" => counts.interrupted += count,
                 "uncertain" => counts.uncertain += count,
                 _ => {}
             }
@@ -512,11 +601,9 @@ impl Database {
         let connection = self.connect()?;
         let mut statement = connection.prepare(
             "SELECT t.id, t.event_id, t.state, t.started_at, d.state
-             FROM turns t
-             LEFT JOIN deliveries d ON d.turn_id = t.id
+             FROM turns t LEFT JOIN deliveries d ON d.turn_id = t.id
              WHERE (?1 IS NULL OR t.event_id = ?1)
-             ORDER BY t.started_at DESC, t.id DESC
-             LIMIT ?2",
+             ORDER BY t.started_at DESC, t.id DESC LIMIT ?2",
         )?;
         let rows = statement.query_map(params![event_id, limit.clamp(1, 100)], |row| {
             Ok(TurnSummary {
@@ -566,74 +653,106 @@ mod tests {
     use super::Database;
     use crate::model::{ExternalEvent, ResourceSnapshot, RuntimeTurnResponse};
 
-    #[test]
-    fn duplicate_event_has_one_turn_and_one_delivery() -> Result<()> {
-        let directory = tempdir()?;
-        let database = Database::open(&directory.path().join("state.sqlite3"))?;
-        let event = ExternalEvent {
-            event_id: "external-1".to_owned(),
-            guild_id: Some("guild-1".to_owned()),
-            user_id: "user-1".to_owned(),
-            audience_id: "conversation-1".to_owned(),
-            delivery_target_id: "channel-1".to_owned(),
-            feedback_target_id: "channel-1:message-1".to_owned(),
+    fn event(id: &str) -> ExternalEvent {
+        ExternalEvent {
+            event_id: id.to_owned(),
+            agent_id: "agent".to_owned(),
+            user_id: "user".to_owned(),
+            audience_id: "conversation".to_owned(),
+            delivery_target_id: "channel".to_owned(),
+            feedback_target_id: "message".to_owned(),
             content: "hello".to_owned(),
             native: json!({}),
-        };
-        let resources = ResourceSnapshot {
+        }
+    }
+
+    fn resources() -> ResourceSnapshot {
+        ResourceSnapshot {
             root: "/agent".to_owned(),
             system_sha256: "a".to_owned(),
             context_sha256: "b".to_owned(),
             settings_sha256: "c".to_owned(),
             extensions_sha256: "d".to_owned(),
             skills_sha256: "e".to_owned(),
-        };
+        }
+    }
+
+    #[test]
+    fn event_is_idempotent_and_completion_is_atomic() -> Result<()> {
+        let directory = tempdir()?;
+        let database = Database::open(&directory.path().join("state.sqlite3"))?;
         let first = database.accept_event(
             "discord",
-            "agent",
             "runtime",
-            &event,
+            &event("one"),
             &json!([]),
-            &resources,
+            &resources(),
         )?;
         let duplicate = database.accept_event(
             "discord",
-            "agent",
             "runtime",
-            &event,
+            &event("one"),
             &json!([]),
-            &resources,
+            &resources(),
         )?;
         assert!(!first.duplicate);
         assert!(duplicate.duplicate);
         assert_eq!(first.turn_id, duplicate.turn_id);
 
-        database.mark_processing(&first.turn_id)?;
+        let turn = database
+            .claim_turn("runtime")?
+            .context("turn was not queued")?;
         database.complete_turn(
-            &first.turn_id,
-            "discord",
-            "channel-1",
-            "channel-1:message-1",
+            &turn,
+            "runtime",
             &RuntimeTurnResponse {
-                correlation_id: first.turn_id.clone(),
+                correlation_id: turn.turn_id.clone(),
                 output: "reply".to_owned(),
-                continuation_ref: "native-1".to_owned(),
-                native: json!({ "complete": true }),
-                capability_activity: Vec::new(),
+                continuation_ref: "native".to_owned(),
             },
         )?;
-        let delivery = database
-            .claim_delivery("discord", "instance-a")?
-            .context("completed turn did not create a delivery")?;
-        assert_eq!(delivery.content, "reply");
         assert_eq!(
-            database.reconcile_delivery_claims("discord", "instance-b")?,
-            vec!["channel-1:message-1"]
+            database
+                .continuation("discord", "agent", "conversation", "runtime")?
+                .as_deref(),
+            Some("native")
         );
-        let inspection = database
-            .inspect_turn(&first.turn_id)?
-            .context("turn inspection missing")?;
-        assert_eq!(inspection.delivery_state.as_deref(), Some("uncertain"));
+        assert_eq!(
+            database
+                .claim_delivery("discord", "instance")?
+                .context("delivery missing")?
+                .content,
+            "reply"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn restart_marks_running_turn_uncertain_without_requeueing_it() -> Result<()> {
+        let directory = tempdir()?;
+        let database = Database::open(&directory.path().join("state.sqlite3"))?;
+        database.accept_event(
+            "discord",
+            "runtime",
+            &event("one"),
+            &json!([]),
+            &resources(),
+        )?;
+        database
+            .claim_turn("runtime")?
+            .context("turn was not queued")?;
+        assert_eq!(database.recover_running_turns()?, 1);
+        assert!(database.claim_turn("runtime")?.is_none());
+        assert_eq!(database.state_counts("turns")?.uncertain, 1);
+        let turn_id = database.recent_turns(Some("one"), 1)?[0].turn_id.clone();
+        database.resolve_uncertain_turn(&turn_id, true)?;
+        let retried = database
+            .claim_turn("runtime")?
+            .context("resolved turn was not queued")?;
+        database.mark_uncertain(&retried, "still ambiguous")?;
+        database.resolve_uncertain_turn(&turn_id, false)?;
+        assert!(database.claim_turn("runtime")?.is_none());
+        assert_eq!(database.state_counts("turns")?.interrupted, 1);
         Ok(())
     }
 }

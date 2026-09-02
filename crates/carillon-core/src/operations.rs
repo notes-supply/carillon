@@ -14,8 +14,8 @@ use tar::{Archive, Builder};
 
 use crate::{
     config::{
-        AgentConfig, Component, ComponentRole, Config, CoreConfig, DiscordConfig, DiscordRoute,
-        LoadedConfig, RELEASE_VERSION, hash_token, new_token,
+        AgentConfig, Config, CoreConfig, DiscordConfig, DiscordRoute, LoadedConfig, Provider,
+        ProviderRole, RELEASE_VERSION, hash_token, new_token, validate_provider_identity,
     },
     db::Database,
 };
@@ -81,8 +81,7 @@ pub fn initialize(
     let discord_token = new_token();
     let operator_token = new_token();
     let runtime_token = new_token();
-    let extension_token = new_token();
-    let capability_token = new_token();
+
     let loopback = IpAddr::V4(Ipv4Addr::LOCALHOST);
     let config = Config {
         release: RELEASE_VERSION.to_owned(),
@@ -91,10 +90,10 @@ pub fn initialize(
             listen: SocketAddr::new(loopback, base_port),
             operator_token_hash: hash_token(&operator_token),
         },
-        discord: DiscordConfig {
-            id: "discord-private".to_owned(),
-            version: RELEASE_VERSION.to_owned(),
-            listen: SocketAddr::new(loopback, checked_port(base_port, 1)?),
+        providers: default_providers(base_port, &discord_token, &runtime_token)?,
+        discord: Some(DiscordConfig {
+            provider: "discord-private".to_owned(),
+            agent: "default".to_owned(),
             guild_id: guild_id.to_owned(),
             bot_user_id: bot_user_id.to_owned(),
             allowed_user_ids: users.to_vec(),
@@ -105,40 +104,17 @@ pub fn initialize(
             delivered_emoji: "✅".to_owned(),
             failed_emoji: "❌".to_owned(),
             uncertain_emoji: "⚠️".to_owned(),
-            token_hash: hash_token(&discord_token),
-        },
+        }),
         agent: AgentConfig {
             id: "default".to_owned(),
             name: "Default agent".to_owned(),
             resource_root: PathBuf::from("agents/default"),
             workspace: workspace.to_path_buf(),
-        },
-        runtime: Component {
-            id: "runtime-pi".to_owned(),
-            role: ComponentRole::RuntimeAdapter,
-            version: RELEASE_VERSION.to_owned(),
-            url: format!("http://127.0.0.1:{}", checked_port(base_port, 2)?),
-            token_hash: hash_token(&runtime_token),
-            enabled: true,
-        },
-        interface_extension: Component {
-            id: "guild-command".to_owned(),
-            role: ComponentRole::InterfaceExtension,
-            version: RELEASE_VERSION.to_owned(),
-            url: format!("http://127.0.0.1:{}", checked_port(base_port, 3)?),
-            token_hash: hash_token(&extension_token),
-            enabled: false,
-        },
-        capability: Component {
-            id: "echo-capability".to_owned(),
-            role: ComponentRole::Capability,
-            version: RELEASE_VERSION.to_owned(),
-            url: format!("http://127.0.0.1:{}", checked_port(base_port, 4)?),
-            token_hash: hash_token(&capability_token),
-            enabled: false,
+            runtime_provider: "runtime-pi".to_owned(),
         },
     };
     config.validate()?;
+    config.discord()?;
     let config_path = root.join("carillon.toml");
     atomic_write(
         &config_path,
@@ -149,10 +125,8 @@ pub fn initialize(
         root,
         &[
             ("operator", &operator_token),
-            (config.discord.id.as_str(), &discord_token),
-            (config.runtime.id.as_str(), &runtime_token),
-            (config.interface_extension.id.as_str(), &extension_token),
-            (config.capability.id.as_str(), &capability_token),
+            ("discord-private", &discord_token),
+            ("runtime-pi", &runtime_token),
         ],
     )?;
     let agent = root.join("agents/default");
@@ -169,6 +143,31 @@ pub fn initialize(
     Ok(config_path)
 }
 
+fn default_providers(
+    base_port: u16,
+    discord_token: &str,
+    runtime_token: &str,
+) -> Result<Vec<Provider>> {
+    Ok(vec![
+        Provider {
+            id: "discord-private".to_owned(),
+            role: ProviderRole::Interface,
+            version: RELEASE_VERSION.to_owned(),
+            url: format!("http://127.0.0.1:{}", checked_port(base_port, 1)?),
+            token_hash: hash_token(discord_token),
+            enabled: true,
+        },
+        Provider {
+            id: "runtime-pi".to_owned(),
+            role: ProviderRole::Runtime,
+            version: RELEASE_VERSION.to_owned(),
+            url: format!("http://127.0.0.1:{}", checked_port(base_port, 2)?),
+            token_hash: hash_token(runtime_token),
+            enabled: true,
+        },
+    ])
+}
+
 fn create_installation_directories(root: &Path) -> Result<()> {
     fs::create_dir_all(root)?;
     fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
@@ -177,9 +176,8 @@ fn create_installation_directories(root: &Path) -> Result<()> {
         "credentials",
         "pi",
         "logs",
-        "state/components/discord",
+        "state/components/discord-private",
         "state/components/runtime-pi",
-        "state/components/echo-capability",
         "agents/default/extensions",
         "agents/default/skills",
         "agents/default/sessions",
@@ -203,18 +201,17 @@ fn write_credentials(root: &Path, credentials: &[(&str, &str)]) -> Result<()> {
     Ok(())
 }
 
-pub fn set_component(config_path: &Path, id: &str, enabled: bool) -> Result<()> {
+pub fn set_provider(config_path: &Path, id: &str, enabled: bool) -> Result<()> {
+    validate_provider_identity(id)?;
     let text = fs::read_to_string(config_path)?;
     let mut config: Config = toml::from_str(&text)?;
-    let component = [
-        &mut config.runtime,
-        &mut config.interface_extension,
-        &mut config.capability,
-    ]
-    .into_iter()
-    .find(|component| component.id == id)
-    .with_context(|| format!("component {id} is not configured"))?;
-    component.enabled = enabled;
+    let provider = config
+        .providers
+        .iter_mut()
+        .find(|provider| provider.id == id)
+        .with_context(|| format!("provider {id} is not configured"))?;
+    provider.enabled = enabled;
+    config.validate()?;
     write_config(config_path, &config)
 }
 
@@ -227,11 +224,16 @@ pub fn configure_discord(
 ) -> Result<()> {
     let text = fs::read_to_string(config_path)?;
     let mut config: Config = toml::from_str(&text)?;
-    guild_id.clone_into(&mut config.discord.guild_id);
-    bot_user_id.clone_into(&mut config.discord.bot_user_id);
-    config.discord.allowed_user_ids = users.to_vec();
-    config.discord.routes = routes.to_vec();
+    let discord = config
+        .discord
+        .as_mut()
+        .context("Discord interface configuration is absent")?;
+    guild_id.clone_into(&mut discord.guild_id);
+    bot_user_id.clone_into(&mut discord.bot_user_id);
+    discord.allowed_user_ids = users.to_vec();
+    discord.routes = routes.to_vec();
     config.validate()?;
+    config.discord()?;
     write_config(config_path, &config)
 }
 
@@ -317,17 +319,19 @@ pub fn restore(archive_path: &Path, target: &Path) -> Result<PathBuf> {
 
 fn ensure_stopped(config: &LoadedConfig) -> Result<ServiceLock> {
     let lock = ServiceLock::acquire(&config.value.data_dir)?;
-    let addresses = [
-        config.value.core.listen,
-        config.value.discord.listen,
-        component_address(&config.value.runtime.url)?,
-        component_address(&config.value.interface_extension.url)?,
-        component_address(&config.value.capability.url)?,
-    ];
+    let mut addresses = vec![config.value.core.listen];
+    addresses.extend(
+        config
+            .value
+            .providers
+            .iter()
+            .map(|provider| component_address(&provider.url))
+            .collect::<Result<Vec<_>>>()?,
+    );
     for address in addresses {
         if TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok() {
             bail!(
-                "service at {address} is still running; stop every Carillon component before backup"
+                "service at {address} is still running; stop every Carillon provider before backup"
             );
         }
     }
@@ -386,4 +390,88 @@ fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     fs::set_permissions(&temporary, fs::Permissions::from_mode(mode))?;
     fs::rename(temporary, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use anyhow::Result;
+    use tempfile::tempdir;
+
+    use super::{initialize, set_provider};
+    use crate::config::{
+        DiscordActivation, DiscordConversation, DiscordRoute, LoadedConfig, ProviderRole,
+    };
+
+    fn route() -> DiscordRoute {
+        DiscordRoute {
+            channel_id: "300".to_owned(),
+            activation: DiscordActivation::Always,
+            conversation: DiscordConversation::Channel,
+        }
+    }
+
+    #[test]
+    fn fresh_install_configures_only_discord_and_pi() -> Result<()> {
+        let directory = tempdir()?;
+        let root = directory.path().join("installation");
+        let config_path = initialize(
+            &root,
+            directory.path(),
+            "100",
+            "101",
+            &["200".to_owned()],
+            &[route()],
+            44_000,
+        )?;
+        let config = LoadedConfig::load(&config_path)?;
+
+        assert_eq!(config.value.providers.len(), 2);
+        assert_eq!(
+            config
+                .value
+                .providers
+                .iter()
+                .map(|provider| (provider.id.as_str(), provider.role))
+                .collect::<Vec<_>>(),
+            [
+                ("discord-private", ProviderRole::Interface),
+                ("runtime-pi", ProviderRole::Runtime),
+            ]
+        );
+
+        let mut credentials = fs::read_dir(root.join("credentials"))?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<Result<Vec<_>, _>>()?;
+        credentials.sort();
+        assert_eq!(
+            credentials,
+            [
+                "discord-private.token",
+                "operator.token",
+                "runtime-pi.token"
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn provider_command_rejects_unsafe_identity_before_mutation() -> Result<()> {
+        let directory = tempdir()?;
+        let root = directory.path().join("installation");
+        let config_path = initialize(
+            &root,
+            directory.path(),
+            "100",
+            "101",
+            &["200".to_owned()],
+            &[route()],
+            44_000,
+        )?;
+        let before = fs::read(&config_path)?;
+        assert!(set_provider(&config_path, "../escape", false).is_err());
+        assert_eq!(fs::read(&config_path)?, before);
+        Ok(())
+    }
 }

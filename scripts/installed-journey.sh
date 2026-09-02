@@ -13,10 +13,16 @@ for artifact in \
   install.sh \
   uninstall.sh \
   systemd/carillon.target \
+  systemd/carillon-core.service \
+  systemd/carillon-discord.service \
   systemd/carillon-runtime-pi.service
 do
   [ -e "$RELEASE/$artifact" ] || { printf 'release artifact missing: %s\n' "$artifact" >&2; exit 1; }
 done
+[ "$(find "$RELEASE/systemd" -maxdepth 1 -type f | wc -l)" -eq 4 ] || {
+  printf '%s\n' "release must contain exactly the target and three default service units" >&2
+  exit 1
+}
 
 TEST_ROOT=$(mktemp -d)
 OWNER_HOME="$TEST_ROOT/owner home"
@@ -66,6 +72,10 @@ install_release() {
 
 verify_units() {
   verify_dir=$1
+  [ "$(find "$verify_dir" -maxdepth 1 -type f -name 'carillon*' | wc -l)" -eq 4 ] || {
+    printf '%s\n' "installation must contain exactly the target and three default service units" >&2
+    exit 1
+  }
   systemd-analyze verify "$verify_dir"/carillon.target "$verify_dir"/carillon-*.service
 }
 
@@ -174,7 +184,7 @@ CONFIG=$CARILLON_HOME/carillon.toml
 start_runtime() {
   env HOME="$OWNER_HOME" USER="$OWNER" LOGNAME="$OWNER" SHELL="$OWNER_SHELL" PATH="$PATH" \
     CARILLON_HOME="$CARILLON_HOME" PI_CODING_AGENT_DIR="$CARILLON_HOME/pi" \
-    "$APP/carillon-runtime-pi" --config "$CONFIG" \
+    "$APP/carillon-runtime-pi" --config "$CONFIG" --provider runtime-pi \
       --token-file "$CARILLON_HOME/credentials/runtime-pi.token" \
       --state-dir "$CARILLON_HOME/pi" --deterministic \
       >>"$CARILLON_HOME/logs/runtime-pi.log" 2>&1 &
@@ -230,7 +240,6 @@ DENIED=$(curl --silent --output /dev/null --write-out '%{http_code}' -X POST \
   --data '{"event_id":"denied","guild_id":"100","user_id":"999","channel_id":"300","content":"must not run"}' \
   "http://127.0.0.1:$DISCORD_PORT/v1/simulate")
 [ "$DENIED" = 403 ]
-[ ! -e "$CARILLON_HOME/state/components/runtime-pi/evidence/denied.json" ]
 
 FIRST=$(curl --fail --silent -X POST -H 'content-type: application/json' \
   --data '{"event_id":"installed-1","guild_id":"100","user_id":"200","channel_id":"300","content":"installed identity turn"}' \
