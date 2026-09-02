@@ -557,13 +557,8 @@ async fn gateway_loop(
                     content: message.content.clone(),
                 };
                 let native = serde_json::to_value(&*message).unwrap_or(Value::Null);
-                if messages
-                    .send(InboundMessage { request, native })
-                    .await
-                    .is_err()
-                {
-                    bail!("Discord message worker stopped");
-                }
+                handoff_gateway_message(&state, &messages, InboundMessage { request, native })
+                    .await?;
             }
             Event::InteractionCreate(interaction) => {
                 let interaction_state = state.clone();
@@ -582,6 +577,37 @@ async fn gateway_loop(
             }
             _ => {}
         }
+    }
+    Ok(())
+}
+
+async fn handoff_gateway_message(
+    state: &DiscordState,
+    messages: &mpsc::Sender<InboundMessage>,
+    inbound: InboundMessage,
+) -> Result<()> {
+    if let Ok(config) = LoadedConfig::load(&state.config_path)
+        && let Ok(discord) = config.discord()
+        && adapter_identity_admit(
+            discord,
+            inbound.request.guild_id.as_deref(),
+            &inbound.request.user_id,
+        )
+        .is_err()
+    {
+        return Ok(());
+    }
+    let remembered = loop {
+        match remember_inbound_message(state, &inbound).await {
+            Ok(remembered) => break remembered,
+            Err(failure) => {
+                warn!(error = %failure, event_id = %inbound.request.event_id, "persist Discord message before gateway handoff");
+                sleep(Duration::from_secs(1)).await;
+            }
+        }
+    };
+    if remembered && messages.send(inbound).await.is_err() {
+        bail!("Discord message worker stopped");
     }
     Ok(())
 }
@@ -906,29 +932,6 @@ async fn message_worker(
     mut messages: mpsc::Receiver<InboundMessage>,
 ) {
     while let Some(inbound) = messages.recv().await {
-        if let Ok(config) = LoadedConfig::load(&state.config_path)
-            && let Ok(discord) = config.discord()
-            && adapter_identity_admit(
-                discord,
-                inbound.request.guild_id.as_deref(),
-                &inbound.request.user_id,
-            )
-            .is_err()
-        {
-            continue;
-        }
-        let remembered = loop {
-            match remember_inbound_message(&state, &inbound).await {
-                Ok(remembered) => break remembered,
-                Err(failure) => {
-                    warn!(error = %failure, event_id = %inbound.request.event_id, "persist Discord message before queueing");
-                    sleep(Duration::from_secs(1)).await;
-                }
-            }
-        };
-        if !remembered {
-            continue;
-        }
         let channel = inbound.request.channel_id.clone();
         if queue_inbound_message(&mut *inbound_queues.lock().await, inbound) {
             tokio::spawn(channel_message_worker(
@@ -2465,11 +2468,11 @@ mod tests {
     use super::{
         CapabilityState, DISCORD_MESSAGE_LIMIT, DiscordHttp, DiscordParticipation, DiscordState,
         InboundMessage, MessagePlan, PendingMessage, ResolvedMessage, ServiceError, adopt_thread,
-        clear_pending_message, deferred_model_response, execute_capability, message_worker,
-        pending_message, profile_panel, queue_inbound_message, queue_resolved_message,
-        remember_inbound_message, remember_pending_message, resolve_message, resolved_message,
-        resume_pending_messages, split_discord_message, submit_event, submit_resolved_message,
-        thread_title,
+        clear_pending_message, deferred_model_response, execute_capability,
+        handoff_gateway_message, message_worker, pending_message, profile_panel,
+        queue_inbound_message, queue_resolved_message, remember_pending_message, resolve_message,
+        resolved_message, resume_pending_messages, split_discord_message, submit_event,
+        submit_resolved_message, thread_title,
     };
     use crate::{
         config::{
@@ -2875,8 +2878,10 @@ mod tests {
             Arc::new(Mutex::new(BTreeMap::new())),
             receiver,
         ));
-        sender
-            .send(InboundMessage {
+        handoff_gateway_message(
+            &state,
+            &sender,
+            InboundMessage {
                 request: SimulateRequest {
                     event_id: "104".to_owned(),
                     guild_id: Some("100".to_owned()),
@@ -2886,8 +2891,9 @@ mod tests {
                     content: "hello".to_owned(),
                 },
                 native: json!({}),
-            })
-            .await?;
+            },
+        )
+        .await?;
         sleep(Duration::from_millis(1_100)).await;
         assert_eq!(attempts.load(Ordering::SeqCst), 0);
         let persisted: DiscordParticipation =
@@ -3064,7 +3070,13 @@ mod tests {
             },
             native: json!({}),
         };
-        assert!(remember_inbound_message(&state, &inbound).await?);
+        let (sender, receiver) = mpsc::channel(1);
+        drop(receiver);
+        assert!(
+            handoff_gateway_message(&state, &sender, inbound.clone())
+                .await
+                .is_err()
+        );
         let persisted: DiscordParticipation =
             serde_json::from_slice(&fs::read(&state.participation_path)?)?;
         assert_eq!(

@@ -266,7 +266,7 @@ pub fn enable_demo_resources(config: &LoadedConfig) -> Result<()> {
 
 pub fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
     let _lock = ensure_stopped(config)?;
-    let destination = absolute_destination(destination)?;
+    let destination = resolved_destination(destination)?;
     if destination.starts_with(&config.root) {
         bail!("backup destination must be outside the installation root");
     }
@@ -475,11 +475,22 @@ fn checked_port(base: u16, offset: u16) -> Result<u16> {
         .context("base port does not leave room for all services")
 }
 
-fn absolute_destination(path: &Path) -> Result<PathBuf> {
-    if path.is_absolute() {
-        return Ok(path.to_path_buf());
-    }
-    Ok(std::env::current_dir()?.join(path))
+fn resolved_destination(path: &Path) -> Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let parent = absolute
+        .parent()
+        .context("backup destination has no parent")?;
+    let file_name = absolute
+        .file_name()
+        .context("backup destination has no file name")?;
+    Ok(parent
+        .canonicalize()
+        .with_context(|| format!("resolve backup destination parent {}", parent.display()))?
+        .join(file_name))
 }
 
 fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
@@ -709,6 +720,35 @@ mod tests {
             if existing {
                 assert_eq!(fs::metadata(&database)?.len(), 0);
             }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn backup_rejects_destinations_resolving_inside_installation() -> Result<()> {
+        let directory = tempdir()?;
+        let root = directory.path().join("installation");
+        let config_path = initialize(
+            &root,
+            directory.path(),
+            "100",
+            "101",
+            &["200".to_owned()],
+            &[route()],
+            43_100,
+        )?;
+        let config = LoadedConfig::load(&config_path)?;
+        let outside = directory.path().join("outside");
+        fs::create_dir(&outside)?;
+        let alias = directory.path().join("installation-alias");
+        symlink(&root, &alias)?;
+
+        for destination in [
+            outside.join("../installation/backup.tar.gz"),
+            alias.join("backup.tar.gz"),
+        ] {
+            assert!(backup(&config, &destination).is_err());
+            assert!(!root.join("backup.tar.gz").exists());
         }
         Ok(())
     }

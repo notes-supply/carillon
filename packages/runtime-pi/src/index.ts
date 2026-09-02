@@ -409,11 +409,17 @@ async function listExecutionProfiles(signal?: AbortSignal): Promise<RuntimeExecu
   const modelReference = `${selectedModel.provider}/${selectedModel.id}`;
   const persistedDefault =
     defaultExecutionProfile?.model === modelReference ? defaultExecutionProfile : undefined;
-  const requestedReasoning =
-    persistedDefault?.reasoning ?? reasoningForModel(privateSettings, selectedModel, undefined);
+  const resolved = profileEvidence(
+    selectedModel,
+    reasoningForModel(privateSettings, selectedModel, persistedDefault?.reasoning),
+    persistedDefault?.service_tier,
+  );
   return {
     models,
-    selected: profileEvidence(selectedModel, requestedReasoning, persistedDefault?.service_tier),
+    selected:
+      persistedDefault === undefined
+        ? resolved
+        : { requested: persistedDefault, effective: resolved.effective },
   };
 }
 
@@ -461,11 +467,15 @@ async function applyExecutionProfile(
           requested: { model: `${selected.provider}/${selected.id}` },
           effective: { model: `${selected.provider}/${selected.id}` },
         }
-      : profileEvidence(
-          selectedPi,
-          reasoningForModel(privateSettings, selectedPi, selection.reasoning),
-          selection.service_tier,
-        );
+      : {
+          requested: profileEvidence(selectedPi, selection.reasoning, selection.service_tier)
+            .requested,
+          effective: profileEvidence(
+            selectedPi,
+            reasoningForModel(privateSettings, selectedPi, selection.reasoning),
+            selection.service_tier,
+          ).effective,
+        };
   await saveExecutionProfileDefault(executionProfileDefaultPath, evidence.requested, signal);
   defaultExecutionProfile = evidence.requested;
   return { scope: selection.scope, ...evidence };
