@@ -282,8 +282,12 @@ async fn execute_capability(
         output: format!("external echo: {}", request.input),
         native: json!({ "component": state.id, "operation": request.operation, "sequence": evidence.len() + 1 }),
     };
-    evidence.insert(request.correlation_id, response.clone());
-    persist_json(&state.path, &*evidence)?;
+    let correlation_id = request.correlation_id;
+    evidence.insert(correlation_id.clone(), response.clone());
+    if let Err(failure) = persist_json(&state.path, &*evidence) {
+        evidence.remove(&correlation_id);
+        return Err(failure.into());
+    }
     Ok(Json(response))
 }
 
@@ -2446,7 +2450,7 @@ mod tests {
     use axum::{
         Json, Router,
         extract::State,
-        http::StatusCode,
+        http::{HeaderValue, StatusCode, header::AUTHORIZATION},
         response::{IntoResponse as _, Response},
         routing::post,
     };
@@ -2459,20 +2463,22 @@ mod tests {
     };
 
     use super::{
-        DISCORD_MESSAGE_LIMIT, DiscordHttp, DiscordParticipation, DiscordState, InboundMessage,
-        MessagePlan, PendingMessage, ResolvedMessage, ServiceError, adopt_thread,
-        clear_pending_message, deferred_model_response, message_worker, pending_message,
-        profile_panel, queue_inbound_message, queue_resolved_message, remember_inbound_message,
-        remember_pending_message, resolve_message, resolved_message, resume_pending_messages,
-        split_discord_message, submit_event, submit_resolved_message, thread_title,
+        CapabilityState, DISCORD_MESSAGE_LIMIT, DiscordHttp, DiscordParticipation, DiscordState,
+        InboundMessage, MessagePlan, PendingMessage, ResolvedMessage, ServiceError, adopt_thread,
+        clear_pending_message, deferred_model_response, execute_capability, message_worker,
+        pending_message, profile_panel, queue_inbound_message, queue_resolved_message,
+        remember_inbound_message, remember_pending_message, resolve_message, resolved_message,
+        resume_pending_messages, split_discord_message, submit_event, submit_resolved_message,
+        thread_title,
     };
     use crate::{
         config::{
             DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute, LoadedConfig,
+            hash_token,
         },
         model::{
-            EventReceipt, ExternalEvent, RuntimeExecutionProfileModel, RuntimeExecutionProfiles,
-            ServiceTier, SimulateRequest,
+            CapabilityRequest, EventReceipt, ExternalEvent, RuntimeExecutionProfileModel,
+            RuntimeExecutionProfiles, ServiceTier, SimulateRequest,
         },
         operations::initialize,
     };
@@ -2511,6 +2517,42 @@ mod tests {
             state: "completed".to_owned(),
             duplicate: false,
         })
+    }
+
+    #[tokio::test]
+    async fn capability_persistence_failure_does_not_cache_success() -> anyhow::Result<()> {
+        let directory = tempdir()?;
+        let evidence = Arc::new(Mutex::new(BTreeMap::new()));
+        let state = CapabilityState {
+            token_hash: hash_token("secret"),
+            id: "capability".to_owned(),
+            version: "1".to_owned(),
+            path: directory.path().join("missing/evidence.json"),
+            evidence: Arc::clone(&evidence),
+        };
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer secret"));
+        let request = CapabilityRequest {
+            correlation_id: "correlation".to_owned(),
+            operation: "echo".to_owned(),
+            input: "hello".to_owned(),
+        };
+
+        assert!(
+            execute_capability(State(state.clone()), headers.clone(), Json(request.clone()))
+                .await
+                .is_err()
+        );
+        assert!(evidence.lock().await.is_empty());
+
+        fs::create_dir(directory.path().join("missing"))?;
+        let response = execute_capability(State(state), headers, Json(request))
+            .await
+            .map_err(|error| anyhow!(error.message))?;
+        assert_eq!(response.output, "external echo: hello");
+        assert_eq!(response.native["sequence"], 1);
+        assert!(directory.path().join("missing/evidence.json").is_file());
+        Ok(())
     }
 
     #[test]
