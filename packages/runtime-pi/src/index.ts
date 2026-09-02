@@ -466,7 +466,7 @@ async function applyExecutionProfile(
           reasoningForModel(privateSettings, selectedPi, selection.reasoning),
           selection.service_tier,
         );
-  await saveExecutionProfileDefault(executionProfileDefaultPath, evidence.requested);
+  await saveExecutionProfileDefault(executionProfileDefaultPath, evidence.requested, signal);
   defaultExecutionProfile = evidence.requested;
   return { scope: selection.scope, ...evidence };
 }

@@ -104,10 +104,13 @@ export async function loadExecutionProfileDefault(
 export async function saveExecutionProfileDefault(
   path: string,
   profile: ExecutionProfile,
+  signal: AbortSignal,
 ): Promise<void> {
+  signal.throwIfAborted();
   const temporary = `${path}.${randomUUID()}.tmp`;
   try {
     await writeFile(temporary, `${JSON.stringify(profile)}\n`, { mode: 0o600 });
+    signal.throwIfAborted();
     await rename(temporary, path);
   } finally {
     await rm(temporary, { force: true });

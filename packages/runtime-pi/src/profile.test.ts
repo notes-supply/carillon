@@ -191,13 +191,32 @@ describe("execution profiles", () => {
         profileEvidence(codexModel, "medium", "standard").requested,
       );
       const nextDefault = profileEvidence(codexModel, "high", "fast").requested;
-      await saveExecutionProfileDefault(defaultPath, nextDefault);
+      await saveExecutionProfileDefault(defaultPath, nextDefault, new AbortController().signal);
 
       const restoredDefault = await loadExecutionProfileDefault(defaultPath);
       expect(restoredDefault).toEqual(nextDefault);
       expect(latestExecutionProfile(SessionManager.open(existingFile))?.service_tier).toBe(
         "standard",
       );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not save a new-conversation default after model resolution is cancelled", async () => {
+    const root = await mkdtemp(join(tmpdir(), "carillon-profile-"));
+    const defaultPath = join(root, "execution-profile.json");
+    const controller = new AbortController();
+    try {
+      const selected = await Promise.resolve().then(() => {
+        controller.abort();
+        return profileEvidence(codexModel, "high", "fast").requested;
+      });
+
+      await expect(
+        saveExecutionProfileDefault(defaultPath, selected, controller.signal),
+      ).rejects.toMatchObject({ name: "AbortError" });
+      await expect(loadExecutionProfileDefault(defaultPath)).resolves.toBeUndefined();
     } finally {
       await rm(root, { recursive: true, force: true });
     }
