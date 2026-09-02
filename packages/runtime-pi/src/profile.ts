@@ -75,21 +75,6 @@ export function reasoningForModel(
   );
 }
 
-export async function applyPiSessionProfile(
-  session: {
-    setModel(model: Model<Api>): Promise<unknown>;
-    setThinkingLevel(level: ModelThinkingLevel): void;
-  },
-  model: Model<Api>,
-  reasoning: ModelThinkingLevel | undefined,
-  signal: AbortSignal,
-): Promise<void> {
-  signal.throwIfAborted();
-  await session.setModel(model);
-  signal.throwIfAborted();
-  if (reasoning !== undefined) session.setThinkingLevel(reasoning);
-}
-
 export async function loadExecutionProfileDefault(
   path: string,
 ): Promise<ExecutionProfile | undefined> {
@@ -222,10 +207,16 @@ export function persistExecutionProfile(
 ): string {
   const sessionFile = manager.getSessionFile();
   if (sessionFile === undefined) throw new Error("Pi did not create durable session evidence");
+  manager.appendCustomEntry("carillon-execution-profile", profile);
   if (!existsSync(sessionFile)) {
-    writeFileSync(sessionFile, "", { flag: "wx", mode: 0o600 });
+    writeFileSync(
+      sessionFile,
+      `${[manager.getHeader(), ...manager.getEntries()]
+        .map((entry) => JSON.stringify(entry))
+        .join("\n")}\n`,
+      { flag: "wx", mode: 0o600 },
+    );
     manager.setSessionFile(sessionFile);
   }
-  manager.appendCustomEntry("carillon-execution-profile", profile);
   return sessionFile;
 }

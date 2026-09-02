@@ -183,8 +183,6 @@ pub struct RuntimeExecutionProfileSelection {
     pub agent_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audience_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub resources: Option<ResourceSnapshot>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

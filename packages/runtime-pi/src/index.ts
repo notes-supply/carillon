@@ -15,7 +15,6 @@ import { parse as parseToml } from "smol-toml";
 import { Type } from "typebox";
 import { Parse } from "typebox/value";
 import {
-  applyPiSessionProfile,
   type ExecutionProfile,
   ExecutionProfileSchema,
   type ExecutionProfileEvidence,
@@ -33,7 +32,7 @@ import { atomicJson } from "./atomic-json.ts";
 import { callCapability, type CapabilitySelection } from "./capability.ts";
 import { capabilityCallId, nativeSessionId } from "./namespace.ts";
 import { serialize } from "./serial.ts";
-import { createPiExecutionSession, recoverPiTurn } from "./session.ts";
+import { createPiExecutionSession, openOrCreatePiSession, recoverPiTurn } from "./session.ts";
 
 registerBunOAuthFlows();
 
@@ -91,7 +90,6 @@ interface RuntimeExecutionProfileSelection {
   readonly interface_id?: string | null;
   readonly agent_id: string;
   readonly audience_id?: string | null;
-  readonly resources?: ResourceSnapshot | null;
 }
 interface ExecutionProfileApplication {
   readonly scope: RuntimeExecutionProfileSelection["scope"];
@@ -212,7 +210,6 @@ const RuntimeExecutionProfileSelectionSchema = Type.Object({
   interface_id: Type.Optional(Type.Union([ProviderIdentitySchema, Type.Null()])),
   agent_id: Type.String(),
   audience_id: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-  resources: Type.Optional(Type.Union([ResourceSnapshotSchema, Type.Null()])),
 });
 
 const DeterministicSessionSchema = Type.Object({
@@ -320,6 +317,7 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
       shell: process.env["SHELL"],
       path: process.env["PATH"],
       workspace: config.workspace,
+      runtime_instance: runtimeInstance,
     });
     return;
   }
@@ -569,62 +567,41 @@ async function applyPiConversationProfile(
   selected: RuntimeExecutionProfileModel,
   signal: AbortSignal,
 ): Promise<ExecutionProfileApplication> {
-  const resources = selection.resources;
-  if (resources === null || resources === undefined)
-    throw new Error("current conversation scope needs resources");
   const model = (await availablePiModels()).find(
     (candidate) => candidate.provider === selected.provider && candidate.id === selected.id,
   );
   if (model === undefined) throw new Error("selected Pi model is unavailable");
   const requested = profileEvidence(model, selection.reasoning, selection.service_tier).requested;
-  if (selection.continuation_ref === null || selection.continuation_ref === undefined) {
-    signal.throwIfAborted();
-    const manager = SessionManager.create(config.workspace, sessionDirectory, {
-      id: profileNativeSessionId(selection),
-    });
-    const continuation = persistExecutionProfile(manager, requested);
-    return {
-      scope: selection.scope,
-      requested,
-      effective: profileEvidence(model, selection.reasoning, requested.service_tier).effective,
-      continuation_ref: continuation,
-    };
-  }
-  const manager = SessionManager.open(
-    validateContinuation(selection.continuation_ref),
-    sessionDirectory,
+  const effective = profileEvidence(
+    model,
+    reasoningForModel(privateSettings, model, selection.reasoning),
+    requested.service_tier,
+  ).effective;
+  signal.throwIfAborted();
+  const continuation = selection.continuation_ref;
+  const manager = await openOrCreatePiSession(
     config.workspace,
+    sessionDirectory,
+    profileNativeSessionId(selection),
+    continuation === null || continuation === undefined
+      ? undefined
+      : validateContinuation(continuation),
   );
-  const runtime = modelRuntime;
-  if (runtime === undefined) throw new Error("Pi model runtime is unavailable");
-  const created = await createPiExecutionSession({
-    resourceRoot: resolve(resources.root),
-    workspace: config.workspace,
-    manager,
-    ...(requested.service_tier === undefined ? {} : { serviceTier: requested.service_tier }),
-    modelRuntime: runtime,
-  });
-  const { session, extensionsResult } = created;
-  try {
-    assertExtensionsLoaded(extensionsResult.errors);
-    const reasoning = reasoningForModel(privateSettings, model, selection.reasoning);
-    await applyPiSessionProfile(session, model, reasoning, signal);
-    signal.throwIfAborted();
-    const sessionFile = persistExecutionProfile(session.sessionManager, requested);
-    const effective = profileEvidence(
-      session.model ?? model,
-      session.supportsThinking() ? session.thinkingLevel : undefined,
-      requested.service_tier,
-    ).effective;
-    return {
-      scope: selection.scope,
-      requested,
-      effective,
-      continuation_ref: sessionFile,
-    };
-  } finally {
-    session.dispose();
-  }
+  const current = latestExecutionProfile(manager);
+  if (
+    current?.model !== requested.model ||
+    current.reasoning !== requested.reasoning ||
+    current.service_tier !== requested.service_tier
+  )
+    persistExecutionProfile(manager, requested);
+  const sessionFile = manager.getSessionFile();
+  if (sessionFile === undefined) throw new Error("Pi did not create durable session evidence");
+  return {
+    scope: selection.scope,
+    requested,
+    effective,
+    continuation_ref: sessionFile,
+  };
 }
 
 function profileContinuationPath(selection: RuntimeExecutionProfileSelection): string {
@@ -772,21 +749,19 @@ async function executeDeterministic(request: TurnRequest): Promise<TurnResponse>
 async function executePi(request: TurnRequest): Promise<TurnResponse> {
   const root = resolve(request.resources.root);
   const isNew = request.continuation_ref === null || request.continuation_ref === undefined;
-  const manager = isNew
-    ? SessionManager.create(config.workspace, sessionDirectory, {
-        id: nativeSessionId(request.interface_id, request.agent_id, request.audience_id),
-      })
-    : SessionManager.open(
-        validateContinuation(request.continuation_ref),
-        sessionDirectory,
-        config.workspace,
-      );
+  const manager = await openOrCreatePiSession(
+    config.workspace,
+    sessionDirectory,
+    nativeSessionId(request.interface_id, request.agent_id, request.audience_id),
+    isNew ? undefined : validateContinuation(request.continuation_ref),
+  );
   const persistedProfile = latestExecutionProfile(manager);
-  const defaultModel = isNew
-    ? await selectedPiModel()
-    : persistedProfile !== undefined && manager.buildSessionContext().model === null
-      ? await piModelForReference(persistedProfile.model)
-      : undefined;
+  const defaultModel =
+    persistedProfile === undefined
+      ? isNew
+        ? await selectedPiModel()
+        : undefined
+      : await piModelForReference(persistedProfile.model);
   const defaultReasoning =
     persistedProfile?.reasoning ??
     (defaultModel === undefined
@@ -795,7 +770,7 @@ async function executePi(request: TurnRequest): Promise<TurnResponse> {
         reasoningForModel(privateSettings, defaultModel, undefined)));
   const selectedDefaultTier = isNew ? defaultExecutionProfile?.service_tier : undefined;
   const initialProfile =
-    isNew && defaultModel !== undefined
+    persistedProfile === undefined && isNew && defaultModel !== undefined
       ? profileEvidence(defaultModel, defaultReasoning, selectedDefaultTier).requested
       : undefined;
   if (initialProfile !== undefined) persistExecutionProfile(manager, initialProfile);
@@ -965,11 +940,12 @@ async function reconcileEvidence(evidence: Evidence | undefined): Promise<Eviden
   const currentExecution = owner === runtimeInstance;
   if (currentExecution && activeTurns.has(evidence.correlation_id)) return evidence;
   if (evidence.engine === undefined || evidence.continuation_ref === undefined) {
-    if (currentExecution) return evidence;
     const interrupted: Evidence = {
       ...evidence,
       state: "interrupted",
-      error: "runtime restarted before queued work began",
+      error: currentExecution
+        ? "runtime stopped before queued work began"
+        : "runtime restarted before queued work began",
     };
     await writeEvidence(interrupted);
     return interrupted;

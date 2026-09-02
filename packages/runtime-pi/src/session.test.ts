@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { persistExecutionProfile } from "./profile.ts";
-import { createPiExecutionSession, recoverPiTurn } from "./session.ts";
+import { createPiExecutionSession, openOrCreatePiSession, recoverPiTurn } from "./session.ts";
 
 const model: Model<"openai-responses"> = {
   id: "observer-model",
@@ -70,6 +70,21 @@ it("reconstructs capability activity from native Pi tool results", async () => {
         { provider: "echo-capability", operation: "echo", native_ref: "capability-1" },
       ],
     });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("recovers a new conversation session when its first continuation response is lost", async () => {
+  const root = await mkdtemp(join(tmpdir(), "carillon-profile-session-"));
+  const sessions = join(root, "sessions");
+  await mkdir(sessions);
+  try {
+    const first = await openOrCreatePiSession(root, sessions, "stable-session");
+    const continuation = persistExecutionProfile(first, { model: "provider/model" });
+    const recovered = await openOrCreatePiSession(root, sessions, "stable-session");
+    expect(recovered.getSessionFile()).toBe(continuation);
+    expect(recovered.getSessionId()).toBe("stable-session");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

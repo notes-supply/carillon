@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  applyPiSessionProfile,
   latestExecutionProfile,
   loadExecutionProfileDefault,
   type PiServiceTierStreams,
@@ -58,46 +57,6 @@ describe("execution profiles", () => {
     expect(
       profileEvidence(unsupportedModel, undefined, "fast").requested.service_tier,
     ).toBeUndefined();
-  });
-
-  it("does not mutate a native session after profile cancellation", async () => {
-    const controller = new AbortController();
-    controller.abort();
-    const changes: string[] = [];
-    const session = {
-      setModel: () => {
-        changes.push("model");
-        return Promise.resolve();
-      },
-      setThinkingLevel: () => {
-        changes.push("reasoning");
-      },
-    };
-
-    await expect(
-      applyPiSessionProfile(session, codexModel, "high", controller.signal),
-    ).rejects.toMatchObject({ name: "AbortError" });
-    expect(changes).toEqual([]);
-  });
-
-  it("stops a profile mutation when cancellation arrives between native changes", async () => {
-    const controller = new AbortController();
-    const changes: string[] = [];
-    const session = {
-      setModel: () => {
-        changes.push("model");
-        controller.abort();
-        return Promise.resolve();
-      },
-      setThinkingLevel: () => {
-        changes.push("reasoning");
-      },
-    };
-
-    await expect(
-      applyPiSessionProfile(session, codexModel, "high", controller.signal),
-    ).rejects.toMatchObject({ name: "AbortError" });
-    expect(changes).toEqual(["model"]);
   });
 
   it("restores the applicable reasoning default for an existing conversation", async () => {

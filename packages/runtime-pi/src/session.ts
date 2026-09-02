@@ -3,12 +3,12 @@ import {
   DefaultResourceLoader,
   type ModelRuntime,
   type SessionEntry,
-  type SessionManager,
+  SessionManager,
   SettingsManager,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { modelRuntimeForServiceTier, type ServiceTier } from "./profile.ts";
 
@@ -49,6 +49,24 @@ export function recoverPiTurn(entries: readonly SessionEntry[]): RecoveredPiTurn
     for (const content of message.content) if (content.type === "text") output += content.text;
   }
   return { output, stopReason, error, capabilityActivity };
+}
+
+export async function openOrCreatePiSession(
+  workspace: string,
+  sessionDirectory: string,
+  sessionId: string,
+  continuation?: string,
+): Promise<SessionManager> {
+  if (continuation !== undefined)
+    return SessionManager.open(continuation, sessionDirectory, workspace);
+  const suffix = `_${sessionId}.jsonl`;
+  const existing = (await readdir(sessionDirectory))
+    .filter((name) => name.endsWith(suffix))
+    .sort()
+    .at(-1);
+  return existing === undefined
+    ? SessionManager.create(workspace, sessionDirectory, { id: sessionId })
+    : SessionManager.open(join(sessionDirectory, existing), sessionDirectory, workspace);
 }
 
 export async function createPiExecutionSession(options: PiExecutionSessionOptions) {

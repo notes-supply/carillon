@@ -728,14 +728,6 @@ async fn apply_execution_profile(
             value.runtime.as_str()
         });
     let runtime = config.provider(runtime_id, ProviderRole::Runtime)?;
-    let resources = if current {
-        Some(materialize_resources(
-            &config.value.agent.resource_root,
-            &config.value.data_dir.join("resource-snapshots"),
-        )?)
-    } else {
-        None
-    };
     let runtime_selection = RuntimeExecutionProfileSelection {
         key: selection.key,
         reasoning: selection.reasoning,
@@ -745,7 +737,6 @@ async fn apply_execution_profile(
         interface_id: interface_id.clone(),
         agent_id: config.value.agent.id.clone(),
         audience_id: audience_id.clone(),
-        resources,
     };
     let applied = runtime_execution_profile_selection(
         &state.client,
@@ -817,19 +808,40 @@ async fn runtime_execution_profile_selection(
     if !runtime.enabled {
         bail!("selected runtime provider is disabled");
     }
-    client
-        .put(format!("{}/v1/execution-profile", runtime.url))
-        .bearer_auth(config.credential(&runtime.id)?)
-        .json(selection)
-        .timeout(timeout)
-        .send()
-        .await
-        .context("contact runtime execution-profile service")?
-        .error_for_status()
-        .context("runtime provider rejected execution-profile selection")?
-        .json()
-        .await
-        .context("decode applied execution profile")
+    let mut last_failure = None;
+    for _ in 0..2 {
+        let response = match client
+            .put(format!("{}/v1/execution-profile", runtime.url))
+            .bearer_auth(config.credential(&runtime.id)?)
+            .json(selection)
+            .timeout(timeout)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(failure) => {
+                last_failure = Some(
+                    anyhow::Error::new(failure)
+                        .context("contact runtime execution-profile service"),
+                );
+                continue;
+            }
+        };
+        let response = response
+            .error_for_status()
+            .context("runtime provider rejected execution-profile selection")?;
+        match response.json().await {
+            Ok(applied) => return Ok(applied),
+            Err(failure) => {
+                last_failure =
+                    Some(anyhow::Error::new(failure).context("decode applied execution profile"));
+            }
+        }
+    }
+    let Some(failure) = last_failure else {
+        bail!("profile selection made no attempts");
+    };
+    Err(failure)
 }
 
 async fn provider_health(client: &Client, config: &LoadedConfig) -> Vec<Health> {
@@ -1587,6 +1599,7 @@ mod tests {
         evidence: Arc<Mutex<BTreeMap<String, ProviderEvidence>>>,
         profile_selections: Arc<Mutex<Vec<ExecutionProfileSelection>>>,
         corrupt_response: Arc<AtomicBool>,
+        corrupt_profile_response_once: Arc<AtomicBool>,
     }
 
     #[derive(Clone)]
@@ -1734,9 +1747,9 @@ mod tests {
     async fn apply_test_execution_profile(
         State(state): State<TestRuntime>,
         Json(selection): Json<ExecutionProfileSelection>,
-    ) -> Result<Json<ExecutionProfileApplication>, StatusCode> {
+    ) -> Response {
         if selection.key != format!("{}-profile", state.id) {
-            return Err(StatusCode::BAD_REQUEST);
+            return StatusCode::BAD_REQUEST.into_response();
         }
         state
             .profile_selections
@@ -1748,7 +1761,7 @@ mod tests {
             reasoning: selection.reasoning,
             service_tier: selection.service_tier,
         };
-        Ok(Json(ExecutionProfileApplication {
+        let application = ExecutionProfileApplication {
             scope: selection.scope,
             requested: profile.clone(),
             effective: profile,
@@ -1760,7 +1773,14 @@ mod tests {
                         selection.audience_id.as_deref().unwrap_or_default()
                     )
                 }),
-        }))
+        };
+        if state
+            .corrupt_profile_response_once
+            .swap(false, Ordering::SeqCst)
+        {
+            return (StatusCode::OK, "not JSON").into_response();
+        }
+        Json(application).into_response()
     }
 
     async fn start_test_runtime(
@@ -1779,6 +1799,7 @@ mod tests {
             evidence: Arc::new(Mutex::new(BTreeMap::new())),
             profile_selections: Arc::new(Mutex::new(Vec::new())),
             corrupt_response: Arc::new(AtomicBool::new(false)),
+            corrupt_profile_response_once: Arc::new(AtomicBool::new(false)),
         };
         let router = Router::new()
             .route("/v1/turns", post(execute_test_turn))
@@ -2514,6 +2535,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ambiguous_execution_profile_response_is_retried() -> Result<()> {
+        let harness = ProviderHarness::new().await?;
+        harness
+            .primary_state
+            .corrupt_profile_response_once
+            .store(true, Ordering::SeqCst);
+        let applied = runtime_execution_profile_selection(
+            &harness.state.client,
+            &harness.config,
+            &harness.primary_runtime,
+            &RuntimeExecutionProfileSelection {
+                key: "runtime-a-profile".to_owned(),
+                reasoning: None,
+                service_tier: Some(ServiceTier::Standard),
+                scope: ExecutionProfileScope::CurrentConversation,
+                continuation_ref: None,
+                interface_id: Some("interface-a".to_owned()),
+                agent_id: "default".to_owned(),
+                audience_id: Some("conversation".to_owned()),
+            },
+            Duration::from_secs(1),
+        )
+        .await?;
+        assert_eq!(
+            applied.continuation_ref.as_deref(),
+            Some("runtime-a:conversation:profile")
+        );
+        assert_eq!(
+            harness.primary_state.profile_selections.lock().await.len(),
+            2
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn stalled_execution_profile_mutation_is_bounded() -> Result<()> {
         let harness = ProviderHarness::new().await?;
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
@@ -2539,7 +2595,6 @@ mod tests {
                 interface_id: Some("interface-a".to_owned()),
                 agent_id: "default".to_owned(),
                 audience_id: Some("conversation".to_owned()),
-                resources: None,
             },
             Duration::from_millis(25),
         )

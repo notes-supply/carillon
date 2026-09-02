@@ -271,6 +271,13 @@ try {
   assert.equal(reconciledEvidence.status, 200, reconciledBody);
   assert.equal(JSON.parse(reconciledBody).result.output, "native result");
 
+  const runtimeEnvironmentResponse = await fetch(
+    `http://127.0.0.1:${String(basePort + 2)}/v1/environment`,
+    { headers: { authorization: `Bearer ${await credentialValue("runtime-pi")}` } },
+  );
+  const runtimeEnvironmentBody = await runtimeEnvironmentResponse.text();
+  assert.equal(runtimeEnvironmentResponse.status, 200, runtimeEnvironmentBody);
+  const runtimeEnvironment = JSON.parse(runtimeEnvironmentBody);
   const queuedCorrelation = crypto.randomUUID();
   await writeFile(
     join(
@@ -284,7 +291,7 @@ try {
     `${JSON.stringify({
       correlation_id: queuedCorrelation,
       state: "processing",
-      native: { runtime_instance: "crashed-runtime", phase: "queued" },
+      native: { runtime_instance: runtimeEnvironment.runtime_instance, phase: "queued" },
     })}\n`,
   );
   const queuedEvidence = await fetch(
@@ -296,7 +303,7 @@ try {
   assert.equal(
     JSON.parse(queuedBody).state,
     "interrupted",
-    "queued work owned by a stopped runtime must terminalize",
+    "inactive queued work owned by this runtime must terminalize",
   );
 
   const inspected = JSON.parse(
@@ -346,7 +353,7 @@ try {
         restarts: ["discord", "runtime-pi", "interface-extension", "capability"],
         abandoned_delivery_claim: "uncertain",
         native_runtime_reconciliation: "completed from session evidence",
-        queued_runtime_reconciliation: "interrupted after runtime restart",
+        queued_runtime_reconciliation: "inactive work interrupted",
         diagnostics: "authenticated and discoverable by event",
         inspected_turn: afterCapabilityRestart.receipt.turn_id,
         backup_restore: "continued safely",
