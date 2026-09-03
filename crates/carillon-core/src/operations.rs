@@ -2,7 +2,7 @@ use std::{
     fs,
     io::{BufReader, BufWriter, Write as _},
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream},
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -11,6 +11,7 @@ use anyhow::{Context, Result, bail};
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use fs2::FileExt;
 use tar::{Archive, Builder};
+use uuid::Uuid;
 
 use crate::{
     config::{
@@ -276,6 +277,7 @@ pub fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
         let file = fs::OpenOptions::new()
             .create_new(true)
             .write(true)
+            .mode(0o600)
             .open(&destination)?;
         let encoder = GzEncoder::new(BufWriter::new(file), Compression::default());
         let mut archive = Builder::new(encoder);
@@ -294,16 +296,43 @@ pub fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
 }
 
 pub fn restore(archive_path: &Path, target: &Path) -> Result<PathBuf> {
-    if target.exists() && fs::read_dir(target)?.next().is_some() {
+    let target = absolute_destination(target)?;
+    if target.exists() && fs::read_dir(&target)?.next().is_some() {
         bail!("restore target {} is not empty", target.display());
     }
-    fs::create_dir_all(target)?;
+    let parent = target
+        .parent()
+        .context("restore target must have a parent directory")?;
+    fs::create_dir_all(parent)?;
+    let name = target
+        .file_name()
+        .context("restore target must name a directory")?
+        .to_string_lossy();
+    let staging = parent.join(format!(".{name}.restore-{}", Uuid::now_v7()));
+    fs::DirBuilder::new().mode(0o700).create(&staging)?;
+
+    let result = restore_into(archive_path, &staging);
+    if let Err(failure) = result {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(failure);
+    }
+    if target.exists() {
+        fs::remove_dir(&target)?;
+    }
+    if let Err(failure) = fs::rename(&staging, &target) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(failure.into());
+    }
+    Ok(target.join("carillon.toml"))
+}
+
+fn restore_into(archive_path: &Path, target: &Path) -> Result<()> {
     let file = fs::File::open(archive_path)
         .with_context(|| format!("open backup {}", archive_path.display()))?;
     let decoder = GzDecoder::new(BufReader::new(file));
     let mut archive = Archive::new(decoder);
     archive.set_preserve_permissions(true);
-    archive.set_preserve_ownerships(true);
+    archive.set_preserve_ownerships(false);
     for entry in archive.entries()? {
         let mut entry = entry?;
         let path = entry.path()?;
@@ -318,7 +347,7 @@ pub fn restore(archive_path: &Path, target: &Path) -> Result<PathBuf> {
     }
     let config = target.join("carillon.toml");
     LoadedConfig::load(&config).context("restored backup is not a valid Carillon installation")?;
-    Ok(config)
+    Ok(())
 }
 
 fn ensure_stopped(config: &LoadedConfig) -> Result<ServiceLock> {
@@ -398,12 +427,19 @@ fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{
+        fs,
+        io::Cursor,
+        os::unix::fs::{MetadataExt, PermissionsExt},
+        path::{Path, PathBuf},
+    };
 
     use anyhow::Result;
+    use flate2::{Compression, write::GzEncoder};
+    use tar::{Builder, Header};
     use tempfile::tempdir;
 
-    use super::{initialize, set_provider};
+    use super::{backup, initialize, restore, set_provider};
     use crate::config::{
         DiscordActivation, DiscordConversation, DiscordRoute, LoadedConfig, ProviderRole,
     };
@@ -414,6 +450,22 @@ mod tests {
             activation: DiscordActivation::Always,
             conversation: DiscordConversation::Channel,
         }
+    }
+
+    fn initialize_test_installation(
+        root: &Path,
+        workspace: &Path,
+        base_port: u16,
+    ) -> Result<PathBuf> {
+        initialize(
+            root,
+            workspace,
+            "100",
+            "101",
+            &["200".to_owned()],
+            &[route()],
+            base_port,
+        )
     }
 
     #[test]
@@ -456,6 +508,89 @@ mod tests {
                 "operator.token",
                 "runtime-pi.token"
             ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn backup_archive_is_owner_only() -> Result<()> {
+        let directory = tempdir()?;
+        let root = directory.path().join("installation");
+        let config_path = initialize_test_installation(&root, directory.path(), 44_100)?;
+        let destination = directory.path().join("backup.tar.gz");
+
+        backup(&LoadedConfig::load(&config_path)?, &destination)?;
+
+        assert_eq!(
+            fs::metadata(destination)?.permissions().mode() & 0o777,
+            0o600
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failed_restore_leaves_target_retryable() -> Result<()> {
+        let directory = tempdir()?;
+        let source = directory.path().join("source");
+        let config_path = initialize_test_installation(&source, directory.path(), 44_200)?;
+        let valid_archive = directory.path().join("valid.tar.gz");
+        backup(&LoadedConfig::load(&config_path)?, &valid_archive)?;
+
+        let invalid_archive = directory.path().join("invalid.tar.gz");
+        let archive_file = fs::File::create(&invalid_archive)?;
+        let encoder = GzEncoder::new(archive_file, Compression::default());
+        let mut archive = Builder::new(encoder);
+        let invalid_config = b"not valid TOML";
+        let mut header = Header::new_gnu();
+        header.set_path("carillon.toml")?;
+        header.set_size(invalid_config.len().try_into()?);
+        header.set_mode(0o600);
+        header.set_cksum();
+        archive.append(&header, Cursor::new(invalid_config))?;
+        archive.into_inner()?.finish()?;
+        let target = directory.path().join("restored");
+        assert!(restore(&invalid_archive, &target).is_err());
+        assert!(!target.exists());
+        let names = fs::read_dir(directory.path())?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        assert!(
+            names
+                .iter()
+                .all(|name| !name.to_string_lossy().starts_with(".restored.restore-"))
+        );
+
+        let restored_config = restore(&valid_archive, &target)?;
+        LoadedConfig::load(&restored_config)?;
+        Ok(())
+    }
+
+    #[test]
+    fn restore_uses_the_invoking_users_ownership() -> Result<()> {
+        let directory = tempdir()?;
+        let source = directory.path().join("source");
+        let config_path = initialize_test_installation(&source, directory.path(), 44_300)?;
+        let config = fs::read(config_path)?;
+        let archive_path = directory.path().join("foreign-owner.tar.gz");
+        let archive_file = fs::File::create(&archive_path)?;
+        let encoder = GzEncoder::new(archive_file, Compression::default());
+        let mut archive = Builder::new(encoder);
+        let mut header = Header::new_gnu();
+        header.set_path("carillon.toml")?;
+        header.set_size(config.len().try_into()?);
+        header.set_mode(0o600);
+        header.set_uid(123_456);
+        header.set_gid(123_456);
+        header.set_cksum();
+        archive.append(&header, Cursor::new(config))?;
+        archive.into_inner()?.finish()?;
+
+        let target = directory.path().join("restored");
+        let restored_config = restore(&archive_path, &target)?;
+
+        assert_eq!(
+            fs::metadata(restored_config)?.uid(),
+            fs::metadata(directory.path())?.uid()
         );
         Ok(())
     }

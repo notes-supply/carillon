@@ -166,39 +166,40 @@ pub async fn serve_discord(
         }
     };
     let router = discord_router(state.clone(), deterministic);
-    if !deterministic {
-        let discord_token_path = discord_token_file
-            .context("--discord-token-file is required outside deterministic mode")?;
-        let discord_token = read_token_file(discord_token_path)?;
-        let http = Arc::new(DiscordHttp::new(discord_token.clone()));
-        let current_user = http.current_user().await?.model().await?;
-        if current_user.id.to_string() != state.discord.bot_user_id {
-            bail!("configured Discord bot user ID does not match the token");
-        }
-        for target in reconciled.feedback_target_ids {
-            terminal_feedback(&http, &state.discord, &target, Feedback::Uncertain).await;
-        }
-        let (messages, receiver) = mpsc::channel(64);
-        let gateway_state = state.clone();
-        let delivery_state = state.clone();
-        let worker_state = state.clone();
-        let worker_http = http.clone();
-        tokio::spawn(async move {
-            if let Err(failure) =
-                Box::pin(gateway_loop(gateway_state, discord_token, messages)).await
-            {
-                error!(error = %failure, "Discord gateway stopped");
-            }
-        });
-        tokio::spawn(async move {
-            message_worker(worker_state, worker_http, receiver).await;
-        });
-        tokio::spawn(async move {
-            delivery_loop(delivery_state, http).await;
-        });
+    if deterministic {
+        info!(url = %provider.url, deterministic, "Discord interface provider ready");
+        return serve_component(provider.url, router, "Discord interface provider").await;
     }
+
+    let discord_token_path = discord_token_file
+        .context("--discord-token-file is required outside deterministic mode")?;
+    let discord_token = read_token_file(discord_token_path)?;
+    let http = Arc::new(DiscordHttp::new(discord_token.clone()));
+    let current_user = http.current_user().await?.model().await?;
+    if current_user.id.to_string() != state.discord.bot_user_id {
+        bail!("configured Discord bot user ID does not match the token");
+    }
+    for target in reconciled.feedback_target_ids {
+        terminal_feedback(&http, &state.discord, &target, Feedback::Uncertain).await;
+    }
+    let (messages, receiver) = mpsc::channel(64);
+    let delivery_state = state.clone();
+    let worker_state = state.clone();
+    let worker_http = http.clone();
+    tokio::spawn(async move {
+        message_worker(worker_state, worker_http, receiver).await;
+    });
+    tokio::spawn(async move {
+        delivery_loop(delivery_state, http).await;
+    });
+
     info!(url = %provider.url, deterministic, "Discord interface provider ready");
-    serve_component(provider.url, router, "Discord interface provider").await
+    tokio::select! {
+        result = serve_component(provider.url, router, "Discord interface provider") => result,
+        result = gateway_loop(state, discord_token, messages) => {
+            result.context("Discord gateway stopped")
+        }
+    }
 }
 
 fn discord_router(state: DiscordState, deterministic: bool) -> Router {
@@ -331,7 +332,7 @@ async fn gateway_loop(
             }
         }
     }
-    Ok(())
+    bail!("Discord gateway event stream ended")
 }
 
 fn resolve_message(
