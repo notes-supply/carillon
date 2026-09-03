@@ -172,6 +172,17 @@ pub struct Provider {
     pub enabled: bool,
 }
 
+impl Provider {
+    /// The loopback socket address behind the provider's URL.
+    pub fn listen_address(&self) -> Result<SocketAddr> {
+        self.url
+            .strip_prefix("http://")
+            .context("provider URL must use http://")?
+            .parse()
+            .context("provider URL must contain a socket address")
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProviderRole {
@@ -203,6 +214,7 @@ impl LoadedConfig {
         value.validate()?;
         Ok(Self { root, value })
     }
+
     pub fn provider(&self, id: &str, role: ProviderRole) -> Result<&Provider> {
         self.value.provider(id, role)
     }
@@ -211,13 +223,9 @@ impl LoadedConfig {
         self.value.discord()
     }
 
-    pub fn credential_path(&self, id: &str) -> Result<PathBuf> {
-        validate_provider_identity(id)?;
-        Ok(self.root.join("credentials").join(format!("{id}.token")))
-    }
-
     pub fn credential(&self, id: &str) -> Result<String> {
-        let path = self.credential_path(id)?;
+        validate_provider_identity(id)?;
+        let path = self.root.join("credentials").join(format!("{id}.token"));
         Ok(fs::read_to_string(&path)
             .with_context(|| format!("read provider credential {}", path.display()))?
             .trim()
@@ -245,12 +253,17 @@ impl Config {
         let mut provider_ids = BTreeSet::new();
         for provider in &self.providers {
             validate_provider_identity(&provider.id)?;
-            if provider.version.trim().is_empty()
-                || provider.url.trim().is_empty()
-                || provider.token_hash.trim().is_empty()
-                || !provider_ids.insert(&provider.id)
-            {
-                bail!("provider versions, URLs, credentials, and IDs must be explicit and unique");
+            if provider.version.trim().is_empty() {
+                bail!("provider {} must declare a version", provider.id);
+            }
+            if provider.url.trim().is_empty() {
+                bail!("provider {} must declare a URL", provider.id);
+            }
+            if provider.token_hash.trim().is_empty() {
+                bail!("provider {} must declare a credential hash", provider.id);
+            }
+            if !provider_ids.insert(&provider.id) {
+                bail!("provider ID {} is configured more than once", provider.id);
             }
         }
         self.provider(&self.agent.runtime_provider, ProviderRole::Runtime)?;
@@ -268,17 +281,51 @@ impl Config {
 }
 
 impl DiscordConfig {
+    /// A fresh Discord interface configuration carrying the same feedback
+    /// defaults that deserialization applies.
+    pub(crate) fn with_defaults(
+        provider: String,
+        agent: String,
+        guild_id: String,
+        bot_user_id: String,
+        allowed_user_ids: Vec<String>,
+        routes: Vec<DiscordRoute>,
+    ) -> Self {
+        Self {
+            provider,
+            agent,
+            guild_id,
+            bot_user_id,
+            allowed_user_ids,
+            routes,
+            typing: enabled(),
+            reactions: enabled(),
+            processing_emoji: processing_emoji(),
+            delivered_emoji: delivered_emoji(),
+            failed_emoji: failed_emoji(),
+            uncertain_emoji: uncertain_emoji(),
+        }
+    }
+
     fn validate(&self, config: &Config) -> Result<()> {
-        if !valid_snowflake(&self.guild_id)
-            || !valid_snowflake(&self.bot_user_id)
-            || self.allowed_user_ids.is_empty()
-            || self
-                .allowed_user_ids
-                .iter()
-                .any(|user| !valid_snowflake(user))
-            || self.routes.is_empty()
+        if !valid_snowflake(&self.guild_id) {
+            bail!("Discord guild ID must be an immutable snowflake ID");
+        }
+        if !valid_snowflake(&self.bot_user_id) {
+            bail!("Discord bot user ID must be an immutable snowflake ID");
+        }
+        if self.allowed_user_ids.is_empty() {
+            bail!("Discord admission requires at least one allowlisted user ID");
+        }
+        if let Some(user) = self
+            .allowed_user_ids
+            .iter()
+            .find(|user| !valid_snowflake(user))
         {
-            bail!("Discord admission requires immutable guild, bot, user, and channel route IDs");
+            bail!("Discord allowlisted user ID {user:?} is not a snowflake ID");
+        }
+        if self.routes.is_empty() {
+            bail!("Discord admission requires at least one channel route");
         }
         let mut channels = BTreeSet::new();
         for route in &self.routes {

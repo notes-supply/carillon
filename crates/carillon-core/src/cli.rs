@@ -1,18 +1,24 @@
+//! The `carillon` operator command: service entry points, installation
+//! actions, and the authenticated diagnostics client for a running core.
+
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use reqwest::Url;
+use serde::{Serialize, de::DeserializeOwned};
 use tracing_subscriber::EnvFilter;
 
 use crate::{
-    components::serve_discord,
-    config::{DiscordRoute, LoadedConfig},
-    core::{fetch_inspection, fetch_recent, fetch_status, serialize_pretty, serve},
-    db::Database,
-    operations::{
+    admin::{
         ServiceLock, backup, configure_discord, enable_demo_resources, initialize as init, restore,
         set_provider,
     },
+    config::{DiscordRoute, LoadedConfig},
+    core::serve,
+    db::Database,
+    discord,
+    model::{StatusReport, TurnInspection, TurnSummary},
 };
 
 #[derive(Debug, Parser)]
@@ -20,6 +26,18 @@ use crate::{
 struct Cli {
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum ProviderAction {
+    Enable,
+    Disable,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ResolveAction {
+    Retry,
+    Skip,
 }
 
 #[derive(Debug, Subcommand)]
@@ -71,8 +89,7 @@ enum Command {
         #[arg(long)]
         config: PathBuf,
         id: String,
-        #[arg(value_parser = ["enable", "disable"])]
-        action: String,
+        action: ProviderAction,
     },
     EnableDemoResources {
         #[arg(long)]
@@ -99,8 +116,7 @@ enum Command {
         #[arg(long)]
         config: PathBuf,
         turn_id: String,
-        #[arg(value_parser = ["retry", "skip"])]
-        action: String,
+        action: ResolveAction,
     },
 
     Backup {
@@ -155,7 +171,10 @@ pub(crate) async fn run() -> Result<()> {
             bot_user_id,
             user_id,
             route,
-        } => configure_discord_command(&config, &guild_id, &bot_user_id, &user_id, &route)?,
+        } => {
+            configure_discord(&config, &guild_id, &bot_user_id, &user_id, &route)?;
+            println!("{}", config.display());
+        }
         Command::Core { config } => {
             let loaded = LoadedConfig::load(&config)?;
             let _lock = ServiceLock::acquire(&loaded.value.data_dir)?;
@@ -167,7 +186,7 @@ pub(crate) async fn run() -> Result<()> {
             discord_token_file,
             deterministic,
         } => {
-            serve_discord(
+            discord::serve(
                 LoadedConfig::load(&config)?,
                 &token_file,
                 discord_token_file.as_deref(),
@@ -177,10 +196,17 @@ pub(crate) async fn run() -> Result<()> {
         }
 
         Command::Provider { config, id, action } => {
-            set_provider(&config, &id, action == "enable")?;
-            println!("{id} {action}d");
+            set_provider(&config, &id, action == ProviderAction::Enable)?;
+            let outcome = match action {
+                ProviderAction::Enable => "enabled",
+                ProviderAction::Disable => "disabled",
+            };
+            println!("{id} {outcome}");
         }
-        Command::EnableDemoResources { config } => enable_demo_resources_command(&config)?,
+        Command::EnableDemoResources { config } => {
+            enable_demo_resources(&LoadedConfig::load(&config)?)?;
+            println!("Pi-native extension and Agent Skill enabled");
+        }
         Command::Status { config } => print_status(&config).await?,
         Command::Recent {
             config,
@@ -194,9 +220,18 @@ pub(crate) async fn run() -> Result<()> {
             action,
         } => {
             let loaded = LoadedConfig::load(&config)?;
-            Database::open(&loaded.value.data_dir.join("carillon.sqlite3"))?
-                .resolve_uncertain_turn(&turn_id, action == "retry")?;
-            println!("{turn_id} {action}");
+            let database = Database::open(&loaded.value.data_dir.join("carillon.sqlite3"))?;
+            let outcome = match action {
+                ResolveAction::Retry => {
+                    database.retry_turn(&turn_id)?;
+                    "retry"
+                }
+                ResolveAction::Skip => {
+                    database.skip_turn(&turn_id)?;
+                    "skip"
+                }
+            };
+            println!("{turn_id} {outcome}");
         }
 
         Command::Backup { config, output } => {
@@ -211,43 +246,53 @@ pub(crate) async fn run() -> Result<()> {
 }
 
 async fn print_status(config: &Path) -> Result<()> {
-    println!(
-        "{}",
-        serialize_pretty(&fetch_status(&LoadedConfig::load(config)?).await?)?
-    );
-    Ok(())
+    let loaded = LoadedConfig::load(config)?;
+    let report: StatusReport = operator_get(&loaded, operator_url(&loaded, "/v1/status")?).await?;
+    print_pretty(&report)
 }
 
 async fn print_recent(config: &Path, event_id: Option<&str>, limit: u32) -> Result<()> {
-    println!(
-        "{}",
-        serialize_pretty(&fetch_recent(&LoadedConfig::load(config)?, event_id, limit).await?)?
-    );
-    Ok(())
+    let loaded = LoadedConfig::load(config)?;
+    let mut url = operator_url(&loaded, "/v1/turns")?;
+    url.query_pairs_mut()
+        .append_pair("limit", &limit.to_string());
+    if let Some(event_id) = event_id {
+        url.query_pairs_mut().append_pair("event_id", event_id);
+    }
+    let turns: Vec<TurnSummary> = operator_get(&loaded, url).await?;
+    print_pretty(&turns)
 }
 
 async fn print_inspection(config: &Path, turn_id: &str) -> Result<()> {
-    println!(
-        "{}",
-        serialize_pretty(&fetch_inspection(&LoadedConfig::load(config)?, turn_id).await?)?
-    );
-    Ok(())
+    let loaded = LoadedConfig::load(config)?;
+    let inspection: TurnInspection = operator_get(
+        &loaded,
+        operator_url(&loaded, &format!("/v1/turns/{turn_id}"))?,
+    )
+    .await?;
+    print_pretty(&inspection)
 }
 
-fn enable_demo_resources_command(config: &Path) -> Result<()> {
-    enable_demo_resources(&LoadedConfig::load(config)?)?;
-    println!("Pi-native extension and Agent Skill enabled");
-    Ok(())
+fn operator_url(config: &LoadedConfig, path: &str) -> Result<Url> {
+    Ok(Url::parse(&format!(
+        "http://{}{path}",
+        config.value.core.listen
+    ))?)
 }
 
-fn configure_discord_command(
-    config: &Path,
-    guild_id: &str,
-    bot_user_id: &str,
-    user_id: &[String],
-    route: &[DiscordRoute],
-) -> Result<()> {
-    configure_discord(config, guild_id, bot_user_id, user_id, route)?;
-    println!("{}", config.display());
+async fn operator_get<T: DeserializeOwned>(config: &LoadedConfig, url: Url) -> Result<T> {
+    reqwest::Client::new()
+        .get(url)
+        .bearer_auth(config.credential("operator")?)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await
+        .map_err(Into::into)
+}
+
+fn print_pretty<T: Serialize>(value: &T) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
 }

@@ -1,3 +1,7 @@
+//! Operator actions on an installation: initialization, configuration edits,
+//! backup, and restore. These run against a stopped or exclusive-locked
+//! installation, never inside the services.
+
 use std::{
     fs,
     io::{BufReader, BufWriter, Write as _},
@@ -43,6 +47,8 @@ const NATIVE_EXTENSION: &str = r#"export default function carillonContext(pi) {
 "#;
 const SKILL: &str = "---\nname: carillon-status\ndescription: Explain Carillon component and continuity status when the operator asks.\n---\n\nReport component identity, resource selection, and delivery certainty plainly.\n";
 
+/// Exclusive lock over an installation's durable state directory. Core holds
+/// one while serving; backup takes it to prove the services are stopped.
 pub struct ServiceLock {
     _file: fs::File,
 }
@@ -72,9 +78,6 @@ pub fn initialize(
     routes: &[DiscordRoute],
     base_port: u16,
 ) -> Result<PathBuf> {
-    if guild_id.is_empty() || bot_user_id.is_empty() || users.is_empty() || routes.is_empty() {
-        bail!("Discord guild, bot, user, and channel route IDs are required");
-    }
     if root.exists() && fs::read_dir(root)?.next().is_some() {
         bail!("installation root {} is not empty", root.display());
     }
@@ -91,20 +94,14 @@ pub fn initialize(
             operator_token_hash: hash_token(&operator_token),
         },
         providers: default_providers(base_port, &discord_token, &runtime_token)?,
-        discord: Some(DiscordConfig {
-            provider: "discord-private".to_owned(),
-            agent: "default".to_owned(),
-            guild_id: guild_id.to_owned(),
-            bot_user_id: bot_user_id.to_owned(),
-            allowed_user_ids: users.to_vec(),
-            routes: routes.to_vec(),
-            typing: true,
-            reactions: true,
-            processing_emoji: "👀".to_owned(),
-            delivered_emoji: "✅".to_owned(),
-            failed_emoji: "❌".to_owned(),
-            uncertain_emoji: "⚠️".to_owned(),
-        }),
+        discord: Some(DiscordConfig::with_defaults(
+            "discord-private".to_owned(),
+            "default".to_owned(),
+            guild_id.to_owned(),
+            bot_user_id.to_owned(),
+            users.to_vec(),
+            routes.to_vec(),
+        )),
         agent: AgentConfig {
             id: "default".to_owned(),
             name: "Default agent".to_owned(),
@@ -301,6 +298,8 @@ pub fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
         let _ = fs::remove_file(&staging);
         return Err(failure);
     }
+    // Unlike rename, hard_link fails if the destination appeared meanwhile,
+    // so a finished archive can never overwrite an existing file.
     if let Err(failure) = fs::hard_link(&staging, &destination) {
         let _ = fs::remove_file(&staging);
         return Err(failure.into());
@@ -368,14 +367,9 @@ fn restore_into(archive_path: &Path, target: &Path) -> Result<()> {
 fn ensure_stopped(config: &LoadedConfig) -> Result<ServiceLock> {
     let lock = ServiceLock::acquire(&config.value.data_dir)?;
     let mut addresses = vec![config.value.core.listen];
-    addresses.extend(
-        config
-            .value
-            .providers
-            .iter()
-            .map(|provider| component_address(&provider.url))
-            .collect::<Result<Vec<_>>>()?,
-    );
+    for provider in &config.value.providers {
+        addresses.push(provider.listen_address()?);
+    }
     for address in addresses {
         if TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok() {
             bail!(
@@ -411,13 +405,6 @@ fn append_directory<W: std::io::Write>(
         }
     }
     Ok(())
-}
-
-fn component_address(url: &str) -> Result<SocketAddr> {
-    url.strip_prefix("http://")
-        .context("component URL must use http://")?
-        .parse()
-        .context("component URL must contain a socket address")
 }
 
 fn checked_port(base: u16, offset: u16) -> Result<u16> {
@@ -487,15 +474,7 @@ mod tests {
     fn fresh_install_configures_only_discord_and_pi() -> Result<()> {
         let directory = tempdir()?;
         let root = directory.path().join("installation");
-        let config_path = initialize(
-            &root,
-            directory.path(),
-            "100",
-            "101",
-            &["200".to_owned()],
-            &[route()],
-            44_000,
-        )?;
+        let config_path = initialize_test_installation(&root, directory.path(), 44_000)?;
         let config = LoadedConfig::load(&config_path)?;
 
         assert_eq!(config.value.providers.len(), 2);
@@ -634,15 +613,7 @@ mod tests {
     fn provider_command_rejects_unsafe_identity_before_mutation() -> Result<()> {
         let directory = tempdir()?;
         let root = directory.path().join("installation");
-        let config_path = initialize(
-            &root,
-            directory.path(),
-            "100",
-            "101",
-            &["200".to_owned()],
-            &[route()],
-            44_000,
-        )?;
+        let config_path = initialize_test_installation(&root, directory.path(), 44_000)?;
         let before = fs::read(&config_path)?;
         assert!(set_provider(&config_path, "../escape", false).is_err());
         assert_eq!(fs::read(&config_path)?, before);

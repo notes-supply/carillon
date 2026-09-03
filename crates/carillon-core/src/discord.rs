@@ -1,8 +1,13 @@
+//! The Discord interface provider: platform authentication, guild/user/route
+//! admission, thread routing, feedback, and message delivery. Core knows none
+//! of this; the provider talks to core only through [`CoreClient`].
+
 use std::{
     collections::BTreeMap,
     fs,
+    net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::Duration,
 };
 
@@ -14,12 +19,12 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use reqwest::{Client, Method, RequestBuilder};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tokio::{
     net::TcpListener,
-    sync::{Mutex, mpsc},
+    sync::mpsc,
     task::JoinHandle,
     time::{sleep, timeout},
 };
@@ -45,7 +50,7 @@ use crate::{
     },
     model::{
         Delivery, DeliveryAck, DeliveryOutcome, DeliveryReconciliation, EventReceipt,
-        ExternalEvent, Health, SimulateRequest, SimulateResponse,
+        ExternalEvent, Health, INSTANCE_HEADER, PROVIDER_HEADER, SimulateRequest, SimulateResponse,
     },
 };
 
@@ -53,6 +58,28 @@ use crate::{
 struct ServiceError {
     status: StatusCode,
     message: String,
+}
+
+impl ServiceError {
+    fn transient(message: String) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message,
+        }
+    }
+
+    fn protocol(message: String) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            message,
+        }
+    }
+
+    /// Whether the failure is worth retrying: core unreachable or failing,
+    /// rather than rejecting the request or violating its wire contract.
+    fn is_transient(&self) -> bool {
+        self.status.is_server_error() && self.status != StatusCode::BAD_GATEWAY
+    }
 }
 
 impl From<anyhow::Error> for ServiceError {
@@ -71,24 +98,185 @@ impl IntoResponse for ServiceError {
     }
 }
 
+/// The provider's authenticated client for core's provider API.
+#[derive(Clone)]
+struct CoreClient {
+    http: Client,
+    base_url: String,
+    token: String,
+    provider_id: String,
+    /// Fresh per process start; core releases delivery claims held under
+    /// other, presumed dead, instance identities during reconciliation.
+    instance_id: String,
+}
+
+impl CoreClient {
+    fn new(config: &LoadedConfig, provider_id: String, token: String) -> Self {
+        Self {
+            http: Client::new(),
+            base_url: format!("http://{}", config.value.core.listen),
+            token,
+            provider_id,
+            instance_id: Uuid::now_v7().to_string(),
+        }
+    }
+
+    fn request(&self, method: Method, path: &str) -> RequestBuilder {
+        self.http
+            .request(method, format!("{}{path}", self.base_url))
+            .bearer_auth(&self.token)
+            .header(PROVIDER_HEADER, &self.provider_id)
+            .header(INSTANCE_HEADER, &self.instance_id)
+    }
+
+    async fn submit_event(&self, event: &ExternalEvent) -> Result<EventReceipt, ServiceError> {
+        let request = self.request(Method::POST, "/v1/events").json(event);
+        core_json(request, "submit event to core").await
+    }
+
+    async fn claim_delivery(&self) -> Result<Option<Delivery>, ServiceError> {
+        let request = self.request(Method::GET, "/v1/deliveries");
+        core_json(request, "claim core delivery").await
+    }
+
+    async fn acknowledge_delivery(
+        &self,
+        id: i64,
+        outcome: DeliveryOutcome,
+        native_ref: Option<String>,
+    ) -> Result<(), ServiceError> {
+        let request = self
+            .request(Method::POST, &format!("/v1/deliveries/{id}/ack"))
+            .json(&DeliveryAck {
+                native_ref,
+                outcome,
+            });
+        core_send(request, "acknowledge core delivery").await?;
+        Ok(())
+    }
+
+    async fn reconcile(&self) -> Result<DeliveryReconciliation, ServiceError> {
+        let request = self.request(Method::POST, "/v1/deliveries/reconcile");
+        core_json(request, "reconcile abandoned delivery claims").await
+    }
+}
+
+async fn core_send(
+    request: RequestBuilder,
+    action: &str,
+) -> Result<reqwest::Response, ServiceError> {
+    let response = request
+        .send()
+        .await
+        .map_err(|error| ServiceError::transient(format!("{action}: {error}")))?;
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    let detail = response.text().await.unwrap_or_default();
+    Err(ServiceError {
+        status,
+        message: if detail.is_empty() {
+            format!("{action}: core responded with {status}")
+        } else {
+            format!("{action}: {detail}")
+        },
+    })
+}
+
+async fn core_json<T: DeserializeOwned>(
+    request: RequestBuilder,
+    action: &str,
+) -> Result<T, ServiceError> {
+    core_send(request, action)
+        .await?
+        .json()
+        .await
+        .map_err(|error| ServiceError::protocol(format!("decode {action}: {error}")))
+}
+
+/// Durable record of the threads this provider participates in.
+///
+/// `threads` maps a thread to the route channel that admitted it, so later
+/// thread messages resolve and stay activated without Discord lookups.
+/// `created_threads` maps a root message to the thread already created for
+/// it, so a retried message never creates a second thread.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct ParticipationState {
+    threads: BTreeMap<String, String>,
+    #[serde(default)]
+    created_threads: BTreeMap<String, String>,
+}
+
+struct Participation {
+    path: PathBuf,
+    state: Mutex<ParticipationState>,
+}
+
+impl Participation {
+    fn load(path: PathBuf) -> Result<Self> {
+        let state = if path.exists() {
+            serde_json::from_slice(&fs::read(&path)?)
+                .with_context(|| format!("parse Discord participation state {}", path.display()))?
+        } else {
+            ParticipationState::default()
+        };
+        Ok(Self {
+            path,
+            state: Mutex::new(state),
+        })
+    }
+
+    fn lock(&self) -> MutexGuard<'_, ParticipationState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn parent_route(&self, channel_id: &str) -> Option<String> {
+        self.lock().threads.get(channel_id).cloned()
+    }
+
+    fn created_thread(&self, message_id: &str) -> Option<String> {
+        self.lock().created_threads.get(message_id).cloned()
+    }
+
+    fn adopt(&self, thread_id: &str, route_channel_id: &str) -> Result<()> {
+        let mut state = self.lock();
+        state
+            .threads
+            .insert(thread_id.to_owned(), route_channel_id.to_owned());
+        self.persist(&state)
+    }
+
+    fn remember_created(
+        &self,
+        message_id: &str,
+        thread_id: &str,
+        route_channel_id: &str,
+    ) -> Result<()> {
+        let mut state = self.lock();
+        state
+            .created_threads
+            .insert(message_id.to_owned(), thread_id.to_owned());
+        state
+            .threads
+            .insert(thread_id.to_owned(), route_channel_id.to_owned());
+        self.persist(&state)
+    }
+
+    fn persist(&self, state: &ParticipationState) -> Result<()> {
+        let temporary = self.path.with_extension("json.tmp");
+        fs::write(&temporary, serde_json::to_vec_pretty(state)?)?;
+        fs::rename(temporary, &self.path)?;
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 struct DiscordState {
     discord: DiscordConfig,
     health: Health,
-    core_url: String,
-    provider_id: String,
-    token: String,
-    instance_id: String,
-    client: Client,
-    participation_path: PathBuf,
-    participation: Arc<Mutex<DiscordParticipation>>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-struct DiscordParticipation {
-    threads: BTreeMap<String, String>,
-    #[serde(default)]
-    created_threads: BTreeMap<String, String>,
+    core: CoreClient,
+    participation: Arc<Participation>,
 }
 
 #[derive(Clone, Debug)]
@@ -97,16 +285,19 @@ struct InboundMessage {
     native: Value,
 }
 
+/// An admitted, activated message and what conversation handling it needs.
 #[derive(Clone, Debug)]
 struct MessagePlan {
-    event_id: String,
+    /// The Discord message ID, which is also the provider event ID.
+    message_id: String,
     guild_id: String,
     user_id: String,
     agent_id: String,
-    source_channel_id: String,
-    source_message_id: String,
+    /// The channel or thread the message arrived in.
+    channel_id: String,
+    /// The configured route channel that admitted it (the parent channel for
+    /// thread children).
     route_channel_id: String,
-    current_channel_id: String,
     content: String,
     create_thread: bool,
     adopt_thread: bool,
@@ -119,7 +310,7 @@ struct ResolvedMessage {
     conversation_id: String,
 }
 
-pub async fn serve_discord(
+pub async fn serve(
     config: LoadedConfig,
     token_file: &Path,
     discord_token_file: Option<&Path>,
@@ -136,13 +327,14 @@ pub async fn serve_discord(
     if !token_matches(&provider.token_hash, &token) {
         bail!("Discord interface provider token does not match configuration");
     }
-    let participation_path = config
-        .value
-        .data_dir
-        .join("components")
-        .join(&provider.id)
-        .join("participation.json");
-    let participation = load_discord_participation(&participation_path)?;
+    let participation = Arc::new(Participation::load(
+        config
+            .value
+            .data_dir
+            .join("components")
+            .join(&provider.id)
+            .join("participation.json"),
+    )?);
     let state = DiscordState {
         discord,
         health: Health {
@@ -151,16 +343,11 @@ pub async fn serve_discord(
             version: provider.version.clone(),
             status: "ready".to_owned(),
         },
-        core_url: format!("http://{}", config.value.core.listen),
-        provider_id: provider.id.clone(),
-        token,
-        instance_id: Uuid::now_v7().to_string(),
-        client: Client::new(),
-        participation_path,
-        participation: Arc::new(Mutex::new(participation)),
+        core: CoreClient::new(&config, provider.id.clone(), token),
+        participation,
     };
     let reconciled = loop {
-        match reconcile_core_deliveries(&state).await {
+        match state.core.reconcile().await {
             Ok(reconciled) => break reconciled,
             Err(failure) => {
                 warn!(error = %failure.message, "waiting to reconcile Discord delivery claims");
@@ -168,10 +355,11 @@ pub async fn serve_discord(
             }
         }
     };
+    let address = provider.listen_address()?;
     let router = discord_router(state.clone(), deterministic);
     if deterministic {
         info!(url = %provider.url, deterministic, "Discord interface provider ready");
-        return serve_component(provider.url, router, "Discord interface provider").await;
+        return serve_component(address, router, "Discord interface provider").await;
     }
 
     let discord_token_path = discord_token_file
@@ -194,7 +382,7 @@ pub async fn serve_discord(
     });
     info!(url = %provider.url, deterministic, "Discord interface provider ready");
     tokio::select! {
-        result = serve_component(provider.url, router, "Discord interface provider") => result,
+        result = serve_component(address, router, "Discord interface provider") => result,
         result = gateway_loop(state, discord_token, messages) => {
             result.context("Discord gateway stopped")
         },
@@ -214,23 +402,15 @@ fn discord_router(state: DiscordState, deterministic: bool) -> Router {
     .with_state(state)
 }
 
-fn load_discord_participation(path: &Path) -> Result<DiscordParticipation> {
-    if !path.exists() {
-        return Ok(DiscordParticipation::default());
-    }
-    serde_json::from_slice(&fs::read(path)?)
-        .with_context(|| format!("parse Discord participation state {}", path.display()))
-}
-
-async fn discord_health(State(state): State<DiscordState>) -> Result<Json<Health>, ServiceError> {
-    Ok(Json(state.health))
+async fn discord_health(State(state): State<DiscordState>) -> Json<Health> {
+    Json(state.health)
 }
 
 async fn simulate(
     State(state): State<DiscordState>,
     Json(request): Json<SimulateRequest>,
 ) -> Result<Response, ServiceError> {
-    adapter_identity_admit(
+    admit_identity(
         &state.discord,
         request.guild_id.as_deref(),
         &request.user_id,
@@ -239,23 +419,23 @@ async fn simulate(
         &state.discord,
         request,
         Value::String("deterministic-local-discord".to_owned()),
-        &*state.participation.lock().await,
+        &state.participation.lock(),
     )?
     else {
         return Ok(StatusCode::NO_CONTENT.into_response());
     };
-    let resolved = prepare_deterministic_conversation(&state, plan).await?;
+    let resolved = prepare_deterministic_conversation(&state, plan)?;
     let mut feedback = Vec::new();
     if state.discord.reactions {
         feedback.push("processing".to_owned());
     }
-    let receipt = submit_event(&state, &resolved.event).await?;
+    let receipt = state.core.submit_event(&resolved.event).await?;
     let delivery = if receipt.duplicate {
         None
     } else {
         let delivery = timeout(Duration::from_secs(10), async {
             loop {
-                if let Some(delivery) = claim_core_delivery(&state).await? {
+                if let Some(delivery) = state.core.claim_delivery().await? {
                     if delivery.turn_id != receipt.turn_id {
                         return Err(ServiceError {
                             status: StatusCode::CONFLICT,
@@ -272,13 +452,14 @@ async fn simulate(
             status: StatusCode::GATEWAY_TIMEOUT,
             message: "timed out waiting for deterministic delivery".to_owned(),
         })??;
-        acknowledge_core_delivery(
-            &state,
-            delivery.id,
-            DeliveryOutcome::Delivered,
-            Some(format!("local:{}", resolved.event.event_id)),
-        )
-        .await?;
+        state
+            .core
+            .acknowledge_delivery(
+                delivery.id,
+                DeliveryOutcome::Delivered,
+                Some(format!("local:{}", resolved.event.event_id)),
+            )
+            .await?;
         if state.discord.reactions {
             feedback.push("delivered".to_owned());
         }
@@ -307,7 +488,7 @@ async fn gateway_loop(
                 continue;
             }
             let guild = message.guild_id.map(|id| id.to_string());
-            if adapter_identity_admit(
+            if admit_identity(
                 &state.discord,
                 guild.as_deref(),
                 &message.author.id.to_string(),
@@ -337,11 +518,16 @@ async fn gateway_loop(
     bail!("Discord gateway event stream ended")
 }
 
+/// Decides what to do with an admitted message.
+///
+/// `Err` means the channel is not routed (rejected); `Ok(None)` means the
+/// route ignores this message (no activation or empty content). The gateway
+/// silently drops both; simulation reports the rejection.
 fn resolve_message(
     config: &DiscordConfig,
     request: SimulateRequest,
     native: Value,
-    participation: &DiscordParticipation,
+    participation: &ParticipationState,
 ) -> Result<Option<MessagePlan>, ServiceError> {
     let (route, child) = if let Some(route) = config
         .routes
@@ -375,14 +561,12 @@ fn resolve_message(
         return Ok(None);
     }
     Ok(Some(MessagePlan {
-        event_id: request.event_id.clone(),
+        message_id: request.event_id,
         guild_id: request.guild_id.unwrap_or_default(),
         user_id: request.user_id,
         agent_id: config.agent.clone(),
-        source_channel_id: request.channel_id.clone(),
-        source_message_id: request.event_id,
+        channel_id: request.channel_id,
         route_channel_id: route.channel_id.clone(),
-        current_channel_id: request.channel_id,
         content,
         create_thread: !child && route.conversation == DiscordConversation::Thread,
         adopt_thread: child
@@ -407,17 +591,17 @@ fn strip_bot_mention(content: &str, bot_user_id: &str) -> (bool, String) {
     )
 }
 
-async fn prepare_deterministic_conversation(
+fn prepare_deterministic_conversation(
     state: &DiscordState,
     plan: MessagePlan,
 ) -> Result<ResolvedMessage, ServiceError> {
     let target = if plan.create_thread {
-        plan.source_message_id.clone()
+        plan.message_id.clone()
     } else {
-        plan.current_channel_id.clone()
+        plan.channel_id.clone()
     };
     if plan.create_thread || plan.adopt_thread {
-        adopt_thread(state, &target, &plan.route_channel_id).await?;
+        state.participation.adopt(&target, &plan.route_channel_id)?;
     }
     Ok(resolved_message(plan, target))
 }
@@ -428,58 +612,42 @@ async fn prepare_discord_conversation(
     plan: MessagePlan,
 ) -> Result<ResolvedMessage> {
     let target = if plan.create_thread {
-        if let Some(thread) = state
-            .participation
-            .lock()
-            .await
-            .created_threads
-            .get(&plan.source_message_id)
-            .cloned()
-        {
-            remember_created_thread(
-                state,
-                &plan.source_message_id,
-                &thread,
-                &plan.route_channel_id,
-            )
-            .await?;
-            thread
+        let thread = if let Some(existing) = state.participation.created_thread(&plan.message_id) {
+            existing
         } else {
-            let channel = plan
-                .source_channel_id
-                .parse::<Id<ChannelMarker>>()
-                .context("source Discord channel ID is invalid")?;
-            let message = plan
-                .source_message_id
-                .parse::<Id<MessageMarker>>()
-                .context("source Discord message ID is invalid")?;
-            let thread = http
-                .create_thread_from_message(channel, message, &thread_title(&plan.content))
-                .await
-                .context("create Discord conversation thread")?
-                .model()
-                .await
-                .context("decode Discord conversation thread")?
-                .id
-                .to_string();
-            remember_created_thread(
-                state,
-                &plan.source_message_id,
-                &thread,
-                &plan.route_channel_id,
-            )
-            .await?;
-            thread
-        }
+            create_conversation_thread(http, &plan).await?
+        };
+        state
+            .participation
+            .remember_created(&plan.message_id, &thread, &plan.route_channel_id)?;
+        thread
     } else {
-        plan.current_channel_id.clone()
+        plan.channel_id.clone()
     };
     if plan.adopt_thread {
-        adopt_thread(state, &target, &plan.route_channel_id)
-            .await
-            .map_err(|failure| anyhow::anyhow!(failure.message))?;
+        state.participation.adopt(&target, &plan.route_channel_id)?;
     }
     Ok(resolved_message(plan, target))
+}
+
+async fn create_conversation_thread(http: &DiscordHttp, plan: &MessagePlan) -> Result<String> {
+    let channel = plan
+        .channel_id
+        .parse::<Id<ChannelMarker>>()
+        .context("source Discord channel ID is invalid")?;
+    let message = plan
+        .message_id
+        .parse::<Id<MessageMarker>>()
+        .context("source Discord message ID is invalid")?;
+    Ok(http
+        .create_thread_from_message(channel, message, &thread_title(&plan.content))
+        .await
+        .context("create Discord conversation thread")?
+        .model()
+        .await
+        .context("decode Discord conversation thread")?
+        .id
+        .to_string())
 }
 
 fn thread_title(content: &str) -> String {
@@ -496,12 +664,12 @@ fn resolved_message(plan: MessagePlan, target: String) -> ResolvedMessage {
     let conversation_id = format!("discord-{}-{target}", plan.guild_id);
     ResolvedMessage {
         event: ExternalEvent {
-            event_id: plan.event_id,
+            event_id: plan.message_id.clone(),
             agent_id: plan.agent_id,
             user_id: plan.user_id,
             audience_id: conversation_id.clone(),
             delivery_target_id: target,
-            feedback_target_id: format!("{}:{}", plan.source_channel_id, plan.source_message_id),
+            feedback_target_id: format!("{}:{}", plan.channel_id, plan.message_id),
             content: plan.content,
             native: json!({
                 "discord": plan.native,
@@ -513,35 +681,9 @@ fn resolved_message(plan: MessagePlan, target: String) -> ResolvedMessage {
     }
 }
 
-async fn remember_created_thread(
-    state: &DiscordState,
-    message_id: &str,
-    thread_id: &str,
-    route_channel_id: &str,
-) -> Result<()> {
-    let mut participation = state.participation.lock().await;
-    participation
-        .created_threads
-        .insert(message_id.to_owned(), thread_id.to_owned());
-    participation
-        .threads
-        .insert(thread_id.to_owned(), route_channel_id.to_owned());
-    persist_json(&state.participation_path, &*participation)
-}
-
-async fn adopt_thread(
-    state: &DiscordState,
-    thread_id: &str,
-    route_channel_id: &str,
-) -> Result<(), ServiceError> {
-    let mut participation = state.participation.lock().await;
-    participation
-        .threads
-        .insert(thread_id.to_owned(), route_channel_id.to_owned());
-    persist_json(&state.participation_path, &*participation)?;
-    Ok(())
-}
-
+/// Resolves the route parent of a message channel: `None` when the channel is
+/// itself a route or no thread parent exists, asking Discord only when local
+/// participation state cannot answer.
 async fn discord_parent_channel(
     http: &DiscordHttp,
     state: &DiscordState,
@@ -555,14 +697,7 @@ async fn discord_parent_channel(
     {
         return Ok(None);
     }
-    if let Some(parent) = state
-        .participation
-        .lock()
-        .await
-        .threads
-        .get(channel_id)
-        .cloned()
-    {
+    if let Some(parent) = state.participation.parent_route(channel_id) {
         return Ok(Some(parent));
     }
     let channel = http
@@ -610,15 +745,6 @@ async fn message_worker(
 ) {
     'messages: while let Some(mut inbound) = messages.recv().await {
         let discord = &state.discord;
-        if adapter_identity_admit(
-            discord,
-            inbound.request.guild_id.as_deref(),
-            &inbound.request.user_id,
-        )
-        .is_err()
-        {
-            continue;
-        }
         inbound.request.parent_channel_id = loop {
             match discord_parent_channel(&http, &state, &inbound.request.channel_id).await {
                 Ok(parent) => break parent,
@@ -641,11 +767,11 @@ async fn message_worker(
             discord,
             inbound.request,
             inbound.native,
-            &*state.participation.lock().await,
+            &state.participation.lock(),
         ) else {
             continue;
         };
-        let source = format!("{}:{}", plan.source_channel_id, plan.source_message_id);
+        let source = format!("{}:{}", plan.channel_id, plan.message_id);
         let resolved = loop {
             match prepare_discord_conversation(&state, &http, plan.clone()).await {
                 Ok(resolved) => break resolved,
@@ -662,7 +788,7 @@ async fn message_worker(
         };
         processing_feedback(&http, discord, &resolved.event.feedback_target_id).await;
         let typing = start_typing(http.clone(), discord, &resolved.event.delivery_target_id).await;
-        let receipt = submit_event_with_retry(&state, &resolved.event).await;
+        let receipt = submit_event_with_retry(&state.core, &resolved.event).await;
         if let Some(task) = typing {
             task.abort();
         }
@@ -734,27 +860,9 @@ async fn create_feedback_reaction(
     configured: &str,
 ) -> Result<()> {
     let (channel, message) = feedback_ids(target)?;
-    match DiscordEmoji::parse(configured)? {
-        DiscordEmoji::Unicode(name) => {
-            http.create_reaction(
-                channel,
-                message,
-                &RequestReactionType::Unicode { name: &name },
-            )
-            .await?;
-        }
-        DiscordEmoji::Custom { name, id } => {
-            http.create_reaction(
-                channel,
-                message,
-                &RequestReactionType::Custom {
-                    id: Id::<EmojiMarker>::new(id),
-                    name: Some(&name),
-                },
-            )
-            .await?;
-        }
-    }
+    let emoji = DiscordEmoji::parse(configured)?;
+    http.create_reaction(channel, message, &reaction_type(&emoji))
+        .await?;
     Ok(())
 }
 
@@ -764,28 +872,20 @@ async fn delete_feedback_reaction(
     configured: &str,
 ) -> Result<()> {
     let (channel, message) = feedback_ids(target)?;
-    match DiscordEmoji::parse(configured)? {
-        DiscordEmoji::Unicode(name) => {
-            http.delete_current_user_reaction(
-                channel,
-                message,
-                &RequestReactionType::Unicode { name: &name },
-            )
-            .await?;
-        }
-        DiscordEmoji::Custom { name, id } => {
-            http.delete_current_user_reaction(
-                channel,
-                message,
-                &RequestReactionType::Custom {
-                    id: Id::<EmojiMarker>::new(id),
-                    name: Some(&name),
-                },
-            )
-            .await?;
-        }
-    }
+    let emoji = DiscordEmoji::parse(configured)?;
+    http.delete_current_user_reaction(channel, message, &reaction_type(&emoji))
+        .await?;
     Ok(())
+}
+
+fn reaction_type(emoji: &DiscordEmoji) -> RequestReactionType<'_> {
+    match emoji {
+        DiscordEmoji::Unicode(name) => RequestReactionType::Unicode { name },
+        DiscordEmoji::Custom { name, id } => RequestReactionType::Custom {
+            id: Id::<EmojiMarker>::new(*id),
+            name: Some(name),
+        },
+    }
 }
 
 fn feedback_ids(target: &str) -> Result<(Id<ChannelMarker>, Id<MessageMarker>)> {
@@ -832,45 +932,73 @@ async fn start_typing(
 
 async fn delivery_loop(state: DiscordState, http: Arc<DiscordHttp>) -> Result<()> {
     loop {
-        match claim_core_delivery(&state).await {
-            Ok(Some(delivery)) => {
-                let target = delivery.target_id.parse::<Id<ChannelMarker>>();
-                let (outcome, native_ref, feedback) = match target {
-                    Ok(channel_id) => {
-                        match send_discord_message(&http, channel_id, &delivery.content).await {
-                            Ok(native_ref) => (
-                                DeliveryOutcome::Delivered,
-                                Some(native_ref),
-                                Feedback::Delivered,
-                            ),
-                            Err(failure) => {
-                                warn!(error = %failure, delivery_id = delivery.id, "Discord delivery outcome uncertain");
-                                (DeliveryOutcome::Uncertain, None, Feedback::Uncertain)
-                            }
-                        }
-                    }
-                    Err(failure) => {
-                        warn!(error = %failure, "invalid Discord delivery target");
-                        (DeliveryOutcome::Uncertain, None, Feedback::Uncertain)
-                    }
-                };
-                if let Err(failure) =
-                    acknowledge_core_delivery(&state, delivery.id, outcome, native_ref).await
-                {
-                    bail!("delivery acknowledgement failed: {}", failure.message);
+        let delivery = match state.core.claim_delivery().await {
+            Ok(Some(delivery)) => delivery,
+            Ok(None) => {
+                sleep(Duration::from_millis(500)).await;
+                continue;
+            }
+            // A briefly unreachable core must not cost the gateway session,
+            // so transient claim failures wait in place.
+            Err(failure) if failure.is_transient() => {
+                warn!(error = %failure.message, "waiting to claim Discord delivery");
+                sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+            Err(failure) => bail!("delivery claim rejected: {}", failure.message),
+        };
+        let (outcome, native_ref, feedback) = attempt_delivery(&http, &delivery).await;
+        // The Discord outcome is known at this point. Abandoning the
+        // acknowledgement would let a restart downgrade it to uncertain, so
+        // transient core failures are waited out while the claim is held.
+        loop {
+            match state
+                .core
+                .acknowledge_delivery(delivery.id, outcome, native_ref.clone())
+                .await
+            {
+                Ok(()) => break,
+                Err(failure) if failure.is_transient() => {
+                    warn!(
+                        error = %failure.message,
+                        delivery_id = delivery.id,
+                        "waiting to acknowledge Discord delivery"
+                    );
+                    sleep(Duration::from_secs(1)).await;
                 }
-                terminal_feedback(
-                    &http,
-                    &state.discord,
-                    &delivery.feedback_target_id,
-                    feedback,
-                )
-                .await;
+                Err(failure) => bail!("delivery acknowledgement rejected: {}", failure.message),
             }
-            Ok(None) => sleep(Duration::from_millis(500)).await,
-            Err(failure) => {
-                bail!("delivery poll failed: {}", failure.message);
-            }
+        }
+        terminal_feedback(
+            &http,
+            &state.discord,
+            &delivery.feedback_target_id,
+            feedback,
+        )
+        .await;
+    }
+}
+
+async fn attempt_delivery(
+    http: &DiscordHttp,
+    delivery: &Delivery,
+) -> (DeliveryOutcome, Option<String>, Feedback) {
+    let channel = match delivery.target_id.parse::<Id<ChannelMarker>>() {
+        Ok(channel) => channel,
+        Err(failure) => {
+            warn!(error = %failure, "invalid Discord delivery target");
+            return (DeliveryOutcome::Uncertain, None, Feedback::Uncertain);
+        }
+    };
+    match send_discord_message(http, channel, &delivery.content).await {
+        Ok(native_ref) => (
+            DeliveryOutcome::Delivered,
+            Some(native_ref),
+            Feedback::Delivered,
+        ),
+        Err(failure) => {
+            warn!(error = %failure, delivery_id = delivery.id, "Discord delivery outcome uncertain");
+            (DeliveryOutcome::Uncertain, None, Feedback::Uncertain)
         }
     }
 }
@@ -917,111 +1045,24 @@ fn discord_chunks(content: &str) -> Vec<String> {
     chunks
 }
 
-async fn submit_event(
-    state: &DiscordState,
-    event: &ExternalEvent,
-) -> Result<EventReceipt, ServiceError> {
-    let response = state
-        .client
-        .post(format!("{}/v1/events", state.core_url))
-        .bearer_auth(&state.token)
-        .header("x-carillon-provider", &state.provider_id)
-        .json(event)
-        .send()
-        .await
-        .context("submit event to core")?;
-    let status = response.status();
-    if !status.is_success() {
-        let detail = response.text().await.unwrap_or_default();
-        return Err(ServiceError {
-            status,
-            message: if detail.is_empty() {
-                format!("core rejected event with {status}")
-            } else {
-                format!("core rejected event with {status}: {detail}")
-            },
-        });
-    }
-    Ok(response.json().await.context("decode event receipt")?)
-}
-
 async fn submit_event_with_retry(
-    state: &DiscordState,
+    core: &CoreClient,
     event: &ExternalEvent,
 ) -> Result<EventReceipt, ServiceError> {
     loop {
-        match submit_event(state, event).await {
-            Ok(receipt) => return Ok(receipt),
-            Err(failure) if failure.status.is_server_error() => {
+        match core.submit_event(event).await {
+            Err(failure) if failure.is_transient() => {
                 warn!(error = %failure.message, event_id = %event.event_id, "waiting to submit Discord event");
                 sleep(Duration::from_millis(250)).await;
             }
-            Err(failure) => return Err(failure),
+            outcome => return outcome,
         }
     }
 }
 
-async fn claim_core_delivery(state: &DiscordState) -> Result<Option<Delivery>, ServiceError> {
-    Ok(state
-        .client
-        .get(format!("{}/v1/deliveries", state.core_url))
-        .bearer_auth(&state.token)
-        .header("x-carillon-provider", &state.provider_id)
-        .header("x-carillon-instance", &state.instance_id)
-        .send()
-        .await
-        .context("poll core delivery")?
-        .error_for_status()
-        .context("core rejected delivery poll")?
-        .json()
-        .await
-        .context("decode core delivery")?)
-}
-
-async fn acknowledge_core_delivery(
-    state: &DiscordState,
-    id: i64,
-    outcome: DeliveryOutcome,
-    native_ref: Option<String>,
-) -> Result<(), ServiceError> {
-    state
-        .client
-        .post(format!("{}/v1/deliveries/{id}/ack", state.core_url))
-        .bearer_auth(&state.token)
-        .header("x-carillon-provider", &state.provider_id)
-        .header("x-carillon-instance", &state.instance_id)
-        .json(&DeliveryAck {
-            native_ref,
-            outcome,
-        })
-        .send()
-        .await
-        .context("acknowledge core delivery")?
-        .error_for_status()
-        .context("core rejected delivery acknowledgement")?;
-    Ok(())
-}
-
-async fn reconcile_core_deliveries(
-    state: &DiscordState,
-) -> Result<DeliveryReconciliation, ServiceError> {
-    Ok(state
-        .client
-        .post(format!("{}/v1/deliveries/reconcile", state.core_url))
-        .bearer_auth(&state.token)
-        .header("x-carillon-provider", &state.provider_id)
-        .header("x-carillon-instance", &state.instance_id)
-        .send()
-        .await
-        .context("reconcile abandoned delivery claims")?
-        .error_for_status()
-        .context("core rejected delivery reconciliation")?
-        .json()
-        .await
-        .context("decode delivery reconciliation")?)
-}
-
-fn adapter_identity_admit(
+/// Fail-closed identity admission: the configured guild and an allowlisted
+/// user, before any further handling.
+fn admit_identity(
     config: &DiscordConfig,
     guild_id: Option<&str>,
     user_id: &str,
@@ -1049,22 +1090,12 @@ fn adapter_identity_admit(
     Ok(())
 }
 
-async fn serve_component(url: String, router: Router, name: &str) -> Result<()> {
-    let address = url
-        .strip_prefix("http://")
-        .context("component URL must use http://")?;
+async fn serve_component(address: SocketAddr, router: Router, name: &str) -> Result<()> {
     let listener = TcpListener::bind(address)
         .await
         .with_context(|| format!("bind {name} to {address}"))?;
     info!(%address, component = name, "component ready");
     axum::serve(listener, router).await?;
-    Ok(())
-}
-
-fn persist_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    let temporary = path.with_extension("json.tmp");
-    fs::write(&temporary, serde_json::to_vec_pretty(value)?)?;
-    fs::rename(temporary, path)?;
     Ok(())
 }
 
@@ -1074,7 +1105,7 @@ mod tests {
         collections::BTreeMap,
         path::PathBuf,
         sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
         },
         time::Duration,
@@ -1089,23 +1120,31 @@ mod tests {
         routing::post,
     };
     use serde_json::Value;
-    use tokio::sync::Mutex;
     use tower::ServiceExt as _;
     use twilight_http::response::StatusCode as DiscordStatusCode;
 
     use super::{
-        DiscordParticipation, DiscordState, MessagePlan, ServiceError, discord_chunks,
-        discord_router, discord_status_is_terminal, resolve_message, resolved_message,
-        send_discord_message, submit_event_with_retry, thread_title,
+        CoreClient, DiscordState, MessagePlan, Participation, ParticipationState, ServiceError,
+        discord_chunks, discord_router, discord_status_is_terminal, resolve_message,
+        resolved_message, send_discord_message, submit_event_with_retry, thread_title,
     };
     use crate::{
         config::{DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute},
-        model::{EventReceipt, ExternalEvent, Health, SimulateRequest},
+        model::{EventReceipt, ExternalEvent, Health, SimulateRequest, TurnState},
     };
 
-    #[tokio::test]
-    async fn production_discord_does_not_expose_simulation() -> anyhow::Result<()> {
-        let state = DiscordState {
+    fn core_client(base_url: String) -> CoreClient {
+        CoreClient {
+            http: reqwest::Client::new(),
+            base_url,
+            token: "token".to_owned(),
+            provider_id: "discord".to_owned(),
+            instance_id: "instance".to_owned(),
+        }
+    }
+
+    fn discord_state(core: CoreClient) -> DiscordState {
+        DiscordState {
             discord: discord_config(DiscordActivation::Always, DiscordConversation::Channel),
             health: Health {
                 id: "discord".to_owned(),
@@ -1113,14 +1152,17 @@ mod tests {
                 version: "test".to_owned(),
                 status: "ready".to_owned(),
             },
-            core_url: "http://127.0.0.1:1".to_owned(),
-            provider_id: "discord".to_owned(),
-            token: "token".to_owned(),
-            instance_id: "instance".to_owned(),
-            client: reqwest::Client::new(),
-            participation_path: PathBuf::from("unused"),
-            participation: Arc::new(Mutex::new(DiscordParticipation::default())),
-        };
+            core,
+            participation: Arc::new(Participation {
+                path: PathBuf::from("unused"),
+                state: Mutex::new(ParticipationState::default()),
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn production_discord_does_not_expose_simulation() -> anyhow::Result<()> {
+        let state = discord_state(core_client("http://127.0.0.1:1".to_owned()));
         let mut request = Request::new(Body::empty());
         *request.method_mut() = Method::POST;
         *request.uri_mut() = Uri::from_static("/v1/simulate");
@@ -1132,7 +1174,7 @@ mod tests {
     #[tokio::test]
     async fn discord_retries_ambiguous_submission_with_the_same_event_id() -> anyhow::Result<()> {
         let attempts = Arc::new(AtomicUsize::new(0));
-        let event_ids = Arc::new(Mutex::new(Vec::new()));
+        let event_ids = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let server_attempts = attempts.clone();
         let server_event_ids = event_ids.clone();
         let app = Router::new().route(
@@ -1148,7 +1190,7 @@ mod tests {
                         Json(EventReceipt {
                             event_id: event.event_id,
                             turn_id: "turn".to_owned(),
-                            state: "accepted".to_owned(),
+                            state: TurnState::Queued,
                             duplicate: false,
                         })
                         .into_response()
@@ -1160,22 +1202,7 @@ mod tests {
         let address = listener.local_addr()?;
         let server = tokio::spawn(async move { axum::serve(listener, app).await });
 
-        let state = DiscordState {
-            discord: discord_config(DiscordActivation::Always, DiscordConversation::Channel),
-            health: Health {
-                id: "discord".to_owned(),
-                role: "interface".to_owned(),
-                version: "test".to_owned(),
-                status: "ready".to_owned(),
-            },
-            core_url: format!("http://{address}"),
-            provider_id: "discord".to_owned(),
-            token: "token".to_owned(),
-            instance_id: "instance".to_owned(),
-            client: reqwest::Client::new(),
-            participation_path: PathBuf::from("unused"),
-            participation: Arc::new(Mutex::new(DiscordParticipation::default())),
-        };
+        let core = core_client(format!("http://{address}"));
         let event = ExternalEvent {
             event_id: "event".to_owned(),
             agent_id: "default".to_owned(),
@@ -1189,7 +1216,7 @@ mod tests {
 
         let receipt = tokio::time::timeout(
             Duration::from_secs(2),
-            submit_event_with_retry(&state, &event),
+            submit_event_with_retry(&core, &event),
         )
         .await?
         .map_err(|failure| anyhow!(failure.message))?;
@@ -1263,7 +1290,7 @@ mod tests {
             &config,
             request("300", None, "hello"),
             Value::Null,
-            &DiscordParticipation::default(),
+            &ParticipationState::default(),
         )
         .map_err(|failure| anyhow!(failure.message))?;
         assert!(ignored.is_none());
@@ -1272,7 +1299,7 @@ mod tests {
             &config,
             request("300", None, "<@201> hello <@999>"),
             Value::Null,
-            &DiscordParticipation::default(),
+            &ParticipationState::default(),
         ))?;
         assert_eq!(plan.content, "hello <@999>");
         let resolved = resolved_message(plan, "400".to_owned());
@@ -1288,13 +1315,13 @@ mod tests {
             &config,
             request("400", Some("300"), "<@201> adopt"),
             Value::Null,
-            &DiscordParticipation::default(),
+            &ParticipationState::default(),
         ))?;
         assert!(adoption.adopt_thread);
 
-        let participation = DiscordParticipation {
+        let participation = ParticipationState {
             threads: BTreeMap::from([("400".to_owned(), "300".to_owned())]),
-            ..DiscordParticipation::default()
+            ..ParticipationState::default()
         };
         let continuation = accepted(resolve_message(
             &config,
@@ -1317,7 +1344,7 @@ mod tests {
             &thread,
             request("400", Some("300"), "continue"),
             Value::Null,
-            &DiscordParticipation::default(),
+            &ParticipationState::default(),
         ))?;
         assert!(!thread_message.create_thread);
 
@@ -1327,7 +1354,7 @@ mod tests {
                 &channel,
                 request("400", Some("300"), "must reject"),
                 Value::Null,
-                &DiscordParticipation::default(),
+                &ParticipationState::default(),
             )
             .is_err()
         );
@@ -1335,13 +1362,13 @@ mod tests {
             &channel,
             request("300", None, "first"),
             Value::Null,
-            &DiscordParticipation::default(),
+            &ParticipationState::default(),
         ))?;
         let second = accepted(resolve_message(
             &channel,
             request("300", None, "second"),
             Value::Null,
-            &DiscordParticipation::default(),
+            &ParticipationState::default(),
         ))?;
         assert_eq!(
             resolved_message(first, "300".to_owned()).conversation_id,

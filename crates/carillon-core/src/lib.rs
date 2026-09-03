@@ -1,13 +1,14 @@
 #![forbid(unsafe_code)]
 //! Durable product state and composition for Carillon.
 
+mod admin;
 mod cli;
-mod components;
 mod config;
 mod core;
 mod db;
+mod discord;
 mod model;
-mod operations;
+mod resources;
 
 /// Runs the Carillon operator command.
 ///
