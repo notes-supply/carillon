@@ -942,7 +942,7 @@ async fn delivery_loop(state: DiscordState, http: Arc<DiscordHttp>) -> Result<()
             // so transient claim failures wait in place.
             Err(failure) if failure.is_transient() => {
                 warn!(error = %failure.message, "waiting to claim Discord delivery");
-                sleep(Duration::from_secs(1)).await;
+                reconcile_after_claim_failure(&state, &http).await?;
                 continue;
             }
             Err(failure) => bail!("delivery claim rejected: {}", failure.message),
@@ -976,6 +976,27 @@ async fn delivery_loop(state: DiscordState, http: Arc<DiscordHttp>) -> Result<()
             feedback,
         )
         .await;
+    }
+}
+
+/// A failed claim response is ambiguous: core may have committed the claim
+/// before disconnecting. Reconcile before polling again so a core restart
+/// cannot strand that delivery in `uncertain` until this process restarts.
+async fn reconcile_after_claim_failure(state: &DiscordState, http: &DiscordHttp) -> Result<()> {
+    loop {
+        match state.core.reconcile().await {
+            Ok(reconciled) => {
+                for target in reconciled.feedback_target_ids {
+                    terminal_feedback(http, &state.discord, &target, Feedback::Uncertain).await;
+                }
+                return Ok(());
+            }
+            Err(failure) if failure.is_transient() => {
+                warn!(error = %failure.message, "waiting to reconcile Discord delivery claims");
+                sleep(Duration::from_secs(1)).await;
+            }
+            Err(failure) => bail!("delivery reconciliation rejected: {}", failure.message),
+        }
     }
 }
 
@@ -1117,7 +1138,7 @@ mod tests {
         body::Body,
         http::{Method, Request, StatusCode, Uri},
         response::IntoResponse as _,
-        routing::post,
+        routing::{get, post},
     };
     use serde_json::Value;
     use tower::ServiceExt as _;
@@ -1125,12 +1146,14 @@ mod tests {
 
     use super::{
         CoreClient, DiscordState, MessagePlan, Participation, ParticipationState, ServiceError,
-        discord_chunks, discord_router, discord_status_is_terminal, resolve_message,
+        delivery_loop, discord_chunks, discord_router, discord_status_is_terminal, resolve_message,
         resolved_message, send_discord_message, submit_event_with_retry, thread_title,
     };
     use crate::{
         config::{DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute},
-        model::{EventReceipt, ExternalEvent, Health, SimulateRequest, TurnState},
+        model::{
+            DeliveryReconciliation, EventReceipt, ExternalEvent, Health, SimulateRequest, TurnState,
+        },
     };
 
     fn core_client(base_url: String) -> CoreClient {
@@ -1225,6 +1248,56 @@ mod tests {
         assert_eq!(receipt.event_id, event.event_id);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
         assert_eq!(*event_ids.lock().await, vec!["event", "event"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn discord_reconciles_after_an_ambiguous_delivery_claim() -> anyhow::Result<()> {
+        let claims = Arc::new(AtomicUsize::new(0));
+        let reconciliations = Arc::new(AtomicUsize::new(0));
+        let server_claims = claims.clone();
+        let server_reconciliations = reconciliations.clone();
+        let app = Router::new()
+            .route(
+                "/v1/deliveries",
+                get(move || {
+                    let claims = server_claims.clone();
+                    async move {
+                        if claims.fetch_add(1, Ordering::SeqCst) == 0 {
+                            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                        } else {
+                            Json(Value::Null).into_response()
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/deliveries/reconcile",
+                post(move || {
+                    let reconciliations = server_reconciliations.clone();
+                    async move {
+                        reconciliations.fetch_add(1, Ordering::SeqCst);
+                        Json(DeliveryReconciliation {
+                            feedback_target_ids: Vec::new(),
+                        })
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let state = discord_state(core_client(format!("http://{address}")));
+        let http = Arc::new(twilight_http::Client::new("unused".to_owned()));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), delivery_loop(state, http))
+                .await
+                .is_err()
+        );
+        server.abort();
+
+        assert_eq!(claims.load(Ordering::SeqCst), 2);
+        assert_eq!(reconciliations.load(Ordering::SeqCst), 1);
         Ok(())
     }
 
