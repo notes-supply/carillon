@@ -189,16 +189,15 @@ pub async fn serve_discord(
     tokio::spawn(async move {
         message_worker(worker_state, worker_http, receiver).await;
     });
-    tokio::spawn(async move {
-        delivery_loop(delivery_state, http).await;
-    });
-
     info!(url = %provider.url, deterministic, "Discord interface provider ready");
     tokio::select! {
         result = serve_component(provider.url, router, "Discord interface provider") => result,
         result = gateway_loop(state, discord_token, messages) => {
             result.context("Discord gateway stopped")
-        }
+        },
+        result = delivery_loop(delivery_state, http) => {
+            result.context("Discord delivery worker stopped")
+        },
     }
 }
 
@@ -615,7 +614,7 @@ async fn message_worker(
         };
         processing_feedback(&http, discord, &resolved.event.feedback_target_id).await;
         let typing = start_typing(http.clone(), discord, &resolved.event.delivery_target_id).await;
-        let receipt = submit_event(&state, &resolved.event).await;
+        let receipt = submit_event_with_retry(&state, &resolved.event).await;
         if let Some(task) = typing {
             task.abort();
         }
@@ -783,7 +782,7 @@ async fn start_typing(
     }))
 }
 
-async fn delivery_loop(state: DiscordState, http: Arc<DiscordHttp>) {
+async fn delivery_loop(state: DiscordState, http: Arc<DiscordHttp>) -> Result<()> {
     loop {
         match claim_core_delivery(&state).await {
             Ok(Some(delivery)) => {
@@ -810,7 +809,7 @@ async fn delivery_loop(state: DiscordState, http: Arc<DiscordHttp>) {
                 if let Err(failure) =
                     acknowledge_core_delivery(&state, delivery.id, outcome, native_ref).await
                 {
-                    warn!(error = %failure.message, "delivery acknowledgement failed");
+                    bail!("delivery acknowledgement failed: {}", failure.message);
                 }
                 terminal_feedback(
                     &http,
@@ -822,8 +821,7 @@ async fn delivery_loop(state: DiscordState, http: Arc<DiscordHttp>) {
             }
             Ok(None) => sleep(Duration::from_millis(500)).await,
             Err(failure) => {
-                warn!(error = %failure.message, "delivery poll failed");
-                sleep(Duration::from_secs(1)).await;
+                bail!("delivery poll failed: {}", failure.message);
             }
         }
     }
@@ -871,7 +869,7 @@ async fn submit_event(
     state: &DiscordState,
     event: &ExternalEvent,
 ) -> Result<EventReceipt, ServiceError> {
-    Ok(state
+    let response = state
         .client
         .post(format!("{}/v1/events", state.core_url))
         .bearer_auth(&state.token)
@@ -879,12 +877,36 @@ async fn submit_event(
         .json(event)
         .send()
         .await
-        .context("submit event to core")?
-        .error_for_status()
-        .context("core rejected event")?
-        .json()
-        .await
-        .context("decode event receipt")?)
+        .context("submit event to core")?;
+    let status = response.status();
+    if !status.is_success() {
+        let detail = response.text().await.unwrap_or_default();
+        return Err(ServiceError {
+            status,
+            message: if detail.is_empty() {
+                format!("core rejected event with {status}")
+            } else {
+                format!("core rejected event with {status}: {detail}")
+            },
+        });
+    }
+    Ok(response.json().await.context("decode event receipt")?)
+}
+
+async fn submit_event_with_retry(
+    state: &DiscordState,
+    event: &ExternalEvent,
+) -> Result<EventReceipt, ServiceError> {
+    loop {
+        match submit_event(state, event).await {
+            Ok(receipt) => return Ok(receipt),
+            Err(failure) if failure.status.is_server_error() => {
+                warn!(error = %failure.message, event_id = %event.event_id, "waiting to submit Discord event");
+                sleep(Duration::from_millis(250)).await;
+            }
+            Err(failure) => return Err(failure),
+        }
+    }
 }
 
 async fn claim_core_delivery(state: &DiscordState) -> Result<Option<Delivery>, ServiceError> {
@@ -996,12 +1018,23 @@ fn persist_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+    use std::{
+        collections::BTreeMap,
+        path::PathBuf,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
 
     use anyhow::{Context as _, anyhow};
     use axum::{
+        Json, Router,
         body::Body,
         http::{Method, Request, StatusCode, Uri},
+        response::IntoResponse as _,
+        routing::post,
     };
     use serde_json::Value;
     use tokio::sync::Mutex;
@@ -1009,11 +1042,11 @@ mod tests {
 
     use super::{
         DiscordParticipation, DiscordState, MessagePlan, ServiceError, discord_chunks,
-        discord_router, resolve_message, resolved_message, thread_title,
+        discord_router, resolve_message, resolved_message, submit_event_with_retry, thread_title,
     };
     use crate::{
         config::{DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute},
-        model::{Health, SimulateRequest},
+        model::{EventReceipt, ExternalEvent, Health, SimulateRequest},
     };
 
     #[tokio::test]
@@ -1039,6 +1072,78 @@ mod tests {
         *request.uri_mut() = Uri::from_static("/v1/simulate");
         let response = discord_router(state, false).oneshot(request).await?;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn discord_retries_ambiguous_submission_with_the_same_event_id() -> anyhow::Result<()> {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let event_ids = Arc::new(Mutex::new(Vec::new()));
+        let server_attempts = attempts.clone();
+        let server_event_ids = event_ids.clone();
+        let app = Router::new().route(
+            "/v1/events",
+            post(move |Json(event): Json<ExternalEvent>| {
+                let attempts = server_attempts.clone();
+                let event_ids = server_event_ids.clone();
+                async move {
+                    event_ids.lock().await.push(event.event_id.clone());
+                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                    } else {
+                        Json(EventReceipt {
+                            event_id: event.event_id,
+                            turn_id: "turn".to_owned(),
+                            state: "accepted".to_owned(),
+                            duplicate: false,
+                        })
+                        .into_response()
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let state = DiscordState {
+            discord: discord_config(DiscordActivation::Always, DiscordConversation::Channel),
+            health: Health {
+                id: "discord".to_owned(),
+                role: "interface".to_owned(),
+                version: "test".to_owned(),
+                status: "ready".to_owned(),
+            },
+            core_url: format!("http://{address}"),
+            provider_id: "discord".to_owned(),
+            token: "token".to_owned(),
+            instance_id: "instance".to_owned(),
+            client: reqwest::Client::new(),
+            participation_path: PathBuf::from("unused"),
+            participation: Arc::new(Mutex::new(DiscordParticipation::default())),
+        };
+        let event = ExternalEvent {
+            event_id: "event".to_owned(),
+            agent_id: "default".to_owned(),
+            user_id: "user".to_owned(),
+            audience_id: "audience".to_owned(),
+            delivery_target_id: "target".to_owned(),
+            feedback_target_id: "feedback".to_owned(),
+            content: "hello".to_owned(),
+            native: Value::Null,
+        };
+
+        let receipt = tokio::time::timeout(
+            Duration::from_secs(2),
+            submit_event_with_retry(&state, &event),
+        )
+        .await?
+        .map_err(|failure| anyhow!(failure.message))?;
+        server.abort();
+
+        assert_eq!(receipt.event_id, event.event_id);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(*event_ids.lock().await, vec!["event", "event"]);
         Ok(())
     }
 

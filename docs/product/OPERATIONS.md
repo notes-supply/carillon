@@ -79,7 +79,7 @@ The packaged Pi state uses `CARILLON_HOME/pi`, not the owner's global `~/.pi/age
 
 Stop `carillon.target` before backup or restore. Carillon refuses backup while its service listeners or core lock are active.
 
-The backup contains the current Carillon configuration, SQLite state, common agent resources, runtime resource snapshots and sessions, and release identity. Pi-private authentication and model state under `CARILLON_HOME/pi` is not included; copy that private directory separately for a complete host move.
+The backup contains the entire `CARILLON_HOME` tree, including configuration, credentials, SQLite state, common agent resources, runtime resource snapshots and sessions, release identity, and Pi-private authentication and model state under `CARILLON_HOME/pi`. The archive therefore contains credentials and private agent state. Keep it owner-readable only and encrypt it before storing or transferring it.
 
 Restore validates the archive and replaces the managed Carillon state. This private beta does not migrate obsolete schemas. Use a backup made by the same current state format, or perform a fresh installation.
 
