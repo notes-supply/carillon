@@ -541,15 +541,26 @@ async fn adopt_thread(
 
 async fn discord_parent_channel(
     http: &DiscordHttp,
-    config: &DiscordConfig,
+    state: &DiscordState,
     channel_id: &str,
 ) -> Result<Option<String>> {
-    if config
+    if state
+        .discord
         .routes
         .iter()
         .any(|route| route.channel_id == channel_id)
     {
         return Ok(None);
+    }
+    if let Some(parent) = state
+        .participation
+        .lock()
+        .await
+        .threads
+        .get(channel_id)
+        .cloned()
+    {
+        return Ok(Some(parent));
     }
     let channel = http
         .channel(
@@ -587,14 +598,15 @@ async fn message_worker(
         {
             continue;
         }
-        inbound.request.parent_channel_id =
-            match discord_parent_channel(&http, discord, &inbound.request.channel_id).await {
-                Ok(parent) => parent,
+        inbound.request.parent_channel_id = loop {
+            match discord_parent_channel(&http, &state, &inbound.request.channel_id).await {
+                Ok(parent) => break parent,
                 Err(failure) => {
-                    warn!(error = %failure, "resolve Discord message route");
-                    continue;
+                    warn!(error = %failure, "waiting to resolve Discord message route");
+                    sleep(Duration::from_millis(250)).await;
                 }
-            };
+            }
+        };
         let Ok(Some(plan)) = resolve_message(
             discord,
             inbound.request,
@@ -832,8 +844,12 @@ async fn send_discord_message(
     channel_id: Id<ChannelMarker>,
     content: &str,
 ) -> Result<String> {
-    let mut ids = Vec::new();
-    for chunk in discord_chunks(content) {
+    let chunks = discord_chunks(content);
+    if chunks.is_empty() {
+        bail!("Discord delivery content is empty");
+    }
+    let mut ids = Vec::with_capacity(chunks.len());
+    for chunk in chunks {
         let message = http.create_message(channel_id).content(&chunk).await?;
         ids.push(message.model().await?.id.to_string());
     }
@@ -1042,7 +1058,8 @@ mod tests {
 
     use super::{
         DiscordParticipation, DiscordState, MessagePlan, ServiceError, discord_chunks,
-        discord_router, resolve_message, resolved_message, submit_event_with_retry, thread_title,
+        discord_router, resolve_message, resolved_message, send_discord_message,
+        submit_event_with_retry, thread_title,
     };
     use crate::{
         config::{DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute},
@@ -1144,6 +1161,20 @@ mod tests {
         assert_eq!(receipt.event_id, event.event_id);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
         assert_eq!(*event_ids.lock().await, vec!["event", "event"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn empty_discord_delivery_is_not_successful() -> anyhow::Result<()> {
+        let failure = send_discord_message(
+            &twilight_http::Client::new("unused".to_owned()),
+            twilight_model::id::Id::new(1),
+            " \n ",
+        )
+        .await
+        .err()
+        .context("empty content was accepted for delivery")?;
+        assert_eq!(failure.to_string(), "Discord delivery content is empty");
         Ok(())
     }
 

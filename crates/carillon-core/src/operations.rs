@@ -273,12 +273,20 @@ pub fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
             destination.display()
         );
     }
+    let parent = destination
+        .parent()
+        .context("backup destination must have a parent directory")?;
+    let name = destination
+        .file_name()
+        .context("backup destination must name a file")?
+        .to_string_lossy();
+    let staging = parent.join(format!(".{name}.backup-{}", Uuid::now_v7()));
     let result = (|| {
         let file = fs::OpenOptions::new()
             .create_new(true)
             .write(true)
             .mode(0o600)
-            .open(&destination)?;
+            .open(&staging)?;
         let encoder = GzEncoder::new(BufWriter::new(file), Compression::default());
         let mut archive = Builder::new(encoder);
         append_directory(&mut archive, &config.root, &config.root)?;
@@ -289,10 +297,17 @@ pub fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
         writer.get_ref().sync_all()?;
         Ok(())
     })();
-    if result.is_err() {
-        let _ = fs::remove_file(&destination);
+    if let Err(failure) = result {
+        let _ = fs::remove_file(&staging);
+        return Err(failure);
     }
-    result
+    if let Err(failure) = fs::hard_link(&staging, &destination) {
+        let _ = fs::remove_file(&staging);
+        return Err(failure.into());
+    }
+    let _ = fs::remove_file(&staging);
+    fs::File::open(parent)?.sync_all()?;
+    Ok(())
 }
 
 pub fn restore(archive_path: &Path, target: &Path) -> Result<PathBuf> {
