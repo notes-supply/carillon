@@ -1,18 +1,14 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use crate::{
     components::serve_discord,
     config::{DiscordRoute, LoadedConfig},
-    core::{
-        fetch_execution_profiles, fetch_inspection, fetch_recent, fetch_status,
-        select_execution_profile, serialize_pretty, serve,
-    },
+    core::{fetch_inspection, fetch_recent, fetch_status, serialize_pretty, serve},
     db::Database,
-    model::{ExecutionProfileScope, ExecutionProfileSelection, ServiceTier},
     operations::{
         ServiceLock, backup, configure_discord, enable_demo_resources, initialize as init, restore,
         set_provider,
@@ -106,27 +102,7 @@ enum Command {
         #[arg(value_parser = ["retry", "skip"])]
         action: String,
     },
-    Model {
-        #[arg(long)]
-        config: PathBuf,
-        #[arg(long)]
-        refresh: bool,
-        #[arg(long)]
-        reasoning: Option<String>,
-        #[arg(long)]
-        service_tier: Option<ServiceTier>,
-        #[arg(
-            long,
-            value_parser = ["current-conversation", "new-conversations"],
-            default_value = "new-conversations"
-        )]
-        scope: String,
-        #[arg(long)]
-        audience: Option<String>,
-        #[arg(long)]
-        interface: Option<String>,
-        selection: Option<String>,
-    },
+
     Backup {
         #[arg(long)]
         config: PathBuf,
@@ -222,7 +198,7 @@ pub(crate) async fn run() -> Result<()> {
                 .resolve_uncertain_turn(&turn_id, action == "retry")?;
             println!("{turn_id} {action}");
         }
-        command @ Command::Model { .. } => run_model_command(command).await?,
+
         Command::Backup { config, output } => {
             backup(&LoadedConfig::load(&config)?, &output)?;
             println!("{}", output.display());
@@ -273,80 +249,5 @@ fn configure_discord_command(
 ) -> Result<()> {
     configure_discord(config, guild_id, bot_user_id, user_id, route)?;
     println!("{}", config.display());
-    Ok(())
-}
-
-async fn run_model_command(command: Command) -> Result<()> {
-    let Command::Model {
-        config,
-        refresh,
-        reasoning,
-        service_tier,
-        scope,
-        audience: audience_id,
-        interface,
-        selection,
-    } = command
-    else {
-        unreachable!("model command dispatcher passed another command");
-    };
-    let config = LoadedConfig::load(&config)?;
-    let scope = if scope == "current-conversation" {
-        ExecutionProfileScope::CurrentConversation
-    } else {
-        ExecutionProfileScope::NewConversations
-    };
-    let current = matches!(scope, ExecutionProfileScope::CurrentConversation);
-    let interface_id = if current {
-        Some(
-            interface
-                .or_else(|| config.value.sole_enabled_interface().map(str::to_owned))
-                .context(
-                    "current conversation scope needs --interface when multiple interfaces are enabled",
-                )?,
-        )
-    } else {
-        None
-    };
-    let audience_id = if current {
-        Some(
-            audience_id
-                .as_deref()
-                .filter(|value| !value.is_empty())
-                .context("current conversation scope needs --audience")?
-                .to_owned(),
-        )
-    } else {
-        None
-    };
-    let profiles = fetch_execution_profiles(
-        &config,
-        refresh,
-        interface_id.as_deref(),
-        audience_id.as_deref(),
-    )
-    .await?;
-    let Some(reference) = selection else {
-        println!("{}", serialize_pretty(&profiles)?);
-        return Ok(());
-    };
-    let model = profiles
-        .models
-        .iter()
-        .find(|model| format!("{}/{}", model.provider, model.id) == reference)
-        .with_context(|| format!("model {reference} is not available"))?;
-    let applied = select_execution_profile(
-        &config,
-        &ExecutionProfileSelection {
-            key: model.key.clone(),
-            reasoning,
-            service_tier,
-            scope,
-            audience_id,
-            interface_id,
-        },
-    )
-    .await?;
-    println!("{}", serialize_pretty(&applied)?);
     Ok(())
 }

@@ -112,10 +112,6 @@ impl Database {
                 claim_owner TEXT,
                 updated_at INTEGER NOT NULL,
                 FOREIGN KEY(turn_id) REFERENCES turns(id)
-            );
-            CREATE TABLE IF NOT EXISTS backups (
-                path TEXT PRIMARY KEY,
-                created_at INTEGER NOT NULL
             );",
         )?;
         Ok(())
@@ -345,6 +341,18 @@ impl Database {
         Ok(())
     }
 
+    pub fn requeue_turn(&self, turn: &QueuedTurn, runtime_id: &str) -> Result<()> {
+        let changed = self.connect()?.execute(
+            "UPDATE turns SET state = 'queued', error = NULL, finished_at = NULL
+             WHERE id = ?1 AND runtime_id = ?2 AND state = 'running'",
+            params![turn.turn_id, runtime_id],
+        )?;
+        if changed != 1 {
+            bail!("turn {} is not running", turn.turn_id);
+        }
+        Ok(())
+    }
+
     pub fn recover_running_turns(&self) -> Result<usize> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
@@ -392,23 +400,6 @@ impl Database {
         }
         transaction.commit()?;
         Ok(turns.len())
-    }
-
-    pub fn audience_busy(
-        &self,
-        interface_id: &str,
-        agent_id: &str,
-        audience_id: &str,
-    ) -> Result<bool> {
-        self.connect()?
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM turns
-                 WHERE interface_id = ?1 AND agent_id = ?2 AND audience_id = ?3
-                   AND state IN ('queued', 'running', 'uncertain'))",
-                params![interface_id, agent_id, audience_id],
-                |row| row.get(0),
-            )
-            .map_err(Into::into)
     }
 
     pub fn resolve_uncertain_turn(&self, turn_id: &str, retry: bool) -> Result<()> {
@@ -616,25 +607,6 @@ impl Database {
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
-
-    pub fn record_backup(&self, path: &Path) -> Result<()> {
-        self.connect()?.execute(
-            "INSERT OR REPLACE INTO backups(path, created_at) VALUES (?1, ?2)",
-            params![path.display().to_string(), timestamp()?],
-        )?;
-        Ok(())
-    }
-
-    pub fn latest_backup(&self) -> Result<Option<String>> {
-        Ok(self
-            .connect()?
-            .query_row(
-                "SELECT path FROM backups ORDER BY created_at DESC LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?)
-    }
 }
 
 fn timestamp() -> Result<i64> {
@@ -668,7 +640,7 @@ mod tests {
 
     fn resources() -> ResourceSnapshot {
         ResourceSnapshot {
-            root: "/agent".to_owned(),
+            id: "resources".to_owned(),
             system_sha256: "a".to_owned(),
             context_sha256: "b".to_owned(),
             settings_sha256: "c".to_owned(),

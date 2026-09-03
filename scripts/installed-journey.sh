@@ -215,7 +215,7 @@ for offset in 0 1 2; do
   done
 done
 
-env HOME="$OWNER_HOME" "$APP/carillon" model --config "$CONFIG" deterministic/steady >/dev/null
+grep -F -- '--provider runtime-pi' "$XDG_CONFIG_HOME/systemd/user/carillon-runtime-pi.service" >/dev/null
 RUNTIME_TOKEN=$(cat "$CARILLON_HOME/credentials/runtime-pi.token")
 ENVIRONMENT=$(curl --fail --silent -H "authorization: Bearer $RUNTIME_TOKEN" \
   "http://127.0.0.1:$((BASE_PORT + 2))/v1/environment")

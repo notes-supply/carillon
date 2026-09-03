@@ -71,7 +71,7 @@ Discord delivery uses a separate outbox. An unclaimed delivery can be retried. A
 
 ## Credentials
 
-Platform credentials belong to interface providers. Engine credentials and selected model state belong to the runtime provider. Internal loopback tokens authenticate provider-to-core traffic. Credentials stay outside prompts, session history, diagnostics, and ordinary logs.
+Platform credentials belong to interface providers. Engine credentials and settings belong to the runtime provider. Internal loopback tokens authenticate provider-to-core traffic. Credentials stay outside prompts, session history, diagnostics, and ordinary logs.
 
 The packaged Pi state uses `CARILLON_HOME/pi`, not the owner's global `~/.pi/agent`.
 

@@ -6,7 +6,7 @@ use axum::{
     extract::{Path as AxumPath, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post, put},
+    routing::{get, post},
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -20,10 +20,8 @@ use crate::{
     db::{AcceptedTurn, Database, QueuedTurn},
     model::{
         Delivery, DeliveryAck, DeliveryOutcome, DeliveryReconciliation, EventReceipt,
-        ExecutionProfileApplication, ExecutionProfileScope, ExecutionProfileSelection,
-        ExternalEvent, Health, ResourceSnapshot, RuntimeExecutionProfileSelection,
-        RuntimeExecutionProfiles, RuntimeTurnRequest, RuntimeTurnResponse, SelectedProvider,
-        StatusReport, TurnInspection, TurnSummary,
+        ExternalEvent, Health, ResourceSnapshot, RuntimeResources, RuntimeTurnRequest,
+        RuntimeTurnResponse, SelectedProvider, StatusReport, TurnInspection, TurnSummary,
     },
 };
 
@@ -105,12 +103,6 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
         .route("/v1/turns", get(recent_turns))
         .route("/v1/turns/{id}", get(inspect_turn))
         .route("/v1/status", get(status))
-        .route("/v1/execution-profiles", get(execution_profiles))
-        .route(
-            "/v1/execution-profiles/refresh",
-            post(refresh_execution_profiles),
-        )
-        .route("/v1/execution-profile", put(apply_execution_profile))
         .with_state(state);
     let listener = TcpListener::bind(config.value.core.listen).await?;
     info!(listen = %config.value.core.listen, "Carillon core ready");
@@ -171,19 +163,39 @@ async fn run_next_turn(state: &AppState, runtime_id: &str) -> Result<()> {
         tokio::time::sleep(Duration::from_millis(100)).await;
         return Ok(());
     };
-    if let Err(failure) = execute_turn(state, runtime, &token, &turn).await {
-        let message = failure.to_string();
-        while let Err(persistence_failure) = state.database.mark_uncertain(&turn, &message) {
-            warn!(
-                turn_id = %turn.turn_id,
-                error = %persistence_failure,
-                "retrying uncertain turn persistence"
-            );
+    match execute_turn(state, runtime, &token, &turn).await {
+        Ok(()) => {}
+        Err(TurnFailure::Retry(failure)) => {
+            while let Err(persistence_failure) = state.database.requeue_turn(&turn, runtime_id) {
+                warn!(
+                    turn_id = %turn.turn_id,
+                    error = %persistence_failure,
+                    "retrying turn requeue persistence"
+                );
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            warn!(turn_id = %turn.turn_id, error = %failure, "runtime was unavailable; turn requeued");
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        warn!(turn_id = %turn.turn_id, error = %message, "runtime outcome is uncertain");
+        Err(TurnFailure::Uncertain(failure)) => {
+            let message = failure.to_string();
+            while let Err(persistence_failure) = state.database.mark_uncertain(&turn, &message) {
+                warn!(
+                    turn_id = %turn.turn_id,
+                    error = %persistence_failure,
+                    "retrying uncertain turn persistence"
+                );
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            warn!(turn_id = %turn.turn_id, error = %message, "runtime outcome is uncertain");
+        }
     }
     Ok(())
+}
+
+enum TurnFailure {
+    Retry(anyhow::Error),
+    Uncertain(anyhow::Error),
 }
 
 async fn execute_turn(
@@ -191,13 +203,16 @@ async fn execute_turn(
     runtime: &Provider,
     token: &str,
     turn: &QueuedTurn,
-) -> Result<()> {
-    let continuation_ref = state.database.continuation(
-        &turn.interface_id,
-        &turn.agent_id,
-        &turn.audience_id,
-        &runtime.id,
-    )?;
+) -> Result<(), TurnFailure> {
+    let continuation_ref = state
+        .database
+        .continuation(
+            &turn.interface_id,
+            &turn.agent_id,
+            &turn.audience_id,
+            &runtime.id,
+        )
+        .map_err(TurnFailure::Retry)?;
     let request = RuntimeTurnRequest {
         correlation_id: turn.turn_id.clone(),
         interface_id: turn.interface_id.clone(),
@@ -205,7 +220,10 @@ async fn execute_turn(
         audience_id: turn.audience_id.clone(),
         input: turn.input.clone(),
         continuation_ref,
-        resources: turn.resources.clone(),
+        resources: runtime_resources(
+            &turn.resources,
+            &state.config.value.data_dir.join("resource-snapshots"),
+        ),
     };
     let response = state
         .client
@@ -215,19 +233,38 @@ async fn execute_turn(
         .json(&request)
         .send()
         .await
-        .context("contact runtime provider")?
+        .map_err(|error| {
+            let retry = error.is_connect();
+            let failure = anyhow!(error).context("contact runtime provider");
+            if retry {
+                TurnFailure::Retry(failure)
+            } else {
+                TurnFailure::Uncertain(failure)
+            }
+        })?
         .error_for_status()
-        .context("runtime provider rejected turn")?
+        .map_err(|error| {
+            TurnFailure::Uncertain(anyhow!(error).context("runtime provider rejected turn"))
+        })?
         .json::<RuntimeTurnResponse>()
         .await
-        .context("decode runtime response")?;
+        .map_err(|error| {
+            TurnFailure::Uncertain(anyhow!(error).context("decode runtime response"))
+        })?;
     if response.correlation_id != turn.turn_id {
-        bail!("runtime returned a mismatched correlation ID");
+        return Err(TurnFailure::Uncertain(anyhow!(
+            "runtime returned a mismatched correlation ID"
+        )));
     }
     if response.continuation_ref.is_empty() {
-        bail!("runtime returned an empty continuation reference");
+        return Err(TurnFailure::Uncertain(anyhow!(
+            "runtime returned an empty continuation reference"
+        )));
     }
-    state.database.complete_turn(turn, &runtime.id, &response)
+    state
+        .database
+        .complete_turn(turn, &runtime.id, &response)
+        .map_err(TurnFailure::Uncertain)
 }
 
 async fn claim_delivery(
@@ -308,187 +345,14 @@ async fn status(
 ) -> Result<Json<StatusReport>, ApiError> {
     authorize(&headers, &state.config.value.core.operator_token_hash)?;
     let providers = provider_health(&state.client, &state.config).await;
-    let execution_profile = runtime_execution_profiles_request(&state.client, &state.config, false)
-        .await
-        .ok()
-        .and_then(|profiles| profiles.selected);
     Ok(Json(StatusReport {
         release: state.config.value.release.clone(),
         agent_id: state.config.value.agent.id.clone(),
         providers,
         turns: state.database.state_counts("turns")?,
         deliveries: state.database.state_counts("deliveries")?,
-        latest_backup: state.database.latest_backup()?,
         recent_turns: state.database.recent_turns(None, 10)?,
-        execution_profile,
     }))
-}
-
-#[derive(Default, Deserialize)]
-struct ProfileQuery {
-    interface_id: Option<String>,
-    audience_id: Option<String>,
-}
-
-async fn execution_profiles(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(query): Query<ProfileQuery>,
-) -> Result<Json<RuntimeExecutionProfiles>, ApiError> {
-    authorize_profile_access(&headers, &state.config, query.interface_id.as_deref())?;
-    if query.interface_id.is_some() != query.audience_id.is_some() {
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "interface and audience must be supplied together",
-        ));
-    }
-    Ok(Json(
-        runtime_execution_profiles_request(&state.client, &state.config, false).await?,
-    ))
-}
-
-async fn refresh_execution_profiles(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<RuntimeExecutionProfiles>, ApiError> {
-    authorize(&headers, &state.config.value.core.operator_token_hash)?;
-    Ok(Json(
-        runtime_execution_profiles_request(&state.client, &state.config, true).await?,
-    ))
-}
-
-async fn apply_execution_profile(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(selection): Json<ExecutionProfileSelection>,
-) -> Result<Json<ExecutionProfileApplication>, ApiError> {
-    authorize_profile_access(&headers, &state.config, selection.interface_id.as_deref())?;
-    let runtime = selected_runtime(&state.config)?;
-    let current = matches!(selection.scope, ExecutionProfileScope::CurrentConversation);
-    let (interface_id, audience_id, continuation_ref, resources) = if current {
-        let interface_id = selection
-            .interface_id
-            .as_deref()
-            .or_else(|| state.config.value.sole_enabled_interface())
-            .ok_or_else(|| {
-                ApiError::new(
-                    StatusCode::BAD_REQUEST,
-                    "current conversation scope needs an interface",
-                )
-            })?;
-        state
-            .config
-            .provider(interface_id, ProviderRole::Interface)?;
-        let audience_id = selection
-            .audience_id
-            .as_deref()
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                ApiError::new(
-                    StatusCode::BAD_REQUEST,
-                    "current conversation scope needs an audience",
-                )
-            })?;
-        if state
-            .database
-            .audience_busy(interface_id, &state.config.value.agent.id, audience_id)?
-        {
-            return Err(ApiError::new(
-                StatusCode::CONFLICT,
-                "conversation has unfinished work",
-            ));
-        }
-        let continuation = state
-            .database
-            .continuation(
-                interface_id,
-                &state.config.value.agent.id,
-                audience_id,
-                &runtime.id,
-            )?
-            .ok_or_else(|| {
-                ApiError::not_found("current conversation does not have a runtime continuation")
-            })?;
-        let resources = materialize_resources(
-            &state.config.value.agent.resource_root,
-            &state.config.value.data_dir.join("resource-snapshots"),
-        )?;
-        (
-            Some(interface_id.to_owned()),
-            Some(audience_id.to_owned()),
-            Some(continuation),
-            Some(resources),
-        )
-    } else {
-        (None, None, None, None)
-    };
-    let request = RuntimeExecutionProfileSelection {
-        key: selection.key,
-        reasoning: selection.reasoning,
-        service_tier: selection.service_tier,
-        scope: selection.scope,
-        continuation_ref,
-        interface_id,
-        agent_id: state.config.value.agent.id.clone(),
-        audience_id,
-        resources,
-    };
-    Ok(Json(
-        runtime_execution_profile_selection(&state.client, &state.config, &request).await?,
-    ))
-}
-
-async fn runtime_execution_profiles_request(
-    client: &Client,
-    config: &LoadedConfig,
-    refresh: bool,
-) -> Result<RuntimeExecutionProfiles> {
-    let runtime = selected_runtime(config)?;
-    let endpoint = if refresh {
-        "execution-profiles/refresh"
-    } else {
-        "execution-profiles"
-    };
-    client
-        .request(
-            if refresh {
-                reqwest::Method::POST
-            } else {
-                reqwest::Method::GET
-            },
-            format!("{}/v1/{endpoint}", runtime.url),
-        )
-        .bearer_auth(config.credential(&runtime.id)?)
-        .timeout(Duration::from_secs(5))
-        .send()
-        .await
-        .context("contact runtime execution-profile service")?
-        .error_for_status()
-        .context("runtime provider rejected execution-profile operation")?
-        .json()
-        .await
-        .context("decode runtime execution profiles")
-}
-
-async fn runtime_execution_profile_selection(
-    client: &Client,
-    config: &LoadedConfig,
-    selection: &RuntimeExecutionProfileSelection,
-) -> Result<ExecutionProfileApplication> {
-    let runtime = selected_runtime(config)?;
-    client
-        .put(format!("{}/v1/execution-profile", runtime.url))
-        .bearer_auth(config.credential(&runtime.id)?)
-        .timeout(Duration::from_secs(5))
-        .json(selection)
-        .send()
-        .await
-        .context("contact runtime execution-profile service")?
-        .error_for_status()
-        .context("runtime provider rejected execution-profile selection")?
-        .json()
-        .await
-        .context("decode applied execution profile")
 }
 
 async fn provider_health(client: &Client, config: &LoadedConfig) -> Vec<Health> {
@@ -574,25 +438,6 @@ fn interface_provider<'a>(
     Ok(provider)
 }
 
-fn authorize_profile_access(
-    headers: &HeaderMap,
-    config: &LoadedConfig,
-    selected_interface: Option<&str>,
-) -> Result<(), ApiError> {
-    if bearer(headers)
-        .is_some_and(|token| token_matches(&config.value.core.operator_token_hash, token))
-    {
-        return Ok(());
-    }
-    let interface = interface_provider(headers, config)?;
-    if selected_interface.is_some_and(|selected| selected != interface.id) {
-        return Err(ApiError::forbidden(
-            "interface provider cannot mutate another interface conversation",
-        ));
-    }
-    Ok(())
-}
-
 fn authorize(headers: &HeaderMap, expected_hash: &str) -> Result<(), ApiError> {
     let candidate =
         bearer(headers).ok_or_else(|| ApiError::forbidden("component authentication required"))?;
@@ -669,7 +514,7 @@ fn materialize_resources(source: &Path, store: &Path) -> Result<ResourceSnapshot
         )
         .as_bytes(),
     );
-    let destination = store.join(fingerprint);
+    let destination = store.join(&fingerprint);
     if destination.exists() {
         if selected_resource_files(&destination)? != files {
             bail!(
@@ -693,13 +538,24 @@ fn materialize_resources(source: &Path, store: &Path) -> Result<ResourceSnapshot
         fs::rename(temporary, &destination)?;
     }
     Ok(ResourceSnapshot {
-        root: destination.display().to_string(),
+        id: fingerprint,
         system_sha256,
         context_sha256,
         settings_sha256,
         extensions_sha256,
         skills_sha256,
     })
+}
+
+fn runtime_resources(snapshot: &ResourceSnapshot, store: &Path) -> RuntimeResources {
+    RuntimeResources {
+        root: store.join(&snapshot.id).display().to_string(),
+        system_sha256: snapshot.system_sha256.clone(),
+        context_sha256: snapshot.context_sha256.clone(),
+        settings_sha256: snapshot.settings_sha256.clone(),
+        extensions_sha256: snapshot.extensions_sha256.clone(),
+        skills_sha256: snapshot.skills_sha256.clone(),
+    }
 }
 
 fn selected_resource_files(source: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
@@ -797,58 +653,6 @@ pub async fn fetch_status(config: &LoadedConfig) -> Result<StatusReport> {
         .map_err(Into::into)
 }
 
-pub async fn fetch_execution_profiles(
-    config: &LoadedConfig,
-    refresh: bool,
-    interface_id: Option<&str>,
-    audience_id: Option<&str>,
-) -> Result<RuntimeExecutionProfiles> {
-    let path = if refresh {
-        "/v1/execution-profiles/refresh"
-    } else {
-        "/v1/execution-profiles"
-    };
-    let client = Client::new();
-    let mut url = reqwest::Url::parse(&format!("http://{}{path}", config.value.core.listen))?;
-    if let (Some(interface), Some(audience)) = (interface_id, audience_id) {
-        url.query_pairs_mut()
-            .append_pair("interface_id", interface)
-            .append_pair("audience_id", audience);
-    }
-    let mut request = if refresh {
-        client.post(url)
-    } else {
-        client.get(url)
-    };
-    request = request.bearer_auth(config.credential("operator")?);
-    request
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await
-        .map_err(Into::into)
-}
-
-pub async fn select_execution_profile(
-    config: &LoadedConfig,
-    selection: &ExecutionProfileSelection,
-) -> Result<ExecutionProfileApplication> {
-    Client::new()
-        .put(format!(
-            "http://{}/v1/execution-profile",
-            config.value.core.listen
-        ))
-        .bearer_auth(config.credential("operator")?)
-        .json(selection)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await
-        .map_err(Into::into)
-}
-
 pub async fn fetch_inspection(config: &LoadedConfig, turn_id: &str) -> Result<TurnInspection> {
     Client::new()
         .get(format!(
@@ -919,7 +723,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::materialize_resources;
+    use super::{materialize_resources, runtime_resources};
 
     #[test]
     fn materialized_resources_do_not_change_with_the_source() -> anyhow::Result<()> {
@@ -932,10 +736,15 @@ mod tests {
         let second = materialize_resources(source.path(), store.path())?;
         assert_ne!(first.system_sha256, second.system_sha256);
         assert_eq!(first.skills_sha256, second.skills_sha256);
-        assert_ne!(first.root, second.root);
+        assert_ne!(first.id, second.id);
         assert_eq!(
-            fs::read_to_string(std::path::Path::new(&first.root).join("SYSTEM.md"))?,
+            fs::read_to_string(store.path().join(&first.id).join("SYSTEM.md"))?,
             "first"
+        );
+        let relocated = tempdir()?;
+        assert_eq!(
+            runtime_resources(&first, relocated.path()).root,
+            relocated.path().join(&first.id).display().to_string()
         );
         Ok(())
     }

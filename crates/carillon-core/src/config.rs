@@ -265,15 +265,6 @@ impl Config {
         discord.validate(self)?;
         Ok(discord)
     }
-
-    pub fn sole_enabled_interface(&self) -> Option<&str> {
-        let mut interfaces = self
-            .providers
-            .iter()
-            .filter(|provider| provider.role == ProviderRole::Interface && provider.enabled);
-        let interface = interfaces.next()?;
-        interfaces.next().is_none().then_some(interface.id.as_str())
-    }
 }
 
 impl DiscordConfig {

@@ -1,5 +1,3 @@
-use std::{fmt, str::FromStr};
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -34,6 +32,16 @@ pub struct EventReceipt {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ResourceSnapshot {
+    pub id: String,
+    pub system_sha256: String,
+    pub context_sha256: String,
+    pub settings_sha256: String,
+    pub extensions_sha256: String,
+    pub skills_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeResources {
     pub root: String,
     pub system_sha256: String,
     pub context_sha256: String,
@@ -50,40 +58,6 @@ pub struct SelectedProvider {
     pub url: String,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ServiceTier {
-    Standard,
-    Fast,
-}
-
-impl ServiceTier {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Standard => "standard",
-            Self::Fast => "fast",
-        }
-    }
-}
-
-impl fmt::Display for ServiceTier {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-impl FromStr for ServiceTier {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "standard" => Ok(Self::Standard),
-            "fast" => Ok(Self::Fast),
-            _ => Err(format!("unsupported service tier {value}")),
-        }
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RuntimeTurnRequest {
     pub correlation_id: String,
@@ -92,7 +66,7 @@ pub struct RuntimeTurnRequest {
     pub audience_id: String,
     pub input: String,
     pub continuation_ref: Option<String>,
-    pub resources: ResourceSnapshot,
+    pub resources: RuntimeResources,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -100,81 +74,6 @@ pub struct RuntimeTurnResponse {
     pub correlation_id: String,
     pub output: String,
     pub continuation_ref: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct RuntimeExecutionProfileModel {
-    pub key: String,
-    pub provider: String,
-    pub provider_name: String,
-    pub id: String,
-    pub name: String,
-    pub reasoning: Vec<String>,
-    pub service_tiers: Vec<ServiceTier>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ExecutionProfile {
-    pub model: String,
-    pub reasoning: Option<String>,
-    pub service_tier: Option<ServiceTier>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ExecutionProfileEvidence {
-    pub requested: ExecutionProfile,
-    pub effective: Option<ExecutionProfile>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct RuntimeExecutionProfiles {
-    pub models: Vec<RuntimeExecutionProfileModel>,
-    pub selected: Option<ExecutionProfileEvidence>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExecutionProfileScope {
-    CurrentConversation,
-    NewConversations,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ExecutionProfileSelection {
-    pub key: String,
-    pub reasoning: Option<String>,
-    pub service_tier: Option<ServiceTier>,
-    pub scope: ExecutionProfileScope,
-    pub audience_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub interface_id: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct RuntimeExecutionProfileSelection {
-    pub key: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub service_tier: Option<ServiceTier>,
-    pub scope: ExecutionProfileScope,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub continuation_ref: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub interface_id: Option<String>,
-    pub agent_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub audience_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub resources: Option<ResourceSnapshot>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ExecutionProfileApplication {
-    pub scope: ExecutionProfileScope,
-    pub requested: ExecutionProfile,
-    pub effective: ExecutionProfile,
-    pub continuation_ref: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -236,9 +135,7 @@ pub struct StatusReport {
     pub providers: Vec<Health>,
     pub turns: StateCounts,
     pub deliveries: StateCounts,
-    pub latest_backup: Option<String>,
     pub recent_turns: Vec<TurnSummary>,
-    pub execution_profile: Option<ExecutionProfileEvidence>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

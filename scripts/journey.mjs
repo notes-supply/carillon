@@ -40,13 +40,6 @@ try {
   );
   await startAll();
 
-  const discovered = JSON.parse(run("model", "--config", configPath()));
-  assert.equal(discovered.models.length, 2);
-  assert.equal(discovered.selected, null);
-  const selected = JSON.parse(run("model", "--config", configPath(), "deterministic/concise"));
-  assert.equal(selected.requested.model, "deterministic/concise");
-  assert.equal(selected.effective.model, "deterministic/concise");
-
   const denied = await requestSimulation(event("denied", "999", "200", "300", null, "no"));
   assert.equal(denied.status, 403, "other guilds must fail closed");
   const deniedRoute = await requestSimulation(
@@ -74,20 +67,6 @@ try {
     403,
     "operator diagnostics must require authentication",
   );
-
-  const currentProfile = JSON.parse(
-    run(
-      "model",
-      "--config",
-      configPath(),
-      "--scope",
-      "current-conversation",
-      "--audience",
-      "discord-100-300",
-      "deterministic/steady",
-    ),
-  );
-  assert.equal(currentProfile.effective.model, "deterministic/steady");
 
   run("enable-demo-resources", "--config", configPath());
   const additions = await simulate("event-2", "use the additions");
@@ -170,16 +149,31 @@ try {
   const status = JSON.parse(run("status", "--config", configPath()));
   assert.ok(status.providers.every((provider) => provider.status === "ready"));
   assert.equal(status.deliveries.uncertain, 1);
-  assert.equal(status.execution_profile.requested.model, "deterministic/concise");
 
+  await stop("runtime");
+  const queued = await submitCoreEvent(
+    "event-queued-restore",
+    "survive runtime outage and restore",
+  );
+  await new Promise((resolveWait) => setTimeout(resolveWait, 500));
+  const queuedInspection = await waitForTurn(queued.turn_id, "queued");
+  assert.equal(queuedInspection.state, "queued");
+
+  await stop("core");
   await stopAll();
   run("backup", "--config", configPath(), "--output", backup);
   await rm(restoredRoot, { recursive: true, force: true });
   run("restore", "--input", backup, "--target", restoredRoot);
   installation = restoredRoot;
   await startAll();
+  await waitForTurn(queued.turn_id, "completed");
+  const resumedDelivery = await waitForDeliveryClaim("resumed-discord");
+  assert.equal(resumedDelivery.turn_id, queued.turn_id);
+  await acknowledgeDelivery(resumedDelivery.id, "resumed-discord");
+  const resumed = await waitForTurn(queued.turn_id, "completed", "delivered");
+  assert.equal(resumed.delivery_state, "delivered");
   const restored = await simulate("event-5", "continue after restore");
-  assert.match(restored.delivery.content, /Local provider response 6/u);
+  assert.match(restored.delivery.content, /Local provider response 7/u);
 
   process.stdout.write(
     `${JSON.stringify(
@@ -191,6 +185,7 @@ try {
         restarts: ["discord", "runtime-pi"],
         abandoned_delivery_claim: "uncertain",
         diagnostics: "authenticated and queryable",
+        runtime_outage: "queued and resumed",
         backup_restore: "continued",
       },
       null,
@@ -293,6 +288,41 @@ async function waitForDeliveryClaim(instance) {
     await new Promise((resolveWait) => setTimeout(resolveWait, 25));
   }
   throw new Error("delivery did not become ready");
+}
+
+async function acknowledgeDelivery(id, instance) {
+  const response = await fetch(
+    `http://127.0.0.1:${String(basePort)}/v1/deliveries/${String(id)}/ack`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${await credentialValue("discord-private")}`,
+        "x-carillon-provider": "discord-private",
+        "x-carillon-instance": instance,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ outcome: "delivered", native_ref: "local:resumed" }),
+    },
+  );
+  const body = await response.text();
+  assert.equal(response.status, 204, body);
+}
+
+async function waitForTurn(turnId, state, deliveryState = null) {
+  let inspection;
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    inspection = JSON.parse(run("inspect", "--config", configPath(), turnId));
+    if (
+      inspection.state === state &&
+      (deliveryState === null || inspection.delivery_state === deliveryState)
+    ) {
+      return inspection;
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+  }
+  throw new Error(
+    `turn ${turnId} did not reach ${state}/${String(deliveryState)}; last inspection: ${JSON.stringify(inspection)}`,
+  );
 }
 
 function serviceArguments(name) {

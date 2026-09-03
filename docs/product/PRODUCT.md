@@ -16,10 +16,9 @@ An operator can:
 2. configure a private Discord guild, allowlisted users, and explicit channel routes;
 3. converse through Pi with channel- or thread-scoped continuity;
 4. use Pi-native tools, extensions, and skills with the owner's Unix authority;
-5. select supported model, reasoning, and service-tier options;
-6. restart the Discord or Pi provider independently;
-7. inspect recent turns and current provider/resource identity; and
-8. back up and restore the stopped installation.
+5. restart the Discord or Pi provider independently;
+6. inspect recent turns and current provider/resource identity; and
+7. back up and restore the stopped installation.
 
 ## Provider model
 

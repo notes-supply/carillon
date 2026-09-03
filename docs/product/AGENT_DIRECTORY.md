@@ -16,11 +16,11 @@ For the Pi runtime adapter, Carillon's resource source remains an ordinary Pi-co
 
 - `SYSTEM.md` is the plainly named operator-authored system prompt.
 - `AGENTS.md` contains optional contextual instructions.
-- `settings.json`, `extensions/`, `skills/`, and `sessions/` retain their native Pi meanings. Provider authentication, discovered catalogs, and the service's selected model are not agent resources; Pi persists them in `CARILLON_HOME/pi`, isolated from `~/.pi/agent`.
+- `settings.json`, `extensions/`, `skills/`, and `sessions/` retain their native Pi meanings. Provider authentication and engine settings are not agent resources; Pi persists them in `CARILLON_HOME/pi`, isolated from `~/.pi/agent`.
 
 At dispatch, Carillon supplies an immutable snapshot of `SYSTEM.md`, `AGENTS.md`, `settings.json`, extensions, and skills as Pi's global `agentDir` resources. Separately, Pi's `cwd` is the configured real workspace—by default the owner's home. Native tools operate there and on ordinary absolute paths with the owner's authority. Pi-native project-local resources in an intentionally selected workspace retain their normal semantics.
 
-Pi composes the final prompt, including context, tool guidance, skill inventory, project resources, and extension changes. An explicit private model selection takes precedence over a model default in snapshotted agent settings.
+Pi composes the final prompt, including context, tool guidance, skill inventory, project resources, and extension changes. Engine settings remain Pi's responsibility.
 
 Pi extensions use Pi's own loading, hooks, subprocess environment, tools, and persistence. Carillon does not introduce another extension manifest, permission system, or prompt-composition language.
 

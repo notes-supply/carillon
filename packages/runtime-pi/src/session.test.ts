@@ -8,7 +8,6 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { persistExecutionProfile } from "./profile.ts";
 import { createPiExecutionSession } from "./session.ts";
 
 const model: Model<"openai-responses"> = {
@@ -141,13 +140,10 @@ export default function observer(pi) {
 
   try {
     const selected = SessionManager.create(workspace, sessions);
-    const continuation = persistExecutionProfile(selected, {
-      model: `${model.provider}/${model.id}`,
-    });
     const created = await createPiExecutionSession({
       resourceRoot,
       workspace,
-      manager: SessionManager.open(continuation, sessions, workspace),
+      manager: selected,
       modelRuntime: runtime,
       model,
     });

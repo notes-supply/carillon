@@ -27,20 +27,10 @@ use tracing::{error, info, warn};
 use twilight_gateway::{Event, EventTypeFlags, Intents, Shard, ShardId, StreamExt as _};
 use twilight_http::{Client as DiscordHttp, request::channel::reaction::RequestReactionType};
 use twilight_model::{
-    application::interaction::{Interaction, InteractionData},
-    channel::{
-        ChannelType,
-        message::{
-            Component, MessageFlags, MessageType,
-            component::{
-                ActionRow, Button, ButtonStyle, SelectMenu, SelectMenuOption, SelectMenuType,
-            },
-        },
-    },
-    http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
+    channel::{ChannelType, message::MessageType},
     id::{
         Id,
-        marker::{ChannelMarker, EmojiMarker, GuildMarker, MessageMarker},
+        marker::{ChannelMarker, EmojiMarker, MessageMarker},
     },
 };
 use uuid::Uuid;
@@ -52,9 +42,7 @@ use crate::{
     },
     model::{
         Delivery, DeliveryAck, DeliveryOutcome, DeliveryReconciliation, EventReceipt,
-        ExecutionProfileApplication, ExecutionProfileScope, ExecutionProfileSelection,
-        ExternalEvent, Health, RuntimeExecutionProfileModel, RuntimeExecutionProfiles, ServiceTier,
-        SimulateRequest, SimulateResponse,
+        ExternalEvent, Health, SimulateRequest, SimulateResponse,
     },
 };
 
@@ -177,10 +165,7 @@ pub async fn serve_discord(
             }
         }
     };
-    let router = Router::new()
-        .route("/health", get(discord_health))
-        .route("/v1/simulate", post(simulate))
-        .with_state(state.clone());
+    let router = discord_router(state.clone(), deterministic);
     if !deterministic {
         let discord_token_path = discord_token_file
             .context("--discord-token-file is required outside deterministic mode")?;
@@ -193,30 +178,14 @@ pub async fn serve_discord(
         for target in reconciled.feedback_target_ids {
             terminal_feedback(&http, &state.discord, &target, Feedback::Uncertain).await;
         }
-        let application_id = http.current_user_application().await?.model().await?.id;
-        let guild_id = state
-            .discord
-            .guild_id
-            .parse::<Id<GuildMarker>>()
-            .context("configured Discord guild ID is invalid")?;
-        http.interaction(application_id)
-            .create_guild_command(guild_id)
-            .chat_input("model", "Choose provider, model, and supported settings")
-            .await?;
         let (messages, receiver) = mpsc::channel(64);
         let gateway_state = state.clone();
-        let gateway_http = http.clone();
         let delivery_state = state.clone();
         let worker_state = state.clone();
         let worker_http = http.clone();
         tokio::spawn(async move {
-            if let Err(failure) = Box::pin(gateway_loop(
-                gateway_state,
-                discord_token,
-                gateway_http,
-                messages,
-            ))
-            .await
+            if let Err(failure) =
+                Box::pin(gateway_loop(gateway_state, discord_token, messages)).await
             {
                 error!(error = %failure, "Discord gateway stopped");
             }
@@ -230,6 +199,16 @@ pub async fn serve_discord(
     }
     info!(url = %provider.url, deterministic, "Discord interface provider ready");
     serve_component(provider.url, router, "Discord interface provider").await
+}
+
+fn discord_router(state: DiscordState, deterministic: bool) -> Router {
+    let router = Router::new().route("/health", get(discord_health));
+    if deterministic {
+        router.route("/v1/simulate", post(simulate))
+    } else {
+        router
+    }
+    .with_state(state)
 }
 
 fn load_discord_participation(path: &Path) -> Result<DiscordParticipation> {
@@ -314,61 +293,42 @@ async fn simulate(
 async fn gateway_loop(
     state: DiscordState,
     token: String,
-    http: Arc<DiscordHttp>,
     messages: mpsc::Sender<InboundMessage>,
 ) -> Result<()> {
     let intents = Intents::GUILDS | Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT;
     let mut shard = Shard::new(ShardId::ONE, token, intents);
-    let event_types = EventTypeFlags::MESSAGE_CREATE | EventTypeFlags::INTERACTION_CREATE;
+    let event_types = EventTypeFlags::MESSAGE_CREATE;
     while let Some(event) = shard.next_event(event_types).await {
-        match event.context("receive Discord gateway event")? {
-            Event::MessageCreate(message) => {
-                if message.author.bot || message.kind == MessageType::ThreadStarterMessage {
-                    continue;
-                }
-                let guild = message.guild_id.map(|id| id.to_string());
-                if adapter_identity_admit(
-                    &state.discord,
-                    guild.as_deref(),
-                    &message.author.id.to_string(),
-                )
+        if let Event::MessageCreate(message) = event.context("receive Discord gateway event")? {
+            if message.author.bot || message.kind == MessageType::ThreadStarterMessage {
+                continue;
+            }
+            let guild = message.guild_id.map(|id| id.to_string());
+            if adapter_identity_admit(
+                &state.discord,
+                guild.as_deref(),
+                &message.author.id.to_string(),
+            )
+            .is_err()
+            {
+                continue;
+            }
+            let request = SimulateRequest {
+                event_id: message.id.to_string(),
+                guild_id: guild,
+                user_id: message.author.id.to_string(),
+                channel_id: message.channel_id.to_string(),
+                parent_channel_id: None,
+                content: message.content.clone(),
+            };
+            let native = serde_json::to_value(&*message).unwrap_or(Value::Null);
+            if messages
+                .send(InboundMessage { request, native })
+                .await
                 .is_err()
-                {
-                    continue;
-                }
-                let request = SimulateRequest {
-                    event_id: message.id.to_string(),
-                    guild_id: guild,
-                    user_id: message.author.id.to_string(),
-                    channel_id: message.channel_id.to_string(),
-                    parent_channel_id: None,
-                    content: message.content.clone(),
-                };
-                let native = serde_json::to_value(&*message).unwrap_or(Value::Null);
-                if messages
-                    .send(InboundMessage { request, native })
-                    .await
-                    .is_err()
-                {
-                    bail!("Discord message worker stopped");
-                }
+            {
+                bail!("Discord message worker stopped");
             }
-            Event::InteractionCreate(interaction) => {
-                let interaction_state = state.clone();
-                let interaction_http = http.clone();
-                tokio::spawn(async move {
-                    if let Err(failure) = handle_model_interaction(
-                        &interaction_state,
-                        &interaction_http,
-                        interaction.0,
-                    )
-                    .await
-                    {
-                        warn!(error = %failure, "Discord model interaction failed");
-                    }
-                });
-            }
-            _ => {}
         }
     }
     Ok(())
@@ -822,707 +782,6 @@ async fn start_typing(
     }))
 }
 
-const PROFILE_PREFIX: &str = "carillon:profile:";
-const PROVIDER_SELECT_ID: &str = "carillon:profile:provider";
-const MODEL_SELECT_ID: &str = "carillon:profile:model";
-const MODEL_PAGE_PREFIX: &str = "carillon:profile:p:";
-const REASONING_SELECT_ID: &str = "carillon:profile:reasoning";
-const TIER_SELECT_ID: &str = "carillon:profile:tier";
-const APPLY_CURRENT_PREFIX: &str = "carillon:profile:c:";
-const APPLY_NEW_PREFIX: &str = "carillon:profile:n:";
-const PROFILE_PAGE_SIZE: usize = 25;
-
-async fn handle_model_interaction(
-    state: &DiscordState,
-    http: &DiscordHttp,
-    interaction: Interaction,
-) -> Result<()> {
-    let Some(data) = interaction.data.as_ref() else {
-        return Ok(());
-    };
-    let relevant = match data {
-        InteractionData::ApplicationCommand(command) => command.name == "model",
-        InteractionData::MessageComponent(component) => {
-            component.custom_id.starts_with(PROFILE_PREFIX)
-        }
-        _ => false,
-    };
-    if !relevant {
-        return Ok(());
-    }
-    let component = matches!(data, InteractionData::MessageComponent(_));
-    let discord = &state.discord;
-    let guild = interaction.guild_id.map(|guild| guild.to_string());
-    let user = interaction.author_id().map(|user| user.to_string());
-    let channel = interaction
-        .channel
-        .as_ref()
-        .map(|channel| channel.id.to_string());
-    let parent = interaction
-        .channel
-        .as_ref()
-        .and_then(|channel| channel.parent_id)
-        .map(|parent| parent.to_string());
-    let admitted = user.as_deref().is_some_and(|user| {
-        adapter_identity_admit(discord, guild.as_deref(), user).is_ok()
-            && channel.as_deref().is_some_and(|channel| {
-                adapter_route_admit(discord, channel, parent.as_deref()).is_ok()
-            })
-    });
-    if !admitted {
-        let response = interaction_response(
-            if component {
-                InteractionResponseType::UpdateMessage
-            } else {
-                InteractionResponseType::ChannelMessageWithSource
-            },
-            "This interaction is not authorized.",
-            !component,
-        );
-        http.interaction(interaction.application_id)
-            .create_response(interaction.id, &interaction.token, &response)
-            .await
-            .context("respond to unauthorized Discord model interaction")?;
-        return Ok(());
-    }
-    let audience = format!(
-        "discord-{}-{}",
-        guild
-            .as_deref()
-            .context("Discord model interaction has no guild")?,
-        channel
-            .as_deref()
-            .context("Discord model interaction has no channel")?
-    );
-    let current_conversation = channel
-        .as_deref()
-        .is_some_and(|channel| current_conversation_available(discord, channel, parent.as_deref()));
-    let deferred = deferred_model_response(component);
-    http.interaction(interaction.application_id)
-        .create_response(interaction.id, &interaction.token, &deferred)
-        .await
-        .context("defer Discord model interaction")?;
-
-    let response =
-        match model_interaction_response(state, data, &audience, current_conversation).await {
-            Ok(response) => response,
-            Err(failure) => {
-                warn!(error = %failure, "model interaction operation failed");
-                interaction_data("Execution profiles are currently unavailable.", Vec::new())
-            }
-        };
-    http.interaction(interaction.application_id)
-        .update_response(&interaction.token)
-        .content(response.content.as_deref())
-        .components(response.components.as_deref())
-        .await
-        .context("update Discord model interaction response")?;
-    Ok(())
-}
-
-async fn model_interaction_response(
-    state: &DiscordState,
-    data: &InteractionData,
-    audience: &str,
-    current_conversation: bool,
-) -> Result<InteractionResponseData> {
-    let profiles =
-        fetch_runtime_execution_profiles(state, current_conversation.then_some(audience)).await?;
-    let InteractionData::MessageComponent(component) = data else {
-        let model = initial_profile_model(&profiles)?;
-        return Ok(selected_profile_panel(
-            &profiles,
-            model,
-            current_conversation,
-        ));
-    };
-    if component.custom_id.starts_with(APPLY_CURRENT_PREFIX) {
-        if !current_conversation {
-            bail!("this route parent is not a durable conversation");
-        }
-        return apply_profile_selection(
-            state,
-            &profiles,
-            component
-                .custom_id
-                .strip_prefix(APPLY_CURRENT_PREFIX)
-                .context("invalid current-conversation profile")?,
-            ExecutionProfileScope::CurrentConversation,
-            Some(audience.to_owned()),
-        )
-        .await;
-    }
-    if let Some(value) = component.custom_id.strip_prefix(APPLY_NEW_PREFIX) {
-        return apply_profile_selection(
-            state,
-            &profiles,
-            value,
-            ExecutionProfileScope::NewConversations,
-            None,
-        )
-        .await;
-    }
-    profile_draft_response(&profiles, component, current_conversation)
-}
-
-fn profile_draft_response(
-    profiles: &RuntimeExecutionProfiles,
-    component: &twilight_model::application::interaction::message_component::MessageComponentInteractionData,
-    current_conversation: bool,
-) -> Result<InteractionResponseData> {
-    let custom_id = component.custom_id.as_str();
-    if custom_id == PROVIDER_SELECT_ID {
-        let model = provider_profile_model(profiles, selected_component_value(component)?)?;
-        return Ok(selected_profile_panel(
-            profiles,
-            model,
-            current_conversation,
-        ));
-    }
-    if let Some(value) = custom_id.strip_prefix(MODEL_PAGE_PREFIX) {
-        let (provider, page) = value
-            .rsplit_once(':')
-            .context("invalid model page component")?;
-        let page = page.parse::<usize>().context("invalid model page")?;
-        let model = profiles
-            .models
-            .iter()
-            .filter(|model| model.provider == provider)
-            .nth(page * PROFILE_PAGE_SIZE)
-            .context("model page is unavailable")?;
-        return Ok(profile_panel(
-            profiles,
-            model,
-            None,
-            None,
-            current_conversation,
-            page,
-        ));
-    }
-    if custom_id == MODEL_SELECT_ID {
-        let model = profile_model(profiles, selected_component_value(component)?)?;
-        return Ok(selected_profile_panel(
-            profiles,
-            model,
-            current_conversation,
-        ));
-    }
-    if custom_id == REASONING_SELECT_ID || custom_id == TIER_SELECT_ID {
-        let values = profile_selection_parts(selected_component_value(component)?, 3)?;
-        let model = profile_model(profiles, values[0])?;
-        let tier = optional_profile_value(values[2])
-            .map(str::parse)
-            .transpose()
-            .map_err(anyhow::Error::msg)?;
-        return Ok(profile_panel(
-            profiles,
-            model,
-            optional_profile_value(values[1]),
-            tier,
-            current_conversation,
-            model_page(profiles, model),
-        ));
-    }
-    bail!("unsupported model interaction")
-}
-
-fn selected_profile_panel(
-    profiles: &RuntimeExecutionProfiles,
-    model: &RuntimeExecutionProfileModel,
-    current_conversation: bool,
-) -> InteractionResponseData {
-    let (reasoning, tier) = selected_profile_values(profiles, model);
-    profile_panel(
-        profiles,
-        model,
-        reasoning,
-        tier,
-        current_conversation,
-        model_page(profiles, model),
-    )
-}
-
-async fn apply_profile_selection(
-    state: &DiscordState,
-    profiles: &RuntimeExecutionProfiles,
-    value: &str,
-    scope: ExecutionProfileScope,
-    audience_id: Option<String>,
-) -> Result<InteractionResponseData> {
-    let values = profile_selection_parts(value, 3)?;
-    let model = profile_model(profiles, values[0])?;
-    let applied = apply_runtime_execution_profile(
-        state,
-        &ExecutionProfileSelection {
-            key: model.key.clone(),
-            reasoning: optional_profile_value(values[1]).map(str::to_owned),
-            service_tier: optional_profile_value(values[2])
-                .map(str::parse)
-                .transpose()
-                .map_err(anyhow::Error::msg)?,
-            scope,
-            audience_id,
-            interface_id: Some(state.provider_id.clone()),
-        },
-    )
-    .await?;
-    Ok(applied_profile_response(&applied))
-}
-
-fn profile_panel(
-    profiles: &RuntimeExecutionProfiles,
-    model: &RuntimeExecutionProfileModel,
-    reasoning: Option<&str>,
-    service_tier: Option<ServiceTier>,
-    current_conversation: bool,
-    requested_page: usize,
-) -> InteractionResponseData {
-    if profiles.models.is_empty() {
-        return interaction_data(
-            "Pi has no available models. Log in through Pi first.",
-            Vec::new(),
-        );
-    }
-    let providers = profiles
-        .models
-        .iter()
-        .map(|model| (model.provider.as_str(), model.provider_name.as_str()))
-        .collect::<BTreeMap<_, _>>();
-    if providers.len() > PROFILE_PAGE_SIZE {
-        return interaction_data(
-            "Pi exposed more providers than Discord can display.",
-            Vec::new(),
-        );
-    }
-
-    let mut components = Vec::with_capacity(5);
-    if providers.len() > 1 {
-        let options = providers
-            .into_iter()
-            .map(|(provider, name)| SelectMenuOption {
-                default: provider == model.provider,
-                description: None,
-                emoji: None,
-                label: limit_discord_text(name, 100),
-                value: provider.to_owned(),
-            })
-            .collect();
-        components.push(text_select(
-            PROVIDER_SELECT_ID,
-            "Choose a provider",
-            options,
-        ));
-    }
-
-    let models = profiles
-        .models
-        .iter()
-        .filter(|candidate| candidate.provider == model.provider)
-        .collect::<Vec<_>>();
-    let pages = models.len().div_ceil(PROFILE_PAGE_SIZE);
-    let page = requested_page.min(pages.saturating_sub(1));
-    let start = page * PROFILE_PAGE_SIZE;
-    let options = models[start..models.len().min(start + PROFILE_PAGE_SIZE)]
-        .iter()
-        .map(|candidate| SelectMenuOption {
-            default: candidate.key == model.key,
-            description: Some(limit_discord_text(&candidate.id, 100)),
-            emoji: None,
-            label: limit_discord_text(&candidate.name, 100),
-            value: candidate.key.clone(),
-        })
-        .collect();
-    components.push(text_select(MODEL_SELECT_ID, "Choose a model", options));
-    components.extend(profile_setting_selects(model, reasoning, service_tier));
-    components.push(profile_action_row(
-        model,
-        reasoning,
-        service_tier,
-        current_conversation,
-        page,
-        pages,
-    ));
-
-    interaction_data(
-        &format!(
-            "**{} / {}**\nChange any setting, then choose where to apply it.",
-            model.provider_name, model.name
-        ),
-        components,
-    )
-}
-
-fn profile_setting_selects(
-    model: &RuntimeExecutionProfileModel,
-    reasoning: Option<&str>,
-    service_tier: Option<ServiceTier>,
-) -> Vec<Component> {
-    let mut components = Vec::with_capacity(2);
-    let reasoning_value = reasoning.unwrap_or("-");
-    let selected_tier = service_tier.unwrap_or(ServiceTier::Standard);
-    if !model.reasoning.is_empty() {
-        let mut options = vec![SelectMenuOption {
-            default: reasoning.is_none(),
-            description: Some("Use the provider or model default".to_owned()),
-            emoji: None,
-            label: "Default".to_owned(),
-            value: format!("{}|-|{selected_tier}", model.key),
-        }];
-        options.extend(model.reasoning.iter().map(|level| SelectMenuOption {
-            default: reasoning == Some(level.as_str()),
-            description: None,
-            emoji: None,
-            label: title_case_profile_value(level),
-            value: format!("{}|{level}|{selected_tier}", model.key),
-        }));
-        components.push(text_select(
-            REASONING_SELECT_ID,
-            "Reasoning effort",
-            options,
-        ));
-    }
-    if !model.service_tiers.is_empty() {
-        let options = model
-            .service_tiers
-            .iter()
-            .map(|tier| SelectMenuOption {
-                default: *tier == selected_tier,
-                description: match tier {
-                    ServiceTier::Standard => Some("Normal processing".to_owned()),
-                    ServiceTier::Fast => Some("OpenAI priority processing".to_owned()),
-                },
-                emoji: None,
-                label: title_case_profile_value(tier.as_str()),
-                value: format!("{}|{reasoning_value}|{tier}", model.key),
-            })
-            .collect();
-        components.push(text_select(TIER_SELECT_ID, "Speed", options));
-    }
-    components
-}
-
-fn profile_action_row(
-    model: &RuntimeExecutionProfileModel,
-    reasoning: Option<&str>,
-    service_tier: Option<ServiceTier>,
-    current_conversation: bool,
-    page: usize,
-    pages: usize,
-) -> Component {
-    let reasoning_value = reasoning.unwrap_or("-");
-    let tier_value = service_tier.unwrap_or(ServiceTier::Standard);
-    let selection = format!("{}|{reasoning_value}|{tier_value}", model.key);
-    let mut buttons = Vec::with_capacity(4);
-    if pages > 1 {
-        buttons.push(profile_action_button(
-            "Previous",
-            format!(
-                "{MODEL_PAGE_PREFIX}{}:{}",
-                model.provider,
-                page.saturating_sub(1)
-            ),
-            ButtonStyle::Secondary,
-            page == 0,
-        ));
-        buttons.push(profile_action_button(
-            "Next",
-            format!("{MODEL_PAGE_PREFIX}{}:{}", model.provider, page + 1),
-            ButtonStyle::Secondary,
-            page + 1 == pages,
-        ));
-    }
-    if current_conversation {
-        buttons.push(profile_action_button(
-            "Apply to this conversation",
-            format!("{APPLY_CURRENT_PREFIX}{selection}"),
-            ButtonStyle::Primary,
-            false,
-        ));
-    }
-    buttons.push(profile_action_button(
-        "Use for new conversations",
-        format!("{APPLY_NEW_PREFIX}{selection}"),
-        if current_conversation {
-            ButtonStyle::Secondary
-        } else {
-            ButtonStyle::Primary
-        },
-        false,
-    ));
-    Component::ActionRow(ActionRow {
-        id: None,
-        components: buttons,
-    })
-}
-
-fn initial_profile_model(
-    profiles: &RuntimeExecutionProfiles,
-) -> Result<&RuntimeExecutionProfileModel> {
-    profiles
-        .selected
-        .as_ref()
-        .and_then(|selected| {
-            profiles.models.iter().find(|model| {
-                selected.requested.model == format!("{}/{}", model.provider, model.id)
-            })
-        })
-        .or_else(|| profiles.models.first())
-        .context("Pi has no available models")
-}
-
-fn provider_profile_model<'a>(
-    profiles: &'a RuntimeExecutionProfiles,
-    provider: &str,
-) -> Result<&'a RuntimeExecutionProfileModel> {
-    let selected = profiles
-        .selected
-        .as_ref()
-        .map(|profile| profile.requested.model.as_str());
-    profiles
-        .models
-        .iter()
-        .find(|model| {
-            model.provider == provider
-                && selected == Some(format!("{}/{}", model.provider, model.id).as_str())
-        })
-        .or_else(|| {
-            profiles
-                .models
-                .iter()
-                .find(|model| model.provider == provider)
-        })
-        .context("selected provider has no available models")
-}
-
-fn selected_profile_values<'a>(
-    profiles: &'a RuntimeExecutionProfiles,
-    model: &RuntimeExecutionProfileModel,
-) -> (Option<&'a str>, Option<ServiceTier>) {
-    profiles
-        .selected
-        .as_ref()
-        .filter(|selected| selected.requested.model == format!("{}/{}", model.provider, model.id))
-        .map_or((None, None), |selected| {
-            (
-                selected.requested.reasoning.as_deref(),
-                selected.requested.service_tier,
-            )
-        })
-}
-
-fn model_page(
-    profiles: &RuntimeExecutionProfiles,
-    selected: &RuntimeExecutionProfileModel,
-) -> usize {
-    profiles
-        .models
-        .iter()
-        .filter(|model| model.provider == selected.provider)
-        .position(|model| model.key == selected.key)
-        .unwrap_or_default()
-        / PROFILE_PAGE_SIZE
-}
-
-fn applied_profile_response(applied: &ExecutionProfileApplication) -> InteractionResponseData {
-    let scope = match applied.scope {
-        ExecutionProfileScope::CurrentConversation => "this conversation",
-        ExecutionProfileScope::NewConversations => "new conversations",
-    };
-    interaction_data(
-        &format!(
-            "Execution profile set for **{scope}**: model **{}**{}{}.",
-            applied.effective.model,
-            applied
-                .effective
-                .reasoning
-                .as_deref()
-                .map_or_else(String::new, |value| format!(", reasoning **{value}**")),
-            applied
-                .effective
-                .service_tier
-                .map_or_else(String::new, |value| format!(", speed **{value}**")),
-        ),
-        Vec::new(),
-    )
-}
-
-fn text_select(custom_id: &str, placeholder: &str, options: Vec<SelectMenuOption>) -> Component {
-    Component::ActionRow(ActionRow {
-        id: None,
-        components: vec![Component::SelectMenu(SelectMenu {
-            id: None,
-            channel_types: None,
-            custom_id: custom_id.to_owned(),
-            default_values: None,
-            disabled: false,
-            kind: SelectMenuType::Text,
-            max_values: Some(1),
-            min_values: Some(1),
-            options: Some(options),
-            placeholder: Some(placeholder.to_owned()),
-            required: None,
-        })],
-    })
-}
-
-fn profile_action_button(
-    label: &str,
-    custom_id: String,
-    style: ButtonStyle,
-    disabled: bool,
-) -> Component {
-    Component::Button(Button {
-        id: None,
-        custom_id: Some(custom_id),
-        disabled,
-        emoji: None,
-        label: Some(label.to_owned()),
-        style,
-        url: None,
-        sku_id: None,
-    })
-}
-
-fn selected_component_value(
-    component: &twilight_model::application::interaction::message_component::MessageComponentInteractionData,
-) -> Result<&str> {
-    component
-        .values
-        .first()
-        .map(String::as_str)
-        .context("profile selection is empty")
-}
-
-fn profile_selection_parts(value: &str, expected: usize) -> Result<Vec<&str>> {
-    let parts = value.split('|').collect::<Vec<_>>();
-    if parts.len() != expected {
-        bail!("invalid execution-profile selection");
-    }
-    Ok(parts)
-}
-
-fn optional_profile_value(value: &str) -> Option<&str> {
-    (value != "-").then_some(value)
-}
-
-fn profile_model<'a>(
-    profiles: &'a RuntimeExecutionProfiles,
-    key: &str,
-) -> Result<&'a RuntimeExecutionProfileModel> {
-    profiles
-        .models
-        .iter()
-        .find(|model| model.key == key)
-        .context("selected model is unavailable")
-}
-
-fn title_case_profile_value(value: &str) -> String {
-    let mut characters = value.chars();
-    characters.next().map_or_else(String::new, |first| {
-        first.to_uppercase().collect::<String>() + characters.as_str()
-    })
-}
-
-fn current_conversation_available(
-    config: &DiscordConfig,
-    channel_id: &str,
-    parent_channel_id: Option<&str>,
-) -> bool {
-    parent_channel_id.is_some_and(|parent| {
-        config.routes.iter().any(|route| {
-            route.channel_id == parent && route.conversation == DiscordConversation::Thread
-        })
-    }) || config.routes.iter().any(|route| {
-        route.channel_id == channel_id && route.conversation == DiscordConversation::Channel
-    })
-}
-
-fn deferred_model_response(component: bool) -> InteractionResponse {
-    InteractionResponse {
-        kind: if component {
-            InteractionResponseType::DeferredUpdateMessage
-        } else {
-            InteractionResponseType::DeferredChannelMessageWithSource
-        },
-        data: (!component).then(|| InteractionResponseData {
-            flags: Some(MessageFlags::EPHEMERAL),
-            ..InteractionResponseData::default()
-        }),
-    }
-}
-
-fn interaction_response(
-    kind: InteractionResponseType,
-    content: &str,
-    ephemeral: bool,
-) -> InteractionResponse {
-    InteractionResponse {
-        kind,
-        data: Some(InteractionResponseData {
-            flags: ephemeral.then_some(MessageFlags::EPHEMERAL),
-            ..interaction_data(content, Vec::new())
-        }),
-    }
-}
-
-fn interaction_data(content: &str, components: Vec<Component>) -> InteractionResponseData {
-    InteractionResponseData {
-        content: Some(content.to_owned()),
-        components: Some(components),
-        ..InteractionResponseData::default()
-    }
-}
-
-fn limit_discord_text(value: &str, limit: usize) -> String {
-    value.chars().take(limit).collect()
-}
-
-async fn fetch_runtime_execution_profiles(
-    state: &DiscordState,
-    audience_id: Option<&str>,
-) -> Result<RuntimeExecutionProfiles> {
-    let mut url = reqwest::Url::parse(&format!("{}/v1/execution-profiles", state.core_url))?;
-    if let Some(audience_id) = audience_id {
-        url.query_pairs_mut()
-            .append_pair("interface_id", &state.provider_id)
-            .append_pair("audience_id", audience_id);
-    }
-    let request = state
-        .client
-        .get(url)
-        .bearer_auth(&state.token)
-        .header("x-carillon-provider", &state.provider_id);
-    request
-        .send()
-        .await
-        .context("fetch runtime execution profiles")?
-        .error_for_status()
-        .context("core rejected execution-profile listing")?
-        .json()
-        .await
-        .context("decode runtime execution profiles")
-}
-
-async fn apply_runtime_execution_profile(
-    state: &DiscordState,
-    selection: &ExecutionProfileSelection,
-) -> Result<ExecutionProfileApplication> {
-    state
-        .client
-        .put(format!("{}/v1/execution-profile", state.core_url))
-        .bearer_auth(&state.token)
-        .header("x-carillon-provider", &state.provider_id)
-        .json(selection)
-        .send()
-        .await
-        .context("apply runtime execution profile")?
-        .error_for_status()
-        .context("core rejected execution-profile selection")?
-        .json()
-        .await
-        .context("decode applied execution profile")
-}
-
 async fn delivery_loop(state: DiscordState, http: Arc<DiscordHttp>) {
     loop {
         match claim_core_delivery(&state).await {
@@ -1715,30 +974,6 @@ fn adapter_identity_admit(
     Ok(())
 }
 
-fn adapter_route_admit(
-    config: &DiscordConfig,
-    channel_id: &str,
-    parent_channel_id: Option<&str>,
-) -> Result<(), ServiceError> {
-    let direct = config
-        .routes
-        .iter()
-        .any(|route| route.channel_id == channel_id);
-    let child = parent_channel_id.is_some_and(|parent| {
-        config.routes.iter().any(|route| {
-            route.channel_id == parent && route.conversation == DiscordConversation::Thread
-        })
-    });
-    if direct || child {
-        Ok(())
-    } else {
-        Err(ServiceError {
-            status: StatusCode::FORBIDDEN,
-            message: "channel is not configured as a Discord route".to_owned(),
-        })
-    }
-}
-
 async fn serve_component(url: String, router: Router, name: &str) -> Result<()> {
     let address = url
         .strip_prefix("http://")
@@ -1760,21 +995,51 @@ fn persist_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
     use anyhow::{Context as _, anyhow};
+    use axum::{
+        body::Body,
+        http::{Method, Request, StatusCode, Uri},
+    };
     use serde_json::Value;
+    use tokio::sync::Mutex;
+    use tower::ServiceExt as _;
 
     use super::{
-        DiscordParticipation, MessagePlan, ServiceError, deferred_model_response, discord_chunks,
-        profile_panel, resolve_message, resolved_message, thread_title,
+        DiscordParticipation, DiscordState, MessagePlan, ServiceError, discord_chunks,
+        discord_router, resolve_message, resolved_message, thread_title,
     };
     use crate::{
         config::{DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute},
-        model::{
-            RuntimeExecutionProfileModel, RuntimeExecutionProfiles, ServiceTier, SimulateRequest,
-        },
+        model::{Health, SimulateRequest},
     };
+
+    #[tokio::test]
+    async fn production_discord_does_not_expose_simulation() -> anyhow::Result<()> {
+        let state = DiscordState {
+            discord: discord_config(DiscordActivation::Always, DiscordConversation::Channel),
+            health: Health {
+                id: "discord".to_owned(),
+                role: "interface".to_owned(),
+                version: "test".to_owned(),
+                status: "ready".to_owned(),
+            },
+            core_url: "http://127.0.0.1:1".to_owned(),
+            provider_id: "discord".to_owned(),
+            token: "token".to_owned(),
+            instance_id: "instance".to_owned(),
+            client: reqwest::Client::new(),
+            participation_path: PathBuf::from("unused"),
+            participation: Arc::new(Mutex::new(DiscordParticipation::default())),
+        };
+        let mut request = Request::new(Body::empty());
+        *request.method_mut() = Method::POST;
+        *request.uri_mut() = Uri::from_static("/v1/simulate");
+        let response = discord_router(state, false).oneshot(request).await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
 
     #[test]
     fn discord_messages_split_cleanly_at_the_platform_limit() {
@@ -1791,148 +1056,6 @@ mod tests {
         assert_eq!(unbroken.len(), 2);
         assert_eq!(unbroken[0].chars().count(), 2_000);
         assert_eq!(unbroken[1], "🦀");
-    }
-
-    #[test]
-    fn discord_model_deferral_payloads_match_interaction_kinds() -> serde_json::Result<()> {
-        let command = serde_json::to_value(deferred_model_response(false))?;
-        assert_eq!(command["type"], 5);
-        assert_eq!(command["data"]["flags"], 64);
-
-        let component = serde_json::to_value(deferred_model_response(true))?;
-        assert_eq!(component["type"], 6);
-        assert_eq!(component["data"], Value::Null);
-        Ok(())
-    }
-
-    #[test]
-    fn discord_profile_panel_pages_models_and_keeps_apply_visible() -> serde_json::Result<()> {
-        let models = (0..26)
-            .map(|index| RuntimeExecutionProfileModel {
-                key: format!("key-{index}"),
-                provider: "provider".to_owned(),
-                provider_name: "Provider".to_owned(),
-                id: format!("model-{index}"),
-                name: format!("Model {index}"),
-                reasoning: Vec::new(),
-                service_tiers: Vec::new(),
-            })
-            .collect::<Vec<_>>();
-        let profiles = RuntimeExecutionProfiles {
-            models,
-            selected: None,
-        };
-        let first = serde_json::to_value(profile_panel(
-            &profiles,
-            &profiles.models[0],
-            None,
-            None,
-            false,
-            0,
-        ))?;
-        assert_eq!(
-            first["components"][0]["components"][0]["options"]
-                .as_array()
-                .map(Vec::len),
-            Some(25)
-        );
-        assert_eq!(
-            first["components"][1]["components"]
-                .as_array()
-                .map(Vec::len),
-            Some(3)
-        );
-
-        let second = serde_json::to_value(profile_panel(
-            &profiles,
-            &profiles.models[25],
-            None,
-            None,
-            false,
-            1,
-        ))?;
-        assert_eq!(
-            second["components"][0]["components"][0]["options"]
-                .as_array()
-                .map(Vec::len),
-            Some(1)
-        );
-        assert_eq!(
-            second["components"][0]["components"][0]["options"][0]["default"],
-            Value::Bool(true)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn discord_profile_panel_shows_supported_settings_together() -> anyhow::Result<()> {
-        let supported = RuntimeExecutionProfileModel {
-            key: "a".repeat(64),
-            provider: "openai-codex".to_owned(),
-            provider_name: "OpenAI (ChatGPT Plus/Pro)".to_owned(),
-            id: "gpt".to_owned(),
-            name: "GPT".to_owned(),
-            reasoning: vec!["low".to_owned(), "high".to_owned()],
-            service_tiers: vec![ServiceTier::Standard, ServiceTier::Fast],
-        };
-        let unsupported = RuntimeExecutionProfileModel {
-            key: "unsupported".to_owned(),
-            provider: "other".to_owned(),
-            provider_name: "Other".to_owned(),
-            id: "plain".to_owned(),
-            name: "Plain".to_owned(),
-            reasoning: Vec::new(),
-            service_tiers: Vec::new(),
-        };
-        let profiles = RuntimeExecutionProfiles {
-            models: vec![supported.clone(), unsupported.clone()],
-            selected: None,
-        };
-        let panel = serde_json::to_value(profile_panel(
-            &profiles,
-            &supported,
-            Some("high"),
-            Some(ServiceTier::Fast),
-            true,
-            0,
-        ))?;
-        assert_eq!(panel["components"].as_array().map(Vec::len), Some(5));
-        assert_eq!(
-            panel["components"][0]["components"][0]["custom_id"],
-            "carillon:profile:provider"
-        );
-        assert_eq!(
-            panel["components"][1]["components"][0]["custom_id"],
-            "carillon:profile:model"
-        );
-        assert_eq!(
-            panel["components"][2]["components"][0]["custom_id"],
-            "carillon:profile:reasoning"
-        );
-        assert_eq!(
-            panel["components"][3]["components"][0]["custom_id"],
-            "carillon:profile:tier"
-        );
-        let speed_options = panel["components"][3]["components"][0]["options"]
-            .as_array()
-            .context("speed options missing")?;
-        assert_eq!(speed_options.len(), 2);
-        assert_eq!(speed_options[0]["label"], "Standard");
-        assert_eq!(speed_options[1]["label"], "Fast");
-        let buttons = panel["components"][4]["components"]
-            .as_array()
-            .context("profile buttons missing")?;
-        assert_eq!(buttons.len(), 2);
-        assert!(buttons.iter().all(|button| {
-            button["custom_id"]
-                .as_str()
-                .is_some_and(|custom_id| custom_id.len() <= 100)
-        }));
-
-        let minimal =
-            serde_json::to_value(profile_panel(&profiles, &unsupported, None, None, false, 0))?;
-        assert_eq!(minimal["components"].as_array().map(Vec::len), Some(3));
-        Ok(())
     }
 
     #[test]

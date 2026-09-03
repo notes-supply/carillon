@@ -9,7 +9,6 @@ import {
 import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { modelRuntimeForServiceTier, type ServiceTier } from "./profile.ts";
 
 interface PiExecutionSessionOptions {
   readonly resourceRoot: string;
@@ -18,7 +17,7 @@ interface PiExecutionSessionOptions {
   readonly modelRuntime: ModelRuntime;
   readonly model?: Model<Api>;
   readonly thinkingLevel?: ModelThinkingLevel;
-  readonly serviceTier?: ServiceTier;
+
   readonly customTools?: ToolDefinition[];
 }
 
@@ -35,7 +34,7 @@ export async function createPiExecutionSession(options: PiExecutionSessionOption
   const created = await createAgentSession({
     cwd: options.workspace,
     agentDir: options.resourceRoot,
-    modelRuntime: modelRuntimeForServiceTier(options.modelRuntime, options.serviceTier),
+    modelRuntime: options.modelRuntime,
     ...(options.model === undefined ? {} : { model: options.model }),
     ...(options.thinkingLevel === undefined ? {} : { thinkingLevel: options.thinkingLevel }),
     resourceLoader: loader,

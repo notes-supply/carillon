@@ -77,7 +77,6 @@ pub fn initialize(
     if root.exists() && fs::read_dir(root)?.next().is_some() {
         bail!("installation root {} is not empty", root.display());
     }
-    create_installation_directories(root)?;
     let discord_token = new_token();
     let operator_token = new_token();
     let runtime_token = new_token();
@@ -115,6 +114,7 @@ pub fn initialize(
     };
     config.validate()?;
     config.discord()?;
+    create_installation_directories(root)?;
     let config_path = root.join("carillon.toml");
     atomic_write(
         &config_path,
@@ -272,8 +272,6 @@ pub fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
             destination.display()
         );
     }
-    let database = Database::open(&config.value.data_dir.join("carillon.sqlite3"))?;
-    database.record_backup(&destination)?;
     let file = fs::OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -453,6 +451,26 @@ mod tests {
                 "runtime-pi.token"
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_initialization_does_not_create_the_root() -> Result<()> {
+        let directory = tempdir()?;
+        let root = directory.path().join("installation");
+        assert!(
+            initialize(
+                &root,
+                directory.path(),
+                "100",
+                "101",
+                &["200".to_owned()],
+                &[route()],
+                u16::MAX,
+            )
+            .is_err()
+        );
+        assert!(!root.exists());
         Ok(())
     }
 
