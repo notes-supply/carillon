@@ -272,19 +272,25 @@ pub fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
             destination.display()
         );
     }
-    let file = fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&destination)?;
-    let encoder = GzEncoder::new(BufWriter::new(file), Compression::default());
-    let mut archive = Builder::new(encoder);
-    append_directory(&mut archive, &config.root, &config.root)?;
-    archive.finish()?;
-    let encoder = archive.into_inner()?;
-    let mut writer = encoder.finish()?;
-    writer.flush()?;
-    writer.get_ref().sync_all()?;
-    Ok(())
+    let result = (|| {
+        let file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&destination)?;
+        let encoder = GzEncoder::new(BufWriter::new(file), Compression::default());
+        let mut archive = Builder::new(encoder);
+        append_directory(&mut archive, &config.root, &config.root)?;
+        archive.finish()?;
+        let encoder = archive.into_inner()?;
+        let mut writer = encoder.finish()?;
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&destination);
+    }
+    result
 }
 
 pub fn restore(archive_path: &Path, target: &Path) -> Result<PathBuf> {
