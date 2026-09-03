@@ -25,7 +25,10 @@ use tokio::{
 };
 use tracing::{error, info, warn};
 use twilight_gateway::{Event, EventTypeFlags, Intents, Shard, ShardId, StreamExt as _};
-use twilight_http::{Client as DiscordHttp, request::channel::reaction::RequestReactionType};
+use twilight_http::{
+    Client as DiscordHttp, error::ErrorType as DiscordErrorType,
+    request::channel::reaction::RequestReactionType, response::StatusCode as DiscordStatusCode,
+};
 use twilight_model::{
     channel::{ChannelType, message::MessageType},
     id::{
@@ -433,6 +436,13 @@ async fn prepare_discord_conversation(
             .get(&plan.source_message_id)
             .cloned()
         {
+            remember_created_thread(
+                state,
+                &plan.source_message_id,
+                &thread,
+                &plan.route_channel_id,
+            )
+            .await?;
             thread
         } else {
             let channel = plan
@@ -525,13 +535,6 @@ async fn adopt_thread(
     route_channel_id: &str,
 ) -> Result<(), ServiceError> {
     let mut participation = state.participation.lock().await;
-    if participation
-        .threads
-        .get(thread_id)
-        .is_some_and(|parent| parent == route_channel_id)
-    {
-        return Ok(());
-    }
     participation
         .threads
         .insert(thread_id.to_owned(), route_channel_id.to_owned());
@@ -582,12 +585,30 @@ async fn discord_parent_channel(
     Ok(channel.parent_id.map(|parent| parent.to_string()))
 }
 
+fn discord_status_is_terminal(status: DiscordStatusCode) -> bool {
+    status.is_client_error() && status != DiscordStatusCode::TOO_MANY_REQUESTS
+}
+
+fn discord_failure_is_terminal(failure: &anyhow::Error) -> bool {
+    failure
+        .downcast_ref::<twilight_http::Error>()
+        .is_some_and(|failure| match failure.kind() {
+            DiscordErrorType::Response { status, .. } => discord_status_is_terminal(*status),
+            DiscordErrorType::BuildingRequest
+            | DiscordErrorType::CreatingHeader { .. }
+            | DiscordErrorType::Json
+            | DiscordErrorType::Unauthorized
+            | DiscordErrorType::Validation => true,
+            _ => false,
+        })
+}
+
 async fn message_worker(
     state: DiscordState,
     http: Arc<DiscordHttp>,
     mut messages: mpsc::Receiver<InboundMessage>,
 ) {
-    while let Some(mut inbound) = messages.recv().await {
+    'messages: while let Some(mut inbound) = messages.recv().await {
         let discord = &state.discord;
         if adapter_identity_admit(
             discord,
@@ -601,6 +622,15 @@ async fn message_worker(
         inbound.request.parent_channel_id = loop {
             match discord_parent_channel(&http, &state, &inbound.request.channel_id).await {
                 Ok(parent) => break parent,
+                Err(failure) if discord_failure_is_terminal(&failure) => {
+                    let source = format!(
+                        "{}:{}",
+                        inbound.request.channel_id, inbound.request.event_id
+                    );
+                    terminal_feedback(&http, discord, &source, Feedback::Failed).await;
+                    warn!(error = %failure, "Discord message route is unavailable");
+                    continue 'messages;
+                }
                 Err(failure) => {
                     warn!(error = %failure, "waiting to resolve Discord message route");
                     sleep(Duration::from_millis(250)).await;
@@ -616,12 +646,18 @@ async fn message_worker(
             continue;
         };
         let source = format!("{}:{}", plan.source_channel_id, plan.source_message_id);
-        let resolved = match prepare_discord_conversation(&state, &http, plan).await {
-            Ok(resolved) => resolved,
-            Err(failure) => {
-                terminal_feedback(&http, discord, &source, Feedback::Failed).await;
-                warn!(error = %failure, "Discord conversation resolution failed");
-                continue;
+        let resolved = loop {
+            match prepare_discord_conversation(&state, &http, plan.clone()).await {
+                Ok(resolved) => break resolved,
+                Err(failure) if discord_failure_is_terminal(&failure) => {
+                    terminal_feedback(&http, discord, &source, Feedback::Failed).await;
+                    warn!(error = %failure, "Discord conversation cannot be prepared");
+                    continue 'messages;
+                }
+                Err(failure) => {
+                    warn!(error = %failure, "waiting to prepare Discord conversation");
+                    sleep(Duration::from_millis(250)).await;
+                }
             }
         };
         processing_feedback(&http, discord, &resolved.event.feedback_target_id).await;
@@ -1055,11 +1091,12 @@ mod tests {
     use serde_json::Value;
     use tokio::sync::Mutex;
     use tower::ServiceExt as _;
+    use twilight_http::response::StatusCode as DiscordStatusCode;
 
     use super::{
         DiscordParticipation, DiscordState, MessagePlan, ServiceError, discord_chunks,
-        discord_router, resolve_message, resolved_message, send_discord_message,
-        submit_event_with_retry, thread_title,
+        discord_router, discord_status_is_terminal, resolve_message, resolved_message,
+        send_discord_message, submit_event_with_retry, thread_title,
     };
     use crate::{
         config::{DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute},
@@ -1162,6 +1199,18 @@ mod tests {
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
         assert_eq!(*event_ids.lock().await, vec!["event", "event"]);
         Ok(())
+    }
+
+    #[test]
+    fn discord_route_errors_distinguish_terminal_responses() {
+        assert!(discord_status_is_terminal(DiscordStatusCode::FORBIDDEN));
+        assert!(discord_status_is_terminal(DiscordStatusCode::NOT_FOUND));
+        assert!(!discord_status_is_terminal(
+            DiscordStatusCode::TOO_MANY_REQUESTS
+        ));
+        assert!(!discord_status_is_terminal(
+            DiscordStatusCode::GATEWAY_UNAVAILABLE
+        ));
     }
 
     #[tokio::test]
