@@ -27,7 +27,7 @@ Carillon has two provider roles:
 - **interface providers** own external-platform connections, admission, routing, and delivery;
 - **runtime providers** translate Carillon turns into a native agent engine and own its continuations and resources.
 
-Provider instances have stable IDs. An agent selects a runtime provider. A conversation with a native continuation remains tied to the runtime that owns it.
+Provider instances have stable IDs. An agent selects the default runtime for new conversations. The first accepted turn pins its conversation to that runtime, including while queued and before a native continuation exists. Changing the default does not move accepted work or existing conversations. Disabled or removed owners are not silently replaced; re-enable or restore that provider to continue its conversations.
 
 Provider configuration is static during a process lifetime. Adding or replacing a provider is an explicit configuration and supervision change, followed by restarting the affected service. Carillon does not attempt hot plugin loading or automatic translation between unlike runtimes.
 

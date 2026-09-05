@@ -42,7 +42,7 @@ A future runtime can use different native state and features. Runtime replacemen
 
 1. An interface provider authenticates and admits an external event.
 2. Core transactionally records the event and a queued turn, then returns a queued receipt.
-3. A worker for the selected runtime claims the next eligible turn and marks it running.
+3. Core runs a worker for each enabled runtime, including non-default owners of accepted work. Each claims its next eligible turn and marks it running.
 4. The runtime attempts execution. Carillon does not guarantee exactly-once model or tool side effects.
 5. On success, core atomically stores completed output, the continuation reference, and a delivery intent.
 6. The interface provider claims and sends that delivery, then records delivered or uncertain status.

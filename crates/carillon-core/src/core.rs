@@ -6,7 +6,7 @@ mod tests;
 
 use std::{path::PathBuf, time::Duration};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use axum::{
     Json, Router,
     extract::{Path as AxumPath, Query, State},
@@ -97,9 +97,17 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
         database,
         client: Client::new(),
     };
-    let runtime_id = config.value.agent.runtime_provider.clone();
-    let worker = state.clone();
-    tokio::spawn(async move { runtime_worker(worker, runtime_id).await });
+    let mut workers = tokio::task::JoinSet::new();
+    for runtime in config
+        .value
+        .providers
+        .iter()
+        .filter(|provider| provider.role == ProviderRole::Runtime && provider.enabled)
+    {
+        let runtime_id = runtime.id.clone();
+        let worker = state.clone();
+        workers.spawn(async move { runtime_worker(worker, runtime_id).await });
+    }
 
     let router = Router::new()
         .route("/health", get(health))
@@ -145,7 +153,20 @@ async fn accept_event(
     {
         return Ok(Json(receipt));
     }
-    let runtime = selected_runtime(&state.config)?.clone();
+    let owner = state.database.conversation_runtime(&interface.id, &event)?;
+    let runtime_id = owner
+        .as_deref()
+        .unwrap_or(&state.config.value.agent.runtime_provider);
+    let runtime = state
+        .config
+        .provider(runtime_id, ProviderRole::Runtime)?
+        .clone();
+    if !runtime.enabled {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "conversation runtime provider is disabled",
+        ));
+    }
     let resources = resources::materialize(
         &state.config.value.agent.resource_root,
         &state.snapshot_store(),
@@ -451,14 +472,6 @@ fn provider_status(provider: &Provider, status: &str) -> Health {
         version: provider.version.clone(),
         status: status.to_owned(),
     }
-}
-
-fn selected_runtime(config: &LoadedConfig) -> Result<&Provider> {
-    let runtime = config.provider(&config.value.agent.runtime_provider, ProviderRole::Runtime)?;
-    if !runtime.enabled {
-        bail!("selected runtime provider is disabled");
-    }
-    Ok(runtime)
 }
 
 fn interface_provider<'a>(

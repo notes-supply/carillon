@@ -1,6 +1,6 @@
 use std::{fs, path::Path};
 
-use anyhow::Context as _;
+use anyhow::{Context as _, bail};
 use axum::{response::IntoResponse as _, routing::post};
 use tempfile::tempdir;
 
@@ -305,6 +305,157 @@ async fn duplicate_receipts_do_not_read_mutable_resources() -> Result<()> {
             .event_receipt("other-interface", "one")?
             .is_none()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_ownership_survives_default_changes_and_unavailable_owners() -> Result<()> {
+    let directory = tempdir()?;
+    let mut state = installation(directory.path())?;
+    let mut replacement = state
+        .config
+        .provider("test-runtime", ProviderRole::Runtime)?
+        .clone();
+    replacement.id = "replacement".to_owned();
+    fs::write(
+        directory.path().join("credentials/replacement.token"),
+        "test-only",
+    )?;
+    state.config.value.providers.push(replacement);
+    let first = accept(&state, "one", "conversation").await?;
+    state.config.value.agent.runtime_provider = "replacement".to_owned();
+    state.database = Database::open(&state.config.value.data_dir.join("carillon.sqlite3"))?;
+    let second = accept(&state, "two", "conversation").await?;
+    let fresh = accept(&state, "fresh", "new-conversation").await?;
+    run_next_turn(&state, "replacement", async |_, _, request| {
+        assert_eq!(request.correlation_id, fresh.turn_id);
+        assert_eq!(request.continuation_ref, None);
+        Ok(completed(request))
+    })
+    .await?;
+    for (receipt, continuation) in [(&first, None), (&second, Some("native-conversation"))] {
+        let inspected = state
+            .database
+            .inspect_turn(&receipt.turn_id)?
+            .context("missing turn")?;
+        assert_eq!(inspected.providers[1]["id"], "test-runtime");
+        run_next_turn(&state, "test-runtime", async |_, _, request| {
+            assert_eq!(request.correlation_id, receipt.turn_id);
+            assert_eq!(request.continuation_ref.as_deref(), continuation);
+            Ok(completed(request))
+        })
+        .await?;
+    }
+    let third = accept(&state, "three", "conversation").await?;
+    run_next_turn(&state, "test-runtime", async |_, _, request| {
+        assert_eq!(request.correlation_id, third.turn_id);
+        assert_eq!(
+            request.continuation_ref.as_deref(),
+            Some("native-conversation")
+        );
+        Ok(completed(request))
+    })
+    .await?;
+    state.config.value.providers[1].enabled = false;
+    assert!(accept(&state, "disabled", "conversation").await.is_err());
+    assert!(accept(&state, "one", "conversation").await?.duplicate);
+    state.config.value.providers.remove(1);
+    assert!(accept(&state, "removed", "conversation").await.is_err());
+    assert_eq!(state.database.recent_turns(None, 10)?.len(), 4);
+    Ok(())
+}
+
+#[tokio::test]
+async fn startup_drains_queued_nondefault_runtime_without_replaying_running_work() -> Result<()> {
+    let directory = tempdir()?;
+    let mut state = installation(directory.path())?;
+    let running = accept(&state, "interrupted", "blocked").await?;
+    state
+        .database
+        .claim_turn("test-runtime")?
+        .context("missing claim")?;
+    let blocked = accept(&state, "successor", "blocked").await?;
+    let queued = accept(&state, "queued", "old-conversation").await?;
+    let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let mut services = tokio::task::JoinSet::new();
+    for id in ["test-runtime", "replacement"] {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let mut provider = state
+            .config
+            .provider("test-runtime", ProviderRole::Runtime)?
+            .clone();
+        provider.id = id.to_owned();
+        provider.url = format!("http://{}", listener.local_addr()?);
+        fs::write(
+            directory.path().join(format!("credentials/{id}.token")),
+            "test-only",
+        )?;
+        if id == "test-runtime" {
+            state.config.value.providers[1] = provider;
+        } else {
+            state.config.value.providers.push(provider);
+        }
+        let sent = sent.clone();
+        let app = Router::new().route(
+            "/v1/turns",
+            post(move |Json(request): Json<RuntimeTurnRequest>| {
+                let sent = sent.clone();
+                async move {
+                    let _ = sent.send((id, request.correlation_id.clone()));
+                    Json(completed(request))
+                }
+            }),
+        );
+        services.spawn(async move { axum::serve(listener, app).await });
+    }
+    state.config.value.agent.runtime_provider = "replacement".to_owned();
+    let fresh = accept(&state, "fresh", "new-conversation").await?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    state.config.value.core.listen = listener.local_addr()?;
+    drop(listener);
+    // Exercise the real startup worker selection and recovery against reopened SQLite.
+    let config = state.config.clone();
+    services.spawn(async move { serve(config).await.map_err(std::io::Error::other) });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut calls = Vec::new();
+        for _ in 0..2 {
+            calls.push(received.recv().await.context("runtime trace ended")?);
+        }
+        calls.sort();
+        assert_eq!(
+            calls,
+            vec![
+                ("replacement", fresh.turn_id.clone()),
+                ("test-runtime", queued.turn_id.clone())
+            ]
+        );
+        loop {
+            if state.database.turn_counts()?.completed == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            state
+                .database
+                .inspect_turn(&running.turn_id)?
+                .context("interrupted turn missing")?
+                .state,
+            TurnState::Uncertain
+        );
+        assert_eq!(
+            state
+                .database
+                .inspect_turn(&blocked.turn_id)?
+                .context("blocked turn missing")?
+                .state,
+            TurnState::Queued
+        );
+        assert!(received.try_recv().is_err());
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
+    services.shutdown().await;
     Ok(())
 }
 

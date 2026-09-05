@@ -134,6 +134,8 @@ impl Database {
                 UNIQUE(interface_id, event_id),
                 FOREIGN KEY(interface_id, event_id) REFERENCES events(interface_id, event_id)
             );
+            CREATE INDEX IF NOT EXISTS turns_conversation
+                ON turns(interface_id, agent_id, audience_id, acceptance_sequence);
             CREATE TABLE IF NOT EXISTS continuations (
                 interface_id TEXT NOT NULL,
                 agent_id TEXT NOT NULL,
@@ -169,6 +171,16 @@ impl Database {
         event_receipt(&self.connect()?, interface_id, event_id)
     }
 
+    /// The first accepted turn pins a conversation, even before its runtime
+    /// has returned a continuation. Changing the default cannot move it.
+    pub fn conversation_runtime(
+        &self,
+        interface_id: &str,
+        event: &ExternalEvent,
+    ) -> Result<Option<String>> {
+        conversation_runtime(&self.connect()?, interface_id, event)
+    }
+
     /// Records an admitted event and its queued turn, or returns the receipt
     /// of the turn a previous submission of the same event already created.
     pub fn accept_event(
@@ -186,6 +198,11 @@ impl Database {
             return Ok(receipt);
         }
 
+        if let Some(owner) = conversation_runtime(&transaction, interface_id, event)?
+            && owner != runtime_id
+        {
+            bail!("conversation is owned by runtime {owner}, not {runtime_id}");
+        }
         let turn_id = uuid::Uuid::now_v7().to_string();
         let now = timestamp()?;
         transaction.execute(
@@ -723,6 +740,22 @@ fn json_column<T: DeserializeOwned>(row: &Row<'_>, index: usize) -> rusqlite::Re
     })
 }
 
+fn conversation_runtime(
+    connection: &Connection,
+    interface_id: &str,
+    event: &ExternalEvent,
+) -> Result<Option<String>> {
+    Ok(connection
+        .query_row(
+            "SELECT runtime_id FROM turns
+         WHERE interface_id = ?1 AND agent_id = ?2 AND audience_id = ?3
+         ORDER BY acceptance_sequence LIMIT 1",
+            params![interface_id, event.agent_id, event.audience_id],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
 fn event_receipt(
     connection: &Connection,
     interface_id: &str,
@@ -794,6 +827,61 @@ mod tests {
             &json!([]),
             &resources(),
         )
+    }
+
+    #[test]
+    fn acceptance_pins_only_committed_conversations_and_rejects_owner_changes() -> Result<()> {
+        let directory = tempdir()?;
+        let database = Database::open(&directory.path().join("state.sqlite3"))?;
+        let first = event("one", "conversation");
+        database.connect()?.execute_batch(
+            "CREATE TRIGGER fail_turn BEFORE INSERT ON turns
+             BEGIN SELECT RAISE(ABORT, 'injected acceptance failure'); END;",
+        )?;
+        assert!(accept(&database, "one", "conversation").is_err());
+        assert_eq!(database.conversation_runtime("discord", &first)?, None);
+        assert_eq!(
+            database
+                .connect()?
+                .query_row("SELECT COUNT(*) FROM events", [], |row| row
+                    .get::<_, u32>(0))?,
+            0
+        );
+        database
+            .connect()?
+            .execute_batch("DROP TRIGGER fail_turn")?;
+        accept(&database, "one", "conversation")?;
+        assert_eq!(
+            database.conversation_runtime("discord", &first)?.as_deref(),
+            Some("runtime")
+        );
+        assert_eq!(
+            database.conversation_runtime("other-interface", &first)?,
+            None
+        );
+        let mut other_agent = first.clone();
+        other_agent.agent_id = "other-agent".to_owned();
+        assert_eq!(
+            database.conversation_runtime("discord", &other_agent)?,
+            None
+        );
+        let second = event("two", "conversation");
+        assert!(
+            database
+                .accept_event("discord", "replacement", &second, &json!([]), &resources())
+                .is_err()
+        );
+        assert!(database.event_receipt("discord", "two")?.is_none());
+        assert_eq!(database.recent_turns(None, 10)?.len(), 1);
+        // A stale runtime selection must not prevent recovery of an existing receipt.
+        assert!(
+            database
+                .accept_event("discord", "replacement", &first, &json!([]), &resources())?
+                .duplicate
+        );
+        accept(&database, "two", "conversation")?;
+        assert_eq!(database.recent_turns(None, 10)?.len(), 2);
+        Ok(())
     }
 
     #[test]
