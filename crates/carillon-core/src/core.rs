@@ -158,13 +158,17 @@ async fn accept_event(
     let runtime_id = owner
         .as_deref()
         .unwrap_or(&state.config.value.agent.runtime_provider);
+    // A missing/disabled owner is a configuration conflict, not temporary
+    // transport failure. Reject new input explicitly so interfaces do not
+    // retry it indefinitely ahead of unrelated conversations.
     let runtime = state
         .config
-        .provider(runtime_id, ProviderRole::Runtime)?
+        .provider(runtime_id, ProviderRole::Runtime)
+        .map_err(|error| ApiError::new(StatusCode::CONFLICT, error.to_string()))?
         .clone();
     if !runtime.enabled {
         return Err(ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::CONFLICT,
             "conversation runtime provider is disabled",
         ));
     }
@@ -224,6 +228,11 @@ async fn run_next_turn(
         return Ok(WorkerStep::Backoff);
     }
     let token = state.config.credential(runtime_id)?;
+    if !token_matches(&runtime.token_hash, &token) {
+        return Err(anyhow!(
+            "runtime provider {runtime_id} credential does not match configuration"
+        ));
+    }
     let Some(turn) = state.database.claim_turn(runtime_id)? else {
         return Ok(WorkerStep::Idle);
     };

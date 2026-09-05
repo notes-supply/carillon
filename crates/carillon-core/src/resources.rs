@@ -106,8 +106,7 @@ fn selected_resource_files(source: &Path) -> Result<BTreeMap<String, ResourceFil
     let mut files = BTreeMap::new();
     for name in ["SYSTEM.md", "AGENTS.md", "settings.json"] {
         let path = source.join(name);
-        if path.exists() {
-            let metadata = fs::symlink_metadata(&path)?;
+        if let Some(metadata) = resource_metadata(&path)? {
             if !metadata.file_type().is_file() {
                 bail!("agent resource is not a regular file: {}", path.display());
             }
@@ -125,8 +124,11 @@ fn collect_resource_tree(
     prefix: &str,
     files: &mut BTreeMap<String, ResourceFile>,
 ) -> Result<()> {
-    if !directory.exists() {
+    let Some(metadata) = resource_metadata(directory)? else {
         return Ok(());
+    };
+    if !metadata.is_dir() {
+        bail!("agent resource is not a directory: {}", directory.display());
     }
     for entry in fs::read_dir(directory)
         .with_context(|| format!("read resource directory {}", directory.display()))?
@@ -154,6 +156,19 @@ fn collect_resource_tree(
         }
     }
     Ok(())
+}
+
+fn resource_metadata(path: &Path) -> Result<Option<fs::Metadata>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.is_symlink() {
+                bail!("resource symlinks are not supported: {}", path.display());
+            }
+            Ok(Some(metadata))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn hash_entries(files: &BTreeMap<String, ResourceFile>, prefix: &str) -> String {
@@ -195,6 +210,49 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{materialize, runtime_view};
+
+    #[test]
+    fn snapshots_reject_symlinked_subtree_roots_and_dangling_resources() -> anyhow::Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let external = tempdir()?;
+        fs::write(
+            external.path().join("private.txt"),
+            "outside snapshot selection",
+        )?;
+        for name in [
+            "extensions",
+            "skills",
+            "SYSTEM.md",
+            "AGENTS.md",
+            "settings.json",
+        ] {
+            for destination in [
+                external.path().to_path_buf(),
+                external.path().join("absent"),
+            ] {
+                let source = tempdir()?;
+                let parent = tempdir()?;
+                let store = parent.path().join("snapshots");
+                let link = source.path().join(name);
+                symlink(destination, &link)?;
+                let error = materialize(source.path(), &store)
+                    .err()
+                    .context("symlink was accepted")?;
+                assert!(
+                    error
+                        .to_string()
+                        .contains("resource symlinks are not supported")
+                );
+                assert!(!store.exists(), "rejected resource published a snapshot");
+                fs::remove_file(link)?;
+                // Missing optional resources are still valid; refusal leaves retry usable.
+                let snapshot = materialize(source.path(), &store)?;
+                assert!(fs::read_dir(store.join(snapshot.id))?.next().is_none());
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn snapshots_preserve_native_helpers_and_address_executable_changes() -> anyhow::Result<()> {

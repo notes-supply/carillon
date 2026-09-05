@@ -1591,6 +1591,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn configuration_rejection_does_not_block_the_next_discord_message() -> anyhow::Result<()>
+    {
+        let (trace, mut observed) = tokio::sync::mpsc::unbounded_channel();
+        let core_trace = trace.clone();
+        let app = Router::new()
+            .route(
+                "/v1/events",
+                post(move |Json(event): Json<ExternalEvent>| {
+                    let trace = core_trace.clone();
+                    async move {
+                        let _ = trace.send(format!("submit {}", event.event_id));
+                        if event.event_id == "400" {
+                            (
+                                StatusCode::CONFLICT,
+                                "conversation runtime provider is disabled",
+                            )
+                                .into_response()
+                        } else {
+                            Json(EventReceipt {
+                                event_id: event.event_id,
+                                turn_id: "accepted".to_owned(),
+                                duplicate: false,
+                                state: TurnState::Queued,
+                            })
+                            .into_response()
+                        }
+                    }
+                }),
+            )
+            .fallback(move |method: Method, uri: Uri| {
+                let trace = trace.clone();
+                async move {
+                    let _ = trace.send(format!("{method} {uri}"));
+                    StatusCode::NO_CONTENT
+                }
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let http = Arc::new(
+            twilight_http::Client::builder()
+                .token("test-only".to_owned())
+                .proxy(address.to_string(), true)
+                .ratelimiter(None)
+                .build(),
+        );
+        let mut state = discord_state(core_client(format!("http://{address}")));
+        state.discord.typing = false;
+        let mut other = state.discord.routes[0].clone();
+        other.channel_id = "301".to_owned();
+        state.discord.routes.push(other);
+        state.discord.failed_emoji = "❌".to_owned();
+        let mut services = tokio::task::JoinSet::new();
+        services.spawn(async move { axum::serve(listener, app).await });
+        let (send, receive) = tokio::sync::mpsc::channel(2);
+        for (event, channel) in [("400", "300"), ("401", "301")] {
+            send.send(super::InboundMessage {
+                request: SimulateRequest {
+                    event_id: event.to_owned(),
+                    guild_id: Some("100".to_owned()),
+                    user_id: "200".to_owned(),
+                    channel_id: channel.to_owned(),
+                    parent_channel_id: None,
+                    content: "hello".to_owned(),
+                },
+                native: Value::Null,
+            })
+            .await?;
+        }
+        drop(send);
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            super::message_worker(state, http, receive),
+        )
+        .await?;
+        let mut requests = Vec::new();
+        while let Ok(request) = observed.try_recv() {
+            requests.push(request);
+        }
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("submit "))
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["submit 400", "submit 401"]
+        );
+        // Observe actual failure feedback before the unrelated event's admission.
+        let failure = requests
+            .iter()
+            .position(|request| {
+                request.starts_with("PUT /api/v10/channels/300/messages/400/reactions/")
+                    && request.contains("%E2%9D%8C")
+            })
+            .context("rejected message had no failure feedback")?;
+        let next = requests
+            .iter()
+            .position(|request| request == "submit 401")
+            .context("unrelated message not submitted")?;
+        assert!(failure < next);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn complete_invalid_receipt_is_not_retried_forever() -> anyhow::Result<()> {
         let attempts = Arc::new(AtomicUsize::new(0));
         let server_attempts = attempts.clone();

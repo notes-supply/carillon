@@ -508,6 +508,62 @@ async fn live_interface_claim_survives_core_startup_and_acknowledges_once() -> R
 }
 
 #[tokio::test]
+async fn credential_drift_leaves_work_queued_until_repaired() -> Result<()> {
+    let directory = tempdir()?;
+    let mut state = installation(directory.path())?;
+    let credential = directory.path().join("credentials/test-runtime.token");
+    let first = accept(&state, "one", "conversation").await?;
+    for replacement in [Some("changed-token"), Some("\n"), None] {
+        if let Some(value) = replacement {
+            fs::write(&credential, value)?;
+        } else {
+            fs::remove_file(&credential)?;
+        }
+        let mut calls = 0;
+        let result = run_next_turn(&state, "test-runtime", async |_, _, request| {
+            calls += 1;
+            Ok(completed(request))
+        })
+        .await;
+        assert!(result.is_err(), "invalid credential was accepted");
+        assert_eq!(
+            calls, 0,
+            "runtime was contacted before credential validation"
+        );
+        let turn = state
+            .database
+            .inspect_turn(&first.turn_id)?
+            .context("missing turn")?;
+        assert_eq!(turn.state, TurnState::Queued);
+        assert!(turn.delivery_state.is_none());
+    }
+    state.database = Database::open(&state.config.value.data_dir.join("carillon.sqlite3"))?;
+    assert_eq!(state.database.recover_running_turns()?, 0);
+    fs::write(&credential, "test-only\n")?;
+    let mut calls = 0;
+    assert_eq!(
+        run_next_turn(&state, "test-runtime", async |_, token, request| {
+            calls += 1;
+            assert_eq!(token, "test-only");
+            assert_eq!(request.correlation_id, first.turn_id);
+            Ok(completed(request))
+        })
+        .await?,
+        WorkerStep::Advanced
+    );
+    assert_eq!(calls, 1);
+    assert_eq!(
+        state
+            .database
+            .inspect_turn(&first.turn_id)?
+            .context("missing turn")?
+            .state,
+        TurnState::Completed
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn duplicate_events_share_one_accepted_turn_without_reexecution() -> Result<()> {
     let directory = tempdir()?;
     let state = installation(directory.path())?;
@@ -585,6 +641,70 @@ async fn duplicate_receipts_do_not_read_mutable_resources() -> Result<()> {
             .event_receipt("other-interface", "one")?
             .is_none()
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn unavailable_conversation_owner_rejects_input_as_configuration_conflict() -> Result<()> {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt as _;
+
+    let directory = tempdir()?;
+    let mut state = installation(directory.path())?;
+    let original = accept(&state, "original", "pinned").await?;
+    let mut replacement = state.config.value.providers[1].clone();
+    replacement.id = "replacement".to_owned();
+    state.config.value.providers.push(replacement);
+    state.config.value.agent.runtime_provider = "replacement".to_owned();
+    state.config.value.providers[1].enabled = false;
+    for id in ["disabled", "removed"] {
+        let router = Router::new()
+            .route("/v1/events", post(accept_event))
+            .with_state(state.clone());
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/events")
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .header(http::header::AUTHORIZATION, "Bearer test-only")
+                    .header(PROVIDER_HEADER, "test-interface")
+                    .body(Body::from(serde_json::to_vec(&ExternalEvent {
+                        event_id: id.to_owned(),
+                        agent_id: "test-agent".to_owned(),
+                        user_id: "test-user".to_owned(),
+                        audience_id: "pinned".to_owned(),
+                        delivery_target_id: "target".to_owned(),
+                        feedback_target_id: "feedback".to_owned(),
+                        content: "new input".to_owned(),
+                        native: serde_json::Value::Null,
+                    })?))?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(
+            state
+                .database
+                .event_receipt("test-interface", id)?
+                .is_none()
+        );
+        // Other conversations still accept input; recovery of known receipts still works.
+        accept(&state, id, "unrelated").await?;
+        assert!(accept(&state, "original", "pinned").await?.duplicate);
+        assert_eq!(
+            state
+                .database
+                .inspect_turn(&original.turn_id)?
+                .context("missing pinned turn")?
+                .state,
+            TurnState::Queued
+        );
+        state
+            .config
+            .value
+            .providers
+            .retain(|provider| provider.id != "test-runtime");
+    }
     Ok(())
 }
 
