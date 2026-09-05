@@ -65,11 +65,12 @@ case "$command" in
   rm) exec "$REAL_RM" "$@" ;;
   rmdir) exec "$REAL_RMDIR" "$@" ;;
   sync) exec "$REAL_SYNC" "$@" ;;
+  systemctl) touch "$MARKER"; exit 1 ;;
 esac
 exit 2
 COMMAND
 chmod 0755 "$COMMANDS/fail-command"
-for command in find rm rmdir sync; do
+for command in find rm rmdir sync systemctl; do
   ln -s fail-command "$COMMANDS/$command"
 done
 ln -s "$ROOT/app/bin/carillon-uninstall" "$OWNER_HOME/remove-carillon"
@@ -125,6 +126,48 @@ for failure in unset stale partial-term partial-kill sync-cleanup marker-kill rm
   [ "$(cat "$OWNER_HOME/unrelated")" = unrelated-owner-data ]
   printf 'uninstall recovery passed: %s\n' "$failure"
 done
+
+# Refuse relative owner/unit paths before service-manager or filesystem changes.
+install_release "$ROOT"
+cp -a "$ROOT" "$TEST_ROOT/installation-before"
+cp -a "$UNIT_DIR" "$TEST_ROOT/units-before-relative"
+app_inode=$(stat -c %i "$ROOT/app")
+mkdir -p "$TEST_ROOT/relative-config/systemd" "$TEST_ROOT/relative-home/.config/systemd"
+cp -a "$UNIT_DIR" "$TEST_ROOT/relative-config/systemd/user"
+cp -a "$UNIT_DIR" "$TEST_ROOT/relative-home/.config/systemd/user"
+for helper in "$OWNER_HOME/remove-carillon" "$RELEASE/uninstall.sh"; do
+  for invalid in xdg home home-with-xdg; do
+    bad_home=$OWNER_HOME
+    bad_xdg=relative-config
+    expected=XDG_CONFIG_HOME
+    if [ "$invalid" != xdg ]; then
+      bad_home=relative-home
+      bad_xdg=
+      expected=HOME
+      [ "$invalid" != home-with-xdg ] || bad_xdg=$OWNER_HOME/.config
+    fi
+    if (cd "$TEST_ROOT" && env HOME="$bad_home" XDG_CONFIG_HOME="$bad_xdg" \
+      CARILLON_HOME="$ROOT" CARILLON_SKIP_SYSTEMD_RELOAD=0 PATH="$COMMANDS:$PATH" \
+      FAILURE=relative MARKER="$TEST_ROOT/service-manager-called" \
+      "$helper") >"$TEST_ROOT/relative.log" 2>&1; then
+      echo "uninstaller accepted relative paths: $helper / $invalid" >&2
+      exit 1
+    fi
+    grep -F "$expected must be an absolute path" "$TEST_ROOT/relative.log" >/dev/null
+    [ ! -e "$TEST_ROOT/service-manager-called" ]
+    [ "$(stat -c %i "$ROOT/app")" = "$app_inode" ]
+    diff -r --no-dereference "$TEST_ROOT/installation-before" "$ROOT"
+    for units in "$UNIT_DIR" "$TEST_ROOT/relative-config/systemd/user" "$TEST_ROOT/relative-home/.config/systemd/user"; do
+      diff -r --no-dereference "$TEST_ROOT/units-before-relative" "$units"
+    done
+    printf 'uninstall path refusal passed: %s / %s\n' "${helper##*/}" "$invalid"
+  done
+done
+env HOME="$OWNER_HOME" XDG_CONFIG_HOME="$OWNER_HOME/.config" \
+  CARILLON_SKIP_SYSTEMD_RELOAD=1 "$OWNER_HOME/remove-carillon" >/dev/null
+[ ! -e "$ROOT/app" ]
+[ -z "$(find "$UNIT_DIR" -maxdepth 1 -name 'carillon*')" ]
+diff -r --no-dereference "$TEST_ROOT/decoy-before" "$DECOY"
 
 # Missing ownership evidence must still refuse recursive deletion and preserve
 # the current user units. Empty-path recovery above cannot be used for this tree.

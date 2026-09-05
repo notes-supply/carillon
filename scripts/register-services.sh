@@ -115,6 +115,8 @@ sync -f -- "$UNIT_DIR"
 if [ "${CARILLON_SKIP_SYSTEMD_RELOAD:-0}" != "1" ]; then
   systemctl --user daemon-reload
   systemctl --user enable carillon.target
+  # Enablement creates the wants symlink after definition publication.
+  sync -f -- "$UNIT_DIR"
 fi
 
 printf '%s\n' "Carillon user units registered for $OWNER at $CARILLON_HOME; services were not started."

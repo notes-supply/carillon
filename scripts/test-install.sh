@@ -2,7 +2,8 @@
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-RELEASE=${1:-"$ROOT/target/package/carillon-0.0.0"}
+VERSION=$(cd "$ROOT" && bun -e 'import manifest from "./crates/carillon-core/Cargo.toml"; console.log(manifest.package.version)')
+RELEASE=${1:-"$ROOT/target/package/carillon-$VERSION"}
 BASE_PORT=${CARILLON_TEST_BASE_PORT:-44800}
 
 # This tests the bundled Discord/Pi release, not a limit on provider extensibility.
@@ -65,6 +66,21 @@ cleanup() {
   rm -rf "$TEST_ROOT"
 }
 trap cleanup EXIT INT TERM
+
+# Package names cannot override the identity embedded by Cargo. Refuse before
+# creating staging/output, including for a non-default manifest version.
+VERSION_FIXTURE=$TEST_ROOT/version-fixture
+mkdir -p "$VERSION_FIXTURE/scripts" "$VERSION_FIXTURE/crates/carillon-core"
+cp "$ROOT/scripts/package-release.sh" "$VERSION_FIXTURE/scripts/"
+printf '[package]\nversion = "1.2.3"\n' >"$VERSION_FIXTURE/crates/carillon-core/Cargo.toml"
+if "$VERSION_FIXTURE/scripts/package-release.sh" 9.8.7 "$VERSION_FIXTURE/release.tar.gz" \
+  >"$TEST_ROOT/version.log" 2>&1; then
+  echo 'packager accepted a version different from the embedded identity' >&2
+  exit 1
+fi
+grep -F 'requested release version 9.8.7 differs from the Carillon crate version 1.2.3' "$TEST_ROOT/version.log" >/dev/null
+[ ! -e "$VERSION_FIXTURE/target" ] && [ ! -e "$VERSION_FIXTURE/release.tar.gz" ]
+[ "$("$RELEASE/bin/carillon" --version)" = "carillon $VERSION" ]
 
 install_release() {
   install_home=$1
@@ -148,6 +164,9 @@ case "$command:$FAIL_MODE:$last" in
     elif [ "$FAIL_MODE" = unit-sync-rollback ]; then
       boundary=rollback
       diff -r --no-dereference "$FAIL_BEFORE" "$FAIL_UNIT_DIR" --exclude='.carillon-units.*'
+    elif [ -e "$FAIL_MARKER.publish" ]; then
+      boundary=enable
+      [ "$(readlink "$FAIL_UNIT_DIR/default.target.wants/carillon.target")" = ../carillon.target ]
     else
       boundary=publish
       for unit in carillon-core.service carillon-runtime-pi.service carillon-discord.service carillon.target; do
@@ -257,6 +276,17 @@ case "$command:$FAIL_MODE:$last" in
       exit 1
     fi
     ;;
+  systemctl:unit-*:daemon-reload)
+    printf '%s\n' daemon-reload >>"$FAIL_MARKER.order"
+    exit 0
+    ;;
+  systemctl:unit-*:carillon.target)
+    [ "$1" = --user ] && [ "$2" = enable ]
+    mkdir -p "$FAIL_UNIT_DIR/default.target.wants"
+    ln -sf ../carillon.target "$FAIL_UNIT_DIR/default.target.wants/carillon.target"
+    printf '%s\n' enable >>"$FAIL_MARKER.order"
+    exit 0
+    ;;
   systemctl:reload:daemon-reload | systemctl:enable:carillon.target)
     printf '%s\n' "$FAIL_MODE" >"$FAIL_MARKER"
     exit 1
@@ -278,7 +308,7 @@ done
 
 # Unit storage has its own barriers, independently of the application filesystem.
 for previous in fresh existing; do
-  for failure in unit-sync-stage unit-sync-publish unit-sync-rollback unit-sync-ok; do
+  for failure in unit-sync-stage unit-sync-publish unit-sync-rollback unit-sync-enable unit-sync-ok; do
     SYNC_HOME=$TEST_ROOT/$previous-$failure
     SYNC_ROOT=$SYNC_HOME/.carillon
     SYNC_CONFIG_HOME=$SYNC_HOME/separate-config
@@ -306,7 +336,7 @@ for previous in fresh existing; do
     failure_marker=$SYNC_HOME/failure
     result=0
     env HOME="$SYNC_HOME" XDG_CONFIG_HOME="$SYNC_CONFIG_HOME" \
-      CARILLON_HOME="$SYNC_ROOT" CARILLON_SKIP_SYSTEMD_RELOAD=1 \
+      CARILLON_HOME="$SYNC_ROOT" CARILLON_SKIP_SYSTEMD_RELOAD=0 \
       PATH="$FAIL_COMMANDS:$PATH" FAIL_MODE="$failure" FAIL_MARKER="$failure_marker" \
       FAIL_UNIT_DIR="$SYNC_UNIT_DIR" FAIL_BEFORE="$SYNC_HOME/units-before" \
       FAIL_TEMPLATE="$SYNC_ROOT/app/systemd/carillon.target" \
@@ -316,7 +346,7 @@ for previous in fresh existing; do
       >"$SYNC_HOME/install.log" 2>&1 || result=$?
     if [ "$failure" = unit-sync-ok ]; then
       [ "$result" -eq 0 ]
-      for boundary in stage publish; do
+      for boundary in stage publish enable; do
         grep -E 'syncfs\(.*\) = 0$' "$failure_marker.$boundary.trace" >/dev/null
       done
     else
@@ -338,11 +368,14 @@ for previous in fresh existing; do
         printf '%s\n' 'sync rollback' >>"$SYNC_HOME/expected-order"
       else
         printf '%s\n' 'sync publish' >>"$SYNC_HOME/expected-order"
+        if [ "$failure" != unit-sync-publish ]; then
+          printf '%s\n' daemon-reload enable 'sync enable' >>"$SYNC_HOME/expected-order"
+        fi
       fi
     fi
     cmp "$SYNC_HOME/expected-order" "$failure_marker.order"
     retained_units=$(find "$SYNC_UNIT_DIR" -maxdepth 1 -type d -name '.carillon-units.*')
-    if [ "$failure" = unit-sync-publish ] || [ "$failure" = unit-sync-rollback ]; then
+    if [ "$failure" = unit-sync-publish ] || [ "$failure" = unit-sync-rollback ] || [ "$failure" = unit-sync-enable ]; then
       [ -d "$retained_units/old" ]
       for unit in "$SYNC_HOME/units-before"/carillon*; do
         [ -e "$unit" ] || [ -L "$unit" ] || continue
@@ -374,6 +407,12 @@ for previous in fresh existing; do
     diff -r "$SYNC_HOME/credentials-before" "$SYNC_ROOT/credentials"
     install_release "$SYNC_HOME" "$SYNC_HOME/workspace" "$SYNC_ROOT" \
       "$SYNC_CONFIG_HOME" "$((BASE_PORT + 40))" >/dev/null
+    env HOME="$SYNC_HOME" XDG_CONFIG_HOME="$SYNC_CONFIG_HOME" CARILLON_SKIP_SYSTEMD_RELOAD=0 \
+      PATH="$FAIL_COMMANDS:$PATH" FAIL_MODE=unit-retry FAIL_MARKER="$failure_marker.retry" \
+      FAIL_UNIT_DIR="$SYNC_UNIT_DIR" FAIL_TEMPLATE="$SYNC_ROOT/app/systemd/carillon.target" \
+      REAL_MV="$REAL_MV" REAL_SED="$REAL_SED" REAL_CHMOD="$REAL_CHMOD" \
+      "$SYNC_ROOT/app/bin/carillon-register-services" >/dev/null
+    [ "$(readlink "$SYNC_UNIT_DIR/default.target.wants/carillon.target")" = ../carillon.target ]
     verify_units "$SYNC_UNIT_DIR"
     diff -r "$SYNC_HOME/credentials-before" "$SYNC_ROOT/credentials"
     printf 'install unit durability passed: %s / %s\n' "$previous" "$failure"

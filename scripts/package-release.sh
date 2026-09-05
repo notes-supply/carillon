@@ -2,7 +2,14 @@
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-VERSION=${1:-0.0.0}
+cd "$ROOT"
+# Cargo embeds this identity in the core and Discord binaries. A supplied version
+# is an assertion, not an independent label for differently versioned artifacts.
+VERSION=$(bun -e 'import manifest from "./crates/carillon-core/Cargo.toml"; console.log(manifest.package.version)')
+[ "${1:-$VERSION}" = "$VERSION" ] || {
+  echo "requested release version $1 differs from the Carillon crate version $VERSION" >&2
+  exit 1
+}
 OUTPUT=${2:-"$ROOT/dist/carillon-$VERSION-linux-x86_64.tar.gz"}
 STAGE="$ROOT/target/package/carillon-$VERSION"
 PI_DIST=packages/runtime-pi/node_modules/@earendil-works/pi-coding-agent/dist
@@ -11,7 +18,6 @@ PI_PACKAGE=${PI_DIST%/dist}
 rm -rf "$STAGE"
 mkdir -p "$STAGE/bin/theme" "$STAGE/bin/assets" "$STAGE/licenses" "$STAGE/systemd" "$(dirname -- "$OUTPUT")"
 
-cd "$ROOT"
 cargo build --release --locked --bin carillon
 bun build --compile packages/runtime-pi/src/index.ts --outfile "$STAGE/bin/carillon-runtime-pi"
 bun build --compile --no-compile-autoload-bunfig \

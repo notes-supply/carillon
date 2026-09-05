@@ -14,6 +14,8 @@ esac
 case "$CARILLON_HOME" in /*) ;; *) echo "CARILLON_HOME must be an absolute path" >&2; exit 1 ;; esac
 CARILLON_HOME=$(realpath -m -- "$CARILLON_HOME")
 UNIT_DIR=${XDG_CONFIG_HOME:-"$HOME/.config"}/systemd/user
+case "$HOME" in /*) ;; *) echo "HOME must be an absolute path" >&2; exit 1 ;; esac
+case "$UNIT_DIR" in /*) ;; *) echo "XDG_CONFIG_HOME must be an absolute path" >&2; exit 1 ;; esac
 APP="$CARILLON_HOME/app"
 APP_MARKER=.carillon-managed
 APP_MARKER_VALUE=carillon-managed-application-v1
