@@ -18,7 +18,7 @@ In Rust, use ownership, structs, and enums to express the design. Shared ownersh
 
 In TypeScript, preserve useful library types, validate unknown input at its boundary, and prefer discriminated unions and ordinary functions over wrappers and repeated casts.
 
-Test observable behavior, state transitions, failure boundaries, and recovery. Avoid tests coupled only to source shape or implementation trivia.
+Test observable behavior, state transitions, failure boundaries, and recovery. Avoid tests coupled only to source shape or implementation trivia. A passing test is not authority to preserve a bug or an obsolete requirement: name the current contract, distinguish test fixtures and bundled defaults from product guarantees, and update tests with an intentional contract change. Do not weaken a safety invariant just to make a change pass.
 
 Use the tasks in `mise.toml` for verification. During iteration, run affected tests; run `check` before submitting code changes. Run `test:integration` for service communication, startup, routing, or recovery changes. Run `test:install` for packaging, installer, service-unit, or owner-environment changes, and before a release; it builds the package itself. Do not rebuild and install the package after every small edit by default.
 

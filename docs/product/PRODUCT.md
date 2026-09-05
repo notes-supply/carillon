@@ -39,7 +39,7 @@ Discord rejects direct messages and any event outside its configured guild, immu
 
 ### Operation lifecycle
 
-Once core accepts an event, it persists a queued turn. The selected runtime provider claims queued work and executes it once. Completion stores the output, continuation reference, and delivery intent atomically.
+Once core accepts an event, it persists a queued turn. A core worker claims queued work and submits it to the selected runtime provider. Ambiguous execution is not automatically replayed; this is not an exactly-once guarantee for model or tool side effects. Completion stores the output, continuation reference, and delivery intent atomically.
 
 A running turn whose outcome can no longer be proved becomes uncertain. It is not automatically replayed, and later work for the same conversation waits for operator action. Delivery has a separate durable outbox so a lost interface connection does not require rerunning the model.
 

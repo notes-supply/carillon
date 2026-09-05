@@ -471,25 +471,20 @@ mod tests {
     }
 
     #[test]
-    fn fresh_install_configures_only_discord_and_pi() -> Result<()> {
+    fn bundled_install_configures_default_providers_and_their_credentials() -> Result<()> {
         let directory = tempdir()?;
         let root = directory.path().join("installation");
         let config_path = initialize_test_installation(&root, directory.path(), 44_000)?;
         let config = LoadedConfig::load(&config_path)?;
 
         assert_eq!(config.value.providers.len(), 2);
-        assert_eq!(
-            config
-                .value
-                .providers
-                .iter()
-                .map(|provider| (provider.id.as_str(), provider.role))
-                .collect::<Vec<_>>(),
-            [
-                ("discord-private", ProviderRole::Interface),
-                ("runtime-pi", ProviderRole::Runtime),
-            ]
-        );
+        // This initializer bundles defaults; it does not constrain core providers.
+        for (id, role) in [
+            ("discord-private", ProviderRole::Interface),
+            ("runtime-pi", ProviderRole::Runtime),
+        ] {
+            config.provider(id, role)?;
+        }
 
         let mut credentials = fs::read_dir(root.join("credentials"))?
             .map(|entry| entry.map(|entry| entry.file_name()))

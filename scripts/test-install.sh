@@ -5,6 +5,10 @@ ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 RELEASE=${1:-"$ROOT/target/package/carillon-0.0.0"}
 BASE_PORT=${CARILLON_TEST_BASE_PORT:-44800}
 
+# This tests the bundled Discord/Pi release, not a limit on provider extensibility.
+# Reinstallation below replaces binaries with the same schema; it is not a
+# database/configuration migration or a promise to support old beta formats.
+
 for artifact in \
   bin/carillon \
   bin/carillon-runtime-pi \

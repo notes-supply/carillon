@@ -5,19 +5,59 @@ use axum::{response::IntoResponse as _, routing::post};
 use tempfile::tempdir;
 
 use super::*;
-use crate::{admin, model::TurnState};
+use crate::model::TurnState;
 
 fn installation(root: &Path) -> Result<AppState> {
-    let config_path = admin::initialize(
-        &root.join("installation"),
-        root,
-        "100",
-        "201",
-        &["200".to_owned()],
-        &["300:always:channel".parse()?],
-        44000,
-    )?;
-    let config = LoadedConfig::load(&config_path)?;
+    use crate::config::{AgentConfig, Config, CoreConfig, Provider, hash_token};
+
+    // Core tests have no Discord configuration or Pi installation. These
+    // provider IDs and continuation values are opaque test fixtures.
+    let resources = root.join("resources");
+    fs::create_dir(&resources)?;
+    fs::write(resources.join("SYSTEM.md"), "test instructions")?;
+    fs::create_dir(root.join("credentials"))?;
+    let providers = [
+        ("test-interface", ProviderRole::Interface),
+        ("test-runtime", ProviderRole::Runtime),
+    ]
+    .into_iter()
+    .map(|(id, role)| {
+        fs::write(
+            root.join("credentials").join(format!("{id}.token")),
+            "test-only",
+        )?;
+        Ok(Provider {
+            id: id.to_owned(),
+            role,
+            version: "test".to_owned(),
+            url: "http://127.0.0.1:1".to_owned(),
+            token_hash: hash_token("test-only"),
+            enabled: true,
+        })
+    })
+    .collect::<Result<Vec<_>>>()?;
+    let value = Config {
+        release: RELEASE_VERSION.to_owned(),
+        data_dir: root.join("state"),
+        core: CoreConfig {
+            listen: "127.0.0.1:0".parse()?,
+            operator_token_hash: hash_token("test-operator"),
+        },
+        providers,
+        discord: None,
+        agent: AgentConfig {
+            id: "test-agent".to_owned(),
+            name: "Test agent".to_owned(),
+            resource_root: resources,
+            workspace: root.to_path_buf(),
+            runtime_provider: "test-runtime".to_owned(),
+        },
+    };
+    value.validate()?;
+    let config = LoadedConfig {
+        root: root.to_path_buf(),
+        value,
+    };
     Ok(AppState {
         database: Database::open(&config.value.data_dir.join("carillon.sqlite3"))?,
         config,
@@ -27,21 +67,21 @@ fn installation(root: &Path) -> Result<AppState> {
 
 async fn accept(state: &AppState, id: &str, audience: &str) -> Result<EventReceipt> {
     let mut headers = HeaderMap::new();
-    headers.insert(PROVIDER_HEADER, "discord-private".parse()?);
+    headers.insert(PROVIDER_HEADER, "test-interface".parse()?);
     headers.insert(
         http::header::AUTHORIZATION,
-        format!("Bearer {}", state.config.credential("discord-private")?).parse()?,
+        format!("Bearer {}", state.config.credential("test-interface")?).parse()?,
     );
     let receipt = accept_event(
         State(state.clone()),
         headers,
         Json(ExternalEvent {
             event_id: id.to_owned(),
-            agent_id: "default".to_owned(),
-            user_id: "200".to_owned(),
+            agent_id: state.config.value.agent.id.clone(),
+            user_id: "test-user".to_owned(),
             audience_id: audience.to_owned(),
-            delivery_target_id: "300".to_owned(),
-            feedback_target_id: "300:400".to_owned(),
+            delivery_target_id: "test-destination".to_owned(),
+            feedback_target_id: "test-feedback".to_owned(),
             content: id.to_owned(),
             native: serde_json::Value::Null,
         }),
@@ -60,7 +100,7 @@ fn completed(request: RuntimeTurnRequest) -> RuntimeTurnResponse {
 }
 
 #[tokio::test]
-async fn acceptance_is_durable_and_duplicates_never_execute() -> Result<()> {
+async fn duplicate_events_share_one_accepted_turn_without_reexecution() -> Result<()> {
     let directory = tempdir()?;
     let state = installation(directory.path())?;
     let first = accept(&state, "one", "conversation").await?;
@@ -73,7 +113,7 @@ async fn acceptance_is_durable_and_duplicates_never_execute() -> Result<()> {
     assert!(
         state
             .database
-            .claim_delivery("discord-private", "instance")?
+            .claim_delivery("test-interface", "instance")?
             .is_none()
     );
     let snapshot = state.snapshot_store();
@@ -81,8 +121,8 @@ async fn acceptance_is_durable_and_duplicates_never_execute() -> Result<()> {
         state.config.value.agent.resource_root.join("SYSTEM.md"),
         "changed after acceptance",
     )?;
-    let step = run_next_turn(&state, "runtime-pi", async |runtime, _, request| {
-        assert_eq!(runtime.id, "runtime-pi");
+    let step = run_next_turn(&state, "test-runtime", async |runtime, _, request| {
+        assert_eq!(runtime.id, "test-runtime");
         assert_eq!(request.correlation_id, first.turn_id);
         assert_eq!(request.continuation_ref, None);
         assert!(Path::new(&request.resources.root).starts_with(&snapshot));
@@ -100,7 +140,7 @@ async fn acceptance_is_durable_and_duplicates_never_execute() -> Result<()> {
         TurnState::Completed
     );
     assert_eq!(
-        run_next_turn(&state, "runtime-pi", async |_, _, _| {
+        run_next_turn(&state, "test-runtime", async |_, _, _| {
             Err(TurnFailure::Uncertain(anyhow!("duplicate was executed")))
         })
         .await?,
@@ -108,7 +148,7 @@ async fn acceptance_is_durable_and_duplicates_never_execute() -> Result<()> {
     );
     let delivery = state
         .database
-        .claim_delivery("discord-private", "instance")?
+        .claim_delivery("test-interface", "instance")?
         .context("missing reply")?;
     assert_eq!(delivery.turn_id, first.turn_id);
     assert_eq!(delivery.content, "reply to one");
@@ -121,13 +161,13 @@ async fn queued_turns_use_their_predecessors_continuation() -> Result<()> {
     let state = installation(directory.path())?;
     let first = accept(&state, "one", "conversation").await?;
     let second = accept(&state, "two", "conversation").await?;
-    run_next_turn(&state, "runtime-pi", async |_, _, request| {
+    run_next_turn(&state, "test-runtime", async |_, _, request| {
         assert_eq!(request.correlation_id, first.turn_id);
         assert_eq!(request.continuation_ref, None);
         Ok(completed(request))
     })
     .await?;
-    run_next_turn(&state, "runtime-pi", async |_, _, request| {
+    run_next_turn(&state, "test-runtime", async |_, _, request| {
         assert_eq!(request.correlation_id, second.turn_id);
         assert_eq!(
             request.continuation_ref.as_deref(),
@@ -146,7 +186,7 @@ async fn definite_connection_failure_requeues_the_same_turn() -> Result<()> {
     let state = installation(directory.path())?;
     let receipt = accept(&state, "one", "conversation").await?;
     assert_eq!(
-        run_next_turn(&state, "runtime-pi", async |_, _, request| {
+        run_next_turn(&state, "test-runtime", async |_, _, request| {
             assert_eq!(request.correlation_id, receipt.turn_id);
             Err(TurnFailure::Retry(anyhow!("connection refused")))
         })
@@ -164,10 +204,10 @@ async fn definite_connection_failure_requeues_the_same_turn() -> Result<()> {
     assert!(
         state
             .database
-            .claim_delivery("discord-private", "instance")?
+            .claim_delivery("test-interface", "instance")?
             .is_none()
     );
-    run_next_turn(&state, "runtime-pi", async |_, _, request| {
+    run_next_turn(&state, "test-runtime", async |_, _, request| {
         assert_eq!(request.correlation_id, receipt.turn_id);
         Ok(completed(request))
     })
@@ -182,7 +222,7 @@ async fn ambiguity_holds_only_its_conversation_without_replaying() -> Result<()>
     let state = installation(directory.path())?;
     let uncertain = accept(&state, "one", "blocked").await?;
     accept(&state, "two", "blocked").await?;
-    run_next_turn(&state, "runtime-pi", async |_, _, _| {
+    run_next_turn(&state, "test-runtime", async |_, _, _| {
         Err(TurnFailure::Uncertain(anyhow!("response lost")))
     })
     .await?;
@@ -195,7 +235,7 @@ async fn ambiguity_holds_only_its_conversation_without_replaying() -> Result<()>
         TurnState::Uncertain
     );
     assert_eq!(
-        run_next_turn(&state, "runtime-pi", async |_, _, _| {
+        run_next_turn(&state, "test-runtime", async |_, _, _| {
             Err(TurnFailure::Uncertain(anyhow!(
                 "uncertain work or its successor was submitted"
             )))
@@ -204,7 +244,7 @@ async fn ambiguity_holds_only_its_conversation_without_replaying() -> Result<()>
         WorkerStep::Idle
     );
     accept(&state, "three", "unrelated").await?;
-    run_next_turn(&state, "runtime-pi", async |_, _, request| {
+    run_next_turn(&state, "test-runtime", async |_, _, request| {
         assert_eq!(request.audience_id, "unrelated");
         Ok(completed(request))
     })
@@ -225,7 +265,7 @@ async fn cancelled_execution_is_uncertain_after_reopening_while_queued_work_resu
     let (admitted, received) = tokio::sync::oneshot::channel();
     let worker = state.clone();
     let task = tokio::spawn(async move {
-        run_next_turn(&worker, "runtime-pi", async move |_, _, _| {
+        run_next_turn(&worker, "test-runtime", async move |_, _, _| {
             let _ = admitted.send(());
             std::future::pending().await
         })
@@ -249,13 +289,13 @@ async fn cancelled_execution_is_uncertain_after_reopening_while_queued_work_resu
             .state,
         TurnState::Uncertain
     );
-    run_next_turn(&state, "runtime-pi", async |_, _, request| {
+    run_next_turn(&state, "test-runtime", async |_, _, request| {
         assert_eq!(request.correlation_id, queued.turn_id);
         Ok(completed(request))
     })
     .await?;
     assert_eq!(
-        run_next_turn(&state, "runtime-pi", async |_, _, _| {
+        run_next_turn(&state, "test-runtime", async |_, _, _| {
             Err(TurnFailure::Uncertain(anyhow!(
                 "restart replayed ambiguous work"
             )))
@@ -273,7 +313,7 @@ async fn persistence_retry_cannot_downgrade_a_committed_completion() -> Result<(
     accept(&state, "one", "conversation").await?;
     let turn = state
         .database
-        .claim_turn("runtime-pi")?
+        .claim_turn("test-runtime")?
         .context("missing claim")?;
     let response = completed(runtime_request(&state, &turn)?);
     let mut attempts = 0;
@@ -304,7 +344,7 @@ async fn persistence_retry_cannot_downgrade_a_committed_completion() -> Result<(
     assert_eq!(
         state
             .database
-            .claim_delivery("discord-private", "instance")?
+            .claim_delivery("test-interface", "instance")?
             .context("missing reply")?
             .content,
         "reply to one"
@@ -319,11 +359,11 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
     accept(&state, "one", "conversation").await?;
     let turn = state
         .database
-        .claim_turn("runtime-pi")?
+        .claim_turn("test-runtime")?
         .context("missing claim")?;
     let mut runtime = state
         .config
-        .provider("runtime-pi", ProviderRole::Runtime)?
+        .provider("test-runtime", ProviderRole::Runtime)?
         .clone();
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     runtime.url = format!("http://{}", listener.local_addr()?);
@@ -338,6 +378,8 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
         }
     }));
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    // These responses carry no protocol proof of non-admission. This is not
+    // a blanket rule for a future explicit rejected-before-execution response.
     for input in [
         "forbidden",
         "server error",

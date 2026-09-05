@@ -413,7 +413,7 @@ mod tests {
     };
 
     #[test]
-    fn discord_configuration_receives_ingress_defaults() -> anyhow::Result<()> {
+    fn discord_feedback_defaults_leave_admission_unconfigured() -> anyhow::Result<()> {
         let config: DiscordConfig = toml::from_str(
             r#"
 provider = "discord-private"

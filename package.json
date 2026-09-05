@@ -13,7 +13,7 @@
     "format:check": "biome format .",
     "lint": "eslint \"**/*.ts\" --max-warnings 0",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --passWithNoTests",
+    "test": "vitest run",
     "check": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm run test"
   },
   "devDependencies": {

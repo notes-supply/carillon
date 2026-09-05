@@ -4,9 +4,10 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
+// This fixture uses the bundled providers and simulated model responses.
+// Counters/activation markers below are test output, not a required reply format.
 const root = await mkdtemp(join(tmpdir(), "carillon-integration-"));
 const restoredRoot = await mkdtemp(join(tmpdir(), "carillon-restored-"));
-const piState = await mkdtemp(join(tmpdir(), "pi-carillon-"));
 const workspace = await mkdtemp(join(tmpdir(), "carillon-workspace-"));
 const backup = join(tmpdir(), `carillon-backup-${crypto.randomUUID()}.tar.gz`);
 const binary = resolve("target/debug/carillon");
@@ -39,13 +40,22 @@ try {
     String(basePort),
   );
   await startAll();
+  await writeFile(join(installation, "pi", "test-private-state"), "private runtime state fixture");
 
   const denied = await requestSimulation(event("denied", "999", "200", "300", null, "no"));
   assert.equal(denied.status, 403, "other guilds must fail closed");
+  const deniedUser = await requestSimulation(event("denied-user", "100", "999", "300", null, "no"));
+  assert.equal(deniedUser.status, 403, "users outside the allowlist must fail closed");
+  const deniedDm = await requestSimulation(event("denied-dm", null, "200", "300", null, "no"));
+  assert.equal(deniedDm.status, 403, "direct messages must fail closed");
   const deniedRoute = await requestSimulation(
     event("denied-route", "100", "200", "399", null, "no"),
   );
   assert.equal(deniedRoute.status, 403, "unconfigured channels must fail closed");
+  for (const eventId of ["denied", "denied-user", "denied-dm", "denied-route"]) {
+    const turns = JSON.parse(run("recent", "--config", configPath(), "--event-id", eventId));
+    assert.deepEqual(turns, [], "rejected ingress must not create accepted work");
+  }
   const ignoredMention = await requestSimulation(
     event("ignored", "100", "200", "301", null, "no activation"),
   );
@@ -155,7 +165,6 @@ try {
     "event-queued-restore",
     "survive runtime outage and restore",
   );
-  await new Promise((resolveWait) => setTimeout(resolveWait, 500));
   const queuedInspection = await waitForTurn(queued.turn_id, "queued");
   assert.equal(queuedInspection.state, "queued");
 
@@ -164,7 +173,14 @@ try {
   run("backup", "--config", configPath(), "--output", backup);
   await rm(restoredRoot, { recursive: true, force: true });
   run("restore", "--input", backup, "--target", restoredRoot);
+  // Prove restoration uses archived runtime state, not the original directory.
+  await rm(root, { recursive: true, force: true });
   installation = restoredRoot;
+  assert.equal(
+    await readFile(join(installation, "pi", "test-private-state"), "utf8"),
+    "private runtime state fixture",
+    "restore must include private runtime state, not just core and session records",
+  );
   await startAll();
   await waitForTurn(queued.turn_id, "completed");
   const resumedDelivery = await waitForDeliveryClaim("resumed-discord");
@@ -181,7 +197,7 @@ try {
         admission: "guild, user, and routes fail closed",
         conversations: "channel and thread continuity",
         duplicate: "deduplicated",
-        resources: "Pi extensions and skills loaded natively",
+        resources: "resource snapshots reach the deterministic runtime",
         restarts: ["discord", "runtime-pi"],
         abandoned_delivery_claim: "uncertain",
         diagnostics: "authenticated and queryable",
@@ -197,7 +213,6 @@ try {
   await rm(root, { recursive: true, force: true });
   await rm(restoredRoot, { recursive: true, force: true });
   await rm(backup, { force: true });
-  await rm(piState, { recursive: true, force: true });
   await rm(workspace, { recursive: true, force: true });
 }
 
@@ -337,7 +352,7 @@ function serviceArguments(name) {
       "runtime-pi",
       "--deterministic",
       "--state-dir",
-      piState,
+      join(installation, "pi"),
     ];
     return packagedRuntime === undefined
       ? [process.execPath, [runtimeEntry, ...args]]

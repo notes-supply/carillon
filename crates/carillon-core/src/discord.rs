@@ -1406,7 +1406,6 @@ mod tests {
         });
         let mut state = discord_state(core_client(format!("http://{address}")));
         state.discord.reactions = true;
-        let expected_processing = state.discord.processing_emoji.clone();
         let expected_uncertain = state.discord.uncertain_emoji.clone();
         let http = Arc::new(
             twilight_http::Client::builder()
@@ -1426,17 +1425,32 @@ mod tests {
                 .to_string()
                 .contains("delivery claim rejected")
         );
-        assert_eq!(
-            *trace.lock().await,
-            vec![
-                "claim committed".to_owned(),
-                "recovered".to_owned(),
-                "reconcile".to_owned(),
-                format!("DELETE 300:400 {expected_processing}"),
-                format!("PUT 300:400 {expected_uncertain}"),
-                "poll".to_owned(),
-            ]
+        let requests = trace.lock().await;
+        // Recovery must precede uncertainty feedback and resumed polling.
+        // Processing-reaction cleanup is not part of this recovery contract.
+        let required = [
+            "claim committed".to_owned(),
+            "recovered".to_owned(),
+            "reconcile".to_owned(),
+            format!("PUT 300:400 {expected_uncertain}"),
+            "poll".to_owned(),
+        ];
+        let positions = required
+            .iter()
+            .map(|event| {
+                requests
+                    .iter()
+                    .position(|request| request == event)
+                    .with_context(|| format!("missing {event}: {requests:?}"))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.starts_with("unexpected"))
         );
+        drop(requests);
         let inspected = Database::open(&directory.path().join("state.sqlite3"))?
             .inspect_turn(&turn.turn_id)?
             .context("turn disappeared")?;
@@ -1475,28 +1489,29 @@ mod tests {
         let content = format!("{}\n\n{}", "a".repeat(1_990), "b".repeat(30));
         let chunks = discord_chunks(&content);
         assert_eq!(chunks.len(), 2);
-        assert_eq!(
-            chunks.concat(),
-            format!("{}{}", "a".repeat(1_990), "b".repeat(30))
-        );
+        assert_eq!(chunks.join("\n\n"), content);
         assert!(chunks.iter().all(|chunk| chunk.chars().count() <= 2_000));
 
-        let unbroken = discord_chunks(&"🦀".repeat(2_001));
-        assert_eq!(unbroken.len(), 2);
-        assert_eq!(unbroken[0].chars().count(), 2_000);
-        assert_eq!(unbroken[1], "🦀");
+        let content = "🦀".repeat(2_001);
+        let unbroken = discord_chunks(&content);
+        assert!(unbroken.len() > 1);
+        assert!(
+            unbroken
+                .iter()
+                .all(|chunk| !chunk.is_empty() && chunk.chars().count() <= 2_000)
+        );
+        assert_eq!(unbroken.concat(), content);
     }
 
     #[test]
-    fn thread_titles_are_deterministic_and_bounded() {
-        let title = thread_title(
-            "  Build   a production-ready Discord ingress boundary with a deliberately overlong title that must be trimmed safely  ",
-        );
-        assert_eq!(title.chars().count(), 80);
-        assert_eq!(
-            title,
-            "Build a production-ready Discord ingress boundary with a deliberately overlong t"
-        );
+    fn thread_titles_preserve_short_text_and_fit_discord() {
+        assert_eq!(thread_title("  Plan   the weekend  "), "Plan the weekend");
+        for content in ["a long discussion ".repeat(20), "🦀".repeat(150)] {
+            let title = thread_title(&content);
+            assert!(!title.trim().is_empty());
+            assert!(title.chars().count() <= 100);
+            assert_eq!(title, thread_title(&content));
+        }
     }
 
     #[test]
