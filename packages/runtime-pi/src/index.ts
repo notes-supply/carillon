@@ -7,7 +7,7 @@ import {
 import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { Type } from "typebox";
@@ -22,6 +22,7 @@ registerBunOAuthFlows();
 interface RuntimeProviderConfig {
   readonly id: string;
   readonly url: string;
+  readonly token_hash: string;
 }
 
 interface Config {
@@ -81,6 +82,8 @@ const ProviderSchema = Type.Object({
   role: Type.String({ minLength: 1 }),
   version: Type.String({ minLength: 1 }),
   url: Type.String({ minLength: 1 }),
+  token_hash: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+  enabled: Type.Boolean(),
 });
 const TurnRequestSchema = Type.Object({
   correlation_id: Type.String(),
@@ -122,6 +125,11 @@ async function startRuntime(values: readonly string[]): Promise<void> {
     throw new Error("workspace must be an existing directory");
   const listenAddress = runtimeListenAddress(config.runtime.url);
   token = (await readFile(requiredArgument(args, "token-file"), "utf8")).trim();
+  if (
+    token.length === 0 ||
+    createHash("sha256").update(token).digest("hex") !== config.runtime.token_hash
+  )
+    throw new Error("runtime credential does not match configuration");
   deterministic = args.has("deterministic");
   const privateStateDirectory = resolve(requiredArgument(args, "state-dir"));
   sessionDirectory = join(config.resourceRoot, "sessions");
@@ -351,12 +359,14 @@ async function atomicJson(path: string, value: unknown): Promise<void> {
 
 async function loadConfig(path: string, providerId: string): Promise<Config> {
   Parse(ProviderIdentitySchema, providerId);
-  const root = resolve(path, "..");
-  const parsed = Parse(FileConfigSchema, parseToml(await readFile(path, "utf8")));
+  const configPath = await realpath(path);
+  const root = resolve(configPath, "..");
+  const parsed = Parse(FileConfigSchema, parseToml(await readFile(configPath, "utf8")));
   const runtime = parsed.providers.find(
     (provider) => provider.id === providerId && provider.role === "runtime",
   );
   if (runtime === undefined) throw new Error(`runtime provider ${providerId} is not configured`);
+  if (!runtime.enabled) throw new Error(`runtime provider ${providerId} is disabled`);
   return {
     root,
     resourceRoot: resolve(root, parsed.agent.resource_root),

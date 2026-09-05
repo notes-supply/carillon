@@ -346,6 +346,11 @@ async fn call_runtime(
             "runtime returned an empty continuation reference"
         )));
     }
+    if response.output.trim().is_empty() {
+        return Err(TurnFailure::Uncertain(anyhow!(
+            "runtime returned empty output"
+        )));
+    }
     Ok(response)
 }
 

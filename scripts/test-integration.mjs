@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -16,6 +16,7 @@ const packagedRuntime = process.env.CARILLON_RUNTIME_BINARY;
 const basePort = 45_000 + (process.pid % 10_000);
 let installation = root;
 let runtimeHost = "127.0.0.1";
+let runtimeConfigPath;
 const services = new Map();
 
 try {
@@ -239,8 +240,14 @@ try {
     await rename(`${sessions}-saved`, sessions);
     await stop("core");
   }
+  await testRuntimeStartupRefusals(queued.turn_id);
+  // Both services must interpret relative paths from the canonical config file,
+  // not from the directory holding an operator's convenient symlink.
+  runtimeConfigPath = join(workspace, "config-link.toml");
+  await symlink(configPath(), runtimeConfigPath);
   await startAll();
   await waitForTurn(queued.turn_id, "completed");
+  await assert.rejects(stat(join(workspace, "agents")), { code: "ENOENT" });
   const resumedDelivery = await waitForDeliveryClaim("resumed-discord");
   assert.equal(resumedDelivery.turn_id, queued.turn_id);
   await acknowledgeDelivery(resumedDelivery.id, "resumed-discord");
@@ -278,14 +285,50 @@ function configPath() {
   return join(installation, "carillon.toml");
 }
 
-function assertStartupRefused(name, expected) {
+function assertStartupRefused(name, expected, extraArgs = []) {
   const [program, args] = serviceArguments(name);
-  const result = spawnSync(program, args, { encoding: "utf8", timeout: 10_000 });
+  const result = spawnSync(program, [...args, ...extraArgs], { encoding: "utf8", timeout: 10_000 });
+  assert.doesNotMatch(result.stdout, /ready at/u, `${name} must refuse before listening`);
   assert.ifError(result.error);
   assert.equal(result.signal, null);
   assert.notEqual(result.status, 0, `${name} must refuse startup`);
   assert.match(result.stderr, expected);
-  assert.doesNotMatch(result.stdout, /ready at/u);
+}
+
+async function testRuntimeStartupRefusals(turnId) {
+  const original = await readFile(configPath(), "utf8");
+  const sessions = join(installation, "agents/default/sessions");
+  const privateState = join(installation, "pi");
+  const alternateToken = join(workspace, "alternate-runtime.token");
+  await rename(sessions, `${sessions}-saved`);
+  await rename(privateState, `${privateState}-saved`);
+  await start("core");
+  try {
+    for (const value of ["wrong-token", "   ", null]) {
+      if (value === null) await rm(alternateToken);
+      else await writeFile(alternateToken, value);
+      assertStartupRefused("runtime", value === null ? /ENOENT/u : /credential does not match/u, [
+        "--token-file",
+        alternateToken,
+      ]);
+      await assert.rejects(stat(sessions), { code: "ENOENT" });
+      await assert.rejects(stat(privateState), { code: "ENOENT" });
+      assert.equal(JSON.parse(run("inspect", "--config", configPath(), turnId)).state, "queued");
+    }
+    run("provider", "--config", configPath(), "runtime-pi", "disable");
+    assertStartupRefused("runtime", /runtime provider runtime-pi is disabled/u);
+    await assert.rejects(stat(sessions), { code: "ENOENT" });
+    await assert.rejects(stat(privateState), { code: "ENOENT" });
+    assert.equal(JSON.parse(run("inspect", "--config", configPath(), turnId)).state, "queued");
+  } finally {
+    await stop("core");
+    await writeFile(configPath(), original);
+    await rm(alternateToken, { force: true });
+    await rm(sessions, { recursive: true, force: true });
+    await rm(privateState, { recursive: true, force: true });
+    await rename(`${sessions}-saved`, sessions);
+    await rename(`${privateState}-saved`, privateState);
+  }
 }
 
 async function testProviderVersions() {
@@ -517,7 +560,7 @@ function serviceArguments(name) {
   if (name === "runtime") {
     const args = [
       "--config",
-      configPath(),
+      runtimeConfigPath ?? configPath(),
       "--token-file",
       credential("runtime-pi"),
       "--provider",

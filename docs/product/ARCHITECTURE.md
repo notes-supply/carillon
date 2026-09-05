@@ -32,7 +32,7 @@ A future interface provider can map another platform to the same accepted-event 
 
 ## Runtime providers
 
-A runtime provider receives a claimed turn containing agent, interface, audience, input, resource, and optional continuation identity. It returns output and an opaque continuation reference.
+A runtime provider receives a claimed turn containing agent, interface, audience, input, resource, and optional continuation identity. It returns nonblank output and an opaque continuation reference. A response without usable output is uncertain, not a completed silent turn: core preserves the operator's retry/skip decision and does not advance the continuation or enqueue an empty reply.
 
 The provider owns everything native to its engine. For Pi this includes sessions, model execution, tools, extensions, skills, compaction, settings, and usage. Core does not offer a generic tool or extension protocol on top of Pi.
 

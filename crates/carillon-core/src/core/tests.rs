@@ -5,7 +5,7 @@ use axum::{response::IntoResponse as _, routing::post};
 use tempfile::tempdir;
 
 use super::*;
-use crate::model::TurnState;
+use crate::model::{DeliveryOutcome, TurnState};
 
 fn installation(root: &Path) -> Result<AppState> {
     use crate::config::{AgentConfig, Config, CoreConfig, Provider, hash_token};
@@ -1061,6 +1061,107 @@ async fn persistence_retry_cannot_downgrade_a_committed_completion() -> Result<(
             .content,
         "reply to one"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn empty_runtime_output_stays_resolvable_without_empty_delivery_or_replay() -> Result<()> {
+    let directory = tempdir()?;
+    let mut state = installation(directory.path())?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    state.config.value.providers[1].url = format!("http://{}", listener.local_addr()?);
+    let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let app = Router::new().route(
+        "/v1/turns",
+        post(move |Json(request): Json<RuntimeTurnRequest>| {
+            let sent = sent.clone();
+            async move {
+                let _ = sent.send(request.correlation_id.clone());
+                Json(RuntimeTurnResponse {
+                    correlation_id: request.correlation_id,
+                    output: if request.input == "empty" {
+                        ""
+                    } else {
+                        " \t\n"
+                    }
+                    .to_owned(),
+                    continuation_ref: "native-may-have-changed".to_owned(),
+                })
+            }
+        }),
+    );
+    let mut services = tokio::task::JoinSet::new();
+    services.spawn(async move { axum::serve(listener, app).await });
+    for input in ["empty", "whitespace"] {
+        let receipt = accept(&state, input, input).await?;
+        let successor = accept(&state, &format!("after-{input}"), input).await?;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            run_next_turn(&state, "test-runtime", async |runtime, token, request| {
+                call_runtime(&state.client, runtime, token, request).await
+            }),
+        )
+        .await??;
+        assert_eq!(received.try_recv()?, receipt.turn_id);
+        let inspection = state
+            .database
+            .inspect_turn(&receipt.turn_id)?
+            .context("missing turn")?;
+        assert_eq!(
+            inspection.state,
+            TurnState::Uncertain,
+            "empty output was completed"
+        );
+        let feedback = state
+            .database
+            .claim_delivery("test-interface", "instance")?
+            .context("missing uncertainty feedback")?;
+        assert_eq!(feedback.turn_id, receipt.turn_id);
+        assert!(
+            feedback
+                .content
+                .contains("will not run it again automatically")
+        );
+        state.database.acknowledge_delivery(
+            "test-interface",
+            feedback.id,
+            "instance",
+            DeliveryOutcome::Delivered,
+            None,
+        )?;
+        assert_eq!(
+            run_next_turn(&state, "test-runtime", async |_, _, _| {
+                Err(TurnFailure::Uncertain(anyhow!(
+                    "ambiguous work replayed or its successor ran"
+                )))
+            })
+            .await?,
+            WorkerStep::Idle
+        );
+        state.database.skip_turn(&receipt.turn_id)?;
+        run_next_turn(&state, "test-runtime", async |_, _, request| {
+            assert_eq!(request.correlation_id, successor.turn_id);
+            assert!(
+                request.continuation_ref.is_none(),
+                "invalid response advanced continuation"
+            );
+            Ok(completed(request))
+        })
+        .await?;
+        let delivery = state
+            .database
+            .claim_delivery("test-interface", "instance")?
+            .context("missing successor delivery")?;
+        assert_eq!(delivery.turn_id, successor.turn_id);
+        state.database.acknowledge_delivery(
+            "test-interface",
+            delivery.id,
+            "instance",
+            DeliveryOutcome::Delivered,
+            None,
+        )?;
+    }
+    assert!(received.try_recv().is_err());
     Ok(())
 }
 
