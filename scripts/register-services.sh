@@ -2,6 +2,39 @@
 set -eu
 umask 077
 
+# Exit 10 means registration failed with previous unit definitions intact.
+# Other failures are ambiguous or occur after publication; callers must not
+# select an older application on that evidence alone.
+UNIT_STAGE=
+PUBLICATION_STARTED=0
+UNITS_PUBLISHED=0
+cleanup_staging() {
+  result=$?
+  if [ "$result" -ne 0 ] && [ "$UNITS_PUBLISHED" -eq 0 ]; then
+    result=10
+    if [ "$PUBLICATION_STARTED" -eq 1 ]; then
+      for template in "$SOURCE"/systemd/*; do
+        name=$(basename "$template")
+        # A missing staged definition has already been published.
+        [ ! -e "$UNIT_STAGE/new/$name" ] || continue
+        if [ -e "$UNIT_STAGE/old/$name" ] || [ -L "$UNIT_STAGE/old/$name" ]; then
+          mv -T -- "$UNIT_STAGE/old/$name" "$UNIT_DIR/$name" || result=1
+        else
+          rm -f -- "$UNIT_DIR/$name" || result=1
+        fi
+      done
+      if [ "$result" -ne 10 ]; then
+        echo "unit restoration failed; retained backups at $UNIT_STAGE" >&2
+        UNIT_STAGE=
+      fi
+    fi
+  fi
+  [ -z "$UNIT_STAGE" ] || rm -rf -- "$UNIT_STAGE"
+  exit "$result"
+}
+trap cleanup_staging EXIT
+trap 'exit 1' HUP INT TERM
+
 # Registration belongs to the bundled release, not the provider-neutral restore.
 # Resolve this installed helper's location so relocation cannot retain an old root.
 [ "$#" -eq 0 ] || { echo "usage: carillon-register-services" >&2; exit 2; }
@@ -24,12 +57,6 @@ case "$UNIT_DIR" in /*) ;; *) echo "XDG_CONFIG_HOME must be an absolute path" >&
 [ -f "$CARILLON_HOME/carillon.toml" ] || { echo "installed configuration is missing" >&2; exit 1; }
 # This directory is shared with unrelated user services. Preserve its mode.
 mkdir -p "$UNIT_DIR"
-UNIT_STAGE=
-cleanup_staging() {
-  [ -z "$UNIT_STAGE" ] || rm -rf -- "$UNIT_STAGE"
-}
-trap cleanup_staging EXIT
-trap 'exit 1' HUP INT TERM
 
 unit_escape() {
   printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/%/%%/g'
@@ -61,28 +88,15 @@ for template in "$SOURCE"/systemd/*; do
     cp -Pp -- "$unit" "$UNIT_STAGE/old/$name"
   fi
 done
+PUBLICATION_STARTED=1
 for template in "$SOURCE"/systemd/*; do
   name=$(basename "$template")
   if ! mv -T -- "$UNIT_STAGE/new/$name" "$UNIT_DIR/$name"; then
     echo "failed to publish unit: $UNIT_DIR/$name; restoring previous definitions" >&2
-    restore_failed=0
-    for restore_template in "$SOURCE"/systemd/*; do
-      restore_name=$(basename "$restore_template")
-      # A missing staged definition has already been published.
-      [ ! -e "$UNIT_STAGE/new/$restore_name" ] || continue
-      if [ -e "$UNIT_STAGE/old/$restore_name" ] || [ -L "$UNIT_STAGE/old/$restore_name" ]; then
-        mv -T -- "$UNIT_STAGE/old/$restore_name" "$UNIT_DIR/$restore_name" || restore_failed=1
-      else
-        rm -f -- "$UNIT_DIR/$restore_name" || restore_failed=1
-      fi
-    done
-    if [ "$restore_failed" -ne 0 ]; then
-      echo "unit restoration failed; retained backups at $UNIT_STAGE" >&2
-      UNIT_STAGE=
-    fi
     exit 1
   fi
 done
+UNITS_PUBLISHED=1
 
 if [ "${CARILLON_SKIP_SYSTEMD_RELOAD:-0}" != "1" ]; then
   systemctl --user daemon-reload

@@ -241,8 +241,13 @@ async fn provider_health_mismatches_keep_configured_identity_unavailable() -> Re
             let result = fetch_health(&state.client, &configured).await;
             assert_eq!(result.id, configured.id);
             assert_eq!(result.role, configured.role.as_str());
-            assert_eq!(result.version, configured.version);
-            assert_eq!(result.status, "unavailable", "accepted mismatched {field}");
+            if field == "version" {
+                assert_eq!(result.version, "unexpected");
+                assert_eq!(result.status, "version_mismatch");
+            } else {
+                assert_eq!(result.version, configured.version);
+                assert_eq!(result.status, "unavailable", "accepted mismatched {field}");
+            }
         }
     }
     Ok(())

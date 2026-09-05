@@ -10,7 +10,7 @@ const root = await mkdtemp(join(tmpdir(), "carillon-integration-"));
 const restoredRoot = await mkdtemp(join(tmpdir(), "carillon-restored-"));
 const workspace = await mkdtemp(join(tmpdir(), "carillon-workspace-"));
 const backup = join(tmpdir(), `carillon-backup-${crypto.randomUUID()}.tar.gz`);
-const binary = resolve("target/debug/carillon");
+const binary = resolve(process.env.CARILLON_CORE_BINARY ?? "target/debug/carillon");
 const runtimeEntry = resolve("packages/runtime-pi/src/index.ts");
 const packagedRuntime = process.env.CARILLON_RUNTIME_BINARY;
 const basePort = 45_000 + (process.pid % 10_000);
@@ -41,6 +41,7 @@ try {
     String(basePort),
   );
   await testConfigurationRefusals();
+  await testProviderVersions();
   await startAll();
   for (const authorization of [
     null,
@@ -285,6 +286,51 @@ function assertStartupRefused(name, expected) {
   assert.notEqual(result.status, 0, `${name} must refuse startup`);
   assert.match(result.stderr, expected);
   assert.doesNotMatch(result.stdout, /ready at/u);
+}
+
+async function testProviderVersions() {
+  const original = await readFile(configPath(), "utf8");
+  const coreVersion = run("--version").replace(/^carillon /u, "");
+  const runtimeVersion = JSON.parse(
+    await readFile("packages/runtime-pi/package.json", "utf8"),
+  ).version;
+  const expected = [
+    ["core", coreVersion],
+    ["discord-private", coreVersion],
+    ["runtime-pi", runtimeVersion],
+  ];
+  try {
+    // A preserved expectation from a different release must not become the
+    // running provider's identity. This runs against source and packaged services.
+    const stale = original.replaceAll(/version = "[^"]+"/gu, 'version = "stale-expectation"');
+    assert.notEqual(stale, original);
+    await writeFile(configPath(), stale);
+    await startAll();
+    for (const [offset, [id, version]] of expected.entries()) {
+      const response = await fetch(`http://127.0.0.1:${String(basePort + offset)}/health`);
+      assert.equal(response.status, 200);
+      const health = await response.json();
+      assert.equal(health.id, id);
+      assert.equal(health.version, version, `${id} must report its build-owned version`);
+    }
+    const status = JSON.parse(run("status", "--config", configPath()));
+    for (const [id, version] of expected) {
+      const provider = status.providers.find((report) => report.id === id);
+      assert.equal(provider.version, version);
+      assert.equal(provider.status, id === "core" ? "ready" : "version_mismatch");
+    }
+  } finally {
+    await stopAll();
+    await writeFile(configPath(), original);
+  }
+  // Repair the operator expectation and restart, without changing binaries.
+  await startAll();
+  assert.ok(
+    JSON.parse(run("status", "--config", configPath())).providers.every(
+      (provider) => provider.status === "ready",
+    ),
+  );
+  await stopAll();
 }
 
 async function testConfigurationRefusals() {

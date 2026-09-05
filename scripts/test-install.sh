@@ -30,6 +30,8 @@ done
 }
 
 node "$ROOT/scripts/test-filesystem.mjs" init "$RELEASE"
+CARILLON_CORE_BINARY="$RELEASE/bin/carillon" CARILLON_RUNTIME_BINARY="$RELEASE/bin/carillon-runtime-pi" \
+  node "$ROOT/scripts/test-integration.mjs"
 
 TEST_ROOT=$(mktemp -d)
 OWNER_HOME="$TEST_ROOT/owner home"
@@ -175,16 +177,28 @@ case "$command:$FAIL_MODE:$last" in
     printf '%s\n' publish >"$FAIL_MARKER"
     exit 1
     ;;
+  mv:publish-after:"$FAIL_UNIT_DIR/carillon.target")
+    if [ ! -e "$FAIL_MARKER" ]; then
+      "$REAL_MV" "$@"
+      printf '%s\n' publish-after >"$FAIL_MARKER"
+      exit 1
+    fi
+    ;;
+  systemctl:reload:daemon-reload | systemctl:enable:carillon.target)
+    printf '%s\n' "$FAIL_MODE" >"$FAIL_MARKER"
+    exit 1
+    ;;
 esac
 case "$command" in
   sed) exec "$REAL_SED" "$@" ;;
   chmod) exec "$REAL_CHMOD" "$@" ;;
   mv) exec "$REAL_MV" "$@" ;;
+  systemctl) exit 0 ;;
 esac
 exit 2
 FAIL_COMMAND
 chmod 0755 "$FAIL_COMMANDS/fail-unit-command"
-for command in sed chmod mv; do
+for command in sed chmod mv systemctl; do
   ln -s fail-unit-command "$FAIL_COMMANDS/$command"
 done
 
@@ -200,16 +214,22 @@ for previous in fresh existing; do
   printf '%s\n' unrelated-unit >"$FAILURE_UNIT_DIR/unrelated.service"
   printf '%s\n' unrelated-drop-in >"$FAILURE_UNIT_DIR/unrelated.service.d/override.conf"
   if [ "$previous" = existing ]; then
+    install_release "$FAILURE_HOME" "$FAILURE_WORKSPACE" "$FAILURE_ROOT" \
+      "$FAILURE_CONFIG_HOME" "$((BASE_PORT + 30))" >/dev/null
+    printf '%s\n' previous-application >"$FAILURE_ROOT/app/upgrade-sentinel"
+    old_inode=$(stat -c %i "$FAILURE_ROOT/app")
+    old_token_hash=$(sha256sum "$FAILURE_ROOT/credentials/runtime-pi.token" | cut -d' ' -f1)
     printf '%s\n' previous-core >"$FAILURE_UNIT_DIR/carillon-core.service"
     printf '%s\n' previous-target >"$FAILURE_UNIT_DIR/carillon.target"
     chmod 0640 "$FAILURE_UNIT_DIR/carillon-core.service"
     chmod 0600 "$FAILURE_UNIT_DIR/carillon.target"
+    rm "$FAILURE_UNIT_DIR/carillon-runtime-pi.service" "$FAILURE_UNIT_DIR/carillon-discord.service"
     ln -s unrelated.service "$FAILURE_UNIT_DIR/carillon-runtime-pi.service"
     # Leave Discord absent to exercise removal of a newly published unit.
   fi
   cp -a "$FAILURE_UNIT_DIR" "$FAILURE_HOME/units-before"
   find "$FAILURE_UNIT_DIR" -printf '%P %y %m %l\n' | sort >"$FAILURE_HOME/modes-before"
-  for failure in render write chmod publish; do
+  for failure in render write chmod publish publish-after; do
     failure_marker=$FAILURE_HOME/$failure.triggered
     if env HOME="$FAILURE_HOME" XDG_CONFIG_HOME="$FAILURE_CONFIG_HOME" \
       CARILLON_HOME="$FAILURE_ROOT" CARILLON_SKIP_SYSTEMD_RELOAD=1 \
@@ -233,6 +253,14 @@ for previous in fresh existing; do
     diff -r --no-dereference "$FAILURE_HOME/units-before" "$FAILURE_UNIT_DIR"
     find "$FAILURE_UNIT_DIR" -printf '%P %y %m %l\n' | sort >"$FAILURE_HOME/modes-after"
     cmp "$FAILURE_HOME/modes-before" "$FAILURE_HOME/modes-after"
+    if [ "$previous" = existing ]; then
+      [ "$(stat -c %i "$FAILURE_ROOT/app")" = "$old_inode" ] || {
+        echo "previous application identity not restored after unit $failure failure" >&2
+        exit 1
+      }
+      [ "$(cat "$FAILURE_ROOT/app/upgrade-sentinel")" = previous-application ]
+      [ "$(sha256sum "$FAILURE_ROOT/credentials/runtime-pi.token" | cut -d' ' -f1)" = "$old_token_hash" ]
+    fi
     printf 'install unit failure test passed: %s / %s\n' "$previous" "$failure"
   done
   # The same installation remains usable after each failed attempt.
@@ -307,6 +335,43 @@ for failure in app-before app-after app-term-before app-term-after app-kill-befo
     "$ORDINARY_CONFIG_HOME" "$((BASE_PORT + 10))" >/dev/null
   [ ! -e "$ORDINARY_ROOT/app/upgrade-sentinel" ]
   printf 'install application failure test passed: %s\n' "$failure"
+done
+for failure in reload enable; do
+  printf '%s\n' previous-application >"$ORDINARY_ROOT/app/upgrade-sentinel"
+  printf '%s\n' '# previous-unit' >>"$ORDINARY_UNIT_DIR/carillon-core.service"
+  old_inode=$(stat -c %i "$ORDINARY_ROOT/app")
+  failure_marker=$ORDINARY_HOME/$failure.triggered
+  if env HOME="$ORDINARY_HOME" XDG_CONFIG_HOME="$ORDINARY_CONFIG_HOME" \
+    CARILLON_HOME="$ORDINARY_ROOT" CARILLON_SKIP_SYSTEMD_RELOAD=0 \
+    PATH="$FAIL_COMMANDS:$PATH" FAIL_MODE="$failure" FAIL_MARKER="$failure_marker" \
+    FAIL_TEMPLATE="$RELEASE/systemd/carillon.target" FAIL_UNIT_DIR="$ORDINARY_UNIT_DIR" \
+    REAL_MV="$REAL_MV" REAL_SED="$REAL_SED" REAL_CHMOD="$REAL_CHMOD" \
+    "$RELEASE/install.sh" --guild-id 100 --bot-user-id 201 --user-id 200 \
+    --route 300:always:channel --workspace "$ORDINARY_WORKSPACE" --base-port "$((BASE_PORT + 10))" \
+    >"$ORDINARY_HOME/$failure.log" 2>&1; then
+    echo "installer unexpectedly succeeded after systemctl $failure failure" >&2
+    exit 1
+  fi
+  [ "$(cat "$failure_marker")" = "$failure" ]
+  [ "$(stat -c %i "$ORDINARY_ROOT/app")" != "$old_inode" ] || {
+    echo "committed application incorrectly rolled back after systemctl $failure failure" >&2
+    exit 1
+  }
+  [ ! -e "$ORDINARY_ROOT/app/upgrade-sentinel" ]
+  if grep -F '# previous-unit' "$ORDINARY_UNIT_DIR/carillon-core.service"; then
+    echo "old units were selected after committed registration" >&2
+    exit 1
+  fi
+  [ "$(sha256sum "$ORDINARY_ROOT/credentials/runtime-pi.token" | cut -d' ' -f1)" = "$ORDINARY_TOKEN_HASH" ]
+  retained=0
+  for candidate in "$ORDINARY_ROOT"/.app-new.*; do
+    [ "$(stat -c %i "$candidate")" != "$old_inode" ] || retained=1
+  done
+  [ "$retained" -eq 1 ]
+  verify_units "$ORDINARY_UNIT_DIR"
+  install_release "$ORDINARY_HOME" "$ORDINARY_WORKSPACE" "$ORDINARY_ROOT" \
+    "$ORDINARY_CONFIG_HOME" "$((BASE_PORT + 10))" >/dev/null
+  printf 'install committed registration failure test passed: %s\n' "$failure"
 done
 printf '%s\n' replaced-by-upgrade >"$ORDINARY_ROOT/app/upgrade-sentinel"
 install_release "$ORDINARY_HOME" "$ORDINARY_WORKSPACE" "$ORDINARY_ROOT" \

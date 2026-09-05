@@ -463,11 +463,12 @@ async fn fetch_health(client: &Client, provider: &Provider) -> Health {
     match request.send().await {
         Ok(response) => match response.error_for_status() {
             Ok(response) => match response.json::<Health>().await {
-                Ok(health)
-                    if health.id == provider.id
-                        && health.role == provider.role.as_str()
-                        && health.version == provider.version =>
+                Ok(mut health)
+                    if health.id == provider.id && health.role == provider.role.as_str() =>
                 {
+                    if health.version != provider.version {
+                        "version_mismatch".clone_into(&mut health.status);
+                    }
                     health
                 }
                 _ => provider_status(provider, "unavailable"),

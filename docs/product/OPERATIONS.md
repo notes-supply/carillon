@@ -51,6 +51,8 @@ systemctl --user restart carillon-runtime-pi.service
 
 Core is restarted separately. Provider configuration is static until restart.
 
+Each bundled provider reports its own build version, not the `providers[].version` expectation in configuration. Core's status reports the observed version with `version_mismatch` when the provider ID and role match but its version differs. Unreachable or wrong-identity providers are `unavailable`, with the configured identity and expected version instead.
+
 ## Failure behavior
 
 A turn is queued before acceptance is acknowledged. Runtime work is executed only after the turn is durably claimed as running.
@@ -101,6 +103,10 @@ The installed registration helper needs no source checkout or release installer.
 
 Re-running the installer replaces managed application files and user units while preserving current configuration, credentials, sessions, and SQLite state. It is suitable only when the installed state format is still current.
 
+Stop the target before updating. When intentionally changing a provider release, update that provider's expected `version` in `carillon.toml`, restart, and check `carillon status`. The installer does not rewrite provider expectations: an entry may refer to a replacement provider rather than the bundled implementation. Discord's build version is the Carillon crate version; the Pi adapter's is `@carillon/runtime-pi`'s package version, not the underlying Pi engine version. A version mismatch is a diagnostic, not a protocol-compatibility or execution-safety guarantee.
+
 Application replacement uses GNU `mv --exchange --no-copy` (coreutils 9.5 or newer) on a filesystem supporting atomic rename exchange. An interrupted replacement leaves either the complete previous application or the complete new one at `app`, never a missing or partly copied application. Unsupported exchange fails without deleting the previous application. Abrupt process death may leave a private `.app-new.*` staging directory; it is not selected by services.
+
+If service rendering or publication fails and the registration helper confirms that previous unit definitions are intact, the installer exchanges the previous application back too. After unit publication, a service-manager failure does not roll back the new application against the new units. An unconfirmed registration or rollback failure retains the other application tree and prints its path for inspection. These filesystem steps are not one transaction with systemd: after any interrupted update, rerun the installer successfully before restarting services. On a failed first installation there is no previous application to restore; configuration and the complete new application remain for retry.
 
 The installed uninstaller removes Carillon's user units and managed application files while preserving data under `CARILLON_HOME`. It does not remove unrelated owner files or the owner's global Pi directory.

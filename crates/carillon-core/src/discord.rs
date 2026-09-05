@@ -45,7 +45,7 @@ use uuid::Uuid;
 use crate::{
     config::{
         DiscordActivation, DiscordConfig, DiscordConversation, DiscordEmoji, LoadedConfig,
-        ProviderRole, read_token_file, token_matches,
+        ProviderRole, RELEASE_VERSION, read_token_file, token_matches,
     },
     model::{
         Delivery, DeliveryAck, DeliveryOutcome, DeliveryReconciliation, EventReceipt,
@@ -360,7 +360,7 @@ pub async fn serve(
         health: Health {
             id: provider.id.clone(),
             role: provider.role.as_str().to_owned(),
-            version: provider.version.clone(),
+            version: RELEASE_VERSION.to_owned(),
             status: "ready".to_owned(),
         },
         core: CoreClient::new(&config, provider.id.clone(), token),

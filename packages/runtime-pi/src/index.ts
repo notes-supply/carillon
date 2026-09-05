@@ -15,12 +15,12 @@ import { Parse } from "typebox/value";
 import { nativeSessionId } from "./namespace.ts";
 import { createPiExecutionSession } from "./session.ts";
 import { runtimeListenAddress } from "./endpoint.ts";
+import packageInfo from "../package.json" with { type: "json" };
 
 registerBunOAuthFlows();
 
 interface RuntimeProviderConfig {
   readonly id: string;
-  readonly version: string;
   readonly url: string;
 }
 
@@ -157,7 +157,7 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     writeJson(response, 200, {
       id: config.runtime.id,
       role: "runtime",
-      version: config.runtime.version,
+      version: packageInfo.version,
       status: "ready",
       features: ["native-continuations", "native-extensions", "skills"],
       provider: deterministic ? "deterministic-local-substitute" : "pi",

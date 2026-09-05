@@ -114,7 +114,25 @@ fi
 chmod 0700 "$CARILLON_HOME" "$CARILLON_HOME/credentials" "$CARILLON_HOME/pi" "$CARILLON_HOME/logs"
 chmod 0600 "$CARILLON_HOME/carillon.toml" "$CARILLON_HOME/credentials"/*.token
 
-"$APP/bin/carillon-register-services"
+if "$APP/bin/carillon-register-services"; then
+  :
+else
+  registration_result=$?
+  if [ "$registration_result" -eq 10 ] && [ -n "$APP_NEW" ]; then
+    # The helper confirmed the old definitions are intact. Select their old
+    # application too; never infer rollback safety from an arbitrary failure.
+    if mv --exchange --no-copy -T -- "$APP_NEW" "$APP"; then
+      echo "service registration failed; previous application and units restored" >&2
+    else
+      echo "application rollback failed; inspect $APP and retained tree $APP_NEW before restarting" >&2
+      APP_NEW=
+    fi
+  elif [ -n "$APP_NEW" ]; then
+    echo "service registration did not confirm rollback; new application remains selected, previous tree retained at $APP_NEW; rerun installer before restarting" >&2
+    APP_NEW=
+  fi
+  exit 1
+fi
 cat <<EOF
 Carillon installed for $OWNER at $CARILLON_HOME and enabled for this user's service manager.
 1. Put the Discord bot token in $CARILLON_HOME/credentials/discord-bot.token (mode 0600).
