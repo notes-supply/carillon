@@ -12,3 +12,11 @@ pub(crate) fn sync_tree(path: &Path) -> std::io::Result<()> {
     }
     fs::File::open(path)?.sync_all()
 }
+
+/// Persist a publication directory and the entries naming its ancestors.
+pub(crate) fn sync_ancestors(directory: &Path) -> std::io::Result<()> {
+    for parent in directory.ancestors() {
+        fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}

@@ -155,9 +155,7 @@ pub fn initialize(
         fs::rename(root, &target)?;
         // Persist the publication and any newly created parent directories. A
         // failure after rename leaves the complete installation selected for retry.
-        for ancestor in parent.ancestors() {
-            fs::File::open(ancestor)?.sync_all()?;
-        }
+        crate::filesystem::sync_ancestors(parent)?;
         Ok(())
     })();
     if let Err(error) = result {
@@ -376,18 +374,17 @@ pub fn restore(archive_path: &Path, target: &Path) -> Result<PathBuf> {
     let staging = parent.join(format!(".{name}.restore-{}", Uuid::now_v7()));
     fs::DirBuilder::new().mode(0o700).create(&staging)?;
 
-    let result = restore_into(archive_path, &staging);
+    let result = restore_into(archive_path, &staging)
+        .and_then(|()| Ok(crate::filesystem::sync_tree(&staging)?));
     if let Err(failure) = result {
         let _ = fs::remove_dir_all(&staging);
         return Err(failure);
-    }
-    if target.exists() {
-        fs::remove_dir(&target)?;
     }
     if let Err(failure) = fs::rename(&staging, &target) {
         let _ = fs::remove_dir_all(&staging);
         return Err(failure.into());
     }
+    crate::filesystem::sync_ancestors(parent)?;
     Ok(target.join("carillon.toml"))
 }
 

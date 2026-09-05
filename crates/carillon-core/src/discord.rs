@@ -218,6 +218,10 @@ impl Participation {
     fn load(path: PathBuf) -> Result<Self> {
         fs::create_dir_all(path.parent().context("participation path has no parent")?)?;
         let state = if path.exists() {
+            fs::File::open(&path)?.sync_all()?;
+            crate::filesystem::sync_ancestors(
+                path.parent().context("participation path has no parent")?,
+            )?;
             serde_json::from_slice(&fs::read(&path)?)
                 .with_context(|| format!("parse Discord participation state {}", path.display()))?
         } else {
@@ -243,10 +247,12 @@ impl Participation {
 
     fn adopt(&self, thread_id: &str, route_channel_id: &str) -> Result<()> {
         let mut state = self.lock();
-        state
-            .threads
+        let mut next = state.clone();
+        next.threads
             .insert(thread_id.to_owned(), route_channel_id.to_owned());
-        self.persist(&state)
+        self.persist(&next)?;
+        *state = next;
+        Ok(())
     }
 
     fn remember_created(
@@ -256,19 +262,26 @@ impl Participation {
         route_channel_id: &str,
     ) -> Result<()> {
         let mut state = self.lock();
-        state
-            .created_threads
+        let mut next = state.clone();
+        next.created_threads
             .insert(message_id.to_owned(), thread_id.to_owned());
-        state
-            .threads
+        next.threads
             .insert(thread_id.to_owned(), route_channel_id.to_owned());
-        self.persist(&state)
+        self.persist(&next)?;
+        *state = next;
+        Ok(())
     }
 
     fn persist(&self, state: &ParticipationState) -> Result<()> {
         let temporary = self.path.with_extension("json.tmp");
         fs::write(&temporary, serde_json::to_vec_pretty(state)?)?;
+        fs::File::open(&temporary)?.sync_all()?;
         fs::rename(temporary, &self.path)?;
+        crate::filesystem::sync_ancestors(
+            self.path
+                .parent()
+                .context("participation path has no parent")?,
+        )?;
         Ok(())
     }
 }
@@ -1189,6 +1202,69 @@ mod tests {
             DeliveryReconciliation, EventReceipt, ExternalEvent, Health, SimulateRequest, TurnState,
         },
     };
+
+    #[test]
+    fn participation_persistence_retries_without_bypassing_activation() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("participation.json");
+        let participation = Participation::load(path.clone())?;
+        if let Err(failure) = participation.adopt("400", "300") {
+            eprintln!("adoption persistence failed: {failure}");
+            assert_eq!(participation.parent_route("400"), None);
+            participation.adopt("400", "300")?;
+        }
+        if let Err(failure) = participation.remember_created("500", "500", "300") {
+            eprintln!("creation persistence failed: {failure}");
+            assert_eq!(participation.created_thread("500"), None);
+            assert_eq!(participation.parent_route("500"), None);
+            assert_eq!(participation.parent_route("400").as_deref(), Some("300"));
+            participation.remember_created("500", "500", "300")?;
+        }
+        let recovered = Participation::load(path)?;
+        assert_eq!(recovered.created_thread("500").as_deref(), Some("500"));
+        let config = discord_config(DiscordActivation::Mention, DiscordConversation::Thread);
+        let plan = resolve_message(
+            &config,
+            SimulateRequest {
+                event_id: "unmentioned".to_owned(),
+                guild_id: Some("100".to_owned()),
+                user_id: "200".to_owned(),
+                channel_id: "400".to_owned(),
+                parent_channel_id: recovered.parent_route("400"),
+                content: "continue without a mention".to_owned(),
+            },
+            serde_json::json!({}),
+            &recovered.lock(),
+        )
+        .map_err(|error| anyhow!(error.message))?
+        .context("lost adopted-thread activation")?;
+        assert!(!plan.adopt_thread);
+        assert!(!plan.create_thread);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_participation_write_leaves_memory_and_disk_unchanged() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("participation.json");
+        let participation = Participation::load(path.clone())?;
+        participation.adopt("400", "300")?;
+        let original = std::fs::read(&path)?;
+        let temporary = path.with_extension("json.tmp");
+        std::fs::create_dir(&temporary)?;
+        assert!(participation.adopt("401", "300").is_err());
+        assert!(participation.remember_created("500", "500", "300").is_err());
+        assert_eq!(participation.parent_route("401"), None);
+        assert_eq!(participation.created_thread("500"), None);
+        assert_eq!(std::fs::read(&path)?, original);
+        std::fs::remove_dir(temporary)?;
+        participation.adopt("401", "300")?;
+        participation.remember_created("500", "500", "300")?;
+        let recovered = Participation::load(path)?;
+        assert_eq!(recovered.parent_route("401").as_deref(), Some("300"));
+        assert_eq!(recovered.created_thread("500").as_deref(), Some("500"));
+        Ok(())
+    }
 
     fn core_client(base_url: String) -> CoreClient {
         CoreClient {

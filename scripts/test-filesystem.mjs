@@ -9,7 +9,10 @@ import { setTimeout as delay } from "node:timers/promises";
 // Linux syscall fault injection: real binaries, SQLite, files and HTTP. No
 // application fault switches, mocked storage, or service-manager interaction.
 const [mode, artifact] = process.argv.slice(2);
-assert.ok(mode === "init" || mode === "resources", "expected init or resources");
+assert.ok(
+  ["init", "resources", "restore", "participation"].includes(mode),
+  "unknown filesystem test mode",
+);
 const binary = resolve(mode === "init" ? join(artifact, "bin/carillon") : artifact);
 const release = mode === "init" ? resolve(artifact) : null;
 execFileSync("strace", ["--version"], { stdio: "ignore" });
@@ -31,8 +34,15 @@ const traceOptions = ["-f", "-qq", "-yy", "-s", "4096", "-e", "trace=mkdir,renam
 const run = (...args) => execFileSync(binary, args, { encoding: "utf8", timeout: 30_000 });
 
 try {
-  if (mode === "init") await testInitialization();
-  else await testResources();
+  if (mode === "init") {
+    await testInitialization();
+    await testRestore();
+  } else if (mode === "restore") await testRestore();
+  else if (mode === "participation") await testParticipation();
+  else {
+    await testResources();
+    await testParticipation();
+  }
 } finally {
   await rm(scratch, { recursive: true, force: true });
 }
@@ -180,6 +190,193 @@ async function testInitialization() {
         );
       console.log(`initialization interruption passed: ${empty ? "empty" : "absent"} / ${name}`);
       await rm(home, { recursive: true, force: true });
+    }
+  }
+}
+
+async function testRestore() {
+  const source = join(scratch, "restore-source");
+  run("init", "--root", source, "--workspace", scratch, ...options);
+  const token = await readFile(join(source, "credentials/operator.token"));
+  const archive = join(scratch, "restore-source.tar.gz");
+  run("backup", "--config", join(source, "carillon.toml"), "--output", archive);
+  await rm(source, { recursive: true });
+  const baseline = join(scratch, "restore-baseline");
+  const trace = join(scratch, "restore.trace");
+  const restoreArgs = (target) => ["restore", "--input", archive, "--target", target];
+  execFileSync("strace", [...traceOptions, "-o", trace, binary, ...restoreArgs(baseline)]);
+  const lines = (await readFile(trace, "utf8")).split("\n");
+  const publication = lines.findIndex((line) => line.includes(`, "${baseline}")`));
+  assert.ok(publication >= 0, "restore must publish with rename");
+  const staging = lines[publication].match(/rename\("([^"]+)"/u)[1];
+  // Check every restored file and directory, not only a convenient fixture file.
+  for (const name of ["", ...(await readdir(baseline, { recursive: true }))]) {
+    assert.ok(
+      lines
+        .slice(0, publication)
+        .some(
+          (line) =>
+            line.includes(`fsync(`) &&
+            line.includes(`<${join(staging, name)}>`) &&
+            line.endsWith("= 0"),
+        ),
+      `restored tree missing pre-publication sync: ${name}`,
+    );
+  }
+  assert.ok(
+    lines
+      .slice(publication + 1)
+      .some(
+        (line) => line.includes(`fsync(`) && line.includes(`<${scratch}>`) && line.endsWith("= 0"),
+      ),
+    "restore parent must be synced",
+  );
+  const configSync =
+    lines
+      .filter((line) => line.includes(" fsync("))
+      .findIndex((line) => line.includes("/carillon.toml>")) + 1;
+  const parentSync =
+    lines.slice(0, publication).filter((line) => line.includes(" fsync(")).length + 1;
+  const rename = lines.slice(0, publication + 1).filter((line) => line.includes(" rename(")).length;
+  const cases = [
+    ["tree-sync", `fsync:error=EIO:when=${configSync}`, false],
+    ["rename", `rename:error=EIO:when=${rename}`, false],
+    ["kill-before", `rename:error=EIO:signal=SIGKILL:when=${rename}`, false],
+    ["parent-sync", `fsync:error=EIO:when=${parentSync}`, true],
+    ["term-after", `fsync:error=EIO:signal=SIGTERM:when=${parentSync}`, true],
+    ["kill-after", `fsync:error=EIO:signal=SIGKILL:when=${parentSync}`, true],
+  ];
+  for (const empty of [false, true]) {
+    for (const [name, injection, published] of cases) {
+      const target = join(scratch, `restore-${empty}-${name}`);
+      if (empty) await mkdir(target);
+      const inode = empty ? (await stat(target)).ino : null;
+      const log = `${target}.trace`;
+      const result = spawnSync(
+        "strace",
+        [...traceOptions, "-o", log, "-e", `inject=${injection}`, binary, ...restoreArgs(target)],
+        { encoding: "utf8", timeout: 30_000 },
+      );
+      assert.ifError(result.error);
+      assert.notEqual(result.status, 0, "injection must fail the restore");
+      const observed = await readFile(log, "utf8");
+      const signal = injection.match(/signal=(SIG\w+)/u)?.[1];
+      if (signal) {
+        assert.ok(observed.includes(`killed by ${signal}`));
+        assert.equal(
+          observed.split("\n").filter((line) => line.includes(` ${injection.split(":")[0]}(`))
+            .length,
+          Number(injection.match(/when=(\d+)/u)[1]),
+        );
+      } else assert.match(observed, /INJECTED/u);
+      if (!published) {
+        if (empty) {
+          assert.deepEqual(await readdir(target), []);
+          assert.equal((await stat(target)).ino, inode);
+        } else await assert.rejects(stat(target), { code: "ENOENT" });
+        run(...restoreArgs(target));
+      }
+      // Post-rename failure is a committed publication, not a rollback: validate
+      // the selected tree rather than overwriting a nonempty restore destination.
+      assert.deepEqual(await readFile(join(target, "credentials/operator.token")), token);
+      run("backup", "--config", join(target, "carillon.toml"), "--output", `${target}.tar.gz`);
+      console.log(`restore durability failure passed: ${empty ? "empty" : "absent"} / ${name}`);
+    }
+  }
+}
+
+async function testParticipation() {
+  const messages = execFileSync(
+    "cargo",
+    ["test", "--locked", "-p", "carillon-core", "--lib", "--no-run", "--message-format=json"],
+    { encoding: "utf8", timeout: 120_000 },
+  );
+  const artifacts = messages
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))
+    .filter(
+      (message) =>
+        message.reason === "compiler-artifact" && message.executable && message.profile.test,
+    );
+  assert.equal(artifacts.length, 1, "one library test binary must be built");
+  const args = [
+    artifacts[0].executable,
+    "--exact",
+    "discord::tests::participation_persistence_retries_without_bypassing_activation",
+    "--nocapture",
+    "--test-threads=1",
+  ];
+  const trace = join(scratch, "participation.trace");
+  const output = execFileSync("strace", [...traceOptions, "-o", trace, ...args], {
+    encoding: "utf8",
+    timeout: 30_000,
+  });
+  assert.match(output, /1 passed; 0 failed/u, "must execute the participation regression");
+  const lines = (await readFile(trace, "utf8")).split("\n");
+  const renames = lines.filter(
+    (line) => line.includes(" rename(") && line.includes("/participation.json.tmp"),
+  );
+  assert.equal(renames.length, 2, "adoption and native creation must each persist");
+  let previousPublication = -1;
+  for (const [index, rename] of renames.entries()) {
+    const publication = lines.findIndex(
+      (line, position) => position > previousPublication && line === rename,
+    );
+    previousPublication = publication;
+    const [temporary, target] = rename.match(/rename\("([^"]+)", "([^"]+)"/u).slice(1);
+    const before = lines.findLastIndex(
+      (line, position) =>
+        position < publication &&
+        line.includes(`fsync(`) &&
+        line.includes(`<${temporary}>`) &&
+        line.endsWith("= 0"),
+    );
+    const after = lines.findIndex(
+      (line, position) =>
+        position > publication &&
+        line.includes(`fsync(`) &&
+        line.includes(`<${dirname(target)}>`) &&
+        line.endsWith("= 0"),
+    );
+    assert.ok(
+      before >= 0 && after > publication,
+      "participation requires file sync before rename and parent sync after",
+    );
+    for (const [boundary, position] of [
+      ["file", before],
+      ["parent", after],
+    ]) {
+      const tid = lines[position].trim().split(/\s+/u)[0];
+      const ordinal = lines
+        .slice(0, position + 1)
+        .filter((line) => line.trim().startsWith(`${tid} `) && line.includes(" fsync(")).length;
+      const log = join(scratch, `participation-${index}-${boundary}.trace`);
+      const result = spawnSync(
+        "strace",
+        [...traceOptions, "-o", log, "-e", `inject=fsync:error=EIO:when=${ordinal}`, ...args],
+        { encoding: "utf8", timeout: 30_000 },
+      );
+      assert.ifError(result.error);
+      assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+      assert.match(result.stdout, /1 passed; 0 failed/u);
+      assert.ok(
+        result.stderr.includes(`${index === 0 ? "adoption" : "creation"} persistence failed:`),
+        "failed publication must surface before retry",
+      );
+      const injected = (await readFile(log, "utf8"))
+        .split("\n")
+        .filter((line) => line.includes("INJECTED"));
+      assert.equal(injected.length, 1, "only the intended test-thread syscall may fail");
+      assert.ok(
+        boundary === "file"
+          ? injected[0].includes("/participation.json.tmp>")
+          : !injected[0].includes(".json"),
+        `wrong participation boundary: ${injected[0]}`,
+      );
+      console.log(
+        `participation durability failure passed: ${index === 0 ? "adoption" : "creation"} / ${boundary}`,
+      );
     }
   }
 }
