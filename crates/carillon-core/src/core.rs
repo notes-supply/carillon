@@ -82,14 +82,9 @@ impl IntoResponse for ApiError {
 
 pub async fn serve(config: LoadedConfig) -> Result<()> {
     let database = Database::open(&config.value.data_dir.join("carillon.sqlite3"))?;
-    let recovered_deliveries = database.recover_deliveries()?;
     let recovered_turns = database.recover_running_turns()?;
-    if recovered_deliveries > 0 {
-        warn!(
-            recovered_deliveries,
-            "delivery outcomes became uncertain after restart"
-        );
-    }
+    // Interface processes may outlive core. Their claims remain recoverable;
+    // interface-instance reconciliation handles abandoned claims instead.
     if recovered_turns > 0 {
         warn!(
             recovered_turns,

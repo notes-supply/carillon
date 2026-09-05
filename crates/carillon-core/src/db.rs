@@ -452,16 +452,6 @@ impl Database {
         Ok(())
     }
 
-    /// Marks every claimed delivery as uncertain. Run at core startup: the
-    /// interface holding the claim may already have sent the content.
-    pub fn recover_deliveries(&self) -> Result<usize> {
-        Ok(self.connect()?.execute(
-            "UPDATE deliveries SET state = 'uncertain', claim_owner = NULL, updated_at = ?1
-             WHERE state = 'delivering'",
-            [timestamp()?],
-        )?)
-    }
-
     /// Releases delivery claims held by other, presumed dead, instances of an
     /// interface as uncertain, and returns the feedback targets of every
     /// uncertain delivery so the new instance can surface them.

@@ -99,6 +99,134 @@ fn completed(request: RuntimeTurnRequest) -> RuntimeTurnResponse {
     }
 }
 
+#[test]
+fn configuration_rejects_malformed_provider_endpoints_before_startup() -> Result<()> {
+    let directory = tempdir()?;
+    let mut state = installation(directory.path())?;
+    let path = directory.path().join("carillon.toml");
+    for index in 0..state.config.value.providers.len() {
+        for url in [
+            "not-a-url",
+            "",
+            "https://127.0.0.1:3000",
+            "http://localhost:3000",
+            "http://127.0.0.1",
+            "http://127.0.0.1:99999",
+            "http://127.0.0.1:3000/path",
+            "http://user@127.0.0.1:3000",
+            "http://127.0.0.1:3000?query",
+        ] {
+            state.config.value.providers[index].url = url.to_owned();
+            fs::write(&path, toml::to_string(&state.config.value)?)?;
+            assert!(LoadedConfig::load(&path).is_err(), "accepted {url:?}");
+        }
+        for url in ["http://127.0.0.1:3000", "http://[::1]:3000"] {
+            state.config.value.providers[index].url = url.to_owned();
+            fs::write(&path, toml::to_string(&state.config.value)?)?;
+            LoadedConfig::load(&path)?;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn live_interface_claim_survives_core_startup_and_acknowledges_once() -> Result<()> {
+    use crate::model::{DeliveryOutcome, DeliveryState};
+
+    let directory = tempdir()?;
+    let mut state = installation(directory.path())?;
+    let receipt = accept(&state, "one", "conversation").await?;
+    run_next_turn(&state, "test-runtime", async |_, _, request| {
+        Ok(completed(request))
+    })
+    .await?;
+    let claim = state
+        .database
+        .claim_delivery("test-interface", "live-instance")?
+        .context("missing claim")?;
+    // Startup uses the real service path, not merely reopening SQLite.
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    state.config.value.core.listen = listener.local_addr()?;
+    drop(listener);
+    let base = format!("http://{}", state.config.value.core.listen);
+    let server = tokio::spawn(serve(state.config.clone()));
+    let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if state
+                .client
+                .get(format!("{base}/health"))
+                .send()
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let request = |method, path: &str| {
+            state
+                .client
+                .request(method, format!("{base}{path}"))
+                .bearer_auth("test-only")
+                .header(PROVIDER_HEADER, "test-interface")
+                .header(INSTANCE_HEADER, "live-instance")
+        };
+        let reconciliation = request(reqwest::Method::POST, "/v1/deliveries/reconcile")
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<DeliveryReconciliation>()
+            .await?;
+        assert!(reconciliation.feedback_target_ids.is_empty());
+        let recovered = request(reqwest::Method::GET, "/v1/deliveries")
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Option<Delivery>>()
+            .await?
+            .context("live claim was lost")?;
+        assert_eq!(recovered.id, claim.id);
+        // The interface already sent the reply; it retries only the known acknowledgement.
+        for _ in 0..2 {
+            assert_eq!(
+                request(
+                    reqwest::Method::POST,
+                    &format!("/v1/deliveries/{}/ack", claim.id)
+                )
+                .json(&DeliveryAck {
+                    outcome: DeliveryOutcome::Delivered,
+                    native_ref: Some("native-reply".to_owned())
+                })
+                .send()
+                .await?
+                .status(),
+                StatusCode::NO_CONTENT
+            );
+        }
+        assert!(
+            request(reqwest::Method::GET, "/v1/deliveries")
+                .send()
+                .await?
+                .error_for_status()?
+                .json::<Option<Delivery>>()
+                .await?
+                .is_none()
+        );
+        let turn = state
+            .database
+            .inspect_turn(&receipt.turn_id)?
+            .context("missing turn")?;
+        assert_eq!(turn.delivery_state, Some(DeliveryState::Delivered));
+        assert_eq!(turn.delivery_native_ref.as_deref(), Some("native-reply"));
+        Ok::<_, anyhow::Error>(())
+    })
+    .await;
+    server.abort();
+    let _ = server.await;
+    outcome??;
+    Ok(())
+}
+
 #[tokio::test]
 async fn duplicate_events_share_one_accepted_turn_without_reexecution() -> Result<()> {
     let directory = tempdir()?;

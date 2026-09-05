@@ -982,8 +982,8 @@ async fn delivery_loop(state: DiscordState, http: Arc<DiscordHttp>) -> Result<()
 }
 
 /// A failed claim response is ambiguous: core may have committed the claim
-/// before disconnecting. Reconcile before polling again so a core restart
-/// cannot strand that delivery in `uncertain` until this process restarts.
+/// before disconnecting. Reconciliation preserves this instance's claim so
+/// polling can recover it, while surfacing claims abandoned by older instances.
 async fn reconcile_after_claim_failure(state: &DiscordState, http: &DiscordHttp) -> Result<()> {
     loop {
         match state.core.reconcile().await {
@@ -1497,7 +1497,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discord_reconciles_after_an_ambiguous_delivery_claim() -> anyhow::Result<()> {
+    async fn replacement_interface_reconciles_an_abandoned_delivery_claim() -> anyhow::Result<()> {
         use crate::{db::Database, model::DeliveryState};
         use anyhow::Context as _;
         use tokio::io::AsyncReadExt as _;
@@ -1523,10 +1523,13 @@ mod tests {
                 request.extend_from_slice(&buffer[..length]);
             }
             assert!(request.starts_with(b"GET /v1/deliveries HTTP/1.1\r\n"));
-            assert!(database.claim_delivery("discord", "instance")?.is_some());
+            assert!(
+                database
+                    .claim_delivery("discord", "previous-instance")?
+                    .is_some()
+            );
             server_trace.lock().await.push("claim committed".to_owned());
             let restarted = Database::open(&path)?;
-            assert_eq!(restarted.recover_deliveries()?, 1);
             restarted.recover_running_turns()?;
             server_trace.lock().await.push("recovered".to_owned());
             drop(connection);
@@ -1543,8 +1546,15 @@ mod tests {
                 .build(),
         );
         // A deadline bounds test failure; progression is driven by actual requests, not sleeps.
-        let outcome =
-            tokio::time::timeout(Duration::from_secs(5), delivery_loop(state, http)).await;
+        let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut previous = core_client(format!("http://{address}"));
+            previous.instance_id = "previous-instance".to_owned();
+            assert!(previous.claim_delivery().await.is_err());
+            // A replacement interface must reconcile its predecessor before polling.
+            super::reconcile_after_claim_failure(&state, &http).await?;
+            delivery_loop(state, http).await
+        })
+        .await;
         server.abort();
         let _ = server.await;
         assert!(

@@ -256,9 +256,9 @@ impl Config {
             if provider.version.trim().is_empty() {
                 bail!("provider {} must declare a version", provider.id);
             }
-            if provider.url.trim().is_empty() {
-                bail!("provider {} must declare a URL", provider.id);
-            }
+            provider
+                .listen_address()
+                .with_context(|| format!("invalid URL for provider {}", provider.id))?;
             if provider.token_hash.trim().is_empty() {
                 bail!("provider {} must declare a credential hash", provider.id);
             }
