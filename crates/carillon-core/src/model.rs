@@ -128,7 +128,7 @@ pub struct EventReceipt {
     pub duplicate: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ResourceSnapshot {
     pub id: String,
     pub system_sha256: String,

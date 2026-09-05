@@ -365,6 +365,8 @@ async function loadConfig(path: string, providerId: string): Promise<Config> {
   const configPath = await realpath(path);
   const root = resolve(configPath, "..");
   const parsed = Parse(FileConfigSchema, parseToml(await readFile(configPath, "utf8")));
+  if (parsed.providers.some((provider) => provider.id === "operator"))
+    throw new Error("provider ID operator is reserved for operator diagnostics");
   const runtime = parsed.providers.find(
     (provider) => provider.id === providerId && provider.role === "runtime",
   );

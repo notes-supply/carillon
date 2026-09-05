@@ -136,6 +136,20 @@ impl Database {
         Ok(())
     }
 
+    /// Validate every captured resource reference before archiving or restoring.
+    pub fn validate_resource_snapshots(&self, store: &Path) -> Result<()> {
+        let connection =
+            Connection::open_with_flags(&self.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let mut statement =
+            connection.prepare("SELECT DISTINCT resource_snapshot_json FROM turns")?;
+        for record in statement.query_map([], |row| row.get::<_, String>(0))? {
+            let snapshot: ResourceSnapshot = serde_json::from_str(&record?)?;
+            crate::resources::validate(&snapshot, store)
+                .context("backup has missing or altered captured resources")?;
+        }
+        Ok(())
+    }
+
     fn initialize_connection(connection: &Connection) -> Result<()> {
         connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS events (

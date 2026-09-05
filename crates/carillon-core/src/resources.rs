@@ -32,13 +32,8 @@ impl ResourceFile {
 pub fn materialize(source: &Path, store: &Path) -> Result<ResourceSnapshot> {
     let files = selected_resource_files(source)?;
 
-    let system_sha256 = hash_bytes(files.get("SYSTEM.md").map_or(&[], |file| &file.bytes));
-    let context_sha256 = hash_bytes(files.get("AGENTS.md").map_or(&[], |file| &file.bytes));
-    let settings_sha256 = hash_bytes(files.get("settings.json").map_or(&[], |file| &file.bytes));
-    let extensions_sha256 = hash_entries(&files, "extensions/");
-    let skills_sha256 = hash_entries(&files, "skills/");
-    let fingerprint = hash_entries(&files, "");
-    let destination = store.join(&fingerprint);
+    let snapshot = describe(&files);
+    let destination = store.join(&snapshot.id);
     if destination.exists() {
         if selected_resource_files(&destination)? != files {
             bail!(
@@ -78,14 +73,44 @@ pub fn materialize(source: &Path, store: &Path) -> Result<ResourceSnapshot> {
     // failed to persist the directory entry. No accepted turn may outrun this.
     fs::File::open(store)?.sync_all()?;
     fs::File::open(store.parent().context("snapshot store has no parent")?)?.sync_all()?;
-    Ok(ResourceSnapshot {
-        id: fingerprint,
-        system_sha256,
-        context_sha256,
-        settings_sha256,
-        extensions_sha256,
-        skills_sha256,
-    })
+    Ok(snapshot)
+}
+
+fn describe(files: &BTreeMap<String, ResourceFile>) -> ResourceSnapshot {
+    ResourceSnapshot {
+        id: hash_entries(files, ""),
+        system_sha256: hash_bytes(files.get("SYSTEM.md").map_or(&[], |file| &file.bytes)),
+        context_sha256: hash_bytes(files.get("AGENTS.md").map_or(&[], |file| &file.bytes)),
+        settings_sha256: hash_bytes(files.get("settings.json").map_or(&[], |file| &file.bytes)),
+        extensions_sha256: hash_entries(files, "extensions/"),
+        skills_sha256: hash_entries(files, "skills/"),
+    }
+}
+
+/// Check archived core-owned resources without publishing or repairing them.
+pub fn validate(snapshot: &ResourceSnapshot, store: &Path) -> Result<()> {
+    if snapshot.id.len() != 64
+        || !snapshot
+            .id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        bail!("invalid resource snapshot content address");
+    }
+    let root = store.join(&snapshot.id);
+    if !fs::symlink_metadata(&root)?.file_type().is_dir() {
+        bail!(
+            "resource snapshot root is not a directory: {}",
+            root.display()
+        );
+    }
+    if describe(&selected_resource_files(&root)?) != *snapshot {
+        bail!(
+            "resource snapshot {} does not match its recorded hashes",
+            snapshot.id
+        );
+    }
+    Ok(())
 }
 
 /// The runtime's view of a snapshot: its on-disk location in the given store

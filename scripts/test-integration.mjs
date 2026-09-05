@@ -604,6 +604,22 @@ async function testConfigurationRefusals() {
   const database = join(installation, "state/carillon.sqlite3");
   const previousDatabase = await readFile(database);
   try {
+    for (const id of ["runtime-pi", "discord-private"]) {
+      // Matching hashes must not turn a provider credential into operator identity;
+      // differing hashes must not leave an impossible-to-authenticate provider.
+      for (const sameHash of [false, true]) {
+        let text = original.replaceAll(`"${id}"`, '"operator"');
+        if (sameHash) {
+          const operatorHash = /^operator_token_hash = "([a-f0-9]+)"/mu.exec(original)?.[1];
+          assert.ok(operatorHash);
+          text = text.replaceAll(/^token_hash = "[a-f0-9]+"/gmu, `token_hash = "${operatorHash}"`);
+        }
+        await writeFile(configPath(), text);
+        for (const name of ["core", "discord", "runtime"])
+          assertStartupRefused(name, /provider ID operator is reserved/u);
+        assert.deepEqual(await readFile(database), previousDatabase);
+      }
+    }
     for (const field of ["operator_token_hash", "token_hash"]) {
       for (const hash of [
         "",

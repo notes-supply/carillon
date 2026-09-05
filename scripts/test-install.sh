@@ -37,7 +37,7 @@ CARILLON_CORE_BINARY="$RELEASE/bin/carillon" CARILLON_RUNTIME_BINARY="$RELEASE/b
 TEST_ROOT=$(mktemp -d)
 OWNER_HOME="$TEST_ROOT/owner home"
 WORKSPACE=$OWNER_HOME/workspace
-CARILLON_HOME=$OWNER_HOME/.carillon
+CARILLON_HOME="$TEST_ROOT/custom installation"
 XDG_CONFIG_HOME=$OWNER_HOME/.config
 GLOBAL_PI=$OWNER_HOME/.pi
 mkdir -p "$WORKSPACE" "$GLOBAL_PI"
@@ -758,9 +758,21 @@ cat >"$CARILLON_HOME/app/bin/pi" <<'PROBE'
 printf '%s\n%s\n' "$PI_CODING_AGENT_DIR" "$HOME" >"$CARILLON_HOME/pi/login-probe"
 PROBE
 chmod 0755 "$CARILLON_HOME/app/bin/pi"
-env HOME="$OWNER_HOME" CARILLON_HOME="$CARILLON_HOME" "$CARILLON_HOME/app/bin/carillon-pi"
-[ "$(sed -n '1p' "$CARILLON_HOME/pi/login-probe")" = "$CARILLON_HOME/pi" ]
-[ "$(sed -n '2p' "$CARILLON_HOME/pi/login-probe")" = "$OWNER_HOME" ]
+ln -s "$CARILLON_HOME/app/bin/carillon-pi" "$TEST_ROOT/pi-login"
+for launcher in "$CARILLON_HOME/app/bin/carillon-pi" "$TEST_ROOT/pi-login"; do
+  for location in unset conflicting; do
+    rm -f "$CARILLON_HOME/pi/login-probe"
+    if [ "$location" = unset ]; then
+      env -u CARILLON_HOME HOME="$OWNER_HOME" "$launcher"
+    else
+      env HOME="$OWNER_HOME" CARILLON_HOME="$TEST_ROOT/wrong-root" "$launcher"
+    fi
+    [ "$(sed -n '1p' "$CARILLON_HOME/pi/login-probe")" = "$CARILLON_HOME/pi" ]
+    [ "$(sed -n '2p' "$CARILLON_HOME/pi/login-probe")" = "$OWNER_HOME" ]
+    [ ! -e "$TEST_ROOT/wrong-root" ]
+    [ ! -e "$OWNER_HOME/.carillon" ]
+  done
+done
 mv "$CARILLON_HOME/app/bin/pi.real" "$CARILLON_HOME/app/bin/pi"
 
 APP=$CARILLON_HOME/app/bin

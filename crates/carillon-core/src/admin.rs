@@ -170,6 +170,12 @@ fn default_providers(
     discord_token: &str,
     runtime_token: &str,
 ) -> Result<Vec<Provider>> {
+    #[derive(serde::Deserialize)]
+    struct PiPackage {
+        version: String,
+    }
+    let pi: PiPackage =
+        serde_json::from_str(include_str!("../../../packages/runtime-pi/package.json"))?;
     Ok(vec![
         Provider {
             id: "discord-private".to_owned(),
@@ -182,7 +188,7 @@ fn default_providers(
         Provider {
             id: "runtime-pi".to_owned(),
             role: ProviderRole::Runtime,
-            version: RELEASE_VERSION.to_owned(),
+            version: pi.version,
             url: format!("http://127.0.0.1:{}", checked_port(base_port, 2)?),
             token_hash: hash_token(runtime_token),
             enabled: true,
@@ -464,8 +470,9 @@ fn validate_installation(config: &LoadedConfig) -> Result<()> {
             bail!("backup credential for {id} does not match the configuration");
         }
     }
-    Database::validate_backup(&config.value.data_dir.join("carillon.sqlite3"))
-        .context("backup does not contain a valid current core database")
+    Database::open(&config.value.data_dir.join("carillon.sqlite3"))
+        .context("backup does not contain a valid current core database")?
+        .validate_resource_snapshots(&config.value.data_dir.join("resource-snapshots"))
 }
 
 fn ensure_stopped(config: &LoadedConfig) -> Result<ServiceLock> {
@@ -627,6 +634,22 @@ mod tests {
         let config = LoadedConfig::load(&config_path)?;
 
         assert_eq!(config.value.providers.len(), 2);
+        let pi_package: serde_json::Value =
+            serde_json::from_str(include_str!("../../../packages/runtime-pi/package.json"))?;
+        assert_eq!(
+            config
+                .provider("runtime-pi", ProviderRole::Runtime)?
+                .version,
+            pi_package["version"]
+                .as_str()
+                .context("Pi package version")?
+        );
+        assert_eq!(
+            config
+                .provider("discord-private", ProviderRole::Interface)?
+                .version,
+            crate::config::RELEASE_VERSION
+        );
         // This initializer bundles defaults; it does not constrain core providers.
         for (id, role) in [
             ("discord-private", ProviderRole::Interface),
@@ -891,6 +914,147 @@ mod tests {
                 let restored = LoadedConfig::load(&restore(&valid, &target)?)?;
                 super::validate_installation(&restored)?;
                 fs::remove_dir_all(&target)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn damage_captured_resources(
+        config: &LoadedConfig,
+        snapshot: &crate::model::ResourceSnapshot,
+        damage: &str,
+    ) -> Result<()> {
+        let store = config.value.data_dir.join("resource-snapshots");
+        let captured_root = store.join(&snapshot.id);
+        match damage {
+            "missing" => fs::rename(&captured_root, store.join("unreferenced"))?,
+            "content" => {
+                let path = captured_root.join("SYSTEM.md");
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o640))?;
+                fs::write(path, "altered capture")?;
+            }
+            "executable" => fs::set_permissions(
+                captured_root.join("SYSTEM.md"),
+                fs::Permissions::from_mode(0o550),
+            )?,
+            _ => {
+                let mut record = serde_json::to_value(snapshot)?;
+                match damage {
+                    "hash" => record["context_sha256"] = serde_json::json!("0".repeat(64)),
+                    "address" => record["id"] = serde_json::json!("../outside"),
+                    "malformed" => record = serde_json::json!({}),
+                    _ => unreachable!(),
+                }
+                rusqlite::Connection::open(config.value.data_dir.join("carillon.sqlite3"))?
+                    .execute(
+                        "UPDATE turns SET resource_snapshot_json = ?1",
+                        [serde_json::to_string(&record)?],
+                    )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn archives_validate_captured_resources_before_publication() -> Result<()> {
+        use crate::{
+            db::Database,
+            model::{ExternalEvent, TurnState},
+            resources,
+        };
+
+        for uncertain in [false, true] {
+            for damage in [
+                "missing",
+                "content",
+                "executable",
+                "hash",
+                "address",
+                "malformed",
+            ] {
+                let directory = tempdir()?;
+                let source = directory.path().join("source");
+                let config_path = initialize_test_installation(&source, directory.path(), 44_800)?;
+                let config = LoadedConfig::load(&config_path)?;
+                let store = config.value.data_dir.join("resource-snapshots");
+                let snapshot = resources::materialize(&config.value.agent.resource_root, &store)?;
+                let db_path = config.value.data_dir.join("carillon.sqlite3");
+                let db = Database::open(&db_path)?;
+                let receipt = db.accept_event(
+                    "discord-private",
+                    "runtime-pi",
+                    &ExternalEvent {
+                        event_id: "captured".to_owned(),
+                        agent_id: "default".to_owned(),
+                        audience_id: "audience".to_owned(),
+                        user_id: "user".to_owned(),
+                        delivery_target_id: "target".to_owned(),
+                        feedback_target_id: "feedback".to_owned(),
+                        content: "use captured resources".to_owned(),
+                        native: serde_json::json!({}),
+                    },
+                    &serde_json::json!([]),
+                    &snapshot,
+                )?;
+                let expected_state = if uncertain {
+                    assert!(db.claim_turn("runtime-pi")?.is_some());
+                    assert_eq!(db.recover_running_turns()?, 1);
+                    TurnState::Uncertain
+                } else {
+                    TurnState::Queued
+                };
+                // Valid capture remains independent of subsequent live-root edits.
+                fs::write(
+                    config.value.agent.resource_root.join("SYSTEM.md"),
+                    "new live prompt",
+                )?;
+                let valid = directory.path().join("valid.tar.gz");
+                backup(&config, &valid)?;
+                damage_captured_resources(&config, &snapshot, damage)?;
+                let refused_backup = directory.path().join("refused.tar.gz");
+                assert!(
+                    backup(&config, &refused_backup).is_err(),
+                    "backup accepted {damage}"
+                );
+                assert!(!refused_backup.exists());
+                let invalid = directory.path().join("invalid.tar.gz");
+                archive_test_tree(&source, &invalid)?;
+                fs::remove_dir_all(&source)?;
+                for existing in [false, true] {
+                    let target = directory.path().join("restored");
+                    if existing {
+                        fs::create_dir(&target)?;
+                    }
+                    assert!(
+                        restore(&invalid, &target).is_err(),
+                        "restore accepted {damage}"
+                    );
+                    assert_eq!(target.exists(), existing);
+                    if existing {
+                        assert!(fs::read_dir(&target)?.next().is_none());
+                    }
+                    let restored = LoadedConfig::load(&restore(&valid, &target)?)?;
+                    let restored_db =
+                        Database::open(&restored.value.data_dir.join("carillon.sqlite3"))?;
+                    let inspection = restored_db
+                        .inspect_turn(&receipt.turn_id)?
+                        .context("restored turn")?;
+                    assert_eq!(inspection.state, expected_state);
+                    resources::validate(
+                        &snapshot,
+                        &restored.value.data_dir.join("resource-snapshots"),
+                    )?;
+                    assert_eq!(
+                        fs::read(
+                            target
+                                .join("state/resource-snapshots")
+                                .join(&snapshot.id)
+                                .join("SYSTEM.md")
+                        )?,
+                        super::DEFAULT_SYSTEM.as_bytes()
+                    );
+                    fs::remove_dir_all(&target)?;
+                }
             }
         }
         Ok(())
