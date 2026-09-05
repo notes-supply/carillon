@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-const root = await mkdtemp(join(tmpdir(), "carillon-journey-"));
+const root = await mkdtemp(join(tmpdir(), "carillon-integration-"));
 const restoredRoot = await mkdtemp(join(tmpdir(), "carillon-restored-"));
 const piState = await mkdtemp(join(tmpdir(), "pi-carillon-"));
 const workspace = await mkdtemp(join(tmpdir(), "carillon-workspace-"));

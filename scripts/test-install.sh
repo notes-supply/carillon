@@ -267,4 +267,4 @@ env HOME="$OWNER_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" CARILLON_HOME="$CARILL
 [ "$(sha256sum "$GLOBAL_PI/sentinel" | cut -d' ' -f1)" = "$GLOBAL_PI_HASH" ]
 [ -e "$CARILLON_HOME/carillon.toml" ]
 
-printf '%s\n' "installed per-user journey preserved owner authority, admission, continuation, private Pi state, and unrelated files"
+printf '%s\n' "install tests passed: owner authority, admission, continuation, private Pi state, and unrelated files"

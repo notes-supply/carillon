@@ -20,7 +20,7 @@ description = "Format first-party Rust and TypeScript files"
 run = ["cargo fmt --all", "pnpm run format"]
 
 [tasks.check]
-description = "Run the complete non-mutating repository quality gate"
+description = "Run static checks and Rust/TypeScript tests"
 depends = ["install"]
 run = [
   "cargo fmt --all -- --check",
@@ -32,12 +32,17 @@ run = [
   "pnpm run check",
 ]
 
-[tasks.journey]
-description = "Exercise the complete deterministic first-release journey"
+[tasks."test:integration"]
+description = "Test local core, Discord, and Pi services together"
 depends = ["install"]
-run = "cargo build --locked --bin carillon && node scripts/journey.mjs"
+run = "cargo build --locked --bin carillon && node scripts/test-integration.mjs"
 
 [tasks.package]
 description = "Build a toolchain-free Linux release archive"
 depends = ["install"]
 run = "scripts/package-release.sh"
+
+[tasks."test:install"]
+description = "Build and test the release installation in a temporary home"
+depends = ["package"]
+run = "scripts/test-install.sh"

@@ -48,11 +48,27 @@ The repository uses Rust, TypeScript, `mise`, Cargo, and pnpm.
 ```sh
 mise install
 mise run check
-mise run journey
-mise run package
 ```
 
-`mise run journey` starts local loopback services with a deterministic runtime and exercises admission, conversation continuity, duplicate suppression, restarts, delivery recovery, diagnostics, and backup/restore.
+`check` runs static checks and the Rust/TypeScript test suites. These include unit tests for parsing, validation, and routing, plus focused database, HTTP, and Pi-session integration tests.
+
+For changes to service communication, startup, routing, or recovery, also run:
+
+```sh
+mise run test:integration
+```
+
+This starts local core, Discord, and Pi processes and tests admission, conversation continuity, deduplication, restarts, delivery recovery, diagnostics, and backup/restore. Discord input and model responses are simulated; it does not test live Discord or a model provider.
+
+For packaging, installer, service-unit, or owner-environment changes—and before a release—run:
+
+```sh
+mise run test:install
+```
+
+This builds the package, installs it into a temporary home, and tests permissions, configuration, packaged service startup, continuation, and safe uninstallation. It validates generated systemd units but launches the test processes directly.
+
+During iteration, run the tests affected by the change. Run `check` before submitting code changes; package/install verification is not required after every small edit.
 
 ## Installation
 

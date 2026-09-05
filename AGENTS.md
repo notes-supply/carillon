@@ -20,6 +20,6 @@ In TypeScript, preserve useful library types, validate unknown input at its boun
 
 Test observable behavior, state transitions, failure boundaries, and recovery. Avoid tests coupled only to source shape or implementation trivia.
 
-Treat `mise.toml` as the authoritative quality and release gate.
+Use the tasks in `mise.toml` for verification. During iteration, run affected tests; run `check` before submitting code changes. Run `test:integration` for service communication, startup, routing, or recovery changes. Run `test:install` for packaging, installer, service-unit, or owner-environment changes, and before a release; it builds the package itself. Do not rebuild and install the package after every small edit by default.
 
 Before finishing, read the complete net diff as a maintainer. Remove displaced code, obsolete tests and state, speculative fallbacks, and architecture that the new design has made unnecessary.
