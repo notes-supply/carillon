@@ -1251,53 +1251,196 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn discord_reconciles_after_an_ambiguous_delivery_claim() -> anyhow::Result<()> {
-        let claims = Arc::new(AtomicUsize::new(0));
-        let reconciliations = Arc::new(AtomicUsize::new(0));
-        let server_claims = claims.clone();
-        let server_reconciliations = reconciliations.clone();
-        let app = Router::new()
+    fn completed_delivery(
+        database: &crate::db::Database,
+    ) -> anyhow::Result<crate::db::ClaimedTurn> {
+        use crate::model::{ResourceSnapshot, RuntimeTurnResponse};
+        use anyhow::Context as _;
+        let event = ExternalEvent {
+            event_id: "one".to_owned(),
+            agent_id: "agent".to_owned(),
+            user_id: "200".to_owned(),
+            audience_id: "300".to_owned(),
+            delivery_target_id: "300".to_owned(),
+            feedback_target_id: "300:400".to_owned(),
+            content: "question".to_owned(),
+            native: Value::Null,
+        };
+        let resources = ResourceSnapshot {
+            id: "snapshot".to_owned(),
+            system_sha256: String::new(),
+            context_sha256: String::new(),
+            settings_sha256: String::new(),
+            extensions_sha256: String::new(),
+            skills_sha256: String::new(),
+        };
+        database.accept_event("discord", "runtime", &event, &Value::Null, &resources)?;
+        let turn = database
+            .claim_turn("runtime")?
+            .context("turn was not queued")?;
+        database.complete_turn(
+            &turn,
+            &RuntimeTurnResponse {
+                correlation_id: turn.turn_id.clone(),
+                output: "must not be sent twice".to_owned(),
+                continuation_ref: "native".to_owned(),
+            },
+        )?;
+        Ok(turn)
+    }
+
+    fn reconnect_router(
+        database: crate::db::Database,
+        trace: Arc<tokio::sync::Mutex<Vec<String>>>,
+    ) -> Router {
+        let reconcile_trace = trace.clone();
+        let reconcile_database = database.clone();
+        let poll_trace = trace.clone();
+        let poll_database = database;
+        let discord_trace = trace.clone();
+        let unexpected_trace = trace;
+        Router::new()
             .route(
-                "/v1/deliveries",
-                get(move || {
-                    let claims = server_claims.clone();
+                "/v1/deliveries/reconcile",
+                post(move || {
+                    let database = reconcile_database.clone();
+                    let trace = reconcile_trace.clone();
                     async move {
-                        if claims.fetch_add(1, Ordering::SeqCst) == 0 {
-                            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-                        } else {
-                            Json(Value::Null).into_response()
-                        }
+                        trace.lock().await.push("reconcile".to_owned());
+                        Ok::<_, StatusCode>(Json(DeliveryReconciliation {
+                            feedback_target_ids: database
+                                .reconcile_delivery_claims("discord", "instance")
+                                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+                        }))
                     }
                 }),
             )
             .route(
-                "/v1/deliveries/reconcile",
-                post(move || {
-                    let reconciliations = server_reconciliations.clone();
+                "/v1/deliveries",
+                get(move || {
+                    let database = poll_database.clone();
+                    let trace = poll_trace.clone();
                     async move {
-                        reconciliations.fetch_add(1, Ordering::SeqCst);
-                        Json(DeliveryReconciliation {
-                            feedback_target_ids: Vec::new(),
-                        })
+                        trace.lock().await.push("poll".to_owned());
+                        if database
+                            .claim_delivery("discord", "instance")
+                            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                            .is_some()
+                        {
+                            trace
+                                .lock()
+                                .await
+                                .push("unexpected duplicate delivery".to_owned());
+                        }
+                        // Terminate the infinite production loop after observing resumed polling.
+                        Ok::<_, StatusCode>(StatusCode::FORBIDDEN)
                     }
                 }),
-            );
+            )
+            .route(
+                "/api/v10/channels/{channel}/messages/{message}/reactions/{emoji}/@me",
+                axum::routing::any(
+                    move |method: Method,
+                          axum::extract::Path((channel, message, emoji)): axum::extract::Path<
+                        (String, String, String),
+                    >| {
+                        let trace = discord_trace.clone();
+                        async move {
+                            trace
+                                .lock()
+                                .await
+                                .push(format!("{method} {channel}:{message} {emoji}"));
+                            StatusCode::NO_CONTENT
+                        }
+                    },
+                ),
+            )
+            .fallback(move |method: Method, uri: Uri| {
+                let trace = unexpected_trace.clone();
+                async move {
+                    trace
+                        .lock()
+                        .await
+                        .push(format!("unexpected {method} {uri}"));
+                    StatusCode::NOT_FOUND
+                }
+            })
+    }
+
+    #[tokio::test]
+    async fn discord_reconciles_after_an_ambiguous_delivery_claim() -> anyhow::Result<()> {
+        use crate::{db::Database, model::DeliveryState};
+        use anyhow::Context as _;
+        use tokio::io::AsyncReadExt as _;
+
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("state.sqlite3");
+        let database = Database::open(&path)?;
+        let turn = completed_delivery(&database)?;
+
+        let trace = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let app = reconnect_router(database.clone(), trace.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
-        let server = tokio::spawn(async move { axum::serve(listener, app).await });
-
-        let state = discord_state(core_client(format!("http://{address}")));
-        let http = Arc::new(twilight_http::Client::new("unused".to_owned()));
-        assert!(
-            tokio::time::timeout(Duration::from_millis(250), delivery_loop(state, http))
-                .await
-                .is_err()
+        let server_trace = trace.clone();
+        let server = tokio::spawn(async move {
+            // Commit a real claim, but close the TCP connection without its response.
+            let (mut connection, _) = listener.accept().await?;
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let length = connection.read(&mut buffer).await?;
+                anyhow::ensure!(length > 0, "claim request disconnected early");
+                request.extend_from_slice(&buffer[..length]);
+            }
+            assert!(request.starts_with(b"GET /v1/deliveries HTTP/1.1\r\n"));
+            assert!(database.claim_delivery("discord", "instance")?.is_some());
+            server_trace.lock().await.push("claim committed".to_owned());
+            let restarted = Database::open(&path)?;
+            assert_eq!(restarted.recover_deliveries()?, 1);
+            restarted.recover_running_turns()?;
+            server_trace.lock().await.push("recovered".to_owned());
+            drop(connection);
+            axum::serve(listener, app).await?;
+            Ok::<_, anyhow::Error>(())
+        });
+        let mut state = discord_state(core_client(format!("http://{address}")));
+        state.discord.reactions = true;
+        let expected_processing = state.discord.processing_emoji.clone();
+        let expected_uncertain = state.discord.uncertain_emoji.clone();
+        let http = Arc::new(
+            twilight_http::Client::builder()
+                .proxy(address.to_string(), true)
+                .ratelimiter(None)
+                .build(),
         );
+        // A deadline bounds test failure; progression is driven by actual requests, not sleeps.
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(5), delivery_loop(state, http)).await;
         server.abort();
-
-        assert_eq!(claims.load(Ordering::SeqCst), 2);
-        assert_eq!(reconciliations.load(Ordering::SeqCst), 1);
+        let _ = server.await;
+        assert!(
+            outcome?
+                .err()
+                .context("delivery loop unexpectedly succeeded")?
+                .to_string()
+                .contains("delivery claim rejected")
+        );
+        assert_eq!(
+            *trace.lock().await,
+            vec![
+                "claim committed".to_owned(),
+                "recovered".to_owned(),
+                "reconcile".to_owned(),
+                format!("DELETE 300:400 {expected_processing}"),
+                format!("PUT 300:400 {expected_uncertain}"),
+                "poll".to_owned(),
+            ]
+        );
+        let inspected = Database::open(&directory.path().join("state.sqlite3"))?
+            .inspect_turn(&turn.turn_id)?
+            .context("turn disappeared")?;
+        assert_eq!(inspected.delivery_state, Some(DeliveryState::Uncertain));
         Ok(())
     }
 

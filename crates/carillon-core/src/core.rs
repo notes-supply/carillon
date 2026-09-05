@@ -1,6 +1,9 @@
 //! The core service: admission, the turn lifecycle worker, and the delivery
 //! outbox, served over the loopback provider API.
 
+#[cfg(test)]
+mod tests;
+
 use std::{path::PathBuf, time::Duration};
 
 use anyhow::{Result, anyhow, bail};
@@ -156,32 +159,66 @@ async fn accept_event(
     Ok(Json(receipt))
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum WorkerStep {
+    Idle,
+    Advanced,
+    Backoff,
+}
+
 async fn runtime_worker(state: AppState, runtime_id: String) {
     loop {
-        if let Err(failure) = run_next_turn(&state, &runtime_id).await {
-            warn!(runtime_id, error = %failure, "runtime worker failed");
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
+        let delay = match run_next_turn(&state, &runtime_id, async |runtime, token, request| {
+            call_runtime(&state.client, runtime, token, request).await
+        })
+        .await
+        {
+            Ok(WorkerStep::Advanced) => continue,
+            Ok(WorkerStep::Idle) => Duration::from_millis(100),
+            Ok(WorkerStep::Backoff) => Duration::from_secs(1),
+            Err(failure) => {
+                warn!(runtime_id, error = %failure, "runtime worker failed");
+                Duration::from_secs(1)
+            }
+        };
+        tokio::time::sleep(delay).await;
     }
 }
 
-async fn run_next_turn(state: &AppState, runtime_id: &str) -> Result<()> {
+/// One worker iteration without idle or availability waits. Only the runtime
+/// call is substitutable; claims and outcome writes use the real database.
+async fn run_next_turn(
+    state: &AppState,
+    runtime_id: &str,
+    submit: impl AsyncFnOnce(
+        &Provider,
+        &str,
+        RuntimeTurnRequest,
+    ) -> Result<RuntimeTurnResponse, TurnFailure>,
+) -> Result<WorkerStep> {
     let runtime = state.config.provider(runtime_id, ProviderRole::Runtime)?;
     if !runtime.enabled {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        return Ok(());
+        return Ok(WorkerStep::Backoff);
     }
     let token = state.config.credential(runtime_id)?;
     let Some(turn) = state.database.claim_turn(runtime_id)? else {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        return Ok(());
+        return Ok(WorkerStep::Idle);
     };
-    match execute_turn(state, runtime, &token, &turn).await {
+    let outcome = async {
+        let request = runtime_request(state, &turn).map_err(TurnFailure::Retry)?;
+        let response = submit(runtime, &token, request).await?;
+        state
+            .database
+            .complete_turn(&turn, &response)
+            .map_err(TurnFailure::Uncertain)
+    }
+    .await;
+    match outcome {
         Ok(()) => {}
         Err(TurnFailure::Retry(failure)) => {
             persist_outcome(&turn, "turn requeue", || state.database.requeue_turn(&turn)).await;
             warn!(turn_id = %turn.turn_id, error = %failure, "runtime was unavailable; turn requeued");
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            return Ok(WorkerStep::Backoff);
         }
         Err(TurnFailure::Uncertain(failure)) => {
             let message = failure.to_string();
@@ -192,7 +229,7 @@ async fn run_next_turn(state: &AppState, runtime_id: &str) -> Result<()> {
             warn!(turn_id = %turn.turn_id, error = %message, "runtime outcome is uncertain");
         }
     }
-    Ok(())
+    Ok(WorkerStep::Advanced)
 }
 
 /// Retries a local outcome write until it lands. Giving up would either lose
@@ -212,6 +249,7 @@ async fn persist_outcome(turn: &ClaimedTurn, action: &str, mut write: impl FnMut
 }
 
 /// How a turn execution attempt failed.
+#[derive(Debug)]
 enum TurnFailure {
     /// The runtime provably never received the turn; running it again is safe.
     Retry(anyhow::Error),
@@ -219,17 +257,9 @@ enum TurnFailure {
     Uncertain(anyhow::Error),
 }
 
-async fn execute_turn(
-    state: &AppState,
-    runtime: &Provider,
-    token: &str,
-    turn: &ClaimedTurn,
-) -> Result<(), TurnFailure> {
-    let continuation_ref = state
-        .database
-        .continuation(turn)
-        .map_err(TurnFailure::Retry)?;
-    let request = RuntimeTurnRequest {
+fn runtime_request(state: &AppState, turn: &ClaimedTurn) -> Result<RuntimeTurnRequest> {
+    let continuation_ref = state.database.continuation(turn)?;
+    Ok(RuntimeTurnRequest {
         correlation_id: turn.turn_id.clone(),
         interface_id: turn.interface_id.clone(),
         agent_id: turn.agent_id.clone(),
@@ -237,9 +267,16 @@ async fn execute_turn(
         input: turn.input.clone(),
         continuation_ref,
         resources: resources::runtime_view(&turn.resources, &state.snapshot_store()),
-    };
-    let response = state
-        .client
+    })
+}
+
+async fn call_runtime(
+    client: &Client,
+    runtime: &Provider,
+    token: &str,
+    request: RuntimeTurnRequest,
+) -> Result<RuntimeTurnResponse, TurnFailure> {
+    let response = client
         .post(format!("{}/v1/turns", runtime.url))
         .bearer_auth(token)
         .timeout(Duration::from_mins(30))
@@ -267,7 +304,7 @@ async fn execute_turn(
         .map_err(|error| {
             TurnFailure::Uncertain(anyhow!(error).context("decode runtime response"))
         })?;
-    if response.correlation_id != turn.turn_id {
+    if response.correlation_id != request.correlation_id {
         return Err(TurnFailure::Uncertain(anyhow!(
             "runtime returned a mismatched correlation ID"
         )));
@@ -277,10 +314,7 @@ async fn execute_turn(
             "runtime returned an empty continuation reference"
         )));
     }
-    state
-        .database
-        .complete_turn(turn, &response)
-        .map_err(TurnFailure::Uncertain)
+    Ok(response)
 }
 
 async fn claim_delivery(

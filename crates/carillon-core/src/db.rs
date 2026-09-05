@@ -822,6 +822,77 @@ mod tests {
     }
 
     #[test]
+    fn completion_failure_rolls_back_output_continuation_and_delivery() -> Result<()> {
+        let directory = tempdir()?;
+        let database = Database::open(&directory.path().join("state.sqlite3"))?;
+        accept(&database, "one", "conversation")?;
+        let first = database
+            .claim_turn("runtime")?
+            .context("first turn missing")?;
+        database.complete_turn(
+            &first,
+            &RuntimeTurnResponse {
+                correlation_id: first.turn_id.clone(),
+                output: "first reply".to_owned(),
+                continuation_ref: "first native".to_owned(),
+            },
+        )?;
+        accept(&database, "two", "conversation")?;
+        let second = database
+            .claim_turn("runtime")?
+            .context("second turn missing")?;
+        // Delivery insertion follows the turn update and continuation upsert.
+        // Fail at that last write, using real SQLite transaction semantics.
+        database.connect()?.execute_batch(
+            "CREATE TRIGGER fail_delivery BEFORE INSERT ON deliveries
+             BEGIN SELECT RAISE(ABORT, 'injected delivery failure'); END;",
+        )?;
+        let response = RuntimeTurnResponse {
+            correlation_id: second.turn_id.clone(),
+            output: "second reply".to_owned(),
+            continuation_ref: "second native".to_owned(),
+        };
+        let failure = database
+            .complete_turn(&second, &response)
+            .err()
+            .context("injected failure did not fire")?;
+        assert!(failure.to_string().contains("injected delivery failure"));
+        let inspection = database
+            .inspect_turn(&second.turn_id)?
+            .context("second turn disappeared")?;
+        assert_eq!(inspection.state, TurnState::Running);
+        assert_eq!(inspection.output, None);
+        assert_eq!(
+            database.continuation(&second)?.as_deref(),
+            Some("first native")
+        );
+        assert_eq!(
+            database.connect()?.query_row(
+                "SELECT COUNT(*) FROM deliveries WHERE turn_id = ?1",
+                [&second.turn_id],
+                |row| row.get::<_, u32>(0),
+            )?,
+            0
+        );
+        database
+            .connect()?
+            .execute_batch("DROP TRIGGER fail_delivery;")?;
+        database.complete_turn(&second, &response)?;
+        assert_eq!(
+            database.continuation(&second)?.as_deref(),
+            Some("second native")
+        );
+        assert_eq!(
+            database
+                .inspect_turn(&second.turn_id)?
+                .context("missing turn")?
+                .state,
+            TurnState::Completed
+        );
+        Ok(())
+    }
+
+    #[test]
     fn uncertain_turn_blocks_its_conversation_but_not_others() -> Result<()> {
         let directory = tempdir()?;
         let database = Database::open(&directory.path().join("state.sqlite3"))?;
