@@ -126,6 +126,8 @@ mkdir "$FAIL_COMMANDS"
 REAL_SED=$(command -v sed)
 REAL_CHMOD=$(command -v chmod)
 REAL_MV=$(command -v mv)
+REAL_SYNC=$(command -v sync)
+export REAL_SYNC
 cat >"$FAIL_COMMANDS/fail-unit-command" <<'FAIL_COMMAND'
 #!/bin/sh
 set -eu
@@ -133,6 +135,39 @@ command=${0##*/}
 last=
 for argument do last=$argument; done
 case "$command:$FAIL_MODE:$last" in
+  sync:sync-*:*)
+    [ "$#" -eq 3 ] && [ "$1" = -f ] && [ "$2" = -- ]
+    if [ ! -e "$FAIL_MARKER.stage" ]; then
+      boundary=stage
+      case "$last" in "$CARILLON_HOME"/.app-new.*) ;; *) exit 2 ;; esac
+      # Content and final executable modes exist before the real syncfs call.
+      diff -r --no-dereference "$FAIL_RELEASE/bin" "$last/bin" --exclude=carillon-uninstall
+      [ "$(stat -c %a "$last/bin/carillon")" = 755 ]
+    elif [ ! -e "$FAIL_MARKER.publish" ]; then
+      boundary=publish
+      [ "$last" = "$CARILLON_HOME" ]
+      [ ! -e "$FAIL_APP/upgrade-sentinel" ]
+    else
+      boundary=rollback
+      [ "$last" = "$CARILLON_HOME" ]
+      [ -f "$FAIL_APP/upgrade-sentinel" ]
+    fi
+    touch "$FAIL_MARKER.$boundary"
+    printf 'sync %s\n' "$boundary" >>"$FAIL_MARKER.order"
+    if [ "$FAIL_MODE" = "sync-$boundary" ]; then
+      printf '%s\n' "$FAIL_MODE" >"$FAIL_MARKER"
+      # Inject an actual kernel syncfs error, not just a fake helper exit.
+      exec strace -qq -yy -o "$FAIL_MARKER.trace" -e trace=syncfs \
+        -e inject=syncfs:error=EIO:when=1 "$REAL_SYNC" "$@"
+    fi
+    exec strace -qq -yy -o "$FAIL_MARKER.$boundary.trace" -e trace=syncfs "$REAL_SYNC" "$@"
+    ;;
+  mv:sync-*:"${FAIL_APP:-}")
+    printf '%s\n' rename >>"$FAIL_MARKER.order"
+    ;;
+  sed:sync-rollback:"$FAIL_TEMPLATE")
+    exit 1
+    ;;
   mv:app-*:"${FAIL_APP:-}")
     printf '%s\n' "$FAIL_MODE" >"$FAIL_MARKER"
     # Even immediately before the rename the previous tree is still selected.
@@ -193,13 +228,119 @@ case "$command" in
   sed) exec "$REAL_SED" "$@" ;;
   chmod) exec "$REAL_CHMOD" "$@" ;;
   mv) exec "$REAL_MV" "$@" ;;
+  sync) exec "$REAL_SYNC" "$@" ;;
   systemctl) exit 0 ;;
 esac
 exit 2
 FAIL_COMMAND
 chmod 0755 "$FAIL_COMMANDS/fail-unit-command"
-for command in sed chmod mv systemctl; do
+for command in sed chmod mv sync systemctl; do
   ln -s fail-unit-command "$FAIL_COMMANDS/$command"
+done
+
+# Persist the copied tree before rename and its parent after rename. Real
+# syncfs failures prove cleanup/retry behavior, not a simulated physical power cut.
+for previous in fresh existing; do
+  for failure in sync-stage sync-publish sync-rollback sync-ok; do
+    [ "$previous:$failure" != fresh:sync-rollback ] || continue
+    SYNC_HOME=$TEST_ROOT/$previous-$failure
+    SYNC_ROOT=$SYNC_HOME/.carillon
+    SYNC_CONFIG_HOME=$SYNC_HOME/.config
+    mkdir -p "$SYNC_HOME/workspace"
+    "$RELEASE/bin/carillon" init --root "$SYNC_ROOT" --workspace "$SYNC_HOME/workspace" \
+      --guild-id 100 --bot-user-id 201 --user-id 200 --route 300:always:channel \
+      --base-port "$((BASE_PORT + 40))" >/dev/null
+    if [ "$previous" = existing ]; then
+      install_release "$SYNC_HOME" "$SYNC_HOME/workspace" "$SYNC_ROOT" \
+        "$SYNC_CONFIG_HOME" "$((BASE_PORT + 40))" >/dev/null
+      printf '%s\n' previous-application >"$SYNC_ROOT/app/upgrade-sentinel"
+      old_inode=$(stat -c %i "$SYNC_ROOT/app")
+      cp -a "$SYNC_CONFIG_HOME/systemd/user" "$SYNC_HOME/units-before"
+    fi
+    printf '%s\n' private-bot-token >"$SYNC_ROOT/credentials/discord-bot.token"
+    chmod 0600 "$SYNC_ROOT/credentials/discord-bot.token"
+    cp -a "$SYNC_ROOT/credentials" "$SYNC_HOME/credentials-before"
+    failure_marker=$SYNC_HOME/failure
+    result=0
+    env HOME="$SYNC_HOME" XDG_CONFIG_HOME="$SYNC_CONFIG_HOME" \
+      CARILLON_HOME="$SYNC_ROOT" CARILLON_SKIP_SYSTEMD_RELOAD=1 \
+      PATH="$FAIL_COMMANDS:$PATH" FAIL_MODE="$failure" FAIL_MARKER="$failure_marker" \
+      FAIL_APP="$SYNC_ROOT/app" FAIL_RELEASE="$RELEASE" FAIL_UNIT_DIR="$SYNC_CONFIG_HOME/systemd/user" \
+      FAIL_TEMPLATE="$SYNC_ROOT/app/systemd/carillon.target" \
+      REAL_MV="$REAL_MV" REAL_SED="$REAL_SED" REAL_CHMOD="$REAL_CHMOD" \
+      "$RELEASE/install.sh" --guild-id 100 --bot-user-id 201 --user-id 200 \
+      --route 300:always:channel --workspace "$SYNC_HOME/workspace" --base-port "$((BASE_PORT + 40))" \
+      >"$SYNC_HOME/install.log" 2>&1 || result=$?
+    if [ "$failure" = sync-ok ]; then
+      [ "$result" -eq 0 ]
+      for boundary in stage publish; do
+        grep -E 'syncfs\(.*\) = 0$' "$failure_marker.$boundary.trace" >/dev/null
+      done
+    else
+      [ "$result" -ne 0 ]
+      if [ ! -f "$failure_marker" ]; then
+        cat "$SYNC_HOME/install.log" >&2
+        echo "installer did not reach $failure" >&2
+        exit 1
+      fi
+      [ "$(cat "$failure_marker")" = "$failure" ]
+      grep -F 'EIO (Input/output error) (INJECTED)' "$failure_marker.trace" >/dev/null
+      case "$failure" in
+        sync-stage) grep -F "<$SYNC_ROOT/.app-new." "$failure_marker.trace" >/dev/null ;;
+        *) grep -F "<$SYNC_ROOT>" "$failure_marker.trace" >/dev/null ;;
+      esac
+      if [ "$previous" = existing ]; then
+        diff -r --no-dereference "$SYNC_HOME/units-before" "$SYNC_CONFIG_HOME/systemd/user"
+      else
+        [ ! -e "$SYNC_CONFIG_HOME" ]
+      fi
+    fi
+    printf '%s\n' 'sync stage' >"$SYNC_HOME/expected-order"
+    if [ "$failure" != sync-stage ]; then
+      printf '%s\n' rename 'sync publish' >>"$SYNC_HOME/expected-order"
+      if [ "$failure" = sync-rollback ]; then
+        printf '%s\n' rename 'sync rollback' >>"$SYNC_HOME/expected-order"
+      fi
+    fi
+    cmp "$SYNC_HOME/expected-order" "$failure_marker.order"
+    if [ "$failure" = sync-stage ] || [ "$failure" = sync-rollback ]; then
+      if [ "$previous" = existing ]; then
+        [ "$(stat -c %i "$SYNC_ROOT/app")" = "$old_inode" ]
+        [ "$(cat "$SYNC_ROOT/app/upgrade-sentinel")" = previous-application ]
+      else
+        [ ! -e "$SYNC_ROOT/app" ]
+      fi
+    else
+      diff -r --no-dereference "$RELEASE/bin" "$SYNC_ROOT/app/bin" --exclude=carillon-uninstall
+      [ "$(stat -c %a "$SYNC_ROOT/app/bin/carillon")" = 755 ]
+      [ ! -e "$SYNC_ROOT/app/upgrade-sentinel" ]
+      [ "$previous" != existing ] || [ "$(stat -c %i "$SYNC_ROOT/app")" != "$old_inode" ]
+    fi
+    retained=$(find "$SYNC_ROOT" -maxdepth 1 -type d -name '.app-new.*')
+    if [ "$previous:$failure" = existing:sync-publish ]; then
+      [ "$(stat -c %i "$retained")" = "$old_inode" ]
+      [ "$(cat "$retained/upgrade-sentinel")" = previous-application ]
+      grep -F "retained tree $retained" "$SYNC_HOME/install.log" >/dev/null
+    elif [ "$failure" = sync-rollback ]; then
+      [ "$(stat -c %i "$retained")" != "$old_inode" ]
+      diff -r --no-dereference "$RELEASE/bin" "$retained/bin" --exclude=carillon-uninstall
+      grep -F 'rollback durability unconfirmed' "$SYNC_HOME/install.log" >/dev/null
+      if grep -F 'previous application and units restored' "$SYNC_HOME/install.log"; then
+        echo 'installer claimed durable rollback after sync failure' >&2
+        exit 1
+      fi
+    else
+      [ -z "$retained" ]
+    fi
+    diff -r "$SYNC_HOME/credentials-before" "$SYNC_ROOT/credentials"
+    install_release "$SYNC_HOME" "$SYNC_HOME/workspace" "$SYNC_ROOT" \
+      "$SYNC_CONFIG_HOME" "$((BASE_PORT + 40))" >/dev/null
+    [ ! -e "$SYNC_ROOT/app/upgrade-sentinel" ]
+    verify_units "$SYNC_CONFIG_HOME/systemd/user"
+    diff -r "$SYNC_HOME/credentials-before" "$SYNC_ROOT/credentials"
+    [ -z "$retained" ] || [ -d "$retained" ]
+    printf 'install application durability passed: %s / %s\n' "$previous" "$failure"
+  done
 done
 
 for previous in fresh existing; do
@@ -328,7 +469,12 @@ for failure in app-before app-after app-term-before app-term-after app-kill-befo
       [ -f "$ORDINARY_ROOT/app/upgrade-sentinel" ] ;;
     *-after)
       [ "$(stat -c %i "$ORDINARY_ROOT/app")" != "$old_inode" ]
-      [ ! -e "$ORDINARY_ROOT/app/upgrade-sentinel" ] ;;
+      [ ! -e "$ORDINARY_ROOT/app/upgrade-sentinel" ]
+      retained=0
+      for candidate in "$ORDINARY_ROOT"/.app-new.*; do
+        [ "$(stat -c %i "$candidate")" != "$old_inode" ] || retained=1
+      done
+      [ "$retained" -eq 1 ] ;;
   esac
   [ "$(sha256sum "$ORDINARY_ROOT/credentials/runtime-pi.token" | cut -d' ' -f1)" = "$ORDINARY_TOKEN_HASH" ]
   install_release "$ORDINARY_HOME" "$ORDINARY_WORKSPACE" "$ORDINARY_ROOT" \

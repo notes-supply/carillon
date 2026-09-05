@@ -84,8 +84,15 @@ fi
 install -d -m 0700 "$CARILLON_HOME" "$CARILLON_HOME/credentials" "$CARILLON_HOME/pi" \
   "$CARILLON_HOME/logs"
 APP_NEW=$(mktemp -d "$CARILLON_HOME/.app-new.XXXXXX")
+CLEANUP_APP_NEW=1
 cleanup_staging() {
-  [ -z "$APP_NEW" ] || rm -rf -- "$APP_NEW"
+  if [ -n "$APP_NEW" ] && [ -d "$APP_NEW" ]; then
+    if [ "$CLEANUP_APP_NEW" -eq 1 ]; then
+      rm -rf -- "$APP_NEW"
+    else
+      echo "application publication unconfirmed; inspect $APP and retained tree $APP_NEW; rerun installer before restarting" >&2
+    fi
+  fi
 }
 trap cleanup_staging EXIT
 trap 'exit 1' HUP INT TERM
@@ -97,19 +104,25 @@ install -m 0755 "$SOURCE/uninstall.sh" "$APP_NEW/bin/carillon-uninstall"
 printf '%s\n' "$APP_MARKER_VALUE" >"$APP_NEW/$APP_MARKER"
 chmod -R go-rwx "$APP_NEW"
 find "$APP_NEW/bin" -maxdepth 1 -type f -perm -0100 -exec chmod 0755 {} \;
+# GNU sync -f uses Linux syncfs: persist all copied content, modes and directory
+# entries on the staging filesystem before selecting it. No recursive fsync helper.
+sync -f -- "$APP_NEW"
 if [ -e "$APP" ] || [ -L "$APP" ]; then
   is_managed_app "$APP" || {
     echo "refusing to replace application path after ownership changed: $APP" >&2
     exit 1
   }
-  # Linux rename exchange keeps APP complete even if this process is killed.
-  # Failure (including unsupported mv/filesystem) leaves the previous tree in
-  # place. After success APP_NEW holds the old tree for staging cleanup.
+  # Keep both trees until publication is durable, even if mv succeeds but then
+  # reports failure or a signal interrupts the shell before the following sync.
+  CLEANUP_APP_NEW=0
   mv --exchange --no-copy -T -- "$APP_NEW" "$APP"
 else
+  CLEANUP_APP_NEW=0
   mv --no-copy -T -- "$APP_NEW" "$APP"
   APP_NEW=
 fi
+sync -f -- "$CARILLON_HOME"
+CLEANUP_APP_NEW=1
 [ -e "$CARILLON_HOME/credentials/discord-bot.token" ] || install -m 0600 /dev/null "$CARILLON_HOME/credentials/discord-bot.token"
 chmod 0700 "$CARILLON_HOME" "$CARILLON_HOME/credentials" "$CARILLON_HOME/pi" "$CARILLON_HOME/logs"
 chmod 0600 "$CARILLON_HOME/carillon.toml" "$CARILLON_HOME/credentials"/*.token
@@ -121,11 +134,12 @@ else
   if [ "$registration_result" -eq 10 ] && [ -n "$APP_NEW" ]; then
     # The helper confirmed the old definitions are intact. Select their old
     # application too; never infer rollback safety from an arbitrary failure.
-    if mv --exchange --no-copy -T -- "$APP_NEW" "$APP"; then
+    CLEANUP_APP_NEW=0
+    if mv --exchange --no-copy -T -- "$APP_NEW" "$APP" && sync -f -- "$CARILLON_HOME"; then
+      CLEANUP_APP_NEW=1
       echo "service registration failed; previous application and units restored" >&2
     else
-      echo "application rollback failed; inspect $APP and retained tree $APP_NEW before restarting" >&2
-      APP_NEW=
+      echo "application rollback durability unconfirmed; inspect $APP and retained tree $APP_NEW before restarting" >&2
     fi
   elif [ -n "$APP_NEW" ]; then
     echo "service registration did not confirm rollback; new application remains selected, previous tree retained at $APP_NEW; rerun installer before restarting" >&2
