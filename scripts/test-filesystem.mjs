@@ -10,7 +10,7 @@ import { setTimeout as delay } from "node:timers/promises";
 // application fault switches, mocked storage, or service-manager interaction.
 const [mode, artifact] = process.argv.slice(2);
 assert.ok(
-  ["init", "resources", "restore", "participation"].includes(mode),
+  ["init", "resources", "restore", "participation", "config"].includes(mode),
   "unknown filesystem test mode",
 );
 const binary = resolve(mode === "init" ? join(artifact, "bin/carillon") : artifact);
@@ -39,12 +39,99 @@ try {
     await testRestore();
   } else if (mode === "restore") await testRestore();
   else if (mode === "participation") await testParticipation();
+  else if (mode === "config") await testConfiguration();
   else {
+    await testConfiguration();
     await testResources();
     await testParticipation();
   }
 } finally {
   await rm(scratch, { recursive: true, force: true });
+}
+
+async function testConfiguration() {
+  const root = join(scratch, "configuration");
+  run("init", "--root", root, "--workspace", scratch, ...options);
+  const config = join(root, "carillon.toml");
+  await chmod(config, 0o640);
+  const original = await readFile(config);
+  const token = await readFile(join(root, "credentials/operator.token"));
+  for (const args of [
+    ["provider", "--config", config, "runtime-pi", "disable"],
+    [
+      "configure-discord",
+      "--config",
+      config,
+      "--guild-id",
+      "100",
+      "--bot-user-id",
+      "201",
+      "--user-id",
+      "999",
+      "--route",
+      "301:mention:thread",
+    ],
+  ]) {
+    await writeFile(config, original);
+    const trace = join(scratch, `${args[0]}.trace`);
+    execFileSync("strace", [...traceOptions, "-o", trace, binary, ...args]);
+    const updated = await readFile(config);
+    assert.notDeepEqual(updated, original);
+    const lines = (await readFile(trace, "utf8")).split("\n");
+    const publication = lines.findIndex((line) => line.includes(`, "${config}") = 0`));
+    const fileSync = lines.findIndex(
+      (line) => line.includes(`/carillon.tmp>`) && line.endsWith("= 0"),
+    );
+    const parentSync = lines.findIndex(
+      (line) => line.includes(`fsync(`) && line.includes(`<${root}>`) && line.endsWith("= 0"),
+    );
+    assert.ok(
+      fileSync >= 0 && fileSync < publication && publication < parentSync,
+      "configuration must sync file, rename, then sync parent",
+    );
+    for (const [boundary, published] of [
+      [fileSync, false],
+      [parentSync, true],
+    ]) {
+      const pid = lines[boundary].trim().split(/\s+/u)[0];
+      const ordinal = lines
+        .slice(0, boundary + 1)
+        .filter((line) => line.trim().startsWith(`${pid} `) && line.includes(" fsync(")).length;
+      assert.ok(ordinal > 0);
+      await writeFile(config, original);
+      const injected = join(scratch, `${args[0]}-${ordinal}.trace`);
+      const result = spawnSync(
+        "strace",
+        [
+          ...traceOptions,
+          "-o",
+          injected,
+          "-e",
+          `inject=fsync:error=EIO:when=${ordinal}`,
+          binary,
+          ...args,
+        ],
+        { encoding: "utf8", timeout: 30_000 },
+      );
+      assert.ifError(result.error);
+      assert.notEqual(result.status, 0);
+      const failures = (await readFile(injected, "utf8"))
+        .split("\n")
+        .filter((line) => line.includes("INJECTED"));
+      assert.equal(failures.length, 1);
+      assert.ok(failures[0].includes(published ? `<${root}>` : `/carillon.tmp>`));
+      assert.deepEqual(await readFile(config), published ? updated : original);
+      run(...args);
+      assert.deepEqual(
+        await readFile(config),
+        updated,
+        "retry must preserve the intended change after either failure boundary",
+      );
+      assert.equal((await stat(config)).mode & 0o777, 0o640);
+      assert.deepEqual(await readFile(join(root, "credentials/operator.token")), token);
+      console.log(`configuration durability passed: ${args[0]} / ${published ? "parent" : "file"}`);
+    }
+  }
 }
 
 async function testInitialization() {

@@ -7,7 +7,7 @@ import {
 import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { Type } from "typebox";
@@ -118,6 +118,8 @@ async function startRuntime(values: readonly string[]): Promise<void> {
   const args = parseArguments(values);
   const providerId = requiredArgument(args, "provider");
   config = await loadConfig(requiredArgument(args, "config"), providerId);
+  if (!(await stat(config.workspace)).isDirectory())
+    throw new Error("workspace must be an existing directory");
   const listenAddress = runtimeListenAddress(config.runtime.url);
   token = (await readFile(requiredArgument(args, "token-file"), "utf8")).trim();
   deterministic = args.has("deterministic");

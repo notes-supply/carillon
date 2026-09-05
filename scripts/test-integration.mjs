@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -40,6 +40,7 @@ try {
     "--base-port",
     String(basePort),
   );
+  await testConfigurationRefusals();
   await startAll();
   for (const authorization of [
     null,
@@ -216,6 +217,27 @@ try {
     "private runtime state fixture",
     "restore must include private runtime state, not just core and session records",
   );
+  // The external workspace is deliberately not in the archive. Pi must refuse
+  // startup if it disappears, before binding or touching native session state.
+  await start("core");
+  await rename(workspace, `${workspace}-saved`);
+  const sessions = join(installation, "agents/default/sessions");
+  await rename(sessions, `${sessions}-saved`);
+  try {
+    for (const missing of [true, false]) {
+      if (!missing) await writeFile(workspace, "not a directory");
+      assertStartupRefused("runtime", missing ? /ENOENT/u : /existing directory/u);
+      await assert.rejects(stat(sessions), { code: "ENOENT" });
+      const inspection = JSON.parse(run("inspect", "--config", configPath(), queued.turn_id));
+      assert.equal(inspection.state, "queued");
+    }
+  } finally {
+    await rm(workspace, { force: true });
+    await rename(`${workspace}-saved`, workspace);
+    await rm(sessions, { recursive: true, force: true });
+    await rename(`${sessions}-saved`, sessions);
+    await stop("core");
+  }
   await startAll();
   await waitForTurn(queued.turn_id, "completed");
   const resumedDelivery = await waitForDeliveryClaim("resumed-discord");
@@ -253,6 +275,72 @@ try {
 
 function configPath() {
   return join(installation, "carillon.toml");
+}
+
+function assertStartupRefused(name, expected) {
+  const [program, args] = serviceArguments(name);
+  const result = spawnSync(program, args, { encoding: "utf8", timeout: 10_000 });
+  assert.ifError(result.error);
+  assert.equal(result.signal, null);
+  assert.notEqual(result.status, 0, `${name} must refuse startup`);
+  assert.match(result.stderr, expected);
+  assert.doesNotMatch(result.stdout, /ready at/u);
+}
+
+async function testConfigurationRefusals() {
+  const original = await readFile(configPath(), "utf8");
+  const runtimeUrl = `http://127.0.0.1:${String(basePort + 2)}`;
+  const interfaceUrl = `http://127.0.0.1:${String(basePort + 1)}`;
+  const coreAddress = `127.0.0.1:${String(basePort)}`;
+  const collision = /listen address conflicts/u;
+  const database = join(installation, "state/carillon.sqlite3");
+  const previousDatabase = await readFile(database);
+  try {
+    for (const [text, message] of [
+      [original.replace(runtimeUrl, interfaceUrl), collision],
+      [original.replace(runtimeUrl, `http://${coreAddress}`), collision],
+      [original.replace(interfaceUrl, `http://${coreAddress}`), collision],
+      [
+        original
+          .replace(runtimeUrl, interfaceUrl)
+          .replace('role = "interface"', 'role = "runtime"'),
+        collision,
+      ],
+      [original.replace(coreAddress, `0.0.0.0:${String(basePort + 2)}`), collision],
+      [original.replace(coreAddress, `[::]:${String(basePort + 2)}`), collision],
+      [
+        original
+          .replace(interfaceUrl, `http://[::1]:${String(basePort + 1)}`)
+          .replace(runtimeUrl, `http://[0:0:0:0:0:0:0:1]:${String(basePort + 1)}`),
+        collision,
+      ],
+      [
+        original.replace('id = "default"', 'id = ""').replace('agent = "default"', 'agent = ""'),
+        /agent identity must not be empty/u,
+      ],
+      [original.replace('id = "default"', 'id = "  "'), /agent identity must not be empty/u],
+    ]) {
+      assert.notEqual(text, original);
+      await writeFile(configPath(), text);
+      for (const name of ["core", "discord"]) assertStartupRefused(name, message);
+      assert.deepEqual(await readFile(database), previousDatabase);
+    }
+    // Disabled entries reserve no listener; enable must reject before writing.
+    const disabled = original
+      .replace(runtimeUrl, interfaceUrl)
+      .replace("enabled = true", "enabled = false");
+    await writeFile(configPath(), disabled);
+    await start("core");
+    assert.deepEqual(JSON.parse(run("recent", "--config", configPath())), []);
+    assert.throws(
+      () => run("provider", "--config", configPath(), "discord-private", "enable"),
+      collision,
+    );
+    assert.equal(await readFile(configPath(), "utf8"), disabled);
+  } finally {
+    await stop("core");
+    await writeFile(configPath(), original);
+  }
 }
 
 function credential(name) {

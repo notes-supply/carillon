@@ -257,15 +257,30 @@ impl Config {
         if self.core.operator_token_hash.is_empty() {
             bail!("operator diagnostics credential is not configured");
         }
+        if self.agent.id.trim().is_empty() {
+            bail!("agent identity must not be empty");
+        }
         let mut provider_ids = BTreeSet::new();
+        let mut listen_addresses = BTreeSet::from([self.core.listen]);
         for provider in &self.providers {
             validate_provider_identity(&provider.id)?;
             if provider.version.trim().is_empty() {
                 bail!("provider {} must declare a version", provider.id);
             }
-            provider
+            let address = provider
                 .listen_address()
                 .with_context(|| format!("invalid URL for provider {}", provider.id))?;
+            if provider.enabled
+                && (!listen_addresses.insert(address)
+                    || (self.core.listen.port() == address.port()
+                        && self.core.listen.ip().is_unspecified()
+                        && (self.core.listen.is_ipv6() || address.is_ipv4())))
+            {
+                bail!(
+                    "provider {} listen address conflicts with another service",
+                    provider.id
+                );
+            }
             if provider.token_hash.trim().is_empty() {
                 bail!("provider {} must declare a credential hash", provider.id);
             }

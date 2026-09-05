@@ -21,7 +21,8 @@ fn installation(root: &Path) -> Result<AppState> {
         ("test-runtime", ProviderRole::Runtime),
     ]
     .into_iter()
-    .map(|(id, role)| {
+    .enumerate()
+    .map(|(index, (id, role))| {
         fs::write(
             root.join("credentials").join(format!("{id}.token")),
             "test-only",
@@ -30,7 +31,7 @@ fn installation(root: &Path) -> Result<AppState> {
             id: id.to_owned(),
             role,
             version: "test".to_owned(),
-            url: "http://127.0.0.1:1".to_owned(),
+            url: format!("http://127.0.0.1:{}", index + 2),
             token_hash: hash_token("test-only"),
             enabled: true,
         })
@@ -104,6 +105,7 @@ fn configuration_rejects_malformed_provider_endpoints_before_startup() -> Result
     let mut state = installation(directory.path())?;
     let path = directory.path().join("carillon.toml");
     for index in 0..state.config.value.providers.len() {
+        let original = state.config.value.providers[index].url.clone();
         for url in [
             "not-a-url",
             "",
@@ -134,6 +136,7 @@ fn configuration_rejects_malformed_provider_endpoints_before_startup() -> Result
             fs::write(&path, toml::to_string(&state.config.value)?)?;
             LoadedConfig::load(&path)?;
         }
+        state.config.value.providers[index].url = original;
     }
     state.config.value.core.listen.set_port(0);
     fs::write(&path, toml::to_string(&state.config.value)?)?;

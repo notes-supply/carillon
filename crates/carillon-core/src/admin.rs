@@ -521,7 +521,12 @@ fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     let temporary = path.with_extension("tmp");
     fs::write(&temporary, bytes)?;
     fs::set_permissions(&temporary, fs::Permissions::from_mode(mode))?;
+    fs::File::open(&temporary)?.sync_all()?;
     fs::rename(temporary, path)?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    fs::File::open(parent.unwrap_or(Path::new(".")))?.sync_all()?;
     Ok(())
 }
 
