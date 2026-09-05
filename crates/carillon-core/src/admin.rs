@@ -543,6 +543,23 @@ mod tests {
     }
 
     #[test]
+    fn initialization_rejects_unusable_ports_without_writing_installation() -> Result<()> {
+        let directory = tempdir()?;
+        let root = directory.path().join("installation");
+        for base_port in [0, 65_534, 65_535] {
+            assert!(initialize_test_installation(&root, directory.path(), base_port).is_err());
+            assert!(!root.exists());
+            fs::create_dir(&root)?;
+            assert!(initialize_test_installation(&root, directory.path(), base_port).is_err());
+            assert!(fs::read_dir(&root)?.next().is_none());
+            fs::remove_dir(&root)?;
+        }
+        initialize_test_installation(&root, directory.path(), 44_000)?;
+        LoadedConfig::load(&root.join("carillon.toml"))?;
+        Ok(())
+    }
+
+    #[test]
     fn bundled_install_configures_default_providers_and_their_credentials() -> Result<()> {
         let directory = tempdir()?;
         let root = directory.path().join("installation");
@@ -938,26 +955,6 @@ mod tests {
             fs::metadata(restored_config)?.uid(),
             fs::metadata(directory.path())?.uid()
         );
-        Ok(())
-    }
-
-    #[test]
-    fn invalid_initialization_does_not_create_the_root() -> Result<()> {
-        let directory = tempdir()?;
-        let root = directory.path().join("installation");
-        assert!(
-            initialize(
-                &root,
-                directory.path(),
-                "100",
-                "101",
-                &["200".to_owned()],
-                &[route()],
-                u16::MAX,
-            )
-            .is_err()
-        );
-        assert!(!root.exists());
         Ok(())
     }
 

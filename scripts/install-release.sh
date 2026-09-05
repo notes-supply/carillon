@@ -41,7 +41,10 @@ case "$WORKSPACE" in /*) ;; *) echo "workspace must be an absolute path" >&2; ex
 
 CARILLON_HOME=${CARILLON_HOME:-"$HOME/.carillon"}
 case "$CARILLON_HOME" in /*) ;; *) echo "CARILLON_HOME must be an absolute path" >&2; exit 1 ;; esac
-case "$CARILLON_HOME/" in "$HOME/.pi/"*) echo "CARILLON_HOME must not overlap the owner's global ~/.pi directory" >&2; exit 1 ;; esac
+CARILLON_HOME=$(realpath -m -- "$CARILLON_HOME")
+GLOBAL_PI=$(realpath -m -- "$HOME/.pi")
+case "$CARILLON_HOME/" in "$GLOBAL_PI/"*) echo "CARILLON_HOME must not overlap the owner's global ~/.pi directory" >&2; exit 1 ;; esac
+case "$GLOBAL_PI/" in "$CARILLON_HOME/"*) echo "CARILLON_HOME must not overlap the owner's global ~/.pi directory" >&2; exit 1 ;; esac
 
 SOURCE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 OWNER=$(id -un)
@@ -94,6 +97,7 @@ cleanup_staging() {
   [ -z "$UNIT_STAGE" ] || rm -rf -- "$UNIT_STAGE"
 }
 trap cleanup_staging EXIT
+trap 'exit 1' HUP INT TERM
 install -d -m 0700 "$APP_NEW/bin" "$APP_NEW/licenses" "$APP_NEW/systemd"
 cp -R "$SOURCE/bin/." "$APP_NEW/bin/"
 cp -R "$SOURCE/licenses/." "$APP_NEW/licenses/"
@@ -107,10 +111,14 @@ if [ -e "$APP" ] || [ -L "$APP" ]; then
     echo "refusing to replace application path after ownership changed: $APP" >&2
     exit 1
   }
-  rm -rf -- "$APP"
+  # Linux rename exchange keeps APP complete even if this process is killed.
+  # Failure (including unsupported mv/filesystem) leaves the previous tree in
+  # place. After success APP_NEW holds the old tree for staging cleanup.
+  mv --exchange --no-copy -T -- "$APP_NEW" "$APP"
+else
+  mv --no-copy -T -- "$APP_NEW" "$APP"
+  APP_NEW=
 fi
-mv "$APP_NEW" "$APP"
-APP_NEW=
 [ -e "$CARILLON_HOME/credentials/discord-bot.token" ] || install -m 0600 /dev/null "$CARILLON_HOME/credentials/discord-bot.token"
 chmod 0700 "$CARILLON_HOME" "$CARILLON_HOME/credentials" "$CARILLON_HOME/pi" "$CARILLON_HOME/logs"
 chmod 0600 "$CARILLON_HOME/carillon.toml" "$CARILLON_HOME/credentials"/*.token

@@ -15,6 +15,7 @@ const runtimeEntry = resolve("packages/runtime-pi/src/index.ts");
 const packagedRuntime = process.env.CARILLON_RUNTIME_BINARY;
 const basePort = 45_000 + (process.pid % 10_000);
 let installation = root;
+let runtimeHost = "127.0.0.1";
 const services = new Map();
 
 try {
@@ -170,6 +171,16 @@ try {
 
   await stop("core");
   await stopAll();
+  // Restore onto the other supported loopback family. This exercises the real
+  // Pi listener and authenticated core/runtime requests, including queued work.
+  runtimeHost = "[::1]";
+  const priorConfig = await readFile(configPath(), "utf8");
+  const ipv6Config = priorConfig.replace(
+    `http://127.0.0.1:${String(basePort + 2)}`,
+    `http://${runtimeHost}:${String(basePort + 2)}`,
+  );
+  assert.notEqual(ipv6Config, priorConfig);
+  await writeFile(configPath(), ipv6Config);
   run("backup", "--config", configPath(), "--output", backup);
   await rm(restoredRoot, { recursive: true, force: true });
   run("restore", "--input", backup, "--target", restoredRoot);
@@ -379,7 +390,7 @@ async function start(name) {
   const [program, args] = serviceArguments(name);
   const child = spawn(program, args, { stdio: "ignore" });
   services.set(name, child);
-  await waitForHealth(servicePort(name));
+  await waitForHealth(servicePort(name), name === "runtime" ? runtimeHost : "127.0.0.1");
 }
 
 async function startAll() {
@@ -409,10 +420,10 @@ async function stopAll() {
   for (const name of [...services.keys()].reverse()) await stop(name);
 }
 
-async function waitForHealth(port) {
+async function waitForHealth(port, host) {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     try {
-      const response = await fetch(`http://127.0.0.1:${String(port)}/health`);
+      const response = await fetch(`http://${host}:${String(port)}/health`);
       if (response.ok) return;
     } catch {}
     await new Promise((resolveWait) => setTimeout(resolveWait, 50));

@@ -14,6 +14,7 @@ import { Type } from "typebox";
 import { Parse } from "typebox/value";
 import { nativeSessionId } from "./namespace.ts";
 import { createPiExecutionSession } from "./session.ts";
+import { runtimeListenAddress } from "./endpoint.ts";
 
 registerBunOAuthFlows();
 
@@ -117,6 +118,7 @@ async function startRuntime(values: readonly string[]): Promise<void> {
   const args = parseArguments(values);
   const providerId = requiredArgument(args, "provider");
   config = await loadConfig(requiredArgument(args, "config"), providerId);
+  const listenAddress = runtimeListenAddress(config.runtime.url);
   token = (await readFile(requiredArgument(args, "token-file"), "utf8")).trim();
   deterministic = args.has("deterministic");
   const privateStateDirectory = resolve(requiredArgument(args, "state-dir"));
@@ -141,8 +143,7 @@ async function startRuntime(values: readonly string[]): Promise<void> {
       writeJson(response, 500, { error: message });
     });
   });
-  const listenUrl = new URL(config.runtime.url);
-  server.listen(Number(listenUrl.port), listenUrl.hostname, () => {
+  server.listen(listenAddress, () => {
     process.stdout.write(
       `runtime-pi ready at ${config.runtime.url}${deterministic ? " (deterministic provider substitute)" : ""}\n`,
     );

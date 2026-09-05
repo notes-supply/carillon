@@ -81,6 +81,8 @@ impl IntoResponse for ApiError {
 }
 
 pub async fn serve(config: LoadedConfig) -> Result<()> {
+    // A failed bind must not recover state or start accepted work.
+    let listener = TcpListener::bind(config.value.core.listen).await?;
     let database = Database::open(&config.value.data_dir.join("carillon.sqlite3"))?;
     let recovered_turns = database.recover_running_turns()?;
     // Interface processes may outlive core. Their claims remain recoverable;
@@ -119,7 +121,6 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
         .route("/v1/turns/{id}", get(inspect_turn))
         .route("/v1/status", get(status))
         .with_state(state);
-    let listener = TcpListener::bind(config.value.core.listen).await?;
     info!(listen = %config.value.core.listen, "Carillon core ready");
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown())

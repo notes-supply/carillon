@@ -91,6 +91,29 @@ assert_service_identity() {
   done
 }
 
+# Compare resolved locations before creating any managed state, including when
+# the owner's global Pi directory itself points elsewhere.
+mkdir "$OWNER_HOME/other"
+ln -s "$GLOBAL_PI" "$OWNER_HOME/pi-alias"
+for global_location in directory symlink; do
+  if [ "$global_location" = symlink ]; then
+    mv "$GLOBAL_PI" "$OWNER_HOME/pi-target"
+    ln -s "$OWNER_HOME/pi-target" "$GLOBAL_PI"
+  fi
+  for overlap in "$GLOBAL_PI" "$GLOBAL_PI/carillon" \
+    "$OWNER_HOME/other/../.pi/carillon" "$OWNER_HOME/pi-alias/carillon" "$OWNER_HOME"; do
+    if install_release "$OWNER_HOME" "$WORKSPACE" "$overlap" "$XDG_CONFIG_HOME" \
+      "$BASE_PORT" >"$TEST_ROOT/overlap.log" 2>&1; then
+      echo "installer accepted Pi overlap: $overlap" >&2
+      exit 1
+    fi
+    grep -F 'must not overlap' "$TEST_ROOT/overlap.log" >/dev/null
+    [ "$(sha256sum "$GLOBAL_PI/sentinel" | cut -d' ' -f1)" = "$GLOBAL_PI_HASH" ]
+    [ "$(find -L "$GLOBAL_PI" -mindepth 1 | wc -l)" -eq 1 ]
+    [ ! -e "$XDG_CONFIG_HOME" ]
+  done
+done
+
 # Fail only unit operations, after earlier templates have been processed. Use
 # real package binaries and filesystem writes; never contact the service manager.
 FAIL_COMMANDS=$TEST_ROOT/fail-commands
@@ -105,6 +128,25 @@ command=${0##*/}
 last=
 for argument do last=$argument; done
 case "$command:$FAIL_MODE:$last" in
+  mv:app-*:"${FAIL_APP:-}")
+    printf '%s\n' "$FAIL_MODE" >"$FAIL_MARKER"
+    # Even immediately before the rename the previous tree is still selected.
+    [ -f "$FAIL_APP/upgrade-sentinel" ]
+    case "$FAIL_MODE" in
+      app-before) exit 1 ;;
+      app-term-before) kill -TERM "$PPID"; exit 1 ;;
+      app-kill-before) kill -KILL "$PPID"; exit 1 ;;
+    esac
+    "$REAL_MV" "$@"
+    [ -x "$FAIL_APP/bin/carillon" ]
+    [ ! -e "$FAIL_APP/upgrade-sentinel" ]
+    case "$FAIL_MODE" in
+      app-after) exit 1 ;;
+      app-term-after) kill -TERM "$PPID"; exit 1 ;;
+      app-kill-after) kill -KILL "$PPID"; exit 1 ;;
+    esac
+    exit 2
+    ;;
   sed:render:"$FAIL_TEMPLATE")
     printf '%s\n' render >"$FAIL_MARKER"
     printf '%s\n' 'incomplete unit definition'
@@ -227,6 +269,42 @@ verify_units "$ORDINARY_UNIT_DIR"
 assert_service_identity "$ORDINARY_UNIT_DIR"
 [ "$(cat "$ORDINARY_ROOT/app/.carillon-managed")" = carillon-managed-application-v1 ]
 ORDINARY_TOKEN_HASH=$(sha256sum "$ORDINARY_ROOT/credentials/runtime-pi.token" | cut -d' ' -f1)
+# Fail or kill only this temporary installer on either side of publication.
+# No rollback is needed for an atomic exchange: APP always selects a full tree.
+for failure in app-before app-after app-term-before app-term-after app-kill-before app-kill-after; do
+  printf '%s\n' replaced-by-upgrade >"$ORDINARY_ROOT/app/upgrade-sentinel"
+  old_inode=$(stat -c %i "$ORDINARY_ROOT/app")
+  failure_marker=$ORDINARY_HOME/$failure.triggered
+  if env HOME="$ORDINARY_HOME" XDG_CONFIG_HOME="$ORDINARY_CONFIG_HOME" \
+    CARILLON_HOME="$ORDINARY_ROOT" CARILLON_SKIP_SYSTEMD_RELOAD=1 \
+    PATH="$FAIL_COMMANDS:$PATH" FAIL_MODE="$failure" FAIL_MARKER="$failure_marker" \
+    FAIL_APP="$ORDINARY_ROOT/app" FAIL_TEMPLATE="$RELEASE/systemd/carillon.target" \
+    FAIL_UNIT_DIR="$ORDINARY_UNIT_DIR" REAL_MV="$REAL_MV" REAL_SED="$REAL_SED" REAL_CHMOD="$REAL_CHMOD" \
+    "$RELEASE/install.sh" --guild-id 100 --bot-user-id 201 --user-id 200 \
+    --route 300:always:channel --workspace "$ORDINARY_WORKSPACE" --base-port "$((BASE_PORT + 10))" \
+    >"$ORDINARY_HOME/$failure.log" 2>&1; then
+    echo "installer unexpectedly succeeded after $failure" >&2
+    exit 1
+  fi
+  [ "$(cat "$failure_marker")" = "$failure" ]
+  for original in "$RELEASE"/bin/*; do
+    diff -r --no-dereference "$original" "$ORDINARY_ROOT/app/bin/$(basename "$original")"
+  done
+  [ "$(cat "$ORDINARY_ROOT/app/.carillon-managed")" = carillon-managed-application-v1 ]
+  case "$failure" in
+    *-before)
+      [ "$(stat -c %i "$ORDINARY_ROOT/app")" = "$old_inode" ]
+      [ -f "$ORDINARY_ROOT/app/upgrade-sentinel" ] ;;
+    *-after)
+      [ "$(stat -c %i "$ORDINARY_ROOT/app")" != "$old_inode" ]
+      [ ! -e "$ORDINARY_ROOT/app/upgrade-sentinel" ] ;;
+  esac
+  [ "$(sha256sum "$ORDINARY_ROOT/credentials/runtime-pi.token" | cut -d' ' -f1)" = "$ORDINARY_TOKEN_HASH" ]
+  install_release "$ORDINARY_HOME" "$ORDINARY_WORKSPACE" "$ORDINARY_ROOT" \
+    "$ORDINARY_CONFIG_HOME" "$((BASE_PORT + 10))" >/dev/null
+  [ ! -e "$ORDINARY_ROOT/app/upgrade-sentinel" ]
+  printf 'install application failure test passed: %s\n' "$failure"
+done
 printf '%s\n' replaced-by-upgrade >"$ORDINARY_ROOT/app/upgrade-sentinel"
 install_release "$ORDINARY_HOME" "$ORDINARY_WORKSPACE" "$ORDINARY_ROOT" \
   "$ORDINARY_CONFIG_HOME" "$((BASE_PORT + 10))" >/dev/null

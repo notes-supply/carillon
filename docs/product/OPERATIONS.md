@@ -91,4 +91,6 @@ This is not a provider-native health check: individual resource files are option
 
 Re-running the installer replaces managed application files and user units while preserving current configuration, credentials, sessions, and SQLite state. It is suitable only when the installed state format is still current.
 
+Application replacement uses GNU `mv --exchange --no-copy` (coreutils 9.5 or newer) on a filesystem supporting atomic rename exchange. An interrupted replacement leaves either the complete previous application or the complete new one at `app`, never a missing or partly copied application. Unsupported exchange fails without deleting the previous application. Abrupt process death may leave a private `.app-new.*` staging directory; it is not selected by services.
+
 The installed uninstaller removes Carillon's user units and managed application files while preserving data under `CARILLON_HOME`. It does not remove unrelated owner files or the owner's global Pi directory.

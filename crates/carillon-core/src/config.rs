@@ -175,11 +175,16 @@ pub struct Provider {
 impl Provider {
     /// The loopback socket address behind the provider's URL.
     pub fn listen_address(&self) -> Result<SocketAddr> {
-        self.url
+        let address: SocketAddr = self
+            .url
             .strip_prefix("http://")
             .context("provider URL must use http://")?
             .parse()
-            .context("provider URL must contain a socket address")
+            .context("provider URL must contain a socket address")?;
+        if !address.ip().is_loopback() || address.port() == 0 {
+            bail!("provider URL must use a loopback address and a nonzero port");
+        }
+        Ok(address)
     }
 }
 
@@ -247,6 +252,9 @@ impl Config {
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
+        if self.core.listen.port() == 0 {
+            bail!("core listen port must be nonzero");
+        }
         if self.core.operator_token_hash.is_empty() {
             bail!("operator diagnostics credential is not configured");
         }

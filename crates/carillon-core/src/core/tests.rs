@@ -40,7 +40,7 @@ fn installation(root: &Path) -> Result<AppState> {
         release: RELEASE_VERSION.to_owned(),
         data_dir: root.join("state"),
         core: CoreConfig {
-            listen: "127.0.0.1:0".parse()?,
+            listen: "127.0.0.1:1".parse()?,
             operator_token_hash: hash_token("test-operator"),
         },
         providers,
@@ -115,17 +115,76 @@ fn configuration_rejects_malformed_provider_endpoints_before_startup() -> Result
             "http://127.0.0.1:3000/path",
             "http://user@127.0.0.1:3000",
             "http://127.0.0.1:3000?query",
+            "http://0.0.0.0:3000",
+            "http://192.168.1.2:3000",
+            "http://[::]:3000",
+            "http://[2001:db8::1]:3000",
+            "http://127.0.0.1:0",
+            "http://[::1]:0",
         ] {
             state.config.value.providers[index].url = url.to_owned();
             fs::write(&path, toml::to_string(&state.config.value)?)?;
             assert!(LoadedConfig::load(&path).is_err(), "accepted {url:?}");
         }
-        for url in ["http://127.0.0.1:3000", "http://[::1]:3000"] {
+        for url in [
+            "http://127.0.0.1:3000",
+            "http://127.2.3.4:3000",
+            "http://[::1]:3000",
+        ] {
             state.config.value.providers[index].url = url.to_owned();
             fs::write(&path, toml::to_string(&state.config.value)?)?;
             LoadedConfig::load(&path)?;
         }
     }
+    state.config.value.core.listen.set_port(0);
+    fs::write(&path, toml::to_string(&state.config.value)?)?;
+    assert!(
+        LoadedConfig::load(&path).is_err(),
+        "accepted core port zero"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn occupied_listener_leaves_accepted_and_running_work_untouched() -> Result<()> {
+    let directory = tempdir()?;
+    let mut state = installation(directory.path())?;
+    let running = accept(&state, "running", "busy").await?;
+    state
+        .database
+        .claim_turn("test-runtime")?
+        .context("missing running turn")?;
+    let queued = accept(&state, "queued", "other").await?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    state.config.value.core.listen = listener.local_addr()?;
+
+    let error = tokio::time::timeout(Duration::from_secs(5), serve(state.config.clone()))
+        .await?
+        .err()
+        .context("occupied port was accepted")?;
+    assert_eq!(
+        error
+            .downcast_ref::<std::io::Error>()
+            .context("not a bind error")?
+            .kind(),
+        std::io::ErrorKind::AddrInUse
+    );
+    assert_eq!(
+        state
+            .database
+            .inspect_turn(&running.turn_id)?
+            .context("missing running turn")?
+            .state,
+        TurnState::Running
+    );
+    assert_eq!(
+        state
+            .database
+            .inspect_turn(&queued.turn_id)?
+            .context("missing queued turn")?
+            .state,
+        TurnState::Queued
+    );
     Ok(())
 }
 

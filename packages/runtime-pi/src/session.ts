@@ -22,13 +22,19 @@ interface PiExecutionSessionOptions {
 }
 
 export async function createPiExecutionSession(options: PiExecutionSessionOptions) {
-  const systemPrompt = await readFile(join(options.resourceRoot, "SYSTEM.md"), "utf8");
+  const systemPrompt = await readFile(join(options.resourceRoot, "SYSTEM.md"), "utf8").catch(
+    (failure: unknown) => {
+      if (failure instanceof Error && "code" in failure && failure.code === "ENOENT")
+        return undefined;
+      throw failure;
+    },
+  );
   const settingsManager = SettingsManager.create(options.workspace, options.resourceRoot);
   const loader = new DefaultResourceLoader({
     cwd: options.workspace,
     agentDir: options.resourceRoot,
     settingsManager,
-    systemPromptOverride: () => systemPrompt,
+    ...(systemPrompt === undefined ? {} : { systemPromptOverride: () => systemPrompt }),
   });
   await loader.reload();
   const created = await createAgentSession({

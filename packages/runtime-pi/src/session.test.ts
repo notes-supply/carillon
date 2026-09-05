@@ -44,7 +44,7 @@ const assistantMessage: AssistantMessage = {
   timestamp: 1_787_846_400_000,
 };
 
-it("preserves data extensions and native assistant metadata through the headless Pi path", async () => {
+it.each([true, false])("preserves native Pi with SYSTEM.md: %s", async (hasSystemPrompt) => {
   const resourceRoot = await mkdtemp(join(tmpdir(), "carillon-headless-pi-"));
   const ownerHome = await mkdtemp(join(tmpdir(), "carillon-owner-home-"));
   const workspace = await mkdtemp(join(tmpdir(), "carillon-workspace-"));
@@ -53,7 +53,7 @@ it("preserves data extensions and native assistant metadata through the headless
   const extensionState = join(ownerHome, "extension-state.json");
   await mkdir(extensions);
   await mkdir(sessions);
-  await writeFile(join(resourceRoot, "SYSTEM.md"), "Observe the test turn.\n");
+  if (hasSystemPrompt) await writeFile(join(resourceRoot, "SYSTEM.md"), "Observe the test turn.\n");
   await writeFile(
     join(extensions, "observer.ts"),
     `import { execFileSync } from "node:child_process";
@@ -150,6 +150,8 @@ export default function observer(pi) {
     const { session, extensionsResult } = created;
     try {
       expect(extensionsResult.errors).toEqual([]);
+      expect(session.systemPrompt.length).toBeGreaterThan(0);
+      expect(session.systemPrompt.includes("Observe the test turn.")).toBe(hasSystemPrompt);
       expect(session.sessionManager.getCwd()).toBe(workspace);
       expect(session.getActiveToolNames()).toEqual(
         expect.arrayContaining(["read", "bash", "edit", "write"]),
