@@ -81,9 +81,11 @@ Stop `carillon.target` before backup or restore. Carillon refuses backup while i
 
 The backup contains the entire `CARILLON_HOME` tree, including configuration, credentials, SQLite state, common agent resources, runtime resource snapshots and sessions, release identity, and Pi-private authentication and model state under `CARILLON_HOME/pi`. The archive therefore contains credentials and private agent state. Keep it owner-readable only and encrypt it before storing or transferring it.
 
-Backup requires `data_dir` and `agent.resource_root` to resolve inside `CARILLON_HOME`; it rejects external owned paths rather than producing an incomplete archive. The destination must resolve outside that tree. An external user workspace is allowed, but is not included in this backup.
+Backup requires `data_dir` and `agent.resource_root` to be installation-relative paths without `..`, resolving inside `CARILLON_HOME`. Absolute paths are rejected even when they point inside the source installation: use `state` and `agents/default`, for example, so a restored configuration cannot refer back to the source. The destination must resolve outside that tree. An external user workspace is allowed, but is not included in this backup.
 
-Restore validates the archive and replaces the managed Carillon state. This private beta does not migrate obsolete schemas. Use a backup made by the same current state format, or perform a fresh installation.
+Before creating a backup or publishing a restore, Carillon checks the configured resource directory, matching operator/provider loopback credentials, and the core database's integrity, foreign keys, and current schema. Restore accepts only regular files and directories and validates in a temporary directory; failure leaves the target absent or empty and retryable. This private beta does not migrate obsolete schemas.
+
+This is not a provider-native health check: individual resource files are optional, and providers own their native sessions, settings, and authentication requirements. The entire installation tree is copied, but restore cannot infer whether arbitrary provider-private files were omitted from a manually edited archive. Check the provider after restoring; a successful restore does not attest that external credentials are still valid. Use a backup made by the same current state format, or perform a fresh installation.
 
 ## Update and uninstall
 

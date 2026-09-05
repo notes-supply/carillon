@@ -84,7 +84,10 @@ else
 fi
 
 install -d -m 0700 "$CARILLON_HOME" "$CARILLON_HOME/credentials" "$CARILLON_HOME/pi" \
-  "$CARILLON_HOME/logs" "$UNIT_DIR"
+  "$CARILLON_HOME/logs"
+# This directory is shared with unrelated user services. Create it privately
+# when absent, but retain the owner's existing mode when it is already there.
+mkdir -p "$UNIT_DIR"
 APP_NEW=$(mktemp -d "$CARILLON_HOME/.app-new.XXXXXX")
 cleanup_staging() {
   [ -z "$APP_NEW" ] || rm -rf -- "$APP_NEW"

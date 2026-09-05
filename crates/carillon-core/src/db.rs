@@ -100,8 +100,38 @@ impl Database {
         Ok(connection)
     }
 
+    /// Validate without creating a missing database or repairing an old schema.
+    pub fn validate_backup(path: &Path) -> Result<()> {
+        let connection =
+            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let integrity: String =
+            connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+        if integrity != "ok" {
+            bail!("SQLite integrity check failed: {integrity}");
+        }
+        if connection.prepare("PRAGMA foreign_key_check")?.exists([])? {
+            bail!("SQLite foreign key check failed");
+        }
+        let current = Connection::open_in_memory()?;
+        Self::initialize_connection(&current)?;
+        let schema = |database: &Connection| -> Result<Vec<(String, String, String)>> {
+            Ok(database.prepare(
+                "SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+            )?.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?)
+        };
+        if schema(&connection)? != schema(&current)? {
+            bail!("backup database schema is not the current Carillon format");
+        }
+        Ok(())
+    }
+
     fn initialize(&self) -> Result<()> {
-        self.connect()?.execute_batch(
+        Self::initialize_connection(&self.connect()?)
+    }
+
+    fn initialize_connection(connection: &Connection) -> Result<()> {
+        connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS events (
                 interface_id TEXT NOT NULL,
                 event_id TEXT NOT NULL,

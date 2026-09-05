@@ -150,6 +150,8 @@ for previous in fresh existing; do
   FAILURE_CONFIG_HOME=$FAILURE_HOME/.config
   FAILURE_UNIT_DIR=$FAILURE_CONFIG_HOME/systemd/user
   mkdir -p "$FAILURE_WORKSPACE" "$FAILURE_UNIT_DIR/unrelated.service.d"
+  # Make preservation observable even when the test runner's umask is 077.
+  chmod 0755 "$FAILURE_UNIT_DIR"
   printf '%s\n' unrelated-unit >"$FAILURE_UNIT_DIR/unrelated.service"
   printf '%s\n' unrelated-drop-in >"$FAILURE_UNIT_DIR/unrelated.service.d/override.conf"
   if [ "$previous" = existing ]; then

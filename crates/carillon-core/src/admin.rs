@@ -295,7 +295,9 @@ pub fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
             bail!("backup requires {field} to be inside the installation root");
         }
     }
+    validate_portable_paths(&root)?;
     let _lock = ensure_stopped(config)?;
+    validate_installation(config)?;
     let staging = parent.join(format!(
         ".{}.backup-{}",
         name.to_string_lossy(),
@@ -380,11 +382,58 @@ fn restore_into(archive_path: &Path, target: &Path) -> Result<()> {
         {
             bail!("backup contains unsafe path {}", path.display());
         }
+        if !entry.header().entry_type().is_file() && !entry.header().entry_type().is_dir() {
+            bail!("backup contains unsupported entry {}", path.display());
+        }
         entry.unpack_in(target)?;
     }
-    let config = target.join("carillon.toml");
-    LoadedConfig::load(&config).context("restored backup is not a valid Carillon installation")?;
+    validate_portable_paths(target)?;
+    let config = LoadedConfig::load(&target.join("carillon.toml"))
+        .context("restored backup is not a valid Carillon installation")?;
+    validate_installation(&config)?;
     Ok(())
+}
+
+fn validate_portable_paths(root: &Path) -> Result<()> {
+    // LoadedConfig resolves paths for services; check the stored spelling before
+    // allowing it into an archive that must work under a different root.
+    let config: Config = toml::from_str(&fs::read_to_string(root.join("carillon.toml"))?)?;
+    for (field, path) in [
+        ("data_dir", &config.data_dir),
+        ("agent.resource_root", &config.agent.resource_root),
+    ] {
+        if path.as_os_str().is_empty()
+            || path.is_absolute()
+            || path
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            bail!("backup and restore require {field} to be installation-relative without '..'");
+        }
+    }
+    Ok(())
+}
+
+fn validate_installation(config: &LoadedConfig) -> Result<()> {
+    if !config.value.agent.resource_root.is_dir() {
+        bail!("backup is missing the configured agent resource directory");
+    }
+    for (id, expected) in std::iter::once(("operator", &config.value.core.operator_token_hash))
+        .chain(
+            config
+                .value
+                .providers
+                .iter()
+                .map(|provider| (provider.id.as_str(), &provider.token_hash)),
+        )
+    {
+        let token = config.credential(id)?;
+        if token.is_empty() || hash_token(&token) != *expected {
+            bail!("backup credential for {id} does not match the configuration");
+        }
+    }
+    Database::validate_backup(&config.value.data_dir.join("carillon.sqlite3"))
+        .context("backup does not contain a valid current core database")
 }
 
 fn ensure_stopped(config: &LoadedConfig) -> Result<ServiceLock> {
@@ -619,6 +668,175 @@ mod tests {
     }
 
     #[test]
+    fn backup_and_restore_reject_absolute_managed_paths_inside_source() -> Result<()> {
+        for field in ["data_dir", "agent.resource_root"] {
+            let directory = tempdir()?;
+            let root = directory.path().join("installation");
+            let config_path = initialize_test_installation(&root, directory.path(), 44_700)?;
+            let mut config: Config = toml::from_str(&fs::read_to_string(&config_path)?)?;
+            match field {
+                "data_dir" => config.data_dir = root.join("state"),
+                _ => config.agent.resource_root = root.join("agents/default"),
+            }
+            fs::write(&config_path, toml::to_string_pretty(&config)?)?;
+            let destination = directory.path().join("backup.tar.gz");
+            let error = backup(&LoadedConfig::load(&config_path)?, &destination)
+                .err()
+                .context("backup accepted an absolute managed path")?;
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("require {field} to be installation-relative"))
+            );
+            assert!(!destination.exists());
+            assert!(!root.join("state/service.lock").exists());
+
+            // A manually built archive must not make restore use source state,
+            // even when that state is still accessible to this Unix user.
+            archive_test_tree(&root, &destination)?;
+            let target = directory.path().join("restored");
+            assert!(restore(&destination, &target).is_err());
+            assert!(!target.exists());
+        }
+        Ok(())
+    }
+
+    fn archive_test_tree(root: &Path, destination: &Path) -> Result<()> {
+        let encoder = GzEncoder::new(fs::File::create(destination)?, Compression::default());
+        let mut archive = Builder::new(encoder);
+        super::append_directory(&mut archive, root, root)?;
+        archive.into_inner()?.finish()?;
+        Ok(())
+    }
+
+    #[test]
+    fn incomplete_restore_is_rejected_before_publication_and_can_be_retried() -> Result<()> {
+        for damage in [
+            "config-only",
+            "database",
+            "operator",
+            "provider",
+            "resource-root",
+            "wrong-credential",
+            "corrupt-database",
+            "empty-database",
+            "old-schema",
+            "foreign-key",
+        ] {
+            let directory = tempdir()?;
+            let source = directory.path().join("source");
+            let config_path = initialize_test_installation(&source, directory.path(), 44_800)?;
+            let valid = directory.path().join("valid.tar.gz");
+            backup(&LoadedConfig::load(&config_path)?, &valid)?;
+            let database = source.join("state/carillon.sqlite3");
+            match damage {
+                "config-only" => {
+                    for entry in fs::read_dir(&source)? {
+                        let entry = entry?;
+                        if entry.file_type()?.is_dir() {
+                            fs::remove_dir_all(entry.path())?;
+                        }
+                    }
+                }
+                "database" => fs::remove_file(&database)?,
+                "operator" => fs::remove_file(source.join("credentials/operator.token"))?,
+                "provider" => fs::remove_file(source.join("credentials/runtime-pi.token"))?,
+                "resource-root" => fs::remove_dir_all(source.join("agents/default"))?,
+                "wrong-credential" => {
+                    fs::write(source.join("credentials/runtime-pi.token"), b"wrong")?;
+                }
+                "corrupt-database" => fs::write(&database, b"not a database")?,
+                "empty-database" => fs::write(&database, b"")?,
+                "old-schema" => {
+                    rusqlite::Connection::open(&database)?
+                        .execute_batch("ALTER TABLE deliveries DROP COLUMN claim_owner")?;
+                }
+                "foreign-key" => {
+                    rusqlite::Connection::open(&database)?.execute_batch(
+                        "PRAGMA foreign_keys = OFF;
+                         INSERT INTO deliveries (turn_id, interface_id, target_id, feedback_target_id, content, state, updated_at)
+                         VALUES ('missing', 'interface', 'target', 'feedback', 'output', 'pending', 0)"
+                    )?;
+                }
+                _ => unreachable!(),
+            }
+            let invalid = directory.path().join("invalid.tar.gz");
+            archive_test_tree(&source, &invalid)?;
+            fs::remove_dir_all(&source)?;
+            for existing_target in [false, true] {
+                let target = directory.path().join("restored");
+                if existing_target {
+                    fs::create_dir(&target)?;
+                }
+                assert!(restore(&invalid, &target).is_err(), "accepted {damage}");
+                assert_eq!(target.exists(), existing_target, "published {damage}");
+                if existing_target {
+                    assert!(fs::read_dir(&target)?.next().is_none());
+                }
+                for entry in fs::read_dir(directory.path())? {
+                    assert!(
+                        !entry?
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(".restored.restore-")
+                    );
+                }
+                let restored = LoadedConfig::load(&restore(&valid, &target)?)?;
+                super::validate_installation(&restored)?;
+                fs::remove_dir_all(&target)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn backup_restores_opaque_native_state_without_bundled_provider_requirements() -> Result<()> {
+        let directory = tempdir()?;
+        let root = directory.path().join("source");
+        let config_path = initialize_test_installation(&root, directory.path(), 44_900)?;
+        let mut config: Config = toml::from_str(&fs::read_to_string(&config_path)?)?;
+        config.discord = None;
+        config
+            .providers
+            .retain(|provider| provider.role == ProviderRole::Runtime);
+        config.providers[0].id = "other-runtime".to_owned();
+        config.agent.runtime_provider = "other-runtime".to_owned();
+        fs::rename(
+            root.join("credentials/runtime-pi.token"),
+            root.join("credentials/other-runtime.token"),
+        )?;
+        fs::remove_file(root.join("credentials/discord-private.token"))?;
+        fs::remove_dir_all(root.join("pi"))?;
+        fs::remove_dir_all(root.join("state/components"))?;
+        fs::remove_dir_all(root.join("agents/default"))?;
+        fs::create_dir(root.join("agents/default"))?; // All individual resources are optional.
+        fs::write(&config_path, toml::to_string_pretty(&config)?)?;
+        let native = root.join("other-engine");
+        fs::create_dir(&native)?;
+        let fixtures = [
+            ("history", "native session history"),
+            ("auth", "private auth fixture"),
+            ("settings", "private engine settings"),
+        ];
+        for (name, content) in fixtures {
+            fs::write(native.join(name), content)?;
+        }
+        let destination = directory.path().join("backup.tar.gz");
+        backup(&LoadedConfig::load(&config_path)?, &destination)?;
+        fs::remove_dir_all(&root)?;
+        let target = directory.path().join("restored");
+        restore(&destination, &target)?;
+        for (name, content) in fixtures {
+            assert_eq!(
+                fs::read_to_string(target.join("other-engine").join(name))?,
+                content
+            );
+        }
+        assert!(!target.join("pi").exists());
+        Ok(())
+    }
+
+    #[test]
     fn backup_restores_owned_state_with_an_external_workspace() -> Result<()> {
         let directory = tempdir()?;
         let root = directory.path().join("installation");
@@ -696,20 +914,22 @@ mod tests {
         let directory = tempdir()?;
         let source = directory.path().join("source");
         let config_path = initialize_test_installation(&source, directory.path(), 44_300)?;
-        let config = fs::read(config_path)?;
+        let valid = directory.path().join("valid.tar.gz");
+        backup(&LoadedConfig::load(&config_path)?, &valid)?;
+        let mut original = tar::Archive::new(flate2::read::GzDecoder::new(fs::File::open(valid)?));
         let archive_path = directory.path().join("foreign-owner.tar.gz");
-        let archive_file = fs::File::create(&archive_path)?;
-        let encoder = GzEncoder::new(archive_file, Compression::default());
+        let encoder = GzEncoder::new(fs::File::create(&archive_path)?, Compression::default());
         let mut archive = Builder::new(encoder);
-        let mut header = Header::new_gnu();
-        header.set_path("carillon.toml")?;
-        header.set_size(config.len().try_into()?);
-        header.set_mode(0o600);
-        header.set_uid(123_456);
-        header.set_gid(123_456);
-        header.set_cksum();
-        archive.append(&header, Cursor::new(config))?;
+        for entry in original.entries()? {
+            let mut entry = entry?;
+            let mut header = entry.header().clone();
+            header.set_uid(123_456);
+            header.set_gid(123_456);
+            header.set_cksum();
+            archive.append(&header, &mut entry)?;
+        }
         archive.into_inner()?.finish()?;
+        fs::remove_dir_all(&source)?;
 
         let target = directory.path().join("restored");
         let restored_config = restore(&archive_path, &target)?;
