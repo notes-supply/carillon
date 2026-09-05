@@ -135,6 +135,44 @@ command=${0##*/}
 last=
 for argument do last=$argument; done
 case "$command:$FAIL_MODE:$last" in
+  sync:unit-sync-*:"$FAIL_UNIT_DIR" | sync:unit-sync-*:"$FAIL_UNIT_DIR"/.carillon-units.*)
+    [ "$#" -eq 3 ] && [ "$1" = -f ] && [ "$2" = -- ]
+    if [ ! -e "$FAIL_MARKER.stage" ]; then
+      boundary=stage
+      case "$last" in "$FAIL_UNIT_DIR"/.carillon-units.*) ;; *) exit 2 ;; esac
+      for unit in "$last"/new/*; do
+        [ "$(stat -c %a "$unit")" = 600 ]
+        grep -F "$CARILLON_HOME" "$unit" >/dev/null || [ "${unit##*/}" = carillon.target ]
+      done
+      diff -r --no-dereference "$FAIL_BEFORE" "$FAIL_UNIT_DIR" --exclude='.carillon-units.*'
+    elif [ "$FAIL_MODE" = unit-sync-rollback ]; then
+      boundary=rollback
+      diff -r --no-dereference "$FAIL_BEFORE" "$FAIL_UNIT_DIR" --exclude='.carillon-units.*'
+    else
+      boundary=publish
+      for unit in carillon-core.service carillon-runtime-pi.service carillon-discord.service carillon.target; do
+        [ -f "$FAIL_UNIT_DIR/$unit" ] && [ ! -L "$FAIL_UNIT_DIR/$unit" ]
+        [ "$(stat -c %a "$FAIL_UNIT_DIR/$unit")" = 600 ]
+      done
+    fi
+    touch "$FAIL_MARKER.$boundary"
+    printf 'sync %s\n' "$boundary" >>"$FAIL_MARKER.order"
+    if [ "$FAIL_MODE" = "unit-sync-$boundary" ]; then
+      printf '%s\n' "$FAIL_MODE" >"$FAIL_MARKER"
+      exec strace -qq -yy -o "$FAIL_MARKER.trace" -e trace=syncfs \
+        -e inject=syncfs:error=EIO:when=1 "$REAL_SYNC" "$@"
+    fi
+    exec strace -qq -yy -o "$FAIL_MARKER.$boundary.trace" -e trace=syncfs "$REAL_SYNC" "$@"
+    ;;
+  mv:unit-sync-*:"$FAIL_UNIT_DIR"/carillon*)
+    printf 'rename %s\n' "${last##*/}" >>"$FAIL_MARKER.order"
+    if [ "$FAIL_MODE" = unit-sync-rollback ] && [ "${last##*/}" = carillon.target ]; then
+      exit 1
+    fi
+    ;;
+  sync:sync-*:"$FAIL_UNIT_DIR" | sync:sync-*:"$FAIL_UNIT_DIR"/.carillon-units.*)
+    exec "$REAL_SYNC" "$@"
+    ;;
   sync:sync-*:*)
     [ "$#" -eq 3 ] && [ "$1" = -f ] && [ "$2" = -- ]
     if [ ! -e "$FAIL_MARKER.stage" ]; then
@@ -236,6 +274,110 @@ FAIL_COMMAND
 chmod 0755 "$FAIL_COMMANDS/fail-unit-command"
 for command in sed chmod mv sync systemctl; do
   ln -s fail-unit-command "$FAIL_COMMANDS/$command"
+done
+
+# Unit storage has its own barriers, independently of the application filesystem.
+for previous in fresh existing; do
+  for failure in unit-sync-stage unit-sync-publish unit-sync-rollback unit-sync-ok; do
+    SYNC_HOME=$TEST_ROOT/$previous-$failure
+    SYNC_ROOT=$SYNC_HOME/.carillon
+    SYNC_CONFIG_HOME=$SYNC_HOME/separate-config
+    SYNC_UNIT_DIR=$SYNC_CONFIG_HOME/systemd/user
+    mkdir -p "$SYNC_HOME/workspace" "$SYNC_UNIT_DIR"
+    chmod 0755 "$SYNC_UNIT_DIR"
+    printf '%s\n' unrelated >"$SYNC_UNIT_DIR/unrelated.service"
+    "$RELEASE/bin/carillon" init --root "$SYNC_ROOT" --workspace "$SYNC_HOME/workspace" \
+      --guild-id 100 --bot-user-id 201 --user-id 200 --route 300:always:channel \
+      --base-port "$((BASE_PORT + 40))" >/dev/null
+    if [ "$previous" = existing ]; then
+      install_release "$SYNC_HOME" "$SYNC_HOME/workspace" "$SYNC_ROOT" \
+        "$SYNC_CONFIG_HOME" "$((BASE_PORT + 40))" >/dev/null
+      printf '%s\n' previous-application >"$SYNC_ROOT/app/upgrade-sentinel"
+      old_inode=$(stat -c %i "$SYNC_ROOT/app")
+      printf '%s\n' previous-core >"$SYNC_UNIT_DIR/carillon-core.service"
+      chmod 0640 "$SYNC_UNIT_DIR/carillon-core.service"
+      rm "$SYNC_UNIT_DIR/carillon-discord.service" "$SYNC_UNIT_DIR/carillon-runtime-pi.service"
+      ln -s unrelated.service "$SYNC_UNIT_DIR/carillon-runtime-pi.service"
+    fi
+    cp -a "$SYNC_UNIT_DIR" "$SYNC_HOME/units-before"
+    printf '%s\n' private-bot-token >"$SYNC_ROOT/credentials/discord-bot.token"
+    chmod 0600 "$SYNC_ROOT/credentials/discord-bot.token"
+    cp -a "$SYNC_ROOT/credentials" "$SYNC_HOME/credentials-before"
+    failure_marker=$SYNC_HOME/failure
+    result=0
+    env HOME="$SYNC_HOME" XDG_CONFIG_HOME="$SYNC_CONFIG_HOME" \
+      CARILLON_HOME="$SYNC_ROOT" CARILLON_SKIP_SYSTEMD_RELOAD=1 \
+      PATH="$FAIL_COMMANDS:$PATH" FAIL_MODE="$failure" FAIL_MARKER="$failure_marker" \
+      FAIL_UNIT_DIR="$SYNC_UNIT_DIR" FAIL_BEFORE="$SYNC_HOME/units-before" \
+      FAIL_TEMPLATE="$SYNC_ROOT/app/systemd/carillon.target" \
+      REAL_MV="$REAL_MV" REAL_SED="$REAL_SED" REAL_CHMOD="$REAL_CHMOD" \
+      "$RELEASE/install.sh" --guild-id 100 --bot-user-id 201 --user-id 200 \
+      --route 300:always:channel --workspace "$SYNC_HOME/workspace" --base-port "$((BASE_PORT + 40))" \
+      >"$SYNC_HOME/install.log" 2>&1 || result=$?
+    if [ "$failure" = unit-sync-ok ]; then
+      [ "$result" -eq 0 ]
+      for boundary in stage publish; do
+        grep -E 'syncfs\(.*\) = 0$' "$failure_marker.$boundary.trace" >/dev/null
+      done
+    else
+      [ "$result" -ne 0 ]
+      [ -f "$failure_marker" ] || { cat "$SYNC_HOME/install.log" >&2; exit 1; }
+      [ "$(cat "$failure_marker")" = "$failure" ]
+      grep -F 'EIO (Input/output error) (INJECTED)' "$failure_marker.trace" >/dev/null
+      grep -F "<$SYNC_UNIT_DIR" "$failure_marker.trace" >/dev/null
+    fi
+    printf '%s\n' 'sync stage' >"$SYNC_HOME/expected-order"
+    if [ "$failure" != unit-sync-stage ]; then
+      for unit in carillon-core.service carillon-discord.service carillon-runtime-pi.service carillon.target; do
+        printf 'rename %s\n' "$unit" >>"$SYNC_HOME/expected-order"
+      done
+      if [ "$failure" = unit-sync-rollback ]; then
+        if [ "$previous" = existing ]; then
+          printf '%s\n' 'rename carillon-core.service' 'rename carillon-runtime-pi.service' >>"$SYNC_HOME/expected-order"
+        fi
+        printf '%s\n' 'sync rollback' >>"$SYNC_HOME/expected-order"
+      else
+        printf '%s\n' 'sync publish' >>"$SYNC_HOME/expected-order"
+      fi
+    fi
+    cmp "$SYNC_HOME/expected-order" "$failure_marker.order"
+    retained_units=$(find "$SYNC_UNIT_DIR" -maxdepth 1 -type d -name '.carillon-units.*')
+    if [ "$failure" = unit-sync-publish ] || [ "$failure" = unit-sync-rollback ]; then
+      [ -d "$retained_units/old" ]
+      for unit in "$SYNC_HOME/units-before"/carillon*; do
+        [ -e "$unit" ] || [ -L "$unit" ] || continue
+        diff --no-dereference "$unit" "$retained_units/old/${unit##*/}"
+        [ "$(stat -c %a "$unit")" = "$(stat -c %a "$retained_units/old/${unit##*/}")" ]
+      done
+      grep -F "retained backups at $retained_units" "$SYNC_HOME/install.log" >/dev/null
+    else
+      [ -z "$retained_units" ]
+    fi
+    if [ "$failure" = unit-sync-stage ] || [ "$failure" = unit-sync-rollback ]; then
+      diff -r --no-dereference "$SYNC_HOME/units-before" "$SYNC_UNIT_DIR" --exclude='.carillon-units.*'
+      [ "$(stat -c %a "$SYNC_UNIT_DIR")" = 755 ]
+      if [ "$previous:$failure" = existing:unit-sync-stage ]; then
+        [ "$(stat -c %i "$SYNC_ROOT/app")" = "$old_inode" ]
+        [ -f "$SYNC_ROOT/app/upgrade-sentinel" ]
+      fi
+    else
+      verify_units "$SYNC_UNIT_DIR"
+    fi
+    if [ "$failure" != unit-sync-stage ] && [ "$previous" = existing ]; then
+      [ "$(stat -c %i "$SYNC_ROOT/app")" != "$old_inode" ]
+      [ ! -e "$SYNC_ROOT/app/upgrade-sentinel" ]
+      if [ "$failure" != unit-sync-ok ]; then
+        retained_app=$(find "$SYNC_ROOT" -maxdepth 1 -type d -name '.app-new.*')
+        [ "$(stat -c %i "$retained_app")" = "$old_inode" ]
+      fi
+    fi
+    diff -r "$SYNC_HOME/credentials-before" "$SYNC_ROOT/credentials"
+    install_release "$SYNC_HOME" "$SYNC_HOME/workspace" "$SYNC_ROOT" \
+      "$SYNC_CONFIG_HOME" "$((BASE_PORT + 40))" >/dev/null
+    verify_units "$SYNC_UNIT_DIR"
+    diff -r "$SYNC_HOME/credentials-before" "$SYNC_ROOT/credentials"
+    printf 'install unit durability passed: %s / %s\n' "$previous" "$failure"
+  done
 done
 
 # Persist the copied tree before rename and its parent after rename. Real
@@ -737,5 +879,7 @@ for previous in fresh existing; do
   [ ! -e "$CARILLON_HOME" ]
   printf 'restored service registration passed: %s units, relocated root and owner environment\n' "$previous"
 done
+
+sh "$ROOT/scripts/test-uninstall.sh" "$RELEASE"
 
 printf '%s\n' "install tests passed: owner authority, admission, continuation, private Pi state, and unrelated files"

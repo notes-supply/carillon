@@ -18,16 +18,25 @@ cleanup_staging() {
         # A missing staged definition has already been published.
         [ ! -e "$UNIT_STAGE/new/$name" ] || continue
         if [ -e "$UNIT_STAGE/old/$name" ] || [ -L "$UNIT_STAGE/old/$name" ]; then
-          mv -T -- "$UNIT_STAGE/old/$name" "$UNIT_DIR/$name" || result=1
+          # Keep the backup until restoration itself is durably confirmed.
+          if cp -Pp -- "$UNIT_STAGE/old/$name" "$UNIT_STAGE/new/$name"; then
+            mv -T -- "$UNIT_STAGE/new/$name" "$UNIT_DIR/$name" || result=1
+          else
+            result=1
+          fi
         else
           rm -f -- "$UNIT_DIR/$name" || result=1
         fi
       done
+      sync -f -- "$UNIT_DIR" || result=1
       if [ "$result" -ne 10 ]; then
-        echo "unit restoration failed; retained backups at $UNIT_STAGE" >&2
+        echo "unit restoration unconfirmed; retained backups at $UNIT_STAGE" >&2
         UNIT_STAGE=
       fi
     fi
+  elif [ "$result" -ne 0 ] && [ -n "$UNIT_STAGE" ]; then
+    echo "unit publication or registration unconfirmed; retained backups at $UNIT_STAGE; rerun registration before restarting" >&2
+    UNIT_STAGE=
   fi
   [ -z "$UNIT_STAGE" ] || rm -rf -- "$UNIT_STAGE"
   exit "$result"
@@ -88,6 +97,9 @@ for template in "$SOURCE"/systemd/*; do
     cp -Pp -- "$unit" "$UNIT_STAGE/old/$name"
   fi
 done
+# XDG_CONFIG_HOME may be on a different filesystem from the application. Persist
+# rendered definitions, modes and recovery copies before the first rename.
+sync -f -- "$UNIT_STAGE"
 PUBLICATION_STARTED=1
 for template in "$SOURCE"/systemd/*; do
   name=$(basename "$template")
@@ -97,6 +109,8 @@ for template in "$SOURCE"/systemd/*; do
   fi
 done
 UNITS_PUBLISHED=1
+# A complete publication is not rolled back merely because its barrier fails.
+sync -f -- "$UNIT_DIR"
 
 if [ "${CARILLON_SKIP_SYSTEMD_RELOAD:-0}" != "1" ]; then
   systemctl --user daemon-reload
