@@ -116,7 +116,8 @@ impl Database {
                 PRIMARY KEY(interface_id, event_id)
             );
             CREATE TABLE IF NOT EXISTS turns (
-                id TEXT PRIMARY KEY,
+                acceptance_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                id TEXT NOT NULL UNIQUE,
                 interface_id TEXT NOT NULL,
                 event_id TEXT NOT NULL,
                 agent_id TEXT NOT NULL,
@@ -159,6 +160,15 @@ impl Database {
         Ok(())
     }
 
+    /// Reads an accepted event without depending on current runtime resources.
+    pub fn event_receipt(
+        &self,
+        interface_id: &str,
+        event_id: &str,
+    ) -> Result<Option<EventReceipt>> {
+        event_receipt(&self.connect()?, interface_id, event_id)
+    }
+
     /// Records an admitted event and its queued turn, or returns the receipt
     /// of the turn a previous submission of the same event already created.
     pub fn accept_event(
@@ -171,21 +181,9 @@ impl Database {
     ) -> Result<EventReceipt> {
         let mut connection = self.connect()?;
         let transaction = write_transaction(&mut connection)?;
-        if let Some((turn_id, state)) = transaction
-            .query_row(
-                "SELECT id, state FROM turns WHERE interface_id = ?1 AND event_id = ?2",
-                params![interface_id, event.event_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, TurnState>(1)?)),
-            )
-            .optional()?
-        {
+        if let Some(receipt) = event_receipt(&transaction, interface_id, &event.event_id)? {
             transaction.commit()?;
-            return Ok(EventReceipt {
-                event_id: event.event_id.clone(),
-                turn_id,
-                state,
-                duplicate: true,
-            });
+            return Ok(receipt);
         }
 
         let turn_id = uuid::Uuid::now_v7().to_string();
@@ -253,10 +251,9 @@ impl Database {
                        AND earlier.agent_id = t.agent_id
                        AND earlier.audience_id = t.audience_id
                        AND earlier.state IN ('queued', 'running', 'uncertain')
-                       AND (earlier.started_at < t.started_at
-                         OR (earlier.started_at = t.started_at AND earlier.id < t.id))
+                       AND earlier.acceptance_sequence < t.acceptance_sequence
                    )
-                 ORDER BY t.started_at, t.id LIMIT 1",
+                 ORDER BY t.acceptance_sequence LIMIT 1",
                 [runtime_id],
                 |row| {
                     Ok(ClaimedTurn {
@@ -669,7 +666,7 @@ impl Database {
             "SELECT t.id, t.event_id, t.state, t.started_at, d.state
              FROM turns t LEFT JOIN deliveries d ON d.turn_id = t.id
              WHERE (?1 IS NULL OR t.event_id = ?1)
-             ORDER BY t.started_at DESC, t.id DESC LIMIT ?2",
+             ORDER BY t.acceptance_sequence DESC LIMIT ?2",
         )?;
         let rows = statement.query_map(params![event_id, limit.clamp(1, 100)], |row| {
             Ok(TurnSummary {
@@ -734,6 +731,27 @@ fn json_column<T: DeserializeOwned>(row: &Row<'_>, index: usize) -> rusqlite::Re
     serde_json::from_str(&text).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(index, Type::Text, Box::new(error))
     })
+}
+
+fn event_receipt(
+    connection: &Connection,
+    interface_id: &str,
+    event_id: &str,
+) -> Result<Option<EventReceipt>> {
+    Ok(connection
+        .query_row(
+            "SELECT id, state FROM turns WHERE interface_id = ?1 AND event_id = ?2",
+            params![interface_id, event_id],
+            |row| {
+                Ok(EventReceipt {
+                    event_id: event_id.to_owned(),
+                    turn_id: row.get(0)?,
+                    state: row.get(1)?,
+                    duplicate: true,
+                })
+            },
+        )
+        .optional()?)
 }
 
 fn timestamp() -> Result<i64> {
@@ -889,6 +907,54 @@ mod tests {
                 .state,
             TurnState::Completed
         );
+        Ok(())
+    }
+
+    #[test]
+    fn acceptance_order_survives_clock_rollback_and_reopening() -> Result<()> {
+        // Force timestamps and opaque identifiers to disagree with insertion order.
+        // No assumption about a UUID generator's in-process monotonicity is needed.
+        for second_timestamp in [100, 99] {
+            let directory = tempdir()?;
+            let path = directory.path().join("state.sqlite3");
+            let database = Database::open(&path)?;
+            accept(&database, "one", "conversation")?;
+            accept(&database, "two", "conversation")?;
+            database.connect()?.execute(
+                "UPDATE turns SET id = 'z-first', started_at = 100 WHERE event_id = 'one'",
+                [],
+            )?;
+            database.connect()?.execute(
+                "UPDATE turns SET id = 'a-second', started_at = ?1 WHERE event_id = 'two'",
+                [second_timestamp],
+            )?;
+            drop(database);
+            let database = Database::open(&path)?;
+            let recent = database.recent_turns(None, 10)?;
+            assert_eq!(recent[0].event_id, "two");
+            assert_eq!(recent[1].event_id, "one");
+            let first = database.claim_turn("runtime")?.context("first missing")?;
+            assert_eq!(first.turn_id, "z-first");
+            assert!(database.claim_turn("runtime")?.is_none());
+            database.mark_uncertain(&first, "interrupted")?;
+            assert!(database.claim_turn("runtime")?.is_none());
+            database.retry_turn(&first.turn_id)?;
+            let first = database.claim_turn("runtime")?.context("retry missing")?;
+            database.complete_turn(
+                &first,
+                &RuntimeTurnResponse {
+                    correlation_id: first.turn_id.clone(),
+                    output: "first reply".to_owned(),
+                    continuation_ref: "first continuation".to_owned(),
+                },
+            )?;
+            let second = database.claim_turn("runtime")?.context("second missing")?;
+            assert_eq!(second.turn_id, "a-second");
+            assert_eq!(
+                database.continuation(&second)?.as_deref(),
+                Some("first continuation")
+            );
+        }
         Ok(())
     }
 

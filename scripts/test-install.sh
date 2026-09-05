@@ -91,6 +91,112 @@ assert_service_identity() {
   done
 }
 
+# Fail only unit operations, after earlier templates have been processed. Use
+# real package binaries and filesystem writes; never contact the service manager.
+FAIL_COMMANDS=$TEST_ROOT/fail-commands
+mkdir "$FAIL_COMMANDS"
+REAL_SED=$(command -v sed)
+REAL_CHMOD=$(command -v chmod)
+REAL_MV=$(command -v mv)
+cat >"$FAIL_COMMANDS/fail-unit-command" <<'FAIL_COMMAND'
+#!/bin/sh
+set -eu
+command=${0##*/}
+last=
+for argument do last=$argument; done
+case "$command:$FAIL_MODE:$last" in
+  sed:render:"$FAIL_TEMPLATE")
+    printf '%s\n' render >"$FAIL_MARKER"
+    printf '%s\n' 'incomplete unit definition'
+    exit 1
+    ;;
+  sed:write:"$FAIL_TEMPLATE")
+    printf '%s\n' write >"$FAIL_MARKER"
+    # Force the real renderer's output write to fail, not an unrelated command.
+    ulimit -c 0
+    ulimit -f 0
+    exec "$REAL_SED" "$@"
+    ;;
+  chmod:chmod:"$FAIL_UNIT_DIR"/*/new/carillon.target | chmod:chmod:"$FAIL_UNIT_DIR/carillon.target")
+    printf '%s\n' chmod >"$FAIL_MARKER"
+    exit 1
+    ;;
+  mv:publish:"$FAIL_UNIT_DIR/carillon.target")
+    # Publication really is partial: earlier new units exist, and the previous
+    # runtime symlink (when present) has already been replaced by a regular file.
+    [ -f "$FAIL_UNIT_DIR/carillon-discord.service" ]
+    [ -f "$FAIL_UNIT_DIR/carillon-core.service" ]
+    [ ! -L "$FAIL_UNIT_DIR/carillon-runtime-pi.service" ]
+    printf '%s\n' publish >"$FAIL_MARKER"
+    exit 1
+    ;;
+esac
+case "$command" in
+  sed) exec "$REAL_SED" "$@" ;;
+  chmod) exec "$REAL_CHMOD" "$@" ;;
+  mv) exec "$REAL_MV" "$@" ;;
+esac
+exit 2
+FAIL_COMMAND
+chmod 0755 "$FAIL_COMMANDS/fail-unit-command"
+for command in sed chmod mv; do
+  ln -s fail-unit-command "$FAIL_COMMANDS/$command"
+done
+
+for previous in fresh existing; do
+  FAILURE_HOME=$TEST_ROOT/unit-failure-$previous
+  FAILURE_WORKSPACE=$FAILURE_HOME/workspace
+  FAILURE_ROOT=$FAILURE_HOME/.carillon
+  FAILURE_CONFIG_HOME=$FAILURE_HOME/.config
+  FAILURE_UNIT_DIR=$FAILURE_CONFIG_HOME/systemd/user
+  mkdir -p "$FAILURE_WORKSPACE" "$FAILURE_UNIT_DIR/unrelated.service.d"
+  printf '%s\n' unrelated-unit >"$FAILURE_UNIT_DIR/unrelated.service"
+  printf '%s\n' unrelated-drop-in >"$FAILURE_UNIT_DIR/unrelated.service.d/override.conf"
+  if [ "$previous" = existing ]; then
+    printf '%s\n' previous-core >"$FAILURE_UNIT_DIR/carillon-core.service"
+    printf '%s\n' previous-target >"$FAILURE_UNIT_DIR/carillon.target"
+    chmod 0640 "$FAILURE_UNIT_DIR/carillon-core.service"
+    chmod 0600 "$FAILURE_UNIT_DIR/carillon.target"
+    ln -s unrelated.service "$FAILURE_UNIT_DIR/carillon-runtime-pi.service"
+    # Leave Discord absent to exercise removal of a newly published unit.
+  fi
+  cp -a "$FAILURE_UNIT_DIR" "$FAILURE_HOME/units-before"
+  find "$FAILURE_UNIT_DIR" -printf '%P %y %m %l\n' | sort >"$FAILURE_HOME/modes-before"
+  for failure in render write chmod publish; do
+    failure_marker=$FAILURE_HOME/$failure.triggered
+    if env HOME="$FAILURE_HOME" XDG_CONFIG_HOME="$FAILURE_CONFIG_HOME" \
+      CARILLON_HOME="$FAILURE_ROOT" CARILLON_SKIP_SYSTEMD_RELOAD=1 \
+      PATH="$FAIL_COMMANDS:$PATH" FAIL_MODE="$failure" FAIL_MARKER="$failure_marker" \
+      FAIL_TEMPLATE="$RELEASE/systemd/carillon.target" FAIL_UNIT_DIR="$FAILURE_UNIT_DIR" \
+      REAL_SED="$REAL_SED" REAL_CHMOD="$REAL_CHMOD" REAL_MV="$REAL_MV" \
+      "$RELEASE/install.sh" \
+      --guild-id 100 --bot-user-id 201 --user-id 200 --route 300:always:channel \
+      --workspace "$FAILURE_WORKSPACE" --base-port "$((BASE_PORT + 30))" \
+      >"$FAILURE_HOME/$failure.log" 2>&1
+    then
+      echo "installer unexpectedly succeeded after $previous unit $failure failure" >&2
+      exit 1
+    fi
+    [ -f "$failure_marker" ] || {
+      cat "$FAILURE_HOME/$failure.log" >&2
+      echo "unit $failure failure was not exercised" >&2
+      exit 1
+    }
+    [ "$(cat "$failure_marker")" = "$failure" ]
+    diff -r --no-dereference "$FAILURE_HOME/units-before" "$FAILURE_UNIT_DIR"
+    find "$FAILURE_UNIT_DIR" -printf '%P %y %m %l\n' | sort >"$FAILURE_HOME/modes-after"
+    cmp "$FAILURE_HOME/modes-before" "$FAILURE_HOME/modes-after"
+    printf 'install unit failure test passed: %s / %s\n' "$previous" "$failure"
+  done
+  # The same installation remains usable after each failed attempt.
+  install_release "$FAILURE_HOME" "$FAILURE_WORKSPACE" "$FAILURE_ROOT" \
+    "$FAILURE_CONFIG_HOME" "$((BASE_PORT + 30))" >/dev/null
+  verify_units "$FAILURE_UNIT_DIR"
+  assert_service_identity "$FAILURE_UNIT_DIR"
+  cmp "$FAILURE_HOME/units-before/unrelated.service" "$FAILURE_UNIT_DIR/unrelated.service"
+  diff -r "$FAILURE_HOME/units-before/unrelated.service.d" "$FAILURE_UNIT_DIR/unrelated.service.d"
+done
+
 UNRELATED_HOME=$TEST_ROOT/unrelated-home
 UNRELATED_WORKSPACE=$UNRELATED_HOME/workspace
 UNRELATED_ROOT=$UNRELATED_HOME/.carillon

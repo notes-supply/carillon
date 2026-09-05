@@ -259,25 +259,48 @@ pub fn enable_demo_resources(config: &LoadedConfig) -> Result<()> {
 }
 
 pub fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
-    let _lock = ensure_stopped(config)?;
+    let root = config
+        .root
+        .canonicalize()
+        .context("resolve installation root")?;
     let destination = absolute_destination(destination)?;
-    if destination.starts_with(&config.root) {
+    let parent = destination
+        .parent()
+        .context("backup destination must have a parent directory")?
+        .canonicalize()
+        .context("resolve backup destination parent directory")?;
+    if parent.starts_with(&root) {
         bail!("backup destination must be outside the installation root");
     }
+    let name = destination
+        .file_name()
+        .context("backup destination must name a file")?;
+    let destination = parent.join(name);
     if destination.exists() {
         bail!(
             "backup destination {} already exists",
             destination.display()
         );
     }
-    let parent = destination
-        .parent()
-        .context("backup destination must have a parent directory")?;
-    let name = destination
-        .file_name()
-        .context("backup destination must name a file")?
-        .to_string_lossy();
-    let staging = parent.join(format!(".{name}.backup-{}", Uuid::now_v7()));
+    // Only installation-owned state is archived; the user's workspace may
+    // deliberately live elsewhere.
+    for (field, path) in [
+        ("data_dir", &config.value.data_dir),
+        ("agent.resource_root", &config.value.agent.resource_root),
+    ] {
+        let path = path
+            .canonicalize()
+            .with_context(|| format!("resolve backup {field}"))?;
+        if !path.starts_with(&root) {
+            bail!("backup requires {field} to be inside the installation root");
+        }
+    }
+    let _lock = ensure_stopped(config)?;
+    let staging = parent.join(format!(
+        ".{}.backup-{}",
+        name.to_string_lossy(),
+        Uuid::now_v7()
+    ));
     let result = (|| {
         let file = fs::OpenOptions::new()
             .create_new(true)
@@ -286,7 +309,7 @@ pub fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
             .open(&staging)?;
         let encoder = GzEncoder::new(BufWriter::new(file), Compression::default());
         let mut archive = Builder::new(encoder);
-        append_directory(&mut archive, &config.root, &config.root)?;
+        append_directory(&mut archive, &root, &root)?;
         archive.finish()?;
         let encoder = archive.into_inner()?;
         let mut writer = encoder.finish()?;
@@ -432,18 +455,18 @@ mod tests {
     use std::{
         fs,
         io::Cursor,
-        os::unix::fs::{MetadataExt, PermissionsExt},
+        os::unix::fs::{MetadataExt, PermissionsExt, symlink},
         path::{Path, PathBuf},
     };
 
-    use anyhow::Result;
+    use anyhow::{Context, Result};
     use flate2::{Compression, write::GzEncoder};
     use tar::{Builder, Header};
     use tempfile::tempdir;
 
     use super::{backup, initialize, restore, set_provider};
     use crate::config::{
-        DiscordActivation, DiscordConversation, DiscordRoute, LoadedConfig, ProviderRole,
+        Config, DiscordActivation, DiscordConversation, DiscordRoute, LoadedConfig, ProviderRole,
     };
 
     fn route() -> DiscordRoute {
@@ -514,6 +537,120 @@ mod tests {
             fs::metadata(destination)?.permissions().mode() & 0o777,
             0o600
         );
+        Ok(())
+    }
+
+    #[test]
+    fn backup_rejects_symlink_and_traversal_destinations_inside_installation() -> Result<()> {
+        let directory = tempdir()?;
+        let root = directory.path().join("installation");
+        let config_path = initialize_test_installation(&root, directory.path(), 44_400)?;
+        let mut config = LoadedConfig::load(&config_path)?;
+        let inside = root.join("backups");
+        fs::create_dir(&inside)?;
+        let alias = directory.path().join("alias");
+        symlink(&root, &alias)?;
+        let outside = directory.path().join("outside");
+        fs::create_dir(&outside)?;
+
+        for source in [&root, &alias] {
+            config.root = source.clone();
+            for destination in [
+                alias.join("backups/backup.tar.gz"),
+                outside.join("../installation/backups/backup.tar.gz"),
+            ] {
+                let error = backup(&config, &destination)
+                    .err()
+                    .context("backup accepted a destination inside the installation")?;
+                assert_eq!(
+                    error.to_string(),
+                    "backup destination must be outside the installation root"
+                );
+                assert!(fs::read_dir(&inside)?.next().is_none());
+                assert!(!root.join("state/service.lock").exists());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn backup_rejects_external_configured_owned_paths() -> Result<()> {
+        for field in ["data_dir", "agent.resource_root"] {
+            let directory = tempdir()?;
+            let root = directory.path().join("installation");
+            let config_path = initialize_test_installation(&root, directory.path(), 44_500)?;
+            let external = directory.path().join("external");
+            fs::create_dir(&external)?;
+            fs::write(external.join("owned-state"), b"must not be omitted")?;
+            let alias = root.join("external-alias");
+            symlink(&external, &alias)?;
+            let output = directory.path().join("backups");
+            fs::create_dir(&output)?;
+
+            let mut config: Config = toml::from_str(&fs::read_to_string(&config_path)?)?;
+            for path in [
+                external.clone(),
+                PathBuf::from("../external"),
+                PathBuf::from("external-alias"),
+            ] {
+                match field {
+                    "data_dir" => config.data_dir = path,
+                    _ => config.agent.resource_root = path,
+                }
+                fs::write(&config_path, toml::to_string_pretty(&config)?)?;
+                let loaded = LoadedConfig::load(&config_path)?;
+                let error = backup(&loaded, &output.join("backup.tar.gz"))
+                    .err()
+                    .context("backup accepted external owned state")?;
+                assert_eq!(
+                    error.to_string(),
+                    format!("backup requires {field} to be inside the installation root")
+                );
+                assert!(fs::read_dir(&output)?.next().is_none());
+                assert!(!external.join("service.lock").exists());
+                assert!(!root.join("state/service.lock").exists());
+                assert_eq!(
+                    fs::read(external.join("owned-state"))?,
+                    b"must not be omitted"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn backup_restores_owned_state_with_an_external_workspace() -> Result<()> {
+        let directory = tempdir()?;
+        let root = directory.path().join("installation");
+        let workspace = directory.path().join("workspace");
+        fs::create_dir(&workspace)?;
+        fs::write(workspace.join("user-file"), b"user-owned")?;
+        let config_path = initialize_test_installation(&root, &workspace, 44_600)?;
+        fs::write(root.join("state/owned-state"), b"durable state")?;
+        fs::write(root.join("agents/default/SYSTEM.md"), b"agent instructions")?;
+        let output = directory.path().join("backups");
+        fs::create_dir(&output)?;
+        let alias = directory.path().join("backup-alias");
+        symlink(&output, &alias)?;
+        let destination = alias.join("backup.tar.gz");
+
+        backup(&LoadedConfig::load(&config_path)?, &destination)?;
+        fs::remove_dir_all(&root)?;
+        let target = directory.path().join("restored");
+        let restored = LoadedConfig::load(&restore(&destination, &target)?)?;
+
+        assert_eq!(
+            fs::read(restored.value.data_dir.join("owned-state"))?,
+            b"durable state"
+        );
+        assert!(restored.value.data_dir.join("carillon.sqlite3").is_file());
+        assert_eq!(
+            fs::read(restored.value.agent.resource_root.join("SYSTEM.md"))?,
+            b"agent instructions"
+        );
+        assert_eq!(restored.value.agent.workspace, workspace);
+        assert_eq!(fs::read(workspace.join("user-file"))?, b"user-owned");
+        assert!(!target.join("workspace").exists());
         Ok(())
     }
 

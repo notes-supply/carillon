@@ -81,6 +81,8 @@ Stop `carillon.target` before backup or restore. Carillon refuses backup while i
 
 The backup contains the entire `CARILLON_HOME` tree, including configuration, credentials, SQLite state, common agent resources, runtime resource snapshots and sessions, release identity, and Pi-private authentication and model state under `CARILLON_HOME/pi`. The archive therefore contains credentials and private agent state. Keep it owner-readable only and encrypt it before storing or transferring it.
 
+Backup requires `data_dir` and `agent.resource_root` to resolve inside `CARILLON_HOME`; it rejects external owned paths rather than producing an incomplete archive. The destination must resolve outside that tree. An external user workspace is allowed, but is not included in this backup.
+
 Restore validates the archive and replaces the managed Carillon state. This private beta does not migrate obsolete schemas. Use a backup made by the same current state format, or perform a fresh installation.
 
 ## Update and uninstall

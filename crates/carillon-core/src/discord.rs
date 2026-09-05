@@ -188,10 +188,12 @@ async fn core_json<T: DeserializeOwned>(
     request: RequestBuilder,
     action: &str,
 ) -> Result<T, ServiceError> {
-    core_send(request, action)
+    let bytes = core_send(request, action)
         .await?
-        .json()
+        .bytes()
         .await
+        .map_err(|error| ServiceError::transient(format!("read {action}: {error}")))?;
+    serde_json::from_slice(&bytes)
         .map_err(|error| ServiceError::protocol(format!("decode {action}: {error}")))
 }
 
@@ -1248,6 +1250,133 @@ mod tests {
         assert_eq!(receipt.event_id, event.event_id);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
         assert_eq!(*event_ids.lock().await, vec!["event", "event"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn interrupted_success_receipt_recovers_the_committed_turn() -> anyhow::Result<()> {
+        use crate::{db::Database, model::ResourceSnapshot};
+        use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
+
+        let directory = tempfile::tempdir()?;
+        let database = Database::open(&directory.path().join("state.sqlite3"))?;
+        let server_database = database.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let core = core_client(format!("http://{}", listener.local_addr()?));
+        let event = ExternalEvent {
+            event_id: "lost-receipt".to_owned(),
+            agent_id: "agent".to_owned(),
+            user_id: "user".to_owned(),
+            audience_id: "conversation".to_owned(),
+            delivery_target_id: "target".to_owned(),
+            feedback_target_id: "feedback".to_owned(),
+            content: "hello".to_owned(),
+            native: Value::Null,
+        };
+        let server = tokio::spawn(async move {
+            let resources = ResourceSnapshot {
+                id: "snapshot".to_owned(),
+                system_sha256: String::new(),
+                context_sha256: String::new(),
+                settings_sha256: String::new(),
+                extensions_sha256: String::new(),
+                skills_sha256: String::new(),
+            };
+            for attempt in 0..2 {
+                let (socket, _) = listener.accept().await?;
+                let mut stream = BufReader::new(socket);
+                let mut length = None;
+                loop {
+                    let mut line = String::new();
+                    anyhow::ensure!(
+                        stream.read_line(&mut line).await? > 0,
+                        "missing request headers"
+                    );
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        length = Some(value.trim().parse::<usize>()?);
+                    }
+                }
+                let mut body = vec![0; length.context("missing request length")?];
+                stream.read_exact(&mut body).await?;
+                let submitted: ExternalEvent = serde_json::from_slice(&body)?;
+                assert_eq!(submitted.event_id, "lost-receipt");
+                let receipt = server_database.accept_event(
+                    "discord",
+                    "runtime",
+                    &submitted,
+                    &Value::Null,
+                    &resources,
+                )?;
+                assert_eq!(receipt.duplicate, attempt == 1);
+                let body = serde_json::to_vec(&receipt)?;
+                stream.write_all(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len(),
+                ).as_bytes()).await?;
+                // Core committed. Deliver headers and an incomplete body, then close TCP.
+                stream
+                    .write_all(if attempt == 0 { &body[..1] } else { &body })
+                    .await?;
+                stream.shutdown().await?;
+            }
+            Ok::<_, anyhow::Error>(())
+        });
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(3),
+            submit_event_with_retry(&core, &event),
+        )
+        .await;
+        if !matches!(&outcome, Ok(Ok(_))) {
+            server.abort();
+        }
+        let receipt = outcome?.map_err(|failure| anyhow!(failure.message))?;
+        tokio::time::timeout(Duration::from_secs(3), server).await???;
+        assert!(receipt.duplicate);
+        assert_eq!(receipt.state, TurnState::Queued);
+        let turns = database.recent_turns(None, 10)?;
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].turn_id, receipt.turn_id);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn complete_invalid_receipt_is_not_retried_forever() -> anyhow::Result<()> {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let server_attempts = attempts.clone();
+        let app = Router::new().route(
+            "/v1/events",
+            post(move || {
+                server_attempts.fetch_add(1, Ordering::SeqCst);
+                async { (StatusCode::OK, "{invalid json}") }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let core = core_client(format!("http://{}", listener.local_addr()?));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let event = ExternalEvent {
+            event_id: "invalid-receipt".to_owned(),
+            agent_id: "agent".to_owned(),
+            user_id: "user".to_owned(),
+            audience_id: "conversation".to_owned(),
+            delivery_target_id: "target".to_owned(),
+            feedback_target_id: "feedback".to_owned(),
+            content: "hello".to_owned(),
+            native: Value::Null,
+        };
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(2),
+            submit_event_with_retry(&core, &event),
+        )
+        .await;
+        server.abort();
+        let failure = outcome?.err().context("invalid receipt was accepted")?;
+        assert!(!failure.is_transient());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
         Ok(())
     }
 

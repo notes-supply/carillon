@@ -144,6 +144,12 @@ async fn accept_event(
 ) -> Result<Json<EventReceipt>, ApiError> {
     let interface = interface_provider(&headers, &state.config)?.clone();
     admit(&event, &state.config)?;
+    if let Some(receipt) = state
+        .database
+        .event_receipt(&interface.id, &event.event_id)?
+    {
+        return Ok(Json(receipt));
+    }
     let runtime = selected_runtime(&state.config)?.clone();
     let resources = resources::materialize(
         &state.config.value.agent.resource_root,

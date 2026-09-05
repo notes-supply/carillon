@@ -156,6 +156,31 @@ async fn duplicate_events_share_one_accepted_turn_without_reexecution() -> Resul
 }
 
 #[tokio::test]
+async fn duplicate_receipts_do_not_read_mutable_resources() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    let first = accept(&state, "one", "conversation").await?;
+    // A resource change after acceptance must affect new work, not receipt recovery.
+    std::os::unix::fs::symlink(
+        "SYSTEM.md",
+        state.config.value.agent.resource_root.join("AGENTS.md"),
+    )?;
+    let duplicate = accept(&state, "one", "conversation").await?;
+    assert!(duplicate.duplicate);
+    assert_eq!(duplicate.turn_id, first.turn_id);
+    assert_eq!(duplicate.state, TurnState::Queued);
+    assert!(accept(&state, "two", "conversation").await.is_err());
+    assert_eq!(state.database.recent_turns(None, 10)?.len(), 1);
+    assert!(
+        state
+            .database
+            .event_receipt("other-interface", "one")?
+            .is_none()
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn queued_turns_use_their_predecessors_continuation() -> Result<()> {
     let directory = tempdir()?;
     let state = installation(directory.path())?;

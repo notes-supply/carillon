@@ -51,6 +51,7 @@ OWNER_PATH=${PATH:-/usr/local/bin:/usr/bin:/bin}
 UNIT_DIR=${XDG_CONFIG_HOME:-"$HOME/.config"}/systemd/user
 APP="$CARILLON_HOME/app"
 APP_NEW=
+UNIT_STAGE=
 APP_MARKER=.carillon-managed
 APP_MARKER_VALUE=carillon-managed-application-v1
 
@@ -87,6 +88,7 @@ install -d -m 0700 "$CARILLON_HOME" "$CARILLON_HOME/credentials" "$CARILLON_HOME
 APP_NEW=$(mktemp -d "$CARILLON_HOME/.app-new.XXXXXX")
 cleanup_staging() {
   [ -z "$APP_NEW" ] || rm -rf -- "$APP_NEW"
+  [ -z "$UNIT_STAGE" ] || rm -rf -- "$UNIT_STAGE"
 }
 trap cleanup_staging EXIT
 install -d -m 0700 "$APP_NEW/bin" "$APP_NEW/licenses" "$APP_NEW/systemd"
@@ -121,16 +123,46 @@ OWNER_UNIT=$(sed_replacement "$(unit_escape "$OWNER")")
 ROOT_UNIT=$(sed_replacement "$(unit_escape "$CARILLON_HOME")")
 SHELL_UNIT=$(sed_replacement "$(unit_escape "$OWNER_SHELL")")
 PATH_UNIT=$(sed_replacement "$(unit_escape "$OWNER_PATH")")
+# Render and set modes before touching any live unit. Keep staging on the same
+# filesystem so publication and restoration each replace a definition atomically.
+UNIT_STAGE=$(mktemp -d "$UNIT_DIR/.carillon-units.XXXXXX")
+mkdir "$UNIT_STAGE/new" "$UNIT_STAGE/old"
 for template in "$SOURCE"/systemd/*; do
-  unit=$UNIT_DIR/$(basename "$template")
+  name=$(basename "$template")
+  unit=$UNIT_DIR/$name
   sed \
     -e "s|@OWNER_HOME@|$HOME_UNIT|g" \
     -e "s|@OWNER@|$OWNER_UNIT|g" \
     -e "s|@CARILLON_HOME@|$ROOT_UNIT|g" \
     -e "s|@OWNER_SHELL@|$SHELL_UNIT|g" \
     -e "s|@OWNER_PATH@|$PATH_UNIT|g" \
-    "$template" >"$unit"
-  chmod 0600 "$unit"
+    "$template" >"$UNIT_STAGE/new/$name"
+  chmod 0600 "$UNIT_STAGE/new/$name"
+  if [ -e "$unit" ] || [ -L "$unit" ]; then
+    cp -Pp -- "$unit" "$UNIT_STAGE/old/$name"
+  fi
+done
+for template in "$SOURCE"/systemd/*; do
+  name=$(basename "$template")
+  if ! mv -T -- "$UNIT_STAGE/new/$name" "$UNIT_DIR/$name"; then
+    echo "failed to publish unit: $UNIT_DIR/$name; restoring previous definitions" >&2
+    restore_failed=0
+    for restore_template in "$SOURCE"/systemd/*; do
+      restore_name=$(basename "$restore_template")
+      # A missing staged definition has already been published.
+      [ ! -e "$UNIT_STAGE/new/$restore_name" ] || continue
+      if [ -e "$UNIT_STAGE/old/$restore_name" ] || [ -L "$UNIT_STAGE/old/$restore_name" ]; then
+        mv -T -- "$UNIT_STAGE/old/$restore_name" "$UNIT_DIR/$restore_name" || restore_failed=1
+      else
+        rm -f -- "$UNIT_DIR/$restore_name" || restore_failed=1
+      fi
+    done
+    if [ "$restore_failed" -ne 0 ]; then
+      echo "unit restoration failed; retained backups at $UNIT_STAGE" >&2
+      UNIT_STAGE=
+    fi
+    exit 1
+  fi
 done
 
 if [ "${CARILLON_SKIP_SYSTEMD_RELOAD:-0}" != "1" ]; then
