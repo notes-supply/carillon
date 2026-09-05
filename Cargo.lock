@@ -232,6 +232,7 @@ dependencies = [
  "http",
  "reqwest",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

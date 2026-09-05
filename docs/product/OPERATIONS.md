@@ -103,6 +103,8 @@ The installed registration helper needs no source checkout or release installer.
 
 Release archive and staging names use the Carillon crate's version. `scripts/package-release.sh` accepts an optional version assertion and output path; a version differing from the crate manifest is refused before building or staging. Packaging does not relabel binaries: the core and bundled Discord use that crate identity, while the separately versioned Pi adapter retains its own package identity.
 
+The release builder selects the native Rust host explicitly for Cargo and the corresponding Bun executable target, regardless of Cargo environment/config target overrides. Linux GNU x86_64 and aarch64 hosts produce architecture-labelled archives; other build hosts are refused before staging.
+
 Re-running the installer replaces managed application files and user units while preserving current configuration, credentials, sessions, and SQLite state. It is suitable only when the installed state format is still current.
 
 Stop the target before updating. When intentionally changing a provider release, update that provider's expected `version` in `carillon.toml`, restart, and check `carillon status`. The installer does not rewrite provider expectations: an entry may refer to a replacement provider rather than the bundled implementation. Discord's build version is the Carillon crate version; the Pi adapter's is `@carillon/runtime-pi`'s package version, not the underlying Pi engine version. A version mismatch is a diagnostic, not a protocol-compatibility or execution-safety guarantee.

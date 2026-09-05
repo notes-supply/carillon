@@ -78,7 +78,7 @@ case "$command" in
         }
         ;;
       '--user show --property=LoadState --value carillon.target')
-        if [ -f "$XDG_CONFIG_HOME/systemd/user/carillon.target" ]; then
+        if [ -f "$XDG_CONFIG_HOME/systemd/user/carillon.target" ] || [ -f "$ROOT/manager-loaded" ]; then
           printf '%s\n' loaded
         else
           printf '%s\n' not-found
@@ -87,7 +87,10 @@ case "$command" in
       '--user show --property=ActiveState --value carillon.target')
         if [ "$FAILURE" = active-missing ]; then printf '%s\n' active; else printf '%s\n' inactive; fi
         ;;
-      '--user daemon-reload') ;;
+      '--user daemon-reload')
+        [ "$FAILURE" != reload-failure ] || exit 1
+        rm -f "$ROOT/manager-loaded"
+        ;;
       *) exit 2 ;;
     esac
     exit 0
@@ -102,6 +105,9 @@ done
 ln -s "$ROOT/app/bin/carillon-uninstall" "$OWNER_HOME/remove-carillon"
 for failure in unset stale partial-term partial-kill sync-cleanup marker-kill rmdir-kill; do
   install_release "$ROOT"
+  # The manager retains its loaded definition until a successful reload, even
+  # when interrupted filesystem cleanup has already removed every unit file.
+  touch "$ROOT/manager-loaded"
   printf '%s\n' private-token >"$ROOT/credentials/discord-bot.token"
   cp -a "$ROOT/credentials" "$TEST_ROOT/credentials-before"
   cp "$ROOT/carillon.toml" "$TEST_ROOT/config-before"
@@ -150,6 +156,7 @@ for failure in unset stale partial-term partial-kill sync-cleanup marker-kill rm
   case "$failure" in
     partial-* | sync-cleanup)
       printf '%s\n' '--user disable --now carillon.target' \
+        '--user daemon-reload' \
         '--user show --property=LoadState --value carillon.target' \
         '--user show --property=ActiveState --value carillon.target' \
         '--user daemon-reload' >"$TEST_ROOT/expected-recovery"
@@ -168,9 +175,11 @@ done
 
 # A real manager/disable failure or a still-active missing target must not be
 # mistaken for an already-stopped installation. Keep every file for safe retry.
-for failure in manager-failure disable-failure active-missing; do
+for failure in manager-failure disable-failure active-missing reload-failure; do
   install_release "$ROOT"
-  [ "$failure" != active-missing ] || rm "$UNIT_DIR/carillon.target"
+  case "$failure" in
+    active-missing | reload-failure) rm "$UNIT_DIR/carillon.target" ;;
+  esac
   cp -a "$ROOT" "$TEST_ROOT/refusal-before"
   cp -a "$UNIT_DIR" "$TEST_ROOT/refusal-units"
   app_inode=$(stat -c %i "$ROOT/app")

@@ -69,6 +69,7 @@ trap cleanup EXIT INT TERM
 
 # Package names cannot override the identity embedded by Cargo. Refuse before
 # creating staging/output, including for a non-default manifest version.
+sh "$ROOT/scripts/test-package.sh"
 VERSION_FIXTURE=$TEST_ROOT/version-fixture
 mkdir -p "$VERSION_FIXTURE/scripts" "$VERSION_FIXTURE/crates/carillon-core"
 cp "$ROOT/scripts/package-release.sh" "$VERSION_FIXTURE/scripts/"

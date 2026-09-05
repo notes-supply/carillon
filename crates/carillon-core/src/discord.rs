@@ -123,6 +123,9 @@ impl CoreClient {
     fn request(&self, method: Method, path: &str) -> RequestBuilder {
         self.http
             .request(method, format!("{}{path}", self.base_url))
+            // These are local admission/delivery endpoints, not model calls.
+            // Bound headers and body reads so ambiguous claims can reconcile.
+            .timeout(Duration::from_secs(10))
             .bearer_auth(&self.token)
             .header(PROVIDER_HEADER, &self.provider_id)
             .header(INSTANCE_HEADER, &self.instance_id)
@@ -369,10 +372,11 @@ pub async fn serve(
     let reconciled = loop {
         match state.core.reconcile().await {
             Ok(reconciled) => break reconciled,
-            Err(failure) => {
+            Err(failure) if failure.is_transient() => {
                 warn!(error = %failure.message, "waiting to reconcile Discord delivery claims");
                 sleep(Duration::from_millis(250)).await;
             }
+            Err(failure) => bail!("delivery reconciliation rejected: {}", failure.message),
         }
     };
     let router = discord_router(state.clone(), deterministic);
@@ -1294,6 +1298,189 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_reconciliation_refuses_permanent_errors_and_recovers_transient_errors()
+    -> anyhow::Result<()> {
+        use crate::{admin::initialize, config::LoadedConfig};
+
+        for status in [
+            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            let directory = tempfile::tempdir()?;
+            let root = directory.path().join("installation");
+            let config_path = initialize(
+                &root,
+                directory.path(),
+                "100",
+                "101",
+                &["200".to_owned()],
+                &[DiscordRoute {
+                    channel_id: "300".to_owned(),
+                    activation: DiscordActivation::Always,
+                    conversation: DiscordConversation::Channel,
+                }],
+                45_200,
+            )?;
+            let core_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let provider_address = provider_listener.local_addr()?;
+            drop(provider_listener);
+            let mut config = LoadedConfig::load(&config_path)?;
+            config.value.core.listen = core_listener.local_addr()?;
+            let interface_id = config.discord()?.provider.clone();
+            config
+                .value
+                .providers
+                .iter_mut()
+                .find(|provider| provider.id == interface_id)
+                .context("missing interface")?
+                .url = format!("http://{provider_address}");
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let request_attempts = attempts.clone();
+            let app = Router::new().route(
+                "/v1/deliveries/reconcile",
+                post(move || {
+                    let attempt = request_attempts.fetch_add(1, Ordering::SeqCst);
+                    async move {
+                        if attempt == 0 {
+                            status.into_response()
+                        } else {
+                            Json(DeliveryReconciliation {
+                                feedback_target_ids: Vec::new(),
+                            })
+                            .into_response()
+                        }
+                    }
+                }),
+            );
+            let mut services = tokio::task::JoinSet::new();
+            services
+                .spawn(async move { axum::serve(core_listener, app).await.map_err(Into::into) });
+            let token_file = root
+                .join("credentials")
+                .join(format!("{interface_id}.token"));
+            if status != StatusCode::SERVICE_UNAVAILABLE {
+                let result = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    super::serve(config.clone(), &token_file, None, true),
+                )
+                .await?;
+                assert!(
+                    result
+                        .err()
+                        .context("permanent reconciliation failure accepted")?
+                        .to_string()
+                        .contains("delivery reconciliation rejected")
+                );
+                assert_eq!(attempts.load(Ordering::SeqCst), 1);
+                // Failed startup releases the socket; repairing core permits the same config.
+                let probe = tokio::net::TcpListener::bind(provider_address).await?;
+                drop(probe);
+            }
+            services.spawn(async move { super::serve(config, &token_file, None, true).await });
+            // A connection can be refused before serve binds. Yield only on that
+            // boundary; a connected request waits for reconciliation and health.
+            let health = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    match reqwest::get(format!("http://{provider_address}/health")).await {
+                        Ok(response) => break response.json::<Health>().await,
+                        Err(error) if error.is_connect() => tokio::task::yield_now().await,
+                        Err(error) => break Err(error),
+                    }
+                }
+            })
+            .await??;
+            assert_eq!(health.status, "ready");
+            assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn core_requests_timeout_on_stalled_headers_and_bodies() -> anyhow::Result<()> {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let mut cases = tokio::task::JoinSet::new();
+        for operation in 0..4 {
+            for partial_body in [false, true] {
+                // Acknowledgements need only a success status, not a response body.
+                if operation == 3 && partial_body {
+                    continue;
+                }
+                cases.spawn(async move {
+                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+                    let client = core_client(format!("http://{}", listener.local_addr()?));
+                    let mut services = tokio::task::JoinSet::new();
+                    services.spawn(async move {
+                        let (mut connection, _) = listener.accept().await?;
+                        let mut request = Vec::new();
+                        let mut buffer = [0; 1024];
+                        while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                            let length = connection.read(&mut buffer).await?;
+                            anyhow::ensure!(length > 0, "request disconnected early");
+                            request.extend_from_slice(&buffer[..length]);
+                        }
+                        if partial_body {
+                            connection
+                                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{")
+                                .await?;
+                        }
+                        std::future::pending::<()>().await;
+                        Ok::<_, anyhow::Error>(())
+                    });
+                    let started = tokio::time::Instant::now();
+                    let result = tokio::time::timeout(Duration::from_secs(15), async {
+                        match operation {
+                            0 => client
+                                .submit_event(&ExternalEvent {
+                                    event_id: "timeout".to_owned(),
+                                    agent_id: "agent".to_owned(),
+                                    user_id: "user".to_owned(),
+                                    audience_id: "conversation".to_owned(),
+                                    delivery_target_id: "target".to_owned(),
+                                    feedback_target_id: "feedback".to_owned(),
+                                    content: "hello".to_owned(),
+                                    native: Value::Null,
+                                })
+                                .await
+                                .map(|_| ()),
+                            1 => client.claim_delivery().await.map(|_| ()),
+                            2 => client.reconcile().await.map(|_| ()),
+                            _ => {
+                                client
+                                    .acknowledge_delivery(
+                                        1,
+                                        crate::model::DeliveryOutcome::Delivered,
+                                        None,
+                                    )
+                                    .await
+                            }
+                        }
+                    })
+                    .await?;
+                    let failure = result.err().context("stalled response was accepted")?;
+                    assert!(failure.is_transient());
+                    assert!(started.elapsed() >= Duration::from_secs(10));
+                    assert!(
+                        services.try_join_next().is_none(),
+                        "server failed instead of stalling"
+                    );
+                    Ok::<_, anyhow::Error>(())
+                });
+            }
+        }
+        let mut count = 0;
+        while let Some(result) = cases.join_next().await {
+            result??;
+            count += 1;
+        }
+        assert_eq!(count, 7);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn ambiguous_thread_creation_recovers_native_thread_before_retrying() -> anyhow::Result<()>
     {
         let directory = tempfile::tempdir()?;
@@ -1862,7 +2049,7 @@ mod tests {
         let address = listener.local_addr()?;
         let server_trace = trace.clone();
         let server = tokio::spawn(async move {
-            // Commit a real claim, but close the TCP connection without its response.
+            // Commit a real claim, but stall its response until the client deadline.
             let (mut connection, _) = listener.accept().await?;
             let mut request = Vec::new();
             let mut buffer = [0; 1024];
@@ -1881,6 +2068,7 @@ mod tests {
             let restarted = Database::open(&path)?;
             restarted.recover_running_turns()?;
             server_trace.lock().await.push("recovered".to_owned());
+            assert_eq!(connection.read(&mut buffer).await?, 0);
             drop(connection);
             axum::serve(listener, app).await?;
             Ok::<_, anyhow::Error>(())
@@ -1895,7 +2083,7 @@ mod tests {
                 .build(),
         );
         // A deadline bounds test failure; progression is driven by actual requests, not sleeps.
-        let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+        let outcome = tokio::time::timeout(Duration::from_secs(15), async {
             let mut previous = core_client(format!("http://{address}"));
             previous.instance_id = "previous-instance".to_owned();
             assert!(previous.claim_delivery().await.is_err());

@@ -48,6 +48,8 @@ if [ "${CARILLON_SKIP_SYSTEMD_RELOAD:-0}" != "1" ]; then
   if ! systemctl --user disable --now carillon.target; then
     # An interrupted uninstall can already have removed the definitions. Only
     # confirmed absence/inactivity permits cleanup; manager/stop failures do not.
+    # Definitions may be gone while the manager still caches the old unit.
+    systemctl --user daemon-reload || exit 1
     load_state=$(systemctl --user show --property=LoadState --value carillon.target) &&
       [ "$load_state" = not-found ] &&
       active_state=$(systemctl --user show --property=ActiveState --value carillon.target) &&

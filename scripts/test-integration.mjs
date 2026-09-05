@@ -202,14 +202,25 @@ try {
   assert.equal(status.deliveries.uncertain, 1);
 
   await stop("runtime");
+  await stop("core");
+  // A queued observation is not a shutdown barrier: an outage worker can
+  // claim again before SIGTERM. Start this backup fixture with unavailable
+  // credentials so no iteration can claim the turn, rather than racing a retry.
+  const runtimeCredential = credential("runtime-pi");
+  const runtimeToken = await readFile(runtimeCredential);
+  await writeFile(runtimeCredential, "");
+  await start("core");
   const queued = await submitCoreEvent(
     "event-queued-restore",
     "survive runtime outage and restore",
   );
-  const queuedInspection = await waitForTurn(queued.turn_id, "queued");
-  assert.equal(queuedInspection.state, "queued");
-
-  await stop("core");
+  try {
+    const queuedInspection = await waitForTurn(queued.turn_id, "queued");
+    assert.equal(queuedInspection.state, "queued");
+    await stop("core");
+  } finally {
+    await writeFile(runtimeCredential, runtimeToken);
+  }
   await stopAll();
   // Restore onto the other supported loopback family. This exercises the real
   // Pi listener and authenticated core/runtime requests, including queued work.

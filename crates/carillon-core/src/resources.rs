@@ -8,6 +8,7 @@
 use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, path::Path};
 
 use anyhow::{Context, Result, bail};
+use rustix::fs::{Access, AtFlags, CWD, accessat};
 use sha2::{Digest, Sha256};
 
 use crate::model::{ResourceSnapshot, RuntimeResources};
@@ -22,7 +23,13 @@ impl ResourceFile {
     fn read(path: &Path) -> Result<Self> {
         Ok(Self {
             bytes: fs::read(path)?,
-            executable: fs::metadata(path)?.permissions().mode() & 0o111,
+            // Ownership changes on capture. Ask the OS about this owner's
+            // effective access (including ACLs), rather than copying bit slots.
+            executable: match accessat(CWD, path, Access::EXEC_OK, AtFlags::EACCESS) {
+                Ok(()) => 0o110,
+                Err(rustix::io::Errno::ACCESS) => 0,
+                Err(error) => return Err(error.into()),
+            },
         })
     }
 }
@@ -244,6 +251,46 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{materialize, runtime_view};
+
+    #[test]
+    fn snapshots_preserve_effective_owner_execution_not_other_bit_slots() -> anyhow::Result<()> {
+        let source = tempdir()?;
+        let parent = tempdir()?;
+        let store = parent.path().join("snapshots");
+        let helper = source.path().join("skills/helper");
+        fs::create_dir(source.path().join("skills"))?;
+        fs::write(&helper, b"#!/bin/sh\nprintf native-helper")?;
+        let mut executable_snapshot = None;
+        let mut ordinary_snapshot = None;
+        for mode in [0o450, 0o405, 0o455, 0o500, 0o550, 0o555] {
+            fs::set_permissions(&helper, fs::Permissions::from_mode(mode))?;
+            let live = Command::new(&helper).output();
+            let snapshot = materialize(source.path(), &store)?;
+            let captured = Command::new(store.join(&snapshot.id).join("skills/helper")).output();
+            assert_eq!(live.is_ok(), captured.is_ok(), "mode {mode:o}");
+            let previous = if mode & 0o100 != 0 {
+                &mut executable_snapshot
+            } else {
+                &mut ordinary_snapshot
+            };
+            if let Some(id) = previous {
+                assert_eq!(
+                    id, &snapshot.id,
+                    "equivalent effective permissions changed capture"
+                );
+            } else {
+                *previous = Some(snapshot.id.clone());
+            }
+            if let Ok(output) = captured {
+                assert!(output.status.success());
+                assert_eq!(output.stdout, b"native-helper");
+            }
+            super::validate(&snapshot, &store)?;
+            assert_eq!(materialize(source.path(), &store)?.id, snapshot.id);
+        }
+        assert_ne!(executable_snapshot, ordinary_snapshot);
+        Ok(())
+    }
 
     #[test]
     fn snapshots_reject_symlinked_subtree_roots_and_dangling_resources() -> anyhow::Result<()> {

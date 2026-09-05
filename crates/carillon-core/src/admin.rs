@@ -513,6 +513,8 @@ fn append_directory<W: std::io::Write>(
             append_directory(archive, root, &path)?;
         } else if file_type.is_file() {
             archive.append_path_with_name(&path, relative)?;
+        } else {
+            bail!("installation contains unsupported entry {}", path.display());
         }
     }
     Ok(())
@@ -669,6 +671,57 @@ mod tests {
                 "operator.token",
                 "runtime-pi.token"
             ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn backup_refuses_special_entries_without_publishing_and_can_retry() -> Result<()> {
+        let directory = tempdir()?;
+        let root = directory.path().join("installation");
+        let config_path = initialize_test_installation(&root, directory.path(), 45_100)?;
+        let config = LoadedConfig::load(&config_path)?;
+        let private = root.join("state/components/custom");
+        fs::create_dir_all(&private)?;
+        fs::write(private.join("session"), "opaque private state")?;
+        let special = private.join("special");
+        let destination = directory.path().join("backup.tar.gz");
+        for socket in [false, true] {
+            let listener = if socket {
+                Some(std::os::unix::net::UnixListener::bind(&special)?)
+            } else {
+                rustix::fs::mknodat(
+                    rustix::fs::CWD,
+                    &special,
+                    rustix::fs::FileType::Fifo,
+                    rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+                    0,
+                )?;
+                None
+            };
+            let failure = backup(&config, &destination)
+                .err()
+                .context("backup silently skipped special provider state")?;
+            assert!(failure.to_string().contains("unsupported entry"));
+            assert!(!destination.exists());
+            assert!(!fs::read_dir(directory.path())?.any(|entry| {
+                entry.is_ok_and(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".backup.tar.gz.backup-")
+                })
+            }));
+            drop(listener);
+            fs::remove_file(&special)?;
+        }
+        backup(&config, &destination)?;
+        fs::remove_dir_all(&root)?;
+        let restored = directory.path().join("restored");
+        restore(&destination, &restored)?;
+        assert_eq!(
+            fs::read_to_string(restored.join("state/components/custom/session"))?,
+            "opaque private state"
         );
         Ok(())
     }
