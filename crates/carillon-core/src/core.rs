@@ -425,7 +425,7 @@ async fn status(
     authorize(&headers, &state.config.value.core.operator_token_hash)?;
     let providers = provider_health(&state.client, &state.config).await;
     Ok(Json(StatusReport {
-        release: state.config.value.release.clone(),
+        release: RELEASE_VERSION.to_owned(),
         agent_id: state.config.value.agent.id.clone(),
         providers,
         turns: state.database.turn_counts()?,
@@ -453,10 +453,16 @@ async fn fetch_health(client: &Client, provider: &Provider) -> Health {
         .timeout(Duration::from_secs(2));
     match request.send().await {
         Ok(response) => match response.error_for_status() {
-            Ok(response) => response
-                .json::<Health>()
-                .await
-                .unwrap_or_else(|_| provider_status(provider, "unavailable")),
+            Ok(response) => match response.json::<Health>().await {
+                Ok(health)
+                    if health.id == provider.id
+                        && health.role == provider.role.as_str()
+                        && health.version == provider.version =>
+                {
+                    health
+                }
+                _ => provider_status(provider, "unavailable"),
+            },
             Err(_) => provider_status(provider, "unavailable"),
         },
         Err(_) => provider_status(provider, "unavailable"),

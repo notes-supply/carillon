@@ -79,7 +79,7 @@ impl FromSql for DeliveryState {
 }
 
 impl Database {
-    pub fn open(path: &Path) -> Result<Self> {
+    pub fn create(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create {}", parent.display()))?;
@@ -87,13 +87,23 @@ impl Database {
         let database = Self {
             path: path.to_path_buf(),
         };
-        database.initialize()?;
+        let connection = Connection::open(path)?;
+        connection.pragma_update(None, "journal_mode", "WAL")?;
+        Self::initialize_connection(&connection)?;
         Ok(database)
     }
 
+    pub fn open(path: &Path) -> Result<Self> {
+        Self::validate_backup(path)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+        })
+    }
+
     fn connect(&self) -> Result<Connection> {
-        let connection = Connection::open(&self.path)
-            .with_context(|| format!("open {}", self.path.display()))?;
+        let connection =
+            Connection::open_with_flags(&self.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+                .with_context(|| format!("open {}", self.path.display()))?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
@@ -121,13 +131,9 @@ impl Database {
                 .collect::<rusqlite::Result<Vec<_>>>()?)
         };
         if schema(&connection)? != schema(&current)? {
-            bail!("backup database schema is not the current Carillon format");
+            bail!("database schema is not the current Carillon format");
         }
         Ok(())
-    }
-
-    fn initialize(&self) -> Result<()> {
-        Self::initialize_connection(&self.connect()?)
     }
 
     fn initialize_connection(connection: &Connection) -> Result<()> {
@@ -472,6 +478,14 @@ impl Database {
     pub fn retry_turn(&self, turn_id: &str) -> Result<()> {
         let mut connection = self.connect()?;
         let transaction = write_transaction(&mut connection)?;
+        if transaction
+            .prepare("SELECT 1 FROM deliveries WHERE turn_id = ?1 AND state = 'delivering'")?
+            .exists([turn_id])?
+        {
+            bail!(
+                "turn {turn_id} has an actively claimed delivery; settle its outcome before retry"
+            );
+        }
         let changed = transaction.execute(
             "UPDATE turns SET state = 'queued', error = NULL, finished_at = NULL
              WHERE id = ?1 AND state = 'uncertain'",
@@ -822,7 +836,8 @@ mod tests {
 
     use super::Database;
     use crate::model::{
-        DeliveryOutcome, ExternalEvent, ResourceSnapshot, RuntimeTurnResponse, TurnState,
+        DeliveryOutcome, DeliveryState, ExternalEvent, ResourceSnapshot, RuntimeTurnResponse,
+        TurnState,
     };
 
     fn event(id: &str, audience: &str) -> ExternalEvent {
@@ -860,9 +875,64 @@ mod tests {
     }
 
     #[test]
+    fn retry_preserves_an_active_uncertainty_delivery_until_acknowledged() -> Result<()> {
+        let directory = tempdir()?;
+        let database = Database::create(&directory.path().join("state.sqlite3"))?;
+        accept(&database, "one", "conversation")?;
+        let turn = database.claim_turn("runtime")?.context("missing turn")?;
+        database.mark_uncertain(&turn, "ambiguous runtime outcome")?;
+        let claim = database
+            .claim_delivery("discord", "live")?
+            .context("missing notice")?;
+        assert!(database.retry_turn(&turn.turn_id).is_err());
+        let retained = database
+            .inspect_turn(&turn.turn_id)?
+            .context("missing turn")?;
+        assert_eq!(retained.state, TurnState::Uncertain);
+        assert_eq!(retained.delivery_state, Some(DeliveryState::Delivering));
+        assert!(database.claim_turn("runtime")?.is_none());
+        assert!(database.acknowledge_delivery(
+            "discord",
+            claim.id,
+            "live",
+            DeliveryOutcome::Delivered,
+            Some("known-send"),
+        )?);
+        assert_eq!(
+            database
+                .inspect_turn(&turn.turn_id)?
+                .context("missing turn")?
+                .delivery_native_ref
+                .as_deref(),
+            Some("known-send")
+        );
+        database.retry_turn(&turn.turn_id)?;
+        assert_eq!(
+            database
+                .claim_turn("runtime")?
+                .context("retry missing")?
+                .turn_id,
+            turn.turn_id
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn established_database_handles_do_not_recreate_a_lost_file() -> Result<()> {
+        let directory = tempdir()?;
+        let path = directory.path().join("state.sqlite3");
+        let database = Database::create(&path)?;
+        accept(&database, "one", "conversation")?;
+        std::fs::remove_file(&path)?;
+        assert!(database.turn_counts().is_err());
+        assert!(!path.exists());
+        Ok(())
+    }
+
+    #[test]
     fn acceptance_pins_only_committed_conversations_and_rejects_owner_changes() -> Result<()> {
         let directory = tempdir()?;
-        let database = Database::open(&directory.path().join("state.sqlite3"))?;
+        let database = Database::create(&directory.path().join("state.sqlite3"))?;
         let first = event("one", "conversation");
         database.connect()?.execute_batch(
             "CREATE TRIGGER fail_turn BEFORE INSERT ON turns
@@ -917,7 +987,7 @@ mod tests {
     #[test]
     fn event_is_idempotent_and_completion_is_atomic() -> Result<()> {
         let directory = tempdir()?;
-        let database = Database::open(&directory.path().join("state.sqlite3"))?;
+        let database = Database::create(&directory.path().join("state.sqlite3"))?;
         let first = accept(&database, "one", "conversation")?;
         let duplicate = accept(&database, "one", "conversation")?;
         assert!(!first.duplicate);
@@ -950,7 +1020,7 @@ mod tests {
     #[test]
     fn completion_failure_rolls_back_output_continuation_and_delivery() -> Result<()> {
         let directory = tempdir()?;
-        let database = Database::open(&directory.path().join("state.sqlite3"))?;
+        let database = Database::create(&directory.path().join("state.sqlite3"))?;
         accept(&database, "one", "conversation")?;
         let first = database
             .claim_turn("runtime")?
@@ -1025,7 +1095,7 @@ mod tests {
         for second_timestamp in [100, 99] {
             let directory = tempdir()?;
             let path = directory.path().join("state.sqlite3");
-            let database = Database::open(&path)?;
+            let database = Database::create(&path)?;
             accept(&database, "one", "conversation")?;
             accept(&database, "two", "conversation")?;
             database.connect()?.execute(
@@ -1069,7 +1139,7 @@ mod tests {
     #[test]
     fn uncertain_turn_blocks_its_conversation_but_not_others() -> Result<()> {
         let directory = tempdir()?;
-        let database = Database::open(&directory.path().join("state.sqlite3"))?;
+        let database = Database::create(&directory.path().join("state.sqlite3"))?;
         accept(&database, "one", "blocked")?;
         accept(&database, "two", "blocked")?;
         let first = database
@@ -1089,7 +1159,7 @@ mod tests {
     #[test]
     fn restart_marks_running_turn_uncertain_without_requeueing_it() -> Result<()> {
         let directory = tempdir()?;
-        let database = Database::open(&directory.path().join("state.sqlite3"))?;
+        let database = Database::create(&directory.path().join("state.sqlite3"))?;
         accept(&database, "one", "conversation")?;
         database
             .claim_turn("runtime")?
@@ -1112,7 +1182,7 @@ mod tests {
     #[test]
     fn delivery_claim_and_ack_retries_are_idempotent() -> Result<()> {
         let directory = tempdir()?;
-        let database = Database::open(&directory.path().join("state.sqlite3"))?;
+        let database = Database::create(&directory.path().join("state.sqlite3"))?;
         accept(&database, "one", "first")?;
         accept(&database, "two", "second")?;
 
@@ -1177,7 +1247,7 @@ mod tests {
     #[test]
     fn worker_transitions_only_retry_their_committed_target_state() -> Result<()> {
         let directory = tempdir()?;
-        let database = Database::open(&directory.path().join("state.sqlite3"))?;
+        let database = Database::create(&directory.path().join("state.sqlite3"))?;
 
         accept(&database, "uncertain", "one")?;
         let uncertain = database

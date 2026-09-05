@@ -37,7 +37,6 @@ fn installation(root: &Path) -> Result<AppState> {
     })
     .collect::<Result<Vec<_>>>()?;
     let value = Config {
-        release: RELEASE_VERSION.to_owned(),
         data_dir: root.join("state"),
         core: CoreConfig {
             listen: "127.0.0.1:1".parse()?,
@@ -59,7 +58,7 @@ fn installation(root: &Path) -> Result<AppState> {
         value,
     };
     Ok(AppState {
-        database: Database::open(&config.value.data_dir.join("carillon.sqlite3"))?,
+        database: Database::create(&config.value.data_dir.join("carillon.sqlite3"))?,
         config,
         client: Client::new(),
     })
@@ -198,6 +197,7 @@ async fn status_probes_public_health_without_provider_credentials() -> Result<()
     assert_eq!(response.status(), StatusCode::OK);
     let body = axum::body::to_bytes(response.into_body(), 65536).await?;
     let report: StatusReport = serde_json::from_slice(&body)?;
+    assert_eq!(report.release, RELEASE_VERSION);
     assert_eq!(report.providers.len(), 3);
     assert!(
         report
@@ -212,6 +212,94 @@ async fn status_probes_public_health_without_provider_credentials() -> Result<()
             "public health leaked a credential"
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_health_mismatches_keep_configured_identity_unavailable() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    let mut services = tokio::task::JoinSet::new();
+    for provider in &state.config.value.providers {
+        for field in ["id", "role", "version"] {
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let mut configured = provider.clone();
+            configured.url = format!("http://{}", listener.local_addr()?);
+            let mut report = serde_json::to_value(provider_status(provider, "ready"))?;
+            report[field] = json!("unexpected");
+            let router = Router::new().route(
+                "/health",
+                get(move || {
+                    let report = report.clone();
+                    async move { Json(report) }
+                }),
+            );
+            services.spawn(async move { axum::serve(listener, router).await });
+            let result = fetch_health(&state.client, &configured).await;
+            assert_eq!(result.id, configured.id);
+            assert_eq!(result.role, configured.role.as_str());
+            assert_eq!(result.version, configured.version);
+            assert_eq!(result.status, "unavailable", "accepted mismatched {field}");
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn startup_refuses_missing_empty_and_obsolete_databases_without_repair() -> Result<()> {
+    let directory = tempdir()?;
+    let mut state = installation(directory.path())?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    state.config.value.core.listen = listener.local_addr()?;
+    drop(listener);
+    let path = state.config.value.data_dir.join("carillon.sqlite3");
+    let saved = fs::read(&path)?;
+    fs::remove_file(&path)?;
+    for contents in [None, Some(Vec::new()), Some(b"not SQLite".to_vec())] {
+        if let Some(bytes) = &contents {
+            fs::write(&path, bytes)?;
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), serve(state.config.clone()))
+                .await?
+                .is_err()
+        );
+        assert_eq!(fs::read(&path).ok(), contents);
+    }
+    fs::remove_file(&path)?;
+    let obsolete = rusqlite::Connection::open(&path)?;
+    obsolete.execute_batch("CREATE TABLE obsolete (id INTEGER)")?;
+    drop(obsolete);
+    let before = fs::read(&path)?;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), serve(state.config.clone()))
+            .await?
+            .is_err()
+    );
+    assert_eq!(fs::read(&path)?, before);
+    fs::write(&path, saved)?;
+    Database::open(&path)?;
+    let mut services = tokio::task::JoinSet::new();
+    services.spawn(serve(state.config.clone()));
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Ok(response) = state
+                .client
+                .get(format!("http://{}/health", state.config.value.core.listen))
+                .send()
+                .await
+            {
+                assert_eq!(response.status(), StatusCode::OK);
+                return Ok::<_, anyhow::Error>(());
+            }
+            if let Some(result) = services.try_join_next() {
+                result??;
+                bail!("core stopped before reporting ready");
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await??;
     Ok(())
 }
 

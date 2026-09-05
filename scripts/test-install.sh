@@ -427,13 +427,18 @@ if (JSON.stringify(actualGroups) !== JSON.stringify(expectedGroups)) throw new E
 '
 
 DISCORD_PORT=$((BASE_PORT + 1))
+# Keep the private credential out of curl's process arguments.
+SIMULATION_HEADERS=$OWNER_HOME/simulation-headers
+printf 'Authorization: Bearer %s\n' "$(cat "$CARILLON_HOME/credentials/discord-private.token")" > "$SIMULATION_HEADERS"
+chmod 0600 "$SIMULATION_HEADERS"
 DENIED=$(curl --silent --output /dev/null --write-out '%{http_code}' -X POST \
-  -H 'content-type: application/json' \
+  -H 'content-type: application/json' -H "@$SIMULATION_HEADERS" \
   --data '{"event_id":"denied","guild_id":"100","user_id":"999","channel_id":"300","content":"must not run"}' \
   "http://127.0.0.1:$DISCORD_PORT/v1/simulate")
 [ "$DENIED" = 403 ]
 
 FIRST=$(curl --fail --silent -X POST -H 'content-type: application/json' \
+  -H "@$SIMULATION_HEADERS" \
   --data '{"event_id":"installed-1","guild_id":"100","user_id":"200","channel_id":"300","content":"installed identity turn"}' \
   "http://127.0.0.1:$DISCORD_PORT/v1/simulate")
 case "$FIRST" in *"Local provider response 1"*) ;; *) printf '%s\n' "$FIRST" >&2; exit 1 ;; esac
@@ -446,6 +451,7 @@ until curl --fail --silent "http://127.0.0.1:$((BASE_PORT + 2))/health" >/dev/nu
   attempt=$((attempt + 1)); [ "$attempt" -lt 100 ] || exit 1; sleep 0.05
 done
 SECOND=$(curl --fail --silent -X POST -H 'content-type: application/json' \
+  -H "@$SIMULATION_HEADERS" \
   --data '{"event_id":"installed-2","guild_id":"100","user_id":"200","channel_id":"300","content":"continue after restart"}' \
   "http://127.0.0.1:$DISCORD_PORT/v1/simulate")
 case "$SECOND" in *"Local provider response 2"*) ;; *) printf '%s\n' "$SECOND" >&2; exit 1 ;; esac

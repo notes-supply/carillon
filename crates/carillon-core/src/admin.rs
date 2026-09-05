@@ -78,6 +78,9 @@ pub fn initialize(
     routes: &[DiscordRoute],
     base_port: u16,
 ) -> Result<PathBuf> {
+    if !workspace.is_absolute() || !workspace.is_dir() {
+        bail!("workspace must be an absolute path to an existing directory");
+    }
     if root.exists() && fs::read_dir(root)?.next().is_some() {
         bail!("installation root {} is not empty", root.display());
     }
@@ -87,7 +90,6 @@ pub fn initialize(
 
     let loopback = IpAddr::V4(Ipv4Addr::LOCALHOST);
     let config = Config {
-        release: RELEASE_VERSION.to_owned(),
         data_dir: PathBuf::from("state"),
         core: CoreConfig {
             listen: SocketAddr::new(loopback, base_port),
@@ -146,7 +148,7 @@ pub fn initialize(
             0o640,
         )?;
         atomic_write(&root.join("examples/SKILL.md"), SKILL.as_bytes(), 0o640)?;
-        Database::open(&root.join("state/carillon.sqlite3"))?;
+        Database::create(&root.join("state/carillon.sqlite3"))?;
         crate::filesystem::sync_tree(root)?;
         // Rename replaces an empty target directory atomically, but refuses a
         // nonempty target that appeared meanwhile. Never adopt partial state.
@@ -564,6 +566,29 @@ mod tests {
             &[route()],
             base_port,
         )
+    }
+
+    #[test]
+    fn initialization_rejects_unusable_workspaces_without_publishing_state() -> Result<()> {
+        let directory = tempdir()?;
+        let root = directory.path().join("installation");
+        let missing = directory.path().join("missing");
+        let file = directory.path().join("file");
+        fs::write(&file, "not a directory")?;
+        for workspace in [Path::new("."), Path::new("relative"), &missing, &file] {
+            assert!(initialize_test_installation(&root, workspace, 44_000).is_err());
+            assert!(!root.exists());
+            fs::create_dir(&root)?;
+            assert!(initialize_test_installation(&root, workspace, 44_000).is_err());
+            assert!(fs::read_dir(&root)?.next().is_none());
+            fs::remove_dir(&root)?;
+        }
+        let config = initialize_test_installation(&root, directory.path(), 44_000)?;
+        assert_eq!(
+            LoadedConfig::load(&config)?.value.agent.workspace,
+            directory.path()
+        );
+        Ok(())
     }
 
     #[test]

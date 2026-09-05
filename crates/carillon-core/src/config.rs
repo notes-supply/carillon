@@ -15,7 +15,6 @@ pub const RELEASE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Config {
-    pub release: String,
     pub data_dir: PathBuf,
     pub core: CoreConfig,
     pub providers: Vec<Provider>,

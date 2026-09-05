@@ -41,6 +41,30 @@ try {
     String(basePort),
   );
   await startAll();
+  for (const authorization of [
+    null,
+    "Bearer wrong",
+    `Bearer ${await credentialValue("operator")}`,
+  ]) {
+    const response = await fetch(`http://127.0.0.1:${String(basePort + 1)}/v1/simulate`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(authorization === null ? {} : { authorization }),
+      },
+      body: JSON.stringify(event("unauthenticated", "100", "200", "402", "301", "<@201> adopt")),
+    });
+    assert.equal(
+      response.status,
+      403,
+      "simulation must authenticate before participation or runtime work",
+    );
+  }
+  assert.deepEqual(JSON.parse(run("recent", "--config", configPath())), []);
+  await assert.rejects(
+    readFile(join(installation, "state/components/discord-private/participation.json")),
+    { code: "ENOENT" },
+  );
   await writeFile(join(installation, "pi", "test-private-state"), "private runtime state fixture");
 
   const denied = await requestSimulation(event("denied", "999", "200", "300", null, "no"));
@@ -257,7 +281,10 @@ function event(eventId, guildId, userId, channelId, parentChannelId, content) {
 async function requestSimulation(value) {
   return fetch(`http://127.0.0.1:${String(basePort + 1)}/v1/simulate`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${await credentialValue("discord-private")}`,
+    },
     body: JSON.stringify(value),
   });
 }

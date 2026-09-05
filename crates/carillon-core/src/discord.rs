@@ -14,7 +14,7 @@ use anyhow::{Context, Result, bail};
 use axum::{
     Json, Router,
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -415,8 +415,20 @@ async fn discord_health(State(state): State<DiscordState>) -> Json<Health> {
 
 async fn simulate(
     State(state): State<DiscordState>,
+    headers: HeaderMap,
     Json(request): Json<SimulateRequest>,
 ) -> Result<Response, ServiceError> {
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .unwrap_or_default();
+    if !token_matches(&crate::config::hash_token(&state.core.token), token) {
+        return Err(ServiceError {
+            status: StatusCode::FORBIDDEN,
+            message: "simulation requires the interface provider credential".to_owned(),
+        });
+    }
     admit_identity(
         &state.discord,
         request.guild_id.as_deref(),
@@ -1417,7 +1429,7 @@ mod tests {
         use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 
         let directory = tempfile::tempdir()?;
-        let database = Database::open(&directory.path().join("state.sqlite3"))?;
+        let database = Database::create(&directory.path().join("state.sqlite3"))?;
         let server_database = database.clone();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let core = core_client(format!("http://{}", listener.local_addr()?));
@@ -1662,7 +1674,7 @@ mod tests {
 
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("state.sqlite3");
-        let database = Database::open(&path)?;
+        let database = Database::create(&path)?;
         let turn = completed_delivery(&database)?;
 
         let trace = Arc::new(tokio::sync::Mutex::new(Vec::new()));
