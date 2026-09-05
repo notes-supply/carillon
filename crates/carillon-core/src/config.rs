@@ -216,6 +216,7 @@ impl LoadedConfig {
         value.agent.resource_root = absolutize(&root, &value.agent.resource_root);
         value.agent.workspace = absolutize(&root, &value.agent.workspace);
         value.validate()?;
+        value.validate_resource_state_separation()?;
         Ok(Self { root, value })
     }
 
@@ -248,6 +249,37 @@ impl Config {
             bail!("provider {id} does not have role {}", role.as_str());
         }
         Ok(provider)
+    }
+
+    fn validate_resource_state_separation(&self) -> Result<()> {
+        // Core requires existing state; capture requires an existing resource
+        // root. Let those boundaries diagnose absent paths, so diagnostics and
+        // receipt recovery do not depend on live resources being available.
+        let resolve = |path: &Path| -> Result<Option<PathBuf>> {
+            match path.canonicalize() {
+                Ok(path) => Ok(Some(path)),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    Ok(None)
+                }
+                Err(error) => Err(error).with_context(|| format!("resolve {}", path.display())),
+            }
+        };
+        if let (Some(data), Some(resources)) = (
+            resolve(&self.data_dir)?,
+            resolve(&self.agent.resource_root)?,
+        ) {
+            for subtree in ["extensions", "skills"] {
+                if data.starts_with(resources.join(subtree)) {
+                    bail!("data_dir must not be inside selected agent resources ({subtree})");
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn validate(&self) -> Result<()> {

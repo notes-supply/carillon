@@ -50,7 +50,8 @@ trap 'exit 1' HUP INT TERM
 [ "$(id -u)" -ne 0 ] || { echo "service registration must run as the non-root owner" >&2; exit 1; }
 [ -n "${HOME:-}" ] && [ -d "$HOME" ] || { echo "HOME must name the owner's existing home directory" >&2; exit 1; }
 [ "$(stat -c %u "$HOME")" -eq "$(id -u)" ] || { echo "HOME is not owned by the service owner" >&2; exit 1; }
-CARILLON_HOME=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd -P)
+SELF=$(realpath -e -- "$0")
+CARILLON_HOME=$(dirname -- "$(dirname -- "$(dirname -- "$SELF")")")
 SOURCE=$CARILLON_HOME/app
 OWNER=$(id -un)
 OWNER_SHELL=$(getent passwd "$OWNER" | cut -d: -f7)

@@ -884,9 +884,9 @@ set -eu
 printf '%s\n' "$*" >>"$REGISTER_TRACE"
 SYSTEMCTL
 chmod 0755 "$REGISTER_COMMANDS/systemctl"
-for previous in fresh existing; do
-  if [ "$previous" = fresh ]; then
-    RESTORE_HOME=$TEST_ROOT/restored-owner
+for previous in fresh existing symlink; do
+  if [ "$previous" != existing ]; then
+    RESTORE_HOME=$TEST_ROOT/restored-$previous-owner
     RESTORE_CONFIG_HOME=$RESTORE_HOME/.config
   else
     RESTORE_HOME=$OWNER_HOME
@@ -902,11 +902,18 @@ for previous in fresh existing; do
   cp -a "$RESTORE_ROOT/carillon.toml" "$RESTORE_ROOT/credentials" "$RESTORE_ROOT/pi" \
     "$RESTORE_ROOT/private-before/"
   REGISTER_TRACE=$TEST_ROOT/register-$previous.trace
+  REGISTER_HELPER=$RESTORE_ROOT/app/bin/carillon-register-services
+  if [ "$previous" = symlink ]; then
+    # The link lives inside another valid installation: deriving its directory
+    # would silently publish units for that decoy, not merely fail to find config.
+    REGISTER_HELPER=$TEST_ROOT/restored-fresh-owner/relocated-carillon/app/bin/register-link
+    ln -s "$RESTORE_ROOT/app/bin/carillon-register-services" "$REGISTER_HELPER"
+  fi
   # A stale inherited CARILLON_HOME must not redirect a relocated helper.
   env HOME="$RESTORE_HOME" XDG_CONFIG_HOME="$RESTORE_CONFIG_HOME" \
     CARILLON_HOME="$CARILLON_HOME" CARILLON_SKIP_SYSTEMD_RELOAD=0 \
     PATH="$REGISTER_COMMANDS:/usr/bin:/bin" REGISTER_TRACE="$REGISTER_TRACE" \
-    "$RESTORE_ROOT/app/bin/carillon-register-services" >/dev/null
+    "$REGISTER_HELPER" >/dev/null
   printf '%s\n' '--user daemon-reload' '--user enable carillon.target' >"$TEST_ROOT/expected-registration"
   cmp "$TEST_ROOT/expected-registration" "$REGISTER_TRACE"
   verify_units "$RESTORE_UNITS"

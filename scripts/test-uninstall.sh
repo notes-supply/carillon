@@ -65,7 +65,33 @@ case "$command" in
   rm) exec "$REAL_RM" "$@" ;;
   rmdir) exec "$REAL_RMDIR" "$@" ;;
   sync) exec "$REAL_SYNC" "$@" ;;
-  systemctl) touch "$MARKER"; exit 1 ;;
+  systemctl)
+    printf '%s\n' "$*" >>"$MARKER.systemctl"
+    [ "$FAILURE" != relative ] || { touch "$MARKER"; exit 1; }
+    [ "$FAILURE" != manager-failure ] || exit 1
+    case "$*" in
+      '--user disable --now carillon.target')
+        [ "$FAILURE" != disable-failure ] || exit 1
+        [ -f "$XDG_CONFIG_HOME/systemd/user/carillon.target" ] || {
+          echo 'Unit carillon.target does not exist' >&2
+          exit 1
+        }
+        ;;
+      '--user show --property=LoadState --value carillon.target')
+        if [ -f "$XDG_CONFIG_HOME/systemd/user/carillon.target" ]; then
+          printf '%s\n' loaded
+        else
+          printf '%s\n' not-found
+        fi
+        ;;
+      '--user show --property=ActiveState --value carillon.target')
+        if [ "$FAILURE" = active-missing ]; then printf '%s\n' active; else printf '%s\n' inactive; fi
+        ;;
+      '--user daemon-reload') ;;
+      *) exit 2 ;;
+    esac
+    exit 0
+    ;;
 esac
 exit 2
 COMMAND
@@ -85,10 +111,12 @@ for failure in unset stale partial-term partial-kill sync-cleanup marker-kill rm
   # helper's canonical location, not the other managed default installation.
   if [ "$failure" = unset ]; then
     env -u CARILLON_HOME HOME="$OWNER_HOME" XDG_CONFIG_HOME="$OWNER_HOME/.config" \
-      CARILLON_SKIP_SYSTEMD_RELOAD=1 "$OWNER_HOME/remove-carillon" >"$TEST_ROOT/uninstall.log" 2>&1 || result=$?
+      CARILLON_SKIP_SYSTEMD_RELOAD=0 PATH="$COMMANDS:$PATH" \
+      ROOT="$ROOT" FAILURE="$failure" MARKER="$TEST_ROOT/$failure" \
+      "$OWNER_HOME/remove-carillon" >"$TEST_ROOT/uninstall.log" 2>&1 || result=$?
   else
     env HOME="$OWNER_HOME" XDG_CONFIG_HOME="$OWNER_HOME/.config" \
-      CARILLON_HOME="$DECOY" CARILLON_SKIP_SYSTEMD_RELOAD=1 PATH="$COMMANDS:$PATH" \
+      CARILLON_HOME="$DECOY" CARILLON_SKIP_SYSTEMD_RELOAD=0 PATH="$COMMANDS:$PATH" \
       ROOT="$ROOT" FAILURE="$failure" MARKER="$TEST_ROOT/$failure" \
       "$OWNER_HOME/remove-carillon" >"$TEST_ROOT/uninstall.log" 2>&1 || result=$?
   fi
@@ -116,7 +144,18 @@ for failure in unset stale partial-term partial-kill sync-cleanup marker-kill rm
   esac
   # The archive helper remains available even after the installed one is gone.
   env HOME="$OWNER_HOME" XDG_CONFIG_HOME="$OWNER_HOME/.config" \
-    CARILLON_HOME="$ROOT" CARILLON_SKIP_SYSTEMD_RELOAD=1 "$RELEASE/uninstall.sh" >/dev/null
+    CARILLON_HOME="$ROOT" CARILLON_SKIP_SYSTEMD_RELOAD=0 PATH="$COMMANDS:$PATH" \
+    ROOT="$ROOT" FAILURE=recovery MARKER="$TEST_ROOT/recovery-$failure" \
+    "$RELEASE/uninstall.sh" >/dev/null
+  case "$failure" in
+    partial-* | sync-cleanup)
+      printf '%s\n' '--user disable --now carillon.target' \
+        '--user show --property=LoadState --value carillon.target' \
+        '--user show --property=ActiveState --value carillon.target' \
+        '--user daemon-reload' >"$TEST_ROOT/expected-recovery"
+      cmp "$TEST_ROOT/expected-recovery" "$TEST_ROOT/recovery-$failure.systemctl"
+      ;;
+  esac
   [ ! -e "$ROOT/app" ]
   [ -z "$(find "$UNIT_DIR" -maxdepth 1 -name 'carillon*')" ]
   cmp "$TEST_ROOT/config-before" "$ROOT/carillon.toml"
@@ -125,6 +164,33 @@ for failure in unset stale partial-term partial-kill sync-cleanup marker-kill rm
   diff -r --no-dereference "$TEST_ROOT/decoy-before" "$DECOY"
   [ "$(cat "$OWNER_HOME/unrelated")" = unrelated-owner-data ]
   printf 'uninstall recovery passed: %s\n' "$failure"
+done
+
+# A real manager/disable failure or a still-active missing target must not be
+# mistaken for an already-stopped installation. Keep every file for safe retry.
+for failure in manager-failure disable-failure active-missing; do
+  install_release "$ROOT"
+  [ "$failure" != active-missing ] || rm "$UNIT_DIR/carillon.target"
+  cp -a "$ROOT" "$TEST_ROOT/refusal-before"
+  cp -a "$UNIT_DIR" "$TEST_ROOT/refusal-units"
+  app_inode=$(stat -c %i "$ROOT/app")
+  if env HOME="$OWNER_HOME" XDG_CONFIG_HOME="$OWNER_HOME/.config" \
+    CARILLON_HOME="$ROOT" CARILLON_SKIP_SYSTEMD_RELOAD=0 PATH="$COMMANDS:$PATH" \
+    ROOT="$ROOT" FAILURE="$failure" MARKER="$TEST_ROOT/$failure" \
+    "$RELEASE/uninstall.sh" >"$TEST_ROOT/refusal.log" 2>&1; then
+    echo "uninstall ignored service-manager failure: $failure" >&2
+    exit 1
+  fi
+  [ "$(stat -c %i "$ROOT/app")" = "$app_inode" ]
+  diff -r --no-dereference "$TEST_ROOT/refusal-before" "$ROOT"
+  diff -r --no-dereference "$TEST_ROOT/refusal-units" "$UNIT_DIR"
+  env HOME="$OWNER_HOME" XDG_CONFIG_HOME="$OWNER_HOME/.config" \
+    CARILLON_HOME="$ROOT" CARILLON_SKIP_SYSTEMD_RELOAD=0 PATH="$COMMANDS:$PATH" \
+    ROOT="$ROOT" FAILURE=recovery MARKER="$TEST_ROOT/repaired-$failure" \
+    "$RELEASE/uninstall.sh" >/dev/null
+  [ ! -e "$ROOT/app" ]
+  rm -rf "$TEST_ROOT/refusal-before" "$TEST_ROOT/refusal-units"
+  printf 'uninstall manager refusal and retry passed: %s\n' "$failure"
 done
 
 # Refuse relative owner/unit paths before service-manager or filesystem changes.

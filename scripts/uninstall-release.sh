@@ -45,7 +45,14 @@ is_managed_app "$APP" || {
 }
 
 if [ "${CARILLON_SKIP_SYSTEMD_RELOAD:-0}" != "1" ]; then
-  systemctl --user disable --now carillon.target
+  if ! systemctl --user disable --now carillon.target; then
+    # An interrupted uninstall can already have removed the definitions. Only
+    # confirmed absence/inactivity permits cleanup; manager/stop failures do not.
+    load_state=$(systemctl --user show --property=LoadState --value carillon.target) &&
+      [ "$load_state" = not-found ] &&
+      active_state=$(systemctl --user show --property=ActiveState --value carillon.target) &&
+      [ "$active_state" = inactive ] || exit 1
+  fi
 fi
 for unit in \
   carillon.target \

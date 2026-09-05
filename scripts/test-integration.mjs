@@ -253,6 +253,7 @@ try {
     await rename(`${sessions}-saved`, sessions);
     await stop("core");
   }
+  await testResourceStateSeparation(queued.turn_id);
   await testPiModelReadiness(queued.turn_id);
   await testMissingResourceRoot(queued.turn_id);
   await testRuntimeStartupRefusals(queued.turn_id);
@@ -312,6 +313,57 @@ function assertStartupRefused(name, expected, extraArgs = [], options = {}) {
   assert.equal(result.signal, null);
   assert.notEqual(result.status, 0, `${name} must refuse startup`);
   assert.match(result.stderr, expected);
+}
+
+async function testResourceStateSeparation(turnId) {
+  const original = await readFile(configPath(), "utf8");
+  const state = join(installation, "state");
+  const resources = join(installation, "agents/default");
+  const alias = join(installation, "state-alias");
+  const database = await readFile(join(state, "carillon.sqlite3"));
+  for (const subtree of ["extensions", "skills"]) {
+    const nested = join(resources, subtree, "core-state");
+    await mkdir(join(resources, subtree), { recursive: true });
+    await rename(state, nested);
+    await symlink(nested, alias);
+    try {
+      for (const path of [
+        `agents/default/${subtree}/core-state`,
+        `agents/default/${subtree}/../${subtree}/core-state`,
+        nested,
+        "state-alias",
+      ]) {
+        await writeFile(
+          configPath(),
+          original.replace('data_dir = "state"', `data_dir = "${path}"`),
+        );
+        for (const service of ["core", "discord"])
+          assertStartupRefused(service, /data_dir must not be inside selected agent resources/u);
+        assert.deepEqual(await readFile(join(nested, "carillon.sqlite3")), database);
+        await assert.rejects(stat(state), { code: "ENOENT" });
+      }
+    } finally {
+      await writeFile(configPath(), original);
+      await rm(alias);
+      await rename(nested, state);
+    }
+  }
+  // Non-selected siblings remain valid: the resource root need not be isolated
+  // from every kind of state (Pi itself keeps sessions beneath that root).
+  const sibling = join(resources, "core-state");
+  await rename(state, sibling);
+  try {
+    await writeFile(
+      configPath(),
+      original.replace('data_dir = "state"', 'data_dir = "agents/default/core-state"'),
+    );
+    await start("core");
+    assert.equal(JSON.parse(run("inspect", "--config", configPath(), turnId)).state, "queued");
+  } finally {
+    await stop("core");
+    await writeFile(configPath(), original);
+    await rename(sibling, state);
+  }
 }
 
 async function testPiModelReadiness(turnId) {
