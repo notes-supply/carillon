@@ -112,33 +112,57 @@ pub fn initialize(
     };
     config.validate()?;
     config.discord()?;
-    create_installation_directories(root)?;
-    let config_path = root.join("carillon.toml");
-    atomic_write(
-        &config_path,
-        toml::to_string_pretty(&config)?.as_bytes(),
-        0o600,
-    )?;
-    write_credentials(
-        root,
-        &[
-            ("operator", &operator_token),
-            ("discord-private", &discord_token),
-            ("runtime-pi", &runtime_token),
-        ],
-    )?;
-    let agent = root.join("agents/default");
-    atomic_write(&agent.join("SYSTEM.md"), DEFAULT_SYSTEM.as_bytes(), 0o640)?;
-    atomic_write(&agent.join("AGENTS.md"), DEFAULT_CONTEXT.as_bytes(), 0o640)?;
-    atomic_write(&agent.join("settings.json"), b"{}\n", 0o640)?;
-    atomic_write(
-        &root.join("examples/carillon-context.js"),
-        NATIVE_EXTENSION.as_bytes(),
-        0o640,
-    )?;
-    atomic_write(&root.join("examples/SKILL.md"), SKILL.as_bytes(), 0o640)?;
-    Database::open(&root.join("state/carillon.sqlite3"))?;
-    Ok(config_path)
+    let target = absolute_destination(root)?;
+    let parent = target
+        .parent()
+        .context("installation root must have a parent")?;
+    fs::create_dir_all(parent)?;
+    let staging = parent.join(format!(".carillon-init-{}", Uuid::now_v7()));
+    fs::DirBuilder::new().mode(0o700).create(&staging)?;
+    let result = (|| -> Result<()> {
+        let root = &staging;
+        create_installation_directories(root)?;
+        let config_path = root.join("carillon.toml");
+        atomic_write(
+            &config_path,
+            toml::to_string_pretty(&config)?.as_bytes(),
+            0o600,
+        )?;
+        write_credentials(
+            root,
+            &[
+                ("operator", &operator_token),
+                ("discord-private", &discord_token),
+                ("runtime-pi", &runtime_token),
+            ],
+        )?;
+        let agent = root.join("agents/default");
+        atomic_write(&agent.join("SYSTEM.md"), DEFAULT_SYSTEM.as_bytes(), 0o640)?;
+        atomic_write(&agent.join("AGENTS.md"), DEFAULT_CONTEXT.as_bytes(), 0o640)?;
+        atomic_write(&agent.join("settings.json"), b"{}\n", 0o640)?;
+        atomic_write(
+            &root.join("examples/carillon-context.js"),
+            NATIVE_EXTENSION.as_bytes(),
+            0o640,
+        )?;
+        atomic_write(&root.join("examples/SKILL.md"), SKILL.as_bytes(), 0o640)?;
+        Database::open(&root.join("state/carillon.sqlite3"))?;
+        crate::filesystem::sync_tree(root)?;
+        // Rename replaces an empty target directory atomically, but refuses a
+        // nonempty target that appeared meanwhile. Never adopt partial state.
+        fs::rename(root, &target)?;
+        // Persist the publication and any newly created parent directories. A
+        // failure after rename leaves the complete installation selected for retry.
+        for ancestor in parent.ancestors() {
+            fs::File::open(ancestor)?.sync_all()?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    Ok(target.join("carillon.toml"))
 }
 
 fn default_providers(

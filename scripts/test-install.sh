@@ -28,6 +28,8 @@ done
   exit 1
 }
 
+node "$ROOT/scripts/test-filesystem.mjs" init "$RELEASE"
+
 TEST_ROOT=$(mktemp -d)
 OWNER_HOME="$TEST_ROOT/owner home"
 WORKSPACE=$OWNER_HOME/workspace

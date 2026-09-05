@@ -12,22 +12,32 @@ use sha2::{Digest, Sha256};
 
 use crate::model::{ResourceSnapshot, RuntimeResources};
 
+#[derive(PartialEq, Eq)]
+struct ResourceFile {
+    bytes: Vec<u8>,
+    executable: u32,
+}
+
+impl ResourceFile {
+    fn read(path: &Path) -> Result<Self> {
+        Ok(Self {
+            bytes: fs::read(path)?,
+            executable: fs::metadata(path)?.permissions().mode() & 0o111,
+        })
+    }
+}
+
 /// Captures the current resource root into the snapshot store and returns the
 /// fingerprints identifying it.
 pub fn materialize(source: &Path, store: &Path) -> Result<ResourceSnapshot> {
     let files = selected_resource_files(source)?;
 
-    let system_sha256 = hash_bytes(files.get("SYSTEM.md").map_or(&[], Vec::as_slice));
-    let context_sha256 = hash_bytes(files.get("AGENTS.md").map_or(&[], Vec::as_slice));
-    let settings_sha256 = hash_bytes(files.get("settings.json").map_or(&[], Vec::as_slice));
+    let system_sha256 = hash_bytes(files.get("SYSTEM.md").map_or(&[], |file| &file.bytes));
+    let context_sha256 = hash_bytes(files.get("AGENTS.md").map_or(&[], |file| &file.bytes));
+    let settings_sha256 = hash_bytes(files.get("settings.json").map_or(&[], |file| &file.bytes));
     let extensions_sha256 = hash_entries(&files, "extensions/");
     let skills_sha256 = hash_entries(&files, "skills/");
-    let fingerprint = hash_bytes(
-        format!(
-            "{system_sha256}{context_sha256}{settings_sha256}{extensions_sha256}{skills_sha256}"
-        )
-        .as_bytes(),
-    );
+    let fingerprint = hash_entries(&files, "");
     let destination = store.join(&fingerprint);
     if destination.exists() {
         if selected_resource_files(&destination)? != files {
@@ -37,20 +47,37 @@ pub fn materialize(source: &Path, store: &Path) -> Result<ResourceSnapshot> {
             );
         }
     } else {
-        fs::create_dir_all(store)?;
+        // The store is an immediate child of the already-created core data directory.
+        match fs::create_dir(store) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
         let temporary = store.join(format!(".{}", uuid::Uuid::now_v7()));
         fs::create_dir(&temporary)?;
-        for (relative, bytes) in &files {
-            let path = temporary.join(relative);
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)?;
+        let result = (|| -> Result<()> {
+            for (relative, file) in &files {
+                let path = temporary.join(relative);
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(&path, &file.bytes)?;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o440 | file.executable))?;
             }
-            fs::write(&path, bytes)?;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o440))?;
+            set_snapshot_directory_permissions(&temporary)?;
+            crate::filesystem::sync_tree(&temporary)?;
+            fs::rename(&temporary, &destination)?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            let _ = fs::remove_dir_all(&temporary);
+            return Err(error);
         }
-        set_snapshot_directory_permissions(&temporary)?;
-        fs::rename(temporary, &destination)?;
     }
+    // Also sync on reuse: a previous attempt may have renamed successfully but
+    // failed to persist the directory entry. No accepted turn may outrun this.
+    fs::File::open(store)?.sync_all()?;
+    fs::File::open(store.parent().context("snapshot store has no parent")?)?.sync_all()?;
     Ok(ResourceSnapshot {
         id: fingerprint,
         system_sha256,
@@ -75,7 +102,7 @@ pub fn runtime_view(snapshot: &ResourceSnapshot, store: &Path) -> RuntimeResourc
     }
 }
 
-fn selected_resource_files(source: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
+fn selected_resource_files(source: &Path) -> Result<BTreeMap<String, ResourceFile>> {
     let mut files = BTreeMap::new();
     for name in ["SYSTEM.md", "AGENTS.md", "settings.json"] {
         let path = source.join(name);
@@ -84,7 +111,7 @@ fn selected_resource_files(source: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
             if !metadata.file_type().is_file() {
                 bail!("agent resource is not a regular file: {}", path.display());
             }
-            files.insert(name.to_owned(), fs::read(&path)?);
+            files.insert(name.to_owned(), ResourceFile::read(&path)?);
         }
     }
     collect_resource_tree(source, &source.join("extensions"), "extensions", &mut files)?;
@@ -96,7 +123,7 @@ fn collect_resource_tree(
     source_root: &Path,
     directory: &Path,
     prefix: &str,
-    files: &mut BTreeMap<String, Vec<u8>>,
+    files: &mut BTreeMap<String, ResourceFile>,
 ) -> Result<()> {
     if !directory.exists() {
         return Ok(());
@@ -123,22 +150,24 @@ fn collect_resource_tree(
             if !relative.starts_with(prefix) {
                 bail!("resource escaped selected directory: {relative}");
             }
-            files.insert(relative, fs::read(entry.path())?);
+            files.insert(relative, ResourceFile::read(&entry.path())?);
         }
     }
     Ok(())
 }
 
-fn hash_entries(files: &BTreeMap<String, Vec<u8>>, prefix: &str) -> String {
+fn hash_entries(files: &BTreeMap<String, ResourceFile>, prefix: &str) -> String {
     let mut digest = Sha256::new();
-    for (path, bytes) in files.range(prefix.to_owned()..) {
+    for (path, file) in files.range(prefix.to_owned()..) {
         if !path.starts_with(prefix) {
             break;
         }
-        digest.update(path.strip_prefix(prefix).unwrap_or(path).as_bytes());
-        digest.update([0]);
-        digest.update(bytes);
-        digest.update([0]);
+        let relative = path.strip_prefix(prefix).unwrap_or(path).as_bytes();
+        digest.update((relative.len() as u64).to_le_bytes());
+        digest.update(relative);
+        digest.update(file.executable.to_le_bytes());
+        digest.update((file.bytes.len() as u64).to_le_bytes());
+        digest.update(&file.bytes);
     }
     hex::encode(digest.finalize())
 }
@@ -160,11 +189,68 @@ fn set_snapshot_directory_permissions(directory: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, os::unix::fs::PermissionsExt, process::Command};
 
+    use anyhow::Context;
     use tempfile::tempdir;
 
     use super::{materialize, runtime_view};
+
+    #[test]
+    fn snapshots_preserve_native_helpers_and_address_executable_changes() -> anyhow::Result<()> {
+        let source = tempdir()?;
+        let parent = tempdir()?;
+        let store = parent.path().join("resource-snapshots");
+        for relative in ["skills/example/scripts/helper", "extensions/example/helper"] {
+            let helper = source.path().join(relative);
+            fs::create_dir_all(helper.parent().context("missing parent")?)?;
+            fs::write(&helper, b"#!/bin/sh\nprintf native-helper")?;
+            fs::set_permissions(&helper, fs::Permissions::from_mode(0o750))?;
+        }
+        let executable = materialize(source.path(), &store)?;
+        for relative in ["skills/example/scripts/helper", "extensions/example/helper"] {
+            let helper = store.join(&executable.id).join(relative);
+            let output = Command::new(&helper).output()?;
+            assert!(output.status.success());
+            assert_eq!(output.stdout, b"native-helper");
+            assert_eq!(fs::metadata(&helper)?.permissions().mode() & 0o777, 0o550);
+            fs::set_permissions(
+                source.path().join(relative),
+                fs::Permissions::from_mode(0o640),
+            )?;
+        }
+        let ordinary = materialize(source.path(), &store)?;
+        assert_ne!(executable.id, ordinary.id);
+        assert_ne!(executable.skills_sha256, ordinary.skills_sha256);
+        assert_ne!(executable.extensions_sha256, ordinary.extensions_sha256);
+        assert_eq!(materialize(source.path(), &store)?.id, ordinary.id);
+        for relative in ["skills/example/scripts/helper", "extensions/example/helper"] {
+            // Source chmod affects future turns only; already accepted helpers still run.
+            assert!(
+                Command::new(store.join(&executable.id).join(relative))
+                    .output()?
+                    .status
+                    .success()
+            );
+            assert_eq!(
+                Command::new(store.join(&ordinary.id).join(relative))
+                    .output()
+                    .err()
+                    .context("non-executable helper ran")?
+                    .kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+        }
+        // Comparison must check executable metadata too, not silently reuse tampered content.
+        fs::set_permissions(
+            store
+                .join(&ordinary.id)
+                .join("skills/example/scripts/helper"),
+            fs::Permissions::from_mode(0o550),
+        )?;
+        assert!(materialize(source.path(), &store).is_err());
+        Ok(())
+    }
 
     #[test]
     fn materialized_resources_do_not_change_with_the_source() -> anyhow::Result<()> {

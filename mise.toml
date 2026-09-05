@@ -35,7 +35,7 @@ run = [
 [tasks."test:integration"]
 description = "Test local core, Discord, and Pi services together"
 depends = ["install"]
-run = "cargo build --locked --bin carillon && node scripts/test-integration.mjs"
+run = "cargo build --locked --bin carillon && node scripts/test-integration.mjs && node scripts/test-filesystem.mjs resources target/debug/carillon"
 
 [tasks.package]
 description = "Build a toolchain-free Linux release archive"

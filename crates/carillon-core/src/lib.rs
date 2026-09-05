@@ -7,6 +7,7 @@ mod config;
 mod core;
 mod db;
 mod discord;
+mod filesystem;
 mod model;
 mod resources;
 
