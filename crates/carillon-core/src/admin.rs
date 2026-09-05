@@ -335,6 +335,9 @@ pub fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
             .open(&staging)?;
         let encoder = GzEncoder::new(BufWriter::new(file), Compression::default());
         let mut archive = Builder::new(encoder);
+        // Keep the writer inside restore's regular-file/directory format even
+        // when installed binaries or provider files have filesystem holes.
+        archive.sparse(false);
         append_directory(&mut archive, &root, &root)?;
         archive.finish()?;
         let encoder = archive.into_inner()?;
@@ -527,7 +530,7 @@ mod tests {
     use std::{
         fs,
         io::Cursor,
-        os::unix::fs::{MetadataExt, PermissionsExt, symlink},
+        os::unix::fs::{FileExt, MetadataExt, PermissionsExt, symlink},
         path::{Path, PathBuf},
     };
 
@@ -648,6 +651,36 @@ mod tests {
         assert_eq!(
             fs::metadata(destination)?.permissions().mode() & 0o777,
             0o600
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn backup_restores_sparse_files_as_regular_files() -> Result<()> {
+        let directory = tempdir()?;
+        let root = directory.path().join("installation");
+        let config_path = initialize_test_installation(&root, directory.path(), 44_900)?;
+        let path = root.join("sparse-executable");
+        let file = fs::File::create(&path)?;
+        file.set_len(1_048_576)?;
+        file.write_all_at(b"contents after a hole", 1_048_000)?;
+        file.set_permissions(fs::Permissions::from_mode(0o700))?;
+        assert!(file.metadata()?.blocks() * 512 < file.metadata()?.len());
+        drop(file);
+        let expected = fs::read(&path)?;
+        let destination = directory.path().join("backup.tar.gz");
+        backup(&LoadedConfig::load(&config_path)?, &destination)?;
+        fs::remove_dir_all(&root)?;
+
+        let target = directory.path().join("restored");
+        restore(&destination, &target)?;
+        assert_eq!(fs::read(target.join("sparse-executable"))?, expected);
+        assert_eq!(
+            fs::metadata(target.join("sparse-executable"))?
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
         );
         Ok(())
     }

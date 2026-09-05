@@ -19,6 +19,7 @@ bun build --compile --no-compile-autoload-bunfig \
   --outfile "$STAGE/bin/pi"
 install -m 0755 target/release/carillon "$STAGE/bin/carillon"
 install -m 0755 scripts/carillon-pi.sh "$STAGE/bin/carillon-pi"
+install -m 0755 scripts/register-services.sh "$STAGE/bin/carillon-register-services"
 install -m 0755 scripts/install-release.sh "$STAGE/install.sh"
 install -m 0755 scripts/uninstall-release.sh "$STAGE/uninstall.sh"
 install -m 0644 deploy/systemd/* "$STAGE/systemd/"

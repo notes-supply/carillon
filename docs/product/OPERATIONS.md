@@ -87,6 +87,16 @@ Before creating a backup or publishing a restore, Carillon checks the configured
 
 This is not a provider-native health check: individual resource files are optional, and providers own their native sessions, settings, and authentication requirements. The entire installation tree is copied, but restore cannot infer whether arbitrary provider-private files were omitted from a manually edited archive. Check the provider after restoring; a successful restore does not attest that external credentials are still valid. Use a backup made by the same current state format, or perform a fresh installation.
 
+Restore publishes the installation tree; it does not register services or execute archived programs. User units live outside `CARILLON_HOME` and must be registered separately before starting a restored bundled release, including a same-user relocation. As the intended non-root owner, with that owner's `HOME`, `PATH`, and optional `XDG_CONFIG_HOME`:
+
+```sh
+carillon restore --input /path/to/private-backup.tar.gz --target /new/carillon
+/new/carillon/app/bin/carillon-register-services
+systemctl --user start carillon.target
+```
+
+The installed registration helper needs no source checkout or release installer. It derives the root from its own installed location, renders the bundled templates with the current owner's environment, replaces Carillon's user units, reloads the user service manager, and enables—but does not start—`carillon.target`. It leaves configuration, credentials and provider state untouched. Stop the old target before relocation; check the configured external workspace and provider health before restarting. Non-bundled service supervisors/providers retain their own registration procedure.
+
 ## Update and uninstall
 
 Re-running the installer replaces managed application files and user units while preserving current configuration, credentials, sessions, and SQLite state. It is suitable only when the installed state format is still current.

@@ -14,6 +14,7 @@ for artifact in \
   bin/carillon-runtime-pi \
   bin/pi \
   bin/carillon-pi \
+  bin/carillon-register-services \
   install.sh \
   uninstall.sh \
   systemd/carillon.target \
@@ -213,7 +214,7 @@ for previous in fresh existing; do
     if env HOME="$FAILURE_HOME" XDG_CONFIG_HOME="$FAILURE_CONFIG_HOME" \
       CARILLON_HOME="$FAILURE_ROOT" CARILLON_SKIP_SYSTEMD_RELOAD=1 \
       PATH="$FAIL_COMMANDS:$PATH" FAIL_MODE="$failure" FAIL_MARKER="$failure_marker" \
-      FAIL_TEMPLATE="$RELEASE/systemd/carillon.target" FAIL_UNIT_DIR="$FAILURE_UNIT_DIR" \
+      FAIL_TEMPLATE="$FAILURE_ROOT/app/systemd/carillon.target" FAIL_UNIT_DIR="$FAILURE_UNIT_DIR" \
       REAL_SED="$REAL_SED" REAL_CHMOD="$REAL_CHMOD" REAL_MV="$REAL_MV" \
       "$RELEASE/install.sh" \
       --guild-id 100 --bot-user-id 201 --user-id 200 --route 300:always:channel \
@@ -457,6 +458,9 @@ SECOND=$(curl --fail --silent -X POST -H 'content-type: application/json' \
 case "$SECOND" in *"Local provider response 2"*) ;; *) printf '%s\n' "$SECOND" >&2; exit 1 ;; esac
 
 stop_services
+# Capture a real packaged installation before uninstall removes its application.
+"$APP/carillon" backup --config "$CONFIG" --output "$TEST_ROOT/registration-backup.tar.gz" >/dev/null
+cp -a "$XDG_CONFIG_HOME/systemd/user" "$TEST_ROOT/source-units"
 env HOME="$OWNER_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" CARILLON_HOME="$CARILLON_HOME" \
   CARILLON_SKIP_SYSTEMD_RELOAD=1 "$CARILLON_HOME/app/bin/carillon-uninstall" >/dev/null
 [ ! -e "$CARILLON_HOME/app" ]
@@ -464,5 +468,63 @@ env HOME="$OWNER_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" CARILLON_HOME="$CARILL
 [ "$(cat "$OWNER_HOME/unrelated")" = unrelated-owner-file ]
 [ "$(sha256sum "$GLOBAL_PI/sentinel" | cut -d' ' -f1)" = "$GLOBAL_PI_HASH" ]
 [ -e "$CARILLON_HOME/carillon.toml" ]
+
+# Remove access through the original installation path. Restored registration
+# uses only archived packaged content, never the release installer or checkout.
+mv "$CARILLON_HOME" "$OWNER_HOME/uninstalled-source"
+REGISTER_COMMANDS=$TEST_ROOT/register-commands
+mkdir "$REGISTER_COMMANDS"
+cat >"$REGISTER_COMMANDS/systemctl" <<'SYSTEMCTL'
+#!/bin/sh
+set -eu
+printf '%s\n' "$*" >>"$REGISTER_TRACE"
+SYSTEMCTL
+chmod 0755 "$REGISTER_COMMANDS/systemctl"
+for previous in fresh existing; do
+  if [ "$previous" = fresh ]; then
+    RESTORE_HOME=$TEST_ROOT/restored-owner
+    RESTORE_CONFIG_HOME=$RESTORE_HOME/.config
+  else
+    RESTORE_HOME=$OWNER_HOME
+    RESTORE_CONFIG_HOME=$XDG_CONFIG_HOME
+    cp -a "$TEST_ROOT/source-units/." "$RESTORE_CONFIG_HOME/systemd/user/"
+  fi
+  mkdir -p "$RESTORE_HOME"
+  RESTORE_ROOT=$RESTORE_HOME/relocated-carillon
+  RESTORE_UNITS=$RESTORE_CONFIG_HOME/systemd/user
+  "$RELEASE/bin/carillon" restore --input "$TEST_ROOT/registration-backup.tar.gz" \
+    --target "$RESTORE_ROOT" >/dev/null
+  mkdir "$RESTORE_ROOT/private-before"
+  cp -a "$RESTORE_ROOT/carillon.toml" "$RESTORE_ROOT/credentials" "$RESTORE_ROOT/pi" \
+    "$RESTORE_ROOT/private-before/"
+  REGISTER_TRACE=$TEST_ROOT/register-$previous.trace
+  # A stale inherited CARILLON_HOME must not redirect a relocated helper.
+  env HOME="$RESTORE_HOME" XDG_CONFIG_HOME="$RESTORE_CONFIG_HOME" \
+    CARILLON_HOME="$CARILLON_HOME" CARILLON_SKIP_SYSTEMD_RELOAD=0 \
+    PATH="$REGISTER_COMMANDS:/usr/bin:/bin" REGISTER_TRACE="$REGISTER_TRACE" \
+    "$RESTORE_ROOT/app/bin/carillon-register-services" >/dev/null
+  printf '%s\n' '--user daemon-reload' '--user enable carillon.target' >"$TEST_ROOT/expected-registration"
+  cmp "$TEST_ROOT/expected-registration" "$REGISTER_TRACE"
+  verify_units "$RESTORE_UNITS"
+  assert_service_identity "$RESTORE_UNITS"
+  for service in "$RESTORE_UNITS"/carillon-*.service; do
+    grep -Fqx "Environment=\"HOME=$RESTORE_HOME\"" "$service"
+    grep -Fqx "Environment=\"CARILLON_HOME=$RESTORE_ROOT\"" "$service"
+    grep -Fqx "Environment=\"SHELL=$OWNER_SHELL\"" "$service"
+    grep -Fqx "Environment=\"PATH=$REGISTER_COMMANDS:/usr/bin:/bin\"" "$service"
+    grep -F -- "\"$RESTORE_ROOT/app/bin/" "$service" >/dev/null
+    if grep -F "$CARILLON_HOME" "$service"; then
+      echo 'restored service still refers to the source installation' >&2
+      exit 1
+    fi
+    [ "$(stat -c %u "$service")" -eq "$(id -u)" ]
+    [ "$(stat -c %a "$service")" = 600 ]
+  done
+  cmp "$RESTORE_ROOT/private-before/carillon.toml" "$RESTORE_ROOT/carillon.toml"
+  diff -r "$RESTORE_ROOT/private-before/credentials" "$RESTORE_ROOT/credentials"
+  diff -r "$RESTORE_ROOT/private-before/pi" "$RESTORE_ROOT/pi"
+  [ ! -e "$CARILLON_HOME" ]
+  printf 'restored service registration passed: %s units, relocated root and owner environment\n' "$previous"
+done
 
 printf '%s\n' "install tests passed: owner authority, admission, continuation, private Pi state, and unrelated files"
