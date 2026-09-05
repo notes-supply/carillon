@@ -20,6 +20,10 @@ For the Pi runtime adapter, Carillon's resource source remains an ordinary Pi-co
 
 At dispatch, Carillon supplies an immutable snapshot of `SYSTEM.md`, `AGENTS.md`, `settings.json`, extensions, and skills as Pi's global `agentDir` resources. Separately, Pi's `cwd` is the configured real workspace—by default the owner's home. Native tools operate there and on ordinary absolute paths with the owner's authority. Pi-native project-local resources in an intentionally selected workspace retain their normal semantics.
 
+The configured resource root must already be a directory. Core refuses new acceptance if it is missing or is not a directory; Pi refuses startup instead of recreating it. Individual resource files remain optional, so an intentionally empty root is valid. Known acceptance receipts and already captured snapshots do not depend on the live root remaining available.
+
+Pi also validates that its selected default model is available with locally configured authentication before listening. Incomplete model setup leaves queued work queued, rather than claiming a turn merely to discover the setup error. This does not guarantee that a remote model service will accept a later request.
+
 Pi composes the final prompt, including context, tool guidance, skill inventory, project resources, and extension changes. Engine settings remain Pi's responsibility.
 
 Pi extensions use Pi's own loading, hooks, subprocess environment, tools, and persistence. Carillon does not introduce another extension manifest, permission system, or prompt-composition language.

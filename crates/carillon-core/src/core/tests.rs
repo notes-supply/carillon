@@ -628,6 +628,55 @@ async fn duplicate_events_share_one_accepted_turn_without_reexecution() -> Resul
 }
 
 #[tokio::test]
+async fn missing_resource_root_refuses_new_acceptance_without_losing_receipts() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    let first = accept(&state, "one", "conversation").await?;
+    let root = &state.config.value.agent.resource_root;
+    let saved = directory.path().join("saved-resources");
+    fs::rename(root, &saved)?;
+    for missing in [true, false] {
+        if !missing {
+            fs::write(root, "not a directory")?;
+        }
+        assert!(accept(&state, "two", "conversation").await.is_err());
+        assert_eq!(state.database.recent_turns(None, 10)?.len(), 1);
+        assert!(
+            state
+                .database
+                .event_receipt("test-interface", "two")?
+                .is_none()
+        );
+        let duplicate = accept(&state, "one", "conversation").await?;
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.turn_id, first.turn_id);
+        assert_eq!(duplicate.state, TurnState::Queued);
+    }
+    fs::remove_file(root)?;
+    fs::rename(saved, root)?;
+    // An existing empty root is valid: individual resources remain optional.
+    fs::remove_dir_all(root)?;
+    fs::create_dir(root)?;
+    let second = accept(&state, "two", "conversation").await?;
+    assert!(!second.duplicate);
+    assert_eq!(state.database.recent_turns(None, 10)?.len(), 2);
+    assert_eq!(
+        run_next_turn(&state, "test-runtime", async |_, _, request| {
+            assert_eq!(request.correlation_id, first.turn_id);
+            assert!(
+                Path::new(&request.resources.root)
+                    .join("SYSTEM.md")
+                    .is_file()
+            );
+            Ok(completed(request))
+        })
+        .await?,
+        WorkerStep::Advanced
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn duplicate_receipts_do_not_read_mutable_resources() -> Result<()> {
     let directory = tempdir()?;
     let state = installation(directory.path())?;

@@ -123,6 +123,8 @@ async function startRuntime(values: readonly string[]): Promise<void> {
   config = await loadConfig(requiredArgument(args, "config"), providerId);
   if (!(await stat(config.workspace)).isDirectory())
     throw new Error("workspace must be an existing directory");
+  if (!(await stat(config.resourceRoot)).isDirectory())
+    throw new Error("resource root must be an existing directory");
   const listenAddress = runtimeListenAddress(config.runtime.url);
   token = (await readFile(requiredArgument(args, "token-file"), "utf8")).trim();
   if (
@@ -146,6 +148,7 @@ async function startRuntime(values: readonly string[]): Promise<void> {
         allowModelNetwork: true,
         modelRefreshTimeoutMs: 15_000,
       });
+  if (!deterministic) await selectedPiModel();
 
   const server = createServer((request, response) => {
     void route(request, response).catch((failure: unknown) => {

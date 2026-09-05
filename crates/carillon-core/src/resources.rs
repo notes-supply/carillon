@@ -103,6 +103,15 @@ pub fn runtime_view(snapshot: &ResourceSnapshot, store: &Path) -> RuntimeResourc
 }
 
 fn selected_resource_files(source: &Path) -> Result<BTreeMap<String, ResourceFile>> {
+    if !fs::metadata(source)
+        .with_context(|| format!("read agent resource root {}", source.display()))?
+        .is_dir()
+    {
+        bail!(
+            "agent resource root is not a directory: {}",
+            source.display()
+        );
+    }
     let mut files = BTreeMap::new();
     for name in ["SYSTEM.md", "AGENTS.md", "settings.json"] {
         let path = source.join(name);

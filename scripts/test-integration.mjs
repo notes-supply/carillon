@@ -3,8 +3,10 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   chmod,
   lstat,
+  mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rename,
   rm,
   stat,
@@ -251,6 +253,8 @@ try {
     await rename(`${sessions}-saved`, sessions);
     await stop("core");
   }
+  await testPiModelReadiness(queued.turn_id);
+  await testMissingResourceRoot(queued.turn_id);
   await testRuntimeStartupRefusals(queued.turn_id);
   // Both services must interpret relative paths from the canonical config file,
   // not from the directory holding an operator's convenient symlink.
@@ -296,14 +300,134 @@ function configPath() {
   return join(installation, "carillon.toml");
 }
 
-function assertStartupRefused(name, expected, extraArgs = []) {
-  const [program, args] = serviceArguments(name);
-  const result = spawnSync(program, [...args, ...extraArgs], { encoding: "utf8", timeout: 10_000 });
+function assertStartupRefused(name, expected, extraArgs = [], options = {}) {
+  const [program, args] = serviceArguments(name, options);
+  const result = spawnSync(program, [...args, ...extraArgs], {
+    encoding: "utf8",
+    timeout: 10_000,
+    env: options.env,
+  });
   assert.doesNotMatch(result.stdout, /ready at/u, `${name} must refuse before listening`);
   assert.ifError(result.error);
   assert.equal(result.signal, null);
   assert.notEqual(result.status, 0, `${name} must refuse startup`);
   assert.match(result.stderr, expected);
+}
+
+async function testPiModelReadiness(turnId) {
+  const privateState = join(installation, "pi");
+  const sessions = join(installation, "agents/default/sessions");
+  await rename(privateState, `${privateState}-saved`);
+  await rename(sessions, `${sessions}-saved`);
+  await mkdir(privateState);
+  // Pi's own offline switch keeps catalog refresh local, without substituting
+  // ModelRuntime or borrowing the installing user's model credentials.
+  const options = { nativePi: true, env: { ...process.env, PI_OFFLINE: "1" } };
+  const settingsPath = join(privateState, "settings.json");
+  const modelsPath = join(privateState, "models.json");
+  const provider = {
+    baseUrl: "http://127.0.0.1:1/v1",
+    api: "openai-completions",
+    models: [{ id: "readiness-model" }],
+  };
+  await start("core");
+  try {
+    for (const [settings, configured, message] of [
+      [{}, provider, /no Pi model is selected/u],
+      [
+        { defaultProvider: "readiness-fixture", defaultModel: "missing-model" },
+        { ...provider, apiKey: "test-only" },
+        /selected Pi model readiness-fixture\/missing-model is not available/u,
+      ],
+      [
+        { defaultProvider: "readiness-fixture", defaultModel: "readiness-model" },
+        provider,
+        /selected Pi model readiness-fixture\/readiness-model is not available/u,
+      ],
+    ]) {
+      await writeFile(settingsPath, JSON.stringify(settings));
+      await writeFile(
+        modelsPath,
+        JSON.stringify({ providers: { "readiness-fixture": configured } }),
+      );
+      assertStartupRefused("runtime", message, [], options);
+      assert.deepEqual(await readdir(sessions), [], "setup failure must not create a native turn");
+      assert.equal(JSON.parse(run("inspect", "--config", configPath(), turnId)).state, "queued");
+      const status = JSON.parse(run("status", "--config", configPath()));
+      assert.equal(
+        status.providers.find((entry) => entry.id === "runtime-pi").status,
+        "unavailable",
+      );
+    }
+    // Repair readiness without a model API call. Stop core first so this fixture
+    // never dispatches work to the intentionally non-listening model endpoint.
+    await stop("core");
+    await writeFile(
+      modelsPath,
+      JSON.stringify({
+        providers: { "readiness-fixture": { ...provider, apiKey: "test-only" } },
+      }),
+    );
+    await start("runtime", options);
+    const response = await fetch(`http://${runtimeHost}:${String(basePort + 2)}/health`);
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).provider, "pi");
+    assert.deepEqual(await readdir(sessions), []);
+    await stop("runtime");
+    await start("core");
+    assert.equal(JSON.parse(run("inspect", "--config", configPath(), turnId)).state, "queued");
+  } finally {
+    await stop("runtime");
+    await stop("core");
+    await rm(privateState, { recursive: true, force: true });
+    await rm(sessions, { recursive: true, force: true });
+    await rename(`${privateState}-saved`, privateState);
+    await rename(`${sessions}-saved`, sessions);
+  }
+}
+
+async function testMissingResourceRoot(turnId) {
+  const resources = join(installation, "agents/default");
+  const privateState = join(installation, "pi");
+  await rename(resources, `${resources}-saved`);
+  await rename(privateState, `${privateState}-saved`);
+  await start("core");
+  const before = JSON.parse(run("recent", "--config", configPath()));
+  try {
+    for (const missing of [true, false]) {
+      if (!missing) await writeFile(resources, "not a directory");
+      assertStartupRefused("runtime", missing ? /ENOENT/u : /existing directory/u);
+      if (missing) await assert.rejects(stat(resources), { code: "ENOENT" });
+      else assert.equal(await readFile(resources, "utf8"), "not a directory");
+      await assert.rejects(stat(privateState), { code: "ENOENT" });
+      assert.equal(JSON.parse(run("inspect", "--config", configPath(), turnId)).state, "queued");
+      const response = await fetch(`http://127.0.0.1:${String(basePort)}/v1/events`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${await credentialValue("discord-private")}`,
+          "x-carillon-provider": "discord-private",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          event_id: "missing-resources",
+          agent_id: "default",
+          user_id: "200",
+          audience_id: "new-conversation",
+          delivery_target_id: "300",
+          feedback_target_id: "300:missing-resources",
+          content: "must not be accepted without the configured root",
+        }),
+      });
+      assert.equal(response.status, 500, await response.text());
+      assert.deepEqual(JSON.parse(run("recent", "--config", configPath())), before);
+    }
+  } finally {
+    await stop("core");
+    await rm(resources, { recursive: true, force: true });
+    await rm(privateState, { recursive: true, force: true });
+    await rename(`${resources}-saved`, resources);
+    await rename(`${privateState}-saved`, privateState);
+  }
 }
 
 async function testRuntimeStartupRefusals(turnId) {
@@ -679,7 +803,7 @@ async function waitForTurn(turnId, state, deliveryState = null) {
   );
 }
 
-function serviceArguments(name) {
+function serviceArguments(name, { nativePi = false } = {}) {
   if (name === "core") return [binary, ["core", "--config", configPath()]];
   if (name === "runtime") {
     const args = [
@@ -689,7 +813,7 @@ function serviceArguments(name) {
       credential("runtime-pi"),
       "--provider",
       "runtime-pi",
-      "--deterministic",
+      ...(nativePi ? [] : ["--deterministic"]),
       "--state-dir",
       join(installation, "pi"),
     ];
@@ -714,9 +838,9 @@ function servicePort(name) {
   return basePort + { core: 0, discord: 1, runtime: 2 }[name];
 }
 
-async function start(name) {
-  const [program, args] = serviceArguments(name);
-  const child = spawn(program, args, { stdio: "ignore" });
+async function start(name, options = {}) {
+  const [program, args] = serviceArguments(name, options);
+  const child = spawn(program, args, { stdio: "ignore", env: options.env });
   services.set(name, child);
   await waitForHealth(servicePort(name), name === "runtime" ? runtimeHost : "127.0.0.1");
 }
