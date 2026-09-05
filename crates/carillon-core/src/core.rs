@@ -441,19 +441,16 @@ async fn provider_health(client: &Client, config: &LoadedConfig) -> Vec<Health> 
             reports.push(provider_status(provider, "disabled"));
             continue;
         }
-        let token = config.credential(&provider.id).ok();
-        reports.push(fetch_health(client, token.as_deref(), provider).await);
+        reports.push(fetch_health(client, provider).await);
     }
     reports
 }
 
-async fn fetch_health(client: &Client, token: Option<&str>, provider: &Provider) -> Health {
-    let mut request = client
+async fn fetch_health(client: &Client, provider: &Provider) -> Health {
+    // Public diagnostics must not disclose reusable provider credentials.
+    let request = client
         .get(format!("{}/health", provider.url))
         .timeout(Duration::from_secs(2));
-    if let Some(value) = token {
-        request = request.bearer_auth(value);
-    }
     match request.send().await {
         Ok(response) => match response.error_for_status() {
             Ok(response) => response

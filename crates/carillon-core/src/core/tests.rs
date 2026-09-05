@@ -146,6 +146,139 @@ fn configuration_rejects_malformed_provider_endpoints_before_startup() -> Result
 }
 
 #[tokio::test]
+async fn status_probes_public_health_without_provider_credentials() -> Result<()> {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt as _;
+
+    let directory = tempdir()?;
+    let mut state = installation(directory.path())?;
+    let mut services = tokio::task::JoinSet::new();
+    let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+    for provider in &mut state.config.value.providers {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        provider.url = format!("http://{}", listener.local_addr()?);
+        let report = provider_status(provider, "ready");
+        let sent = sent.clone();
+        let router = Router::new().route(
+            "/health",
+            get(move |headers: HeaderMap| {
+                let sent = sent.clone();
+                let report = report.clone();
+                async move {
+                    let _ = sent.send(headers);
+                    Json(report)
+                }
+            }),
+        );
+        services.spawn(async move { axum::serve(listener, router).await });
+    }
+    let router = Router::new()
+        .route("/v1/status", get(status))
+        .with_state(state);
+    let response = router
+        .clone()
+        .oneshot(Request::builder().uri("/v1/status").body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(
+        received.try_recv().is_err(),
+        "unauthenticated status probed providers"
+    );
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        router.oneshot(
+            Request::builder()
+                .uri("/v1/status")
+                .header(http::header::AUTHORIZATION, "Bearer test-operator")
+                .body(Body::empty())?,
+        ),
+    )
+    .await??;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 65536).await?;
+    let report: StatusReport = serde_json::from_slice(&body)?;
+    assert_eq!(report.providers.len(), 3);
+    assert!(
+        report
+            .providers
+            .iter()
+            .all(|provider| provider.status == "ready")
+    );
+    for _ in 0..2 {
+        let headers = received.try_recv()?;
+        assert!(
+            !headers.contains_key(http::header::AUTHORIZATION),
+            "public health leaked a credential"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn occupied_discord_listener_preserves_live_delivery_claim() -> Result<()> {
+    use crate::{config::DiscordConfig, model::DeliveryOutcome};
+
+    let directory = tempdir()?;
+    let mut state = installation(directory.path())?;
+    accept(&state, "one", "conversation").await?;
+    run_next_turn(&state, "test-runtime", async |_, _, request| {
+        Ok(completed(request))
+    })
+    .await?;
+    let delivery = state
+        .database
+        .claim_delivery("test-interface", "live-instance")?
+        .context("missing delivery")?;
+    let core_listener = TcpListener::bind("127.0.0.1:0").await?;
+    state.config.value.core.listen = core_listener.local_addr()?;
+    let discord_listener = TcpListener::bind("127.0.0.1:0").await?;
+    state.config.value.providers[0].url = format!("http://{}", discord_listener.local_addr()?);
+    state.config.value.discord = Some(DiscordConfig::with_defaults(
+        "test-interface".to_owned(),
+        "test-agent".to_owned(),
+        "1".to_owned(),
+        "2".to_owned(),
+        vec!["3".to_owned()],
+        vec!["4:always:channel".parse()?],
+    ));
+    let router = Router::new()
+        .route("/v1/deliveries/reconcile", post(reconcile_delivery_claims))
+        .with_state(state.clone());
+    let mut services = tokio::task::JoinSet::new();
+    services.spawn(async move { axum::serve(core_listener, router).await });
+    for deterministic in [false, true] {
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            crate::discord::serve(
+                state.config.clone(),
+                &directory.path().join("credentials/test-interface.token"),
+                None,
+                deterministic,
+            ),
+        )
+        .await?
+        .err()
+        .context("occupied Discord port was accepted")?;
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .context("not a bind error")?
+                .kind(),
+            std::io::ErrorKind::AddrInUse
+        );
+    }
+    assert!(state.database.acknowledge_delivery(
+        "test-interface",
+        delivery.id,
+        "live-instance",
+        DeliveryOutcome::Delivered,
+        Some("known-send")
+    )?);
+    Ok(())
+}
+
+#[tokio::test]
 async fn occupied_listener_leaves_accepted_and_running_work_untouched() -> Result<()> {
     let directory = tempdir()?;
     let mut state = installation(directory.path())?;

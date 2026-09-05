@@ -5,7 +5,6 @@
 use std::{
     collections::BTreeMap,
     fs,
-    net::SocketAddr,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::Duration,
@@ -217,6 +216,7 @@ struct Participation {
 
 impl Participation {
     fn load(path: PathBuf) -> Result<Self> {
+        fs::create_dir_all(path.parent().context("participation path has no parent")?)?;
         let state = if path.exists() {
             serde_json::from_slice(&fs::read(&path)?)
                 .with_context(|| format!("parse Discord participation state {}", path.display()))?
@@ -329,6 +329,11 @@ pub async fn serve(
     if !token_matches(&provider.token_hash, &token) {
         bail!("Discord interface provider token does not match configuration");
     }
+    // Establish instance exclusivity before touching provider state or claims.
+    let address = provider.listen_address()?;
+    let listener = TcpListener::bind(address)
+        .await
+        .with_context(|| format!("bind Discord interface provider to {address}"))?;
     let participation = Arc::new(Participation::load(
         config
             .value
@@ -357,11 +362,11 @@ pub async fn serve(
             }
         }
     };
-    let address = provider.listen_address()?;
     let router = discord_router(state.clone(), deterministic);
     if deterministic {
         info!(url = %provider.url, deterministic, "Discord interface provider ready");
-        return serve_component(address, router, "Discord interface provider").await;
+        axum::serve(listener, router).await?;
+        return Ok(());
     }
 
     let discord_token_path = discord_token_file
@@ -384,7 +389,7 @@ pub async fn serve(
     });
     info!(url = %provider.url, deterministic, "Discord interface provider ready");
     tokio::select! {
-        result = serve_component(address, router, "Discord interface provider") => result,
+        result = axum::serve(listener, router).into_future() => result.map_err(Into::into),
         result = gateway_loop(state, discord_token, messages) => {
             result.context("Discord gateway stopped")
         },
@@ -1137,15 +1142,6 @@ fn admit_identity(
     Ok(())
 }
 
-async fn serve_component(address: SocketAddr, router: Router, name: &str) -> Result<()> {
-    let listener = TcpListener::bind(address)
-        .await
-        .with_context(|| format!("bind {name} to {address}"))?;
-    info!(%address, component = name, "component ready");
-    axum::serve(listener, router).await?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1215,7 +1211,9 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let mut state = discord_state(core_client("http://127.0.0.1:1".to_owned()));
         state.participation = Arc::new(Participation::load(
-            directory.path().join("participation.json"),
+            directory
+                .path()
+                .join("components/custom-discord/participation.json"),
         )?);
         let plan = MessagePlan {
             message_id: "200".to_owned(),
@@ -1274,9 +1272,7 @@ mod tests {
             assert_eq!(recovered.event.event_id, "200");
             assert_eq!(recovered.event.delivery_target_id, "200");
             assert_eq!(recovered.event.audience_id, "discord-1-200");
-            state.participation = Arc::new(Participation::load(
-                directory.path().join("participation.json"),
-            )?);
+            state.participation = Arc::new(Participation::load(state.participation.path.clone())?);
             assert_eq!(
                 state.participation.created_thread("200").as_deref(),
                 Some("200")
