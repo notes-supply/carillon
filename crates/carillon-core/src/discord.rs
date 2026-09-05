@@ -641,6 +641,30 @@ async fn create_conversation_thread(http: &DiscordHttp, plan: &MessagePlan) -> R
         .message_id
         .parse::<Id<MessageMarker>>()
         .context("source Discord message ID is invalid")?;
+    // Discord assigns a message-started thread the source message's ID.
+    // Reconcile native state before creating: a previous create may have
+    // succeeded even when its response (or our local persistence) was lost.
+    match http.channel(Id::new(message.get())).await {
+        Ok(response) => {
+            let thread = response
+                .model()
+                .await
+                .context("decode existing Discord thread")?;
+            if thread.id.get() != message.get()
+                || thread.parent_id != Some(channel)
+                || !matches!(
+                    thread.kind,
+                    ChannelType::PublicThread | ChannelType::AnnouncementThread
+                )
+            {
+                bail!("Discord source message does not identify a thread in its route channel");
+            }
+            return Ok(thread.id.to_string());
+        }
+        Err(error) if matches!(error.kind(), DiscordErrorType::Response { status, .. } if *status == DiscordStatusCode::NOT_FOUND) =>
+            {}
+        Err(error) => return Err(error).context("resolve existing Discord conversation thread"),
+    }
     Ok(http
         .create_thread_from_message(channel, message, &thread_title(&plan.content))
         .await
@@ -1183,6 +1207,144 @@ mod tests {
                 state: Mutex::new(ParticipationState::default()),
             }),
         }
+    }
+
+    #[tokio::test]
+    async fn ambiguous_thread_creation_recovers_native_thread_before_retrying() -> anyhow::Result<()>
+    {
+        let directory = tempfile::tempdir()?;
+        let mut state = discord_state(core_client("http://127.0.0.1:1".to_owned()));
+        state.participation = Arc::new(Participation::load(
+            directory.path().join("participation.json"),
+        )?);
+        let plan = MessagePlan {
+            message_id: "200".to_owned(),
+            guild_id: "1".to_owned(),
+            user_id: "2".to_owned(),
+            agent_id: "agent".to_owned(),
+            channel_id: "100".to_owned(),
+            route_channel_id: "100".to_owned(),
+            content: "hello".to_owned(),
+            create_thread: true,
+            adopt_thread: false,
+            native: Value::Null,
+        };
+        let creates = Arc::new(AtomicUsize::new(0));
+        let get_creates = creates.clone();
+        let post_creates = creates.clone();
+        let app = Router::new()
+            .route("/api/v10/channels/200", get(move || {
+                let exists = get_creates.load(Ordering::SeqCst) > 0;
+                async move {
+                    if exists {
+                        Json(serde_json::json!({"id":"200", "type":11, "parent_id":"100"})).into_response()
+                    } else {
+                        (StatusCode::NOT_FOUND, Json(serde_json::json!({"code":10003, "message":"Unknown Channel"}))).into_response()
+                    }
+                }
+            }))
+            .route("/api/v10/channels/100/messages/200/threads", post(move || {
+                let attempt = post_creates.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if attempt == 0 {
+                        // Discord committed the thread, but its successful response is undecodable.
+                        (StatusCode::CREATED, "{broken response").into_response()
+                    } else {
+                        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"code":160_004, "message":"A thread has already been created for this message"}))).into_response()
+                    }
+                }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let http = twilight_http::Client::builder()
+            .token("test-only".to_owned())
+            .proxy(listener.local_addr()?.to_string(), true)
+            .ratelimiter(None)
+            .build();
+        let mut services = tokio::task::JoinSet::new();
+        services.spawn(async move { axum::serve(listener, app).await });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let failure = super::prepare_discord_conversation(&state, &http, plan.clone())
+                .await
+                .err()
+                .context("undecodable create should fail")?;
+            assert!(!super::discord_failure_is_terminal(&failure));
+            assert_eq!(state.participation.created_thread("200"), None);
+            let recovered =
+                super::prepare_discord_conversation(&state, &http, plan.clone()).await?;
+            assert_eq!(recovered.event.event_id, "200");
+            assert_eq!(recovered.event.delivery_target_id, "200");
+            assert_eq!(recovered.event.audience_id, "discord-1-200");
+            state.participation = Arc::new(Participation::load(
+                directory.path().join("participation.json"),
+            )?);
+            assert_eq!(
+                state.participation.created_thread("200").as_deref(),
+                Some("200")
+            );
+            assert_eq!(
+                state.participation.parent_route("200").as_deref(),
+                Some("100")
+            );
+            super::prepare_discord_conversation(&state, &http, plan).await?;
+            assert_eq!(creates.load(Ordering::SeqCst), 1);
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+        services.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn thread_lookup_failures_do_not_speculatively_create() -> anyhow::Result<()> {
+        for status in [StatusCode::FORBIDDEN, StatusCode::SERVICE_UNAVAILABLE] {
+            let creates = Arc::new(AtomicUsize::new(0));
+            let seen = creates.clone();
+            let app = Router::new().fallback(move |method: Method| {
+                if method == Method::POST {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                }
+                async move {
+                    (
+                        status,
+                        Json(serde_json::json!({"code":50001, "message":"Unavailable"})),
+                    )
+                }
+            });
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let http = twilight_http::Client::builder()
+                .token("test-only".to_owned())
+                .proxy(listener.local_addr()?.to_string(), true)
+                .ratelimiter(None)
+                .build();
+            let mut services = tokio::task::JoinSet::new();
+            services.spawn(async move { axum::serve(listener, app).await });
+            let plan = MessagePlan {
+                message_id: "200".to_owned(),
+                guild_id: "1".to_owned(),
+                user_id: "2".to_owned(),
+                agent_id: "agent".to_owned(),
+                channel_id: "100".to_owned(),
+                route_channel_id: "100".to_owned(),
+                content: "hello".to_owned(),
+                create_thread: true,
+                adopt_thread: false,
+                native: Value::Null,
+            };
+            let failure = tokio::time::timeout(
+                Duration::from_secs(3),
+                super::create_conversation_thread(&http, &plan),
+            )
+            .await?
+            .err()
+            .context("lookup should fail")?;
+            assert_eq!(
+                super::discord_failure_is_terminal(&failure),
+                status == StatusCode::FORBIDDEN
+            );
+            assert_eq!(creates.load(Ordering::SeqCst), 0);
+            services.shutdown().await;
+        }
+        Ok(())
     }
 
     #[tokio::test]
