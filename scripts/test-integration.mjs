@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -42,6 +52,7 @@ try {
     String(basePort),
   );
   await testConfigurationRefusals();
+  await testConfigurationSymlinkUpdates();
   await testProviderVersions();
   await startAll();
   for (const authorization of [
@@ -376,6 +387,90 @@ async function testProviderVersions() {
   await stopAll();
 }
 
+async function testConfigurationSymlinkUpdates() {
+  const original = await readFile(configPath(), "utf8");
+  const previousMode = (await stat(configPath())).mode & 0o777;
+  const link = join(workspace, "admin-config.toml");
+  await symlink(configPath(), link);
+  const linkInode = (await lstat(link)).ino;
+  await chmod(configPath(), 0o640);
+  const assertUpdated = async () => {
+    assert.equal((await lstat(link)).ino, linkInode, "CLI must retain the configuration symlink");
+    assert.ok((await lstat(link)).isSymbolicLink());
+    assert.equal((await stat(configPath())).mode & 0o777, 0o640);
+    const canonical = await readFile(configPath(), "utf8");
+    assert.equal(await readFile(link, "utf8"), canonical);
+    assert.match(
+      canonical,
+      /^data_dir = "state"$/mu,
+      "writing must retain installation-relative paths",
+    );
+  };
+  try {
+    for (const enabled of [false, true]) {
+      run("provider", "--config", link, "runtime-pi", enabled ? "enable" : "disable");
+      await assertUpdated();
+      await start("core");
+      const status = JSON.parse(run("status", "--config", configPath()));
+      assert.equal(
+        status.providers.find((provider) => provider.id === "runtime-pi").status,
+        enabled ? "unavailable" : "disabled",
+      );
+      await stop("core");
+    }
+    run(
+      "configure-discord",
+      "--config",
+      link,
+      "--guild-id",
+      "101",
+      "--bot-user-id",
+      "202",
+      "--user-id",
+      "203",
+      "--route",
+      "304:mention:thread",
+    );
+    await assertUpdated();
+    const beforeRefusal = await readFile(configPath(), "utf8");
+    assert.throws(
+      () =>
+        run(
+          "configure-discord",
+          "--config",
+          link,
+          "--guild-id",
+          "invalid",
+          "--bot-user-id",
+          "202",
+          "--user-id",
+          "203",
+          "--route",
+          "304:mention:thread",
+        ),
+      /snowflake/u,
+    );
+    await assertUpdated();
+    assert.equal(await readFile(configPath(), "utf8"), beforeRefusal);
+    // Readiness through the canonical path must observe what the symlink command wrote.
+    await startAll();
+    const denied = await requestSimulation(
+      event("symlink-old-guild", "100", "200", "300", null, "no"),
+    );
+    assert.equal(denied.status, 403);
+    const ignored = await requestSimulation(
+      event("symlink-new-route", "101", "203", "304", null, "no mention"),
+    );
+    assert.equal(ignored.status, 204);
+    assert.deepEqual(JSON.parse(run("recent", "--config", configPath())), []);
+  } finally {
+    await stopAll();
+    await rm(link, { force: true });
+    await writeFile(configPath(), original);
+    await chmod(configPath(), previousMode);
+  }
+}
+
 async function testConfigurationRefusals() {
   const original = await readFile(configPath(), "utf8");
   const runtimeUrl = `http://127.0.0.1:${String(basePort + 2)}`;
@@ -385,6 +480,35 @@ async function testConfigurationRefusals() {
   const database = join(installation, "state/carillon.sqlite3");
   const previousDatabase = await readFile(database);
   try {
+    for (const field of ["operator_token_hash", "token_hash"]) {
+      for (const hash of [
+        "",
+        " ",
+        "a".repeat(63),
+        "a".repeat(65),
+        "A".repeat(64),
+        "g".repeat(64),
+        "é".repeat(32),
+      ]) {
+        const text = original.replace(
+          new RegExp(`^${field} = "[^"]+"`, "mu"),
+          `${field} = "${hash}"`,
+        );
+        assert.notEqual(text, original);
+        await writeFile(configPath(), text);
+        for (const name of ["core", "discord"]) {
+          assertStartupRefused(
+            name,
+            /credential hash must be 64 lowercase hexadecimal characters/u,
+          );
+        }
+        assert.deepEqual(
+          await readFile(database),
+          previousDatabase,
+          "invalid hash must fail before recovery",
+        );
+      }
+    }
     for (const [text, message] of [
       [original.replace(runtimeUrl, interfaceUrl), collision],
       [original.replace(runtimeUrl, `http://${coreAddress}`), collision],

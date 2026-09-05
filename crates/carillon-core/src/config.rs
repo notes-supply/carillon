@@ -254,8 +254,10 @@ impl Config {
         if self.core.listen.port() == 0 {
             bail!("core listen port must be nonzero");
         }
-        if self.core.operator_token_hash.is_empty() {
-            bail!("operator diagnostics credential is not configured");
+        if !valid_token_hash(&self.core.operator_token_hash) {
+            bail!(
+                "operator diagnostics credential hash must be 64 lowercase hexadecimal characters"
+            );
         }
         if self.agent.id.trim().is_empty() {
             bail!("agent identity must not be empty");
@@ -281,8 +283,11 @@ impl Config {
                     provider.id
                 );
             }
-            if provider.token_hash.trim().is_empty() {
-                bail!("provider {} must declare a credential hash", provider.id);
+            if !valid_token_hash(&provider.token_hash) {
+                bail!(
+                    "provider {} credential hash must be 64 lowercase hexadecimal characters",
+                    provider.id
+                );
             }
             if !provider_ids.insert(&provider.id) {
                 bail!("provider ID {} is configured more than once", provider.id);
@@ -417,6 +422,13 @@ fn absolutize(root: &Path, path: &Path) -> PathBuf {
     } else {
         root.join(path)
     }
+}
+
+fn valid_token_hash(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn valid_snowflake(value: &str) -> bool {

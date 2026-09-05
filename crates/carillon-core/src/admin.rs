@@ -225,7 +225,10 @@ fn write_credentials(root: &Path, credentials: &[(&str, &str)]) -> Result<()> {
 
 pub fn set_provider(config_path: &Path, id: &str, enabled: bool) -> Result<()> {
     validate_provider_identity(id)?;
-    let text = fs::read_to_string(config_path)?;
+    let config_path = config_path
+        .canonicalize()
+        .context("resolve configuration path")?;
+    let text = fs::read_to_string(&config_path)?;
     let mut config: Config = toml::from_str(&text)?;
     let provider = config
         .providers
@@ -234,7 +237,7 @@ pub fn set_provider(config_path: &Path, id: &str, enabled: bool) -> Result<()> {
         .with_context(|| format!("provider {id} is not configured"))?;
     provider.enabled = enabled;
     config.validate()?;
-    write_config(config_path, &config)
+    write_config(&config_path, &config)
 }
 
 pub fn configure_discord(
@@ -244,7 +247,10 @@ pub fn configure_discord(
     users: &[String],
     routes: &[DiscordRoute],
 ) -> Result<()> {
-    let text = fs::read_to_string(config_path)?;
+    let config_path = config_path
+        .canonicalize()
+        .context("resolve configuration path")?;
+    let text = fs::read_to_string(&config_path)?;
     let mut config: Config = toml::from_str(&text)?;
     let discord = config
         .discord
@@ -256,7 +262,7 @@ pub fn configure_discord(
     discord.routes = routes.to_vec();
     config.validate()?;
     config.discord()?;
-    write_config(config_path, &config)
+    write_config(&config_path, &config)
 }
 
 fn write_config(config_path: &Path, config: &Config) -> Result<()> {
