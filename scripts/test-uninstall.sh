@@ -174,7 +174,8 @@ for failure in unset stale partial-term partial-kill sync-cleanup marker-kill rm
 done
 
 # A real manager/disable failure or a still-active missing target must not be
-# mistaken for an already-stopped installation. Keep every file for safe retry.
+# mistaken for an already-stopped installation. Even an inherited installer-only
+# skip flag must not bypass shutdown. Keep every file for safe retry.
 for failure in manager-failure disable-failure active-missing reload-failure; do
   install_release "$ROOT"
   case "$failure" in
@@ -184,7 +185,7 @@ for failure in manager-failure disable-failure active-missing reload-failure; do
   cp -a "$UNIT_DIR" "$TEST_ROOT/refusal-units"
   app_inode=$(stat -c %i "$ROOT/app")
   if env HOME="$OWNER_HOME" XDG_CONFIG_HOME="$OWNER_HOME/.config" \
-    CARILLON_HOME="$ROOT" CARILLON_SKIP_SYSTEMD_RELOAD=0 PATH="$COMMANDS:$PATH" \
+    CARILLON_HOME="$ROOT" CARILLON_SKIP_SYSTEMD_RELOAD=1 PATH="$COMMANDS:$PATH" \
     ROOT="$ROOT" FAILURE="$failure" MARKER="$TEST_ROOT/$failure" \
     "$RELEASE/uninstall.sh" >"$TEST_ROOT/refusal.log" 2>&1; then
     echo "uninstall ignored service-manager failure: $failure" >&2
@@ -239,7 +240,8 @@ for helper in "$OWNER_HOME/remove-carillon" "$RELEASE/uninstall.sh"; do
   done
 done
 env HOME="$OWNER_HOME" XDG_CONFIG_HOME="$OWNER_HOME/.config" \
-  CARILLON_SKIP_SYSTEMD_RELOAD=1 "$OWNER_HOME/remove-carillon" >/dev/null
+  PATH="$COMMANDS:$PATH" ROOT="$ROOT" FAILURE=recovery MARKER="$TEST_ROOT/path-recovery" \
+  "$OWNER_HOME/remove-carillon" >/dev/null
 [ ! -e "$ROOT/app" ]
 [ -z "$(find "$UNIT_DIR" -maxdepth 1 -name 'carillon*')" ]
 diff -r --no-dereference "$TEST_ROOT/decoy-before" "$DECOY"

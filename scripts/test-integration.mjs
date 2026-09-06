@@ -683,6 +683,12 @@ async function testConfigurationRefusals() {
         assert.deepEqual(await readFile(database), previousDatabase);
       }
     }
+    for (const id of ["runtime-pi", "discord-private"]) {
+      await writeFile(configPath(), original.replaceAll(`"${id}"`, '"discord-bot"'));
+      for (const name of ["core", "discord", "runtime"])
+        assertStartupRefused(name, /provider ID discord-bot is reserved/u);
+      assert.deepEqual(await readFile(database), previousDatabase);
+    }
     for (const field of ["operator_token_hash", "token_hash"]) {
       for (const hash of [
         "",

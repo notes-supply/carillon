@@ -284,6 +284,7 @@ async fn operator_get<T: DeserializeOwned>(config: &LoadedConfig, url: Url) -> R
     reqwest::Client::new()
         .get(url)
         .bearer_auth(config.credential("operator")?)
+        .timeout(std::time::Duration::from_secs(5))
         .send()
         .await?
         .error_for_status()?
@@ -295,4 +296,62 @@ async fn operator_get<T: DeserializeOwned>(config: &LoadedConfig, url: Url) -> R
 fn print_pretty<T: Serialize>(value: &T) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use anyhow::{Context, Result};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn operator_requests_time_out_on_stalled_headers_and_bodies() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let config_path = crate::admin::initialize(
+            &directory.path().join("installation"),
+            directory.path(),
+            "100",
+            "101",
+            &["200".to_owned()],
+            &["300:always:channel".parse()?],
+            44_000,
+        )?;
+        let config = super::LoadedConfig::load(&config_path)?;
+        for partial_body in [false, true] {
+            // Keep slow diagnostic fixtures away from backup's 127.0.0.1 probes.
+            let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await?;
+            let url = format!("http://{}/v1/status", listener.local_addr()?).parse()?;
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await?;
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(stream.read_u8().await?);
+                }
+                if partial_body {
+                    stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{")
+                        .await?;
+                }
+                // The request deadline must close this connection without a response.
+                let mut remaining = Vec::new();
+                stream.read_to_end(&mut remaining).await?;
+                Ok::<_, std::io::Error>(())
+            });
+            let result = tokio::time::timeout(
+                Duration::from_secs(7),
+                super::operator_get::<serde_json::Value>(&config, url),
+            )
+            .await;
+            server.abort();
+            let error = result?.err().context("stalled diagnostics succeeded")?;
+            assert!(
+                error
+                    .downcast_ref::<reqwest::Error>()
+                    .context("not an HTTP error")?
+                    .is_timeout()
+            );
+        }
+        Ok(())
+    }
 }

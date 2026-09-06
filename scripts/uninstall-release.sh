@@ -34,9 +34,7 @@ is_managed_app "$APP" || {
   # directory). Without the marker, never recurse or remove service definitions.
   if [ ! -L "$APP" ] && { [ ! -e "$APP" ] || rmdir -- "$APP" 2>/dev/null; }; then
     sync -f -- "$CARILLON_HOME"
-    if [ "${CARILLON_SKIP_SYSTEMD_RELOAD:-0}" != "1" ]; then
-      systemctl --user daemon-reload
-    fi
+    systemctl --user daemon-reload
     printf '%s\n' "Application files already removed. Data remains at $CARILLON_HOME."
     exit 0
   fi
@@ -44,17 +42,15 @@ is_managed_app "$APP" || {
   exit 1
 }
 
-if [ "${CARILLON_SKIP_SYSTEMD_RELOAD:-0}" != "1" ]; then
-  if ! systemctl --user disable --now carillon.target; then
-    # An interrupted uninstall can already have removed the definitions. Only
-    # confirmed absence/inactivity permits cleanup; manager/stop failures do not.
-    # Definitions may be gone while the manager still caches the old unit.
-    systemctl --user daemon-reload || exit 1
-    load_state=$(systemctl --user show --property=LoadState --value carillon.target) &&
-      [ "$load_state" = not-found ] &&
-      active_state=$(systemctl --user show --property=ActiveState --value carillon.target) &&
-      [ "$active_state" = inactive ] || exit 1
-  fi
+if ! systemctl --user disable --now carillon.target; then
+  # An interrupted uninstall can already have removed the definitions. Only
+  # confirmed absence/inactivity permits cleanup; manager/stop failures do not.
+  # Definitions may be gone while the manager still caches the old unit.
+  systemctl --user daemon-reload || exit 1
+  load_state=$(systemctl --user show --property=LoadState --value carillon.target) &&
+    [ "$load_state" = not-found ] &&
+    active_state=$(systemctl --user show --property=ActiveState --value carillon.target) &&
+    [ "$active_state" = inactive ] || exit 1
 fi
 for unit in \
   carillon.target \
@@ -76,8 +72,6 @@ sync -f -- "$APP"
 rm -- "$APP/$APP_MARKER"
 rmdir -- "$APP"
 sync -f -- "$CARILLON_HOME"
-if [ "${CARILLON_SKIP_SYSTEMD_RELOAD:-0}" != "1" ]; then
-  systemctl --user daemon-reload
-fi
+systemctl --user daemon-reload
 
 printf '%s\n' "Carillon user services and application files removed. Data remains at $CARILLON_HOME."

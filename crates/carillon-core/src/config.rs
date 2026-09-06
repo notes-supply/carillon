@@ -298,8 +298,11 @@ impl Config {
         let mut listen_addresses = BTreeSet::from([self.core.listen]);
         for provider in &self.providers {
             validate_provider_identity(&provider.id)?;
-            if provider.id == "operator" {
-                bail!("provider ID operator is reserved for operator diagnostics");
+            if matches!(provider.id.as_str(), "operator" | "discord-bot") {
+                bail!(
+                    "provider ID {} is reserved for installation credentials",
+                    provider.id
+                );
             }
             if provider.version.trim().is_empty() {
                 bail!("provider {} must declare a version", provider.id);

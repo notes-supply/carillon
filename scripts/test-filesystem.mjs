@@ -79,8 +79,10 @@ async function testConfiguration() {
     assert.notDeepEqual(updated, original);
     const lines = (await readFile(trace, "utf8")).split("\n");
     const publication = lines.findIndex((line) => line.includes(`, "${config}") = 0`));
+    const temporary = /rename\("([^"]+)",/u.exec(lines[publication])?.[1];
+    assert.ok(temporary);
     const fileSync = lines.findIndex(
-      (line) => line.includes(`/carillon.tmp>`) && line.endsWith("= 0"),
+      (line) => line.includes(`fsync(`) && line.includes(`<${temporary}>`) && line.endsWith("= 0"),
     );
     const parentSync = lines.findIndex(
       (line) => line.includes(`fsync(`) && line.includes(`<${root}>`) && line.endsWith("= 0"),
@@ -119,7 +121,9 @@ async function testConfiguration() {
         .split("\n")
         .filter((line) => line.includes("INJECTED"));
       assert.equal(failures.length, 1);
-      assert.ok(failures[0].includes(published ? `<${root}>` : `/carillon.tmp>`));
+      const syncedPath = /fsync\(\d+<([^>]+)>/u.exec(failures[0])?.[1];
+      assert.ok(syncedPath);
+      assert.equal(published ? syncedPath : dirname(syncedPath), root);
       assert.deepEqual(await readFile(config), published ? updated : original);
       run(...args);
       assert.deepEqual(

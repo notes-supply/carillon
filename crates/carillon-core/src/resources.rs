@@ -194,6 +194,11 @@ fn collect_resource_tree(
                 bail!("resource escaped selected directory: {relative}");
             }
             files.insert(relative, ResourceFile::read(&entry.path())?);
+        } else {
+            bail!(
+                "resource is not a regular file or directory: {}",
+                entry.path().display()
+            );
         }
     }
     Ok(())
@@ -251,6 +256,29 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{materialize, runtime_view};
+
+    #[test]
+    fn snapshots_refuse_unsupported_entries_instead_of_omitting_them() -> anyhow::Result<()> {
+        let source = tempdir()?;
+        let parent = tempdir()?;
+        let store = parent.path().join("snapshots");
+        fs::create_dir(source.path().join("skills"))?;
+        let socket = source.path().join("skills/live.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket)?;
+        let error = materialize(source.path(), &store)
+            .err()
+            .context("socket was omitted")?;
+        assert!(
+            error
+                .to_string()
+                .contains("not a regular file or directory")
+        );
+        assert!(!store.exists());
+        fs::remove_file(socket)?;
+        let snapshot = materialize(source.path(), &store)?;
+        super::validate(&snapshot, &store)?;
+        Ok(())
+    }
 
     #[test]
     fn snapshots_preserve_effective_owner_execution_not_other_bit_slots() -> anyhow::Result<()> {

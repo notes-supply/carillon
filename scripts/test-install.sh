@@ -153,6 +153,14 @@ fi
 [ ! -e "$UNRELATED_ROOT/carillon.toml" ]
 [ ! -e "$UNRELATED_CONFIG_HOME" ]
 
+REGISTER_COMMANDS=$TEST_ROOT/register-commands
+mkdir "$REGISTER_COMMANDS"
+cat >"$REGISTER_COMMANDS/systemctl" <<'SYSTEMCTL'
+#!/bin/sh
+set -eu
+printf '%s\n' "$*" >>"$REGISTER_TRACE"
+SYSTEMCTL
+chmod 0755 "$REGISTER_COMMANDS/systemctl"
 ORDINARY_HOME=$TEST_ROOT/ordinary-home
 ORDINARY_WORKSPACE=$ORDINARY_HOME/workspace
 ORDINARY_ROOT=$ORDINARY_HOME/.carillon
@@ -185,6 +193,7 @@ mv "$ORDINARY_ROOT/app/.carillon-managed.saved" "$ORDINARY_ROOT/app/.carillon-ma
 mv "$ORDINARY_ROOT/app/.carillon-managed" "$ORDINARY_ROOT/app/.carillon-managed.saved"
 if env HOME="$ORDINARY_HOME" XDG_CONFIG_HOME="$ORDINARY_CONFIG_HOME" \
   CARILLON_HOME="$ORDINARY_ROOT" CARILLON_SKIP_SYSTEMD_RELOAD=1 \
+  PATH="$REGISTER_COMMANDS:$PATH" REGISTER_TRACE="$TEST_ROOT/ordinary-uninstall.trace" \
   "$ORDINARY_ROOT/app/bin/carillon-uninstall" >/dev/null 2>&1
 then
   echo "uninstaller removed an application without its ownership marker" >&2
@@ -195,6 +204,7 @@ fi
 mv "$ORDINARY_ROOT/app/.carillon-managed.saved" "$ORDINARY_ROOT/app/.carillon-managed"
 env HOME="$ORDINARY_HOME" XDG_CONFIG_HOME="$ORDINARY_CONFIG_HOME" \
   CARILLON_HOME="$ORDINARY_ROOT" CARILLON_SKIP_SYSTEMD_RELOAD=1 \
+  PATH="$REGISTER_COMMANDS:$PATH" REGISTER_TRACE="$TEST_ROOT/ordinary-uninstall.trace" \
   "$ORDINARY_ROOT/app/bin/carillon-uninstall" >/dev/null
 [ ! -e "$ORDINARY_ROOT/app" ]
 [ ! -e "$ORDINARY_UNIT_DIR/carillon.target" ]
@@ -331,7 +341,10 @@ stop_services
 "$APP/carillon" backup --config "$CONFIG" --output "$TEST_ROOT/registration-backup.tar.gz" >/dev/null
 cp -a "$XDG_CONFIG_HOME/systemd/user" "$TEST_ROOT/source-units"
 env HOME="$OWNER_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" CARILLON_HOME="$CARILLON_HOME" \
+  PATH="$REGISTER_COMMANDS:$PATH" REGISTER_TRACE="$TEST_ROOT/uninstall.trace" \
   CARILLON_SKIP_SYSTEMD_RELOAD=1 "$CARILLON_HOME/app/bin/carillon-uninstall" >/dev/null
+printf '%s\n' '--user disable --now carillon.target' '--user daemon-reload' >"$TEST_ROOT/expected-uninstall"
+cmp "$TEST_ROOT/expected-uninstall" "$TEST_ROOT/uninstall.trace"
 [ ! -e "$CARILLON_HOME/app" ]
 [ ! -e "$XDG_CONFIG_HOME/systemd/user/carillon.target" ]
 [ "$(cat "$OWNER_HOME/unrelated")" = unrelated-owner-file ]
@@ -341,14 +354,6 @@ env HOME="$OWNER_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" CARILLON_HOME="$CARILL
 # Remove access through the original installation path. Restored registration
 # uses only archived packaged content, never the release installer or checkout.
 mv "$CARILLON_HOME" "$OWNER_HOME/uninstalled-source"
-REGISTER_COMMANDS=$TEST_ROOT/register-commands
-mkdir "$REGISTER_COMMANDS"
-cat >"$REGISTER_COMMANDS/systemctl" <<'SYSTEMCTL'
-#!/bin/sh
-set -eu
-printf '%s\n' "$*" >>"$REGISTER_TRACE"
-SYSTEMCTL
-chmod 0755 "$REGISTER_COMMANDS/systemctl"
 for previous in fresh existing symlink; do
   if [ "$previous" != existing ]; then
     RESTORE_HOME=$TEST_ROOT/restored-$previous-owner

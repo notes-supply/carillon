@@ -533,15 +533,18 @@ fn absolute_destination(path: &Path) -> Result<PathBuf> {
 }
 
 fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
-    let temporary = path.with_extension("tmp");
-    fs::write(&temporary, bytes)?;
-    fs::set_permissions(&temporary, fs::Permissions::from_mode(mode))?;
-    fs::File::open(&temporary)?.sync_all()?;
-    fs::rename(temporary, path)?;
     let parent = path
         .parent()
-        .filter(|parent| !parent.as_os_str().is_empty());
-    fs::File::open(parent.unwrap_or(Path::new(".")))?.sync_all()?;
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary
+        .as_file()
+        .set_permissions(fs::Permissions::from_mode(mode))?;
+    temporary.write_all(bytes)?;
+    temporary.as_file().sync_all()?;
+    fs::rename(temporary.path(), path)?;
+    fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
 
@@ -586,6 +589,47 @@ mod tests {
             &[route()],
             base_port,
         )
+    }
+
+    #[test]
+    fn configuration_edits_preserve_unrelated_temporary_siblings() -> Result<()> {
+        let directory = tempdir()?;
+        let root = directory.path().join("installation");
+        let config = initialize_test_installation(&root, directory.path(), 44_000)?;
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o640))?;
+        let sibling = config.with_extension("tmp");
+        let external = directory.path().join("unrelated");
+        fs::write(&external, "owner data")?;
+        for linked in [false, true] {
+            if linked {
+                symlink(&external, &sibling)?;
+            } else {
+                fs::write(&sibling, "owner data")?;
+            }
+            set_provider(&config, "runtime-pi", false)?;
+            super::configure_discord(&config, "100", "101", &["201".to_owned()], &[route()])?;
+            let loaded = LoadedConfig::load(&config)?;
+            assert!(
+                !loaded
+                    .provider("runtime-pi", ProviderRole::Runtime)?
+                    .enabled
+            );
+            assert_eq!(
+                loaded
+                    .value
+                    .discord
+                    .context("missing Discord config")?
+                    .allowed_user_ids,
+                ["201"]
+            );
+            assert_eq!(fs::read_to_string(&sibling)?, "owner data");
+            assert_eq!(fs::read_to_string(&external)?, "owner data");
+            assert_eq!(fs::symlink_metadata(&sibling)?.is_symlink(), linked);
+            assert!(!fs::symlink_metadata(&config)?.is_symlink());
+            assert_eq!(fs::metadata(&config)?.permissions().mode() & 0o777, 0o640);
+            fs::remove_file(&sibling)?;
+        }
+        Ok(())
     }
 
     #[test]
