@@ -90,7 +90,7 @@ cleanup_staging() {
     if [ "$CLEANUP_APP_NEW" -eq 1 ]; then
       rm -rf -- "$APP_NEW"
     else
-      echo "application publication unconfirmed; inspect $APP and retained tree $APP_NEW; rerun installer before restarting" >&2
+      echo "installation incomplete; inspect $APP and retained tree $APP_NEW; rerun installer before restarting" >&2
     fi
   fi
 }
@@ -122,31 +122,14 @@ else
   APP_NEW=
 fi
 sync -f -- "$CARILLON_HOME"
-CLEANUP_APP_NEW=1
 [ -e "$CARILLON_HOME/credentials/discord-bot.token" ] || install -m 0600 /dev/null "$CARILLON_HOME/credentials/discord-bot.token"
 chmod 0700 "$CARILLON_HOME" "$CARILLON_HOME/credentials" "$CARILLON_HOME/pi" "$CARILLON_HOME/logs"
 chmod 0600 "$CARILLON_HOME/carillon.toml" "$CARILLON_HOME/credentials"/*.token
 
-if "$APP/bin/carillon-register-services"; then
-  :
-else
-  registration_result=$?
-  if [ "$registration_result" -eq 10 ] && [ -n "$APP_NEW" ]; then
-    # The helper confirmed the old definitions are intact. Select their old
-    # application too; never infer rollback safety from an arbitrary failure.
-    CLEANUP_APP_NEW=0
-    if mv --exchange --no-copy -T -- "$APP_NEW" "$APP" && sync -f -- "$CARILLON_HOME"; then
-      CLEANUP_APP_NEW=1
-      echo "service registration failed; previous application and units restored" >&2
-    else
-      echo "application rollback durability unconfirmed; inspect $APP and retained tree $APP_NEW before restarting" >&2
-    fi
-  elif [ -n "$APP_NEW" ]; then
-    echo "service registration did not confirm rollback; new application remains selected, previous tree retained at $APP_NEW; rerun installer before restarting" >&2
-    APP_NEW=
-  fi
-  exit 1
-fi
+# Retain the previous application until registration succeeds. On any failure,
+# leave the selected complete application in place and require a successful rerun.
+"$APP/bin/carillon-register-services"
+CLEANUP_APP_NEW=1
 cat <<EOF
 Carillon installed for $OWNER at $CARILLON_HOME and enabled for this user's service manager.
 1. Put the Discord bot token in $CARILLON_HOME/credentials/discord-bot.token (mode 0600).

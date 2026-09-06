@@ -35,7 +35,17 @@ run = [
 [tasks."test:integration"]
 description = "Test local core, Discord, and Pi services together"
 depends = ["install"]
-run = "cargo build --locked --bin carillon && node scripts/test-integration.mjs && node scripts/test-filesystem.mjs resources target/debug/carillon"
+run = "cargo build --locked --bin carillon && node scripts/test-integration.mjs"
+
+[tasks."test:persistence"]
+description = "Run Linux syscall fault-injection tests against packaged binaries"
+depends = ["package"]
+run = """
+version=$(bun -e 'import manifest from "./crates/carillon-core/Cargo.toml"; console.log(manifest.package.version)')
+release="target/package/carillon-$version"
+node scripts/test-filesystem.mjs init "$release"
+node scripts/test-filesystem.mjs resources "$release/bin/carillon"
+"""
 
 [tasks.package]
 description = "Build a toolchain-free Linux release archive"

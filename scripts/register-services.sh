@@ -2,43 +2,19 @@
 set -eu
 umask 077
 
-# Exit 10 means registration failed with previous unit definitions intact.
-# Other failures are ambiguous or occur after publication; callers must not
-# select an older application on that evidence alone.
+# Keep recovery copies after a publication attempt; a successful rerun is the
+# recovery procedure. Application selection and systemd are not one transaction.
 UNIT_STAGE=
 PUBLICATION_STARTED=0
-UNITS_PUBLISHED=0
 cleanup_staging() {
   result=$?
-  if [ "$result" -ne 0 ] && [ "$UNITS_PUBLISHED" -eq 0 ]; then
-    result=10
-    if [ "$PUBLICATION_STARTED" -eq 1 ]; then
-      for template in "$SOURCE"/systemd/*; do
-        name=$(basename "$template")
-        # A missing staged definition has already been published.
-        [ ! -e "$UNIT_STAGE/new/$name" ] || continue
-        if [ -e "$UNIT_STAGE/old/$name" ] || [ -L "$UNIT_STAGE/old/$name" ]; then
-          # Keep the backup until restoration itself is durably confirmed.
-          if cp -Pp -- "$UNIT_STAGE/old/$name" "$UNIT_STAGE/new/$name"; then
-            mv -T -- "$UNIT_STAGE/new/$name" "$UNIT_DIR/$name" || result=1
-          else
-            result=1
-          fi
-        else
-          rm -f -- "$UNIT_DIR/$name" || result=1
-        fi
-      done
-      sync -f -- "$UNIT_DIR" || result=1
-      if [ "$result" -ne 10 ]; then
-        echo "unit restoration unconfirmed; retained backups at $UNIT_STAGE" >&2
-        UNIT_STAGE=
-      fi
+  if [ -n "$UNIT_STAGE" ]; then
+    if [ "$result" -ne 0 ] && [ "$PUBLICATION_STARTED" -eq 1 ]; then
+      echo "service registration failed; retained backups at $UNIT_STAGE; rerun registration before restarting" >&2
+    else
+      rm -rf -- "$UNIT_STAGE"
     fi
-  elif [ "$result" -ne 0 ] && [ -n "$UNIT_STAGE" ]; then
-    echo "unit publication or registration unconfirmed; retained backups at $UNIT_STAGE; rerun registration before restarting" >&2
-    UNIT_STAGE=
   fi
-  [ -z "$UNIT_STAGE" ] || rm -rf -- "$UNIT_STAGE"
   exit "$result"
 }
 trap cleanup_staging EXIT
@@ -80,7 +56,7 @@ ROOT_UNIT=$(sed_replacement "$(unit_escape "$CARILLON_HOME")")
 SHELL_UNIT=$(sed_replacement "$(unit_escape "$OWNER_SHELL")")
 PATH_UNIT=$(sed_replacement "$(unit_escape "$OWNER_PATH")")
 # Render and set modes before touching any live unit. Keep staging on the same
-# filesystem so publication and restoration each replace a definition atomically.
+# filesystem so each definition is published as a complete file.
 UNIT_STAGE=$(mktemp -d "$UNIT_DIR/.carillon-units.XXXXXX")
 mkdir "$UNIT_STAGE/new" "$UNIT_STAGE/old"
 for template in "$SOURCE"/systemd/*; do
@@ -104,13 +80,9 @@ sync -f -- "$UNIT_STAGE"
 PUBLICATION_STARTED=1
 for template in "$SOURCE"/systemd/*; do
   name=$(basename "$template")
-  if ! mv -T -- "$UNIT_STAGE/new/$name" "$UNIT_DIR/$name"; then
-    echo "failed to publish unit: $UNIT_DIR/$name; restoring previous definitions" >&2
-    exit 1
-  fi
+  mv -T -- "$UNIT_STAGE/new/$name" "$UNIT_DIR/$name"
 done
-UNITS_PUBLISHED=1
-# A complete publication is not rolled back merely because its barrier fails.
+# A barrier failure does not undo a published definition.
 sync -f -- "$UNIT_DIR"
 
 if [ "${CARILLON_SKIP_SYSTEMD_RELOAD:-0}" != "1" ]; then

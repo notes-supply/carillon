@@ -68,7 +68,13 @@ mise run test:install
 
 This builds the package, installs it into a temporary home, and tests permissions, configuration, packaged service startup, continuation, and safe uninstallation. It validates generated systemd units but launches the test processes directly.
 
-The integration and install tasks also require Linux `strace` with syscall injection support. They verify sync ordering and error/retry behavior for resource snapshots, restored installations, and Discord thread participation, and interrupt initialization and restore at real publication boundaries. Post-rename failures may leave a complete new tree selected; the tests do not assume that a committed publication rolls back. These tests use only temporary installations; they do not simulate a physical power cut.
+For filesystem publication or persistence-barrier changes—and before a release—run:
+
+```sh
+mise run test:persistence
+```
+
+This selects the extended Linux `strace` syscall-injection suite for initialization, restore, configuration writes, resource snapshots, and Discord thread participation. It checks sync ordering and error/retry behavior at real publication boundaries, not physical power cuts. Post-rename failures may leave a complete new tree selected. The install task separately retains representative maintenance failure/retry tests and requires `strace` for its uninstall interruption checks. All of these tests use temporary installations.
 
 During iteration, run the tests affected by the change. Run `check` before submitting code changes; package/install verification is not required after every small edit.
 
