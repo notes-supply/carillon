@@ -1,0 +1,7 @@
+[Unit]
+Description=Carillon personal agent
+Wants=carillon-core.service carillon-runtime-pi.service carillon-discord.service
+After=network-online.target
+
+[Install]
+WantedBy=default.target

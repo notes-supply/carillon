@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = ["crates/carillon-core"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.98"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+warnings = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+future_incompatible = { level = "deny", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+allow_attributes = "deny"
