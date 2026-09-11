@@ -41,13 +41,13 @@ A future runtime can use different native state and features. Runtime replacemen
 ## Operation lifecycle
 
 1. An interface provider authenticates and admits an external event.
-2. Core transactionally records the event and a queued turn, then returns a queued receipt.
+2. Core durably records the accepted event as a queued turn, capturing the current agent resources, then returns a queued receipt.
 3. Core runs a worker for each enabled runtime, including non-default owners of accepted work. Each claims its next eligible turn and marks it running.
 4. The runtime attempts execution. Carillon does not guarantee exactly-once model or tool side effects.
 5. On success, core atomically stores completed output, the continuation reference, and a delivery intent.
 6. The interface provider claims and sends that delivery, then records delivered or uncertain status.
 
-If the runtime call or completion commit has an ambiguous outcome, the turn becomes uncertain. On startup, any turn still marked running becomes uncertain. Carillon does not infer that it is safe to repeat model work.
+If the runtime call or completion commit has an ambiguous outcome, the turn becomes uncertain. Each outcome is recorded once; if core cannot record it, the turn stays running, which blocks only its conversation, and the next core start records it as uncertain. On startup, any turn still marked running becomes uncertain. Carillon does not infer that it is safe to repeat model work.
 
 An uncertain turn blocks later turns for the same interface, agent, and audience, but does not block unrelated conversations. An operator can explicitly retry or skip it.
 

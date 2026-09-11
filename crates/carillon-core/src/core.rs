@@ -6,7 +6,7 @@ mod tests;
 
 use std::{path::PathBuf, time::Duration};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context as _, Result, anyhow};
 use axum::{
     Json, Router,
     extract::{Path as AxumPath, Query, State},
@@ -245,38 +245,28 @@ async fn run_next_turn(
             .map_err(TurnFailure::Uncertain)
     }
     .await;
+    // Each outcome is written once. If that write fails, the turn stays
+    // `running`, which blocks only its conversation and is never claimed
+    // again; startup recovery then records it as uncertain.
     match outcome {
-        Ok(()) => {}
+        Ok(()) => Ok(WorkerStep::Advanced),
         Err(TurnFailure::Retry(failure)) => {
-            persist_outcome(&turn, "turn requeue", || state.database.requeue_turn(&turn)).await;
+            state
+                .database
+                .requeue_turn(&turn)
+                .with_context(|| format!("requeue turn {}", turn.turn_id))?;
             warn!(turn_id = %turn.turn_id, error = %failure, "runtime was unavailable; turn requeued");
-            return Ok(WorkerStep::Backoff);
+            Ok(WorkerStep::Backoff)
         }
         Err(TurnFailure::Uncertain(failure)) => {
             let message = failure.to_string();
-            persist_outcome(&turn, "uncertain turn record", || {
-                state.database.mark_uncertain(&turn, &message)
-            })
-            .await;
+            state
+                .database
+                .mark_uncertain(&turn, &message)
+                .with_context(|| format!("record uncertain outcome of turn {}", turn.turn_id))?;
             warn!(turn_id = %turn.turn_id, error = %message, "runtime outcome is uncertain");
+            Ok(WorkerStep::Advanced)
         }
-    }
-    Ok(WorkerStep::Advanced)
-}
-
-/// Retries a local outcome write until it lands. Giving up would either lose
-/// the uncertainty marker or rerun claimed work after a restart, so the
-/// worker waits out transient storage failures instead. The operations behind
-/// this are idempotent, so a commit whose acknowledgement was lost is safe.
-async fn persist_outcome(turn: &ClaimedTurn, action: &str, mut write: impl FnMut() -> Result<()>) {
-    while let Err(failure) = write() {
-        warn!(
-            turn_id = %turn.turn_id,
-            action,
-            error = %failure,
-            "retrying turn outcome persistence"
-        );
-        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -298,7 +288,9 @@ fn runtime_request(state: &AppState, turn: &ClaimedTurn) -> Result<RuntimeTurnRe
         audience_id: turn.audience_id.clone(),
         input: turn.input.clone(),
         continuation_ref,
-        resources: resources::runtime_view(&turn.resources, &state.snapshot_store()),
+        resource_root: resources::root(&state.snapshot_store(), &turn.resource_snapshot_id)
+            .display()
+            .to_string(),
     })
 }
 

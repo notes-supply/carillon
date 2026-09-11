@@ -128,26 +128,6 @@ pub struct EventReceipt {
     pub duplicate: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct ResourceSnapshot {
-    pub id: String,
-    pub system_sha256: String,
-    pub context_sha256: String,
-    pub settings_sha256: String,
-    pub extensions_sha256: String,
-    pub skills_sha256: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct RuntimeResources {
-    pub root: String,
-    pub system_sha256: String,
-    pub context_sha256: String,
-    pub settings_sha256: String,
-    pub extensions_sha256: String,
-    pub skills_sha256: String,
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SelectedProvider {
     pub id: String,
@@ -164,7 +144,9 @@ pub struct RuntimeTurnRequest {
     pub audience_id: String,
     pub input: String,
     pub continuation_ref: Option<String>,
-    pub resources: RuntimeResources,
+    /// The captured resource snapshot the turn was accepted with, as a
+    /// directory the runtime reads in place.
+    pub resource_root: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -204,7 +186,7 @@ pub struct TurnInspection {
     pub state: TurnState,
     pub output: Option<String>,
     pub providers: Value,
-    pub resources: ResourceSnapshot,
+    pub resource_snapshot_id: String,
     pub delivery_state: Option<DeliveryState>,
     pub delivery_native_ref: Option<String>,
     pub error: Option<String>,
@@ -215,7 +197,7 @@ pub struct TurnSummary {
     pub turn_id: String,
     pub event_id: String,
     pub state: TurnState,
-    pub started_at: i64,
+    pub accepted_at: i64,
     pub delivery_state: Option<DeliveryState>,
 }
 

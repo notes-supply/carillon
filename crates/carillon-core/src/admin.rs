@@ -1018,11 +1018,11 @@ mod tests {
 
     fn damage_captured_resources(
         config: &LoadedConfig,
-        snapshot: &crate::model::ResourceSnapshot,
+        snapshot: &str,
         damage: &str,
     ) -> Result<()> {
         let store = config.value.data_dir.join("resource-snapshots");
-        let captured_root = store.join(&snapshot.id);
+        let captured_root = store.join(snapshot);
         match damage {
             "missing" => fs::rename(&captured_root, store.join("unreferenced"))?,
             "content" => {
@@ -1035,18 +1035,13 @@ mod tests {
                 fs::Permissions::from_mode(0o550),
             )?,
             _ => {
-                let mut record = serde_json::to_value(snapshot)?;
-                match damage {
-                    "hash" => record["context_sha256"] = serde_json::json!("0".repeat(64)),
-                    "address" => record["id"] = serde_json::json!("../outside"),
-                    "malformed" => record = serde_json::json!({}),
+                let recorded = match damage {
+                    "address" => "../outside",
+                    "malformed" => "",
                     _ => unreachable!(),
-                }
+                };
                 rusqlite::Connection::open(config.value.data_dir.join("carillon.sqlite3"))?
-                    .execute(
-                        "UPDATE turns SET resource_snapshot_json = ?1",
-                        [serde_json::to_string(&record)?],
-                    )?;
+                    .execute("UPDATE turns SET resource_snapshot_id = ?1", [recorded])?;
             }
         }
         Ok(())
@@ -1061,14 +1056,7 @@ mod tests {
         };
 
         for uncertain in [false, true] {
-            for damage in [
-                "missing",
-                "content",
-                "executable",
-                "hash",
-                "address",
-                "malformed",
-            ] {
+            for damage in ["missing", "content", "executable", "address", "malformed"] {
                 let directory = tempdir()?;
                 let source = directory.path().join("source");
                 let config_path = initialize_test_installation(&source, directory.path(), 44_800)?;
@@ -1145,7 +1133,7 @@ mod tests {
                         fs::read(
                             target
                                 .join("state/resource-snapshots")
-                                .join(&snapshot.id)
+                                .join(&snapshot)
                                 .join("SYSTEM.md")
                         )?,
                         super::DEFAULT_SYSTEM.as_bytes()

@@ -13,14 +13,17 @@
 //!
 //! Invariants:
 //!
+//! - One accepted event is one turn row, keyed by (interface, event); the row
+//!   carries what the event said and what happened to it.
 //! - Turns in one conversation (interface, agent, audience) run in acceptance
 //!   order, and an unfinished earlier turn — queued, running, or uncertain —
-//!   blocks later ones. Unrelated conversations proceed independently.
+//!   blocks later ones. Unrelated conversations proceed independently. The
+//!   conversation's current continuation is its latest completed turn's.
 //! - A delivery row exists exactly when its turn left `running`; completion
 //!   output, the continuation reference, and the delivery intent commit in one
 //!   transaction.
-//! - Transitions are guarded conditional updates, so a stale caller fails
-//!   instead of overwriting newer state.
+//! - Transitions are guarded conditional updates that succeed exactly once, so
+//!   a stale caller fails instead of overwriting newer state.
 
 use std::{
     path::{Path, PathBuf},
@@ -36,8 +39,8 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::model::{
-    Delivery, DeliveryOutcome, DeliveryState, EventReceipt, ExternalEvent, ResourceSnapshot,
-    RuntimeTurnResponse, StateCounts, TurnInspection, TurnState, TurnSummary,
+    Delivery, DeliveryOutcome, DeliveryState, EventReceipt, ExternalEvent, RuntimeTurnResponse,
+    StateCounts, TurnInspection, TurnState, TurnSummary,
 };
 
 #[derive(Clone)]
@@ -57,7 +60,7 @@ pub struct ClaimedTurn {
     pub target_id: String,
     pub feedback_target_id: String,
     pub input: String,
-    pub resources: ResourceSnapshot,
+    pub resource_snapshot_id: String,
 }
 
 impl FromSql for TurnState {
@@ -141,10 +144,9 @@ impl Database {
         let connection =
             Connection::open_with_flags(&self.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         let mut statement =
-            connection.prepare("SELECT DISTINCT resource_snapshot_json FROM turns")?;
-        for record in statement.query_map([], |row| row.get::<_, String>(0))? {
-            let snapshot: ResourceSnapshot = serde_json::from_str(&record?)?;
-            crate::resources::validate(&snapshot, store)
+            connection.prepare("SELECT DISTINCT resource_snapshot_id FROM turns")?;
+        for id in statement.query_map([], |row| row.get::<_, String>(0))? {
+            crate::resources::validate(&id?, store)
                 .context("backup has missing or altered captured resources")?;
         }
         Ok(())
@@ -152,7 +154,9 @@ impl Database {
 
     fn initialize_connection(connection: &Connection) -> Result<()> {
         connection.execute_batch(
-            "CREATE TABLE IF NOT EXISTS events (
+            "CREATE TABLE IF NOT EXISTS turns (
+                acceptance_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                id TEXT NOT NULL UNIQUE,
                 interface_id TEXT NOT NULL,
                 event_id TEXT NOT NULL,
                 agent_id TEXT NOT NULL,
@@ -162,39 +166,19 @@ impl Database {
                 feedback_target_id TEXT NOT NULL,
                 input TEXT NOT NULL,
                 native_json TEXT NOT NULL,
-                accepted_at INTEGER NOT NULL,
-                PRIMARY KEY(interface_id, event_id)
-            );
-            CREATE TABLE IF NOT EXISTS turns (
-                acceptance_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                id TEXT NOT NULL UNIQUE,
-                interface_id TEXT NOT NULL,
-                event_id TEXT NOT NULL,
-                agent_id TEXT NOT NULL,
-                audience_id TEXT NOT NULL,
-                user_id TEXT NOT NULL,
                 runtime_id TEXT NOT NULL,
-                state TEXT NOT NULL,
                 provider_snapshot_json TEXT NOT NULL,
-                resource_snapshot_json TEXT NOT NULL,
+                resource_snapshot_id TEXT NOT NULL,
+                state TEXT NOT NULL,
                 output TEXT,
+                continuation_ref TEXT,
                 error TEXT,
-                started_at INTEGER NOT NULL,
+                accepted_at INTEGER NOT NULL,
                 finished_at INTEGER,
-                UNIQUE(interface_id, event_id),
-                FOREIGN KEY(interface_id, event_id) REFERENCES events(interface_id, event_id)
+                UNIQUE(interface_id, event_id)
             );
             CREATE INDEX IF NOT EXISTS turns_conversation
                 ON turns(interface_id, agent_id, audience_id, acceptance_sequence);
-            CREATE TABLE IF NOT EXISTS continuations (
-                interface_id TEXT NOT NULL,
-                agent_id TEXT NOT NULL,
-                audience_id TEXT NOT NULL,
-                runtime_id TEXT NOT NULL,
-                native_ref TEXT NOT NULL,
-                updated_at INTEGER NOT NULL,
-                PRIMARY KEY(interface_id, agent_id, audience_id, runtime_id)
-            );
             CREATE TABLE IF NOT EXISTS deliveries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 turn_id TEXT NOT NULL UNIQUE,
@@ -231,15 +215,15 @@ impl Database {
         conversation_runtime(&self.connect()?, interface_id, event)
     }
 
-    /// Records an admitted event and its queued turn, or returns the receipt
-    /// of the turn a previous submission of the same event already created.
+    /// Records an admitted event as a queued turn, or returns the receipt of
+    /// the turn a previous submission of the same event already created.
     pub fn accept_event(
         &self,
         interface_id: &str,
         runtime_id: &str,
         event: &ExternalEvent,
         providers: &Value,
-        resources: &ResourceSnapshot,
+        resource_snapshot_id: &str,
     ) -> Result<EventReceipt> {
         let mut connection = self.connect()?;
         let transaction = write_transaction(&mut connection)?;
@@ -254,12 +238,13 @@ impl Database {
             bail!("conversation is owned by runtime {owner}, not {runtime_id}");
         }
         let turn_id = uuid::Uuid::now_v7().to_string();
-        let now = timestamp()?;
         transaction.execute(
-            "INSERT INTO events(interface_id, event_id, agent_id, audience_id, user_id, target_id,
-                 feedback_target_id, input, native_json, accepted_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO turns(id, interface_id, event_id, agent_id, audience_id, user_id,
+                 target_id, feedback_target_id, input, native_json, runtime_id,
+                 provider_snapshot_json, resource_snapshot_id, state, accepted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'queued', ?14)",
             params![
+                turn_id,
                 interface_id,
                 event.event_id,
                 event.agent_id,
@@ -269,24 +254,10 @@ impl Database {
                 event.feedback_target_id,
                 event.content,
                 serde_json::to_string(&event.native)?,
-                now,
-            ],
-        )?;
-        transaction.execute(
-            "INSERT INTO turns(id, interface_id, event_id, agent_id, audience_id, user_id,
-                 runtime_id, state, provider_snapshot_json, resource_snapshot_json, started_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'queued', ?8, ?9, ?10)",
-            params![
-                turn_id,
-                interface_id,
-                event.event_id,
-                event.agent_id,
-                event.audience_id,
-                event.user_id,
                 runtime_id,
                 serde_json::to_string(providers)?,
-                serde_json::to_string(resources)?,
-                now,
+                resource_snapshot_id,
+                timestamp()?,
             ],
         )?;
         transaction.commit()?;
@@ -307,11 +278,10 @@ impl Database {
         let transaction = write_transaction(&mut connection)?;
         let turn = transaction
             .query_row(
-                "SELECT t.id, t.interface_id, t.agent_id, t.audience_id, t.runtime_id,
-                        e.target_id, e.feedback_target_id, e.input, t.resource_snapshot_json
+                "SELECT id, interface_id, agent_id, audience_id, runtime_id,
+                        target_id, feedback_target_id, input, resource_snapshot_id
                  FROM turns t
-                 JOIN events e ON e.interface_id = t.interface_id AND e.event_id = t.event_id
-                 WHERE t.runtime_id = ?1 AND t.state = 'queued'
+                 WHERE runtime_id = ?1 AND state = 'queued'
                    AND NOT EXISTS (
                      SELECT 1 FROM turns earlier
                      WHERE earlier.interface_id = t.interface_id
@@ -320,7 +290,7 @@ impl Database {
                        AND earlier.state IN ('queued', 'running', 'uncertain')
                        AND earlier.acceptance_sequence < t.acceptance_sequence
                    )
-                 ORDER BY t.acceptance_sequence LIMIT 1",
+                 ORDER BY acceptance_sequence LIMIT 1",
                 [runtime_id],
                 |row| {
                     Ok(ClaimedTurn {
@@ -332,7 +302,7 @@ impl Database {
                         target_id: row.get(5)?,
                         feedback_target_id: row.get(6)?,
                         input: row.get(7)?,
-                        resources: json_column(row, 8)?,
+                        resource_snapshot_id: row.get(8)?,
                     })
                 },
             )
@@ -352,20 +322,17 @@ impl Database {
         Ok(Some(turn))
     }
 
-    /// The continuation reference the last completed turn of this conversation
-    /// left for its runtime, if any.
+    /// The continuation reference the latest completed turn of this
+    /// conversation left for its runtime, if any.
     pub fn continuation(&self, turn: &ClaimedTurn) -> Result<Option<String>> {
         Ok(self
             .connect()?
             .query_row(
-                "SELECT native_ref FROM continuations
-                 WHERE interface_id = ?1 AND agent_id = ?2 AND audience_id = ?3 AND runtime_id = ?4",
-                params![
-                    turn.interface_id,
-                    turn.agent_id,
-                    turn.audience_id,
-                    turn.runtime_id
-                ],
+                "SELECT continuation_ref FROM turns
+                 WHERE interface_id = ?1 AND agent_id = ?2 AND audience_id = ?3
+                   AND state = 'completed'
+                 ORDER BY acceptance_sequence DESC LIMIT 1",
+                params![turn.interface_id, turn.agent_id, turn.audience_id],
                 |row| row.get(0),
             )
             .optional()?)
@@ -378,27 +345,19 @@ impl Database {
         let transaction = write_transaction(&mut connection)?;
         let now = timestamp()?;
         let changed = transaction.execute(
-            "UPDATE turns SET state = 'completed', output = ?3, finished_at = ?4
+            "UPDATE turns SET state = 'completed', output = ?3, continuation_ref = ?4, finished_at = ?5
              WHERE id = ?1 AND runtime_id = ?2 AND state = 'running'",
-            params![turn.turn_id, turn.runtime_id, response.output, now],
+            params![
+                turn.turn_id,
+                turn.runtime_id,
+                response.output,
+                response.continuation_ref,
+                now
+            ],
         )?;
         if changed != 1 {
             bail!("turn {} was not running", turn.turn_id);
         }
-        transaction.execute(
-            "INSERT INTO continuations(interface_id, agent_id, audience_id, runtime_id, native_ref, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(interface_id, agent_id, audience_id, runtime_id)
-             DO UPDATE SET native_ref = excluded.native_ref, updated_at = excluded.updated_at",
-            params![
-                turn.interface_id,
-                turn.agent_id,
-                turn.audience_id,
-                turn.runtime_id,
-                response.continuation_ref,
-                now,
-            ],
-        )?;
         enqueue_delivery(&transaction, turn, &response.output, now)?;
         transaction.commit()?;
         Ok(())
@@ -406,10 +365,6 @@ impl Database {
 
     /// Records that the outcome of a running turn cannot be proven, and queues
     /// a delivery telling the conversation so.
-    ///
-    /// Idempotent for the worker's persist-until-recorded retry loop. A retry
-    /// also succeeds when the preceding completion write actually committed;
-    /// any other state remains an invariant violation.
     pub fn mark_uncertain(&self, turn: &ClaimedTurn, error: &str) -> Result<()> {
         let mut connection = self.connect()?;
         let transaction = write_transaction(&mut connection)?;
@@ -419,43 +374,29 @@ impl Database {
              WHERE id = ?1 AND runtime_id = ?2 AND state = 'running'",
             params![turn.turn_id, turn.runtime_id, error, now],
         )?;
-        if changed == 1 {
-            enqueue_delivery(
-                &transaction,
-                turn,
-                "I could not determine whether that turn completed. I will not run it again automatically.",
-                now,
-            )?;
-        } else if !matches!(
-            turn_state(&transaction, &turn.turn_id, &turn.runtime_id)?,
-            Some(TurnState::Uncertain | TurnState::Completed)
-        ) {
-            bail!(
-                "turn {} was not running, uncertain, or already completed",
-                turn.turn_id
-            );
+        if changed != 1 {
+            bail!("turn {} was not running", turn.turn_id);
         }
+        enqueue_delivery(
+            &transaction,
+            turn,
+            "I could not determine whether that turn completed. I will not run it again automatically.",
+            now,
+        )?;
         transaction.commit()?;
         Ok(())
     }
 
     /// Returns a running turn to the queue. Only valid when the runtime
-    /// provably never received the work. A retry succeeds only when the same
-    /// transition already committed.
+    /// provably never received the work.
     pub fn requeue_turn(&self, turn: &ClaimedTurn) -> Result<()> {
-        let mut connection = self.connect()?;
-        let transaction = write_transaction(&mut connection)?;
-        let changed = transaction.execute(
-            "UPDATE turns SET state = 'queued', error = NULL, finished_at = NULL
-             WHERE id = ?1 AND runtime_id = ?2 AND state = 'running'",
+        let changed = self.connect()?.execute(
+            "UPDATE turns SET state = 'queued' WHERE id = ?1 AND runtime_id = ?2 AND state = 'running'",
             params![turn.turn_id, turn.runtime_id],
         )?;
-        if changed == 0
-            && turn_state(&transaction, &turn.turn_id, &turn.runtime_id)? != Some(TurnState::Queued)
-        {
-            bail!("turn {} was not running or already queued", turn.turn_id);
+        if changed != 1 {
+            bail!("turn {} was not running", turn.turn_id);
         }
-        transaction.commit()?;
         Ok(())
     }
 
@@ -469,10 +410,8 @@ impl Database {
         transaction.execute(
             "INSERT INTO deliveries(turn_id, interface_id, target_id, feedback_target_id,
                  content, state, updated_at)
-             SELECT t.id, t.interface_id, e.target_id, e.feedback_target_id, ?1, 'pending', ?2
-             FROM turns t
-             JOIN events e ON e.interface_id = t.interface_id AND e.event_id = t.event_id
-             WHERE t.state = 'running'",
+             SELECT id, interface_id, target_id, feedback_target_id, ?1, 'pending', ?2
+             FROM turns WHERE state = 'running'",
             params![
                 "Carillon restarted during that turn. Its outcome is uncertain, so it was not run again.",
                 now,
@@ -655,11 +594,9 @@ impl Database {
         Ok(self
             .connect()?
             .query_row(
-                "SELECT t.id, t.event_id, t.audience_id, t.user_id, e.input, t.state, t.output,
-                        t.provider_snapshot_json, t.resource_snapshot_json, d.state, d.native_ref, t.error
-                 FROM turns t
-                 JOIN events e ON e.interface_id = t.interface_id AND e.event_id = t.event_id
-                 LEFT JOIN deliveries d ON d.turn_id = t.id
+                "SELECT t.id, t.event_id, t.audience_id, t.user_id, t.input, t.state, t.output,
+                        t.provider_snapshot_json, t.resource_snapshot_id, d.state, d.native_ref, t.error
+                 FROM turns t LEFT JOIN deliveries d ON d.turn_id = t.id
                  WHERE t.id = ?1",
                 [turn_id],
                 |row| {
@@ -672,7 +609,7 @@ impl Database {
                         state: row.get(5)?,
                         output: row.get(6)?,
                         providers: json_column(row, 7)?,
-                        resources: json_column(row, 8)?,
+                        resource_snapshot_id: row.get(8)?,
                         delivery_state: row.get(9)?,
                         delivery_native_ref: row.get(10)?,
                         error: row.get(11)?,
@@ -728,7 +665,7 @@ impl Database {
     pub fn recent_turns(&self, event_id: Option<&str>, limit: u32) -> Result<Vec<TurnSummary>> {
         let connection = self.connect()?;
         let mut statement = connection.prepare(
-            "SELECT t.id, t.event_id, t.state, t.started_at, d.state
+            "SELECT t.id, t.event_id, t.state, t.accepted_at, d.state
              FROM turns t LEFT JOIN deliveries d ON d.turn_id = t.id
              WHERE (?1 IS NULL OR t.event_id = ?1)
              ORDER BY t.acceptance_sequence DESC LIMIT ?2",
@@ -738,7 +675,7 @@ impl Database {
                 turn_id: row.get(0)?,
                 event_id: row.get(1)?,
                 state: row.get(2)?,
-                started_at: row.get(3)?,
+                accepted_at: row.get(3)?,
                 delivery_state: row.get(4)?,
             })
         })?;
@@ -775,20 +712,6 @@ fn enqueue_delivery(
         ],
     )?;
     Ok(())
-}
-
-fn turn_state(
-    transaction: &Transaction<'_>,
-    turn_id: &str,
-    runtime_id: &str,
-) -> Result<Option<TurnState>> {
-    Ok(transaction
-        .query_row(
-            "SELECT state FROM turns WHERE id = ?1 AND runtime_id = ?2",
-            params![turn_id, runtime_id],
-            |row| row.get(0),
-        )
-        .optional()?)
 }
 
 fn json_column<T: DeserializeOwned>(row: &Row<'_>, index: usize) -> rusqlite::Result<T> {
@@ -850,8 +773,7 @@ mod tests {
 
     use super::Database;
     use crate::model::{
-        DeliveryOutcome, DeliveryState, ExternalEvent, ResourceSnapshot, RuntimeTurnResponse,
-        TurnState,
+        DeliveryOutcome, DeliveryState, ExternalEvent, RuntimeTurnResponse, TurnState,
     };
 
     fn event(id: &str, audience: &str) -> ExternalEvent {
@@ -867,24 +789,13 @@ mod tests {
         }
     }
 
-    fn resources() -> ResourceSnapshot {
-        ResourceSnapshot {
-            id: "resources".to_owned(),
-            system_sha256: "a".to_owned(),
-            context_sha256: "b".to_owned(),
-            settings_sha256: "c".to_owned(),
-            extensions_sha256: "d".to_owned(),
-            skills_sha256: "e".to_owned(),
-        }
-    }
-
     fn accept(database: &Database, id: &str, audience: &str) -> Result<crate::model::EventReceipt> {
         database.accept_event(
             "discord",
             "runtime",
             &event(id, audience),
             &json!([]),
-            &resources(),
+            "resources",
         )
     }
 
@@ -932,6 +843,28 @@ mod tests {
     }
 
     #[test]
+    fn open_refuses_missing_empty_and_obsolete_databases_without_repair() -> Result<()> {
+        let directory = tempdir()?;
+        let path = directory.path().join("state.sqlite3");
+        for contents in [None, Some(Vec::new()), Some(b"not SQLite".to_vec())] {
+            if let Some(bytes) = &contents {
+                std::fs::write(&path, bytes)?;
+            }
+            assert!(Database::open(&path).is_err());
+            assert_eq!(std::fs::read(&path).ok(), contents);
+        }
+        std::fs::remove_file(&path)?;
+        rusqlite::Connection::open(&path)?.execute_batch("CREATE TABLE obsolete (id INTEGER)")?;
+        let before = std::fs::read(&path)?;
+        assert!(Database::open(&path).is_err());
+        assert_eq!(std::fs::read(&path)?, before);
+        std::fs::remove_file(&path)?;
+        Database::create(&path)?;
+        Database::open(&path)?;
+        Ok(())
+    }
+
+    #[test]
     fn established_database_handles_do_not_recreate_a_lost_file() -> Result<()> {
         let directory = tempdir()?;
         let path = directory.path().join("state.sqlite3");
@@ -944,26 +877,11 @@ mod tests {
     }
 
     #[test]
-    fn acceptance_pins_only_committed_conversations_and_rejects_owner_changes() -> Result<()> {
+    fn acceptance_pins_conversations_and_rejects_owner_changes() -> Result<()> {
         let directory = tempdir()?;
         let database = Database::create(&directory.path().join("state.sqlite3"))?;
         let first = event("one", "conversation");
-        database.connect()?.execute_batch(
-            "CREATE TRIGGER fail_turn BEFORE INSERT ON turns
-             BEGIN SELECT RAISE(ABORT, 'injected acceptance failure'); END;",
-        )?;
-        assert!(accept(&database, "one", "conversation").is_err());
         assert_eq!(database.conversation_runtime("discord", &first)?, None);
-        assert_eq!(
-            database
-                .connect()?
-                .query_row("SELECT COUNT(*) FROM events", [], |row| row
-                    .get::<_, u32>(0))?,
-            0
-        );
-        database
-            .connect()?
-            .execute_batch("DROP TRIGGER fail_turn")?;
         accept(&database, "one", "conversation")?;
         assert_eq!(
             database.conversation_runtime("discord", &first)?.as_deref(),
@@ -982,7 +900,7 @@ mod tests {
         let second = event("two", "conversation");
         assert!(
             database
-                .accept_event("discord", "replacement", &second, &json!([]), &resources())
+                .accept_event("discord", "replacement", &second, &json!([]), "resources")
                 .is_err()
         );
         assert!(database.event_receipt("discord", "two")?.is_none());
@@ -990,7 +908,7 @@ mod tests {
         // A stale runtime selection must not prevent recovery of an existing receipt.
         assert!(
             database
-                .accept_event("discord", "replacement", &first, &json!([]), &resources())?
+                .accept_event("discord", "replacement", &first, &json!([]), "resources")?
                 .duplicate
         );
         accept(&database, "two", "conversation")?;
@@ -1051,8 +969,8 @@ mod tests {
         let second = database
             .claim_turn("runtime")?
             .context("second turn missing")?;
-        // Delivery insertion follows the turn update and continuation upsert.
-        // Fail at that last write, using real SQLite transaction semantics.
+        // Delivery insertion follows the turn update. Fail at that last write,
+        // using real SQLite transaction semantics.
         database.connect()?.execute_batch(
             "CREATE TRIGGER fail_delivery BEFORE INSERT ON deliveries
              BEGIN SELECT RAISE(ABORT, 'injected delivery failure'); END;",
@@ -1113,11 +1031,11 @@ mod tests {
             accept(&database, "one", "conversation")?;
             accept(&database, "two", "conversation")?;
             database.connect()?.execute(
-                "UPDATE turns SET id = 'z-first', started_at = 100 WHERE event_id = 'one'",
+                "UPDATE turns SET id = 'z-first', accepted_at = 100 WHERE event_id = 'one'",
                 [],
             )?;
             database.connect()?.execute(
-                "UPDATE turns SET id = 'a-second', started_at = ?1 WHERE event_id = 'two'",
+                "UPDATE turns SET id = 'a-second', accepted_at = ?1 WHERE event_id = 'two'",
                 [second_timestamp],
             )?;
             drop(database);
@@ -1259,7 +1177,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_transitions_only_retry_their_committed_target_state() -> Result<()> {
+    fn outcome_transitions_leave_running_exactly_once() -> Result<()> {
         let directory = tempdir()?;
         let database = Database::create(&directory.path().join("state.sqlite3"))?;
 
@@ -1268,7 +1186,7 @@ mod tests {
             .claim_turn("runtime")?
             .context("uncertain turn was not queued")?;
         database.mark_uncertain(&uncertain, "ambiguous")?;
-        database.mark_uncertain(&uncertain, "ambiguous")?;
+        assert!(database.mark_uncertain(&uncertain, "ambiguous").is_err());
         assert!(database.requeue_turn(&uncertain).is_err());
 
         accept(&database, "requeued", "two")?;
@@ -1276,29 +1194,28 @@ mod tests {
             .claim_turn("runtime")?
             .context("requeued turn was not queued")?;
         database.requeue_turn(&requeued)?;
-        database.requeue_turn(&requeued)?;
+        assert!(database.requeue_turn(&requeued).is_err());
         assert!(database.mark_uncertain(&requeued, "ambiguous").is_err());
 
         let requeued = database
             .claim_turn("runtime")?
             .context("requeued turn could not be claimed again")?;
-        database.complete_turn(
-            &requeued,
-            &RuntimeTurnResponse {
-                correlation_id: requeued.turn_id.clone(),
-                output: "done".to_owned(),
-                continuation_ref: "native".to_owned(),
-            },
-        )?;
+        let response = RuntimeTurnResponse {
+            correlation_id: requeued.turn_id.clone(),
+            output: "done".to_owned(),
+            continuation_ref: "native".to_owned(),
+        };
+        database.complete_turn(&requeued, &response)?;
+        assert!(database.complete_turn(&requeued, &response).is_err());
         assert!(database.requeue_turn(&requeued).is_err());
-        database.mark_uncertain(&requeued, "ambiguous")?;
-        assert_eq!(
-            database
-                .inspect_turn(&requeued.turn_id)?
-                .context("completed turn disappeared")?
-                .state,
-            TurnState::Completed
-        );
+        assert!(database.mark_uncertain(&requeued, "ambiguous").is_err());
+        let inspection = database
+            .inspect_turn(&requeued.turn_id)?
+            .context("completed turn disappeared")?;
+        assert_eq!(inspection.state, TurnState::Completed);
+        assert_eq!(inspection.delivery_state, Some(DeliveryState::Pending));
+        assert_eq!(database.turn_counts()?.uncertain, 1);
+        assert_eq!(database.delivery_counts()?.pending, 2);
         Ok(())
     }
 }

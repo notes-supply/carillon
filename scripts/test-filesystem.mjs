@@ -598,7 +598,7 @@ async function resourceAttempt(name, fault) {
     const turns = JSON.parse(run("recent", "--config", config));
     assert.equal(turns.length, 1);
     const inspection = JSON.parse(run("inspect", "--config", config, receipt.turn_id));
-    const snapshot = join(root, "state/resource-snapshots", inspection.resources.id);
+    const snapshot = join(root, "state/resource-snapshots", inspection.resource_snapshot_id);
     assert.equal(
       execFileSync(join(snapshot, "skills/example/scripts/helper"), { encoding: "utf8" }),
       "durable-helper",

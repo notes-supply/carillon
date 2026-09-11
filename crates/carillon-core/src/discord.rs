@@ -1688,7 +1688,7 @@ mod tests {
 
     #[tokio::test]
     async fn interrupted_success_receipt_recovers_the_committed_turn() -> anyhow::Result<()> {
-        use crate::{db::Database, model::ResourceSnapshot};
+        use crate::db::Database;
         use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 
         let directory = tempfile::tempdir()?;
@@ -1707,14 +1707,6 @@ mod tests {
             native: Value::Null,
         };
         let server = tokio::spawn(async move {
-            let resources = ResourceSnapshot {
-                id: "snapshot".to_owned(),
-                system_sha256: String::new(),
-                context_sha256: String::new(),
-                settings_sha256: String::new(),
-                extensions_sha256: String::new(),
-                skills_sha256: String::new(),
-            };
             for attempt in 0..2 {
                 let (socket, _) = listener.accept().await?;
                 let mut stream = BufReader::new(socket);
@@ -1743,7 +1735,7 @@ mod tests {
                     "runtime",
                     &submitted,
                     &Value::Null,
-                    &resources,
+                    "snapshot",
                 )?;
                 assert_eq!(receipt.duplicate, attempt == 1);
                 let body = serde_json::to_vec(&receipt)?;
@@ -1919,7 +1911,7 @@ mod tests {
     fn completed_delivery(
         database: &crate::db::Database,
     ) -> anyhow::Result<crate::db::ClaimedTurn> {
-        use crate::model::{ResourceSnapshot, RuntimeTurnResponse};
+        use crate::model::RuntimeTurnResponse;
         use anyhow::Context as _;
         let event = ExternalEvent {
             event_id: "one".to_owned(),
@@ -1931,15 +1923,7 @@ mod tests {
             content: "question".to_owned(),
             native: Value::Null,
         };
-        let resources = ResourceSnapshot {
-            id: "snapshot".to_owned(),
-            system_sha256: String::new(),
-            context_sha256: String::new(),
-            settings_sha256: String::new(),
-            extensions_sha256: String::new(),
-            skills_sha256: String::new(),
-        };
-        database.accept_event("discord", "runtime", &event, &Value::Null, &resources)?;
+        database.accept_event("discord", "runtime", &event, &Value::Null, "snapshot")?;
         let turn = database
             .claim_turn("runtime")?
             .context("turn was not queued")?;
