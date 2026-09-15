@@ -142,7 +142,8 @@ try {
   assert.equal(laterInspection.state, "completed");
   assert.equal(laterInspection.delivery_state, "delivered");
   assert.ok(laterInspection.providers.some((provider) => provider.id === "runtime-pi"));
-  assert.equal(typeof laterInspection.resources.extensions_sha256, "string");
+  assert.match(laterInspection.resource_snapshot_id, /^[a-f0-9]{64}$/u);
+  assert.notEqual(firstInspection.resource_snapshot_id, laterInspection.resource_snapshot_id);
 
   const threadParent = await simulateRoute(
     "401",
@@ -265,7 +266,7 @@ try {
     await stop("core");
   }
   await testResourceStateSeparation(queued.turn_id);
-  await testPiModelReadiness(queued.turn_id);
+  await testPiModelReadiness();
   await testMissingResourceRoot(queued.turn_id);
   await testRuntimeStartupRefusals(queued.turn_id);
   // Both services must interpret relative paths from the canonical config file,
@@ -377,7 +378,7 @@ async function testResourceStateSeparation(turnId) {
   }
 }
 
-async function testPiModelReadiness(turnId) {
+async function testPiModelReadiness() {
   const privateState = join(installation, "pi");
   const sessions = join(installation, "agents/default/sessions");
   await rename(privateState, `${privateState}-saved`);
@@ -393,7 +394,6 @@ async function testPiModelReadiness(turnId) {
     api: "openai-completions",
     models: [{ id: "readiness-model" }],
   };
-  await start("core");
   try {
     for (const [settings, configured, message] of [
       [{}, provider, /no Pi model is selected/u],
@@ -415,16 +415,9 @@ async function testPiModelReadiness(turnId) {
       );
       assertStartupRefused("runtime", message, [], options);
       assert.deepEqual(await readdir(sessions), [], "setup failure must not create a native turn");
-      assert.equal(JSON.parse(run("inspect", "--config", configPath(), turnId)).state, "queued");
-      const status = JSON.parse(run("status", "--config", configPath()));
-      assert.equal(
-        status.providers.find((entry) => entry.id === "runtime-pi").status,
-        "unavailable",
-      );
     }
-    // Repair readiness without a model API call. Stop core first so this fixture
-    // never dispatches work to the intentionally non-listening model endpoint.
-    await stop("core");
+    // Core stays stopped throughout this runtime-only readiness check, so no
+    // queued work can reach the intentionally non-listening model endpoint.
     await writeFile(
       modelsPath,
       JSON.stringify({
@@ -437,11 +430,8 @@ async function testPiModelReadiness(turnId) {
     assert.equal((await response.json()).provider, "pi");
     assert.deepEqual(await readdir(sessions), []);
     await stop("runtime");
-    await start("core");
-    assert.equal(JSON.parse(run("inspect", "--config", configPath(), turnId)).state, "queued");
   } finally {
     await stop("runtime");
-    await stop("core");
     await rm(privateState, { recursive: true, force: true });
     await rm(sessions, { recursive: true, force: true });
     await rename(`${privateState}-saved`, privateState);

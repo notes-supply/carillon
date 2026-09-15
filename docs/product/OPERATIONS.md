@@ -38,7 +38,7 @@ An administrator may run `loginctl enable-linger <owner>` when the services must
 
 ## Services
 
-- **Core** owns accepted events, turn state, continuations, and delivery intents.
+- **Core** owns accepted turns, their state and continuation references, and delivery intents.
 - **Discord** owns Discord admission, routing, threads, feedback, and message delivery.
 - **Pi runtime** owns Pi sessions, inference, native tools, extensions, skills, and private engine settings.
 
@@ -58,6 +58,8 @@ Each bundled provider reports its own build version, not the `providers[].versio
 A turn is queued before acceptance is acknowledged. Runtime work is executed only after the turn is durably claimed as running.
 
 If Carillon cannot prove what happened to running model work, the turn is marked uncertain and is not replayed automatically. Later work for that same conversation waits; unrelated conversations continue. A successful runtime result and delivery intent are committed together.
+
+If core cannot persist a turn's outcome, it logs the write failure and leaves that turn recorded as running. Its conversation remains blocked, but other conversations can proceed once database writes work again. Fix the storage problem, restart core to recover the stranded turn as uncertain, and then inspect it before choosing retry or skip. Core does not retry the outcome write indefinitely.
 
 Inspect and resolve an uncertain turn with:
 
@@ -85,7 +87,7 @@ The backup contains the entire `CARILLON_HOME` tree, including configuration, cr
 
 Backup requires `data_dir` and `agent.resource_root` to be installation-relative paths without `..`, resolving inside `CARILLON_HOME`. Absolute paths are rejected even when they point inside the source installation: use `state` and `agents/default`, for example, so a restored configuration cannot refer back to the source. The destination must resolve outside that tree. An external user workspace is allowed, but is not included in this backup.
 
-Before creating a backup or publishing a restore, Carillon checks the configured resource directory, matching operator/provider loopback credentials, the core database's integrity, foreign keys and current schema, and every recorded resource snapshot against its captured content and executable-mode hashes. Missing or altered captured resources are rejected, not reconstructed from the live resource root. This archive integrity check is not ongoing tamper protection against the owning Unix user. Restore accepts only regular files and directories and validates in a temporary directory. Validation or prepublication failure leaves the target absent or empty and retryable. A persistence error after publication can leave the complete restored tree at the target; inspect it before retrying rather than assuming publication was undone. This private beta does not migrate obsolete schemas.
+Before creating a backup or publishing a restore, Carillon checks the configured resource directory, matching operator/provider loopback credentials, the core database's integrity, foreign keys and current schema, and every recorded resource snapshot against its content address, which covers each captured file's path, bytes, and executability. Missing or altered captured resources are rejected, not reconstructed from the live resource root. This archive integrity check is not ongoing tamper protection against the owning Unix user. Restore accepts only regular files and directories and validates in a temporary directory. Validation or prepublication failure leaves the target absent or empty and retryable. A persistence error after publication can leave the complete restored tree at the target; inspect it before retrying rather than assuming publication was undone. This private beta does not migrate obsolete schemas.
 
 This is not a provider-native health check: individual resource files are optional, and providers own their native sessions, settings, and authentication requirements. The entire installation tree is copied, but restore cannot infer whether arbitrary provider-private files were omitted from a manually edited archive. Check the provider after restoring; a successful restore does not attest that external credentials are still valid. Use a backup made by the same current state format, or perform a fresh installation.
 

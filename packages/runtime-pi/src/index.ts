@@ -32,15 +32,6 @@ interface Config {
   readonly runtime: RuntimeProviderConfig;
 }
 
-interface ResourceSnapshot {
-  readonly root: string;
-  readonly system_sha256: string;
-  readonly context_sha256: string;
-  readonly settings_sha256: string;
-  readonly extensions_sha256: string;
-  readonly skills_sha256: string;
-}
-
 interface TurnRequest {
   readonly correlation_id: string;
   readonly interface_id: string;
@@ -48,7 +39,7 @@ interface TurnRequest {
   readonly audience_id: string;
   readonly input: string;
   readonly continuation_ref?: string | null;
-  readonly resources: ResourceSnapshot;
+  readonly resource_root: string;
 }
 
 interface TurnResponse {
@@ -64,14 +55,6 @@ interface DeterministicSession {
   }[];
 }
 
-const ResourceSnapshotSchema = Type.Object({
-  root: Type.String(),
-  system_sha256: Type.String(),
-  context_sha256: Type.String(),
-  settings_sha256: Type.String(),
-  extensions_sha256: Type.String(),
-  skills_sha256: Type.String(),
-});
 const ProviderIdentitySchema = Type.String({
   minLength: 1,
   maxLength: 128,
@@ -92,7 +75,7 @@ const TurnRequestSchema = Type.Object({
   audience_id: Type.String(),
   input: Type.String(),
   continuation_ref: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-  resources: ResourceSnapshotSchema,
+  resource_root: Type.String(),
 });
 const DeterministicSessionSchema = Type.Object({
   turns: Type.Array(
@@ -242,10 +225,10 @@ async function executeDeterministic(request: TurnRequest): Promise<TurnResponse>
   const sessionPath = continuationPath(request);
   const prior = await readDeterministicSession(sessionPath);
   const extensionActive = await exists(
-    join(request.resources.root, "extensions", "carillon-context.js"),
+    join(request.resource_root, "extensions", "carillon-context.js"),
   );
   const skillActive = await exists(
-    join(request.resources.root, "skills", "carillon-status", "SKILL.md"),
+    join(request.resource_root, "skills", "carillon-status", "SKILL.md"),
   );
   const markers = [
     extensionActive ? "native extension active" : "native extension inactive",
@@ -267,7 +250,7 @@ async function executeDeterministic(request: TurnRequest): Promise<TurnResponse>
 }
 
 async function executePi(request: TurnRequest): Promise<TurnResponse> {
-  const root = resolve(request.resources.root);
+  const root = resolve(request.resource_root);
   const isNew = request.continuation_ref === null || request.continuation_ref === undefined;
   const manager = isNew
     ? SessionManager.create(config.workspace, sessionDirectory, {

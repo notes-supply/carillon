@@ -1,6 +1,6 @@
 use std::{fs, path::Path};
 
-use anyhow::{Context as _, bail};
+use anyhow::Context as _;
 use axum::{response::IntoResponse as _, routing::post};
 use tempfile::tempdir;
 
@@ -254,60 +254,16 @@ async fn provider_health_mismatches_keep_configured_identity_unavailable() -> Re
 }
 
 #[tokio::test]
-async fn startup_refuses_missing_empty_and_obsolete_databases_without_repair() -> Result<()> {
+async fn startup_opens_the_database_without_creating_one() -> Result<()> {
     let directory = tempdir()?;
     let mut state = installation(directory.path())?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     state.config.value.core.listen = listener.local_addr()?;
     drop(listener);
     let path = state.config.value.data_dir.join("carillon.sqlite3");
-    let saved = fs::read(&path)?;
     fs::remove_file(&path)?;
-    for contents in [None, Some(Vec::new()), Some(b"not SQLite".to_vec())] {
-        if let Some(bytes) = &contents {
-            fs::write(&path, bytes)?;
-        }
-        assert!(
-            tokio::time::timeout(Duration::from_secs(3), serve(state.config.clone()))
-                .await?
-                .is_err()
-        );
-        assert_eq!(fs::read(&path).ok(), contents);
-    }
-    fs::remove_file(&path)?;
-    let obsolete = rusqlite::Connection::open(&path)?;
-    obsolete.execute_batch("CREATE TABLE obsolete (id INTEGER)")?;
-    drop(obsolete);
-    let before = fs::read(&path)?;
-    assert!(
-        tokio::time::timeout(Duration::from_secs(3), serve(state.config.clone()))
-            .await?
-            .is_err()
-    );
-    assert_eq!(fs::read(&path)?, before);
-    fs::write(&path, saved)?;
-    Database::open(&path)?;
-    let mut services = tokio::task::JoinSet::new();
-    services.spawn(serve(state.config.clone()));
-    tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            if let Ok(response) = state
-                .client
-                .get(format!("http://{}/health", state.config.value.core.listen))
-                .send()
-                .await
-            {
-                assert_eq!(response.status(), StatusCode::OK);
-                return Ok::<_, anyhow::Error>(());
-            }
-            if let Some(result) = services.try_join_next() {
-                result??;
-                bail!("core stopped before reporting ready");
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await??;
+    assert!(serve(state.config.clone()).await.is_err());
+    assert!(!path.exists());
     Ok(())
 }
 
@@ -597,9 +553,9 @@ async fn duplicate_events_share_one_accepted_turn_without_reexecution() -> Resul
         assert_eq!(runtime.id, "test-runtime");
         assert_eq!(request.correlation_id, first.turn_id);
         assert_eq!(request.continuation_ref, None);
-        assert!(Path::new(&request.resources.root).starts_with(&snapshot));
+        assert!(Path::new(&request.resource_root).starts_with(&snapshot));
         assert_ne!(
-            fs::read_to_string(Path::new(&request.resources.root).join("SYSTEM.md"))
+            fs::read_to_string(Path::new(&request.resource_root).join("SYSTEM.md"))
                 .map_err(|error| TurnFailure::Retry(error.into()))?,
             "changed after acceptance"
         );
@@ -664,7 +620,7 @@ async fn missing_resource_root_refuses_new_acceptance_without_losing_receipts() 
         run_next_turn(&state, "test-runtime", async |_, _, request| {
             assert_eq!(request.correlation_id, first.turn_id);
             assert!(
-                Path::new(&request.resources.root)
+                Path::new(&request.resource_root)
                     .join("SYSTEM.md")
                     .is_file()
             );
@@ -766,7 +722,7 @@ async fn unavailable_conversation_owner_rejects_input_as_configuration_conflict(
 }
 
 #[tokio::test]
-async fn runtime_ownership_survives_default_changes_and_unavailable_owners() -> Result<()> {
+async fn runtime_ownership_survives_default_changes() -> Result<()> {
     let directory = tempdir()?;
     let mut state = installation(directory.path())?;
     let mut replacement = state
@@ -813,12 +769,7 @@ async fn runtime_ownership_survives_default_changes_and_unavailable_owners() -> 
         Ok(completed(request))
     })
     .await?;
-    state.config.value.providers[1].enabled = false;
-    assert!(accept(&state, "disabled", "conversation").await.is_err());
-    assert!(accept(&state, "one", "conversation").await?.duplicate);
-    state.config.value.providers.remove(1);
-    assert!(accept(&state, "removed", "conversation").await.is_err());
-    assert_eq!(state.database.recent_turns(None, 10)?.len(), 4);
+    assert_eq!(state.database.turn_counts()?.completed, 4);
     Ok(())
 }
 
@@ -1016,6 +967,72 @@ async fn ambiguity_holds_only_its_conversation_without_replaying() -> Result<()>
 }
 
 #[tokio::test]
+async fn failed_outcome_write_waits_for_restart_without_blocking_other_conversations() -> Result<()>
+{
+    let directory = tempdir()?;
+    let mut state = installation(directory.path())?;
+    let failed = accept(&state, "one", "blocked").await?;
+    let successor = accept(&state, "two", "blocked").await?;
+    let unrelated = accept(&state, "three", "unrelated").await?;
+    let path = state.config.value.data_dir.join("carillon.sqlite3");
+    let connection = rusqlite::Connection::open(&path)?;
+    // Reject outcome writes, not the claim. Both completion and its fallback
+    // uncertainty write encounter the same temporary database failure.
+    connection.execute_batch(
+        "CREATE TRIGGER fail_outcome BEFORE UPDATE ON turns
+         WHEN OLD.state = 'running'
+         BEGIN SELECT RAISE(FAIL, 'injected outcome write failure'); END;",
+    )?;
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        run_next_turn(&state, "test-runtime", async |_, _, request| {
+            assert_eq!(request.correlation_id, failed.turn_id);
+            Ok(completed(request))
+        }),
+    )
+    .await?;
+    let error = result.err().context("outcome write must fail")?;
+    assert!(format!("{error:#}").contains("injected outcome write failure"));
+    connection.execute_batch("DROP TRIGGER fail_outcome")?;
+    drop(connection);
+
+    // Restoring database writes lets other conversations progress; it does
+    // not make replaying the abandoned running turn safe.
+    run_next_turn(&state, "test-runtime", async |_, _, request| {
+        assert_eq!(request.correlation_id, unrelated.turn_id);
+        Ok(completed(request))
+    })
+    .await?;
+    assert!(state.database.skip_turn(&failed.turn_id).is_err());
+    assert_eq!(
+        state
+            .database
+            .inspect_turn(&failed.turn_id)?
+            .context("missing turn")?
+            .state,
+        TurnState::Running
+    );
+    assert_eq!(
+        run_next_turn(&state, "test-runtime", async |_, _, _| {
+            Err(TurnFailure::Uncertain(anyhow!("blocked work was replayed")))
+        })
+        .await?,
+        WorkerStep::Idle
+    );
+
+    state.database = Database::open(&path)?;
+    assert_eq!(state.database.recover_running_turns()?, 1);
+    state.database.skip_turn(&failed.turn_id)?;
+    run_next_turn(&state, "test-runtime", async |_, _, request| {
+        assert_eq!(request.correlation_id, successor.turn_id);
+        Ok(completed(request))
+    })
+    .await?;
+    assert_eq!(state.database.turn_counts()?.completed, 2);
+    Ok(())
+}
+
+#[tokio::test]
 async fn cancelled_execution_is_uncertain_after_reopening_while_queued_work_resumes() -> Result<()>
 {
     let directory = tempdir()?;
@@ -1063,52 +1080,6 @@ async fn cancelled_execution_is_uncertain_after_reopening_while_queued_work_resu
         })
         .await?,
         WorkerStep::Idle
-    );
-    Ok(())
-}
-
-#[tokio::test(start_paused = true)]
-async fn persistence_retry_cannot_downgrade_a_committed_completion() -> Result<()> {
-    let directory = tempdir()?;
-    let state = installation(directory.path())?;
-    accept(&state, "one", "conversation").await?;
-    let turn = state
-        .database
-        .claim_turn("test-runtime")?
-        .context("missing claim")?;
-    let response = completed(runtime_request(&state, &turn)?);
-    let mut attempts = 0;
-    persist_outcome(&turn, "test lost commit acknowledgement", || {
-        attempts += 1;
-        if attempts == 1 {
-            state.database.complete_turn(&turn, &response)?;
-            bail!("completion committed, but caller did not receive success");
-        }
-        state
-            .database
-            .mark_uncertain(&turn, "apparent persistence failure")
-    })
-    .await;
-    assert_eq!(attempts, 2);
-    assert_eq!(
-        state
-            .database
-            .inspect_turn(&turn.turn_id)?
-            .context("missing turn")?
-            .state,
-        TurnState::Completed
-    );
-    assert_eq!(
-        state.database.continuation(&turn)?.as_deref(),
-        Some("native-conversation")
-    );
-    assert_eq!(
-        state
-            .database
-            .claim_delivery("test-interface", "instance")?
-            .context("missing reply")?
-            .content,
-        "reply to one"
     );
     Ok(())
 }

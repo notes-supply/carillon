@@ -2,16 +2,20 @@
 //!
 //! A turn records the resource state it was accepted with, so later edits to
 //! the live resource root cannot change what an already-queued turn runs
-//! with. Snapshots are stored under their content fingerprint and shared
+//! with. A snapshot is stored under its content address — a digest of every
+//! selected file's path, bytes, and effective executability — and shared
 //! between identical turns.
 
-use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, bail};
 use rustix::fs::{Access, AtFlags, CWD, accessat};
 use sha2::{Digest, Sha256};
-
-use crate::model::{ResourceSnapshot, RuntimeResources};
 
 #[derive(PartialEq, Eq)]
 struct ResourceFile {
@@ -35,12 +39,12 @@ impl ResourceFile {
 }
 
 /// Captures the current resource root into the snapshot store and returns the
-/// fingerprints identifying it.
-pub fn materialize(source: &Path, store: &Path) -> Result<ResourceSnapshot> {
+/// content address identifying it.
+pub fn materialize(source: &Path, store: &Path) -> Result<String> {
     let files = selected_resource_files(source)?;
 
-    let snapshot = describe(&files);
-    let destination = store.join(&snapshot.id);
+    let id = content_address(&files);
+    let destination = store.join(&id);
     if destination.exists() {
         if selected_resource_files(&destination)? != files {
             bail!(
@@ -80,58 +84,35 @@ pub fn materialize(source: &Path, store: &Path) -> Result<ResourceSnapshot> {
     // failed to persist the directory entry. No accepted turn may outrun this.
     fs::File::open(store)?.sync_all()?;
     fs::File::open(store.parent().context("snapshot store has no parent")?)?.sync_all()?;
-    Ok(snapshot)
+    Ok(id)
 }
 
-fn describe(files: &BTreeMap<String, ResourceFile>) -> ResourceSnapshot {
-    ResourceSnapshot {
-        id: hash_entries(files, ""),
-        system_sha256: hash_bytes(files.get("SYSTEM.md").map_or(&[], |file| &file.bytes)),
-        context_sha256: hash_bytes(files.get("AGENTS.md").map_or(&[], |file| &file.bytes)),
-        settings_sha256: hash_bytes(files.get("settings.json").map_or(&[], |file| &file.bytes)),
-        extensions_sha256: hash_entries(files, "extensions/"),
-        skills_sha256: hash_entries(files, "skills/"),
-    }
-}
-
-/// Check archived core-owned resources without publishing or repairing them.
-pub fn validate(snapshot: &ResourceSnapshot, store: &Path) -> Result<()> {
-    if snapshot.id.len() != 64
-        || !snapshot
-            .id
+/// Check an archived core-owned snapshot without publishing or repairing it.
+pub fn validate(id: &str, store: &Path) -> Result<()> {
+    if id.len() != 64
+        || !id
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
         bail!("invalid resource snapshot content address");
     }
-    let root = store.join(&snapshot.id);
+    let root = store.join(id);
     if !fs::symlink_metadata(&root)?.file_type().is_dir() {
         bail!(
             "resource snapshot root is not a directory: {}",
             root.display()
         );
     }
-    if describe(&selected_resource_files(&root)?) != *snapshot {
-        bail!(
-            "resource snapshot {} does not match its recorded hashes",
-            snapshot.id
-        );
+    if content_address(&selected_resource_files(&root)?) != id {
+        bail!("resource snapshot {id} does not match its content address");
     }
     Ok(())
 }
 
-/// The runtime's view of a snapshot: its on-disk location in the given store
-/// plus the fingerprints, resolved at claim time so a relocated store still
-/// points at the right content.
-pub fn runtime_view(snapshot: &ResourceSnapshot, store: &Path) -> RuntimeResources {
-    RuntimeResources {
-        root: store.join(&snapshot.id).display().to_string(),
-        system_sha256: snapshot.system_sha256.clone(),
-        context_sha256: snapshot.context_sha256.clone(),
-        settings_sha256: snapshot.settings_sha256.clone(),
-        extensions_sha256: snapshot.extensions_sha256.clone(),
-        skills_sha256: snapshot.skills_sha256.clone(),
-    }
+/// Where a snapshot lives in the given store. Resolved at claim time, so a
+/// relocated store still points at the right content.
+pub fn root(store: &Path, id: &str) -> PathBuf {
+    store.join(id)
 }
 
 fn selected_resource_files(source: &Path) -> Result<BTreeMap<String, ResourceFile>> {
@@ -217,24 +198,16 @@ fn resource_metadata(path: &Path) -> Result<Option<fs::Metadata>> {
     }
 }
 
-fn hash_entries(files: &BTreeMap<String, ResourceFile>, prefix: &str) -> String {
+fn content_address(files: &BTreeMap<String, ResourceFile>) -> String {
     let mut digest = Sha256::new();
-    for (path, file) in files.range(prefix.to_owned()..) {
-        if !path.starts_with(prefix) {
-            break;
-        }
-        let relative = path.strip_prefix(prefix).unwrap_or(path).as_bytes();
-        digest.update((relative.len() as u64).to_le_bytes());
-        digest.update(relative);
+    for (path, file) in files {
+        digest.update((path.len() as u64).to_le_bytes());
+        digest.update(path.as_bytes());
         digest.update(file.executable.to_le_bytes());
         digest.update((file.bytes.len() as u64).to_le_bytes());
         digest.update(&file.bytes);
     }
     hex::encode(digest.finalize())
-}
-
-fn hash_bytes(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
 }
 
 fn set_snapshot_directory_permissions(directory: &Path) -> Result<()> {
@@ -255,7 +228,7 @@ mod tests {
     use anyhow::Context;
     use tempfile::tempdir;
 
-    use super::{materialize, runtime_view};
+    use super::{materialize, root};
 
     #[test]
     fn snapshots_refuse_unsupported_entries_instead_of_omitting_them() -> anyhow::Result<()> {
@@ -294,7 +267,7 @@ mod tests {
             fs::set_permissions(&helper, fs::Permissions::from_mode(mode))?;
             let live = Command::new(&helper).output();
             let snapshot = materialize(source.path(), &store)?;
-            let captured = Command::new(store.join(&snapshot.id).join("skills/helper")).output();
+            let captured = Command::new(root(&store, &snapshot).join("skills/helper")).output();
             assert_eq!(live.is_ok(), captured.is_ok(), "mode {mode:o}");
             let previous = if mode & 0o100 != 0 {
                 &mut executable_snapshot
@@ -303,18 +276,18 @@ mod tests {
             };
             if let Some(id) = previous {
                 assert_eq!(
-                    id, &snapshot.id,
+                    id, &snapshot,
                     "equivalent effective permissions changed capture"
                 );
             } else {
-                *previous = Some(snapshot.id.clone());
+                *previous = Some(snapshot.clone());
             }
             if let Ok(output) = captured {
                 assert!(output.status.success());
                 assert_eq!(output.stdout, b"native-helper");
             }
             super::validate(&snapshot, &store)?;
-            assert_eq!(materialize(source.path(), &store)?.id, snapshot.id);
+            assert_eq!(materialize(source.path(), &store)?, snapshot);
         }
         assert_ne!(executable_snapshot, ordinary_snapshot);
         Ok(())
@@ -357,7 +330,7 @@ mod tests {
                 fs::remove_file(link)?;
                 // Missing optional resources are still valid; refusal leaves retry usable.
                 let snapshot = materialize(source.path(), &store)?;
-                assert!(fs::read_dir(store.join(snapshot.id))?.next().is_none());
+                assert!(fs::read_dir(root(&store, &snapshot))?.next().is_none());
             }
         }
         Ok(())
@@ -376,7 +349,7 @@ mod tests {
         }
         let executable = materialize(source.path(), &store)?;
         for relative in ["skills/example/scripts/helper", "extensions/example/helper"] {
-            let helper = store.join(&executable.id).join(relative);
+            let helper = root(&store, &executable).join(relative);
             let output = Command::new(&helper).output()?;
             assert!(output.status.success());
             assert_eq!(output.stdout, b"native-helper");
@@ -387,20 +360,18 @@ mod tests {
             )?;
         }
         let ordinary = materialize(source.path(), &store)?;
-        assert_ne!(executable.id, ordinary.id);
-        assert_ne!(executable.skills_sha256, ordinary.skills_sha256);
-        assert_ne!(executable.extensions_sha256, ordinary.extensions_sha256);
-        assert_eq!(materialize(source.path(), &store)?.id, ordinary.id);
+        assert_ne!(executable, ordinary);
+        assert_eq!(materialize(source.path(), &store)?, ordinary);
         for relative in ["skills/example/scripts/helper", "extensions/example/helper"] {
             // Source chmod affects future turns only; already accepted helpers still run.
             assert!(
-                Command::new(store.join(&executable.id).join(relative))
+                Command::new(root(&store, &executable).join(relative))
                     .output()?
                     .status
                     .success()
             );
             assert_eq!(
-                Command::new(store.join(&ordinary.id).join(relative))
+                Command::new(root(&store, &ordinary).join(relative))
                     .output()
                     .err()
                     .context("non-executable helper ran")?
@@ -410,12 +381,11 @@ mod tests {
         }
         // Comparison must check executable metadata too, not silently reuse tampered content.
         fs::set_permissions(
-            store
-                .join(&ordinary.id)
-                .join("skills/example/scripts/helper"),
+            root(&store, &ordinary).join("skills/example/scripts/helper"),
             fs::Permissions::from_mode(0o550),
         )?;
         assert!(materialize(source.path(), &store).is_err());
+        assert!(super::validate(&ordinary, &store).is_err());
         Ok(())
     }
 
@@ -428,17 +398,10 @@ mod tests {
         let first = materialize(source.path(), store.path())?;
         fs::write(source.path().join("SYSTEM.md"), "second")?;
         let second = materialize(source.path(), store.path())?;
-        assert_ne!(first.system_sha256, second.system_sha256);
-        assert_eq!(first.skills_sha256, second.skills_sha256);
-        assert_ne!(first.id, second.id);
+        assert_ne!(first, second);
         assert_eq!(
-            fs::read_to_string(store.path().join(&first.id).join("SYSTEM.md"))?,
+            fs::read_to_string(root(store.path(), &first).join("SYSTEM.md"))?,
             "first"
-        );
-        let relocated = tempdir()?;
-        assert_eq!(
-            runtime_view(&first, relocated.path()).root,
-            relocated.path().join(&first.id).display().to_string()
         );
         Ok(())
     }
