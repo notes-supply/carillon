@@ -24,7 +24,6 @@ use crate::{
         ServiceLock, backup, enable_demo_resources, initialize as init, restore, set_provider,
     },
     core::serve,
-    db::Database,
 };
 
 #[derive(Debug, Parser)]
@@ -38,12 +37,6 @@ struct Cli {
 enum ProviderAction {
     Enable,
     Disable,
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum ResolveAction {
-    Retry,
-    Skip,
 }
 
 #[derive(Debug, Subcommand)]
@@ -88,13 +81,6 @@ enum Command {
         config: PathBuf,
         turn_id: String,
     },
-    Resolve {
-        #[arg(long)]
-        config: PathBuf,
-        turn_id: String,
-        action: ResolveAction,
-    },
-
     Backup {
         #[arg(long)]
         config: PathBuf,
@@ -160,26 +146,6 @@ pub(crate) async fn run() -> Result<()> {
             limit,
         } => print_recent(&config, event_id.as_deref(), limit).await?,
         Command::Inspect { config, turn_id } => print_inspection(&config, &turn_id).await?,
-        Command::Resolve {
-            config,
-            turn_id,
-            action,
-        } => {
-            let loaded = LoadedConfig::load(&config)?;
-            let database = Database::open(&loaded.value.data_dir.join("carillon.sqlite3"))?;
-            let outcome = match action {
-                ResolveAction::Retry => {
-                    database.retry_turn(&turn_id)?;
-                    "retry"
-                }
-                ResolveAction::Skip => {
-                    database.skip_turn(&turn_id)?;
-                    "skip"
-                }
-            };
-            println!("{turn_id} {outcome}");
-        }
-
         Command::Backup { config, output } => {
             backup(&LoadedConfig::load(&config)?, &output)?;
             println!("{}", output.display());

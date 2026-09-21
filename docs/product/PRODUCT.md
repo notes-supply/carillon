@@ -42,13 +42,13 @@ Discord rejects direct messages and any event outside its configured guild, immu
 
 ### Operation lifecycle
 
-Once core accepts an event, it persists a queued turn. A core worker claims queued work and submits it to the selected runtime provider. Ambiguous execution is not automatically replayed; this is not an exactly-once guarantee for model or tool side effects. Completion stores the output, continuation reference, and delivery intent atomically.
+Once core accepts an event, it persists a queued turn. A core worker claims queued work and submits it to the selected runtime provider. Ambiguous execution is not automatically replayed; this is not an exactly-once guarantee for model or tool side effects. Completion stores the output and delivery intent atomically.
 
-A running turn whose outcome can no longer be proved becomes uncertain. It is not automatically replayed, and later work for the same conversation waits for operator action. Delivery has a separate durable outbox so a lost interface connection does not require rerunning the model.
+A running turn whose outcome can no longer be proved becomes interrupted. It is not automatically replayed. The next user message uses the same saved native session without an operator decision; already queued user messages proceed in order once the runtime is idle. Delivery has a separate durable outbox so a lost interface connection does not require rerunning the model.
 
 ### Runtime ownership
 
-The runtime provider owns native sessions, model execution, tools, extensions, skills, and engine-specific settings. Core stores an opaque continuation reference and does not reinterpret native history or plugin state.
+The runtime provider owns native sessions, model execution, tools, extensions, skills, and engine-specific settings. The runtime selects and reopens its native session from the conversation identity. Core does not store a parallel session reference or reinterpret native history or plugin state.
 
 ### Model selection
 

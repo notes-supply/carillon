@@ -16,16 +16,15 @@ pub const INSTANCE_HEADER: &str = "x-carillon-instance";
 
 /// Lifecycle of an accepted turn.
 ///
-/// `Uncertain` records that Carillon cannot prove whether runtime work ran;
-/// only an operator moves such a turn on, to `Queued` (retry) or `Skipped`.
+/// `Interrupted` ends an incomplete turn without replaying it or blocking
+/// the next user message. Tool side effects may already have occurred.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnState {
     Queued,
     Running,
     Completed,
-    Uncertain,
-    Skipped,
+    Interrupted,
 }
 
 impl FromStr for TurnState {
@@ -36,8 +35,7 @@ impl FromStr for TurnState {
             "queued" => Self::Queued,
             "running" => Self::Running,
             "completed" => Self::Completed,
-            "uncertain" => Self::Uncertain,
-            "skipped" => Self::Skipped,
+            "interrupted" => Self::Interrupted,
             other => bail!("unknown turn state {other}"),
         })
     }
@@ -144,7 +142,6 @@ pub struct RuntimeTurnRequest {
     pub agent_id: String,
     pub audience_id: String,
     pub input: String,
-    pub continuation_ref: Option<String>,
     /// The captured resource snapshot the turn was accepted with, as a
     /// directory the runtime reads in place.
     pub resource_root: String,
@@ -154,11 +151,12 @@ pub struct RuntimeTurnRequest {
 pub struct RuntimeTurnResponse {
     pub correlation_id: String,
     pub output: String,
-    pub continuation_ref: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Delivery {
+    /// Outcome of the task, independent of whether this notice is delivered.
+    pub turn_state: TurnState,
     pub id: i64,
     pub turn_id: String,
     pub target_id: String,

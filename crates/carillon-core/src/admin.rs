@@ -1017,7 +1017,7 @@ mod tests {
                 let expected_state = if uncertain {
                     assert!(db.claim_turn("runtime-pi")?.is_some());
                     assert_eq!(db.recover_running_turns()?, 1);
-                    TurnState::Uncertain
+                    TurnState::Interrupted
                 } else {
                     TurnState::Queued
                 };

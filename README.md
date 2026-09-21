@@ -30,20 +30,14 @@ Accepted events are stored before Carillon acknowledges them. A turn moves throu
 
 ```text
 queued -> running -> completed
-                  \-> uncertain
+                  \-> interrupted
 ```
 
-Only queued work is started. If Carillon loses track of a running operation, it marks the turn uncertain rather than silently running it again. Successful runtime output, its continuation reference, and the delivery intent are committed together. Interface delivery is retried separately.
-
-An uncertain turn blocks later work in that conversation until an operator either retries or skips it:
+Only queued work is started. Interrupted execution is never automatically replayed and does not block the conversation. Send another message to continue in the runtime's saved session. Separately queued user messages proceed in order. Successful output and its delivery intent are committed together; delivery is separate from execution.
 
 ```sh
 carillon inspect --config ~/.carillon/carillon.toml TURN_ID
-carillon resolve --config ~/.carillon/carillon.toml TURN_ID retry
-carillon resolve --config ~/.carillon/carillon.toml TURN_ID skip
 ```
-
-Retrying may repeat work whose outcome could not be observed. Skipping unblocks the conversation without running it again.
 
 ## Development
 

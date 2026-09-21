@@ -1,5 +1,6 @@
 import {
   createAgentSession,
+  type AgentSession,
   DefaultResourceLoader,
   type ModelRuntime,
   type SessionManager,
@@ -50,4 +51,32 @@ export async function createPiExecutionSession(options: PiExecutionSessionOption
   });
   await created.session.bindExtensions({ mode: "print" });
   return created;
+}
+
+/** Cancel native execution on disconnect, and settle it before releasing the serial queue. */
+export async function promptSession(session: AgentSession, input: string, signal: AbortSignal) {
+  signal.throwIfAborted();
+  let cancellation: Promise<void> | undefined;
+  const cancel = () => {
+    cancellation = session.abort();
+  };
+  signal.addEventListener("abort", cancel, { once: true });
+  // Preparation can await extensions before Pi starts its agent loop.
+  const unsubscribe = session.subscribe((event) => {
+    if (event.type === "agent_start" && signal.aborted) cancel();
+  });
+  try {
+    await session.prompt(input);
+    signal.throwIfAborted();
+    const last = session.messages.at(-1);
+    if (
+      last?.role === "assistant" &&
+      (last.stopReason === "aborted" || last.stopReason === "error")
+    )
+      throw new Error(last.errorMessage ?? "Pi execution was interrupted");
+  } finally {
+    signal.removeEventListener("abort", cancel);
+    unsubscribe();
+    await cancellation;
+  }
 }

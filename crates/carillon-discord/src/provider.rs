@@ -1554,7 +1554,11 @@ async fn attempt_delivery(
         Ok(native_ref) => (
             DeliveryOutcome::Delivered,
             Some(native_ref),
-            Feedback::Delivered,
+            if delivery.turn_state == carillon_protocol::model::TurnState::Completed {
+                Feedback::Delivered
+            } else {
+                Feedback::Uncertain
+            },
         ),
         Err(failure) => {
             warn!(error = %failure, delivery_id = delivery.id, "Discord delivery outcome uncertain");

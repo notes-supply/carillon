@@ -91,10 +91,7 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
     // Interface processes may outlive core. Their claims remain recoverable;
     // interface-instance reconciliation handles abandoned claims instead.
     if recovered_turns > 0 {
-        warn!(
-            recovered_turns,
-            "running turns became uncertain after restart"
-        );
+        warn!(recovered_turns, "running turns were interrupted by restart");
     }
 
     let state = AppState {
@@ -367,7 +364,7 @@ async fn run_next_turn(
         return Ok(WorkerStep::Idle);
     };
     let outcome = async {
-        let request = runtime_request(state, &turn).map_err(TurnFailure::Retry)?;
+        let request = runtime_request(state, &turn);
         let response = submit(runtime, &token, request).await?;
         state
             .database
@@ -377,7 +374,7 @@ async fn run_next_turn(
     .await;
     // Each outcome is written once. If that write fails, the turn stays
     // `running`, which blocks only its conversation and is never claimed
-    // again; startup recovery then records it as uncertain.
+    // again; startup recovery then records it as interrupted.
     match outcome {
         Ok(()) => Ok(WorkerStep::Advanced),
         Err(TurnFailure::Retry(failure)) => {
@@ -392,7 +389,7 @@ async fn run_next_turn(
             let message = failure.to_string();
             state
                 .database
-                .mark_uncertain(&turn, &message)
+                .interrupt_turn(&turn, &message)
                 .with_context(|| format!("record uncertain outcome of turn {}", turn.turn_id))?;
             warn!(turn_id = %turn.turn_id, error = %message, "runtime outcome is uncertain");
             Ok(WorkerStep::Advanced)
@@ -418,23 +415,21 @@ fn runtime_token(config: &LoadedConfig, runtime: &Provider) -> Result<String> {
 enum TurnFailure {
     /// The runtime provably never received the turn; running it again is safe.
     Retry(anyhow::Error),
-    /// Model work may have run; only an operator may cause it to run again.
+    /// Model work may have run; it must not be automatically replayed.
     Uncertain(anyhow::Error),
 }
 
-fn runtime_request(state: &AppState, turn: &ClaimedTurn) -> Result<RuntimeTurnRequest> {
-    let continuation_ref = state.database.continuation(turn)?;
-    Ok(RuntimeTurnRequest {
+fn runtime_request(state: &AppState, turn: &ClaimedTurn) -> RuntimeTurnRequest {
+    RuntimeTurnRequest {
         correlation_id: turn.turn_id.clone(),
         interface_id: turn.interface_id.clone(),
         agent_id: turn.agent_id.clone(),
         audience_id: turn.audience_id.clone(),
         input: turn.input.clone(),
-        continuation_ref,
         resource_root: resources::root(&state.snapshot_store(), &turn.resource_snapshot_id)
             .display()
             .to_string(),
-    })
+    }
 }
 
 async fn call_runtime(
@@ -474,11 +469,6 @@ async fn call_runtime(
     if response.correlation_id != request.correlation_id {
         return Err(TurnFailure::Uncertain(anyhow!(
             "runtime returned a mismatched correlation ID"
-        )));
-    }
-    if response.continuation_ref.is_empty() {
-        return Err(TurnFailure::Uncertain(anyhow!(
-            "runtime returned an empty continuation reference"
         )));
     }
     if response.output.trim().is_empty() {

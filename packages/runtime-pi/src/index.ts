@@ -1,6 +1,5 @@
 import {
   ModelRuntime,
-  SessionManager,
   SettingsManager,
   type AgentSessionEvent,
 } from "@earendil-works/pi-coding-agent";
@@ -15,7 +14,7 @@ import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { mkdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
-import { basename, isAbsolute, join, relative, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { Type } from "typebox";
 import { Parse } from "typebox/value";
@@ -32,9 +31,9 @@ import {
   type ModelUpdate,
   type Selection,
 } from "./model.ts";
-import { nativeSessionId } from "./namespace.ts";
+import { conversationDirectory, openConversation } from "./namespace.ts";
 import { Serial } from "./serial.ts";
-import { createPiExecutionSession } from "./session.ts";
+import { createPiExecutionSession, promptSession } from "./session.ts";
 import { runtimeListenAddress } from "./endpoint.ts";
 import packageInfo from "../package.json" with { type: "json" };
 
@@ -59,14 +58,12 @@ interface TurnRequest {
   readonly agent_id: string;
   readonly audience_id: string;
   readonly input: string;
-  readonly continuation_ref?: string | null;
   readonly resource_root: string;
 }
 
 interface TurnResponse {
   readonly correlation_id: string;
   readonly output: string;
-  readonly continuation_ref: string;
 }
 interface DeterministicSession {
   readonly turns: readonly {
@@ -95,7 +92,6 @@ const TurnRequestSchema = Type.Object({
   agent_id: Type.String(),
   audience_id: Type.String(),
   input: Type.String(),
-  continuation_ref: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   resource_root: Type.String(),
 });
 const DeterministicSessionSchema = Type.Object({
@@ -210,8 +206,18 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
       writeJson(response, 400, { error: "invalid runtime turn request" });
       return;
     }
-    const result = await turns.run(() => executeTurn(parsed));
-    writeJson(response, 200, result);
+    const controller = new AbortController();
+    const disconnect = () => {
+      if (!response.writableFinished) controller.abort();
+    };
+    response.on("close", disconnect);
+    try {
+      if (response.destroyed) controller.abort();
+      const result = await turns.run(() => executeTurn(parsed, controller.signal));
+      writeJson(response, 200, result);
+    } finally {
+      response.off("close", disconnect);
+    }
     return;
   }
 
@@ -317,15 +323,18 @@ function piModel(models: readonly Model<Api>[], selection: Selection): Model<Api
   return model;
 }
 
-async function executeTurn(request: TurnRequest): Promise<TurnResponse> {
-  return deterministic ? executeDeterministic(request) : executePi(request);
+async function executeTurn(request: TurnRequest, signal: AbortSignal): Promise<TurnResponse> {
+  signal.throwIfAborted();
+  return deterministic ? executeDeterministic(request) : executePi(request, signal);
 }
 
 async function executeDeterministic(request: TurnRequest): Promise<TurnResponse> {
   // Resolved first, as in `executePi`: a change made while the turn runs
   // applies to the next one.
   const selection = selections.effective(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, request);
-  const sessionPath = continuationPath(request);
+  const directory = conversationDirectory(sessionDirectory, request);
+  await mkdir(directory, { recursive: true });
+  const sessionPath = join(directory, "deterministic.json");
   const prior = await readDeterministicSession(sessionPath);
   const extensionActive = await exists(
     join(request.resource_root, "extensions", "carillon-context.js"),
@@ -349,22 +358,12 @@ async function executeDeterministic(request: TurnRequest): Promise<TurnResponse>
   return {
     correlation_id: request.correlation_id,
     output,
-    continuation_ref: sessionPath,
   };
 }
 
-async function executePi(request: TurnRequest): Promise<TurnResponse> {
+async function executePi(request: TurnRequest, signal: AbortSignal): Promise<TurnResponse> {
   const root = resolve(request.resource_root);
-  const isNew = request.continuation_ref === null || request.continuation_ref === undefined;
-  const manager = isNew
-    ? SessionManager.create(config.workspace, sessionDirectory, {
-        id: nativeSessionId(request.interface_id, request.agent_id, request.audience_id),
-      })
-    : SessionManager.open(
-        validateContinuation(request.continuation_ref),
-        sessionDirectory,
-        config.workspace,
-      );
+  const manager = openConversation(config.workspace, sessionDirectory, request);
   // The effective selection is applied to every turn, so a continued session
   // follows the current choice rather than the model it began with. It is
   // resolved against the same catalogue the picker reports, so the thinking
@@ -386,19 +385,16 @@ async function executePi(request: TurnRequest): Promise<TurnResponse> {
   const { session, extensionsResult } = created;
   try {
     assertExtensionsLoaded(extensionsResult.errors);
-    const sessionFile = session.sessionFile;
-    if (sessionFile === undefined) throw new Error("Pi did not create durable session evidence");
     let output = "";
     const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
       if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta")
         output += event.assistantMessageEvent.delta;
     });
     try {
-      await session.prompt(request.input);
+      await promptSession(session, request.input, signal);
       return {
         correlation_id: request.correlation_id,
         output,
-        continuation_ref: sessionFile,
       };
     } finally {
       unsubscribe();
@@ -423,23 +419,6 @@ function assertExtensionsLoaded(errors: readonly { readonly error: string }[]): 
     throw new Error(
       `Pi extension loading failed: ${errors.map((entry) => entry.error).join("; ")}`,
     );
-}
-
-function continuationPath(request: TurnRequest): string {
-  if (request.continuation_ref !== null && request.continuation_ref !== undefined)
-    return validateContinuation(request.continuation_ref);
-  return join(
-    sessionDirectory,
-    `${safeName(request.interface_id)}--${safeName(request.agent_id)}--${safeName(request.audience_id)}.json`,
-  );
-}
-
-function validateContinuation(value: string): string {
-  const path = resolve(value);
-  const child = relative(resolve(sessionDirectory), path);
-  if (child.startsWith("..") || isAbsolute(child))
-    return join(sessionDirectory, safeName(basename(path)));
-  return path;
 }
 
 async function readDeterministicSession(path: string): Promise<DeterministicSession> {
@@ -557,12 +536,6 @@ function isNodeError(value: unknown): value is NodeJS.ErrnoException {
 
 function errorMessage(value: unknown): string {
   return value instanceof Error ? value.message : String(value);
-}
-
-function safeName(value: string): string {
-  if (!/^[A-Za-z0-9._-]+$/u.test(value))
-    throw new Error("identifier contains unsupported characters");
-  return value;
 }
 
 await startRuntime(process.argv.slice(2));

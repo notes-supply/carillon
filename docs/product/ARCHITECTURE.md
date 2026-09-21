@@ -17,8 +17,7 @@ The Rust core (`carillon-core`, the `carillon` executable) owns:
 - configured agent, interface, and runtime identities;
 - accepted external events and duplicate suppression;
 - conversation continuity and runtime selection;
-- the queued, running, completed, and uncertain turn states;
-- opaque runtime continuation references;
+- the queued, running, completed, and interrupted turn states;
 - delivery intents and their outcomes;
 - relaying model-selection calls from an interface to the runtime that owns the conversation; and
 - inspection, backup, and restore operations.
@@ -64,7 +63,9 @@ Replacement is that one explicit operation. There is no module marketplace, depe
 
 ## Runtime providers
 
-A runtime provider receives a claimed turn containing agent, interface, audience, input, resource, and optional continuation identity. It returns nonblank output and an opaque continuation reference. A response without usable output is uncertain, not a completed silent turn: core preserves the operator's retry/skip decision and does not advance the continuation or enqueue an empty reply.
+A runtime provider receives a claimed turn containing agent, interface, audience, input, and resource identity. It owns the conversation's native session and returns nonblank output. A response without usable output interrupts the turn rather than completing it silently or sending an empty reply.
+
+Pi keeps a separate native session directory per interface/agent/audience and uses its native most-recent-session selection on each message. Saved history survives even an interrupted first turn; Pi may not yet have persisted a brand-new session before its first assistant message. Carillon does not reconstruct unsaved history. Runtime requests execute serially. A disconnected core request cancels native execution and waits for it to settle before releasing the queue; requests disconnected while queued never execute.
 
 The provider owns everything native to its engine. For Pi (`carillon-runtime-pi`) this includes sessions, model execution, tools, extensions, skills, compaction, settings, and usage. Core does not offer a generic tool or extension protocol on top of Pi.
 
@@ -84,12 +85,12 @@ Pi keeps Carillon's selections in `pi/model-selection.json` beside its private s
 2. Core durably records the accepted event as a queued turn, capturing the current agent resources, then returns a queued receipt.
 3. Core runs a worker for each enabled runtime, including non-default owners of accepted work. Each claims its next eligible turn and marks it running.
 4. The runtime attempts execution. Carillon does not guarantee exactly-once model or tool side effects.
-5. On success, core atomically stores completed output, the continuation reference, and a delivery intent.
+5. On success, core atomically stores completed output and a delivery intent.
 6. The interface provider claims and sends that delivery, then records delivered or uncertain status.
 
-If the runtime call or completion commit has an ambiguous outcome, the turn becomes uncertain. Each outcome is recorded once; if core cannot record it, the turn stays running, which blocks only its conversation, and the next core start records it as uncertain. On startup, any turn still marked running becomes uncertain. Carillon does not infer that it is safe to repeat model work.
+If the runtime call or completion commit has an ambiguous outcome, the turn becomes interrupted. It is terminal: core never replays its input, and the next user message can use the same native session without an operator decision. Already queued user messages continue in order once the runtime is idle; otherwise the conversation waits for input. On startup, turns still marked running become interrupted.
 
-An uncertain turn blocks later turns for the same interface, agent, and audience, but does not block unrelated conversations. An operator can explicitly retry or skip it.
+Each outcome is recorded once. If storage cannot record it, the turn remains running until storage is repaired and core restarts; this is a storage failure, not a routine recovery gate. A committed answer's delivery remains independent of execution. Deliveries carry the task state so successfully sending an interruption notice cannot be mistaken for successful task completion.
 
 ## Configuration and supervision
 

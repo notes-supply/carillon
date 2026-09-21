@@ -10,8 +10,8 @@ use carillon_protocol::model::{DeliveryOutcome, TurnState};
 fn installation(root: &Path) -> Result<AppState> {
     use carillon_protocol::config::{AgentConfig, Config, CoreConfig, Provider, hash_token};
 
-    // Core tests have no Discord or Pi installation. These provider IDs and
-    // continuation values are opaque test fixtures.
+    // Core tests use opaque provider IDs, without a Discord or Pi installation.
+    // Native session state belongs to the runtime.
     let resources = root.join("resources");
     fs::create_dir(&resources)?;
     fs::write(resources.join("SYSTEM.md"), "test instructions")?;
@@ -94,7 +94,6 @@ fn completed(request: RuntimeTurnRequest) -> RuntimeTurnResponse {
     RuntimeTurnResponse {
         correlation_id: request.correlation_id,
         output: format!("reply to {}", request.input),
-        continuation_ref: format!("native-{}", request.audience_id),
     }
 }
 
@@ -680,7 +679,6 @@ async fn duplicate_events_share_one_accepted_turn_without_reexecution() -> Resul
     let step = run_next_turn(&state, "test-runtime", async |runtime, _, request| {
         assert_eq!(runtime.id, "test-runtime");
         assert_eq!(request.correlation_id, first.turn_id);
-        assert_eq!(request.continuation_ref, None);
         assert!(Path::new(&request.resource_root).starts_with(&snapshot));
         assert_ne!(
             fs::read_to_string(Path::new(&request.resource_root).join("SYSTEM.md"))
@@ -870,11 +868,10 @@ async fn runtime_ownership_survives_default_changes() -> Result<()> {
     let fresh = accept(&state, "fresh", "new-conversation").await?;
     run_next_turn(&state, "replacement", async |_, _, request| {
         assert_eq!(request.correlation_id, fresh.turn_id);
-        assert_eq!(request.continuation_ref, None);
         Ok(completed(request))
     })
     .await?;
-    for (receipt, continuation) in [(&first, None), (&second, Some("native-conversation"))] {
+    for receipt in [&first, &second] {
         let inspected = state
             .database
             .inspect_turn(&receipt.turn_id)?
@@ -882,7 +879,6 @@ async fn runtime_ownership_survives_default_changes() -> Result<()> {
         assert_eq!(inspected.providers[1]["id"], "test-runtime");
         run_next_turn(&state, "test-runtime", async |_, _, request| {
             assert_eq!(request.correlation_id, receipt.turn_id);
-            assert_eq!(request.continuation_ref.as_deref(), continuation);
             Ok(completed(request))
         })
         .await?;
@@ -890,10 +886,6 @@ async fn runtime_ownership_survives_default_changes() -> Result<()> {
     let third = accept(&state, "three", "conversation").await?;
     run_next_turn(&state, "test-runtime", async |_, _, request| {
         assert_eq!(request.correlation_id, third.turn_id);
-        assert_eq!(
-            request.continuation_ref.as_deref(),
-            Some("native-conversation")
-        );
         Ok(completed(request))
     })
     .await?;
@@ -954,7 +946,7 @@ async fn startup_drains_queued_nondefault_runtime_without_replaying_running_work
     services.spawn(async move { serve(config).await.map_err(std::io::Error::other) });
     tokio::time::timeout(Duration::from_secs(5), async {
         let mut calls = Vec::new();
-        for _ in 0..2 {
+        for _ in 0..3 {
             calls.push(received.recv().await.context("runtime trace ended")?);
         }
         calls.sort();
@@ -962,11 +954,12 @@ async fn startup_drains_queued_nondefault_runtime_without_replaying_running_work
             calls,
             vec![
                 ("replacement", fresh.turn_id.clone()),
+                ("test-runtime", blocked.turn_id.clone()),
                 ("test-runtime", queued.turn_id.clone())
             ]
         );
         loop {
-            if state.database.turn_counts()?.completed == 2 {
+            if state.database.turn_counts()?.completed == 3 {
                 break;
             }
             tokio::task::yield_now().await;
@@ -977,7 +970,7 @@ async fn startup_drains_queued_nondefault_runtime_without_replaying_running_work
                 .inspect_turn(&running.turn_id)?
                 .context("interrupted turn missing")?
                 .state,
-            TurnState::Uncertain
+            TurnState::Interrupted
         );
         assert_eq!(
             state
@@ -985,7 +978,7 @@ async fn startup_drains_queued_nondefault_runtime_without_replaying_running_work
                 .inspect_turn(&blocked.turn_id)?
                 .context("blocked turn missing")?
                 .state,
-            TurnState::Queued
+            TurnState::Completed
         );
         assert!(received.try_recv().is_err());
         Ok::<_, anyhow::Error>(())
@@ -996,23 +989,19 @@ async fn startup_drains_queued_nondefault_runtime_without_replaying_running_work
 }
 
 #[tokio::test]
-async fn queued_turns_use_their_predecessors_continuation() -> Result<()> {
+async fn queued_turns_keep_the_same_runtime_conversation() -> Result<()> {
     let directory = tempdir()?;
     let state = installation(directory.path())?;
     let first = accept(&state, "one", "conversation").await?;
     let second = accept(&state, "two", "conversation").await?;
     run_next_turn(&state, "test-runtime", async |_, _, request| {
         assert_eq!(request.correlation_id, first.turn_id);
-        assert_eq!(request.continuation_ref, None);
         Ok(completed(request))
     })
     .await?;
     run_next_turn(&state, "test-runtime", async |_, _, request| {
         assert_eq!(request.correlation_id, second.turn_id);
-        assert_eq!(
-            request.continuation_ref.as_deref(),
-            Some("native-conversation")
-        );
+        assert_eq!(request.audience_id, "conversation");
         Ok(completed(request))
     })
     .await?;
@@ -1057,11 +1046,11 @@ async fn definite_connection_failure_requeues_the_same_turn() -> Result<()> {
 }
 
 #[tokio::test]
-async fn ambiguity_holds_only_its_conversation_without_replaying() -> Result<()> {
+async fn interruption_allows_the_next_message_without_replaying() -> Result<()> {
     let directory = tempdir()?;
     let state = installation(directory.path())?;
     let uncertain = accept(&state, "one", "blocked").await?;
-    accept(&state, "two", "blocked").await?;
+    let successor = accept(&state, "two", "blocked").await?;
     run_next_turn(&state, "test-runtime", async |_, _, _| {
         Err(TurnFailure::Uncertain(anyhow!("response lost")))
     })
@@ -1072,25 +1061,21 @@ async fn ambiguity_holds_only_its_conversation_without_replaying() -> Result<()>
             .inspect_turn(&uncertain.turn_id)?
             .context("missing turn")?
             .state,
-        TurnState::Uncertain
+        TurnState::Interrupted
     );
-    assert_eq!(
-        run_next_turn(&state, "test-runtime", async |_, _, _| {
-            Err(TurnFailure::Uncertain(anyhow!(
-                "uncertain work or its successor was submitted"
-            )))
-        })
-        .await?,
-        WorkerStep::Idle
-    );
+    run_next_turn(&state, "test-runtime", async |_, _, request| {
+        assert_eq!(request.correlation_id, successor.turn_id);
+        Ok(completed(request))
+    })
+    .await?;
     accept(&state, "three", "unrelated").await?;
     run_next_turn(&state, "test-runtime", async |_, _, request| {
         assert_eq!(request.audience_id, "unrelated");
         Ok(completed(request))
     })
     .await?;
-    assert_eq!(state.database.turn_counts()?.completed, 1);
-    assert_eq!(state.database.turn_counts()?.uncertain, 1);
+    assert_eq!(state.database.turn_counts()?.completed, 2);
+    assert_eq!(state.database.turn_counts()?.interrupted, 1);
     Ok(())
 }
 
@@ -1131,7 +1116,6 @@ async fn failed_outcome_write_waits_for_restart_without_blocking_other_conversat
         Ok(completed(request))
     })
     .await?;
-    assert!(state.database.skip_turn(&failed.turn_id).is_err());
     assert_eq!(
         state
             .database
@@ -1150,7 +1134,6 @@ async fn failed_outcome_write_waits_for_restart_without_blocking_other_conversat
 
     state.database = Database::open(&path)?;
     assert_eq!(state.database.recover_running_turns()?, 1);
-    state.database.skip_turn(&failed.turn_id)?;
     run_next_turn(&state, "test-runtime", async |_, _, request| {
         assert_eq!(request.correlation_id, successor.turn_id);
         Ok(completed(request))
@@ -1161,12 +1144,12 @@ async fn failed_outcome_write_waits_for_restart_without_blocking_other_conversat
 }
 
 #[tokio::test]
-async fn cancelled_execution_is_uncertain_after_reopening_while_queued_work_resumes() -> Result<()>
+async fn cancelled_execution_is_interrupted_after_reopening_while_queued_work_resumes() -> Result<()>
 {
     let directory = tempdir()?;
     let mut state = installation(directory.path())?;
     let running = accept(&state, "one", "blocked").await?;
-    accept(&state, "two", "blocked").await?;
+    let successor = accept(&state, "two", "blocked").await?;
     let queued = accept(&state, "three", "unrelated").await?;
     let (admitted, received) = tokio::sync::oneshot::channel();
     let worker = state.clone();
@@ -1193,8 +1176,13 @@ async fn cancelled_execution_is_uncertain_after_reopening_while_queued_work_resu
             .inspect_turn(&running.turn_id)?
             .context("missing turn")?
             .state,
-        TurnState::Uncertain
+        TurnState::Interrupted
     );
+    run_next_turn(&state, "test-runtime", async |_, _, request| {
+        assert_eq!(request.correlation_id, successor.turn_id);
+        Ok(completed(request))
+    })
+    .await?;
     run_next_turn(&state, "test-runtime", async |_, _, request| {
         assert_eq!(request.correlation_id, queued.turn_id);
         Ok(completed(request))
@@ -1213,7 +1201,7 @@ async fn cancelled_execution_is_uncertain_after_reopening_while_queued_work_resu
 }
 
 #[tokio::test]
-async fn empty_runtime_output_stays_resolvable_without_empty_delivery_or_replay() -> Result<()> {
+async fn empty_runtime_output_interrupts_without_empty_delivery_or_replay() -> Result<()> {
     let directory = tempdir()?;
     let mut state = installation(directory.path())?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -1233,7 +1221,6 @@ async fn empty_runtime_output_stays_resolvable_without_empty_delivery_or_replay(
                         " \t\n"
                     }
                     .to_owned(),
-                    continuation_ref: "native-may-have-changed".to_owned(),
                 })
             }
         }),
@@ -1257,7 +1244,7 @@ async fn empty_runtime_output_stays_resolvable_without_empty_delivery_or_replay(
             .context("missing turn")?;
         assert_eq!(
             inspection.state,
-            TurnState::Uncertain,
+            TurnState::Interrupted,
             "empty output was completed"
         );
         let feedback = state
@@ -1265,11 +1252,7 @@ async fn empty_runtime_output_stays_resolvable_without_empty_delivery_or_replay(
             .claim_delivery("test-interface", "instance")?
             .context("missing uncertainty feedback")?;
         assert_eq!(feedback.turn_id, receipt.turn_id);
-        assert!(
-            feedback
-                .content
-                .contains("will not run it again automatically")
-        );
+        assert!(feedback.content.contains("interrupted"));
         state.database.acknowledge_delivery(
             "test-interface",
             feedback.id,
@@ -1277,22 +1260,8 @@ async fn empty_runtime_output_stays_resolvable_without_empty_delivery_or_replay(
             DeliveryOutcome::Delivered,
             None,
         )?;
-        assert_eq!(
-            run_next_turn(&state, "test-runtime", async |_, _, _| {
-                Err(TurnFailure::Uncertain(anyhow!(
-                    "ambiguous work replayed or its successor ran"
-                )))
-            })
-            .await?,
-            WorkerStep::Idle
-        );
-        state.database.skip_turn(&receipt.turn_id)?;
         run_next_turn(&state, "test-runtime", async |_, _, request| {
             assert_eq!(request.correlation_id, successor.turn_id);
-            assert!(
-                request.continuation_ref.is_none(),
-                "invalid response advanced continuation"
-            );
             Ok(completed(request))
         })
         .await?;
@@ -1328,27 +1297,25 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
         .clone();
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     runtime.url = format!("http://{}", listener.local_addr()?);
-    let app = Router::new().route("/v1/turns", post(|Json(request): Json<RuntimeTurnRequest>| async move {
-        match request.input.as_str() {
-            "forbidden" => StatusCode::FORBIDDEN.into_response(),
-            "server error" => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-            "malformed" => "not json".into_response(),
-            "mismatch" => Json(json!({"correlation_id": "other", "output": "reply", "continuation_ref": "native"})).into_response(),
-            "empty continuation" => Json(json!({"correlation_id": request.correlation_id, "output": "reply", "continuation_ref": ""})).into_response(),
-            _ => Json(completed(request)).into_response(),
-        }
-    }));
+    let app = Router::new().route(
+        "/v1/turns",
+        post(|Json(request): Json<RuntimeTurnRequest>| async move {
+            match request.input.as_str() {
+                "forbidden" => StatusCode::FORBIDDEN.into_response(),
+                "server error" => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                "malformed" => "not json".into_response(),
+                "mismatch" => {
+                    Json(json!({"correlation_id": "other", "output": "reply"})).into_response()
+                }
+                _ => Json(completed(request)).into_response(),
+            }
+        }),
+    );
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
     // These responses carry no protocol proof of non-admission. This is not
     // a blanket rule for a future explicit rejected-before-execution response.
-    for input in [
-        "forbidden",
-        "server error",
-        "malformed",
-        "mismatch",
-        "empty continuation",
-    ] {
-        let mut request = runtime_request(&state, &turn)?;
+    for input in ["forbidden", "server error", "malformed", "mismatch"] {
+        let mut request = runtime_request(&state, &turn);
         request.input = input.to_owned();
         let outcome = call_runtime(&state.client, &runtime, "unused", request).await;
         assert!(
@@ -1360,7 +1327,7 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
         &state.client,
         &runtime,
         "unused",
-        runtime_request(&state, &turn)?,
+        runtime_request(&state, &turn),
     )
     .await
     .map_err(|failure| match failure {
@@ -1384,7 +1351,7 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
             &state.client,
             &runtime,
             "unused",
-            runtime_request(&state, &turn)?
+            runtime_request(&state, &turn)
         )
         .await,
         Err(TurnFailure::Retry(_))

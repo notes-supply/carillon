@@ -30,8 +30,8 @@ Pi composes the final prompt, including context, tool guidance, skill inventory,
 
 Pi extensions use Pi's own loading, hooks, subprocess environment, tools, and persistence. Carillon does not introduce another extension manifest, permission system, or prompt-composition language.
 
-A different runtime adapter may reuse the common instruction files where their meaning fits and own different native resources where it does not. Carillon core treats runtime resources and continuation references as adapter-owned rather than forcing Codex or another engine into Pi's settings, extension, or session format.
+A different runtime adapter may reuse the common instruction files where their meaning fits and own different native resources where it does not. Carillon core treats runtime resources and native sessions as adapter-owned rather than forcing Codex or another engine into Pi's settings, extension, or session format.
 
 Operators edit common and runtime-native files with ordinary tools. A coherent change becomes available to subsequent turns while an existing turn either continues with the resources it began with or ends honestly.
 
-The runtime adapter remains authoritative for model-visible history and native extension state. Carillon stores the product-level agent identity, selected provider/resource identity, and opaque continuation needed to connect runtime work to external conversations.
+The runtime adapter remains authoritative for model-visible history and native extension state. Carillon stores the product-level agent identity, selected provider/resource identity, and external conversation identity; the runtime alone selects and reopens its native session.

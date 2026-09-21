@@ -617,7 +617,6 @@ async function holdTurn(correlationId) {
       audience_id: `discord-100-${correlationId}`,
       input: "held",
       resource_root: fixture,
-      continuation_ref: null,
     }),
   });
   response.catch(() => undefined);

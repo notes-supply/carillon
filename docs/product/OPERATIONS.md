@@ -42,7 +42,7 @@ An administrator may run `loginctl enable-linger <owner>` when the services must
 
 ## Services
 
-- **Core** (`carillon core`) owns accepted turns, their state and continuation references, and delivery intents.
+- **Core** (`carillon core`) owns accepted turns, their state, and delivery intents.
 - **Discord** (`carillon discord serve`, the `carillon-discord` program) owns Discord admission, routing, threads, feedback, message delivery, and slash commands.
 - **Pi runtime** (`carillon-runtime-pi`) owns Pi sessions, inference, native tools, extensions, skills, model selection, and private engine settings.
 
@@ -75,19 +75,15 @@ Each bundled provider reports its own build version, not the `providers[].versio
 
 A turn is queued before acceptance is acknowledged. Runtime work is executed only after the turn is durably claimed as running.
 
-If Carillon cannot prove what happened to running model work, the turn is marked uncertain and is not replayed automatically. Later work for that same conversation waits; unrelated conversations continue. A successful runtime result and delivery intent are committed together.
+If Carillon loses a running turn, it marks it interrupted and does not replay it. The runtime retains its saved session. Send another message to continue the conversation normally; separately queued messages continue in order. There is no retry/skip gate. Tool actions may already have happened, and interruption does not undo them. Discord uses warning feedback for interrupted turns, even when the interruption notice itself was delivered successfully.
 
-If core cannot persist a turn's outcome, it logs the write failure and leaves that turn recorded as running. Its conversation remains blocked, but other conversations can proceed once database writes work again. Fix the storage problem, restart core to recover the stranded turn as uncertain, and then inspect it before choosing retry or skip. Core does not retry the outcome write indefinitely.
+Pi cancels execution when core disconnects and settles the native operation before admitting another turn. If the runtime process dies, its user service restarts it. A successful runtime result and delivery intent are committed together; delivering a committed answer never requires rerunning the model.
 
-Inspect and resolve an uncertain turn with:
+If core cannot persist an outcome, it logs the storage error and leaves the turn recorded as running. Repair storage and restart core; startup records the stranded turn as interrupted without replaying it. Diagnose any turn with:
 
 ```sh
 carillon inspect --config ~/.carillon/carillon.toml TURN_ID
-carillon resolve --config ~/.carillon/carillon.toml TURN_ID retry
-carillon resolve --config ~/.carillon/carillon.toml TURN_ID skip
 ```
-
-`retry` queues the turn again and may repeat work whose outcome could not be observed. `skip` records that the turn was deliberately abandoned and unblocks later work without rerunning it.
 
 Discord delivery uses a separate outbox. An unclaimed delivery can be retried. A delivery that was claimed when the interface stopped is marked uncertain because the external send may already have succeeded.
 
