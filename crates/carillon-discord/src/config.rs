@@ -101,13 +101,13 @@ impl FromStr for DiscordRoute {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DiscordEmoji {
+pub(crate) enum DiscordEmoji {
     Unicode(String),
     Custom { name: String, id: u64 },
 }
 
 impl DiscordEmoji {
-    pub fn parse(value: &str) -> Result<Self> {
+    pub(crate) fn parse(value: &str) -> Result<Self> {
         if let Some((name, id)) = value.split_once(':') {
             if name.len() < 2
                 || name.len() > 32
@@ -134,6 +134,7 @@ impl DiscordEmoji {
 impl DiscordConfig {
     /// A fresh configuration carrying the same feedback defaults that
     /// deserialization applies.
+    #[must_use]
     pub fn with_defaults(
         agent: String,
         guild_id: String,
@@ -158,7 +159,7 @@ impl DiscordConfig {
 
     /// Reads and validates the provider's file for a registered interface
     /// provider.
-    pub fn load(config: &LoadedConfig, provider_id: &str) -> Result<Self> {
+    pub(crate) fn load(config: &LoadedConfig, provider_id: &str) -> Result<Self> {
         let path = config.provider_config_path(provider_id)?;
         let text = fs::read_to_string(&path)
             .with_context(|| format!("read Discord configuration {}", path.display()))?;
@@ -170,7 +171,7 @@ impl DiscordConfig {
 
     /// Writes the file for a registered interface provider, readable only by
     /// the installation owner like the rest of the installation.
-    pub fn write(&self, config: &LoadedConfig, provider_id: &str) -> Result<()> {
+    pub(crate) fn write(&self, config: &LoadedConfig, provider_id: &str) -> Result<()> {
         self.validate(config, provider_id)?;
         let path = config.provider_config_path(provider_id)?;
         let parent = path
@@ -181,7 +182,7 @@ impl DiscordConfig {
             .with_context(|| format!("write {}", path.display()))
     }
 
-    pub fn validate(&self, config: &LoadedConfig, provider_id: &str) -> Result<()> {
+    pub(crate) fn validate(&self, config: &LoadedConfig, provider_id: &str) -> Result<()> {
         if !valid_snowflake(&self.guild_id) {
             bail!("Discord guild ID must be an immutable snowflake ID");
         }
@@ -225,7 +226,7 @@ impl DiscordConfig {
 
 /// Replaces the admission settings of an existing file, or creates the file,
 /// keeping any feedback settings the operator tuned by hand.
-pub fn configure(
+pub(crate) fn configure(
     config: &LoadedConfig,
     provider_id: &str,
     guild_id: &str,

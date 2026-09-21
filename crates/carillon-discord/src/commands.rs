@@ -29,7 +29,7 @@ use twilight_model::{
     },
 };
 
-use crate::provider::CoreClient;
+use crate::client::CoreClient;
 
 /// The whole invocation, including every native call it makes.
 const DEADLINE: Duration = Duration::from_secs(10);
@@ -451,7 +451,7 @@ pub(crate) mod tests {
 
     fn calls() -> super::ModelCalls {
         super::ModelCalls::new(
-            crate::provider::tests::core_client("http://127.0.0.1:1".to_owned()),
+            crate::client::test_client("http://127.0.0.1:1".to_owned()),
             carillon_protocol::model::ModelQuery {
                 agent_id: "default".to_owned(),
                 audience_id: None,
@@ -775,7 +775,7 @@ pub(crate) mod tests {
         );
         let server = tokio::spawn(async move { axum::serve(listener, router).await });
         let calls = super::ModelCalls::new(
-            crate::provider::tests::core_client(format!("http://{address}")),
+            crate::client::test_client(format!("http://{address}")),
             ModelQuery {
                 agent_id: "default".to_owned(),
                 audience_id: None,

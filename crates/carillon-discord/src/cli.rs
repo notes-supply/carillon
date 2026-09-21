@@ -9,9 +9,9 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use crate::{
+    application::{ServeOptions, serve},
     commands::{Commands, DiscordApp},
     config::{DiscordConfig, DiscordRoute, configure},
-    provider::{ServeOptions, serve},
 };
 
 #[derive(Debug, Parser)]

@@ -69,3 +69,7 @@ run = "scripts/package-release.sh"
 description = "Build and test the release installation in a temporary home"
 depends = ["package"]
 run = "scripts/test-install.sh"
+
+[tasks."example:discord"]
+description = "Run Discord admission and model presentation without a gateway"
+run = "cargo run -p carillon-discord --example model_picker"

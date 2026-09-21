@@ -24,6 +24,41 @@ Discord's slash commands—currently `/model`, which shows and changes the model
 
 Carillon does not define its own command permissions or filesystem sandbox. Services run with the authority of the Unix user that installed them. Pi extensions and tools use Pi's native mechanisms.
 
+## Building blocks
+
+The service and direct callers use the same components. Start with the component
+that owns the behavior you want to change:
+
+- **[Durable core](crates/carillon-core/README.md)** — `Core::create` / `Core::open`,
+  admission, execution and delivery over SQLite.
+  [Run a complete conversation](crates/carillon-core/examples/conversation.rs)
+  without HTTP or a model account: `mise run example:core`.
+- **[Pi runtime](packages/runtime-pi/README.md)** — `createPiRuntime`, native
+  sessions, model selection and explicit shutdown.
+  [Run a native session](packages/runtime-pi/examples/session.ts) without Discord
+  or Carillon HTTP: `mise run example:pi -- …` (configured credentials required).
+- **[Discord interface](crates/carillon-discord/README.md)** — admission,
+  conversation mapping, native delivery and command hosting.
+  [Render the model picker](crates/carillon-discord/examples/model_picker.rs)
+  without a gateway: `mise run example:discord`.
+- **[Wire contracts](packages/protocol/README.md)** — identities and requests in
+  Rust; shared model vocabulary in Rust/TypeScript with common conformance fixtures.
+  No installation or credential discovery.
+- **[Wasm host](crates/carillon-wasm/README.md)** — bounded invocation of a compiled
+  module with explicit native operations. An optional leaf, not an application framework.
+
+Application assembly supplies installation paths, credentials, listeners and process
+lifetimes. Find it in [core application](crates/carillon-core/src/application/mod.rs),
+[Discord application](crates/carillon-discord/src/application.rs), and
+[Pi CLI](packages/runtime-pi/src/cli.ts). Registry and filesystem utilities live in
+[`carillon-installation`](crates/carillon-installation/src/lib.rs); bundled provider
+choices belong to the applications, not the durable engine or wire contracts.
+
+Constructors do not parse CLI arguments or start hidden services. Use ordinary defaults
+for component-owned concerns; supply explicit collaborators when replacing them.
+The examples are exercised by `check`, including the native Pi session adapter with a
+controlled model stream. They are not separate demonstration implementations.
+
 ## Operation lifecycle
 
 Accepted events are stored before Carillon acknowledges them. A turn moves through:
@@ -41,7 +76,7 @@ carillon inspect --config ~/.carillon/carillon.toml TURN_ID
 
 ## Development
 
-The repository uses Rust, TypeScript, `mise`, Cargo, and pnpm. The Cargo workspace holds core (`carillon-core`), the Discord provider (`carillon-discord`), its command module (`carillon-discord-commands`, built for `wasm32-unknown-unknown`, a target `mise install` adds to the toolchain), the Wasm hosting crate (`carillon-wasm`), and the shared configuration and wire types (`carillon-protocol`). `packages/runtime-pi` is the Pi runtime provider.
+The repository uses Rust, TypeScript, `mise`, Cargo, and pnpm. Rust components live in `crates/`, TypeScript packages in `packages/`. The Discord command library also builds for `wasm32-unknown-unknown`; `mise install` adds that target to the toolchain. The component guides above link their public APIs, examples and relevant tests.
 
 ```sh
 mise install

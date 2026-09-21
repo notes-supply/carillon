@@ -39,3 +39,7 @@ wat = "1.254.0"
 
 [lints]
 workspace = true
+
+[[example]]
+name = "model_picker"
+test = true

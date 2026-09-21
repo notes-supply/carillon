@@ -404,16 +404,7 @@ async function testRestore() {
 async function testParticipation() {
   const messages = execFileSync(
     "cargo",
-    [
-      "test",
-      "--locked",
-      "-p",
-      "carillon-discord",
-      "--bin",
-      "carillon-discord",
-      "--no-run",
-      "--message-format=json",
-    ],
+    ["test", "--locked", "-p", "carillon-discord", "--lib", "--no-run", "--message-format=json"],
     { encoding: "utf8", timeout: 120_000 },
   );
   const artifacts = messages
@@ -428,7 +419,7 @@ async function testParticipation() {
   const args = [
     artifacts[0].executable,
     "--exact",
-    "provider::tests::participation_persistence_retries_without_bypassing_activation",
+    "conversations::tests::participation_persistence_retries_without_bypassing_activation",
     "--nocapture",
     "--test-threads=1",
   ];
