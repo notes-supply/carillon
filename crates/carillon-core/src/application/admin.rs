@@ -161,7 +161,7 @@ fn default_providers(
         version: String,
     }
     let pi: PiPackage =
-        serde_json::from_str(include_str!("../../../packages/runtime-pi/package.json"))?;
+        serde_json::from_str(include_str!("../../../../packages/runtime-pi/package.json"))?;
     Ok(vec![
         Provider {
             id: "discord-private".to_owned(),
@@ -607,7 +607,7 @@ mod tests {
 
         assert_eq!(config.value.providers.len(), 2);
         let pi_package: serde_json::Value =
-            serde_json::from_str(include_str!("../../../packages/runtime-pi/package.json"))?;
+            serde_json::from_str(include_str!("../../../../packages/runtime-pi/package.json"))?;
         assert_eq!(
             config
                 .provider("runtime-pi", ProviderRole::Runtime)?

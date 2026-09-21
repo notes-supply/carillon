@@ -17,11 +17,11 @@ use reqwest::Url;
 use serde::{Serialize, de::DeserializeOwned};
 use tracing_subscriber::EnvFilter;
 
-use crate::{
+use super::{
     admin::{
         ServiceLock, backup, enable_demo_resources, initialize as init, restore, set_provider,
     },
-    core::serve,
+    http::serve,
 };
 
 #[derive(Debug, Parser)]
@@ -306,7 +306,7 @@ mod tests {
     #[tokio::test]
     async fn operator_requests_time_out_on_stalled_headers_and_bodies() -> Result<()> {
         let directory = tempfile::tempdir()?;
-        let config_path = crate::admin::initialize(
+        let config_path = crate::application::admin::initialize(
             &directory.path().join("installation"),
             directory.path(),
             44_000,

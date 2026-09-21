@@ -10,6 +10,7 @@ name = "carillon"
 path = "src/main.rs"
 
 [dependencies]
+thiserror.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 carillon-protocol = { path = "../carillon-protocol" }
@@ -39,3 +40,7 @@ tower = { version = "0.5.2", features = ["util"] }
 
 [lints]
 workspace = true
+
+[[example]]
+name = "conversation"
+test = true

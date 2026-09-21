@@ -2,5 +2,5 @@
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    carillon_core::run().await
+    carillon_core::application::run().await
 }

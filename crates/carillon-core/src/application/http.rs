@@ -4,7 +4,9 @@
 #[cfg(test)]
 mod tests;
 
-use std::{path::PathBuf, time::Duration};
+#[cfg(test)]
+use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow};
 use axum::{
@@ -30,20 +32,41 @@ use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 
 use crate::{
-    db::{ClaimedTurn, Database},
-    resources,
+    Core, CoreError, CoreOptions, RuntimeClient, RuntimeProvider, TurnFailure, WorkerStep,
 };
 
 #[derive(Clone)]
 struct AppState {
     config: LoadedConfig,
-    database: Database,
+    core: Core,
     client: Client,
 }
 
+#[cfg(test)]
 impl AppState {
     fn snapshot_store(&self) -> PathBuf {
-        self.config.value.data_dir.join("resource-snapshots")
+        self.core.snapshot_store()
+    }
+}
+
+fn core_options(config: &LoadedConfig) -> CoreOptions {
+    CoreOptions {
+        data_directory: config.value.data_dir.clone(),
+        agent_id: config.value.agent.id.clone(),
+        resource_root: config.value.agent.resource_root.clone(),
+        default_runtime: config.value.agent.runtime_provider.clone(),
+        runtimes: config
+            .value
+            .providers
+            .iter()
+            .filter(|provider| provider.role == ProviderRole::Runtime)
+            .map(|provider| RuntimeProvider {
+                id: provider.id.clone(),
+                version: provider.version.clone(),
+                url: provider.url.clone(),
+                enabled: provider.enabled,
+            })
+            .collect(),
     }
 }
 
@@ -77,6 +100,16 @@ impl From<anyhow::Error> for ApiError {
     }
 }
 
+impl From<CoreError> for ApiError {
+    fn from(error: CoreError) -> Self {
+        match error {
+            CoreError::InvalidInput(message) => Self::new(StatusCode::BAD_REQUEST, message),
+            CoreError::Conflict(message) => Self::new(StatusCode::CONFLICT, message),
+            CoreError::Storage(error) => error.into(),
+        }
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.status, Json(json!({ "error": self.message }))).into_response()
@@ -86,8 +119,8 @@ impl IntoResponse for ApiError {
 pub async fn serve(config: LoadedConfig) -> Result<()> {
     // A failed bind must not recover state or start accepted work.
     let listener = TcpListener::bind(config.value.core.listen).await?;
-    let database = Database::open(&config.value.data_dir.join("carillon.sqlite3"))?;
-    let recovered_turns = database.recover_running_turns()?;
+    let core = Core::open(core_options(&config))?;
+    let recovered_turns = core.recover_interrupted()?;
     // Interface processes may outlive core. Their claims remain recoverable;
     // interface-instance reconciliation handles abandoned claims instead.
     if recovered_turns > 0 {
@@ -96,7 +129,7 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
 
     let state = AppState {
         config: config.clone(),
-        database,
+        core,
         client: Client::new(),
     };
     let mut workers = tokio::task::JoinSet::new();
@@ -147,66 +180,10 @@ async fn accept_event(
     headers: HeaderMap,
     Json(event): Json<ExternalEvent>,
 ) -> Result<Json<EventReceipt>, ApiError> {
-    let interface = interface_provider(&headers, &state.config)?.clone();
-    admit(&event, &state.config)?;
-    if let Some(receipt) = state
-        .database
-        .event_receipt(&interface.id, &event.event_id)?
-    {
-        return Ok(Json(receipt));
-    }
-    let runtime = conversation_runtime(
-        &state,
-        &interface.id,
-        &event.agent_id,
-        Some(&event.audience_id),
-    )?;
-    let resources = resources::materialize(
-        &state.config.value.agent.resource_root,
-        &state.snapshot_store(),
-    )?;
-    let providers =
-        serde_json::to_value([selected_provider(&interface), selected_provider(&runtime)])
-            .map_err(anyhow::Error::from)?;
-    let receipt =
-        state
-            .database
-            .accept_event(&interface.id, &runtime.id, &event, &providers, &resources)?;
-    Ok(Json(receipt))
-}
-
-/// The runtime that owns a conversation: the one that accepted its first
-/// turn, or the agent default while it has none. A missing or disabled owner
-/// is a configuration conflict, not temporary transport failure; rejecting
-/// explicitly stops interfaces retrying ahead of unrelated conversations.
-fn conversation_runtime(
-    state: &AppState,
-    interface_id: &str,
-    agent_id: &str,
-    audience_id: Option<&str>,
-) -> Result<Provider, ApiError> {
-    let owner = match audience_id {
-        Some(audience_id) => {
-            state
-                .database
-                .conversation_runtime(interface_id, agent_id, audience_id)?
-        }
-        None => None,
-    };
-    let runtime_id = owner
-        .as_deref()
-        .unwrap_or(&state.config.value.agent.runtime_provider);
-    let runtime = state
-        .config
-        .provider(runtime_id, ProviderRole::Runtime)
-        .map_err(|error| ApiError::new(StatusCode::CONFLICT, error.to_string()))?;
-    if !runtime.enabled {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "conversation runtime provider is disabled",
-        ));
-    }
-    Ok(runtime.clone())
+    let interface = interface_provider(&headers, &state.config)?;
+    Ok(Json(
+        state.core.accept(&selected_provider(interface), &event)?,
+    ))
 }
 
 /// Model calls answer a waiting user; they give up well before the
@@ -274,15 +251,11 @@ fn model_runtime(
     interface_id: &str,
     query: &ModelQuery,
 ) -> Result<Provider, ApiError> {
-    if query.agent_id != state.config.value.agent.id {
-        return Err(ApiError::new(StatusCode::BAD_REQUEST, "unknown agent"));
-    }
-    conversation_runtime(
-        state,
-        interface_id,
-        &query.agent_id,
-        query.audience_id.as_deref(),
-    )
+    let runtime = state.core.runtime_for(interface_id, query)?;
+    Ok(state
+        .config
+        .provider(&runtime.id, ProviderRole::Runtime)?
+        .clone())
 }
 
 /// Forwards a model call and relays the runtime's answer. Runtimes phrase
@@ -316,13 +289,6 @@ async fn relay_model_call(request: RequestBuilder) -> Result<Response, ApiError>
         )
     })?;
     Ok((status, Json(body)).into_response())
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum WorkerStep {
-    Idle,
-    Advanced,
-    Backoff,
 }
 
 async fn runtime_worker(state: AppState, runtime_id: String) {
@@ -360,41 +326,12 @@ async fn run_next_turn(
         return Ok(WorkerStep::Backoff);
     }
     let token = runtime_token(&state.config, runtime)?;
-    let Some(turn) = state.database.claim_turn(runtime_id)? else {
-        return Ok(WorkerStep::Idle);
-    };
-    let outcome = async {
-        let request = runtime_request(state, &turn);
-        let response = submit(runtime, &token, request).await?;
-        state
-            .database
-            .complete_turn(&turn, &response)
-            .map_err(TurnFailure::Uncertain)
-    }
-    .await;
-    // Each outcome is written once. If that write fails, the turn stays
-    // `running`, which blocks only its conversation and is never claimed
-    // again; startup recovery then records it as interrupted.
-    match outcome {
-        Ok(()) => Ok(WorkerStep::Advanced),
-        Err(TurnFailure::Retry(failure)) => {
-            state
-                .database
-                .requeue_turn(&turn)
-                .with_context(|| format!("requeue turn {}", turn.turn_id))?;
-            warn!(turn_id = %turn.turn_id, error = %failure, "runtime was unavailable; turn requeued");
-            Ok(WorkerStep::Backoff)
-        }
-        Err(TurnFailure::Uncertain(failure)) => {
-            let message = failure.to_string();
-            state
-                .database
-                .interrupt_turn(&turn, &message)
-                .with_context(|| format!("record uncertain outcome of turn {}", turn.turn_id))?;
-            warn!(turn_id = %turn.turn_id, error = %message, "runtime outcome is uncertain");
-            Ok(WorkerStep::Advanced)
-        }
-    }
+    state
+        .core
+        .execute_next(runtime_id, async |request| {
+            submit(runtime, &token, request).await
+        })
+        .await
 }
 
 /// The credential core presents to a runtime, checked against the registry
@@ -410,73 +347,15 @@ fn runtime_token(config: &LoadedConfig, runtime: &Provider) -> Result<String> {
     Ok(token)
 }
 
-/// How a turn execution attempt failed.
-#[derive(Debug)]
-enum TurnFailure {
-    /// The runtime provably never received the turn; running it again is safe.
-    Retry(anyhow::Error),
-    /// Model work may have run; it must not be automatically replayed.
-    Uncertain(anyhow::Error),
-}
-
-fn runtime_request(state: &AppState, turn: &ClaimedTurn) -> RuntimeTurnRequest {
-    RuntimeTurnRequest {
-        correlation_id: turn.turn_id.clone(),
-        interface_id: turn.interface_id.clone(),
-        agent_id: turn.agent_id.clone(),
-        audience_id: turn.audience_id.clone(),
-        input: turn.input.clone(),
-        resource_root: resources::root(&state.snapshot_store(), &turn.resource_snapshot_id)
-            .display()
-            .to_string(),
-    }
-}
-
 async fn call_runtime(
     client: &Client,
     runtime: &Provider,
     token: &str,
     request: RuntimeTurnRequest,
 ) -> Result<RuntimeTurnResponse, TurnFailure> {
-    let response = client
-        .post(format!("{}/v1/turns", runtime.url))
-        .bearer_auth(token)
-        .timeout(Duration::from_mins(30))
-        .json(&request)
-        .send()
+    RuntimeClient::new(client.clone(), runtime.url.clone(), token.to_owned())
+        .execute(request)
         .await
-        .map_err(|error| {
-            // A connect failure means the request never reached the runtime.
-            // Any later failure — timeout, broken transfer — may have left
-            // model work running, so the outcome is ambiguous.
-            let retry = error.is_connect();
-            let failure = anyhow!(error).context("contact runtime provider");
-            if retry {
-                TurnFailure::Retry(failure)
-            } else {
-                TurnFailure::Uncertain(failure)
-            }
-        })?
-        .error_for_status()
-        .map_err(|error| {
-            TurnFailure::Uncertain(anyhow!(error).context("runtime provider rejected turn"))
-        })?
-        .json::<RuntimeTurnResponse>()
-        .await
-        .map_err(|error| {
-            TurnFailure::Uncertain(anyhow!(error).context("decode runtime response"))
-        })?;
-    if response.correlation_id != request.correlation_id {
-        return Err(TurnFailure::Uncertain(anyhow!(
-            "runtime returned a mismatched correlation ID"
-        )));
-    }
-    if response.output.trim().is_empty() {
-        return Err(TurnFailure::Uncertain(anyhow!(
-            "runtime returned empty output"
-        )));
-    }
-    Ok(response)
 }
 
 async fn claim_delivery(
@@ -485,7 +364,7 @@ async fn claim_delivery(
 ) -> Result<Json<Option<Delivery>>, ApiError> {
     let interface = interface_provider(&headers, &state.config)?;
     let owner = interface_instance(&headers)?;
-    Ok(Json(state.database.claim_delivery(&interface.id, owner)?))
+    Ok(Json(state.core.claim_delivery(&interface.id, owner)?))
 }
 
 async fn reconcile_delivery_claims(
@@ -494,12 +373,7 @@ async fn reconcile_delivery_claims(
 ) -> Result<Json<DeliveryReconciliation>, ApiError> {
     let interface = interface_provider(&headers, &state.config)?;
     let owner = interface_instance(&headers)?;
-    let feedback_target_ids = state
-        .database
-        .reconcile_delivery_claims(&interface.id, owner)?;
-    Ok(Json(DeliveryReconciliation {
-        feedback_target_ids,
-    }))
+    Ok(Json(state.core.reconcile_deliveries(&interface.id, owner)?))
 }
 
 async fn acknowledge_delivery(
@@ -510,19 +384,9 @@ async fn acknowledge_delivery(
 ) -> Result<StatusCode, ApiError> {
     let interface = interface_provider(&headers, &state.config)?;
     let owner = interface_instance(&headers)?;
-    let recorded = state.database.acknowledge_delivery(
-        &interface.id,
-        id,
-        owner,
-        ack.outcome,
-        ack.native_ref.as_deref(),
-    )?;
-    if !recorded {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            format!("delivery {id} is not claimed by this interface instance"),
-        ));
-    }
+    state
+        .core
+        .acknowledge_delivery(&interface.id, owner, id, &ack)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -533,7 +397,7 @@ async fn inspect_turn(
 ) -> Result<Json<TurnInspection>, ApiError> {
     authorize(&headers, &state.config.value.core.operator_token_hash)?;
     state
-        .database
+        .core
         .inspect_turn(&id)?
         .map(Json)
         .ok_or_else(|| ApiError::not_found(format!("turn {id} not found")))
@@ -551,7 +415,7 @@ async fn recent_turns(
     Query(query): Query<RecentQuery>,
 ) -> Result<Json<Vec<TurnSummary>>, ApiError> {
     authorize(&headers, &state.config.value.core.operator_token_hash)?;
-    Ok(Json(state.database.recent_turns(
+    Ok(Json(state.core.recent_turns(
         query.event_id.as_deref(),
         query.limit.unwrap_or(20),
     )?))
@@ -567,9 +431,9 @@ async fn status(
         release: RELEASE_VERSION.to_owned(),
         agent_id: state.config.value.agent.id.clone(),
         providers,
-        turns: state.database.turn_counts()?,
-        deliveries: state.database.delivery_counts()?,
-        recent_turns: state.database.recent_turns(None, 10)?,
+        turns: state.core.turn_counts()?,
+        deliveries: state.core.delivery_counts()?,
+        recent_turns: state.core.recent_turns(None, 10)?,
     }))
 }
 
@@ -671,26 +535,6 @@ fn interface_instance(headers: &HeaderMap) -> Result<&str, ApiError> {
         return Err(ApiError::forbidden("invalid interface instance identity"));
     }
     Ok(value)
-}
-
-fn admit(event: &ExternalEvent, config: &LoadedConfig) -> Result<(), ApiError> {
-    if event.event_id.is_empty()
-        || event.agent_id.is_empty()
-        || event.user_id.is_empty()
-        || event.audience_id.is_empty()
-        || event.delivery_target_id.is_empty()
-        || event.feedback_target_id.is_empty()
-        || event.content.trim().is_empty()
-    {
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "event identity, agent, audience, targets, user, and content are required",
-        ));
-    }
-    if event.agent_id != config.value.agent.id {
-        return Err(ApiError::new(StatusCode::BAD_REQUEST, "unknown agent"));
-    }
-    Ok(())
 }
 
 fn selected_provider(provider: &Provider) -> SelectedProvider {

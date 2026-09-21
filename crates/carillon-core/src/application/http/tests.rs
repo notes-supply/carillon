@@ -5,6 +5,7 @@ use axum::{response::IntoResponse as _, routing::post};
 use tempfile::tempdir;
 
 use super::*;
+use crate::db::Database;
 use carillon_protocol::model::{DeliveryOutcome, TurnState};
 
 fn installation(root: &Path) -> Result<AppState> {
@@ -58,10 +59,30 @@ fn installation(root: &Path) -> Result<AppState> {
         value,
     };
     Ok(AppState {
-        database: Database::create(&config.value.data_dir.join("carillon.sqlite3"))?,
+        core: Core::create(core_options(&config))?,
         config,
         client: Client::new(),
     })
+}
+
+// These tests mutate configuration in memory to exercise ownership changes.
+// Recompose policy without reopening storage: fault-injection tests deliberately alter its schema.
+fn configured(state: &AppState) -> AppState {
+    let mut state = state.clone();
+    state.core.options = core_options(&state.config);
+    state
+}
+
+async fn run_next_turn(
+    state: &AppState,
+    runtime_id: &str,
+    submit: impl AsyncFnOnce(
+        &Provider,
+        &str,
+        RuntimeTurnRequest,
+    ) -> Result<RuntimeTurnResponse, TurnFailure>,
+) -> Result<WorkerStep> {
+    super::run_next_turn(&configured(state), runtime_id, submit).await
 }
 
 async fn accept(state: &AppState, id: &str, audience: &str) -> Result<EventReceipt> {
@@ -72,7 +93,7 @@ async fn accept(state: &AppState, id: &str, audience: &str) -> Result<EventRecei
         format!("Bearer {}", state.config.credential("test-interface")?).parse()?,
     );
     let receipt = accept_event(
-        State(state.clone()),
+        State(configured(state)),
         headers,
         Json(ExternalEvent {
             event_id: id.to_owned(),
@@ -355,7 +376,7 @@ async fn model_call(
 
     let router = Router::new()
         .route("/v1/model", get(model_state).put(set_model))
-        .with_state(state.clone());
+        .with_state(configured(state));
     let mut request = Request::builder()
         .method(method)
         .uri(uri)
@@ -463,6 +484,7 @@ async fn occupied_listener_leaves_accepted_and_running_work_untouched() -> Resul
     let mut state = installation(directory.path())?;
     let running = accept(&state, "running", "busy").await?;
     state
+        .core
         .database
         .claim_turn("test-runtime")?
         .context("missing running turn")?;
@@ -483,6 +505,7 @@ async fn occupied_listener_leaves_accepted_and_running_work_untouched() -> Resul
     );
     assert_eq!(
         state
+            .core
             .database
             .inspect_turn(&running.turn_id)?
             .context("missing running turn")?
@@ -491,6 +514,7 @@ async fn occupied_listener_leaves_accepted_and_running_work_untouched() -> Resul
     );
     assert_eq!(
         state
+            .core
             .database
             .inspect_turn(&queued.turn_id)?
             .context("missing queued turn")?
@@ -512,6 +536,7 @@ async fn live_interface_claim_survives_core_startup_and_acknowledges_once() -> R
     })
     .await?;
     let claim = state
+        .core
         .database
         .claim_delivery("test-interface", "live-instance")?
         .context("missing claim")?;
@@ -584,6 +609,7 @@ async fn live_interface_claim_survives_core_startup_and_acknowledges_once() -> R
                 .is_none()
         );
         let turn = state
+            .core
             .database
             .inspect_turn(&receipt.turn_id)?
             .context("missing turn")?;
@@ -622,14 +648,15 @@ async fn credential_drift_leaves_work_queued_until_repaired() -> Result<()> {
             "runtime was contacted before credential validation"
         );
         let turn = state
+            .core
             .database
             .inspect_turn(&first.turn_id)?
             .context("missing turn")?;
         assert_eq!(turn.state, TurnState::Queued);
         assert!(turn.delivery_state.is_none());
     }
-    state.database = Database::open(&state.config.value.data_dir.join("carillon.sqlite3"))?;
-    assert_eq!(state.database.recover_running_turns()?, 0);
+    state.core.database = Database::open(&state.config.value.data_dir.join("carillon.sqlite3"))?;
+    assert_eq!(state.core.database.recover_running_turns()?, 0);
     fs::write(&credential, "test-only\n")?;
     let mut calls = 0;
     assert_eq!(
@@ -645,6 +672,7 @@ async fn credential_drift_leaves_work_queued_until_repaired() -> Result<()> {
     assert_eq!(calls, 1);
     assert_eq!(
         state
+            .core
             .database
             .inspect_turn(&first.turn_id)?
             .context("missing turn")?
@@ -664,9 +692,10 @@ async fn duplicate_events_share_one_accepted_turn_without_reexecution() -> Resul
     assert!(!first.duplicate);
     assert!(duplicate.duplicate);
     assert_eq!(duplicate.turn_id, first.turn_id);
-    assert_eq!(state.database.recent_turns(None, 10)?.len(), 1);
+    assert_eq!(state.core.database.recent_turns(None, 10)?.len(), 1);
     assert!(
         state
+            .core
             .database
             .claim_delivery("test-interface", "instance")?
             .is_none()
@@ -701,6 +730,7 @@ async fn duplicate_events_share_one_accepted_turn_without_reexecution() -> Resul
         WorkerStep::Idle
     );
     let delivery = state
+        .core
         .database
         .claim_delivery("test-interface", "instance")?
         .context("missing reply")?;
@@ -722,9 +752,10 @@ async fn missing_resource_root_refuses_new_acceptance_without_losing_receipts() 
             fs::write(root, "not a directory")?;
         }
         assert!(accept(&state, "two", "conversation").await.is_err());
-        assert_eq!(state.database.recent_turns(None, 10)?.len(), 1);
+        assert_eq!(state.core.database.recent_turns(None, 10)?.len(), 1);
         assert!(
             state
+                .core
                 .database
                 .event_receipt("test-interface", "two")?
                 .is_none()
@@ -741,7 +772,7 @@ async fn missing_resource_root_refuses_new_acceptance_without_losing_receipts() 
     fs::create_dir(root)?;
     let second = accept(&state, "two", "conversation").await?;
     assert!(!second.duplicate);
-    assert_eq!(state.database.recent_turns(None, 10)?.len(), 2);
+    assert_eq!(state.core.database.recent_turns(None, 10)?.len(), 2);
     assert_eq!(
         run_next_turn(&state, "test-runtime", async |_, _, request| {
             assert_eq!(request.correlation_id, first.turn_id);
@@ -773,9 +804,10 @@ async fn duplicate_receipts_do_not_read_mutable_resources() -> Result<()> {
     assert_eq!(duplicate.turn_id, first.turn_id);
     assert_eq!(duplicate.state, TurnState::Queued);
     assert!(accept(&state, "two", "conversation").await.is_err());
-    assert_eq!(state.database.recent_turns(None, 10)?.len(), 1);
+    assert_eq!(state.core.database.recent_turns(None, 10)?.len(), 1);
     assert!(
         state
+            .core
             .database
             .event_receipt("other-interface", "one")?
             .is_none()
@@ -799,7 +831,7 @@ async fn unavailable_conversation_owner_rejects_input_as_configuration_conflict(
     for id in ["disabled", "removed"] {
         let router = Router::new()
             .route("/v1/events", post(accept_event))
-            .with_state(state.clone());
+            .with_state(configured(&state));
         let response = router
             .oneshot(
                 Request::builder()
@@ -823,6 +855,7 @@ async fn unavailable_conversation_owner_rejects_input_as_configuration_conflict(
         assert_eq!(response.status(), StatusCode::CONFLICT);
         assert!(
             state
+                .core
                 .database
                 .event_receipt("test-interface", id)?
                 .is_none()
@@ -832,6 +865,7 @@ async fn unavailable_conversation_owner_rejects_input_as_configuration_conflict(
         assert!(accept(&state, "original", "pinned").await?.duplicate);
         assert_eq!(
             state
+                .core
                 .database
                 .inspect_turn(&original.turn_id)?
                 .context("missing pinned turn")?
@@ -863,7 +897,7 @@ async fn runtime_ownership_survives_default_changes() -> Result<()> {
     state.config.value.providers.push(replacement);
     let first = accept(&state, "one", "conversation").await?;
     state.config.value.agent.runtime_provider = "replacement".to_owned();
-    state.database = Database::open(&state.config.value.data_dir.join("carillon.sqlite3"))?;
+    state.core.database = Database::open(&state.config.value.data_dir.join("carillon.sqlite3"))?;
     let second = accept(&state, "two", "conversation").await?;
     let fresh = accept(&state, "fresh", "new-conversation").await?;
     run_next_turn(&state, "replacement", async |_, _, request| {
@@ -873,6 +907,7 @@ async fn runtime_ownership_survives_default_changes() -> Result<()> {
     .await?;
     for receipt in [&first, &second] {
         let inspected = state
+            .core
             .database
             .inspect_turn(&receipt.turn_id)?
             .context("missing turn")?;
@@ -889,7 +924,7 @@ async fn runtime_ownership_survives_default_changes() -> Result<()> {
         Ok(completed(request))
     })
     .await?;
-    assert_eq!(state.database.turn_counts()?.completed, 4);
+    assert_eq!(state.core.database.turn_counts()?.completed, 4);
     Ok(())
 }
 
@@ -899,6 +934,7 @@ async fn startup_drains_queued_nondefault_runtime_without_replaying_running_work
     let mut state = installation(directory.path())?;
     let running = accept(&state, "interrupted", "blocked").await?;
     state
+        .core
         .database
         .claim_turn("test-runtime")?
         .context("missing claim")?;
@@ -959,13 +995,14 @@ async fn startup_drains_queued_nondefault_runtime_without_replaying_running_work
             ]
         );
         loop {
-            if state.database.turn_counts()?.completed == 3 {
+            if state.core.database.turn_counts()?.completed == 3 {
                 break;
             }
             tokio::task::yield_now().await;
         }
         assert_eq!(
             state
+                .core
                 .database
                 .inspect_turn(&running.turn_id)?
                 .context("interrupted turn missing")?
@@ -974,6 +1011,7 @@ async fn startup_drains_queued_nondefault_runtime_without_replaying_running_work
         );
         assert_eq!(
             state
+                .core
                 .database
                 .inspect_turn(&blocked.turn_id)?
                 .context("blocked turn missing")?
@@ -1005,7 +1043,7 @@ async fn queued_turns_keep_the_same_runtime_conversation() -> Result<()> {
         Ok(completed(request))
     })
     .await?;
-    assert_eq!(state.database.turn_counts()?.completed, 2);
+    assert_eq!(state.core.database.turn_counts()?.completed, 2);
     Ok(())
 }
 
@@ -1024,6 +1062,7 @@ async fn definite_connection_failure_requeues_the_same_turn() -> Result<()> {
     );
     assert_eq!(
         state
+            .core
             .database
             .inspect_turn(&receipt.turn_id)?
             .context("missing turn")?
@@ -1032,6 +1071,7 @@ async fn definite_connection_failure_requeues_the_same_turn() -> Result<()> {
     );
     assert!(
         state
+            .core
             .database
             .claim_delivery("test-interface", "instance")?
             .is_none()
@@ -1041,7 +1081,7 @@ async fn definite_connection_failure_requeues_the_same_turn() -> Result<()> {
         Ok(completed(request))
     })
     .await?;
-    assert_eq!(state.database.turn_counts()?.completed, 1);
+    assert_eq!(state.core.database.turn_counts()?.completed, 1);
     Ok(())
 }
 
@@ -1057,6 +1097,7 @@ async fn interruption_allows_the_next_message_without_replaying() -> Result<()> 
     .await?;
     assert_eq!(
         state
+            .core
             .database
             .inspect_turn(&uncertain.turn_id)?
             .context("missing turn")?
@@ -1074,8 +1115,8 @@ async fn interruption_allows_the_next_message_without_replaying() -> Result<()> 
         Ok(completed(request))
     })
     .await?;
-    assert_eq!(state.database.turn_counts()?.completed, 2);
-    assert_eq!(state.database.turn_counts()?.interrupted, 1);
+    assert_eq!(state.core.database.turn_counts()?.completed, 2);
+    assert_eq!(state.core.database.turn_counts()?.interrupted, 1);
     Ok(())
 }
 
@@ -1118,6 +1159,7 @@ async fn failed_outcome_write_waits_for_restart_without_blocking_other_conversat
     .await?;
     assert_eq!(
         state
+            .core
             .database
             .inspect_turn(&failed.turn_id)?
             .context("missing turn")?
@@ -1132,14 +1174,14 @@ async fn failed_outcome_write_waits_for_restart_without_blocking_other_conversat
         WorkerStep::Idle
     );
 
-    state.database = Database::open(&path)?;
-    assert_eq!(state.database.recover_running_turns()?, 1);
+    state.core.database = Database::open(&path)?;
+    assert_eq!(state.core.database.recover_running_turns()?, 1);
     run_next_turn(&state, "test-runtime", async |_, _, request| {
         assert_eq!(request.correlation_id, successor.turn_id);
         Ok(completed(request))
     })
     .await?;
-    assert_eq!(state.database.turn_counts()?.completed, 2);
+    assert_eq!(state.core.database.turn_counts()?.completed, 2);
     Ok(())
 }
 
@@ -1168,10 +1210,11 @@ async fn cancelled_execution_is_interrupted_after_reopening_while_queued_work_re
             .context("worker unexpectedly finished")?
             .is_cancelled()
     );
-    state.database = Database::open(&state.config.value.data_dir.join("carillon.sqlite3"))?;
-    assert_eq!(state.database.recover_running_turns()?, 1);
+    state.core.database = Database::open(&state.config.value.data_dir.join("carillon.sqlite3"))?;
+    assert_eq!(state.core.database.recover_running_turns()?, 1);
     assert_eq!(
         state
+            .core
             .database
             .inspect_turn(&running.turn_id)?
             .context("missing turn")?
@@ -1239,6 +1282,7 @@ async fn empty_runtime_output_interrupts_without_empty_delivery_or_replay() -> R
         .await??;
         assert_eq!(received.try_recv()?, receipt.turn_id);
         let inspection = state
+            .core
             .database
             .inspect_turn(&receipt.turn_id)?
             .context("missing turn")?;
@@ -1248,12 +1292,13 @@ async fn empty_runtime_output_interrupts_without_empty_delivery_or_replay() -> R
             "empty output was completed"
         );
         let feedback = state
+            .core
             .database
             .claim_delivery("test-interface", "instance")?
             .context("missing uncertainty feedback")?;
         assert_eq!(feedback.turn_id, receipt.turn_id);
         assert!(feedback.content.contains("interrupted"));
-        state.database.acknowledge_delivery(
+        state.core.database.acknowledge_delivery(
             "test-interface",
             feedback.id,
             "instance",
@@ -1266,11 +1311,12 @@ async fn empty_runtime_output_interrupts_without_empty_delivery_or_replay() -> R
         })
         .await?;
         let delivery = state
+            .core
             .database
             .claim_delivery("test-interface", "instance")?
             .context("missing successor delivery")?;
         assert_eq!(delivery.turn_id, successor.turn_id);
-        state.database.acknowledge_delivery(
+        state.core.database.acknowledge_delivery(
             "test-interface",
             delivery.id,
             "instance",
@@ -1288,6 +1334,7 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
     let state = installation(directory.path())?;
     accept(&state, "one", "conversation").await?;
     let turn = state
+        .core
         .database
         .claim_turn("test-runtime")?
         .context("missing claim")?;
@@ -1315,7 +1362,7 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
     // These responses carry no protocol proof of non-admission. This is not
     // a blanket rule for a future explicit rejected-before-execution response.
     for input in ["forbidden", "server error", "malformed", "mismatch"] {
-        let mut request = runtime_request(&state, &turn);
+        let mut request = state.core.runtime_request(&turn);
         request.input = input.to_owned();
         let outcome = call_runtime(&state.client, &runtime, "unused", request).await;
         assert!(
@@ -1327,7 +1374,7 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
         &state.client,
         &runtime,
         "unused",
-        runtime_request(&state, &turn),
+        state.core.runtime_request(&turn),
     )
     .await
     .map_err(|failure| match failure {
@@ -1351,7 +1398,7 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
             &state.client,
             &runtime,
             "unused",
-            runtime_request(&state, &turn)
+            state.core.runtime_request(&turn)
         )
         .await,
         Err(TurnFailure::Retry(_))
