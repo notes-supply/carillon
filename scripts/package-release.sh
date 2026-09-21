@@ -5,7 +5,7 @@ ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
 # Cargo embeds this identity in the core and Discord binaries. A supplied version
 # is an assertion, not an independent label for differently versioned artifacts.
-VERSION=$(bun -e 'import manifest from "./crates/carillon-core/Cargo.toml"; console.log(manifest.package.version)')
+VERSION=$(bun -e 'import manifest from "./Cargo.toml"; console.log(manifest.workspace.package.version)')
 [ "${1:-$VERSION}" = "$VERSION" ] || {
   echo "requested release version $1 differs from the Carillon crate version $VERSION" >&2
   exit 1
@@ -24,14 +24,19 @@ PI_DIST=packages/runtime-pi/node_modules/@earendil-works/pi-coding-agent/dist
 PI_PACKAGE=${PI_DIST%/dist}
 
 rm -rf "$STAGE"
-mkdir -p "$STAGE/bin/theme" "$STAGE/bin/assets" "$STAGE/licenses" "$STAGE/systemd" "$(dirname -- "$OUTPUT")"
+mkdir -p "$STAGE/bin/theme" "$STAGE/bin/assets" "$STAGE/lib" "$STAGE/licenses" "$STAGE/systemd" "$(dirname -- "$OUTPUT")"
 
-cargo build --release --locked --target "$TARGET" --target-dir "$ROOT/target" --bin carillon
+cargo build --release --locked --target "$TARGET" --target-dir "$ROOT/target" --bin carillon --bin carillon-discord
+# The Discord command module runs in the provider's Wasm sandbox; it is data,
+# not a native binary, and is built for the wasm32 target regardless of host.
+cargo build --locked --profile wasm --target wasm32-unknown-unknown --target-dir "$ROOT/target" -p carillon-discord-commands
 bun build --compile --target "$BUN_TARGET" packages/runtime-pi/src/index.ts --outfile "$STAGE/bin/carillon-runtime-pi"
 bun build --compile --target "$BUN_TARGET" --no-compile-autoload-bunfig \
   "$PI_DIST/bun/cli.js" "$PI_DIST/utils/image-resize-worker.js" \
   --outfile "$STAGE/bin/pi"
 install -m 0755 "target/$TARGET/release/carillon" "$STAGE/bin/carillon"
+install -m 0755 "target/$TARGET/release/carillon-discord" "$STAGE/bin/carillon-discord"
+install -m 0644 target/wasm32-unknown-unknown/wasm/carillon_discord_commands.wasm "$STAGE/lib/carillon_discord_commands.wasm"
 install -m 0755 scripts/carillon-pi.sh "$STAGE/bin/carillon-pi"
 install -m 0755 scripts/register-services.sh "$STAGE/bin/carillon-register-services"
 install -m 0755 scripts/install-release.sh "$STAGE/install.sh"

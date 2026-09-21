@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { constants } from "node:fs";
 import {
   chmod,
   lstat,
   mkdir,
   mkdtemp,
-  readFile,
+  open,
   readdir,
+  readFile,
   rename,
   rm,
   stat,
@@ -23,6 +25,10 @@ const restoredRoot = await mkdtemp(join(tmpdir(), "carillon-restored-"));
 const workspace = await mkdtemp(join(tmpdir(), "carillon-workspace-"));
 const backup = join(tmpdir(), `carillon-backup-${crypto.randomUUID()}.tar.gz`);
 const binary = resolve(process.env.CARILLON_CORE_BINARY ?? "target/debug/carillon");
+const commandsModule = resolve(
+  process.env.CARILLON_COMMANDS_MODULE ??
+    "target/wasm32-unknown-unknown/wasm/carillon_discord_commands.wasm",
+);
 const runtimeEntry = resolve("packages/runtime-pi/src/index.ts");
 const packagedRuntime = process.env.CARILLON_RUNTIME_BINARY;
 const basePort = 45_000 + (process.pid % 10_000);
@@ -32,26 +38,22 @@ let runtimeConfigPath;
 const services = new Map();
 
 try {
-  run(
-    "init",
-    "--root",
-    installation,
-    "--workspace",
-    workspace,
-    "--guild-id",
-    "100",
-    "--bot-user-id",
-    "201",
-    "--user-id",
-    "200",
-    "--route",
-    "300:always:channel",
-    "--route",
-    "301:mention:thread",
-    "--route",
-    "302:always:thread",
-    "--base-port",
-    String(basePort),
+  run("init", "--root", installation, "--workspace", workspace, "--base-port", String(basePort));
+  // Channel 305 is reserved for the model picker so its turns do not disturb
+  // the response counters of the conversations below.
+  assert.match(
+    configureDiscord(
+      configPath(),
+      "100",
+      "201",
+      "200",
+      "300:always:channel",
+      "301:mention:thread",
+      "302:always:thread",
+      "305:always:channel",
+    ),
+    /providers\/discord-private\.toml$/u,
+    "configure must print the provider-owned file it wrote",
   );
   await testConfigurationRefusals();
   await testConfigurationSymlinkUpdates();
@@ -106,6 +108,7 @@ try {
   assert.equal(first.receipt.state, "queued");
   assert.match(first.delivery.content, /Local provider response 1/u);
   assert.match(first.delivery.content, /native extension inactive; skill inactive/u);
+  assert.match(first.delivery.content, /model local\/echo\.$/u, "turns run on the runtime default");
   assert.deepEqual(first.feedback, ["processing", "delivered"]);
 
   const duplicate = await simulate("event-1", "hello");
@@ -244,31 +247,44 @@ try {
     "private runtime state fixture",
     "restore must include private runtime state, not just core and session records",
   );
-  // The external workspace is deliberately not in the archive. Pi must refuse
-  // startup if it disappears, before binding or touching native session state.
-  await start("core");
-  await rename(workspace, `${workspace}-saved`);
-  const sessions = join(installation, "agents/default/sessions");
-  await rename(sessions, `${sessions}-saved`);
+  // Startup-refusal checks inspect the same queued turn repeatedly. Keep core
+  // from claiming it at all: an offline runtime alone still permits transient
+  // `running` states and makes shutdown race the worker's requeue.
+  const restoredRuntimeCredential = credential("runtime-pi");
+  await writeFile(restoredRuntimeCredential, "");
   try {
-    for (const missing of [true, false]) {
-      if (!missing) await writeFile(workspace, "not a directory");
-      assertStartupRefused("runtime", missing ? /ENOENT/u : /existing directory/u);
-      await assert.rejects(stat(sessions), { code: "ENOENT" });
-      const inspection = JSON.parse(run("inspect", "--config", configPath(), queued.turn_id));
-      assert.equal(inspection.state, "queued");
+    // The external workspace is deliberately not in the archive. Pi must refuse
+    // startup if it disappears, before binding or touching native session state.
+    await start("core");
+    await rename(workspace, `${workspace}-saved`);
+    const sessions = join(installation, "agents/default/sessions");
+    await rename(sessions, `${sessions}-saved`);
+    try {
+      for (const missing of [true, false]) {
+        if (!missing) await writeFile(workspace, "not a directory");
+        assertStartupRefused("runtime", missing ? /ENOENT/u : /existing directory/u);
+        await assert.rejects(stat(sessions), { code: "ENOENT" });
+        // Dispatch is paused, so startup refusals must leave accepted work queued.
+        assert.equal(
+          JSON.parse(run("inspect", "--config", configPath(), queued.turn_id)).state,
+          "queued",
+        );
+      }
+    } finally {
+      await rm(workspace, { force: true });
+      await rename(`${workspace}-saved`, workspace);
+      await rm(sessions, { recursive: true, force: true });
+      await rename(`${sessions}-saved`, sessions);
+      await stop("core");
     }
+    await testResourceStateSeparation(queued.turn_id);
+    await testMissingResourceRoot(queued.turn_id);
+    await testRuntimeStartupRefusals(queued.turn_id);
   } finally {
-    await rm(workspace, { force: true });
-    await rename(`${workspace}-saved`, workspace);
-    await rm(sessions, { recursive: true, force: true });
-    await rename(`${sessions}-saved`, sessions);
     await stop("core");
+    await writeFile(restoredRuntimeCredential, runtimeToken);
   }
-  await testResourceStateSeparation(queued.turn_id);
   await testPiModelReadiness();
-  await testMissingResourceRoot(queued.turn_id);
-  await testRuntimeStartupRefusals(queued.turn_id);
   // Both services must interpret relative paths from the canonical config file,
   // not from the directory holding an operator's convenient symlink.
   runtimeConfigPath = join(workspace, "config-link.toml");
@@ -283,6 +299,7 @@ try {
   assert.equal(resumed.delivery_state, "delivered");
   const restored = await simulate("event-5", "continue after restore");
   assert.match(restored.delivery.content, /Local provider response 7/u);
+  await testModelPicker();
 
   process.stdout.write(
     `${JSON.stringify(
@@ -296,6 +313,7 @@ try {
         diagnostics: "authenticated and queryable",
         runtime_outage: "queued and resumed",
         backup_restore: "continued",
+        model_picker: "selections reach the runtime, persist, and never wait for a running turn",
       },
       null,
       2,
@@ -313,6 +331,28 @@ function configPath() {
   return join(installation, "carillon.toml");
 }
 
+function providerConfigPath() {
+  return join(installation, "providers", "discord-private.toml");
+}
+
+function configureDiscord(config, guildId, botUserId, userId, ...routes) {
+  return run(
+    "discord",
+    "configure",
+    "--config",
+    config,
+    "--provider",
+    "discord-private",
+    "--guild-id",
+    guildId,
+    "--bot-user-id",
+    botUserId,
+    "--user-id",
+    userId,
+    ...routes.flatMap((route) => ["--route", route]),
+  );
+}
+
 function assertStartupRefused(name, expected, extraArgs = [], options = {}) {
   const [program, args] = serviceArguments(name, options);
   const result = spawnSync(program, [...args, ...extraArgs], {
@@ -325,6 +365,283 @@ function assertStartupRefused(name, expected, extraArgs = [], options = {}) {
   assert.equal(result.signal, null);
   assert.notEqual(result.status, 0, `${name} must refuse startup`);
   assert.match(result.stderr, expected);
+}
+
+async function testModelPicker() {
+  const conversation = "discord-100-305";
+  const shown = await interact("305", null, "command", "model");
+  assert.match(shown.content, /^\*\*Model settings\*\*\n/u);
+  assert.match(
+    shown.content,
+    /This conversation: Local echo \(`local\/echo`\) \(follows the agent default\)/u,
+  );
+  assert.match(shown.content, /Agent default: Local echo \(`local\/echo`\) \(runtime default\)/u);
+  assert.deepEqual(customIds(shown), [
+    providerControl(shown, "conversation"),
+    "model:model:conversation",
+    "model:scope:conversation",
+  ]);
+  assert.equal(selectedLabel(shown, providerControl(shown, "conversation")), "local");
+  assert.deepEqual(buttons(shown), [
+    "model:scope:conversation",
+    "model:scope:agent",
+    "model:default:conversation",
+  ]);
+  // Only the browsed provider's models are offered. Identities remain opaque.
+  assert.deepEqual(
+    options(shown, providerControl(shown, "conversation")).map((option) => option.label),
+    ["local", "substitute"],
+  );
+  assert.deepEqual(
+    options(shown, "model:model:conversation").map((option) => option.description),
+    ["local/echo", "local/reasoner"],
+  );
+  assert.ok(
+    options(shown, "model:model:conversation").every((option) =>
+      /^[0-9a-f]{16}$/u.test(option.value),
+    ),
+  );
+  assert.equal(selectedLabel(shown, "model:model:conversation"), "Local echo");
+  assert.equal(control(shown, "model:default:conversation").disabled, true);
+  // Outside a conversation only the agent default is offered.
+  const outside = await interact("301", null, "command", "model");
+  assert.match(outside.content, /Use `\/model` inside a conversation to set a model for it\./u);
+  assert.deepEqual(customIds(outside), [
+    providerControl(outside, "agent"),
+    "model:model:agent",
+    "model:default:agent",
+  ]);
+
+  // Browsing another provider cannot apply a model or disturb inheritance.
+  const provider = providerControl(shown, "conversation");
+  const browsed = await interact("305", null, "component", provider, [
+    value(shown, provider, "substitute"),
+  ]);
+  assert.equal(selectedLabel(browsed, providerControl(browsed, "conversation")), "substitute");
+  assert.deepEqual(
+    options(browsed, "model:model:conversation").map((option) => option.description),
+    ["substitute/fixed"],
+  );
+  assert.match(browsed.content, /This conversation: Local echo/u);
+  assert.match(browsed.content, /follows the agent default/u);
+  assert.match(browsed.content, /Agent default: Local echo/u);
+  const stillActive = await simulateRoute("model-browse", "305", null, "which model");
+  assert.match(stillActive.delivery.content, /model local\/echo\.$/u);
+  const reopened = await interact("305", null, "command", "model");
+  assert.equal(selectedLabel(reopened, providerControl(reopened, "conversation")), "local");
+
+  // Choosing a model shows the settings it will run with, defaults included,
+  // and a turn runs with exactly those.
+  const chosen = await interact("305", null, "component", "model:model:conversation", [
+    value(shown, "model:model:conversation", "local/reasoner"),
+  ]);
+  assert.match(
+    chosen.content,
+    /This conversation: Local reasoner \(`local\/reasoner`\), Thinking: medium \(set for this conversation\)/u,
+  );
+  const thinking = customIds(chosen).find((id) => id.startsWith("model:option:conversation:"));
+  assert.ok(thinking, "the reasoner's thinking setting is offered");
+  assert.deepEqual(
+    options(chosen, thinking).map((option) => option.label),
+    ["off", "low", "medium", "high"],
+  );
+  assert.equal(selectedLabel(chosen, thinking), "medium");
+  const defaulted = await simulateRoute("model-0", "305", null, "which model");
+  assert.equal(defaulted.conversation_id, conversation);
+  assert.match(defaulted.delivery.content, /model local\/reasoner \(thinking=medium\)\.$/u);
+
+  const reasoner =
+    /Local reasoner \(`local\/reasoner`\), Thinking: high \(set for this conversation\)/u;
+  const tuned = await interact("305", null, "component", thinking, [
+    value(chosen, thinking, "high"),
+  ]);
+  assert.match(tuned.content, reasoner);
+  assert.equal(selectedLabel(tuned, thinking), "high");
+  assert.equal(control(tuned, "model:default:conversation").disabled, false);
+  const overridden = await simulateRoute("model-1", "305", null, "which model");
+  assert.match(overridden.delivery.content, /model local\/reasoner \(thinking=high\)\.$/u);
+  // A control left over from an earlier catalogue is reported, not misapplied.
+  const staleSetting = await interact("305", null, "component", thinking, ["0000000000000000"]);
+  assert.match(staleSetting.content, /That setting is no longer available/u);
+  assert.match(staleSetting.content, reasoner);
+  const staleModel = await interact("305", null, "component", "model:model:conversation", [
+    "0000000000000000",
+  ]);
+  assert.match(staleModel.content, /That model is no longer available/u);
+  assert.match(staleModel.content, reasoner);
+
+  // Core must relay the runtime's atomic precondition, not discard it.
+  const staleWrite = await fetch(`http://127.0.0.1:${String(basePort)}/v1/model`, {
+    method: "PUT",
+    headers: {
+      authorization: `Bearer ${await credentialValue("discord-private")}`,
+      "x-carillon-provider": "discord-private",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      agent_id: "default",
+      audience_id: conversation,
+      scope: "conversation",
+      selection: { provider: "local", model: "echo", options: {} },
+      expected: { provider: "local", model: "reasoner", options: { thinking: "medium" } },
+    }),
+  });
+  assert.equal(staleWrite.status, 409, await staleWrite.text());
+  const unchanged = await interact("305", null, "command", "model");
+  assert.match(unchanged.content, reasoner);
+
+  // The agent default reaches conversations without a choice of their own.
+  const agentScope = await interact("305", null, "component", "model:scope:agent");
+  assert.match(agentScope.content, /Changing the agent selection:/u);
+  assert.deepEqual(customIds(agentScope), [
+    providerControl(agentScope, "agent"),
+    "model:model:agent",
+    "model:scope:conversation",
+  ]);
+  const agentProvider = providerControl(agentScope, "agent");
+  const agentBrowse = await interact("305", null, "component", agentProvider, [
+    value(agentScope, agentProvider, "substitute"),
+  ]);
+  assert.match(agentBrowse.content, reasoner);
+  assert.match(agentBrowse.content, /Agent default: Local echo/u);
+  const agentSet = await interact("305", null, "component", "model:model:agent", [
+    value(agentBrowse, "model:model:agent", "substitute/fixed"),
+  ]);
+  assert.match(
+    agentSet.content,
+    /Agent default: Substitute fixed \(`substitute\/fixed`\) \(set for this agent\)/u,
+  );
+  assert.match(agentSet.content, reasoner);
+  const elsewhere = await simulateRoute("model-2", "406", "302", "which model");
+  assert.notEqual(elsewhere.conversation_id, conversation);
+  assert.match(elsewhere.delivery.content, /model substitute\/fixed\.$/u);
+  const kept = await simulateRoute("model-3", "305", null, "which model");
+  assert.match(kept.delivery.content, /model local\/reasoner \(thinking=high\)\.$/u);
+
+  // Selections live in the runtime's ledger, not in a process.
+  await restart("runtime");
+  const persisted = await interact("305", null, "command", "model");
+  assert.match(persisted.content, reasoner);
+  assert.match(
+    persisted.content,
+    /Agent default: Substitute fixed \(`substitute\/fixed`\) \(set for this agent\)/u,
+  );
+
+  // Each scope returns to its default separately.
+  const followsAgent = await interact("305", null, "component", "model:default:conversation");
+  assert.match(
+    followsAgent.content,
+    /This conversation: Substitute fixed \(`substitute\/fixed`\) \(follows the agent default\)/u,
+  );
+  const runtimeDefault = await interact("305", null, "component", "model:default:agent");
+  assert.match(
+    runtimeDefault.content,
+    /Agent default: Local echo \(`local\/echo`\) \(runtime default\)/u,
+  );
+  assert.match(
+    runtimeDefault.content,
+    /This conversation: Local echo \(`local\/echo`\) \(follows the agent default\)/u,
+  );
+  const reset = await simulateRoute("model-4", "305", null, "which model");
+  assert.match(reset.delivery.content, /model local\/echo\.$/u);
+
+  // A change made while a turn runs is confirmed at once; the running turn
+  // keeps the selection it started with and the next turn picks up the change.
+  const held = await holdTurn("held-turn");
+  const during = await interact("305", null, "component", "model:model:agent", [
+    value(shown, "model:model:conversation", "local/reasoner"),
+  ]);
+  assert.match(
+    during.content,
+    /Agent default: Local reasoner \(`local\/reasoner`\), Thinking: medium \(set for this agent\)/u,
+  );
+  assert.match(
+    (await interact("305", null, "command", "model")).content,
+    /Agent default: Local reasoner \(`local\/reasoner`\), Thinking: medium \(set for this agent\)/u,
+  );
+  const released = await held.release();
+  assert.match(released.output, /model local\/echo\.$/u, "the running turn keeps its selection");
+  const next = await simulateRoute("model-5", "305", null, "which model");
+  assert.match(next.delivery.content, /model local\/reasoner \(thinking=medium\)\.$/u);
+  await interact("305", null, "component", "model:default:agent");
+
+  // Interactions are admitted like messages and never reach the module otherwise.
+  for (const [changes, message] of [
+    [{ guild_id: "999" }, "other guilds must fail closed"],
+    [{ guild_id: null }, "direct messages must fail closed"],
+    [{ user_id: "999" }, "users outside the allowlist must fail closed"],
+    [{ channel_id: "399" }, "unconfigured channels must fail closed"],
+  ]) {
+    const response = await requestInteraction({
+      ...interaction("305", null, "command", "model", []),
+      ...changes,
+    });
+    assert.equal(response.status, 403, message);
+  }
+  const unauthenticated = await fetch(`http://127.0.0.1:${String(basePort + 1)}/v1/interactions`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${await credentialValue("operator")}`,
+    },
+    body: JSON.stringify(interaction("305", null, "command", "model", [])),
+  });
+  assert.equal(unauthenticated.status, 403, "interactions require the provider credential");
+  // The operator can reload the module in place; an unchanged module is a no-op.
+  assert.deepEqual(
+    JSON.parse(run("discord", "reload", "--config", configPath(), "--provider", "discord-private")),
+    { commands: 1, changed: false, registered: false },
+  );
+}
+
+/**
+ * Starts a deterministic turn directly on the runtime and holds it at a
+ * resource read: the extension file is a pipe that yields nothing until
+ * `release` writes to it.
+ */
+async function holdTurn(correlationId) {
+  const fixture = join(workspace, `resources-${correlationId}`);
+  await mkdir(join(fixture, "extensions"), { recursive: true });
+  const pipe = join(fixture, "extensions", "carillon-context.js");
+  execFileSync("mkfifo", [pipe]);
+  const response = fetch(`http://${runtimeHost}:${String(basePort + 2)}/v1/turns`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${await credentialValue("runtime-pi")}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      correlation_id: correlationId,
+      interface_id: "discord-private",
+      agent_id: "default",
+      audience_id: `discord-100-${correlationId}`,
+      input: "held",
+      resource_root: fixture,
+      continuation_ref: null,
+    }),
+  });
+  response.catch(() => undefined);
+  // The pipe accepts a writer once the runtime has opened it to read.
+  let writer;
+  for (let attempt = 0; writer === undefined && attempt < 400; attempt += 1) {
+    try {
+      writer = await open(pipe, constants.O_WRONLY | constants.O_NONBLOCK);
+    } catch (failure) {
+      if (failure.code !== "ENXIO") throw failure;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    }
+  }
+  assert.ok(writer, "the held turn did not reach its resource read");
+  return {
+    async release() {
+      await writer.write("held");
+      await writer.close();
+      const settled = await response;
+      const body = await settled.text();
+      assert.equal(settled.status, 200, body);
+      return JSON.parse(body);
+    },
+  };
 }
 
 async function testResourceStateSeparation(turnId) {
@@ -566,6 +883,7 @@ async function testProviderVersions() {
 
 async function testConfigurationSymlinkUpdates() {
   const original = await readFile(configPath(), "utf8");
+  const originalDiscord = await readFile(providerConfigPath(), "utf8");
   const previousMode = (await stat(configPath())).mode & 0o777;
   const link = join(workspace, "admin-config.toml");
   await symlink(configPath(), link);
@@ -595,40 +913,19 @@ async function testConfigurationSymlinkUpdates() {
       );
       await stop("core");
     }
-    run(
-      "configure-discord",
-      "--config",
-      link,
-      "--guild-id",
-      "101",
-      "--bot-user-id",
-      "202",
-      "--user-id",
-      "203",
-      "--route",
-      "304:mention:thread",
-    );
+    // Provider settings live in the provider's own file; the registry is untouched.
+    configureDiscord(link, "101", "202", "203", "304:mention:thread");
     await assertUpdated();
-    const beforeRefusal = await readFile(configPath(), "utf8");
+    assert.equal(await readFile(configPath(), "utf8"), original);
+    const configured = await readFile(providerConfigPath(), "utf8");
+    assert.match(configured, /^guild_id = "101"$/mu);
+    assert.equal((await stat(providerConfigPath())).mode & 0o777, 0o600);
     assert.throws(
-      () =>
-        run(
-          "configure-discord",
-          "--config",
-          link,
-          "--guild-id",
-          "invalid",
-          "--bot-user-id",
-          "202",
-          "--user-id",
-          "203",
-          "--route",
-          "304:mention:thread",
-        ),
+      () => configureDiscord(link, "invalid", "202", "203", "304:mention:thread"),
       /snowflake/u,
     );
     await assertUpdated();
-    assert.equal(await readFile(configPath(), "utf8"), beforeRefusal);
+    assert.equal(await readFile(providerConfigPath(), "utf8"), configured);
     // Readiness through the canonical path must observe what the symlink command wrote.
     await startAll();
     const denied = await requestSimulation(
@@ -644,6 +941,7 @@ async function testConfigurationSymlinkUpdates() {
     await stopAll();
     await rm(link, { force: true });
     await writeFile(configPath(), original);
+    await writeFile(providerConfigPath(), originalDiscord);
     await chmod(configPath(), previousMode);
   }
 }
@@ -657,6 +955,20 @@ async function testConfigurationRefusals() {
   const database = join(installation, "state/carillon.sqlite3");
   const previousDatabase = await readFile(database);
   try {
+    // The provider serves nothing without its own settings or its command module.
+    await rename(providerConfigPath(), `${providerConfigPath()}-saved`);
+    try {
+      assertStartupRefused("discord", /read Discord configuration/u);
+    } finally {
+      await rename(`${providerConfigPath()}-saved`, providerConfigPath());
+    }
+    const brokenModule = join(workspace, "broken.wasm");
+    await writeFile(brokenModule, "\0asm broken");
+    assertStartupRefused("discord", /read command module/u, [], {
+      commands: join(workspace, "missing.wasm"),
+    });
+    assertStartupRefused("discord", /load command module/u, [], { commands: brokenModule });
+    await rm(brokenModule);
     for (const id of ["runtime-pi", "discord-private"]) {
       // Matching hashes must not turn a provider credential into operator identity;
       // differing hashes must not leave an impossible-to-authenticate provider.
@@ -802,6 +1114,81 @@ async function simulateRoute(eventId, channelId, parentChannelId, content) {
   return JSON.parse(body);
 }
 
+function interaction(channelId, parentChannelId, kind, name, values) {
+  return {
+    guild_id: "100",
+    user_id: "200",
+    channel_id: channelId,
+    parent_channel_id: parentChannelId,
+    kind,
+    name,
+    values,
+    options: {},
+  };
+}
+
+async function requestInteraction(source) {
+  return fetch(`http://127.0.0.1:${String(basePort + 1)}/v1/interactions`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${await credentialValue("discord-private")}`,
+    },
+    body: JSON.stringify(source),
+  });
+}
+
+/** Runs a slash command or component interaction and returns the reply. */
+async function interact(channelId, parentChannelId, kind, name, values = []) {
+  const response = await requestInteraction(
+    interaction(channelId, parentChannelId, kind, name, values),
+  );
+  const body = await response.text();
+  assert.equal(response.status, 200, body);
+  return JSON.parse(body);
+}
+
+/** The first control of each action row. */
+function customIds(reply) {
+  return reply.components.map((row) => row.components[0].custom_id);
+}
+
+/** The buttons of the last action row. */
+function buttons(reply) {
+  return reply.components.at(-1).components.map((component) => component.custom_id);
+}
+
+function control(reply, customId) {
+  const found = reply.components
+    .flatMap((row) => row.components)
+    .find((component) => component.custom_id === customId);
+  assert.ok(found, `${customId} is present`);
+  return found;
+}
+
+function options(reply, customId) {
+  return control(reply, customId).options;
+}
+
+function providerControl(reply, scope) {
+  const id = customIds(reply).find((id) => id.startsWith(`model:provider:${scope}:`));
+  assert.ok(id, "provider menu is present");
+  return id;
+}
+
+function selectedLabel(reply, customId) {
+  return options(reply, customId).find((option) => option.default)?.label;
+}
+
+/** The select value standing for the option labelled or described `text`. */
+function value(reply, customId, text) {
+  const option = options(reply, customId).find(
+    (candidate) => candidate.label === text || candidate.description === text,
+  );
+  assert.ok(option, `${customId} offers ${text}`);
+  return option.value;
+}
+
 async function submitCoreEvent(eventId, content) {
   const response = await fetch(`http://127.0.0.1:${String(basePort)}/v1/events`, {
     method: "POST",
@@ -878,7 +1265,7 @@ async function waitForTurn(turnId, state, deliveryState = null) {
   );
 }
 
-function serviceArguments(name, { nativePi = false } = {}) {
+function serviceArguments(name, { nativePi = false, commands = commandsModule } = {}) {
   if (name === "core") return [binary, ["core", "--config", configPath()]];
   if (name === "runtime") {
     const args = [
@@ -900,10 +1287,15 @@ function serviceArguments(name, { nativePi = false } = {}) {
     binary,
     [
       "discord",
+      "serve",
       "--config",
       configPath(),
+      "--provider",
+      "discord-private",
       "--token-file",
       credential("discord-private"),
+      "--commands",
+      commands,
       "--deterministic",
     ],
   ];

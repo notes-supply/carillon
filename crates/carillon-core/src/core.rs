@@ -14,20 +14,23 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use reqwest::Client;
+use carillon_protocol::{
+    config::{LoadedConfig, Provider, ProviderRole, RELEASE_VERSION, token_matches},
+    model::{
+        Delivery, DeliveryAck, DeliveryReconciliation, EventReceipt, ExternalEvent, Health,
+        INSTANCE_HEADER, ModelQuery, ModelUpdate, PROVIDER_HEADER, RuntimeModelQuery,
+        RuntimeModelUpdate, RuntimeTurnRequest, RuntimeTurnResponse, SelectedProvider,
+        StatusReport, TurnInspection, TurnSummary,
+    },
+};
+use reqwest::{Client, RequestBuilder, Url};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 
 use crate::{
-    config::{LoadedConfig, Provider, ProviderRole, RELEASE_VERSION, token_matches},
     db::{ClaimedTurn, Database},
-    model::{
-        Delivery, DeliveryAck, DeliveryReconciliation, EventReceipt, ExternalEvent, Health,
-        INSTANCE_HEADER, PROVIDER_HEADER, RuntimeTurnRequest, RuntimeTurnResponse,
-        SelectedProvider, StatusReport, TurnInspection, TurnSummary,
-    },
     resources,
 };
 
@@ -119,6 +122,7 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
         .route("/v1/deliveries/{id}/ack", post(acknowledge_delivery))
         .route("/v1/turns", get(recent_turns))
         .route("/v1/turns/{id}", get(inspect_turn))
+        .route("/v1/model", get(model_state).put(set_model))
         .route("/v1/status", get(status))
         .with_state(state);
     info!(listen = %config.value.core.listen, "Carillon core ready");
@@ -154,24 +158,12 @@ async fn accept_event(
     {
         return Ok(Json(receipt));
     }
-    let owner = state.database.conversation_runtime(&interface.id, &event)?;
-    let runtime_id = owner
-        .as_deref()
-        .unwrap_or(&state.config.value.agent.runtime_provider);
-    // A missing/disabled owner is a configuration conflict, not temporary
-    // transport failure. Reject new input explicitly so interfaces do not
-    // retry it indefinitely ahead of unrelated conversations.
-    let runtime = state
-        .config
-        .provider(runtime_id, ProviderRole::Runtime)
-        .map_err(|error| ApiError::new(StatusCode::CONFLICT, error.to_string()))?
-        .clone();
-    if !runtime.enabled {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "conversation runtime provider is disabled",
-        ));
-    }
+    let runtime = conversation_runtime(
+        &state,
+        &interface.id,
+        &event.agent_id,
+        Some(&event.audience_id),
+    )?;
     let resources = resources::materialize(
         &state.config.value.agent.resource_root,
         &state.snapshot_store(),
@@ -184,6 +176,149 @@ async fn accept_event(
             .database
             .accept_event(&interface.id, &runtime.id, &event, &providers, &resources)?;
     Ok(Json(receipt))
+}
+
+/// The runtime that owns a conversation: the one that accepted its first
+/// turn, or the agent default while it has none. A missing or disabled owner
+/// is a configuration conflict, not temporary transport failure; rejecting
+/// explicitly stops interfaces retrying ahead of unrelated conversations.
+fn conversation_runtime(
+    state: &AppState,
+    interface_id: &str,
+    agent_id: &str,
+    audience_id: Option<&str>,
+) -> Result<Provider, ApiError> {
+    let owner = match audience_id {
+        Some(audience_id) => {
+            state
+                .database
+                .conversation_runtime(interface_id, agent_id, audience_id)?
+        }
+        None => None,
+    };
+    let runtime_id = owner
+        .as_deref()
+        .unwrap_or(&state.config.value.agent.runtime_provider);
+    let runtime = state
+        .config
+        .provider(runtime_id, ProviderRole::Runtime)
+        .map_err(|error| ApiError::new(StatusCode::CONFLICT, error.to_string()))?;
+    if !runtime.enabled {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "conversation runtime provider is disabled",
+        ));
+    }
+    Ok(runtime.clone())
+}
+
+/// Model calls answer a waiting user; they give up well before the
+/// interface's own deadline does.
+const MODEL_CALL_TIMEOUT: Duration = Duration::from_secs(5);
+
+async fn model_state(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ModelQuery>,
+) -> Result<Response, ApiError> {
+    let interface = interface_provider(&headers, &state.config)?;
+    let runtime = model_runtime(&state, &interface.id, &query)?;
+    let token = runtime_token(&state.config, &runtime)?;
+    let query = RuntimeModelQuery {
+        interface_id: interface.id.clone(),
+        query,
+    };
+    let mut url = Url::parse(&format!("{}/v1/model", runtime.url))
+        .with_context(|| format!("runtime provider {} has an invalid URL", runtime.id))?;
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs.append_pair("interface_id", &query.interface_id);
+        pairs.append_pair("agent_id", &query.query.agent_id);
+        if let Some(audience_id) = &query.query.audience_id {
+            pairs.append_pair("audience_id", audience_id);
+        }
+    }
+    relay_model_call(state.client.get(url).bearer_auth(token)).await
+}
+
+async fn set_model(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(update): Json<ModelUpdate>,
+) -> Result<Response, ApiError> {
+    let interface = interface_provider(&headers, &state.config)?;
+    let runtime = model_runtime(
+        &state,
+        &interface.id,
+        &ModelQuery {
+            agent_id: update.agent_id.clone(),
+            audience_id: update.audience_id.clone(),
+        },
+    )?;
+    let token = runtime_token(&state.config, &runtime)?;
+    let update = RuntimeModelUpdate {
+        interface_id: interface.id.clone(),
+        update,
+    };
+    relay_model_call(
+        state
+            .client
+            .put(format!("{}/v1/model", runtime.url))
+            .bearer_auth(token)
+            .json(&update),
+    )
+    .await
+}
+
+/// Model calls address the runtime that owns the conversation, so a
+/// selection follows the conversation rather than the current default.
+fn model_runtime(
+    state: &AppState,
+    interface_id: &str,
+    query: &ModelQuery,
+) -> Result<Provider, ApiError> {
+    if query.agent_id != state.config.value.agent.id {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "unknown agent"));
+    }
+    conversation_runtime(
+        state,
+        interface_id,
+        &query.agent_id,
+        query.audience_id.as_deref(),
+    )
+}
+
+/// Forwards a model call and relays the runtime's answer. Runtimes phrase
+/// their rejections for people, so status and body pass through unchanged;
+/// only transport failures are described here.
+async fn relay_model_call(request: RequestBuilder) -> Result<Response, ApiError> {
+    let response = request
+        .timeout(MODEL_CALL_TIMEOUT)
+        .send()
+        .await
+        .map_err(|error| {
+            warn!(%error, "model call failed to reach the runtime");
+            if error.is_timeout() {
+                ApiError::new(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "The runtime did not answer in time.",
+                )
+            } else {
+                ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "The runtime is not reachable right now.",
+                )
+            }
+        })?;
+    let status = response.status();
+    let body = response.json::<Value>().await.map_err(|error| {
+        warn!(%error, %status, "runtime model response was not JSON");
+        ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "The runtime reported an unusable model state.",
+        )
+    })?;
+    Ok((status, Json(body)).into_response())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -227,12 +362,7 @@ async fn run_next_turn(
     if !runtime.enabled {
         return Ok(WorkerStep::Backoff);
     }
-    let token = state.config.credential(runtime_id)?;
-    if !token_matches(&runtime.token_hash, &token) {
-        return Err(anyhow!(
-            "runtime provider {runtime_id} credential does not match configuration"
-        ));
-    }
+    let token = runtime_token(&state.config, runtime)?;
     let Some(turn) = state.database.claim_turn(runtime_id)? else {
         return Ok(WorkerStep::Idle);
     };
@@ -268,6 +398,19 @@ async fn run_next_turn(
             Ok(WorkerStep::Advanced)
         }
     }
+}
+
+/// The credential core presents to a runtime, checked against the registry
+/// so a stale token file fails here rather than as a mysterious rejection.
+fn runtime_token(config: &LoadedConfig, runtime: &Provider) -> Result<String> {
+    let token = config.credential(&runtime.id)?;
+    if !token_matches(&runtime.token_hash, &token) {
+        return Err(anyhow!(
+            "runtime provider {} credential does not match configuration",
+            runtime.id
+        ));
+    }
+    Ok(token)
 }
 
 /// How a turn execution attempt failed.

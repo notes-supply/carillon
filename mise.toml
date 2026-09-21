@@ -1,5 +1,5 @@
 [tools]
-rust = { version = "1.98.0", profile = "minimal", components = ["clippy", "rustfmt"] }
+rust = { version = "1.98.0", profile = "minimal", components = ["clippy", "rustfmt"], targets = ["wasm32-unknown-unknown"] }
 node = "26.8.1"
 bun = "1.4.0"
 pnpm = "12.0.0"
@@ -32,16 +32,20 @@ run = [
   "pnpm run check",
 ]
 
+[tasks."build:commands"]
+description = "Build the Discord command module for the Wasm sandbox"
+run = "cargo build --locked --profile wasm -p carillon-discord-commands --target wasm32-unknown-unknown"
+
 [tasks."test:integration"]
 description = "Test local core, Discord, and Pi services together"
-depends = ["install"]
-run = "cargo build --locked --bin carillon && node scripts/test-integration.mjs"
+depends = ["install", "build:commands"]
+run = "cargo build --locked --bin carillon --bin carillon-discord && node scripts/test-integration.mjs"
 
 [tasks."test:persistence"]
 description = "Run Linux syscall fault-injection tests against packaged binaries"
 depends = ["package"]
 run = """
-version=$(bun -e 'import manifest from "./crates/carillon-core/Cargo.toml"; console.log(manifest.package.version)')
+version=$(bun -e 'import manifest from "./Cargo.toml"; console.log(manifest.workspace.package.version)')
 release="target/package/carillon-$version"
 node scripts/test-filesystem.mjs init "$release"
 node scripts/test-filesystem.mjs resources "$release/bin/carillon"

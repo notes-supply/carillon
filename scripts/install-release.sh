@@ -69,20 +69,18 @@ if [ -e "$APP" ] || [ -L "$APP" ]; then
   }
 fi
 
+# Existing per-user installations retain credentials and durable state; only
+# the Discord provider's own settings file is (re)written.
 if [ ! -f "$CARILLON_HOME/carillon.toml" ]; then
-  # USER_IDS and ROUTES intentionally expand into repeated, validated CLI arguments.
-  # shellcheck disable=SC2086
-  "$SOURCE/bin/carillon" init --root "$CARILLON_HOME" --workspace "$WORKSPACE" \
-    --guild-id "$GUILD_ID" --bot-user-id "$BOT_USER_ID" $USER_IDS $ROUTES --base-port "$BASE_PORT"
-else
-  # Existing per-user installations retain credentials and durable state.
-  # shellcheck disable=SC2086
-  "$SOURCE/bin/carillon" configure-discord --config "$CARILLON_HOME/carillon.toml" \
-    --guild-id "$GUILD_ID" --bot-user-id "$BOT_USER_ID" $USER_IDS $ROUTES
+  "$SOURCE/bin/carillon" init --root "$CARILLON_HOME" --workspace "$WORKSPACE" --base-port "$BASE_PORT"
 fi
+# USER_IDS and ROUTES intentionally expand into repeated, validated CLI arguments.
+# shellcheck disable=SC2086
+"$SOURCE/bin/carillon" discord configure --config "$CARILLON_HOME/carillon.toml" --provider discord-private \
+  --guild-id "$GUILD_ID" --bot-user-id "$BOT_USER_ID" $USER_IDS $ROUTES >/dev/null
 
-install -d -m 0700 "$CARILLON_HOME" "$CARILLON_HOME/credentials" "$CARILLON_HOME/pi" \
-  "$CARILLON_HOME/logs"
+install -d -m 0700 "$CARILLON_HOME" "$CARILLON_HOME/credentials" "$CARILLON_HOME/providers" \
+  "$CARILLON_HOME/pi" "$CARILLON_HOME/logs"
 APP_NEW=$(mktemp -d "$CARILLON_HOME/.app-new.XXXXXX")
 CLEANUP_APP_NEW=1
 cleanup_staging() {
@@ -96,8 +94,9 @@ cleanup_staging() {
 }
 trap cleanup_staging EXIT
 trap 'exit 1' HUP INT TERM
-install -d -m 0700 "$APP_NEW/bin" "$APP_NEW/licenses" "$APP_NEW/systemd"
+install -d -m 0700 "$APP_NEW/bin" "$APP_NEW/lib" "$APP_NEW/licenses" "$APP_NEW/systemd"
 cp -R "$SOURCE/bin/." "$APP_NEW/bin/"
+cp -R "$SOURCE/lib/." "$APP_NEW/lib/"
 cp -R "$SOURCE/licenses/." "$APP_NEW/licenses/"
 cp -R "$SOURCE/systemd/." "$APP_NEW/systemd/"
 install -m 0755 "$SOURCE/uninstall.sh" "$APP_NEW/bin/carillon-uninstall"
@@ -123,8 +122,10 @@ else
 fi
 sync -f -- "$CARILLON_HOME"
 [ -e "$CARILLON_HOME/credentials/discord-bot.token" ] || install -m 0600 /dev/null "$CARILLON_HOME/credentials/discord-bot.token"
-chmod 0700 "$CARILLON_HOME" "$CARILLON_HOME/credentials" "$CARILLON_HOME/pi" "$CARILLON_HOME/logs"
-chmod 0600 "$CARILLON_HOME/carillon.toml" "$CARILLON_HOME/credentials"/*.token
+chmod 0700 "$CARILLON_HOME" "$CARILLON_HOME/credentials" "$CARILLON_HOME/providers" \
+  "$CARILLON_HOME/pi" "$CARILLON_HOME/logs"
+chmod 0600 "$CARILLON_HOME/carillon.toml" "$CARILLON_HOME/providers"/*.toml \
+  "$CARILLON_HOME/credentials"/*.token
 
 # Retain the previous application until registration succeeds. On any failure,
 # leave the selected complete application in place and require a successful rerun.
@@ -135,6 +136,8 @@ Carillon installed for $OWNER at $CARILLON_HOME and enabled for this user's serv
 1. Put the Discord bot token in $CARILLON_HOME/credentials/discord-bot.token (mode 0600).
 2. Authenticate packaged Pi state with:
    $APP/bin/carillon-pi --no-session --no-tools --no-approve
+   In Pi, authenticate, then open /model and press Ctrl+S on the desired model to save the startup default.
+   Authentication alone is not enough: the runtime requires a saved, available default model.
 3. Start deliberately with: systemctl --user start carillon.target
 4. Inspect services with: systemctl --user status carillon.target
    Inspect the running product with: $APP/bin/carillon status --config $CARILLON_HOME/carillon.toml

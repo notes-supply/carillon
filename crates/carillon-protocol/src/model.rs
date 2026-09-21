@@ -57,6 +57,7 @@ pub enum DeliveryState {
 }
 
 impl DeliveryState {
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
@@ -221,21 +222,50 @@ pub struct StateCounts {
     pub uncertain: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct SimulateRequest {
-    pub event_id: String,
-    pub guild_id: Option<String>,
-    pub user_id: String,
-    pub channel_id: String,
-    #[serde(default)]
-    pub parent_channel_id: Option<String>,
-    pub content: String,
+/// Scope of a model selection: the agent default or one conversation.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelScope {
+    Agent,
+    Conversation,
 }
 
+/// Interface-to-core request for the model state of an agent and, when the
+/// interaction happens inside a conversation, that conversation's audience.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct SimulateResponse {
-    pub receipt: EventReceipt,
-    pub delivery: Option<Delivery>,
-    pub conversation_id: String,
-    pub feedback: Vec<String>,
+pub struct ModelQuery {
+    pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience_id: Option<String>,
+}
+
+/// Interface-to-core request to change a model selection. `selection` is the
+/// runtime's own vocabulary; `None` returns the scope to its default.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ModelUpdate {
+    pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience_id: Option<String>,
+    pub scope: ModelScope,
+    pub selection: Option<Value>,
+    /// Runtime-owned precondition for read-modify-write controls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected: Option<Value>,
+}
+
+/// Core-to-runtime form of [`ModelQuery`]; core adds the interface identity
+/// that names the conversation together with agent and audience.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeModelQuery {
+    pub interface_id: String,
+    #[serde(flatten)]
+    pub query: ModelQuery,
+}
+
+/// Core-to-runtime form of [`ModelUpdate`].
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeModelUpdate {
+    pub interface_id: String,
+    #[serde(flatten)]
+    pub update: ModelUpdate,
 }

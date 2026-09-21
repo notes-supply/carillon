@@ -3,12 +3,8 @@
 
 mod admin;
 mod cli;
-mod config;
 mod core;
 mod db;
-mod discord;
-mod filesystem;
-mod model;
 mod resources;
 
 /// Runs the Carillon operator command.

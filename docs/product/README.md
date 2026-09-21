@@ -1,7 +1,7 @@
 # Carillon product documents
 
-- [PRODUCT.md](PRODUCT.md) describes the intended product behavior.
-- [ARCHITECTURE.md](ARCHITECTURE.md) describes component ownership and boundaries.
+- [PRODUCT.md](PRODUCT.md) describes the product and current release behavior.
+- [ARCHITECTURE.md](ARCHITECTURE.md) describes the implemented ownership, boundaries, and packaging.
 - [AGENT_DIRECTORY.md](AGENT_DIRECTORY.md) describes common and Pi-native agent resources.
 - [OPERATIONS.md](OPERATIONS.md) describes installation, services, failure handling, backup, and restore.
 

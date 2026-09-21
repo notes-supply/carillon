@@ -1,9 +1,12 @@
+//! The installation registry `carillon.toml`: core listener, provider
+//! registry, and the selected agent. Provider-owned settings live in the
+//! provider's own file under `providers/`.
+
 use std::{
     collections::BTreeSet,
     fs,
     net::SocketAddr,
     path::{Path, PathBuf},
-    str::FromStr,
 };
 
 use anyhow::{Context, Result, bail};
@@ -11,15 +14,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+/// The workspace release version shared by every bundled Rust component.
 pub const RELEASE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Credential names that are never provider identities.
+pub const RESERVED_CREDENTIALS: [&str; 2] = ["operator", "discord-bot"];
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Config {
     pub data_dir: PathBuf,
     pub core: CoreConfig,
     pub providers: Vec<Provider>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub discord: Option<DiscordConfig>,
     pub agent: AgentConfig,
 }
 
@@ -27,129 +32,6 @@ pub struct Config {
 pub struct CoreConfig {
     pub listen: SocketAddr,
     pub operator_token_hash: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct DiscordConfig {
-    pub provider: String,
-    pub agent: String,
-    pub guild_id: String,
-    #[serde(default)]
-    pub bot_user_id: String,
-    pub allowed_user_ids: Vec<String>,
-    #[serde(default)]
-    pub routes: Vec<DiscordRoute>,
-    #[serde(default = "enabled")]
-    pub typing: bool,
-    #[serde(default = "enabled")]
-    pub reactions: bool,
-    #[serde(default = "processing_emoji")]
-    pub processing_emoji: String,
-    #[serde(default = "delivered_emoji")]
-    pub delivered_emoji: String,
-    #[serde(default = "failed_emoji")]
-    pub failed_emoji: String,
-    #[serde(default = "uncertain_emoji")]
-    pub uncertain_emoji: String,
-}
-
-const fn enabled() -> bool {
-    true
-}
-
-fn processing_emoji() -> String {
-    "👀".to_owned()
-}
-
-fn delivered_emoji() -> String {
-    "✅".to_owned()
-}
-
-fn failed_emoji() -> String {
-    "❌".to_owned()
-}
-
-fn uncertain_emoji() -> String {
-    "⚠️".to_owned()
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct DiscordRoute {
-    pub channel_id: String,
-    pub activation: DiscordActivation,
-    pub conversation: DiscordConversation,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum DiscordActivation {
-    Mention,
-    Always,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum DiscordConversation {
-    Thread,
-    Channel,
-}
-
-impl FromStr for DiscordRoute {
-    type Err = anyhow::Error;
-
-    fn from_str(value: &str) -> Result<Self> {
-        let mut fields = value.split(':');
-        let channel_id = fields.next().unwrap_or_default();
-        let activation = match fields.next() {
-            Some("mention") => DiscordActivation::Mention,
-            Some("always") => DiscordActivation::Always,
-            _ => bail!("route activation must be mention or always"),
-        };
-        let conversation = match fields.next() {
-            Some("thread") => DiscordConversation::Thread,
-            Some("channel") => DiscordConversation::Channel,
-            _ => bail!("route conversation must be thread or channel"),
-        };
-        if fields.next().is_some() || !valid_snowflake(channel_id) {
-            bail!("route must be CHANNEL_ID:mention|always:thread|channel");
-        }
-        Ok(Self {
-            channel_id: channel_id.to_owned(),
-            activation,
-            conversation,
-        })
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DiscordEmoji {
-    Unicode(String),
-    Custom { name: String, id: u64 },
-}
-
-impl DiscordEmoji {
-    pub fn parse(value: &str) -> Result<Self> {
-        if let Some((name, id)) = value.split_once(':') {
-            if name.len() < 2
-                || name.len() > 32
-                || !name
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-                || id.contains(':')
-                || !valid_snowflake(id)
-            {
-                bail!("custom Discord emoji must use canonical name:id syntax");
-            }
-            return Ok(Self::Custom {
-                name: name.to_owned(),
-                id: id.parse()?,
-            });
-        }
-        if emojis::get(value).is_none() {
-            bail!("Discord emoji must be Unicode emoji or canonical custom name:id");
-        }
-        Ok(Self::Unicode(value.to_owned()))
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -173,6 +55,11 @@ pub struct Provider {
 
 impl Provider {
     /// The loopback socket address behind the provider's URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the URL is not `http://` on a loopback address
+    /// with a nonzero port.
     pub fn listen_address(&self) -> Result<SocketAddr> {
         let address: SocketAddr = self
             .url
@@ -194,6 +81,18 @@ pub enum ProviderRole {
     Runtime,
 }
 
+impl ProviderRole {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Interface => "interface",
+            Self::Runtime => "runtime",
+        }
+    }
+}
+
+/// A validated `carillon.toml` with installation-relative paths resolved
+/// against the file's directory.
 #[derive(Clone, Debug)]
 pub struct LoadedConfig {
     pub root: PathBuf,
@@ -201,6 +100,10 @@ pub struct LoadedConfig {
 }
 
 impl LoadedConfig {
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be read or parsed, or when the
+    /// registry is inconsistent.
     pub fn load(path: &Path) -> Result<Self> {
         let path = path
             .canonicalize()
@@ -220,14 +123,19 @@ impl LoadedConfig {
         Ok(Self { root, value })
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when no provider has that identity and role.
     pub fn provider(&self, id: &str, role: ProviderRole) -> Result<&Provider> {
         self.value.provider(id, role)
     }
 
-    pub fn discord(&self) -> Result<&DiscordConfig> {
-        self.value.discord()
-    }
-
+    /// The installation credential for a provider or reserved name.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the identity is malformed or the file is
+    /// unreadable.
     pub fn credential(&self, id: &str) -> Result<String> {
         validate_provider_identity(id)?;
         let path = self.root.join("credentials").join(format!("{id}.token"));
@@ -236,9 +144,23 @@ impl LoadedConfig {
             .trim()
             .to_owned())
     }
+
+    /// The provider-owned configuration file `providers/<id>.toml`. Core
+    /// never reads it; its schema belongs to the provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the identity is malformed.
+    pub fn provider_config_path(&self, id: &str) -> Result<PathBuf> {
+        validate_provider_identity(id)?;
+        Ok(self.root.join("providers").join(format!("{id}.toml")))
+    }
 }
 
 impl Config {
+    /// # Errors
+    ///
+    /// Returns an error when no provider has that identity and role.
     pub fn provider(&self, id: &str, role: ProviderRole) -> Result<&Provider> {
         let provider = self
             .providers
@@ -282,7 +204,10 @@ impl Config {
         Ok(())
     }
 
-    pub(crate) fn validate(&self) -> Result<()> {
+    /// # Errors
+    ///
+    /// Returns an error when the registry is internally inconsistent.
+    pub fn validate(&self) -> Result<()> {
         if self.core.listen.port() == 0 {
             bail!("core listen port must be nonzero");
         }
@@ -298,7 +223,7 @@ impl Config {
         let mut listen_addresses = BTreeSet::from([self.core.listen]);
         for provider in &self.providers {
             validate_provider_identity(&provider.id)?;
-            if matches!(provider.id.as_str(), "operator" | "discord-bot") {
+            if RESERVED_CREDENTIALS.contains(&provider.id.as_str()) {
                 bail!(
                     "provider ID {} is reserved for installation credentials",
                     provider.id
@@ -334,95 +259,12 @@ impl Config {
         self.provider(&self.agent.runtime_provider, ProviderRole::Runtime)?;
         Ok(())
     }
-
-    pub fn discord(&self) -> Result<&DiscordConfig> {
-        let discord = self
-            .discord
-            .as_ref()
-            .context("Discord interface configuration is absent")?;
-        discord.validate(self)?;
-        Ok(discord)
-    }
 }
 
-impl DiscordConfig {
-    /// A fresh Discord interface configuration carrying the same feedback
-    /// defaults that deserialization applies.
-    pub(crate) fn with_defaults(
-        provider: String,
-        agent: String,
-        guild_id: String,
-        bot_user_id: String,
-        allowed_user_ids: Vec<String>,
-        routes: Vec<DiscordRoute>,
-    ) -> Self {
-        Self {
-            provider,
-            agent,
-            guild_id,
-            bot_user_id,
-            allowed_user_ids,
-            routes,
-            typing: enabled(),
-            reactions: enabled(),
-            processing_emoji: processing_emoji(),
-            delivered_emoji: delivered_emoji(),
-            failed_emoji: failed_emoji(),
-            uncertain_emoji: uncertain_emoji(),
-        }
-    }
-
-    fn validate(&self, config: &Config) -> Result<()> {
-        if !valid_snowflake(&self.guild_id) {
-            bail!("Discord guild ID must be an immutable snowflake ID");
-        }
-        if !valid_snowflake(&self.bot_user_id) {
-            bail!("Discord bot user ID must be an immutable snowflake ID");
-        }
-        if self.allowed_user_ids.is_empty() {
-            bail!("Discord admission requires at least one allowlisted user ID");
-        }
-        if let Some(user) = self
-            .allowed_user_ids
-            .iter()
-            .find(|user| !valid_snowflake(user))
-        {
-            bail!("Discord allowlisted user ID {user:?} is not a snowflake ID");
-        }
-        if self.routes.is_empty() {
-            bail!("Discord admission requires at least one channel route");
-        }
-        let mut channels = BTreeSet::new();
-        for route in &self.routes {
-            if !valid_snowflake(&route.channel_id) || !channels.insert(&route.channel_id) {
-                bail!("Discord route channel IDs must be valid and unique");
-            }
-        }
-        for emoji in [
-            &self.processing_emoji,
-            &self.delivered_emoji,
-            &self.failed_emoji,
-            &self.uncertain_emoji,
-        ] {
-            DiscordEmoji::parse(emoji)?;
-        }
-        config.provider(&self.provider, ProviderRole::Interface)?;
-        if self.agent != config.agent.id {
-            bail!("Discord interface selects an unknown agent");
-        }
-        Ok(())
-    }
-}
-
-impl ProviderRole {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Interface => "interface",
-            Self::Runtime => "runtime",
-        }
-    }
-}
-
+/// # Errors
+///
+/// Returns an error unless the value is 1-128 bytes of ASCII letters, digits,
+/// `-` or `_`.
 pub fn validate_provider_identity(value: &str) -> Result<()> {
     if value.is_empty()
         || value.len() > 128
@@ -435,18 +277,24 @@ pub fn validate_provider_identity(value: &str) -> Result<()> {
     Ok(())
 }
 
+#[must_use]
 pub fn hash_token(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 
+#[must_use]
 pub fn new_token() -> String {
     format!("{}{}", Uuid::now_v7().simple(), Uuid::now_v7().simple())
 }
 
+#[must_use]
 pub fn token_matches(expected_hash: &str, candidate: &str) -> bool {
     hash_token(candidate).as_bytes() == expected_hash.as_bytes()
 }
 
+/// # Errors
+///
+/// Returns an error when the file cannot be read.
 pub fn read_token_file(path: &Path) -> Result<String> {
     Ok(fs::read_to_string(path)
         .with_context(|| format!("read token file {}", path.display()))?
@@ -454,7 +302,8 @@ pub fn read_token_file(path: &Path) -> Result<String> {
         .to_owned())
 }
 
-fn absolutize(root: &Path, path: &Path) -> PathBuf {
+#[must_use]
+pub fn absolutize(root: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -469,41 +318,9 @@ fn valid_token_hash(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn valid_snowflake(value: &str) -> bool {
-    value
-        .parse::<u64>()
-        .is_ok_and(|id| id != 0 && id.to_string() == value)
-}
-
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
-
-    use super::{
-        DiscordActivation, DiscordConfig, DiscordConversation, DiscordEmoji, DiscordRoute,
-        validate_provider_identity,
-    };
-
-    #[test]
-    fn discord_feedback_defaults_leave_admission_unconfigured() -> anyhow::Result<()> {
-        let config: DiscordConfig = toml::from_str(
-            r#"
-provider = "discord-private"
-agent = "default"
-guild_id = "100"
-allowed_user_ids = ["200"]
-"#,
-        )?;
-        assert!(config.bot_user_id.is_empty());
-        assert!(config.routes.is_empty());
-        assert!(config.typing);
-        assert!(config.reactions);
-        assert_eq!(config.processing_emoji, "👀");
-        assert_eq!(config.delivered_emoji, "✅");
-        assert_eq!(config.failed_emoji, "❌");
-        assert_eq!(config.uncertain_emoji, "⚠️");
-        Ok(())
-    }
+    use super::validate_provider_identity;
 
     #[test]
     fn provider_identity_uses_one_path_safe_slug_grammar() {
@@ -532,35 +349,5 @@ allowed_user_ids = ["200"]
                 "{invalid:?} should be invalid"
             );
         }
-    }
-    #[test]
-    fn route_requires_all_explicit_fields() -> anyhow::Result<()> {
-        let route = DiscordRoute::from_str("300:mention:thread")?;
-        assert_eq!(route.channel_id, "300");
-        assert_eq!(route.activation, DiscordActivation::Mention);
-        assert_eq!(route.conversation, DiscordConversation::Thread);
-        assert!(DiscordRoute::from_str("300:mention").is_err());
-        assert!(DiscordRoute::from_str("300:free:thread").is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn emoji_accepts_unicode_and_canonical_custom_syntax() -> anyhow::Result<()> {
-        assert_eq!(
-            DiscordEmoji::parse("working:123")?,
-            DiscordEmoji::Custom {
-                name: "working".to_owned(),
-                id: 123,
-            }
-        );
-        assert!(matches!(
-            DiscordEmoji::parse("⏳")?,
-            DiscordEmoji::Unicode(_)
-        ));
-        assert!(DiscordEmoji::parse("working").is_err());
-        assert!(DiscordEmoji::parse("é").is_err());
-        assert!(DiscordEmoji::parse("working:not-an-id").is_err());
-        assert!(DiscordEmoji::parse("x:123").is_err());
-        Ok(())
     }
 }

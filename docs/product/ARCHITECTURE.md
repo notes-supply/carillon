@@ -1,5 +1,7 @@
 # Carillon architecture
 
+This document describes the implemented system. Its process layout, packaging, and protocols are design choices, not requirements that future changes must preserve.
+
 ## System shape
 
 ```text
@@ -10,33 +12,71 @@ The included providers are Discord and Pi. They are examples of the two provider
 
 ## Core
 
-The Rust core owns:
+The Rust core (`carillon-core`, the `carillon` executable) owns:
 
 - configured agent, interface, and runtime identities;
 - accepted external events and duplicate suppression;
 - conversation continuity and runtime selection;
 - the queued, running, completed, and uncertain turn states;
 - opaque runtime continuation references;
-- delivery intents and their outcomes; and
+- delivery intents and their outcomes;
+- relaying model-selection calls from an interface to the runtime that owns the conversation; and
 - inspection, backup, and restore operations.
 
 SQLite is the only writer-owned durable store for this lifecycle. Network and model work never run inside its transactions.
+
+Core is platform-neutral. It knows the registry of providers and the loopback protocol; it has no Discord or Pi code and no provider-specific configuration schema.
+
+## Providers are separate programs
+
+Each provider is its own executable, built and packaged separately from core. Core and a provider share only the `carillon-protocol` crate: the installation registry (`carillon.toml`), credential files, and the JSON wire types. Adding an interface for another platform means adding another executable that speaks this protocol, not modifying or rebuilding core.
+
+`carillon <provider> …` is the single user-facing entry point. Core forwards to the executable `carillon-<provider>` by replacing its process, so signals and the exit status are the provider's own. Core subcommands are reserved; other names using the provider-ID character set are forwarded: `carillon discord serve …` runs `carillon-discord serve …`. The bundle's own providers sit beside the `carillon` binary and take precedence; a provider installed independently is found as an executable on `PATH`. The release owns `app/` wholesale and replaces it on upgrade, so an independent provider is installed elsewhere and survives upgrades.
+
+Executable names and registry instance IDs are separate: `carillon discord` can serve an instance named `discord-private`. A provider executable must not use a core subcommand name, but that restriction does not apply to instance IDs.
+
+A provider's own settings live in `providers/<id>.toml` beside `carillon.toml`. Core never reads that file; the provider and its `configure` command own the schema. The registry in `carillon.toml` records only what core needs about a provider: ID, role, expected version, loopback URL, credential hash, and whether it is enabled.
 
 ## Interface providers
 
 An interface provider owns its platform credential and protocol. It authenticates ingress, maps platform conversations to Carillon audience IDs, submits admitted events, claims delivery work, and performs native delivery.
 
-The Discord provider additionally owns guild/user/route admission, mention handling, Discord thread creation and adoption, typing, reactions, and message splitting. Core does not model Discord hierarchy.
+The Discord provider (`carillon-discord`) additionally owns guild/user/route admission, mention handling, Discord thread creation and adoption, typing, reactions, message splitting, application-command registration, and interaction handling. Core does not model Discord hierarchy or interactions.
 
-A future interface provider can map another platform to the same accepted-event and delivery boundaries without teaching core that platform's API.
+### Reloadable command module
+
+Discord's slash commands and their interactive controls live in a WebAssembly module, `carillon_discord_commands.wasm`, that the provider loads at startup and can replace while running. The module defines the commands, handles each interaction, and decides what to show. The provider keeps everything native: the gateway connection, admission of the interaction, every Discord and core call, authority, and deadlines.
+
+```text
+carillon CLI -> carillon-discord
+                 |- native gateway, admission, Discord and core I/O
+                 |- carillon-wasm host -> carillon_discord_commands.wasm
+                 `- core -> carillon-runtime-pi
+```
+
+`carillon-wasm` is the shared hosting crate: bounded execution of a guest module on an established runtime (wasmtime). Every invocation runs in a fresh instance with one linear memory capped at 16 MiB and a deadline that covers the native calls it makes. This is a linear-memory limit, not a total process-memory budget. The guest reaches the native side only through one import, `carillon.call`, whose bytes the embedding provider interprets; nothing survives between invocations inside the guest, so durable state stays native. The Discord provider owns replacement: one immutable generation contains the module and its command definitions. A pointer swap activates them together; in-flight invocations retain their original generation. Reloads serialize preparation, remote registration, and activation without blocking ordinary invocations. The crate knows nothing about Discord; another provider can embed it with its own contract, or not use Wasm at all.
+
+The Discord contract (`carillon-discord-commands::contract`, versioned by `CONTRACT`) is JSON: the provider sends `Describe` or an admitted `Interaction`; the module answers with its command definitions, a `Reply` of content and Discord components, or a `Failure`. Through `carillon.call` the module may ask for the model state or set a model selection; the provider answers with the runtime's confirmed state or a user-facing reason. Command replies are ephemeral; a component interaction's reply updates the message carrying the component. Contract 2 adds conditional model writes; deploy the provider, command module, core, and runtime together for this protocol change. The current response contract still supports only deferred command/component replies, not modals or autocomplete. Provider browsing is presentation-only: the guest filters by provider before paginating models, carries the browsed provider in navigation controls, and writes a selection only when a model or setting is chosen (or a scope is reset).
+
+Loading validates before switching: the provider reads the file, compiles it, checks the required exports, asks it to describe itself, and checks the contract version and each command definition. A failed load leaves the working module in place. Registration with Discord precedes local activation: the provider keeps a record of which definitions it registered with which application and guild, registers at startup when that record does not match, and on `carillon discord reload` registers a prepared module whose definitions differ before it serves a single interaction. The disposable registration cache is invalidated before a remote registration attempt. A registration Discord refuses, or one it does not answer, leaves the previous module serving. Once Discord confirms, the candidate activates even if saving the confirmation cache fails; that bookkeeping failure is logged and causes registration to be retried. Every reply a module produces is checked against Discord's content and component limits before it is sent. Cancelling or replacing guest code never undoes a native action it already caused.
+
+Replacement is that one explicit operation. There is no module marketplace, dependency graph, workflow interpreter, or automatic updater, and a provider speaks exactly one contract version at a time.
 
 ## Runtime providers
 
 A runtime provider receives a claimed turn containing agent, interface, audience, input, resource, and optional continuation identity. It returns nonblank output and an opaque continuation reference. A response without usable output is uncertain, not a completed silent turn: core preserves the operator's retry/skip decision and does not advance the continuation or enqueue an empty reply.
 
-The provider owns everything native to its engine. For Pi this includes sessions, model execution, tools, extensions, skills, compaction, settings, and usage. Core does not offer a generic tool or extension protocol on top of Pi.
+The provider owns everything native to its engine. For Pi (`carillon-runtime-pi`) this includes sessions, model execution, tools, extensions, skills, compaction, settings, and usage. Core does not offer a generic tool or extension protocol on top of Pi.
 
 A future runtime can use different native state and features. Runtime replacement does not imply transcript or extension portability.
+
+### Model selection
+
+The runtime owns model availability, engine settings, and selections. It answers `GET /v1/model` with the models it can run, each with the options it supports for that model, and the effective selection for the agent and, inside a conversation, for that conversation, marking whether each was set at that scope or inherited. `PUT /v1/model` changes the agent default or one conversation's selection, or returns a scope to its default, and answers with the confirmed state or a rejection in words meant for the user. A change may carry an opaque `expected` selection; the runtime checks it against the scope's effective selection inside the same serialized operation as the write and returns 409 without writing when it differs. Discord option controls bind to the displayed model and send this precondition, so old controls cannot retarget another model or overwrite a change made during their read/write interval.
+
+Core relays these calls from an interface provider to the runtime that owns the conversation, adding the interface identity that names the conversation; status and body pass through unchanged. Only transport failures are described by core. Discord presents the state through `/model` and asks for changes; it keeps no settings ledger of its own.
+
+Pi keeps Carillon's selections in `pi/model-selection.json` beside its private state. Updates flush the replacement file, rename it, and sync its directory before confirming success. The runtime default is Pi's own setting. A turn resolves its selection when it starts: conversation override, else agent default, else runtime default. Queued work therefore picks up a change; running work keeps what it started with.
 
 ## Operation lifecycle
 
@@ -53,15 +93,17 @@ An uncertain turn blocks later turns for the same interface, agent, and audience
 
 ## Configuration and supervision
 
-Provider instances are declared in configuration with stable IDs and one of two roles: interface or runtime. An agent names its runtime provider. Provider state paths are namespaced by provider identity.
+Provider instances are declared in `carillon.toml` with stable IDs and one of two roles: interface or runtime. An agent names its runtime provider. Provider state paths are namespaced by provider identity.
 
-The included release supervises core, Discord, and Pi as separate user services. They share the installing Unix identity but can restart independently. Provider configuration is loaded at process start; changes are applied by restarting the affected service.
+The included release supervises core, Discord, and Pi as separate user services running three separate programs: `carillon core`, `carillon discord serve` (the `carillon-discord` executable and its command module under `app/lib`), and `carillon-runtime-pi`.
+
+The services share the installing Unix identity. Registry and provider configuration are loaded at process start; changes are applied by restarting the affected service. The Discord command module is the exception: it is replaced in the running provider by `carillon discord reload`, without reconnecting the gateway.
 
 ## Trust and authority
 
-Remote admission and local execution are separate boundaries. Interface providers fail closed before runtime work. After admission, the services have the ordinary authority of their Unix owner, including that owner's groups, files, executables, applications, and configured passwordless sudo.
+Remote admission and local execution are separate boundaries. Interface providers fail closed before runtime work; Discord admits an interaction by guild, user, and channel exactly as it admits a message, before the command module runs. After admission, the services have the ordinary authority of their Unix owner, including that owner's groups, files, executables, applications, and configured passwordless sudo.
 
-Carillon does not create another permission model. Engine-native extensions may add approval, confinement, or specialized credentials where needed.
+Carillon does not create another permission model. The Wasm sandbox bounds the command module's memory and time and limits what it can ask for; it is not a permission system for the owner, and native operations enforce authority and deadlines. Engine-native extensions may add approval, confinement, or specialized credentials where needed.
 
 ## Beta posture
 

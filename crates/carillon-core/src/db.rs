@@ -27,6 +27,7 @@
 
 use std::{
     path::{Path, PathBuf},
+    str::FromStr,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -38,7 +39,7 @@ use rusqlite::{
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::model::{
+use carillon_protocol::model::{
     Delivery, DeliveryOutcome, DeliveryState, EventReceipt, ExternalEvent, RuntimeTurnResponse,
     StateCounts, TurnInspection, TurnState, TurnSummary,
 };
@@ -63,22 +64,34 @@ pub struct ClaimedTurn {
     pub resource_snapshot_id: String,
 }
 
-impl FromSql for TurnState {
+/// Lifecycle states are stored by their wire names. The wire types live in
+/// the protocol crate, so they are read through this wrapper rather than a
+/// foreign `FromSql` implementation.
+struct Stored<T>(T);
+
+impl<T: FromStr<Err = anyhow::Error>> FromSql for Stored<T> {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
         value
             .as_str()?
             .parse()
+            .map(Self)
             .map_err(|error: anyhow::Error| FromSqlError::Other(error.into()))
     }
 }
 
-impl FromSql for DeliveryState {
-    fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
-        value
-            .as_str()?
-            .parse()
-            .map_err(|error: anyhow::Error| FromSqlError::Other(error.into()))
-    }
+fn state_column<T: FromStr<Err = anyhow::Error>>(
+    row: &Row<'_>,
+    index: usize,
+) -> rusqlite::Result<T> {
+    row.get::<_, Stored<T>>(index).map(|stored| stored.0)
+}
+
+fn optional_state_column<T: FromStr<Err = anyhow::Error>>(
+    row: &Row<'_>,
+    index: usize,
+) -> rusqlite::Result<Option<T>> {
+    row.get::<_, Option<Stored<T>>>(index)
+        .map(|stored| stored.map(|stored| stored.0))
 }
 
 impl Database {
@@ -210,9 +223,10 @@ impl Database {
     pub fn conversation_runtime(
         &self,
         interface_id: &str,
-        event: &ExternalEvent,
+        agent_id: &str,
+        audience_id: &str,
     ) -> Result<Option<String>> {
-        conversation_runtime(&self.connect()?, interface_id, event)
+        conversation_runtime(&self.connect()?, interface_id, agent_id, audience_id)
     }
 
     /// Records an admitted event as a queued turn, or returns the receipt of
@@ -232,8 +246,12 @@ impl Database {
             return Ok(receipt);
         }
 
-        if let Some(owner) = conversation_runtime(&transaction, interface_id, event)?
-            && owner != runtime_id
+        if let Some(owner) = conversation_runtime(
+            &transaction,
+            interface_id,
+            &event.agent_id,
+            &event.audience_id,
+        )? && owner != runtime_id
         {
             bail!("conversation is owned by runtime {owner}, not {runtime_id}");
         }
@@ -577,7 +595,7 @@ impl Database {
                 params![id, interface_id],
                 |row| {
                     Ok((
-                        row.get::<_, DeliveryState>(0)?,
+                        state_column::<DeliveryState>(row, 0)?,
                         row.get::<_, Option<String>>(1)?,
                     ))
                 },
@@ -606,11 +624,11 @@ impl Database {
                         audience_id: row.get(2)?,
                         user_id: row.get(3)?,
                         input: row.get(4)?,
-                        state: row.get(5)?,
+                        state: state_column(row, 5)?,
                         output: row.get(6)?,
                         providers: json_column(row, 7)?,
                         resource_snapshot_id: row.get(8)?,
-                        delivery_state: row.get(9)?,
+                        delivery_state: optional_state_column(row, 9)?,
                         delivery_native_ref: row.get(10)?,
                         error: row.get(11)?,
                     })
@@ -624,7 +642,7 @@ impl Database {
         let mut statement =
             connection.prepare("SELECT state, COUNT(*) FROM turns GROUP BY state")?;
         let rows = statement.query_map([], |row| {
-            Ok((row.get::<_, TurnState>(0)?, row.get::<_, u32>(1)?))
+            Ok((state_column::<TurnState>(row, 0)?, row.get::<_, u32>(1)?))
         })?;
         let mut counts = StateCounts::default();
         for row in rows {
@@ -646,7 +664,10 @@ impl Database {
         let mut statement =
             connection.prepare("SELECT state, COUNT(*) FROM deliveries GROUP BY state")?;
         let rows = statement.query_map([], |row| {
-            Ok((row.get::<_, DeliveryState>(0)?, row.get::<_, u32>(1)?))
+            Ok((
+                state_column::<DeliveryState>(row, 0)?,
+                row.get::<_, u32>(1)?,
+            ))
         })?;
         let mut counts = StateCounts::default();
         for row in rows {
@@ -674,9 +695,9 @@ impl Database {
             Ok(TurnSummary {
                 turn_id: row.get(0)?,
                 event_id: row.get(1)?,
-                state: row.get(2)?,
+                state: state_column(row, 2)?,
                 accepted_at: row.get(3)?,
-                delivery_state: row.get(4)?,
+                delivery_state: optional_state_column(row, 4)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -724,14 +745,15 @@ fn json_column<T: DeserializeOwned>(row: &Row<'_>, index: usize) -> rusqlite::Re
 fn conversation_runtime(
     connection: &Connection,
     interface_id: &str,
-    event: &ExternalEvent,
+    agent_id: &str,
+    audience_id: &str,
 ) -> Result<Option<String>> {
     Ok(connection
         .query_row(
             "SELECT runtime_id FROM turns
          WHERE interface_id = ?1 AND agent_id = ?2 AND audience_id = ?3
          ORDER BY acceptance_sequence LIMIT 1",
-            params![interface_id, event.agent_id, event.audience_id],
+            params![interface_id, agent_id, audience_id],
             |row| row.get(0),
         )
         .optional()?)
@@ -750,7 +772,7 @@ fn event_receipt(
                 Ok(EventReceipt {
                     event_id: event_id.to_owned(),
                     turn_id: row.get(0)?,
-                    state: row.get(1)?,
+                    state: state_column(row, 1)?,
                     duplicate: true,
                 })
             },
@@ -772,8 +794,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::Database;
-    use crate::model::{
-        DeliveryOutcome, DeliveryState, ExternalEvent, RuntimeTurnResponse, TurnState,
+    use carillon_protocol::model::{
+        DeliveryOutcome, DeliveryState, EventReceipt, ExternalEvent, RuntimeTurnResponse, TurnState,
     };
 
     fn event(id: &str, audience: &str) -> ExternalEvent {
@@ -789,7 +811,7 @@ mod tests {
         }
     }
 
-    fn accept(database: &Database, id: &str, audience: &str) -> Result<crate::model::EventReceipt> {
+    fn accept(database: &Database, id: &str, audience: &str) -> Result<EventReceipt> {
         database.accept_event(
             "discord",
             "runtime",
@@ -880,21 +902,23 @@ mod tests {
     fn acceptance_pins_conversations_and_rejects_owner_changes() -> Result<()> {
         let directory = tempdir()?;
         let database = Database::create(&directory.path().join("state.sqlite3"))?;
-        let first = event("one", "conversation");
-        assert_eq!(database.conversation_runtime("discord", &first)?, None);
+        assert_eq!(
+            database.conversation_runtime("discord", "agent", "conversation")?,
+            None
+        );
         accept(&database, "one", "conversation")?;
         assert_eq!(
-            database.conversation_runtime("discord", &first)?.as_deref(),
+            database
+                .conversation_runtime("discord", "agent", "conversation")?
+                .as_deref(),
             Some("runtime")
         );
         assert_eq!(
-            database.conversation_runtime("other-interface", &first)?,
+            database.conversation_runtime("other-interface", "agent", "conversation")?,
             None
         );
-        let mut other_agent = first.clone();
-        other_agent.agent_id = "other-agent".to_owned();
         assert_eq!(
-            database.conversation_runtime("discord", &other_agent)?,
+            database.conversation_runtime("discord", "other-agent", "conversation")?,
             None
         );
         let second = event("two", "conversation");
@@ -908,7 +932,13 @@ mod tests {
         // A stale runtime selection must not prevent recovery of an existing receipt.
         assert!(
             database
-                .accept_event("discord", "replacement", &first, &json!([]), "resources")?
+                .accept_event(
+                    "discord",
+                    "replacement",
+                    &event("one", "conversation"),
+                    &json!([]),
+                    "resources"
+                )?
                 .duplicate
         );
         accept(&database, "two", "conversation")?;

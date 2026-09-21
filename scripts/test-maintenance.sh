@@ -103,7 +103,6 @@ for scenario in existing:app-stage existing:app-before existing:app-after existi
     chmod 0640 "$UNIT_DIR/carillon-core.service"
   else
     "$RELEASE/bin/carillon" init --root "$CARILLON_HOME" --workspace "$HOME/workspace" \
-      --guild-id 100 --bot-user-id 201 --user-id 200 --route 300:always:channel \
       --base-port "${CARILLON_TEST_BASE_PORT:-44800}" >/dev/null
   fi
   printf '%s\n' test-bot-token >"$CARILLON_HOME/credentials/discord-bot.token"

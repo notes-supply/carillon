@@ -18,7 +18,10 @@ const release = mode === "init" ? resolve(artifact) : null;
 execFileSync("strace", ["--version"], { stdio: "ignore" });
 const scratch = await mkdtemp(join(tmpdir(), "carillon-filesystem-"));
 const port = 40_000 + (process.pid % 10_000);
-const options = [
+// `init` takes only installation-wide settings; the installer additionally
+// writes the Discord provider's own admission file.
+const initOptions = ["--base-port", String(port)];
+const installOptions = [
   "--guild-id",
   "100",
   "--bot-user-id",
@@ -27,8 +30,15 @@ const options = [
   "200",
   "--route",
   "300:always:channel",
-  "--base-port",
-  String(port),
+  ...initOptions,
+];
+const discordOptions = [
+  "--provider",
+  "discord-private",
+  "--guild-id",
+  "100",
+  "--bot-user-id",
+  "201",
 ];
 const traceOptions = ["-f", "-qq", "-yy", "-s", "4096", "-e", "trace=mkdir,rename,fsync,fdatasync"];
 const run = (...args) => execFileSync(binary, args, { encoding: "utf8", timeout: 30_000 });
@@ -51,41 +61,56 @@ try {
 
 async function testConfiguration() {
   const root = join(scratch, "configuration");
-  run("init", "--root", root, "--workspace", scratch, ...options);
+  run("init", "--root", root, "--workspace", scratch, ...initOptions);
   const config = join(root, "carillon.toml");
+  const discord = join(root, "providers/discord-private.toml");
+  run(
+    "discord",
+    "configure",
+    "--config",
+    config,
+    ...discordOptions,
+    "--user-id",
+    "200",
+    "--route",
+    "300:always:channel",
+  );
   await chmod(config, 0o640);
-  const original = await readFile(config);
   const token = await readFile(join(root, "credentials/operator.token"));
-  for (const args of [
-    ["provider", "--config", config, "runtime-pi", "disable"],
+  // The registry keeps its operator-chosen mode; provider files are always owner-only.
+  for (const [args, target, mode] of [
+    [["provider", "--config", config, "runtime-pi", "disable"], config, 0o640],
     [
-      "configure-discord",
-      "--config",
-      config,
-      "--guild-id",
-      "100",
-      "--bot-user-id",
-      "201",
-      "--user-id",
-      "999",
-      "--route",
-      "301:mention:thread",
+      [
+        "discord",
+        "configure",
+        "--config",
+        config,
+        ...discordOptions,
+        "--user-id",
+        "999",
+        "--route",
+        "301:mention:thread",
+      ],
+      discord,
+      0o600,
     ],
   ]) {
-    await writeFile(config, original);
+    const original = await readFile(target);
     const trace = join(scratch, `${args[0]}.trace`);
     execFileSync("strace", [...traceOptions, "-o", trace, binary, ...args]);
-    const updated = await readFile(config);
+    const updated = await readFile(target);
     assert.notDeepEqual(updated, original);
     const lines = (await readFile(trace, "utf8")).split("\n");
-    const publication = lines.findIndex((line) => line.includes(`, "${config}") = 0`));
+    const publication = lines.findIndex((line) => line.includes(`, "${target}") = 0`));
     const temporary = /rename\("([^"]+)",/u.exec(lines[publication])?.[1];
     assert.ok(temporary);
     const fileSync = lines.findIndex(
       (line) => line.includes(`fsync(`) && line.includes(`<${temporary}>`) && line.endsWith("= 0"),
     );
     const parentSync = lines.findIndex(
-      (line) => line.includes(`fsync(`) && line.includes(`<${root}>`) && line.endsWith("= 0"),
+      (line) =>
+        line.includes(`fsync(`) && line.includes(`<${dirname(target)}>`) && line.endsWith("= 0"),
     );
     assert.ok(
       fileSync >= 0 && fileSync < publication && publication < parentSync,
@@ -100,7 +125,7 @@ async function testConfiguration() {
         .slice(0, boundary + 1)
         .filter((line) => line.trim().startsWith(`${pid} `) && line.includes(" fsync(")).length;
       assert.ok(ordinal > 0);
-      await writeFile(config, original);
+      await writeFile(target, original);
       const injected = join(scratch, `${args[0]}-${ordinal}.trace`);
       const result = spawnSync(
         "strace",
@@ -123,15 +148,15 @@ async function testConfiguration() {
       assert.equal(failures.length, 1);
       const syncedPath = /fsync\(\d+<([^>]+)>/u.exec(failures[0])?.[1];
       assert.ok(syncedPath);
-      assert.equal(published ? syncedPath : dirname(syncedPath), root);
-      assert.deepEqual(await readFile(config), published ? updated : original);
+      assert.equal(published ? syncedPath : dirname(syncedPath), dirname(target));
+      assert.deepEqual(await readFile(target), published ? updated : original);
       run(...args);
       assert.deepEqual(
-        await readFile(config),
+        await readFile(target),
         updated,
         "retry must preserve the intended change after either failure boundary",
       );
-      assert.equal((await stat(config)).mode & 0o777, 0o640);
+      assert.equal((await stat(target)).mode & 0o777, mode);
       assert.deepEqual(await readFile(join(root, "credentials/operator.token")), token);
       console.log(`configuration durability passed: ${args[0]} / ${published ? "parent" : "file"}`);
     }
@@ -151,7 +176,7 @@ async function testInitialization() {
     baseline,
     "--workspace",
     scratch,
-    ...options,
+    ...initOptions,
   ]);
   const lines = (await readFile(trace, "utf8")).split("\n");
   const renames = lines.filter((line) => / rename\(/u.test(line));
@@ -211,7 +236,7 @@ async function testInitialization() {
           root,
           "--workspace",
           home,
-          ...options,
+          ...initOptions,
         ],
         { encoding: "utf8", timeout: 30_000 },
       );
@@ -255,7 +280,7 @@ async function testInitialization() {
         await assert.rejects(stat(root), { code: "ENOENT" });
       }
       // Exercise the actual installer's choice of fresh/existing state, not just init again.
-      execFileSync(join(release, "install.sh"), ["--workspace", home, ...options], {
+      execFileSync(join(release, "install.sh"), ["--workspace", home, ...installOptions], {
         env: {
           ...process.env,
           HOME: home,
@@ -287,7 +312,7 @@ async function testInitialization() {
 
 async function testRestore() {
   const source = join(scratch, "restore-source");
-  run("init", "--root", source, "--workspace", scratch, ...options);
+  run("init", "--root", source, "--workspace", scratch, ...initOptions);
   const token = await readFile(join(source, "credentials/operator.token"));
   const archive = join(scratch, "restore-source.tar.gz");
   run("backup", "--config", join(source, "carillon.toml"), "--output", archive);
@@ -379,7 +404,16 @@ async function testRestore() {
 async function testParticipation() {
   const messages = execFileSync(
     "cargo",
-    ["test", "--locked", "-p", "carillon-core", "--lib", "--no-run", "--message-format=json"],
+    [
+      "test",
+      "--locked",
+      "-p",
+      "carillon-discord",
+      "--bin",
+      "carillon-discord",
+      "--no-run",
+      "--message-format=json",
+    ],
     { encoding: "utf8", timeout: 120_000 },
   );
   const artifacts = messages
@@ -390,11 +424,11 @@ async function testParticipation() {
       (message) =>
         message.reason === "compiler-artifact" && message.executable && message.profile.test,
     );
-  assert.equal(artifacts.length, 1, "one library test binary must be built");
+  assert.equal(artifacts.length, 1, "one provider test binary must be built");
   const args = [
     artifacts[0].executable,
     "--exact",
-    "discord::tests::participation_persistence_retries_without_bypassing_activation",
+    "provider::tests::participation_persistence_retries_without_bypassing_activation",
     "--nocapture",
     "--test-threads=1",
   ];
@@ -526,7 +560,7 @@ async function testResources() {
 
 async function resourceAttempt(name, fault) {
   const root = join(scratch, name);
-  run("init", "--root", root, "--workspace", scratch, ...options);
+  run("init", "--root", root, "--workspace", scratch, ...initOptions);
   const helper = join(root, "agents/default/skills/example/scripts/helper");
   await mkdir(dirname(helper), { recursive: true });
 

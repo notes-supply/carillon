@@ -17,13 +17,15 @@ use fs2::FileExt;
 use tar::{Archive, Builder};
 use uuid::Uuid;
 
-use crate::{
+use carillon_protocol::{
     config::{
-        AgentConfig, Config, CoreConfig, DiscordConfig, DiscordRoute, LoadedConfig, Provider,
-        ProviderRole, RELEASE_VERSION, hash_token, new_token, validate_provider_identity,
+        AgentConfig, Config, CoreConfig, LoadedConfig, Provider, ProviderRole, RELEASE_VERSION,
+        hash_token, new_token, validate_provider_identity,
     },
-    db::Database,
+    filesystem::{atomic_write, sync_ancestors, sync_tree},
 };
+
+use crate::db::Database;
 
 const DEFAULT_SYSTEM: &str = r"You are Carillon, a capable general-purpose agent.
 
@@ -69,15 +71,10 @@ impl ServiceLock {
     }
 }
 
-pub fn initialize(
-    root: &Path,
-    workspace: &Path,
-    guild_id: &str,
-    bot_user_id: &str,
-    users: &[String],
-    routes: &[DiscordRoute],
-    base_port: u16,
-) -> Result<PathBuf> {
+/// Creates an installation with the bundled providers registered and
+/// credentialed. Provider-owned settings (such as Discord admission) are
+/// written afterwards by each provider's own `configure` command.
+pub fn initialize(root: &Path, workspace: &Path, base_port: u16) -> Result<PathBuf> {
     if !workspace.is_absolute() || !workspace.is_dir() {
         bail!("workspace must be an absolute path to an existing directory");
     }
@@ -96,14 +93,6 @@ pub fn initialize(
             operator_token_hash: hash_token(&operator_token),
         },
         providers: default_providers(base_port, &discord_token, &runtime_token)?,
-        discord: Some(DiscordConfig::with_defaults(
-            "discord-private".to_owned(),
-            "default".to_owned(),
-            guild_id.to_owned(),
-            bot_user_id.to_owned(),
-            users.to_vec(),
-            routes.to_vec(),
-        )),
         agent: AgentConfig {
             id: "default".to_owned(),
             name: "Default agent".to_owned(),
@@ -113,7 +102,6 @@ pub fn initialize(
         },
     };
     config.validate()?;
-    config.discord()?;
     let target = absolute_destination(root)?;
     let parent = target
         .parent()
@@ -149,13 +137,13 @@ pub fn initialize(
         )?;
         atomic_write(&root.join("examples/SKILL.md"), SKILL.as_bytes(), 0o640)?;
         Database::create(&root.join("state/carillon.sqlite3"))?;
-        crate::filesystem::sync_tree(root)?;
+        sync_tree(root)?;
         // Rename replaces an empty target directory atomically, but refuses a
         // nonempty target that appeared meanwhile. Never adopt partial state.
         fs::rename(root, &target)?;
         // Persist the publication and any newly created parent directories. A
         // failure after rename leaves the complete installation selected for retry.
-        crate::filesystem::sync_ancestors(parent)?;
+        sync_ancestors(parent)?;
         Ok(())
     })();
     if let Err(error) = result {
@@ -202,6 +190,7 @@ fn create_installation_directories(root: &Path) -> Result<()> {
     for directory in [
         "state",
         "credentials",
+        "providers",
         "pi",
         "logs",
         "state/components/discord-private",
@@ -246,38 +235,14 @@ pub fn set_provider(config_path: &Path, id: &str, enabled: bool) -> Result<()> {
     write_config(&config_path, &config)
 }
 
-pub fn configure_discord(
-    config_path: &Path,
-    guild_id: &str,
-    bot_user_id: &str,
-    users: &[String],
-    routes: &[DiscordRoute],
-) -> Result<()> {
-    let config_path = config_path
-        .canonicalize()
-        .context("resolve configuration path")?;
-    let text = fs::read_to_string(&config_path)?;
-    let mut config: Config = toml::from_str(&text)?;
-    let discord = config
-        .discord
-        .as_mut()
-        .context("Discord interface configuration is absent")?;
-    guild_id.clone_into(&mut discord.guild_id);
-    bot_user_id.clone_into(&mut discord.bot_user_id);
-    discord.allowed_user_ids = users.to_vec();
-    discord.routes = routes.to_vec();
-    config.validate()?;
-    config.discord()?;
-    write_config(&config_path, &config)
-}
-
 fn write_config(config_path: &Path, config: &Config) -> Result<()> {
     let mode = fs::metadata(config_path)?.permissions().mode() & 0o777;
     atomic_write(
         config_path,
         toml::to_string_pretty(config)?.as_bytes(),
         mode,
-    )
+    )?;
+    Ok(())
 }
 
 pub fn enable_demo_resources(config: &LoadedConfig) -> Result<()> {
@@ -389,8 +354,7 @@ pub fn restore(archive_path: &Path, target: &Path) -> Result<PathBuf> {
     let staging = parent.join(format!(".{name}.restore-{}", Uuid::now_v7()));
     fs::DirBuilder::new().mode(0o700).create(&staging)?;
 
-    let result = restore_into(archive_path, &staging)
-        .and_then(|()| Ok(crate::filesystem::sync_tree(&staging)?));
+    let result = restore_into(archive_path, &staging).and_then(|()| Ok(sync_tree(&staging)?));
     if let Err(failure) = result {
         let _ = fs::remove_dir_all(&staging);
         return Err(failure);
@@ -399,7 +363,7 @@ pub fn restore(archive_path: &Path, target: &Path) -> Result<PathBuf> {
         let _ = fs::remove_dir_all(&staging);
         return Err(failure.into());
     }
-    crate::filesystem::sync_ancestors(parent)?;
+    sync_ancestors(parent)?;
     Ok(target.join("carillon.toml"))
 }
 
@@ -532,22 +496,6 @@ fn absolute_destination(path: &Path) -> Result<PathBuf> {
     Ok(std::env::current_dir()?.join(path))
 }
 
-fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    temporary
-        .as_file()
-        .set_permissions(fs::Permissions::from_mode(mode))?;
-    temporary.write_all(bytes)?;
-    temporary.as_file().sync_all()?;
-    fs::rename(temporary.path(), path)?;
-    fs::File::open(parent)?.sync_all()?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -562,33 +510,16 @@ mod tests {
     use tar::{Builder, Header};
     use tempfile::tempdir;
 
-    use super::{backup, initialize, restore, set_provider};
-    use crate::config::{
-        Config, DiscordActivation, DiscordConversation, DiscordRoute, LoadedConfig, ProviderRole,
-    };
+    use carillon_protocol::config::{Config, LoadedConfig, ProviderRole, RELEASE_VERSION};
 
-    fn route() -> DiscordRoute {
-        DiscordRoute {
-            channel_id: "300".to_owned(),
-            activation: DiscordActivation::Always,
-            conversation: DiscordConversation::Channel,
-        }
-    }
+    use super::{backup, initialize, restore, set_provider};
 
     fn initialize_test_installation(
         root: &Path,
         workspace: &Path,
         base_port: u16,
     ) -> Result<PathBuf> {
-        initialize(
-            root,
-            workspace,
-            "100",
-            "101",
-            &["200".to_owned()],
-            &[route()],
-            base_port,
-        )
+        initialize(root, workspace, base_port)
     }
 
     #[test]
@@ -607,20 +538,17 @@ mod tests {
                 fs::write(&sibling, "owner data")?;
             }
             set_provider(&config, "runtime-pi", false)?;
-            super::configure_discord(&config, "100", "101", &["201".to_owned()], &[route()])?;
             let loaded = LoadedConfig::load(&config)?;
             assert!(
                 !loaded
                     .provider("runtime-pi", ProviderRole::Runtime)?
                     .enabled
             );
-            assert_eq!(
-                loaded
-                    .value
-                    .discord
-                    .context("missing Discord config")?
-                    .allowed_user_ids,
-                ["201"]
+            set_provider(&config, "runtime-pi", true)?;
+            assert!(
+                LoadedConfig::load(&config)?
+                    .provider("runtime-pi", ProviderRole::Runtime)?
+                    .enabled
             );
             assert_eq!(fs::read_to_string(&sibling)?, "owner data");
             assert_eq!(fs::read_to_string(&external)?, "owner data");
@@ -694,7 +622,7 @@ mod tests {
             config
                 .provider("discord-private", ProviderRole::Interface)?
                 .version,
-            crate::config::RELEASE_VERSION
+            RELEASE_VERSION
         );
         // This initializer bundles defaults; it does not constrain core providers.
         for (id, role) in [
@@ -715,6 +643,13 @@ mod tests {
                 "operator.token",
                 "runtime-pi.token"
             ]
+        );
+        // Provider-owned settings arrive through each provider's configure
+        // command; initialization only prepares their directory.
+        assert!(fs::read_dir(root.join("providers"))?.next().is_none());
+        assert_eq!(
+            fs::metadata(root.join("providers"))?.permissions().mode() & 0o777,
+            0o700
         );
         Ok(())
     }
@@ -1049,11 +984,9 @@ mod tests {
 
     #[test]
     fn archives_validate_captured_resources_before_publication() -> Result<()> {
-        use crate::{
-            db::Database,
-            model::{ExternalEvent, TurnState},
-            resources,
-        };
+        use carillon_protocol::model::{ExternalEvent, TurnState};
+
+        use crate::{db::Database, resources};
 
         for uncertain in [false, true] {
             for damage in ["missing", "content", "executable", "address", "malformed"] {
@@ -1151,7 +1084,6 @@ mod tests {
         let root = directory.path().join("source");
         let config_path = initialize_test_installation(&root, directory.path(), 44_900)?;
         let mut config: Config = toml::from_str(&fs::read_to_string(&config_path)?)?;
-        config.discord = None;
         config
             .providers
             .retain(|provider| provider.role == ProviderRole::Runtime);

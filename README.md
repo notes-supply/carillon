@@ -9,14 +9,18 @@ The point of the separation is practical. Carillon should be able to grow—and 
 ## Current shape
 
 ```text
-Discord <-> carillon-discord <-> carillon-core <-> carillon-runtime-pi <-> Pi
+Discord <-> carillon-discord <-> carillon <-> carillon-runtime-pi <-> Pi
+                 |
+                 `- carillon_discord_commands.wasm
 ```
 
-- **Core** admits events, preserves conversation identity, runs the operation lifecycle, and queues deliveries.
-- **Interface providers** own platform authentication, routing, and delivery.
-- **Runtime providers** own model execution, native sessions, tools, extensions, and skills.
+- **Core** (`carillon`) admits events, preserves conversation identity, runs the operation lifecycle, queues deliveries, and relays model-selection calls to the runtime that owns a conversation.
+- **Interface providers** own platform authentication, admission, routing, platform commands, and delivery.
+- **Runtime providers** own model execution, model selection, native sessions, tools, extensions, and skills.
 
-The included installation runs those three parts as separate user services. Configuration can describe multiple interface and runtime provider instances, while each agent selects a runtime.
+Core is platform-neutral. Each provider is a separate program installed beside it and launched through the one command line: `carillon discord serve …` runs `carillon-discord`. A provider keeps its own settings in `providers/<id>.toml`; `carillon.toml` is the registry of provider identities, roles, and loopback credentials. The included installation runs the three parts as separate user services, and configuration can describe multiple interface and runtime provider instances while each agent selects a runtime.
+
+Discord's slash commands—currently `/model`, which shows and changes the model and engine settings for a conversation or the agent default—live in a WebAssembly module the provider loads and can replace while running (`carillon discord reload`), without reconnecting its gateway. The shared `carillon-wasm` crate hosts such modules with bounded memory and time; the module can only ask the provider for the native operations it exposes.
 
 Carillon does not define its own command permissions or filesystem sandbox. Services run with the authority of the Unix user that installed them. Pi extensions and tools use Pi's native mechanisms.
 
@@ -43,7 +47,7 @@ Retrying may repeat work whose outcome could not be observed. Skipping unblocks 
 
 ## Development
 
-The repository uses Rust, TypeScript, `mise`, Cargo, and pnpm.
+The repository uses Rust, TypeScript, `mise`, Cargo, and pnpm. The Cargo workspace holds core (`carillon-core`), the Discord provider (`carillon-discord`), its command module (`carillon-discord-commands`, built for `wasm32-unknown-unknown`, a target `mise install` adds to the toolchain), the Wasm hosting crate (`carillon-wasm`), and the shared configuration and wire types (`carillon-protocol`). `packages/runtime-pi` is the Pi runtime provider.
 
 ```sh
 mise install
@@ -58,7 +62,7 @@ For changes to service communication, startup, routing, or recovery, also run:
 mise run test:integration
 ```
 
-This starts local core, Discord, and Pi processes and tests admission, conversation continuity, deduplication, restarts, delivery recovery, diagnostics, and backup/restore. Discord input and model responses are simulated; it does not test live Discord or a model provider.
+This builds the command module and starts local core, Discord, and Pi processes to test admission, conversation continuity, deduplication, restarts, delivery recovery, diagnostics, backup/restore, and the `/model` picker end to end through the Wasm module. Discord input and model responses are simulated; it does not test live Discord or a model provider.
 
 For packaging, installer, service-unit, or owner-environment changes—and before a release—run:
 
@@ -86,7 +90,7 @@ Build a release archive with:
 mise run package
 ```
 
-Extract it and run `install.sh` as the Unix user that should own the agent. The installer prints the remaining Discord-token, Pi-login, and service-start steps. It installs only:
+Extract it and run `install.sh` as the Unix user that should own the agent. The installer writes the registry and the Discord provider's settings, then prints the remaining Discord-token, Pi-login, and service-start steps. It installs only:
 
 - `carillon-core.service`
 - `carillon-discord.service`

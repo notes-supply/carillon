@@ -5,13 +5,13 @@ use axum::{response::IntoResponse as _, routing::post};
 use tempfile::tempdir;
 
 use super::*;
-use crate::model::{DeliveryOutcome, TurnState};
+use carillon_protocol::model::{DeliveryOutcome, TurnState};
 
 fn installation(root: &Path) -> Result<AppState> {
-    use crate::config::{AgentConfig, Config, CoreConfig, Provider, hash_token};
+    use carillon_protocol::config::{AgentConfig, Config, CoreConfig, Provider, hash_token};
 
-    // Core tests have no Discord configuration or Pi installation. These
-    // provider IDs and continuation values are opaque test fixtures.
+    // Core tests have no Discord or Pi installation. These provider IDs and
+    // continuation values are opaque test fixtures.
     let resources = root.join("resources");
     fs::create_dir(&resources)?;
     fs::write(resources.join("SYSTEM.md"), "test instructions")?;
@@ -44,7 +44,6 @@ fn installation(root: &Path) -> Result<AppState> {
             operator_token_hash: hash_token("test-operator"),
         },
         providers,
-        discord: None,
         agent: AgentConfig {
             id: "test-agent".to_owned(),
             name: "Test agent".to_owned(),
@@ -267,66 +266,195 @@ async fn startup_opens_the_database_without_creating_one() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn occupied_discord_listener_preserves_live_delivery_claim() -> Result<()> {
-    use crate::{config::DiscordConfig, model::DeliveryOutcome};
-
-    let directory = tempdir()?;
-    let mut state = installation(directory.path())?;
-    accept(&state, "one", "conversation").await?;
-    run_next_turn(&state, "test-runtime", async |_, _, request| {
-        Ok(completed(request))
-    })
-    .await?;
-    let delivery = state
-        .database
-        .claim_delivery("test-interface", "live-instance")?
-        .context("missing delivery")?;
-    let core_listener = TcpListener::bind("127.0.0.1:0").await?;
-    state.config.value.core.listen = core_listener.local_addr()?;
-    let discord_listener = TcpListener::bind("127.0.0.1:0").await?;
-    state.config.value.providers[0].url = format!("http://{}", discord_listener.local_addr()?);
-    state.config.value.discord = Some(DiscordConfig::with_defaults(
-        "test-interface".to_owned(),
-        "test-agent".to_owned(),
-        "1".to_owned(),
-        "2".to_owned(),
-        vec!["3".to_owned()],
-        vec!["4:always:channel".parse()?],
-    ));
-    let router = Router::new()
-        .route("/v1/deliveries/reconcile", post(reconcile_delivery_claims))
-        .with_state(state.clone());
-    let mut services = tokio::task::JoinSet::new();
-    services.spawn(async move { axum::serve(core_listener, router).await });
-    for deterministic in [false, true] {
-        let error = tokio::time::timeout(
-            Duration::from_secs(5),
-            crate::discord::serve(
-                state.config.clone(),
-                &directory.path().join("credentials/test-interface.token"),
-                None,
-                deterministic,
-            ),
-        )
-        .await?
-        .err()
-        .context("occupied Discord port was accepted")?;
-        assert_eq!(
-            error
-                .downcast_ref::<std::io::Error>()
-                .context("not a bind error")?
-                .kind(),
-            std::io::ErrorKind::AddrInUse
-        );
+/// A runtime that records every model call and rejects one selection the way
+/// a real runtime phrases it for people.
+fn fake_runtime(
+    id: &'static str,
+    sent: tokio::sync::mpsc::UnboundedSender<(&'static str, serde_json::Value)>,
+) -> Router {
+    fn bearer(headers: &HeaderMap) -> Option<&str> {
+        headers.get(http::header::AUTHORIZATION)?.to_str().ok()
     }
-    assert!(state.database.acknowledge_delivery(
-        "test-interface",
-        delivery.id,
-        "live-instance",
-        DeliveryOutcome::Delivered,
-        Some("known-send")
-    )?);
+    let recorded = sent.clone();
+    Router::new().route(
+        "/v1/model",
+        get(
+            move |headers: HeaderMap,
+                  Query(query): Query<std::collections::HashMap<String, String>>| {
+                let sent = recorded.clone();
+                async move {
+                    let _ = sent.send((id, json!({"auth": bearer(&headers), "query": query})));
+                    Json(json!({"runtime": id, "available": []}))
+                }
+            },
+        )
+        .put(
+            move |headers: HeaderMap, Json(update): Json<serde_json::Value>| {
+                let sent = sent.clone();
+                async move {
+                    let _ = sent.send((id, json!({"auth": bearer(&headers), "update": update})));
+                    if update["selection"] == json!("missing") {
+                        return (
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            Json(json!({"error": "That model is not available."})),
+                        )
+                            .into_response();
+                    }
+                    Json(json!({"runtime": id, "updated": true})).into_response()
+                }
+            },
+        ),
+    )
+}
+
+/// Two fake runtimes: `test-runtime` owns the `pinned` conversation and
+/// `replacement` has become the agent default.
+async fn model_fixture(
+    directory: &Path,
+) -> Result<(
+    AppState,
+    tokio::sync::mpsc::UnboundedReceiver<(&'static str, serde_json::Value)>,
+    tokio::task::JoinSet<std::io::Result<()>>,
+)> {
+    let mut state = installation(directory)?;
+    let (sent, received) = tokio::sync::mpsc::unbounded_channel();
+    let mut services = tokio::task::JoinSet::new();
+    for id in ["test-runtime", "replacement"] {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let mut provider = state
+            .config
+            .provider("test-runtime", ProviderRole::Runtime)?
+            .clone();
+        provider.id = id.to_owned();
+        provider.url = format!("http://{}", listener.local_addr()?);
+        fs::write(
+            directory.join(format!("credentials/{id}.token")),
+            "test-only",
+        )?;
+        if id == "test-runtime" {
+            state.config.value.providers[1] = provider;
+        } else {
+            state.config.value.providers.push(provider);
+        }
+        let app = fake_runtime(id, sent.clone());
+        services.spawn(async move { axum::serve(listener, app).await });
+    }
+    accept(&state, "one", "pinned").await?;
+    state.config.value.agent.runtime_provider = "replacement".to_owned();
+    Ok((state, received, services))
+}
+
+async fn model_call(
+    state: &AppState,
+    method: &str,
+    uri: &str,
+    authorized: bool,
+    body: Option<&serde_json::Value>,
+) -> Result<(StatusCode, serde_json::Value)> {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt as _;
+
+    let router = Router::new()
+        .route("/v1/model", get(model_state).put(set_model))
+        .with_state(state.clone());
+    let mut request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .header(PROVIDER_HEADER, "test-interface");
+    if authorized {
+        request = request.header(http::header::AUTHORIZATION, "Bearer test-only");
+    }
+    let body = match body {
+        Some(body) => Body::from(serde_json::to_vec(body)?),
+        None => Body::empty(),
+    };
+    let response =
+        tokio::time::timeout(Duration::from_secs(10), router.oneshot(request.body(body)?))
+            .await??;
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), 65536).await?;
+    Ok((status, serde_json::from_slice(&body)?))
+}
+
+#[tokio::test]
+async fn model_calls_follow_conversation_ownership() -> Result<()> {
+    let directory = tempdir()?;
+    let (state, mut received, mut services) = model_fixture(directory.path()).await?;
+    let (status, _) =
+        model_call(&state, "GET", "/v1/model?agent_id=test-agent", false, None).await?;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = model_call(&state, "GET", "/v1/model?agent_id=other", true, None).await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        received.try_recv().is_err(),
+        "rejected calls reached a runtime"
+    );
+
+    for (uri, runtime, audience) in [
+        (
+            "/v1/model?agent_id=test-agent&audience_id=pinned",
+            "test-runtime",
+            Some("pinned"),
+        ),
+        ("/v1/model?agent_id=test-agent", "replacement", None),
+        (
+            "/v1/model?agent_id=test-agent&audience_id=fresh",
+            "replacement",
+            Some("fresh"),
+        ),
+    ] {
+        let (status, body) = model_call(&state, "GET", uri, true, None).await?;
+        assert_eq!(status, StatusCode::OK, "{uri}");
+        assert_eq!(body["runtime"], runtime, "{uri}");
+        let (called, call) = received.try_recv()?;
+        assert_eq!(called, runtime);
+        assert_eq!(call["auth"], "Bearer test-only");
+        let mut expected = json!({"interface_id": "test-interface", "agent_id": "test-agent"});
+        if let Some(audience) = audience {
+            expected["audience_id"] = json!(audience);
+        }
+        assert_eq!(call["query"], expected, "{uri}");
+    }
+
+    let update = json!({
+        "agent_id": "test-agent",
+        "audience_id": "pinned",
+        "scope": "conversation",
+        "selection": "missing",
+    });
+    let (status, body) = model_call(&state, "PUT", "/v1/model", true, Some(&update)).await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"], "That model is not available.");
+    let (called, call) = received.try_recv()?;
+    assert_eq!(called, "test-runtime");
+    assert_eq!(call["update"]["interface_id"], "test-interface");
+    assert_eq!(call["update"]["selection"], "missing");
+    services.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn model_calls_describe_unavailable_runtimes_for_people() -> Result<()> {
+    let directory = tempdir()?;
+    let (mut state, mut received, mut services) = model_fixture(directory.path()).await?;
+    state.config.value.providers[1].enabled = false;
+    let (status, body) = model_call(
+        &state,
+        "GET",
+        "/v1/model?agent_id=test-agent&audience_id=pinned",
+        true,
+        None,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "conversation runtime provider is disabled");
+    services.shutdown().await;
+    let (status, body) =
+        model_call(&state, "GET", "/v1/model?agent_id=test-agent", true, None).await?;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"], "The runtime is not reachable right now.");
+    assert!(received.try_recv().is_err());
     Ok(())
 }
 
@@ -375,7 +503,7 @@ async fn occupied_listener_leaves_accepted_and_running_work_untouched() -> Resul
 
 #[tokio::test]
 async fn live_interface_claim_survives_core_startup_and_acknowledges_once() -> Result<()> {
-    use crate::model::{DeliveryOutcome, DeliveryState};
+    use carillon_protocol::model::DeliveryState;
 
     let directory = tempdir()?;
     let mut state = installation(directory.path())?;

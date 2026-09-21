@@ -16,7 +16,7 @@ For the Pi runtime adapter, Carillon's resource source remains an ordinary Pi-co
 
 - `SYSTEM.md` is the plainly named operator-authored system prompt.
 - `AGENTS.md` contains optional contextual instructions.
-- `settings.json`, `extensions/`, `skills/`, and `sessions/` retain their native Pi meanings. Provider authentication and engine settings are not agent resources; Pi persists them in `CARILLON_HOME/pi`, isolated from `~/.pi/agent`.
+- `settings.json`, `extensions/`, `skills/`, and `sessions/` retain their native Pi meanings. Provider authentication and engine settings are not agent resources; Pi persists them in `CARILLON_HOME/pi`, isolated from `~/.pi/agent`. Model selections made through `/model` live there too (`model-selection.json`), so they are not part of a turn's captured resources.
 
 At dispatch, Carillon supplies a content-addressed copy of `SYSTEM.md`, `AGENTS.md`, `settings.json`, extensions, and skills as Pi's global `agentDir` resources. Later edits to the live resource root do not change an accepted turn's captured copy. These snapshots are not a security boundary against the owning Unix user or its extensions: files are write-protected against ordinary in-place edits, but the owner retains permission to replace files or change modes. Edit the live resource root, not the snapshot store; directly changing the store invalidates its recorded content identity. Separately, Pi's `cwd` is the configured real workspace—by default the owner's home. Native tools operate there and on ordinary absolute paths with the owner's authority. Pi-native project-local resources in an intentionally selected workspace retain their normal semantics.
 

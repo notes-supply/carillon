@@ -4,6 +4,13 @@ import {
   SettingsManager,
   type AgentSessionEvent,
 } from "@earendil-works/pi-coding-agent";
+import {
+  clampThinkingLevel,
+  getSupportedThinkingLevels,
+  type Api,
+  type Model,
+  type ModelThinkingLevel,
+} from "@earendil-works/pi-ai";
 import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -12,7 +19,21 @@ import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { Type } from "typebox";
 import { Parse } from "typebox/value";
+import {
+  DETERMINISTIC_DEFAULT,
+  DETERMINISTIC_MODELS,
+  ModelQuerySchema,
+  ModelRejection,
+  ModelSelections,
+  ModelUpdateSchema,
+  describeSelection,
+  type AvailableModel,
+  type ModelQuery,
+  type ModelUpdate,
+  type Selection,
+} from "./model.ts";
 import { nativeSessionId } from "./namespace.ts";
+import { Serial } from "./serial.ts";
 import { createPiExecutionSession } from "./session.ts";
 import { runtimeListenAddress } from "./endpoint.ts";
 import packageInfo from "../package.json" with { type: "json" };
@@ -98,7 +119,8 @@ let sessionDirectory: string;
 
 let privateSettings: SettingsManager;
 let modelRuntime: ModelRuntime | undefined;
-let queue: Promise<void> = Promise.resolve();
+let selections: ModelSelections;
+const turns = new Serial();
 
 async function startRuntime(values: readonly string[]): Promise<void> {
   const args = parseArguments(values);
@@ -132,9 +154,14 @@ async function startRuntime(values: readonly string[]): Promise<void> {
         modelRefreshTimeoutMs: 15_000,
       });
   if (!deterministic) await selectedPiModel();
+  selections = await ModelSelections.open(join(privateStateDirectory, "model-selection.json"));
 
   const server = createServer((request, response) => {
     void route(request, response).catch((failure: unknown) => {
+      if (failure instanceof ModelRejection) {
+        writeJson(response, failure.status, { error: failure.message });
+        return;
+      }
       const message = errorMessage(failure);
       writeJson(response, 500, { error: message });
     });
@@ -183,12 +210,86 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
       writeJson(response, 400, { error: "invalid runtime turn request" });
       return;
     }
-    const result = await serialize(() => executeTurn(parsed));
+    const result = await turns.run(() => executeTurn(parsed));
     writeJson(response, 200, result);
     return;
   }
 
+  const url = new URL(request.url ?? "/", "http://localhost");
+  if (request.method === "GET" && url.pathname === "/v1/model") {
+    let query: ModelQuery;
+    try {
+      query = Parse(ModelQuerySchema, Object.fromEntries(url.searchParams));
+    } catch {
+      writeJson(response, 400, { error: "invalid model query" });
+      return;
+    }
+    writeJson(response, 200, selections.state(await availableModels(), runtimeDefault(), query));
+    return;
+  }
+  if (request.method === "PUT" && url.pathname === "/v1/model") {
+    let update: ModelUpdate;
+    try {
+      update = Parse(ModelUpdateSchema, await readJson(request));
+    } catch {
+      writeJson(response, 400, { error: "invalid model update" });
+      return;
+    }
+    // Not queued behind turns: a running turn resolved its selection when it
+    // started, and the next turn resolves after this change is written.
+    writeJson(
+      response,
+      200,
+      await selections.update(await availableModels(), runtimeDefault(), update),
+    );
+    return;
+  }
+
   writeJson(response, 404, { error: "not found" });
+}
+
+/** The thinking levels a Pi model accepts, offered as one option. */
+const THINKING_OPTION = "thinking";
+
+async function availableModels(): Promise<readonly AvailableModel[]> {
+  return deterministic ? DETERMINISTIC_MODELS : offeredPiModels(await availablePiModels());
+}
+
+/** Pi's catalogue as the picker sees it: one thinking setting per reasoning model. */
+function offeredPiModels(models: readonly Model<Api>[]): readonly AvailableModel[] {
+  return models.map((model) => ({
+    provider: model.provider,
+    model: model.id,
+    name: model.name,
+    options: model.reasoning
+      ? [
+          {
+            id: THINKING_OPTION,
+            name: "Thinking",
+            choices: getSupportedThinkingLevels(model),
+            default: defaultThinkingLevel(model),
+          },
+        ]
+      : [],
+  }));
+}
+
+/** What runs when neither the agent nor the conversation chose a model: Pi's own setting. */
+function runtimeDefault(): Selection {
+  if (deterministic) return DETERMINISTIC_DEFAULT;
+  const provider = privateSettings.getDefaultProvider();
+  const model = privateSettings.getDefaultModel();
+  if (provider === undefined || model === undefined) throw new Error("no Pi model is selected");
+  return { provider, model, options: {} };
+}
+
+function defaultThinkingLevel(model: Model<Api>): ModelThinkingLevel {
+  return clampThinkingLevel(
+    model,
+    privateSettings.getModelThinkingLevel(model.provider, model.id) ??
+      privateSettings.getDefaultThinkingLevel() ??
+      "medium",
+  );
 }
 
 async function availablePiModels() {
@@ -204,24 +305,26 @@ async function availablePiModels() {
 }
 
 async function selectedPiModel() {
-  const provider = privateSettings.getDefaultProvider();
-  const id = privateSettings.getDefaultModel();
-  if (provider === undefined || id === undefined) throw new Error("no Pi model is selected");
-  return piModelForReference(`${provider}/${id}`);
+  return piModel(await availablePiModels(), runtimeDefault());
 }
 
-async function piModelForReference(reference: string) {
-  const model = (await availablePiModels()).find(
-    (candidate) => `${candidate.provider}/${candidate.id}` === reference,
+function piModel(models: readonly Model<Api>[], selection: Selection): Model<Api> {
+  const model = models.find(
+    (candidate) => candidate.provider === selection.provider && candidate.id === selection.model,
   );
-  if (model === undefined) throw new Error(`selected Pi model ${reference} is not available`);
+  if (model === undefined)
+    throw new Error(`selected Pi model ${selection.provider}/${selection.model} is not available`);
   return model;
 }
+
 async function executeTurn(request: TurnRequest): Promise<TurnResponse> {
   return deterministic ? executeDeterministic(request) : executePi(request);
 }
 
 async function executeDeterministic(request: TurnRequest): Promise<TurnResponse> {
+  // Resolved first, as in `executePi`: a change made while the turn runs
+  // applies to the next one.
+  const selection = selections.effective(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, request);
   const sessionPath = continuationPath(request);
   const prior = await readDeterministicSession(sessionPath);
   const extensionActive = await exists(
@@ -233,6 +336,7 @@ async function executeDeterministic(request: TurnRequest): Promise<TurnResponse>
   const markers = [
     extensionActive ? "native extension active" : "native extension inactive",
     skillActive ? "skill active" : "skill inactive",
+    `model ${describeSelection(selection)}`,
   ];
   const output = `Local provider response ${String(prior.turns.length + 1)}: ${request.input}. ${markers.join("; ")}.`;
   const next: DeterministicSession = {
@@ -261,13 +365,14 @@ async function executePi(request: TurnRequest): Promise<TurnResponse> {
         sessionDirectory,
         config.workspace,
       );
-  const defaultModel = isNew ? await selectedPiModel() : undefined;
-  const defaultReasoning =
-    defaultModel?.reasoning === true
-      ? (privateSettings.getModelThinkingLevel(defaultModel.provider, defaultModel.id) ??
-        privateSettings.getDefaultThinkingLevel() ??
-        "medium")
-      : undefined;
+  // The effective selection is applied to every turn, so a continued session
+  // follows the current choice rather than the model it began with. It is
+  // resolved against the same catalogue the picker reports, so the thinking
+  // level that runs is the one shown.
+  const models = await availablePiModels();
+  const selection = selections.effective(offeredPiModels(models), runtimeDefault(), request);
+  const model = piModel(models, selection);
+  const thinking = selection.options?.[THINKING_OPTION];
   const runtime = modelRuntime;
   if (runtime === undefined) throw new Error("Pi model runtime is unavailable");
   const created = await createPiExecutionSession({
@@ -275,8 +380,8 @@ async function executePi(request: TurnRequest): Promise<TurnResponse> {
     workspace: config.workspace,
     manager,
     modelRuntime: runtime,
-    ...(defaultModel === undefined ? {} : { model: defaultModel }),
-    ...(defaultReasoning === undefined ? {} : { thinkingLevel: defaultReasoning }),
+    model,
+    ...(isThinkingLevel(model, thinking) ? { thinkingLevel: thinking } : {}),
   });
   const { session, extensionsResult } = created;
   try {
@@ -301,6 +406,16 @@ async function executePi(request: TurnRequest): Promise<TurnResponse> {
   } finally {
     session.dispose();
   }
+}
+
+function isThinkingLevel(
+  model: Model<Api>,
+  value: string | undefined,
+): value is ModelThinkingLevel {
+  return (
+    value !== undefined &&
+    getSupportedThinkingLevels(model).some((level: string) => level === value)
+  );
 }
 
 function assertExtensionsLoaded(errors: readonly { readonly error: string }[]): void {
@@ -398,20 +513,6 @@ function authorized(request: IncomingMessage): boolean {
   const expected = createHash("sha256").update(token).digest();
   const actual = createHash("sha256").update(candidate).digest();
   return timingSafeEqual(expected, actual);
-}
-
-async function serialize<T>(operation: () => Promise<T>): Promise<T> {
-  const prior = queue;
-  let release = (): void => undefined;
-  queue = new Promise<void>((resolveQueue) => {
-    release = resolveQueue;
-  });
-  await prior;
-  try {
-    return await operation();
-  } finally {
-    release();
-  }
 }
 
 async function readJson(request: IncomingMessage): Promise<unknown> {

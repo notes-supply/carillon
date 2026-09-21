@@ -1,9 +1,19 @@
-//! The `carillon` operator command: service entry points, installation
-//! actions, and the authenticated diagnostics client for a running core.
+//! The `carillon` operator command: the core service, installation actions,
+//! the authenticated diagnostics client for a running core, and forwarding
+//! of provider commands (`carillon discord …`) to the provider's own binary.
 
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::OsString,
+    os::unix::process::CommandExt as _,
+    path::{Path, PathBuf},
+    process::Command as Process,
+};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
+use carillon_protocol::{
+    config::LoadedConfig,
+    model::{StatusReport, TurnInspection, TurnSummary},
+};
 use clap::{Parser, Subcommand, ValueEnum};
 use reqwest::Url;
 use serde::{Serialize, de::DeserializeOwned};
@@ -11,14 +21,10 @@ use tracing_subscriber::EnvFilter;
 
 use crate::{
     admin::{
-        ServiceLock, backup, configure_discord, enable_demo_resources, initialize as init, restore,
-        set_provider,
+        ServiceLock, backup, enable_demo_resources, initialize as init, restore, set_provider,
     },
-    config::{DiscordRoute, LoadedConfig},
     core::serve,
     db::Database,
-    discord,
-    model::{StatusReport, TurnInspection, TurnSummary},
 };
 
 #[derive(Debug, Parser)]
@@ -47,42 +53,12 @@ enum Command {
         root: PathBuf,
         #[arg(long)]
         workspace: PathBuf,
-        #[arg(long)]
-        guild_id: String,
-        #[arg(long)]
-        bot_user_id: String,
-        #[arg(long, required = true)]
-        user_id: Vec<String>,
-        #[arg(long, required = true)]
-        route: Vec<DiscordRoute>,
         #[arg(long, default_value_t = 43_800)]
         base_port: u16,
-    },
-    ConfigureDiscord {
-        #[arg(long)]
-        config: PathBuf,
-        #[arg(long)]
-        guild_id: String,
-        #[arg(long)]
-        bot_user_id: String,
-        #[arg(long, required = true)]
-        user_id: Vec<String>,
-        #[arg(long, required = true)]
-        route: Vec<DiscordRoute>,
     },
     Core {
         #[arg(long)]
         config: PathBuf,
-    },
-    Discord {
-        #[arg(long)]
-        config: PathBuf,
-        #[arg(long)]
-        token_file: PathBuf,
-        #[arg(long)]
-        discord_token_file: Option<PathBuf>,
-        #[arg(long)]
-        deterministic: bool,
     },
 
     Provider {
@@ -131,6 +107,11 @@ enum Command {
         #[arg(long)]
         target: PathBuf,
     },
+    /// `carillon <provider> …` runs `carillon-<provider>` from beside this
+    /// binary or from `PATH`, so provider commands share one entry point
+    /// without core knowing them.
+    #[command(external_subcommand)]
+    External(Vec<OsString>),
 }
 
 fn initialize_tracing() {
@@ -148,52 +129,17 @@ pub(crate) async fn run() -> Result<()> {
         Command::Init {
             root,
             workspace,
-            guild_id,
-            bot_user_id,
-            user_id,
-            route,
             base_port,
         } => {
-            let path = init(
-                &root,
-                &workspace,
-                &guild_id,
-                &bot_user_id,
-                &user_id,
-                &route,
-                base_port,
-            )?;
+            let path = init(&root, &workspace, base_port)?;
             println!("{}", path.display());
-        }
-        Command::ConfigureDiscord {
-            config,
-            guild_id,
-            bot_user_id,
-            user_id,
-            route,
-        } => {
-            configure_discord(&config, &guild_id, &bot_user_id, &user_id, &route)?;
-            println!("{}", config.display());
         }
         Command::Core { config } => {
             let loaded = LoadedConfig::load(&config)?;
             let _lock = ServiceLock::acquire(&loaded.value.data_dir)?;
             serve(loaded).await?;
         }
-        Command::Discord {
-            config,
-            token_file,
-            discord_token_file,
-            deterministic,
-        } => {
-            discord::serve(
-                LoadedConfig::load(&config)?,
-                &token_file,
-                discord_token_file.as_deref(),
-                deterministic,
-            )
-            .await?;
-        }
+        Command::External(arguments) => forward(&arguments)?,
 
         Command::Provider { config, id, action } => {
             set_provider(&config, &id, action == ProviderAction::Enable)?;
@@ -243,6 +189,57 @@ pub(crate) async fn run() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Replaces this process with the `carillon-<name>` binary and the remaining
+/// arguments, so signals and the exit status are the provider's own. Only
+/// names that look like provider ids are forwarded.
+fn forward(arguments: &[OsString]) -> Result<()> {
+    let (name, rest) = arguments
+        .split_first()
+        .context("provider command name is missing")?;
+    let name = name
+        .to_str()
+        .context("provider command name is not UTF-8")?;
+    carillon_protocol::config::validate_provider_identity(name)
+        .with_context(|| format!("unknown command {name}"))?;
+    let binary = provider_binary(name)?;
+    let error = Process::new(&binary).args(rest).exec();
+    Err(error).with_context(|| format!("run {}", binary.display()))
+}
+
+/// The bundle's own providers sit beside this binary and take precedence; a
+/// provider installed independently is found on `PATH`, which replacing the
+/// bundle never touches.
+fn provider_binary(name: &str) -> Result<PathBuf> {
+    let executable = std::env::current_exe()?;
+    let own = executable
+        .parent()
+        .context("current executable has no directory")?;
+    locate_provider(name, own, &std::env::var_os("PATH").unwrap_or_default())
+}
+
+fn locate_provider(name: &str, own: &Path, path: &std::ffi::OsStr) -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let file = format!("carillon-{name}");
+    let own = own.join(&file);
+    if own.is_file() {
+        return Ok(own);
+    }
+    std::env::split_paths(path)
+        .map(|directory| directory.join(&file))
+        .find(|candidate| {
+            candidate.metadata().is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            })
+        })
+        .with_context(|| {
+            format!(
+                "unknown command {name}: {} is not installed and {file} is not on PATH",
+                own.display()
+            )
+        })
 }
 
 async fn print_status(config: &Path) -> Result<()> {
@@ -300,10 +297,47 @@ fn print_pretty<T: Serialize>(value: &T) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{os::unix::fs::PermissionsExt as _, time::Duration};
 
     use anyhow::{Context, Result};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn providers_are_found_beside_the_binary_then_on_path() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let own = directory.path().join("app");
+        let elsewhere = directory.path().join("local");
+        let unrelated = directory.path().join("unrelated");
+        for place in [&own, &elsewhere, &unrelated] {
+            std::fs::create_dir(place)?;
+        }
+        let path = std::env::join_paths([&unrelated, &elsewhere])?;
+
+        let missing = super::locate_provider("review", &own, &path)
+            .err()
+            .context("found a provider that is not installed")?;
+        assert!(missing.to_string().contains("not on PATH"), "{missing}");
+
+        // A file on PATH without the executable bit is not a command.
+        std::fs::write(elsewhere.join("carillon-review"), "")?;
+        assert!(super::locate_provider("review", &own, &path).is_err());
+        std::fs::set_permissions(
+            elsewhere.join("carillon-review"),
+            std::fs::Permissions::from_mode(0o755),
+        )?;
+        assert_eq!(
+            super::locate_provider("review", &own, &path)?,
+            elsewhere.join("carillon-review")
+        );
+
+        // The bundle's own provider wins over one of the same name on PATH.
+        std::fs::write(own.join("carillon-review"), "")?;
+        assert_eq!(
+            super::locate_provider("review", &own, &path)?,
+            own.join("carillon-review")
+        );
+        Ok(())
+    }
 
     #[tokio::test]
     async fn operator_requests_time_out_on_stalled_headers_and_bodies() -> Result<()> {
@@ -311,10 +345,6 @@ mod tests {
         let config_path = crate::admin::initialize(
             &directory.path().join("installation"),
             directory.path(),
-            "100",
-            "101",
-            &["200".to_owned()],
-            &["300:always:channel".parse()?],
             44_000,
         )?;
         let config = super::LoadedConfig::load(&config_path)?;

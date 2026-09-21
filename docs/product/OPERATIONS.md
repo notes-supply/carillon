@@ -11,7 +11,7 @@ The release installs four user units:
 
 Run `install.sh` as the non-root Unix user that should own Carillon. The installer rejects root, creates no users or groups, changes no sudo policy, and does not enable lingering. It enables but does not start `carillon.target`.
 
-`CARILLON_HOME` defaults to `~/.carillon`. It contains configuration, credentials, agent resources, Pi-private state, SQLite state, logs, and installed application files. The configured workspace is separate and defaults to the owner's home.
+`CARILLON_HOME` defaults to `~/.carillon`. It contains the registry (`carillon.toml`), provider-owned settings (`providers/`), credentials, agent resources, Pi-private state, SQLite state, logs, and installed application files (`app/bin` for the programs, `app/lib` for the Discord command module). The configured workspace is separate and defaults to the owner's home.
 
 ## Authority
 
@@ -27,20 +27,26 @@ Installation requires:
 - at least one channel route with activation and conversation mode; and
 - an existing absolute workspace path.
 
+`carillon init` writes the registry and credentials; the installer then writes the Discord settings with `carillon discord configure`, which owns `providers/discord-private.toml`. Rerun `configure` to change the guild, users, or routes; it rewrites the file completely, keeping any tuned feedback settings, and leaves it untouched when the input is invalid. Restart the Discord service afterwards.
+
 After installation:
 
 1. write the Discord bot token to the credential path printed by the installer;
-2. authenticate the packaged Pi installation using the printed `carillon-pi` command;
+2. authenticate the packaged Pi installation using the printed `carillon-pi` command, then open `/model` and press Ctrl+S on the desired model to save its startup default;
 3. start `carillon.target`; and
 4. inspect it with `carillon status` and `systemctl --user status carillon.target`.
+
+The bot's Discord application needs the `applications.commands` scope in the guild: the Discord provider registers its slash commands there on first start, and again whenever the application, guild, or command definitions differ from what it last recorded as registered, and refuses to serve if registration fails.
 
 An administrator may run `loginctl enable-linger <owner>` when the services must start without an interactive login.
 
 ## Services
 
-- **Core** owns accepted turns, their state and continuation references, and delivery intents.
-- **Discord** owns Discord admission, routing, threads, feedback, and message delivery.
-- **Pi runtime** owns Pi sessions, inference, native tools, extensions, skills, and private engine settings.
+- **Core** (`carillon core`) owns accepted turns, their state and continuation references, and delivery intents.
+- **Discord** (`carillon discord serve`, the `carillon-discord` program) owns Discord admission, routing, threads, feedback, message delivery, and slash commands.
+- **Pi runtime** (`carillon-runtime-pi`) owns Pi sessions, inference, native tools, extensions, skills, model selection, and private engine settings.
+
+`carillon <provider> …` runs the `carillon-<provider>` program installed beside `carillon`, or else the one found on `PATH`; the subcommands after the provider name belong to that provider. A provider that is not part of the release is installed as `carillon-<provider>` on the owner's `PATH`, not under `app/`, which each upgrade replaces wholesale; the user units carry the owner's `PATH` at registration.
 
 Restart an individual provider with:
 
@@ -49,7 +55,19 @@ systemctl --user restart carillon-discord.service
 systemctl --user restart carillon-runtime-pi.service
 ```
 
-Core is restarted separately. Provider configuration is static until restart.
+Core is restarted separately. Registry and provider configuration are static until restart.
+
+### Discord commands
+
+`/model` shows the models the runtime offers and lets an allowlisted user change the conversation's selection or the agent default from Discord-native menus. It is admitted like a message: only in the configured guild, from allowlisted users, and in a routed channel or a thread under a thread route. Outside a conversation it changes only the agent default.
+
+The commands and their controls come from `app/lib/carillon_discord_commands.wasm`, which the provider loads at startup and registers with the guild unless its record shows the same definitions already registered for this application and guild. To replace the module without restarting the provider or reconnecting its gateway, put the new file at that path and run:
+
+```sh
+carillon discord reload --config ~/.carillon/carillon.toml --provider discord-private
+```
+
+The reply reports the number of commands, whether their definitions changed, and whether they were re-registered with Discord. A module that fails to load or describe itself is refused and the previous one keeps serving. When the definitions changed, the new module is registered before it serves: if Discord rejects the commands, the reply says so and the previous module keeps serving, so fix the module and rerun `reload`; if Discord does not answer, whether it applied them is unknown, the previous module keeps serving, and rerunning `reload` once Discord answers settles it. Interactions already running finish against the module they started with. `carillon discord register` registers the module's commands using the bot token without serving, for example after changing the guild.
 
 Each bundled provider reports its own build version, not the `providers[].version` expectation in configuration. Core's status reports the observed version with `version_mismatch` when the provider ID and role match but its version differs. Unreachable or wrong-identity providers are `unavailable`, with the configured identity and expected version instead.
 
@@ -75,15 +93,15 @@ Discord delivery uses a separate outbox. An unclaimed delivery can be retried. A
 
 ## Credentials
 
-Platform credentials belong to interface providers. Engine credentials and settings belong to the runtime provider. Internal loopback tokens authenticate provider-to-core traffic. Provider IDs `operator` and `discord-bot` are reserved because those credential filenames already belong to the installation. Credentials stay outside prompts, session history, diagnostics, and ordinary logs.
+Platform credentials belong to interface providers. Engine credentials and settings belong to the runtime provider. Internal loopback tokens authenticate provider-to-core traffic and interface-to-provider simulation; the operator credential authorizes diagnostics and command reloads. Provider IDs `operator` and `discord-bot` are reserved because those credential filenames already belong to the installation. Credentials stay outside prompts, session history, diagnostics, ordinary logs, and the command module.
 
-The packaged Pi state uses `CARILLON_HOME/pi`, not the owner's global `~/.pi/agent`.
+The packaged Pi state uses `CARILLON_HOME/pi`, not the owner's global `~/.pi/agent`. Model selections made through `/model` are kept there in `model-selection.json`; Pi's own default model remains the runtime default.
 
 ## Backup and restore
 
 Stop `carillon.target` before backup or restore. Carillon refuses backup while its service listeners or core lock are active.
 
-The backup contains the entire `CARILLON_HOME` tree, including configuration, credentials, SQLite state, common agent resources, runtime resource snapshots and sessions, release identity, and Pi-private authentication and model state under `CARILLON_HOME/pi`. The archive therefore contains credentials and private agent state. Keep it owner-readable only and encrypt it before storing or transferring it.
+The backup contains the entire `CARILLON_HOME` tree, including the registry, provider settings, credentials, SQLite state, common agent resources, runtime resource snapshots and sessions, release identity, and Pi-private authentication, model selection, and model state under `CARILLON_HOME/pi`. The archive therefore contains credentials and private agent state. Keep it owner-readable only and encrypt it before storing or transferring it.
 
 Backup requires `data_dir` and `agent.resource_root` to be installation-relative paths without `..`, resolving inside `CARILLON_HOME`. Absolute paths are rejected even when they point inside the source installation: use `state` and `agents/default`, for example, so a restored configuration cannot refer back to the source. The destination must resolve outside that tree. An external user workspace is allowed, but is not included in this backup.
 
@@ -103,13 +121,13 @@ The installed registration helper needs no source checkout or release installer.
 
 ## Update and uninstall
 
-Release archive and staging names use the Carillon crate's version. `scripts/package-release.sh` accepts an optional version assertion and output path; a version differing from the crate manifest is refused before building or staging. Packaging does not relabel binaries: the core and bundled Discord use that crate identity, while the separately versioned Pi adapter retains its own package identity.
+Release archive and staging names use the Cargo workspace version. `scripts/package-release.sh` accepts an optional version assertion and output path; a version differing from the workspace manifest is refused before building or staging. Packaging does not relabel binaries: core and the bundled Discord provider use that workspace identity, while the separately versioned Pi adapter retains its own package identity.
 
-The release builder selects the native Rust host explicitly for Cargo and the corresponding Bun executable target, regardless of Cargo environment/config target overrides. Linux GNU x86_64 and aarch64 hosts produce architecture-labelled archives; other build hosts are refused before staging.
+The release builder selects the native Rust host explicitly for Cargo and the corresponding Bun executable target, regardless of Cargo environment/config target overrides. Linux GNU x86_64 and aarch64 hosts produce architecture-labelled archives; other build hosts are refused before staging. The Discord command module is built for `wasm32-unknown-unknown` on every host and shipped as data under `lib/`.
 
-Re-running the installer replaces managed application files and user units while preserving current configuration, credentials, sessions, and SQLite state. It is suitable only when the installed state format is still current.
+Re-running the installer replaces managed application files and user units while preserving the registry, credentials, sessions, and SQLite state; it rewrites the Discord provider's settings from its arguments. It is suitable only when the installed state format is still current.
 
-Stop the target before updating. When intentionally changing a provider release, update that provider's expected `version` in `carillon.toml`, restart, and check `carillon status`. The installer does not rewrite provider expectations: an entry may refer to a replacement provider rather than the bundled implementation. Discord's build version is the Carillon crate version; the Pi adapter's is `@carillon/runtime-pi`'s package version, not the underlying Pi engine version. A version mismatch is a diagnostic, not a protocol-compatibility or execution-safety guarantee.
+Stop the target before updating. When intentionally changing a provider release, update that provider's expected `version` in `carillon.toml`, restart, and check `carillon status`. The installer does not rewrite provider expectations: an entry may refer to a replacement provider rather than the bundled implementation. Discord's build version is the workspace version; the Pi adapter's is `@carillon/runtime-pi`'s package version, not the underlying Pi engine version. A version mismatch is a diagnostic, not a protocol-compatibility or execution-safety guarantee.
 
 Run one administrative operation at a time, with all three services stopped. Application replacement uses GNU `mv --exchange --no-copy` (coreutils 9.5 or newer) on a filesystem supporting atomic rename exchange. GNU `sync -f` persists the staging filesystem before selection and the containing filesystem after publication; these filesystem-wide barriers may wait for unrelated writes. An interrupted replacement leaves either the complete previous application or the complete new one at `app`, never a missing or partly copied application. Unsupported exchange fails without deleting the previous application.
 

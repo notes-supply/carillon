@@ -2,7 +2,7 @@
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-VERSION=$(cd "$ROOT" && bun -e 'import manifest from "./crates/carillon-core/Cargo.toml"; console.log(manifest.package.version)')
+VERSION=$(cd "$ROOT" && bun -e 'import manifest from "./Cargo.toml"; console.log(manifest.workspace.package.version)')
 RELEASE=${1:-"$ROOT/target/package/carillon-$VERSION"}
 BASE_PORT=${CARILLON_TEST_BASE_PORT:-44800}
 
@@ -12,6 +12,8 @@ BASE_PORT=${CARILLON_TEST_BASE_PORT:-44800}
 
 for artifact in \
   bin/carillon \
+  bin/carillon-discord \
+  lib/carillon_discord_commands.wasm \
   bin/carillon-runtime-pi \
   bin/pi \
   bin/carillon-pi \
@@ -31,6 +33,7 @@ done
 }
 
 CARILLON_CORE_BINARY="$RELEASE/bin/carillon" CARILLON_RUNTIME_BINARY="$RELEASE/bin/carillon-runtime-pi" \
+  CARILLON_COMMANDS_MODULE="$RELEASE/lib/carillon_discord_commands.wasm" \
   node "$ROOT/scripts/test-integration.mjs"
 
 TEST_ROOT=$(mktemp -d)
@@ -70,9 +73,9 @@ trap cleanup EXIT INT TERM
 # creating staging/output, including for a non-default manifest version.
 sh "$ROOT/scripts/test-package.sh"
 VERSION_FIXTURE=$TEST_ROOT/version-fixture
-mkdir -p "$VERSION_FIXTURE/scripts" "$VERSION_FIXTURE/crates/carillon-core"
+mkdir -p "$VERSION_FIXTURE/scripts"
 cp "$ROOT/scripts/package-release.sh" "$VERSION_FIXTURE/scripts/"
-printf '[package]\nversion = "1.2.3"\n' >"$VERSION_FIXTURE/crates/carillon-core/Cargo.toml"
+printf '[workspace.package]\nversion = "1.2.3"\n' >"$VERSION_FIXTURE/Cargo.toml"
 if "$VERSION_FIXTURE/scripts/package-release.sh" 9.8.7 "$VERSION_FIXTURE/release.tar.gz" \
   >"$TEST_ROOT/version.log" 2>&1; then
   echo 'packager accepted a version different from the embedded identity' >&2
@@ -174,9 +177,28 @@ assert_service_identity "$ORDINARY_UNIT_DIR"
 [ "$(cat "$ORDINARY_ROOT/app/.carillon-managed")" = carillon-managed-application-v1 ]
 ORDINARY_TOKEN_HASH=$(sha256sum "$ORDINARY_ROOT/credentials/runtime-pi.token" | cut -d' ' -f1)
 printf '%s\n' replaced-by-upgrade >"$ORDINARY_ROOT/app/upgrade-sentinel"
+# The bundle owns its application tree. A provider installed independently
+# goes on PATH instead, where replacing the bundle cannot remove it, and the
+# single CLI forwards to it there.
+PROVIDER_BIN=$TEST_ROOT/provider-bin
+mkdir "$PROVIDER_BIN"
+cat >"$PROVIDER_BIN/carillon-review" <<'PROVIDER'
+#!/bin/sh
+printf 'review-provider %s\n' "$*"
+PROVIDER
+chmod 0755 "$PROVIDER_BIN/carillon-review"
+forward_review() {
+  env PATH="$PROVIDER_BIN:$PATH" "$ORDINARY_ROOT/app/bin/carillon" review serve --flag
+}
+[ "$(forward_review)" = "review-provider serve --flag" ]
+if "$ORDINARY_ROOT/app/bin/carillon" review serve >/dev/null 2>&1; then
+  echo "forwarded to a provider that is not installed" >&2
+  exit 1
+fi
 install_release "$ORDINARY_HOME" "$ORDINARY_WORKSPACE" "$ORDINARY_ROOT" \
   "$ORDINARY_CONFIG_HOME" "$((BASE_PORT + 10))" >/dev/null
 [ ! -e "$ORDINARY_ROOT/app/upgrade-sentinel" ]
+[ "$(forward_review)" = "review-provider serve --flag" ]
 [ "$(sha256sum "$ORDINARY_ROOT/credentials/runtime-pi.token" | cut -d' ' -f1)" = "$ORDINARY_TOKEN_HASH" ]
 ORDINARY_APP_HASH=$(sha256sum "$ORDINARY_ROOT/app/bin/carillon" | cut -d' ' -f1)
 ORDINARY_CONFIG_HASH=$(sha256sum "$ORDINARY_ROOT/carillon.toml" | cut -d' ' -f1)
@@ -223,6 +245,8 @@ for unit in "$XDG_CONFIG_HOME/systemd/user"/carillon*; do
   [ "$(stat -c %a "$unit")" = 600 ]
 done
 [ "$(cat "$CARILLON_HOME/app/.carillon-managed")" = carillon-managed-application-v1 ]
+[ "$(stat -c %a "$CARILLON_HOME/providers/discord-private.toml")" = 600 ]
+grep -Fqx 'guild_id = "100"' "$CARILLON_HOME/providers/discord-private.toml"
 [ "$(sha256sum "$GLOBAL_PI/sentinel" | cut -d' ' -f1)" = "$GLOBAL_PI_HASH" ]
 [ ! -e "$GLOBAL_PI/auth.json" ]
 
@@ -269,8 +293,9 @@ env HOME="$OWNER_HOME" USER="$OWNER" LOGNAME="$OWNER" SHELL="$OWNER_SHELL" PATH=
 CORE_PID=$!
 env HOME="$OWNER_HOME" USER="$OWNER" LOGNAME="$OWNER" SHELL="$OWNER_SHELL" PATH="$PATH" \
   CARILLON_HOME="$CARILLON_HOME" PI_CODING_AGENT_DIR="$CARILLON_HOME/pi" \
-  "$APP/carillon" discord --config "$CONFIG" \
-    --token-file "$CARILLON_HOME/credentials/discord-private.token" --deterministic \
+  "$APP/carillon" discord serve --config "$CONFIG" --provider discord-private \
+    --token-file "$CARILLON_HOME/credentials/discord-private.token" \
+    --commands "$CARILLON_HOME/app/lib/carillon_discord_commands.wasm" --deterministic \
     >>"$CARILLON_HOME/logs/discord.log" 2>&1 &
 DISCORD_PID=$!
 
@@ -288,6 +313,8 @@ for offset in 0 1 2; do
 done
 
 grep -F -- '--provider runtime-pi' "$XDG_CONFIG_HOME/systemd/user/carillon-runtime-pi.service" >/dev/null
+grep -F -- "--commands \"$CARILLON_HOME/app/lib/carillon_discord_commands.wasm\"" \
+  "$XDG_CONFIG_HOME/systemd/user/carillon-discord.service" >/dev/null
 RUNTIME_TOKEN=$(cat "$CARILLON_HOME/credentials/runtime-pi.token")
 ENVIRONMENT=$(curl --fail --silent -H "authorization: Bearer $RUNTIME_TOKEN" \
   "http://127.0.0.1:$((BASE_PORT + 2))/v1/environment")
@@ -322,6 +349,12 @@ FIRST=$(curl --fail --silent -X POST -H 'content-type: application/json' \
   --data '{"event_id":"installed-1","guild_id":"100","user_id":"200","channel_id":"300","content":"installed identity turn"}' \
   "http://127.0.0.1:$DISCORD_PORT/v1/simulate")
 case "$FIRST" in *"Local provider response 1"*) ;; *) printf '%s\n' "$FIRST" >&2; exit 1 ;; esac
+# The packaged command module answers slash commands through the packaged provider.
+PANEL=$(curl --fail --silent -X POST -H 'content-type: application/json' \
+  -H "@$SIMULATION_HEADERS" \
+  --data '{"guild_id":"100","user_id":"200","channel_id":"300","kind":"command","name":"model"}' \
+  "http://127.0.0.1:$DISCORD_PORT/v1/interactions")
+case "$PANEL" in *"model:model:conversation"*) ;; *) printf '%s\n' "$PANEL" >&2; exit 1 ;; esac
 kill "$RUNTIME_PID"
 wait "$RUNTIME_PID" 2>/dev/null || true
 RUNTIME_PID=
@@ -369,8 +402,8 @@ for previous in fresh existing symlink; do
   "$RELEASE/bin/carillon" restore --input "$TEST_ROOT/registration-backup.tar.gz" \
     --target "$RESTORE_ROOT" >/dev/null
   mkdir "$RESTORE_ROOT/private-before"
-  cp -a "$RESTORE_ROOT/carillon.toml" "$RESTORE_ROOT/credentials" "$RESTORE_ROOT/pi" \
-    "$RESTORE_ROOT/private-before/"
+  cp -a "$RESTORE_ROOT/carillon.toml" "$RESTORE_ROOT/credentials" "$RESTORE_ROOT/providers" \
+    "$RESTORE_ROOT/pi" "$RESTORE_ROOT/private-before/"
   REGISTER_TRACE=$TEST_ROOT/register-$previous.trace
   REGISTER_HELPER=$RESTORE_ROOT/app/bin/carillon-register-services
   if [ "$previous" = symlink ]; then
@@ -403,6 +436,7 @@ for previous in fresh existing symlink; do
   done
   cmp "$RESTORE_ROOT/private-before/carillon.toml" "$RESTORE_ROOT/carillon.toml"
   diff -r "$RESTORE_ROOT/private-before/credentials" "$RESTORE_ROOT/credentials"
+  diff -r "$RESTORE_ROOT/private-before/providers" "$RESTORE_ROOT/providers"
   diff -r "$RESTORE_ROOT/private-before/pi" "$RESTORE_ROOT/pi"
   [ ! -e "$CARILLON_HOME" ]
   printf 'restored service registration passed: %s units, relocated root and owner environment\n' "$previous"
