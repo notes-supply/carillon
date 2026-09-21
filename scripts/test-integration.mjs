@@ -29,7 +29,7 @@ const commandsModule = resolve(
   process.env.CARILLON_COMMANDS_MODULE ??
     "target/wasm32-unknown-unknown/wasm/carillon_discord_commands.wasm",
 );
-const runtimeEntry = resolve("packages/runtime-pi/src/index.ts");
+const runtimeEntry = resolve("packages/runtime-pi/src/cli.ts");
 const packagedRuntime = process.env.CARILLON_RUNTIME_BINARY;
 const basePort = 45_000 + (process.pid % 10_000);
 let installation = root;

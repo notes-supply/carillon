@@ -30,7 +30,7 @@ cargo build --release --locked --target "$TARGET" --target-dir "$ROOT/target" --
 # The Discord command module runs in the provider's Wasm sandbox; it is data,
 # not a native binary, and is built for the wasm32 target regardless of host.
 cargo build --locked --profile wasm --target wasm32-unknown-unknown --target-dir "$ROOT/target" -p carillon-discord-commands
-bun build --compile --target "$BUN_TARGET" packages/runtime-pi/src/index.ts --outfile "$STAGE/bin/carillon-runtime-pi"
+bun build --compile --target "$BUN_TARGET" packages/runtime-pi/src/cli.ts --outfile "$STAGE/bin/carillon-runtime-pi"
 bun build --compile --target "$BUN_TARGET" --no-compile-autoload-bunfig \
   "$PI_DIST/bun/cli.js" "$PI_DIST/utils/image-resize-worker.js" \
   --outfile "$STAGE/bin/pi"

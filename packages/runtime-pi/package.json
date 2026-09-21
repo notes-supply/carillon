@@ -4,9 +4,7 @@
   "private": true,
   "type": "module",
   "exports": "./src/index.ts",
-  "bin": {
-    "carillon-runtime-pi": "./src/index.ts"
-  },
+  "bin": "./src/cli.ts",
   "dependencies": {
     "@earendil-works/pi-ai": "0.84.4",
     "@earendil-works/pi-coding-agent": "0.84.4",

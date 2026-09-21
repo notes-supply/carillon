@@ -8,8 +8,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { openConversation } from "./namespace.ts";
-import { createPiExecutionSession, promptSession } from "./session.ts";
+import { openConversation, createPiExecutionSession, promptSession } from "@carillon/runtime-pi";
 
 const model: Model<"openai-responses"> = {
   id: "observer-model",

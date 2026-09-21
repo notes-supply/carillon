@@ -3,15 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { Check } from "typebox/value";
+import { DETERMINISTIC_DEFAULT, DETERMINISTIC_MODELS, describeSelection } from "./testing.ts";
 import { ModelStateSchema } from "@carillon/protocol";
-import {
-  DETERMINISTIC_DEFAULT,
-  DETERMINISTIC_MODELS,
-  ModelRejection,
-  ModelSelections,
-  describeSelection,
-  resolved,
-} from "./model.ts";
+import { ModelRejection, ModelSelections, resolved } from "./model.ts";
 import { type AvailableModel } from "@carillon/protocol";
 
 const conversation = {

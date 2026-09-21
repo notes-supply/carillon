@@ -239,32 +239,3 @@ function validated(available: readonly AvailableModel[], selection: Selection): 
   }
   return { provider: model.provider, model: model.model, options };
 }
-
-/** The catalog the deterministic provider substitute offers. */
-export const DETERMINISTIC_MODELS: readonly AvailableModel[] = [
-  { provider: "local", model: "echo", name: "Local echo", options: [] },
-  {
-    provider: "local",
-    model: "reasoner",
-    name: "Local reasoner",
-    options: [
-      {
-        id: "thinking",
-        name: "Thinking",
-        choices: ["off", "low", "medium", "high"],
-        default: "medium",
-      },
-    ],
-  },
-  { provider: "substitute", model: "fixed", name: "Substitute fixed", options: [] },
-];
-
-export const DETERMINISTIC_DEFAULT: Selection = { provider: "local", model: "echo", options: {} };
-
-/** `provider/model` with any chosen options, for output that names the model. */
-export function describeSelection(selection: Selection): string {
-  const options = Object.entries(selection.options ?? {})
-    .map(([id, choice]) => `${id}=${choice}`)
-    .join(", ");
-  return `${selection.provider}/${selection.model}${options.length === 0 ? "" : ` (${options})`}`;
-}

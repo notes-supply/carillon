@@ -36,6 +36,11 @@ run = [
 description = "Build the Discord command module for the Wasm sandbox"
 run = "cargo build --locked --profile wasm -p carillon-discord-commands --target wasm32-unknown-unknown"
 
+[tasks."example:pi"]
+description = "Run a native Pi conversation directly (requires configured credentials)"
+depends = ["install"]
+run = "bun packages/runtime-pi/examples/session.ts"
+
 [tasks."test:integration"]
 description = "Test local core, Discord, and Pi services together"
 depends = ["install", "build:commands"]
