@@ -28,7 +28,7 @@ Core is platform-neutral. It knows the registry of providers and the loopback pr
 
 ## Providers are separate programs
 
-Each provider is its own executable, built and packaged separately from core. Core and a provider share only the `carillon-protocol` crate: the installation registry (`carillon.toml`), credential files, and the JSON wire types. Adding an interface for another platform means adding another executable that speaks this protocol, not modifying or rebuilding core.
+Each provider is its own executable, built and packaged separately from core. `carillon-protocol` owns their JSON wire types; `carillon-installation` owns installation registry (`carillon.toml`), credential and filesystem utilities. The wire crate has no installation dependency and is also usable by the Wasm command module. Shared model semantics and Rust/TypeScript conformance fixtures are documented in [`packages/protocol`](../../packages/protocol/README.md). Adding an interface for another platform means adding another executable that speaks this protocol, not modifying or rebuilding core.
 
 `carillon <provider> …` is the single user-facing entry point. Core forwards to the executable `carillon-<provider>` by replacing its process, so signals and the exit status are the provider's own. Core subcommands are reserved; other names using the provider-ID character set are forwarded: `carillon discord serve …` runs `carillon-discord serve …`. The bundle's own providers sit beside the `carillon` binary and take precedence; a provider installed independently is found as an executable on `PATH`. The release owns `app/` wholesale and replaces it on upgrade, so an independent provider is installed elsewhere and survives upgrades.
 

@@ -20,15 +20,13 @@ use axum::{
     routing::{get, post},
 };
 use carillon_discord_commands::contract::{Interaction, InteractionKind, Reply};
-use carillon_protocol::{
-    config::{
-        LoadedConfig, ProviderRole, RELEASE_VERSION, hash_token, read_token_file, token_matches,
-    },
-    filesystem::sync_ancestors,
-    model::{
-        Delivery, DeliveryAck, DeliveryOutcome, DeliveryReconciliation, EventReceipt,
-        ExternalEvent, Health, INSTANCE_HEADER, ModelQuery, ModelUpdate, PROVIDER_HEADER,
-    },
+use carillon_installation::config::{
+    LoadedConfig, ProviderRole, RELEASE_VERSION, hash_token, read_token_file, token_matches,
+};
+use carillon_installation::filesystem::sync_ancestors;
+use carillon_protocol::model::{
+    Delivery, DeliveryAck, DeliveryOutcome, DeliveryReconciliation, EventReceipt, ExternalEvent,
+    Health, INSTANCE_HEADER, ModelQuery, ModelUpdate, PROVIDER_HEADER,
 };
 use reqwest::{Client, IntoUrl, Method, RequestBuilder, Url};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -1675,11 +1673,9 @@ pub(crate) mod tests {
         routing::{get, post},
     };
     use carillon_discord_commands::contract::{InteractionKind, Reply};
-    use carillon_protocol::{
-        config::{LoadedConfig, hash_token},
-        model::{
-            DeliveryOutcome, DeliveryReconciliation, EventReceipt, ExternalEvent, Health, TurnState,
-        },
+    use carillon_installation::config::{LoadedConfig, hash_token};
+    use carillon_protocol::model::{
+        DeliveryOutcome, DeliveryReconciliation, EventReceipt, ExternalEvent, Health, TurnState,
     };
     use serde_json::{Value, json};
     use tower::ServiceExt as _;

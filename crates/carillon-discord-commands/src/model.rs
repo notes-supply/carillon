@@ -14,6 +14,8 @@
 //! rows allow, otherwise one select picks the setting and another its value. A setting with more than 25 choices, or a model with more than 25
 //! settings, shows the first 25.
 
+use carillon_protocol::model::ModelScope as Scope;
+use carillon_protocol::models::{AvailableModel, ModelOption, ModelState, ScopeState, Selection};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
@@ -23,10 +25,7 @@ use serde_json::{Value, json};
 
 use crate::{
     HostCalls,
-    contract::{
-        AvailableModel, HostRequest, Interaction, InteractionKind, ModelOption, ModelState,
-        Outcome, Reply, Scope, ScopeState, Selection,
-    },
+    contract::{HostRequest, Interaction, InteractionKind, Outcome, Reply},
 };
 
 pub const COMMAND: &str = "model";
@@ -115,7 +114,10 @@ pub fn interact(host: &mut impl HostCalls, interaction: &Interaction) -> Outcome
         Ok(state) => state,
         Err(error) => {
             return Outcome::Reply(Reply {
-                content: format!("Model settings are unavailable: {}", shorten(&error, 1800)),
+                content: format!(
+                    "Model settings are unavailable: {} Reopen /model to refresh.",
+                    shorten(&error, 1700)
+                ),
                 components: Vec::new(),
             });
         }
@@ -715,10 +717,11 @@ mod tests {
     use super::{COMMAND, PAGE, TEXT_LIMIT, fingerprint, interact};
     use crate::{
         HostCalls,
-        contract::{
-            AvailableModel, HostRequest, Interaction, InteractionKind, ModelOption, ModelState,
-            Outcome, Reply, Scope, ScopeState, Selection,
-        },
+        contract::{HostRequest, Interaction, InteractionKind, Outcome, Reply},
+    };
+    use carillon_protocol::{
+        model::ModelScope as Scope,
+        models::{AvailableModel, ModelOption, ModelState, ScopeState, Selection},
     };
 
     /// Answers like the runtime: a set selection is resolved so every
@@ -801,6 +804,7 @@ mod tests {
                     id: "thinking".to_owned(),
                     name: "Thinking".to_owned(),
                     choices: thinking.iter().map(|level| (*level).to_owned()).collect(),
+                    default: thinking.first().copied().unwrap_or_default().to_owned(),
                 }]
             },
         }
@@ -1277,6 +1281,7 @@ mod tests {
                 id: format!("setting-{index}"),
                 name: format!("Setting {index}"),
                 choices: vec!["one".to_owned(), "two".to_owned()],
+                default: "one".to_owned(),
             })
             .collect();
         let before = host.state.clone();
@@ -1595,6 +1600,7 @@ mod tests {
                 id: (*id).to_owned(),
                 name: id.to_uppercase(),
                 choices: vec!["one".to_owned(), "two".to_owned()],
+                default: "one".to_owned(),
             })
             .collect();
         let shown: BTreeMap<String, String> = options
@@ -1669,7 +1675,7 @@ mod tests {
         let reply = expect_reply(interact(&mut host, &command(true)))?;
         assert_eq!(
             reply.content,
-            "Model settings are unavailable: runtime provider is unavailable"
+            "Model settings are unavailable: runtime provider is unavailable Reopen /model to refresh."
         );
         assert!(reply.components.is_empty());
 

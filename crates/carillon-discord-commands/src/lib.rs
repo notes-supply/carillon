@@ -3,13 +3,15 @@
 //! keeps the gateway connection, admission, and every Discord or core call;
 //! this module only decides what to show and what to ask for.
 
+use carillon_protocol::model::ModelScope as Scope;
+use carillon_protocol::models::{ModelState, Selection};
 pub mod contract;
 mod model;
 
 #[cfg(target_arch = "wasm32")]
 mod abi;
 
-use contract::{HostRequest, Invocation, ModelState, Outcome, Scope, Selection};
+use contract::{HostRequest, Invocation, Outcome};
 
 /// Native operations the provider performs on the module's behalf. Each call
 /// answers with the runtime's confirmed model state or the reason it could

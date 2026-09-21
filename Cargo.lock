@@ -259,6 +259,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "axum",
+ "carillon-installation",
  "carillon-protocol",
  "clap",
  "flate2",
@@ -288,6 +289,7 @@ dependencies = [
  "anyhow",
  "axum",
  "carillon-discord-commands",
+ "carillon-installation",
  "carillon-protocol",
  "carillon-wasm",
  "clap",
@@ -313,8 +315,22 @@ dependencies = [
 name = "carillon-discord-commands"
 version = "0.0.0"
 dependencies = [
+ "carillon-protocol",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "carillon-installation"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "serde",
+ "sha2",
+ "tempfile",
+ "toml",
+ "uuid",
 ]
 
 [[package]]
@@ -322,13 +338,8 @@ name = "carillon-protocol"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "hex",
  "serde",
  "serde_json",
- "sha2",
- "tempfile",
- "toml",
- "uuid",
 ]
 
 [[package]]

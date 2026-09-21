@@ -21,16 +21,18 @@ import { Parse } from "typebox/value";
 import {
   DETERMINISTIC_DEFAULT,
   DETERMINISTIC_MODELS,
-  ModelQuerySchema,
   ModelRejection,
   ModelSelections,
-  ModelUpdateSchema,
   describeSelection,
+} from "./model.ts";
+import {
   type AvailableModel,
   type ModelQuery,
+  ModelQuerySchema,
+  ModelUpdateSchema,
   type ModelUpdate,
   type Selection,
-} from "./model.ts";
+} from "@carillon/protocol";
 import { conversationDirectory, openConversation } from "./namespace.ts";
 import { Serial } from "./serial.ts";
 import { createPiExecutionSession, promptSession } from "./session.ts";

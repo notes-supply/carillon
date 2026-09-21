@@ -14,6 +14,7 @@ anyhow.workspace = true
 axum.workspace = true
 carillon-discord-commands = { path = "../carillon-discord-commands" }
 carillon-protocol = { path = "../carillon-protocol" }
+carillon-installation = { path = "../carillon-installation" }
 carillon-wasm = { path = "../carillon-wasm" }
 clap.workspace = true
 emojis = "0.8.2"

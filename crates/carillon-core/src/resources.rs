@@ -71,7 +71,7 @@ pub fn materialize(source: &Path, store: &Path) -> Result<String> {
                 fs::set_permissions(&path, fs::Permissions::from_mode(0o440 | file.executable))?;
             }
             set_snapshot_directory_permissions(&temporary)?;
-            carillon_protocol::filesystem::sync_tree(&temporary)?;
+            carillon_installation::filesystem::sync_tree(&temporary)?;
             fs::rename(&temporary, &destination)?;
             Ok(())
         })();

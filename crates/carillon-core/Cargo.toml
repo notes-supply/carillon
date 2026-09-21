@@ -13,6 +13,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 axum.workspace = true
 carillon-protocol = { path = "../carillon-protocol" }
+carillon-installation = { path = "../carillon-installation" }
 clap.workspace = true
 flate2 = "1.1.9"
 fs2 = "0.4.3"

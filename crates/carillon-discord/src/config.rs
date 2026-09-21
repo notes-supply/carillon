@@ -5,10 +5,8 @@
 use std::{collections::BTreeSet, fs, str::FromStr};
 
 use anyhow::{Context as _, Result, bail};
-use carillon_protocol::{
-    config::{LoadedConfig, ProviderRole},
-    filesystem::atomic_write,
-};
+use carillon_installation::config::{LoadedConfig, ProviderRole};
+use carillon_installation::filesystem::atomic_write;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -267,7 +265,7 @@ fn valid_snowflake(value: &str) -> bool {
 pub(crate) mod tests {
     use std::{fs, path::Path, str::FromStr};
 
-    use carillon_protocol::config::{
+    use carillon_installation::config::{
         AgentConfig, Config, CoreConfig, LoadedConfig, Provider, ProviderRole, hash_token,
     };
 
@@ -306,7 +304,7 @@ pub(crate) mod tests {
             providers.push(Provider {
                 id: id.to_owned(),
                 role,
-                version: carillon_protocol::config::RELEASE_VERSION.to_owned(),
+                version: carillon_installation::config::RELEASE_VERSION.to_owned(),
                 url: format!("http://127.0.0.1:{port}"),
                 token_hash: hash_token(id),
                 enabled: true,

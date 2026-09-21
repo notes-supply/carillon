@@ -7,60 +7,18 @@ import { open, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { Type, type Static } from "typebox";
+import {
+  SelectionSchema,
+  type Selection,
+  type AvailableModel,
+  type ModelQuery,
+  type ModelUpdate,
+  type ModelState,
+  type ScopeState,
+} from "@carillon/protocol";
 import { Parse } from "typebox/value";
 import { Serial } from "./serial.ts";
 
-export const SelectionSchema = Type.Object({
-  provider: Type.String({ minLength: 1 }),
-  model: Type.String({ minLength: 1 }),
-  options: Type.Optional(Type.Record(Type.String(), Type.String())),
-});
-export type Selection = Static<typeof SelectionSchema>;
-
-/** A setting the model supports; `default` applies when no scope chose a supported value. */
-export interface ModelOption {
-  readonly id: string;
-  readonly name: string;
-  readonly choices: readonly string[];
-  readonly default: string;
-}
-
-export interface AvailableModel {
-  readonly provider: string;
-  readonly model: string;
-  readonly name: string;
-  readonly options: readonly ModelOption[];
-}
-
-/** A scope's resolved selection and whether the scope chose it itself. */
-export interface ScopeState {
-  readonly selection: Selection;
-  readonly overridden: boolean;
-}
-
-/** The runtime's answer to a model query, relayed unchanged to the picker. */
-export interface ModelState {
-  readonly available: readonly AvailableModel[];
-  readonly agent: ScopeState;
-  readonly conversation?: ScopeState;
-}
-
-export const ModelQuerySchema = Type.Object({
-  interface_id: Type.String({ minLength: 1 }),
-  agent_id: Type.String({ minLength: 1 }),
-  audience_id: Type.Optional(Type.String({ minLength: 1 })),
-});
-export type ModelQuery = Static<typeof ModelQuerySchema>;
-
-export const ModelUpdateSchema = Type.Object({
-  ...ModelQuerySchema.properties,
-  scope: Type.Union([Type.Literal("agent"), Type.Literal("conversation")]),
-  selection: Type.Union([SelectionSchema, Type.Null()]),
-  expected: Type.Optional(SelectionSchema),
-});
-export type ModelUpdate = Static<typeof ModelUpdateSchema>;
-
-/** A request the runtime refuses; the message is shown to the person asking. */
 export class ModelRejection extends Error {
   readonly status: number;
 
@@ -131,10 +89,10 @@ export class ModelSelections {
       selection: resolved(available, agentSelection ?? runtimeDefault),
       overridden: agentSelection !== null,
     };
-    if (query.audience_id === undefined) return { available, agent };
+    if (query.audience_id === undefined) return { available: [...available], agent };
     const conversationSelection = this.conversationSelection(query);
     return {
-      available,
+      available: [...available],
       agent,
       conversation: {
         selection:
@@ -165,7 +123,10 @@ export class ModelSelections {
         const current = state[update.scope]?.selection;
         const expected = { ...update.expected, options: update.expected.options ?? {} };
         if (!isDeepStrictEqual(current, expected))
-          throw new ModelRejection(409, "The model settings changed; reopen /model and try again.");
+          throw new ModelRejection(
+            409,
+            "The model settings changed; refresh the model state and try again.",
+          );
       }
       await this.write(this.next(update, selection));
       return this.state(available, runtimeDefault, update);

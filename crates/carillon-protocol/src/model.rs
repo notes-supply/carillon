@@ -2,6 +2,7 @@
 
 use std::str::FromStr;
 
+use crate::models::Selection;
 use anyhow::bail;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -238,17 +239,17 @@ pub struct ModelQuery {
 }
 
 /// Interface-to-core request to change a model selection. `selection` is the
-/// runtime's own vocabulary; `None` returns the scope to its default.
+/// shared model vocabulary; `None` returns the scope to its default.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ModelUpdate {
     pub agent_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audience_id: Option<String>,
     pub scope: ModelScope,
-    pub selection: Option<Value>,
+    pub selection: Option<Selection>,
     /// Runtime-owned precondition for read-modify-write controls.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected: Option<Value>,
+    pub expected: Option<Selection>,
 }
 
 /// Core-to-runtime form of [`ModelQuery`]; core adds the interface identity

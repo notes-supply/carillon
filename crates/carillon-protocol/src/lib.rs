@@ -1,8 +1,5 @@
-#![forbid(unsafe_code)]
-//! Installation configuration, credentials, and wire types shared by Carillon
-//! core and its providers. Platform-specific configuration stays with the
-//! provider that owns it.
+//! Transport-neutral wire vocabulary shared by core and providers.
+//! No installation discovery, credentials, filesystem operations or startup.
 
-pub mod config;
-pub mod filesystem;
 pub mod model;
+pub mod models;

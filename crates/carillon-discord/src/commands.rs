@@ -2,6 +2,7 @@
 //! commands it defines, registering those with Discord, and running each
 //! interaction through it with the native model operations it may ask for.
 
+use carillon_protocol::models::ModelState;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -11,13 +12,10 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use carillon_discord_commands::contract::{
-    CONTRACT, Description, HostReply, HostRequest, Interaction, Invocation, ModelState, Outcome,
-    Reply, Scope,
+    CONTRACT, Description, HostReply, HostRequest, Interaction, Invocation, Outcome, Reply,
 };
-use carillon_protocol::{
-    filesystem::atomic_write,
-    model::{ModelQuery, ModelScope, ModelUpdate},
-};
+use carillon_installation::filesystem::atomic_write;
+use carillon_protocol::model::{ModelQuery, ModelScope, ModelUpdate};
 use carillon_wasm::{Host, Module, Native};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -84,25 +82,18 @@ impl ModelCalls {
                 selection,
                 expected,
             }) => {
-                let scope = match scope {
-                    Scope::Agent => ModelScope::Agent,
-                    Scope::Conversation => ModelScope::Conversation,
-                };
                 if scope == ModelScope::Conversation && self.query.audience_id.is_none() {
                     return HostReply::Error(
                         "There is no conversation here to set a model for.".to_owned(),
                     );
                 }
-                let selection =
-                    selection.and_then(|selection| serde_json::to_value(selection).ok());
                 self.core
                     .set_model(&ModelUpdate {
                         agent_id: self.query.agent_id.clone(),
                         audience_id: self.query.audience_id.clone(),
                         scope,
                         selection,
-                        expected: expected
-                            .and_then(|selection| serde_json::to_value(selection).ok()),
+                        expected,
                     })
                     .await
             }
@@ -758,14 +749,15 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn model_calls_preserve_the_conditional_write() -> anyhow::Result<()> {
         use axum::Json;
-        use carillon_discord_commands::contract::{HostReply, HostRequest, Scope, Selection};
+        use carillon_discord_commands::contract::{HostReply, HostRequest};
         use carillon_protocol::model::{ModelQuery, ModelUpdate};
+        use carillon_protocol::{model::ModelScope as Scope, models::Selection};
         let selection = Selection {
             provider: "fixture".to_owned(),
             model: "A".to_owned(),
             options: std::collections::BTreeMap::new(),
         };
-        let expected = serde_json::to_value(&selection)?;
+        let expected = selection.clone();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let router = Router::new().route(

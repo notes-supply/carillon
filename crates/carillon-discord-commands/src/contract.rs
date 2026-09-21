@@ -3,7 +3,10 @@
 //! either side can grow without breaking the other within one contract
 //! version.
 
-use std::collections::BTreeMap;
+use carillon_protocol::{
+    model::ModelScope as Scope,
+    models::{ModelState, Selection},
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -88,58 +91,4 @@ pub enum HostRequest {
 pub enum HostReply {
     ModelState(ModelState),
     Error(String),
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Scope {
-    Agent,
-    Conversation,
-}
-
-/// The runtime's view of model availability and selection, relayed
-/// unchanged by the provider and core.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-pub struct ModelState {
-    pub available: Vec<AvailableModel>,
-    pub agent: ScopeState,
-    /// Absent outside a conversation.
-    #[serde(default)]
-    pub conversation: Option<ScopeState>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct AvailableModel {
-    pub provider: String,
-    pub model: String,
-    pub name: String,
-    #[serde(default)]
-    pub options: Vec<ModelOption>,
-}
-
-/// One engine setting the runtime supports for a model, with the choices it
-/// accepts.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct ModelOption {
-    pub id: String,
-    pub name: String,
-    pub choices: Vec<String>,
-}
-
-/// The effective selection for one scope and whether it was set at that
-/// scope or inherited.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-pub struct ScopeState {
-    #[serde(default)]
-    pub selection: Option<Selection>,
-    #[serde(default)]
-    pub overridden: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct Selection {
-    pub provider: String,
-    pub model: String,
-    #[serde(default)]
-    pub options: BTreeMap<String, String>,
 }

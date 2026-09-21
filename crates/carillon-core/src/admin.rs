@@ -17,13 +17,11 @@ use fs2::FileExt;
 use tar::{Archive, Builder};
 use uuid::Uuid;
 
-use carillon_protocol::{
-    config::{
-        AgentConfig, Config, CoreConfig, LoadedConfig, Provider, ProviderRole, RELEASE_VERSION,
-        hash_token, new_token, validate_provider_identity,
-    },
-    filesystem::{atomic_write, sync_ancestors, sync_tree},
+use carillon_installation::config::{
+    AgentConfig, Config, CoreConfig, LoadedConfig, Provider, ProviderRole, RELEASE_VERSION,
+    hash_token, new_token, validate_provider_identity,
 };
+use carillon_installation::filesystem::{atomic_write, sync_ancestors, sync_tree};
 
 use crate::db::Database;
 
@@ -510,7 +508,7 @@ mod tests {
     use tar::{Builder, Header};
     use tempfile::tempdir;
 
-    use carillon_protocol::config::{Config, LoadedConfig, ProviderRole, RELEASE_VERSION};
+    use carillon_installation::config::{Config, LoadedConfig, ProviderRole, RELEASE_VERSION};
 
     use super::{backup, initialize, restore, set_provider};
 

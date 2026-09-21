@@ -1,0 +1,136 @@
+{
+  "states": [
+    {
+      "available": [
+        {
+          "provider": "fixture",
+          "model": "reasoner",
+          "name": "Reasoner",
+          "options": [
+            {
+              "id": "thinking",
+              "name": "Thinking",
+              "choices": ["off", "high"],
+              "default": "off"
+            }
+          ]
+        }
+      ],
+      "agent": {
+        "selection": {
+          "provider": "fixture",
+          "model": "reasoner",
+          "options": {
+            "thinking": "off"
+          }
+        },
+        "overridden": false
+      }
+    },
+    {
+      "available": [
+        {
+          "provider": "fixture",
+          "model": "reasoner",
+          "name": "Reasoner",
+          "options": [
+            {
+              "id": "thinking",
+              "name": "Thinking",
+              "choices": ["off", "high"],
+              "default": "off"
+            }
+          ]
+        }
+      ],
+      "agent": {
+        "selection": {
+          "provider": "fixture",
+          "model": "reasoner",
+          "options": {
+            "thinking": "off"
+          }
+        },
+        "overridden": false
+      },
+      "conversation": {
+        "selection": {
+          "provider": "fixture",
+          "model": "reasoner",
+          "options": {
+            "thinking": "high"
+          }
+        },
+        "overridden": true
+      }
+    },
+    {
+      "available": [],
+      "agent": {
+        "selection": null,
+        "overridden": false
+      }
+    }
+  ],
+  "queries": [
+    {
+      "interface_id": "discord-private",
+      "agent_id": "default",
+      "audience_id": "discord-100-300"
+    },
+    {
+      "interface_id": "discord-private",
+      "agent_id": "default"
+    }
+  ],
+  "updates": [
+    {
+      "interface_id": "discord-private",
+      "agent_id": "default",
+      "audience_id": "discord-100-300",
+      "scope": "conversation",
+      "selection": {
+        "provider": "fixture",
+        "model": "reasoner",
+        "options": {
+          "thinking": "high"
+        }
+      },
+      "expected": {
+        "provider": "fixture",
+        "model": "reasoner",
+        "options": {
+          "thinking": "off"
+        }
+      }
+    },
+    {
+      "interface_id": "discord-private",
+      "agent_id": "default",
+      "scope": "agent",
+      "selection": null
+    }
+  ],
+  "invalid_updates": [
+    {
+      "interface_id": "discord-private",
+      "agent_id": "default",
+      "audience_id": "discord-100-300",
+      "scope": "server",
+      "selection": null
+    },
+    {
+      "interface_id": "discord-private",
+      "agent_id": "default",
+      "audience_id": "discord-100-300",
+      "scope": "agent",
+      "selection": {
+        "provider": "fixture",
+        "model": "A",
+        "options": {
+          "thinking": 42
+        }
+      }
+    }
+  ]
+}

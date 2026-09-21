@@ -8,7 +8,7 @@ use super::*;
 use carillon_protocol::model::{DeliveryOutcome, TurnState};
 
 fn installation(root: &Path) -> Result<AppState> {
-    use carillon_protocol::config::{AgentConfig, Config, CoreConfig, Provider, hash_token};
+    use carillon_installation::config::{AgentConfig, Config, CoreConfig, Provider, hash_token};
 
     // Core tests use opaque provider IDs, without a Discord or Pi installation.
     // Native session state belongs to the runtime.
@@ -292,7 +292,7 @@ fn fake_runtime(
                 let sent = sent.clone();
                 async move {
                     let _ = sent.send((id, json!({"auth": bearer(&headers), "update": update})));
-                    if update["selection"] == json!("missing") {
+                    if update["selection"]["model"] == json!("missing") {
                         return (
                             StatusCode::UNPROCESSABLE_ENTITY,
                             Json(json!({"error": "That model is not available."})),
@@ -420,7 +420,7 @@ async fn model_calls_follow_conversation_ownership() -> Result<()> {
         "agent_id": "test-agent",
         "audience_id": "pinned",
         "scope": "conversation",
-        "selection": "missing",
+        "selection": {"provider": "fixture", "model": "missing", "options": {}},
     });
     let (status, body) = model_call(&state, "PUT", "/v1/model", true, Some(&update)).await?;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -428,7 +428,7 @@ async fn model_calls_follow_conversation_ownership() -> Result<()> {
     let (called, call) = received.try_recv()?;
     assert_eq!(called, "test-runtime");
     assert_eq!(call["update"]["interface_id"], "test-interface");
-    assert_eq!(call["update"]["selection"], "missing");
+    assert_eq!(call["update"]["selection"], update["selection"]);
     services.shutdown().await;
     Ok(())
 }

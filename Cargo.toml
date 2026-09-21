@@ -5,6 +5,7 @@ members = [
     "crates/carillon-discord",
     "crates/carillon-discord-commands",
     "crates/carillon-protocol",
+    "crates/carillon-installation",
     "crates/carillon-wasm",
 ]
 

@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, bail};
-use carillon_protocol::config::{LoadedConfig, ProviderRole, read_token_file};
+use carillon_installation::config::{LoadedConfig, ProviderRole, read_token_file};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 

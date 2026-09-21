@@ -9,6 +9,7 @@ publish.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+carillon-protocol = { path = "../carillon-protocol" }
 serde.workspace = true
 serde_json.workspace = true
 

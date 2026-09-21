@@ -7,8 +7,9 @@ use std::cell::RefCell;
 
 use crate::{
     HostCalls,
-    contract::{HostReply, HostRequest, Invocation, ModelState, Outcome},
+    contract::{HostReply, HostRequest, Invocation, Outcome},
 };
+use carillon_protocol::models::ModelState;
 
 thread_local! {
     static INPUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };

@@ -2,6 +2,8 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
+import { Check } from "typebox/value";
+import { ModelStateSchema } from "@carillon/protocol";
 import {
   DETERMINISTIC_DEFAULT,
   DETERMINISTIC_MODELS,
@@ -9,8 +11,8 @@ import {
   ModelSelections,
   describeSelection,
   resolved,
-  type AvailableModel,
 } from "./model.ts";
+import { type AvailableModel } from "@carillon/protocol";
 
 const conversation = {
   interface_id: "discord-private",
@@ -293,4 +295,17 @@ it("refuses a ledger it cannot read rather than starting empty", async () => {
 it("names selections with their options", () => {
   expect(describeSelection(DETERMINISTIC_DEFAULT)).toBe("local/echo");
   expect(describeSelection(reasoner)).toBe("local/reasoner (thinking=high)");
+});
+
+it("produces shared wire states including each model option default", async () => {
+  await withLedger(async (path) => {
+    const ledger = await ModelSelections.open(path);
+    const state = ledger.state(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, conversation);
+    expect(Check(ModelStateSchema, state)).toBe(true);
+    expect(
+      state.available
+        .flatMap((model) => model.options)
+        .every((option) => option.choices.includes(option.default)),
+    ).toBe(true);
+  });
 });

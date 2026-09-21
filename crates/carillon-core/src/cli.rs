@@ -10,10 +10,8 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
-use carillon_protocol::{
-    config::LoadedConfig,
-    model::{StatusReport, TurnInspection, TurnSummary},
-};
+use carillon_installation::config::LoadedConfig;
+use carillon_protocol::model::{StatusReport, TurnInspection, TurnSummary};
 use clap::{Parser, Subcommand, ValueEnum};
 use reqwest::Url;
 use serde::{Serialize, de::DeserializeOwned};
@@ -167,7 +165,7 @@ fn forward(arguments: &[OsString]) -> Result<()> {
     let name = name
         .to_str()
         .context("provider command name is not UTF-8")?;
-    carillon_protocol::config::validate_provider_identity(name)
+    carillon_installation::config::validate_provider_identity(name)
         .with_context(|| format!("unknown command {name}"))?;
     let binary = provider_binary(name)?;
     let error = Process::new(&binary).args(rest).exec();

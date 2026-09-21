@@ -14,14 +14,14 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use carillon_protocol::{
-    config::{LoadedConfig, Provider, ProviderRole, RELEASE_VERSION, token_matches},
-    model::{
-        Delivery, DeliveryAck, DeliveryReconciliation, EventReceipt, ExternalEvent, Health,
-        INSTANCE_HEADER, ModelQuery, ModelUpdate, PROVIDER_HEADER, RuntimeModelQuery,
-        RuntimeModelUpdate, RuntimeTurnRequest, RuntimeTurnResponse, SelectedProvider,
-        StatusReport, TurnInspection, TurnSummary,
-    },
+use carillon_installation::config::{
+    LoadedConfig, Provider, ProviderRole, RELEASE_VERSION, token_matches,
+};
+use carillon_protocol::model::{
+    Delivery, DeliveryAck, DeliveryReconciliation, EventReceipt, ExternalEvent, Health,
+    INSTANCE_HEADER, ModelQuery, ModelUpdate, PROVIDER_HEADER, RuntimeModelQuery,
+    RuntimeModelUpdate, RuntimeTurnRequest, RuntimeTurnResponse, SelectedProvider, StatusReport,
+    TurnInspection, TurnSummary,
 };
 use reqwest::{Client, RequestBuilder, Url};
 use serde::Deserialize;
