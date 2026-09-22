@@ -238,10 +238,17 @@ pub(crate) fn prepare_deterministic_conversation(
     if plan.create_thread || plan.adopt_thread {
         participation.adopt(&target, &plan.route_channel_id)?;
     }
-    Ok(plan.resolve(target))
+    Ok(resolved_message(plan, target))
 }
 
-pub(crate) async fn prepare_discord_conversation(
+/// Prepare an admitted message's native target and persist thread participation.
+/// Channel routes need no Discord request. Thread routes reconcile/create the
+/// native thread before recording it; mentioned existing threads are adopted.
+///
+/// # Errors
+/// Returns Discord or participation-storage failures. A failed call may have
+/// created a native thread; retrying the same plan reconciles it before creating.
+pub async fn prepare_conversation(
     participation: &Participation,
     http: &DiscordHttp,
     plan: MessagePlan,
@@ -260,7 +267,7 @@ pub(crate) async fn prepare_discord_conversation(
     if plan.adopt_thread {
         participation.adopt(&target, &plan.route_channel_id)?;
     }
-    Ok(plan.resolve(target))
+    Ok(resolved_message(plan, target))
 }
 
 pub(crate) async fn create_conversation_thread(
@@ -421,15 +428,6 @@ pub fn admit_message(
 ) -> Result<Option<MessagePlan>, InterfaceError> {
     admit_identity(config, message.guild_id.as_deref(), &message.user_id)?;
     resolve_message(config, message, native, &participation.lock())
-}
-
-impl MessagePlan {
-    /// Resolve an admitted message after the caller has prepared its native target.
-    /// Native thread creation/adoption belongs to the provider, not core.
-    #[must_use]
-    pub fn resolve(self, target: String) -> ResolvedMessage {
-        resolved_message(self, target)
-    }
 }
 
 /// An incoming interaction with the platform identity needed for admission.

@@ -276,3 +276,6 @@ pub(crate) fn discord_chunks(content: &str) -> Vec<String> {
     }
     chunks
 }
+
+#[cfg(test)]
+mod tests;

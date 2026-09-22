@@ -3,8 +3,9 @@
 // setting; the agent default and conversation overrides are Carillon's, kept
 // beside Pi's private state and resolved when a turn starts.
 
-import { open, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { open, readFile, realpath, rename, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
+import lockfile from "proper-lockfile";
 import { isDeepStrictEqual } from "node:util";
 import { Type, type Static } from "typebox";
 import {
@@ -57,29 +58,42 @@ export class ModelSelections {
   }
 
   static async open(path: string): Promise<ModelSelections> {
-    let ledger: Ledger = { agents: [], conversations: [] };
-    try {
-      ledger = Parse(LedgerSchema, JSON.parse(await readFile(path, "utf8")));
-    } catch (failure: unknown) {
-      if (!(failure instanceof Error && "code" in failure && failure.code === "ENOENT"))
-        throw failure;
-    }
+    path = join(await realpath(dirname(path)), basename(path));
+    const ledger = await readLedger(path);
     return new ModelSelections(path, ledger);
   }
 
+  private async refresh(): Promise<void> {
+    this.#ledger = await readLedger(this.#path);
+  }
+
   /** What a turn in this conversation runs with: the nearest scope's choice, else the runtime default. */
-  effective(
+  async effective(
     available: readonly AvailableModel[],
     runtimeDefault: Selection,
     query: ModelQuery,
-  ): Selection {
-    return resolved(
-      available,
-      this.conversationSelection(query) ?? this.agentSelection(query.agent_id) ?? runtimeDefault,
-    );
+  ): Promise<Selection> {
+    return this.#writes.run(async () => {
+      await this.refresh();
+      return resolved(
+        available,
+        this.conversationSelection(query) ?? this.agentSelection(query.agent_id) ?? runtimeDefault,
+      );
+    });
   }
 
-  state(
+  async state(
+    available: readonly AvailableModel[],
+    runtimeDefault: Selection,
+    query: ModelQuery,
+  ): Promise<ModelState> {
+    return this.#writes.run(async () => {
+      await this.refresh();
+      return this.snapshotState(available, runtimeDefault, query);
+    });
+  }
+
+  private snapshotState(
     available: readonly AvailableModel[],
     runtimeDefault: Selection,
     query: ModelQuery,
@@ -118,18 +132,35 @@ export class ModelSelections {
       throw new ModelRejection(400, "There is no conversation here to set a model for.");
     const selection = update.selection === null ? null : validated(available, update.selection);
     return this.#writes.run(async () => {
-      if (update.expected !== undefined) {
-        const state = this.state(available, runtimeDefault, update);
-        const current = state[update.scope]?.selection;
-        const expected = { ...update.expected, options: update.expected.options ?? {} };
-        if (!isDeepStrictEqual(current, expected))
-          throw new ModelRejection(
-            409,
-            "The model settings changed; refresh the model state and try again.",
-          );
+      // The file is the authority. A short lease covers refresh, precondition,
+      // replacement and fsync, across independently opened objects/processes.
+      let compromised: Error | undefined;
+      const checkLease = () => {
+        if (compromised) throw compromised;
+      };
+      const release = await lockfile.lock(this.#path, {
+        realpath: false,
+        retries: { retries: 8, minTimeout: 10, maxTimeout: 100 },
+        onCompromised(error) {
+          compromised = error;
+        },
+      });
+      try {
+        await this.refresh();
+        if (update.expected !== undefined) {
+          const state = this.snapshotState(available, runtimeDefault, update);
+          const current = state[update.scope]?.selection;
+          const expected = { ...update.expected, options: update.expected.options ?? {} };
+          if (!isDeepStrictEqual(current, expected))
+            throw new ModelRejection(409, "The model settings changed.");
+        }
+        checkLease();
+        await this.write(this.next(update, selection));
+        checkLease();
+        return this.snapshotState(available, runtimeDefault, update);
+      } finally {
+        await release();
       }
-      await this.write(this.next(update, selection));
-      return this.state(available, runtimeDefault, update);
     });
   }
 
@@ -238,4 +269,14 @@ function validated(available: readonly AvailableModel[], selection: Selection): 
     options[id] = choice;
   }
   return { provider: model.provider, model: model.model, options };
+}
+
+async function readLedger(path: string): Promise<Ledger> {
+  try {
+    return await Parse(LedgerSchema, JSON.parse(await readFile(path, "utf8")));
+  } catch (failure: unknown) {
+    if (failure instanceof Error && "code" in failure && failure.code === "ENOENT")
+      return { agents: [], conversations: [] };
+    throw failure;
+  }
 }

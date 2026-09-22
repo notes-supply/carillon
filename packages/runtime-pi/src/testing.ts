@@ -42,9 +42,9 @@ export async function createDeterministicRuntime(
         return executeDeterministic(request);
       });
     },
-    modelState(query) {
+    async modelState(query) {
       shutdown.signal.throwIfAborted();
-      return Promise.resolve(selections.state(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, query));
+      return await selections.state(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, query);
     },
     setModel(update) {
       shutdown.signal.throwIfAborted();
@@ -58,7 +58,11 @@ export async function createDeterministicRuntime(
   async function executeDeterministic(request: TurnRequest): Promise<TurnResponse> {
     // Resolved first, as in `executePi`: a change made while the turn runs
     // applies to the next one.
-    const selection = selections.effective(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, request);
+    const selection = await selections.effective(
+      DETERMINISTIC_MODELS,
+      DETERMINISTIC_DEFAULT,
+      request,
+    );
     const directory = conversationDirectory(sessionDirectory, request);
     await mkdir(directory, { recursive: true });
     const sessionPath = join(directory, "deterministic.json");

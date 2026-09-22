@@ -4,6 +4,7 @@ use carillon_discord::{
     config::{DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute},
     conversations::{
         IncomingMessage, InteractionSource, Participation, admit_interaction, admit_message,
+        prepare_conversation,
     },
 };
 use carillon_discord_commands::{
@@ -29,7 +30,7 @@ impl HostCalls for ModelFixture {
     }
 }
 
-fn example() -> Result<Value> {
+async fn example() -> Result<Value> {
     let directory = tempfile::tempdir()?;
     let participation = Participation::load(directory.path().join("participation.json"))?;
     let config = DiscordConfig::with_defaults(
@@ -53,7 +54,8 @@ fn example() -> Result<Value> {
     };
     let admitted = admit_message(&config, &participation, message.clone(), Value::Null)?
         .context("configured message was not admitted")?;
-    let resolved = admitted.resolve(message.channel_id.clone());
+    let http = twilight_http::Client::new(String::new());
+    let resolved = prepare_conversation(&participation, &http, admitted).await?;
     assert_eq!(resolved.conversation_id, "discord-100-300");
     assert_eq!(resolved.event.content, "Hello");
     assert!(
@@ -102,13 +104,14 @@ fn example() -> Result<Value> {
     Ok(serde_json::to_value(reply)?)
 }
 
-fn main() -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(&example()?)?);
+#[tokio::main]
+async fn main() -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(&example().await?)?);
     Ok(())
 }
 
-#[test]
-fn example_uses_admission_and_command_components() -> Result<()> {
-    example()?;
+#[tokio::test]
+async fn example_uses_admission_and_command_components() -> Result<()> {
+    example().await?;
     Ok(())
 }

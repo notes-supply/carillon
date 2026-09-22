@@ -1,5 +1,9 @@
 //! Gateway and operator HTTP assembly. Policies live in the component modules.
 use crate::conversations::{AdmittedInteraction, InteractionSource, admit_interaction};
+use crate::{
+    error::discord_failure_is_terminal,
+    inbound::{QueuedMessage, message_worker},
+};
 
 use crate::{
     InterfaceError,
@@ -7,18 +11,15 @@ use crate::{
     commands::{Commands, DiscordApp, ModelCalls, ReloadError, ReloadReport},
     config::DiscordConfig,
     conversations::{
-        IncomingMessage, Participation, admit_identity, admit_message, discord_parent_channel,
-        prepare_deterministic_conversation, prepare_discord_conversation,
+        IncomingMessage, Participation, admit_identity, admit_message,
+        prepare_deterministic_conversation,
     },
-    delivery::{
-        Feedback, clear_processing_feedback, delivery_loop, processing_feedback, start_typing,
-        terminal_feedback,
-    },
+    delivery::{Feedback, delivery_loop, terminal_feedback},
 };
 #[cfg(test)]
 use crate::{
-    conversations::MessagePlan,
-    delivery::{discord_chunks, send_discord_message},
+    conversations::{MessagePlan, prepare_conversation},
+    error::discord_status_is_terminal,
 };
 use anyhow::{Context, Result, bail};
 use axum::{
@@ -33,8 +34,7 @@ use carillon_installation::config::{
     LoadedConfig, ProviderRole, RELEASE_VERSION, read_token_file, token_matches,
 };
 use carillon_protocol::model::{
-    Delivery, DeliveryOutcome, DeliveryReconciliation, EventReceipt, ExternalEvent, Health,
-    ModelQuery,
+    Delivery, DeliveryOutcome, DeliveryReconciliation, EventReceipt, Health, ModelQuery,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -46,10 +46,7 @@ use tokio::{
 };
 use tracing::{error, info, warn};
 use twilight_gateway::{Event, EventTypeFlags, Intents, Shard, ShardId, StreamExt as _};
-use twilight_http::{
-    Client as DiscordHttp, error::ErrorType as DiscordErrorType,
-    response::StatusCode as DiscordStatusCode,
-};
+use twilight_http::Client as DiscordHttp;
 use twilight_model::channel::ChannelType;
 use twilight_model::{
     application::interaction::{
@@ -85,12 +82,6 @@ struct DiscordState {
     /// Absent in deterministic mode, where no Discord application exists.
     app: Option<Arc<DiscordApp>>,
     operator_token_hash: String,
-}
-
-#[derive(Clone, Debug)]
-struct QueuedMessage {
-    request: IncomingMessage,
-    native: Value,
 }
 
 /// Everything `serve` needs besides the registry.
@@ -217,7 +208,14 @@ async fn connect(
     let worker_state = state.clone();
     let worker_http = http.clone();
     tokio::spawn(async move {
-        message_worker(worker_state, worker_http, receiver).await;
+        message_worker(
+            worker_state.core,
+            worker_state.discord,
+            worker_state.participation,
+            worker_http,
+            receiver,
+        )
+        .await;
     });
     let router = discord_router(state.clone(), false);
     tokio::select! {
@@ -627,119 +625,6 @@ async fn handle_interaction(state: DiscordState, interaction: DiscordInteraction
         .await
     {
         warn!(%error, "Discord interaction reply failed");
-    }
-}
-
-fn discord_status_is_terminal(status: DiscordStatusCode) -> bool {
-    status.is_client_error() && status != DiscordStatusCode::TOO_MANY_REQUESTS
-}
-
-fn discord_failure_is_terminal(failure: &anyhow::Error) -> bool {
-    failure
-        .downcast_ref::<twilight_http::Error>()
-        .is_some_and(|failure| match failure.kind() {
-            DiscordErrorType::Response { status, .. } => discord_status_is_terminal(*status),
-            DiscordErrorType::BuildingRequest
-            | DiscordErrorType::CreatingHeader { .. }
-            | DiscordErrorType::Json
-            | DiscordErrorType::Unauthorized
-            | DiscordErrorType::Validation => true,
-            _ => false,
-        })
-}
-
-async fn message_worker(
-    state: DiscordState,
-    http: Arc<DiscordHttp>,
-    mut messages: mpsc::Receiver<QueuedMessage>,
-) {
-    'messages: while let Some(mut inbound) = messages.recv().await {
-        let discord = &state.discord;
-        inbound.request.parent_channel_id = loop {
-            match discord_parent_channel(
-                &http,
-                &state.discord,
-                &state.participation,
-                &inbound.request.channel_id,
-            )
-            .await
-            {
-                Ok(parent) => break parent,
-                Err(failure) if discord_failure_is_terminal(&failure) => {
-                    let source = format!(
-                        "{}:{}",
-                        inbound.request.channel_id, inbound.request.event_id
-                    );
-                    terminal_feedback(&http, discord, &source, Feedback::Failed).await;
-                    warn!(error = %failure, "Discord message route is unavailable");
-                    continue 'messages;
-                }
-                Err(failure) => {
-                    warn!(error = %failure, "waiting to resolve Discord message route");
-                    sleep(Duration::from_millis(250)).await;
-                }
-            }
-        };
-        let Ok(Some(plan)) = admit_message(
-            discord,
-            &state.participation,
-            inbound.request,
-            inbound.native,
-        ) else {
-            continue;
-        };
-        let source = format!("{}:{}", plan.channel_id, plan.message_id);
-        let resolved = loop {
-            match prepare_discord_conversation(&state.participation, &http, plan.clone()).await {
-                Ok(resolved) => break resolved,
-                Err(failure) if discord_failure_is_terminal(&failure) => {
-                    terminal_feedback(&http, discord, &source, Feedback::Failed).await;
-                    warn!(error = %failure, "Discord conversation cannot be prepared");
-                    continue 'messages;
-                }
-                Err(failure) => {
-                    warn!(error = %failure, "waiting to prepare Discord conversation");
-                    sleep(Duration::from_millis(250)).await;
-                }
-            }
-        };
-        processing_feedback(&http, discord, &resolved.event.feedback_target_id).await;
-        let typing = start_typing(http.clone(), discord, &resolved.event.delivery_target_id).await;
-        let receipt = submit_event_with_retry(&state.core, &resolved.event).await;
-        if let Some(task) = typing {
-            task.abort();
-        }
-        match receipt {
-            Ok(receipt) if receipt.duplicate => {
-                clear_processing_feedback(&http, discord, &resolved.event.feedback_target_id).await;
-            }
-            Ok(_) => {}
-            Err(failure) => {
-                warn!(error = %failure.message, "Discord event submission failed");
-                terminal_feedback(
-                    &http,
-                    discord,
-                    &resolved.event.feedback_target_id,
-                    Feedback::Failed,
-                )
-                .await;
-            }
-        }
-    }
-}
-
-async fn submit_event_with_retry(
-    core: &CoreClient,
-    event: &ExternalEvent,
-) -> Result<EventReceipt, InterfaceError> {
-    loop {
-        match core.submit_event(event).await {
-            Err(failure) if failure.is_transient() => {
-                warn!(error = %failure.message, event_id = %event.event_id, "waiting to submit Discord event");
-                sleep(Duration::from_millis(250)).await;
-            }
-            outcome => return outcome,
-        }
     }
 }
 

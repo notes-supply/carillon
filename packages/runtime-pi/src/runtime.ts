@@ -88,8 +88,13 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
       );
     },
     modelState(query: ModelQuery): Promise<ModelState> {
-      return track(async () =>
-        selections.state(offeredPiModels(await availablePiModels()), runtimeDefault(), query),
+      return track(
+        async () =>
+          await selections.state(
+            offeredPiModels(await availablePiModels()),
+            runtimeDefault(),
+            query,
+          ),
       );
     },
     setModel(update: ModelUpdate): Promise<ModelState> {
@@ -173,7 +178,11 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
     // resolved against the same catalogue the picker reports, so the thinking
     // level that runs is the one shown.
     const models = await availablePiModels();
-    const selection = selections.effective(offeredPiModels(models), runtimeDefault(), request);
+    const selection = await selections.effective(
+      offeredPiModels(models),
+      runtimeDefault(),
+      request,
+    );
     const model = piModel(models, selection);
     const thinking = selection.options?.[THINKING_OPTION];
     const runtime = modelRuntime;

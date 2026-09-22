@@ -29,14 +29,19 @@ retain the actual Wasm path rather than substituting this direct native call.
   them with Discord. [Command presentation](../carillon-discord-commands/src/model.rs)
   lives in the separate guest library; [`HostCalls`](../carillon-discord-commands/src/lib.rs)
   is the existing native-operation boundary, also used by the example.
+- [`inbound`](src/inbound.rs) prepares native conversations, emits feedback and retries
+  only ambiguous transport submission with the same event identity. It receives its
+  core client, configuration and participation store explicitly.
 - [`application`](src/application.rs) binds the operator server, connects the gateway,
   and assembles these pieces. [`cli`](src/cli.rs) supplies installation-derived paths
   and credentials. Importing the library starts none of these services.
 
 For ordinary service use, keep using `carillon discord serve …`; no new CLI is required.
-Thread creation/reconciliation and delivery stay native. `MessagePlan::resolve` maps
-an admitted message to a **confirmed** channel/thread target; it does not create a
-thread or record adoption. The native service performs those steps before resolving.
+Thread creation/reconciliation and delivery stay native. Pass the admitted plan to
+`prepare_conversation(&participation, &discord_http, plan)`: it creates or reconciles
+threads, persists participation, and returns the resolved event. Channel routes make
+no Discord request. Both the service and external callers use this operation; callers
+cannot bypass preparation by assigning an arbitrary target to an opaque plan.
 Participation has one owning provider process; sharing its file between independent
 writers is not supported.
 
@@ -45,7 +50,11 @@ writers is not supported.
 Admission and identity tests live [beside conversations](src/conversations/tests.rs).
 Change picker layout in the [command library](../carillon-discord-commands/src/model.rs),
 not in core or Pi. Host/reload tests live in `commands.rs`; HTTP/gateway composition,
-transport-failure and delivery tests live in [application tests](src/application/tests.rs).
+tests live in [application tests](src/application/tests.rs). Transport-failure tests
+live [beside the core client](src/client/tests.rs), native delivery recovery tests
+[beside delivery](src/delivery/tests.rs), and message retry/feedback tests
+[beside inbound processing](src/inbound/tests.rs). The [external conversation tests](tests/conversations.rs)
+exercise native thread preparation with a local Discord HTTP substitute, not a gateway.
 
 ```sh
 mise exec -- cargo test -p carillon-discord --all-targets

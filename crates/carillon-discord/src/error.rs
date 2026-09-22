@@ -1,6 +1,9 @@
 //! Admission and core-transport failures.
 use axum::http::StatusCode;
 use tracing::error;
+use twilight_http::{
+    error::ErrorType as DiscordErrorType, response::StatusCode as DiscordStatusCode,
+};
 #[derive(Debug)]
 pub struct InterfaceError {
     pub(crate) status: StatusCode,
@@ -46,3 +49,21 @@ impl std::fmt::Display for InterfaceError {
     }
 }
 impl std::error::Error for InterfaceError {}
+
+pub(crate) fn discord_status_is_terminal(status: DiscordStatusCode) -> bool {
+    status.is_client_error() && status != DiscordStatusCode::TOO_MANY_REQUESTS
+}
+
+pub(crate) fn discord_failure_is_terminal(failure: &anyhow::Error) -> bool {
+    failure
+        .downcast_ref::<twilight_http::Error>()
+        .is_some_and(|failure| match failure.kind() {
+            DiscordErrorType::Response { status, .. } => discord_status_is_terminal(*status),
+            DiscordErrorType::BuildingRequest
+            | DiscordErrorType::CreatingHeader { .. }
+            | DiscordErrorType::Json
+            | DiscordErrorType::Unauthorized
+            | DiscordErrorType::Validation => true,
+            _ => false,
+        })
+}

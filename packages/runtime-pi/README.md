@@ -30,6 +30,14 @@ Replace `modelRuntime`, `settings`, or `selections` independently when supplying
 
 `executeTurn` serializes execution within the instance. The tuple of interface, agent and audience identifies the native conversation; a new input in that conversation reopens its native history. Cancellation settles before another turn executes. `close` rejects new work, cancels active/queued execution, and waits for outstanding operations to settle. It does not erase sessions, replay inputs, or dispose caller-owned collaborators. For lower-level native session use, `openConversation`, `createPiExecutionSession`, and `promptSession` are the same primitives used by this runtime.
 
+`ModelSelections` reads the selection file as the authority, not a permanently cached
+copy. Its asynchronous reads refresh from disk; updates hold a short cross-process
+`proper-lockfile` lease around refresh, precondition checking and atomic persistence.
+Independent handles therefore preserve each other's acknowledged writes. Contention
+is bounded and reported as a failure, not a successful overwritten update. This is
+selection-file coordination only: it does not make concurrent runtime instances safe
+to execute against the same native sessions.
+
 ## Try it
 
 ```sh

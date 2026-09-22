@@ -5,6 +5,7 @@ use carillon_protocol::model::{
     Delivery, DeliveryAck, DeliveryOutcome, DeliveryReconciliation, EventReceipt, ExternalEvent,
     INSTANCE_HEADER, ModelQuery, ModelUpdate, PROVIDER_HEADER,
 };
+use carillon_protocol::models::ModelState;
 use reqwest::{Client, IntoUrl, Method, RequestBuilder, Url};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -109,13 +110,11 @@ impl CoreClient {
         )
     }
 
-    /// The runtime's model state for an agent and, when given, a
-    /// conversation, relayed by core as opaque JSON.
-    /// Read the current model state.
+    /// Read the runtime's model state for an agent and optional conversation.
     ///
     /// # Errors
     /// Returns core rejection, transport, or malformed-response failures.
-    pub async fn model_state(&self, query: &ModelQuery) -> Result<Value, String> {
+    pub async fn model_state(&self, query: &ModelQuery) -> Result<ModelState, String> {
         let mut url = Url::parse(&self.url("/v1/model")).map_err(|error| error.to_string())?;
         {
             let mut pairs = url.query_pairs_mut();
@@ -129,11 +128,10 @@ impl CoreClient {
     }
 
     /// Changes a model selection and returns the resulting state.
-    /// Update a model selection.
     ///
     /// # Errors
     /// Returns core rejection, transport, or malformed-response failures.
-    pub async fn set_model(&self, update: &ModelUpdate) -> Result<Value, String> {
+    pub async fn set_model(&self, update: &ModelUpdate) -> Result<ModelState, String> {
         let request = self
             .request(Method::PUT, self.url("/v1/model"))
             .timeout(MODEL_CALL_TIMEOUT)
@@ -149,7 +147,7 @@ const MODEL_CALL_TIMEOUT: Duration = Duration::from_secs(6);
 /// Performs a model call and turns every failure into words for the user.
 /// Core and the runtime phrase their rejections for people; transport
 /// failures are described here.
-async fn model_json(request: RequestBuilder) -> Result<Value, String> {
+async fn model_json(request: RequestBuilder) -> Result<ModelState, String> {
     let response = match request.send().await {
         Ok(response) => response,
         Err(error) if error.is_timeout() => {
@@ -216,3 +214,6 @@ pub(crate) fn test_client(base_url: String) -> CoreClient {
     client.instance_id = "instance".to_owned();
     client
 }
+
+#[cfg(test)]
+mod tests;

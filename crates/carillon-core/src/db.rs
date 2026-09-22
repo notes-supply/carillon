@@ -24,6 +24,7 @@
 //!   a stale caller fails instead of overwriting newer state.
 
 use std::{
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     str::FromStr,
     time::{SystemTime, UNIX_EPOCH},
@@ -95,13 +96,32 @@ fn optional_state_column<T: FromStr<Err = anyhow::Error>>(
 impl Database {
     pub fn create(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)
                 .with_context(|| format!("create {}", parent.display()))?;
+            let metadata = std::fs::symlink_metadata(parent)?;
+            if !metadata.is_dir() || metadata.permissions().mode() & 0o077 != 0 {
+                bail!(
+                    "database directory must be private (0700): {}",
+                    parent.display()
+                );
+            }
         }
         let database = Self {
             path: path.to_path_buf(),
         };
-        let connection = Connection::open(path)?;
+        // Reserve the name atomically before SQLite opens it. Existing files,
+        // including symlinks and incomplete prior creations, are never adopted.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("create fresh database {}", path.display()))?;
+        let connection =
+            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         Self::initialize_connection(&connection)?;
         Ok(database)
@@ -728,7 +748,12 @@ fn timestamp() -> Result<i64> {
 mod tests {
     use anyhow::{Context, Result};
     use serde_json::json;
-    use tempfile::tempdir;
+    use std::os::unix::fs::PermissionsExt as _;
+    fn tempdir() -> Result<tempfile::TempDir> {
+        let directory = tempfile::tempdir()?;
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
+        Ok(directory)
+    }
 
     use super::Database;
     use carillon_protocol::model::{

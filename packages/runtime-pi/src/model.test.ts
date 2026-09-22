@@ -1,3 +1,5 @@
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,13 +30,15 @@ async function withLedger(run: (path: string) => Promise<void>): Promise<void> {
 it("reports runtime defaults until a scope chooses, then follows the nearest scope", async () => {
   await withLedger(async (path) => {
     const selections = await ModelSelections.open(path);
-    expect(selections.state(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, conversation)).toEqual({
+    expect(
+      await selections.state(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, conversation),
+    ).toEqual({
       available: DETERMINISTIC_MODELS,
       agent: { selection: DETERMINISTIC_DEFAULT, overridden: false },
       conversation: { selection: DETERMINISTIC_DEFAULT, overridden: false },
     });
     expect(
-      selections.state(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, {
+      await selections.state(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, {
         interface_id: "discord-private",
         agent_id: "default",
       }),
@@ -47,12 +51,12 @@ it("reports runtime defaults until a scope chooses, then follows the nearest sco
     });
     expect(agentSet.agent).toEqual({ selection: reasoner, overridden: true });
     expect(agentSet.conversation).toEqual({ selection: reasoner, overridden: false });
-    expect(selections.effective(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, conversation)).toEqual(
-      reasoner,
-    );
-    expect(selections.effective(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, elsewhere)).toEqual(
-      reasoner,
-    );
+    expect(
+      await selections.effective(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, conversation),
+    ).toEqual(reasoner);
+    expect(
+      await selections.effective(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, elsewhere),
+    ).toEqual(reasoner);
 
     const fixed = { provider: "substitute", model: "fixed", options: {} };
     const conversationSet = await selections.update(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, {
@@ -62,12 +66,12 @@ it("reports runtime defaults until a scope chooses, then follows the nearest sco
     });
     expect(conversationSet.agent).toEqual({ selection: reasoner, overridden: true });
     expect(conversationSet.conversation).toEqual({ selection: fixed, overridden: true });
-    expect(selections.effective(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, conversation)).toEqual(
-      fixed,
-    );
-    expect(selections.effective(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, elsewhere)).toEqual(
-      reasoner,
-    );
+    expect(
+      await selections.effective(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, conversation),
+    ).toEqual(fixed);
+    expect(
+      await selections.effective(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, elsewhere),
+    ).toEqual(reasoner);
 
     // Returning a scope to its default removes only that scope's choice.
     const agentCleared = await selections.update(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, {
@@ -77,18 +81,18 @@ it("reports runtime defaults until a scope chooses, then follows the nearest sco
     });
     expect(agentCleared.agent).toEqual({ selection: DETERMINISTIC_DEFAULT, overridden: false });
     expect(agentCleared.conversation).toEqual({ selection: fixed, overridden: true });
-    expect(selections.effective(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, elsewhere)).toEqual(
-      DETERMINISTIC_DEFAULT,
-    );
+    expect(
+      await selections.effective(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, elsewhere),
+    ).toEqual(DETERMINISTIC_DEFAULT);
 
     // Choices survive a restart through the ledger file alone.
     const reopened = await ModelSelections.open(path);
-    expect(reopened.effective(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, conversation)).toEqual(
-      fixed,
-    );
-    expect(reopened.effective(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, elsewhere)).toEqual(
-      DETERMINISTIC_DEFAULT,
-    );
+    expect(
+      await reopened.effective(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, conversation),
+    ).toEqual(fixed);
+    expect(
+      await reopened.effective(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, elsewhere),
+    ).toEqual(DETERMINISTIC_DEFAULT);
   });
 });
 
@@ -103,9 +107,9 @@ it("reports and runs the settings a choice leaves to the model's defaults", asyn
       selection: chosen,
     });
     expect(state.agent).toEqual({ selection: runs, overridden: true });
-    expect(selections.effective(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, conversation)).toEqual(
-      runs,
-    );
+    expect(
+      await selections.effective(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, conversation),
+    ).toEqual(runs);
     // The ledger keeps only what was chosen, so a changed default applies later.
     expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject({
       agents: [{ agent_id: "default", selection: chosen }],
@@ -129,21 +133,23 @@ it("reports and runs the settings a choice leaves to the model's defaults", asyn
         : model,
     );
     const lowered = { ...chosen, options: { thinking: "low" } };
-    expect(selections.state(narrowed, DETERMINISTIC_DEFAULT, conversation).agent).toEqual({
+    expect((await selections.state(narrowed, DETERMINISTIC_DEFAULT, conversation)).agent).toEqual({
       selection: lowered,
       overridden: true,
     });
-    expect(selections.effective(narrowed, DETERMINISTIC_DEFAULT, conversation)).toEqual(lowered);
-    expect(selections.effective(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, conversation)).toEqual(
-      reasoner,
+    expect(await selections.effective(narrowed, DETERMINISTIC_DEFAULT, conversation)).toEqual(
+      lowered,
     );
+    expect(
+      await selections.effective(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, conversation),
+    ).toEqual(reasoner);
 
     // A model the catalogue no longer offers is reported as chosen, not replaced.
     const without = DETERMINISTIC_MODELS.filter((model) => model.model !== "reasoner");
     expect(resolved(without, reasoner)).toEqual(reasoner);
-    expect(selections.state(without, DETERMINISTIC_DEFAULT, conversation).agent.selection).toEqual(
-      reasoner,
-    );
+    expect(
+      (await selections.state(without, DETERMINISTIC_DEFAULT, conversation)).agent.selection,
+    ).toEqual(reasoner);
   });
 });
 
@@ -174,12 +180,12 @@ it("applies concurrent changes in order without losing any", async () => {
       DETERMINISTIC_DEFAULT,
     ]);
     const reopened = await ModelSelections.open(path);
-    expect(reopened.effective(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, elsewhere)).toEqual(
-      fixed,
-    );
-    expect(reopened.state(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, conversation).agent).toEqual(
-      { selection: DETERMINISTIC_DEFAULT, overridden: true },
-    );
+    expect(
+      await reopened.effective(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, elsewhere),
+    ).toEqual(fixed);
+    expect(
+      (await reopened.state(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, conversation)).agent,
+    ).toEqual({ selection: DETERMINISTIC_DEFAULT, overridden: true });
   });
 });
 
@@ -211,7 +217,8 @@ it("checks stale-write preconditions inside the write queue for both scopes", as
       expect(outcomes[1]).toMatchObject({ status: "rejected", reason: { status: 409 } });
       const reopened = await ModelSelections.open(path);
       expect(
-        reopened.state(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, conversation)[scope]?.selection,
+        (await reopened.state(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, conversation))[scope]
+          ?.selection,
       ).toEqual(newer);
     }
   });
@@ -225,8 +232,9 @@ it("a conversation option write cannot undo an inherited model change", async ()
       scope: "agent",
       selection: reasoner,
     });
-    const expected = selections.state(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, conversation)
-      .conversation?.selection;
+    const expected = (
+      await selections.state(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, conversation)
+    ).conversation?.selection;
     if (!expected) throw new Error("fixture must have an inherited selection");
     await selections.update(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, {
       ...conversation,
@@ -273,9 +281,9 @@ it("refuses selections the catalog does not offer without touching the ledger", 
       (failure: unknown) => failure instanceof ModelRejection && failure.status === 400,
     );
     await expect(readFile(path)).rejects.toMatchObject({ code: "ENOENT" });
-    expect(selections.effective(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, conversation)).toEqual(
-      DETERMINISTIC_DEFAULT,
-    );
+    expect(
+      await selections.effective(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, conversation),
+    ).toEqual(DETERMINISTIC_DEFAULT);
   });
 });
 
@@ -294,12 +302,103 @@ it("names selections with their options", () => {
 it("produces shared wire states including each model option default", async () => {
   await withLedger(async (path) => {
     const ledger = await ModelSelections.open(path);
-    const state = ledger.state(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, conversation);
+    const state = await ledger.state(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, conversation);
     expect(Check(ModelStateSchema, state)).toBe(true);
     expect(
       state.available
         .flatMap((model) => model.options)
         .every((option) => option.choices.includes(option.default)),
     ).toBe(true);
+  });
+});
+
+it("independent objects serialize file writes and see each other's committed state", async () => {
+  await withLedger(async (path) => {
+    const first = await ModelSelections.open(path);
+    const second = await ModelSelections.open(path);
+    await Promise.all([
+      first.update(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, {
+        ...conversation,
+        agent_id: "one",
+        scope: "agent",
+        selection: reasoner,
+      }),
+      second.update(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, {
+        ...conversation,
+        agent_id: "two",
+        scope: "agent",
+        selection: reasoner,
+      }),
+    ]);
+    for (const store of [first, second, await ModelSelections.open(path)]) {
+      for (const agent_id of ["one", "two"]) {
+        expect(
+          (
+            await store.state(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, {
+              ...conversation,
+              agent_id,
+            })
+          ).agent.selection,
+        ).toEqual(reasoner);
+      }
+    }
+    const outcomes = await Promise.allSettled(
+      [first, second].map((store) =>
+        store.update(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, {
+          ...conversation,
+          agent_id: "one",
+          scope: "agent",
+          selection: DETERMINISTIC_DEFAULT,
+          expected: reasoner,
+        }),
+      ),
+    );
+    expect(outcomes.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(outcomes.filter((result) => result.status === "rejected")).toMatchObject([
+      { reason: { status: 409 } },
+    ]);
+  });
+});
+
+it("serializes selection updates across processes", async () => {
+  await withLedger(async (path) => {
+    const script = `
+      import { ModelSelections } from ${JSON.stringify(new URL("./model.ts", import.meta.url).href)};
+      const [path, agent] = process.argv.slice(1);
+      const store = await ModelSelections.open(path);
+      process.on("message", async () => {
+        await store.update([{provider:"test", model:"small", name:"Small", options:[]}], {provider:"test", model:"small", options:{}},
+          {interface_id:"discord", agent_id:agent, scope:"agent", selection:{provider:"test", model:"small", options:{}}});
+        process.disconnect();
+      });
+      process.send("ready");
+    `;
+    const children = ["first", "second"].map((agent) => {
+      const child = spawn(
+        process.execPath,
+        ["--input-type=module", "--eval", script, path, agent],
+        {
+          stdio: ["ignore", "ignore", "inherit", "ipc"],
+        },
+      );
+      return { child, ready: once(child, "message"), exited: once(child, "exit") };
+    });
+    try {
+      await Promise.all(children.map(({ ready }) => ready));
+      for (const { child } of children) child.send("write");
+      expect(await Promise.all(children.map(({ exited }) => exited))).toEqual([
+        [0, null],
+        [0, null],
+      ]);
+      const store = await ModelSelections.open(path);
+      for (const agent_id of ["first", "second"]) {
+        expect(
+          (await store.state([], DETERMINISTIC_DEFAULT, { interface_id: "discord", agent_id }))
+            .agent.overridden,
+        ).toBe(true);
+      }
+    } finally {
+      for (const { child } of children) if (child.exitCode === null) child.kill();
+    }
   });
 });

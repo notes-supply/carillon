@@ -233,8 +233,13 @@ pub enum ModelScope {
 /// interaction happens inside a conversation, that conversation's audience.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ModelQuery {
+    #[serde(deserialize_with = "crate::models::nonempty_string")]
     pub agent_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "crate::models::optional_nonempty_string",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub audience_id: Option<String>,
 }
 
@@ -242,13 +247,23 @@ pub struct ModelQuery {
 /// shared model vocabulary; `None` returns the scope to its default.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ModelUpdate {
+    #[serde(deserialize_with = "crate::models::nonempty_string")]
     pub agent_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "crate::models::optional_nonempty_string",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub audience_id: Option<String>,
     pub scope: ModelScope,
+    #[serde(deserialize_with = "crate::models::required_nullable")]
     pub selection: Option<Selection>,
     /// Runtime-owned precondition for read-modify-write controls.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "crate::models::optional_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub expected: Option<Selection>,
 }
 
@@ -256,6 +271,7 @@ pub struct ModelUpdate {
 /// that names the conversation together with agent and audience.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RuntimeModelQuery {
+    #[serde(deserialize_with = "crate::models::nonempty_string")]
     pub interface_id: String,
     #[serde(flatten)]
     pub query: ModelQuery,
@@ -264,6 +280,7 @@ pub struct RuntimeModelQuery {
 /// Core-to-runtime form of [`ModelUpdate`].
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RuntimeModelUpdate {
+    #[serde(deserialize_with = "crate::models::nonempty_string")]
     pub interface_id: String,
     #[serde(flatten)]
     pub update: ModelUpdate,

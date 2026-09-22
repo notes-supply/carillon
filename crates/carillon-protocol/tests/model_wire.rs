@@ -19,6 +19,9 @@ struct Fixtures {
     queries: Vec<Value>,
     updates: Vec<Value>,
     invalid_updates: Vec<Value>,
+    invalid_queries: Vec<Value>,
+    invalid_states: Vec<Value>,
+    accepted_updates: Vec<Value>,
 }
 
 #[test]
@@ -37,6 +40,15 @@ fn shared_model_wire_fixtures() -> Result<()> {
     }
     for value in &fixtures.invalid_updates {
         assert!(serde_json::from_value::<RuntimeModelUpdate>(value.clone()).is_err());
+    }
+    for value in fixtures.invalid_queries {
+        assert!(serde_json::from_value::<RuntimeModelQuery>(value).is_err());
+    }
+    for value in fixtures.invalid_states {
+        assert!(serde_json::from_value::<ModelState>(value).is_err());
+    }
+    for value in fixtures.accepted_updates {
+        serde_json::from_value::<RuntimeModelUpdate>(value)?;
     }
     Ok(())
 }

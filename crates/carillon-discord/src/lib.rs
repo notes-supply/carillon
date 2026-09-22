@@ -7,5 +7,6 @@ pub mod config;
 pub mod conversations;
 mod delivery;
 mod error;
+mod inbound;
 pub use client::CoreClient;
 pub use error::InterfaceError;

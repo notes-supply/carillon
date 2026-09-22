@@ -131,6 +131,124 @@
           "thinking": 42
         }
       }
+    },
+    {
+      "interface_id": "discord-private",
+      "agent_id": "default",
+      "scope": "agent"
+    },
+    {
+      "interface_id": "discord-private",
+      "agent_id": "default",
+      "scope": "agent",
+      "selection": null,
+      "expected": null
+    },
+    {
+      "interface_id": "discord-private",
+      "agent_id": "",
+      "scope": "agent",
+      "selection": null
+    },
+    {
+      "interface_id": "discord-private",
+      "agent_id": "default",
+      "scope": "agent",
+      "selection": null,
+      "audience_id": null
+    },
+    {
+      "interface_id": "discord-private",
+      "agent_id": "default",
+      "scope": "agent",
+      "selection": null,
+      "audience_id": ""
+    },
+    {
+      "interface_id": "",
+      "agent_id": "default",
+      "scope": "agent",
+      "selection": null
+    },
+    {
+      "interface_id": "discord-private",
+      "agent_id": "default",
+      "scope": "agent",
+      "selection": {
+        "provider": "",
+        "model": "m"
+      }
+    },
+    {
+      "interface_id": "discord-private",
+      "agent_id": "default",
+      "scope": "agent",
+      "selection": {
+        "provider": "p",
+        "model": "",
+        "options": {}
+      }
+    }
+  ],
+  "invalid_states": [
+    {
+      "available": [],
+      "agent": {
+        "overridden": false
+      }
+    },
+    {
+      "available": [],
+      "agent": {
+        "selection": null
+      }
+    },
+    {
+      "available": [],
+      "agent": {
+        "selection": null,
+        "overridden": false
+      },
+      "conversation": null
+    },
+    {
+      "available": [
+        {
+          "provider": "p",
+          "model": "m",
+          "name": "M"
+        }
+      ],
+      "agent": {
+        "selection": null,
+        "overridden": false
+      }
+    }
+  ],
+  "invalid_queries": [
+    {
+      "interface_id": "i",
+      "agent_id": "a",
+      "audience_id": null
+    },
+    {
+      "interface_id": "i",
+      "agent_id": ""
+    },
+    {
+      "interface_id": "",
+      "agent_id": "a"
+    }
+  ],
+  "accepted_updates": [
+    {
+      "interface_id": "discord-private",
+      "agent_id": "default",
+      "scope": "agent",
+      "selection": {
+        "provider": "p",
+        "model": "m"
+      }
     }
   ]
 }

@@ -2,7 +2,6 @@
 //! commands it defines, registering those with Discord, and running each
 //! interaction through it with the native model operations it may ask for.
 
-use carillon_protocol::models::ModelState;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -100,12 +99,7 @@ impl ModelCalls {
             Err(error) => Err(format!("invalid host request: {error}")),
         };
         match outcome {
-            Ok(value) => match serde_json::from_value::<ModelState>(value) {
-                Ok(state) => HostReply::ModelState(state),
-                Err(_) => {
-                    HostReply::Error("The runtime reported an unusable model state.".to_owned())
-                }
-            },
+            Ok(state) => HostReply::ModelState(state),
             Err(message) => HostReply::Error(message),
         }
     }

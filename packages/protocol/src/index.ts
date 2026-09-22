@@ -49,5 +49,3 @@ export const ModelUpdateSchema = Type.Object({
   expected: Type.Optional(SelectionSchema),
 });
 export type ModelUpdate = Static<typeof ModelUpdateSchema>;
-
-/** A request the runtime refuses; the message is shown to the person asking. */
