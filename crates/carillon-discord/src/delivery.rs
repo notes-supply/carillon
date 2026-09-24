@@ -9,9 +9,12 @@ use std::{sync::Arc, time::Duration};
 use tokio::{task::JoinHandle, time::sleep};
 use tracing::warn;
 use twilight_http::{Client as DiscordHttp, request::channel::reaction::RequestReactionType};
-use twilight_model::id::{
-    Id,
-    marker::{ChannelMarker, EmojiMarker, MessageMarker},
+use twilight_model::{
+    channel::message::AllowedMentions,
+    id::{
+        Id,
+        marker::{ChannelMarker, EmojiMarker, MessageMarker},
+    },
 };
 #[derive(Clone, Copy)]
 pub(crate) enum Feedback {
@@ -244,9 +247,16 @@ pub(crate) async fn send_discord_message(
     if chunks.is_empty() {
         bail!("Discord delivery content is empty");
     }
+    // Delivered text is the agent's and the runtime's, not the user's: it
+    // must not notify anyone, whatever mention syntax it contains.
+    let silent = AllowedMentions::default();
     let mut ids = Vec::with_capacity(chunks.len());
     for chunk in chunks {
-        let message = http.create_message(channel_id).content(&chunk).await?;
+        let message = http
+            .create_message(channel_id)
+            .allowed_mentions(Some(&silent))
+            .content(&chunk)
+            .await?;
         ids.push(message.model().await?.id.to_string());
     }
     Ok(ids.join(","))

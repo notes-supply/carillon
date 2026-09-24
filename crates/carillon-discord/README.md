@@ -25,6 +25,8 @@ retain the actual Wasm path rather than substituting this direct native call.
   provider instance. Reconciliation requires exclusive ownership of that provider.
 - [`delivery`](src/delivery.rs) implements native delivery and feedback using the
   concrete core and Discord clients. It does not own a second delivery queue.
+  Delivered content is sent as given, split at Discord's length limit, with mentions
+  disabled.
 - [`commands`](src/commands.rs) hosts replaceable command generations and registers
   them with Discord. [Command presentation](../carillon-discord-commands/src/model.rs)
   lives in the separate guest library; [`HostCalls`](../carillon-discord-commands/src/lib.rs)
