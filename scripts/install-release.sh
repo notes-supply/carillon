@@ -72,11 +72,11 @@ fi
 # Existing per-user installations retain credentials and durable state; only
 # the Discord provider's own settings file is (re)written.
 if [ ! -f "$CARILLON_HOME/carillon.toml" ]; then
-  "$SOURCE/bin/carillon" init --root "$CARILLON_HOME" --workspace "$WORKSPACE" --base-port "$BASE_PORT"
+  "$SOURCE/bin/carillon" --home "$CARILLON_HOME" init --workspace "$WORKSPACE" --base-port "$BASE_PORT"
 fi
 # USER_IDS and ROUTES intentionally expand into repeated, validated CLI arguments.
 # shellcheck disable=SC2086
-"$SOURCE/bin/carillon" discord configure --config "$CARILLON_HOME/carillon.toml" --provider discord-private \
+"$SOURCE/bin/carillon" --home "$CARILLON_HOME" discord configure --provider discord-private \
   --guild-id "$GUILD_ID" --bot-user-id "$BOT_USER_ID" $USER_IDS $ROUTES >/dev/null
 
 install -d -m 0700 "$CARILLON_HOME" "$CARILLON_HOME/credentials" "$CARILLON_HOME/providers" \
@@ -140,6 +140,6 @@ Carillon installed for $OWNER at $CARILLON_HOME and enabled for this user's serv
    Authentication alone is not enough: the runtime requires a saved, available default model.
 3. Start deliberately with: systemctl --user start carillon.target
 4. Inspect services with: systemctl --user status carillon.target
-   Inspect the running product with: $APP/bin/carillon status --config $CARILLON_HOME/carillon.toml
+   Inspect the running product with: $APP/bin/carillon status
 For boot without an interactive login, an administrator may run: loginctl enable-linger $OWNER
 EOF

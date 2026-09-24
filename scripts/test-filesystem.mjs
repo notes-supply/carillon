@@ -61,14 +61,14 @@ try {
 
 async function testConfiguration() {
   const root = join(scratch, "configuration");
-  run("init", "--root", root, "--workspace", scratch, ...initOptions);
+  run("--home", root, "init", "--workspace", scratch, ...initOptions);
   const config = join(root, "carillon.toml");
   const discord = join(root, "providers/discord-private.toml");
   run(
+    "--home",
+    root,
     "discord",
     "configure",
-    "--config",
-    config,
     ...discordOptions,
     "--user-id",
     "200",
@@ -79,13 +79,11 @@ async function testConfiguration() {
   const token = await readFile(join(root, "credentials/operator.token"));
   // The registry keeps its operator-chosen mode; provider files are always owner-only.
   for (const [args, target, mode] of [
-    [["provider", "--config", config, "runtime-pi", "disable"], config, 0o640],
+    [["provider", "runtime-pi", "disable"], config, 0o640],
     [
       [
         "discord",
         "configure",
-        "--config",
-        config,
         ...discordOptions,
         "--user-id",
         "999",
@@ -98,7 +96,7 @@ async function testConfiguration() {
   ]) {
     const original = await readFile(target);
     const trace = join(scratch, `${args[0]}.trace`);
-    execFileSync("strace", [...traceOptions, "-o", trace, binary, ...args]);
+    execFileSync("strace", [...traceOptions, "-o", trace, binary, "--home", root, ...args]);
     const updated = await readFile(target);
     assert.notDeepEqual(updated, original);
     const lines = (await readFile(trace, "utf8")).split("\n");
@@ -136,6 +134,8 @@ async function testConfiguration() {
           "-e",
           `inject=fsync:error=EIO:when=${ordinal}`,
           binary,
+          "--home",
+          root,
           ...args,
         ],
         { encoding: "utf8", timeout: 30_000 },
@@ -150,7 +150,7 @@ async function testConfiguration() {
       assert.ok(syncedPath);
       assert.equal(published ? syncedPath : dirname(syncedPath), dirname(target));
       assert.deepEqual(await readFile(target), published ? updated : original);
-      run(...args);
+      run("--home", root, ...args);
       assert.deepEqual(
         await readFile(target),
         updated,
@@ -171,9 +171,9 @@ async function testInitialization() {
     "-o",
     trace,
     binary,
-    "init",
-    "--root",
+    "--home",
     baseline,
+    "init",
     "--workspace",
     scratch,
     ...initOptions,
@@ -231,9 +231,9 @@ async function testInitialization() {
           "-e",
           `inject=${injection}`,
           binary,
-          "init",
-          "--root",
+          "--home",
           root,
+          "init",
           "--workspace",
           home,
           ...initOptions,
@@ -261,13 +261,7 @@ async function testInitialization() {
       }
       let token;
       if (published) {
-        run(
-          "backup",
-          "--config",
-          join(root, "carillon.toml"),
-          "--output",
-          join(home, "validated.tar.gz"),
-        );
+        run("--home", root, "backup", "--output", join(home, "validated.tar.gz"));
         token = await readFile(join(root, "credentials/operator.token"));
       } else if (empty) {
         assert.deepEqual(await readdir(root), [], "partial initialization must not be visible");
@@ -291,13 +285,7 @@ async function testInitialization() {
         stdio: "pipe",
         timeout: 60_000,
       });
-      run(
-        "backup",
-        "--config",
-        join(root, "carillon.toml"),
-        "--output",
-        join(home, "retry.tar.gz"),
-      );
+      run("--home", root, "backup", "--output", join(home, "retry.tar.gz"));
       if (published)
         assert.deepEqual(
           await readFile(join(root, "credentials/operator.token")),
@@ -312,10 +300,10 @@ async function testInitialization() {
 
 async function testRestore() {
   const source = join(scratch, "restore-source");
-  run("init", "--root", source, "--workspace", scratch, ...initOptions);
+  run("--home", source, "init", "--workspace", scratch, ...initOptions);
   const token = await readFile(join(source, "credentials/operator.token"));
   const archive = join(scratch, "restore-source.tar.gz");
-  run("backup", "--config", join(source, "carillon.toml"), "--output", archive);
+  run("--home", source, "backup", "--output", archive);
   await rm(source, { recursive: true });
   const baseline = join(scratch, "restore-baseline");
   const trace = join(scratch, "restore.trace");
@@ -395,7 +383,7 @@ async function testRestore() {
       // Post-rename failure is a committed publication, not a rollback: validate
       // the selected tree rather than overwriting a nonempty restore destination.
       assert.deepEqual(await readFile(join(target, "credentials/operator.token")), token);
-      run("backup", "--config", join(target, "carillon.toml"), "--output", `${target}.tar.gz`);
+      run("--home", target, "backup", "--output", `${target}.tar.gz`);
       console.log(`restore durability failure passed: ${empty ? "empty" : "absent"} / ${name}`);
     }
   }
@@ -551,7 +539,7 @@ async function testResources() {
 
 async function resourceAttempt(name, fault) {
   const root = join(scratch, name);
-  run("init", "--root", root, "--workspace", scratch, ...initOptions);
+  run("--home", root, "init", "--workspace", scratch, ...initOptions);
   const helper = join(root, "agents/default/skills/example/scripts/helper");
   await mkdir(dirname(helper), { recursive: true });
 
@@ -611,7 +599,7 @@ async function resourceAttempt(name, fault) {
       assert.equal(injected.length, 1);
       assert.ok(fault.predicate(injected[0]), `wrong injection boundary: ${injected[0]}`);
       assert.deepEqual(
-        JSON.parse(run("recent", "--config", config)),
+        JSON.parse(run("--home", root, "recent")),
         [],
         "failed snapshot publication must not accept durable work",
       );
@@ -620,9 +608,9 @@ async function resourceAttempt(name, fault) {
     assert.equal(response.status, 200, await response.clone().text());
     const receipt = await response.json();
     assert.equal(receipt.state, "queued");
-    const turns = JSON.parse(run("recent", "--config", config));
+    const turns = JSON.parse(run("--home", root, "recent"));
     assert.equal(turns.length, 1);
-    const inspection = JSON.parse(run("inspect", "--config", config, receipt.turn_id));
+    const inspection = JSON.parse(run("--home", root, "inspect", receipt.turn_id));
     const snapshot = join(root, "state/resource-snapshots", inspection.resource_snapshot_id);
     assert.equal(
       execFileSync(join(snapshot, "skills/example/scripts/helper"), { encoding: "utf8" }),

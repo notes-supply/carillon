@@ -13,6 +13,8 @@ Run `install.sh` as the non-root Unix user that should own Carillon. The install
 
 `CARILLON_HOME` defaults to `~/.carillon`. It contains the registry (`carillon.toml`), provider-owned settings (`providers/`), credentials, agent resources, Pi-private state, SQLite state, logs, and installed application files (`app/bin` for the programs, `app/lib` for the Discord command module). The configured workspace is separate and defaults to the owner's home.
 
+Every `carillon` command acts on one installation, chosen in this order: the global `--home PATH` option, then `CARILLON_HOME`, then the installation whose managed `app/bin` contains the running program (following symbolic links), otherwise `~/.carillon`. The current directory and its ancestors are never searched. `carillon <provider> …` passes the chosen installation to the provider as `CARILLON_HOME`. The services themselves are started with explicit `--config` and credential paths.
+
 ## Authority
 
 Every included service runs as the installing user with that user's groups, filesystem access, executables, applications, and passwordless sudo configuration. Carillon has no separate command or path permission layer.
@@ -27,7 +29,9 @@ Installation requires:
 - at least one channel route with activation and conversation mode; and
 - an existing absolute workspace path.
 
-`carillon init` writes the registry and credentials; the installer then writes the Discord settings with `carillon discord configure`, which owns `providers/discord-private.toml`. Rerun `configure` to change the guild, users, or routes; it rewrites the file completely, keeping any tuned feedback settings, and leaves it untouched when the input is invalid. Restart the Discord service afterwards.
+`carillon init` writes the registry and credentials; the installer then writes the Discord settings with `carillon discord configure`, which owns `providers/discord-private.toml`. Run `carillon discord configure --guild-id … --bot-user-id … --user-id … --route …` to change the guild, users, or routes; it rewrites the file completely, keeping any tuned feedback settings, and leaves it untouched when the input is invalid. Restart the Discord service afterwards.
+
+Discord commands that act on a configured instance (`configure`, `register`, `reload`) use the only interface provider with Discord settings. When there is none or several, they list the choices and require `--provider ID`.
 
 After installation:
 
@@ -64,7 +68,7 @@ Core is restarted separately. Registry and provider configuration are static unt
 The commands and their controls come from `app/lib/carillon_discord_commands.wasm`, which the provider loads at startup and registers with the guild unless its record shows the same definitions already registered for this application and guild. To replace the module without restarting the provider or reconnecting its gateway, put the new file at that path and run:
 
 ```sh
-carillon discord reload --config ~/.carillon/carillon.toml --provider discord-private
+carillon discord reload
 ```
 
 The reply reports the number of commands, whether their definitions changed, and whether they were re-registered with Discord. A module that fails to load or describe itself is refused and the previous one keeps serving. When the definitions changed, the new module is registered before it serves: if Discord rejects the commands, the reply says so and the previous module keeps serving, so fix the module and rerun `reload`; if Discord does not answer, whether it applied them is unknown, the previous module keeps serving, and rerunning `reload` once Discord answers settles it. Interactions already running finish against the module they started with. `carillon discord register` registers the module's commands using the bot token without serving, for example after changing the guild.
@@ -82,7 +86,7 @@ Pi cancels execution when core disconnects and settles the native operation befo
 If core cannot persist an outcome, it logs the storage error and leaves the turn recorded as running. Repair storage and restart core; startup records the stranded turn as interrupted without replaying it. Diagnose any turn with:
 
 ```sh
-carillon inspect --config ~/.carillon/carillon.toml TURN_ID
+carillon inspect TURN_ID
 ```
 
 Discord delivery uses a separate outbox. An unclaimed delivery can be retried. A delivery that was claimed when the interface stopped is marked uncertain because the external send may already have succeeded.

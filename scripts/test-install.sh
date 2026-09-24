@@ -371,7 +371,7 @@ case "$SECOND" in *"Local provider response 2"*) ;; *) printf '%s\n' "$SECOND" >
 
 stop_services
 # Capture a real packaged installation before uninstall removes its application.
-"$APP/carillon" backup --config "$CONFIG" --output "$TEST_ROOT/registration-backup.tar.gz" >/dev/null
+"$APP/carillon" --home "$CARILLON_HOME" backup --output "$TEST_ROOT/registration-backup.tar.gz" >/dev/null
 cp -a "$XDG_CONFIG_HOME/systemd/user" "$TEST_ROOT/source-units"
 env HOME="$OWNER_HOME" XDG_CONFIG_HOME="$XDG_CONFIG_HOME" CARILLON_HOME="$CARILLON_HOME" \
   PATH="$REGISTER_COMMANDS:$PATH" REGISTER_TRACE="$TEST_ROOT/uninstall.trace" \

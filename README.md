@@ -50,9 +50,9 @@ that owns the behavior you want to change:
 Application assembly supplies installation paths, credentials, listeners and process
 lifetimes. Find it in [core application](crates/carillon-core/src/application/mod.rs),
 [Discord application](crates/carillon-discord/src/application.rs), and
-[Pi CLI](packages/runtime-pi/src/cli.ts). Registry and filesystem utilities live in
-[`carillon-installation`](crates/carillon-installation/src/lib.rs); bundled provider
-choices belong to the applications, not the durable engine or wire contracts.
+[Pi CLI](packages/runtime-pi/src/cli.ts). Registry, installation-location and
+filesystem utilities live in [`carillon-installation`](crates/carillon-installation/src/lib.rs);
+bundled provider choices belong to the applications, not the durable engine or wire contracts.
 
 Constructors do not parse CLI arguments or start hidden services. Use ordinary defaults
 for component-owned concerns; supply explicit collaborators when replacing them.
@@ -71,7 +71,7 @@ queued -> running -> completed
 Only queued work is started. Interrupted execution is never automatically replayed and does not block the conversation. Send another message to continue in the runtime's saved session. Separately queued user messages proceed in order. Successful output and its delivery intent are committed together; delivery is separate from execution.
 
 ```sh
-carillon inspect --config ~/.carillon/carillon.toml TURN_ID
+carillon inspect TURN_ID
 ```
 
 ## Development

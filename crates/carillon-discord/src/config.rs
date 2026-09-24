@@ -160,13 +160,17 @@ impl DiscordConfig {
     /// Reads and validates the provider's file for a registered interface
     /// provider.
     pub(crate) fn load(config: &LoadedConfig, provider_id: &str) -> Result<Self> {
+        let discord = Self::read(config, provider_id)?;
+        discord.validate(config, provider_id)?;
+        Ok(discord)
+    }
+
+    /// Parses the provider's file without validating it against the registry.
+    pub(crate) fn read(config: &LoadedConfig, provider_id: &str) -> Result<Self> {
         let path = config.provider_config_path(provider_id)?;
         let text = fs::read_to_string(&path)
             .with_context(|| format!("read Discord configuration {}", path.display()))?;
-        let discord: Self =
-            toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
-        discord.validate(config, provider_id)?;
-        Ok(discord)
+        toml::from_str(&text).with_context(|| format!("parse {}", path.display()))
     }
 
     /// Writes the file for a registered interface provider, readable only by
@@ -234,11 +238,8 @@ pub(crate) fn configure(
     allowed_user_ids: &[String],
     routes: &[DiscordRoute],
 ) -> Result<()> {
-    let path = config.provider_config_path(provider_id)?;
-    let mut discord = if path.exists() {
-        let text = fs::read_to_string(&path)
-            .with_context(|| format!("read Discord configuration {}", path.display()))?;
-        toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?
+    let mut discord = if config.provider_config_path(provider_id)?.exists() {
+        DiscordConfig::read(config, provider_id)?
     } else {
         DiscordConfig::with_defaults(
             config.value.agent.id.clone(),

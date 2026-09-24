@@ -10,7 +10,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
-use carillon_installation::config::LoadedConfig;
+use carillon_installation::{config::LoadedConfig, home};
 use carillon_protocol::model::{StatusReport, TurnInspection, TurnSummary};
 use clap::{Parser, Subcommand, ValueEnum};
 use reqwest::Url;
@@ -27,6 +27,10 @@ use super::{
 #[derive(Debug, Parser)]
 #[command(name = "carillon", version, about = "Self-hosted agent service")]
 struct Cli {
+    /// Installation to act on. Defaults to `CARILLON_HOME`, then the
+    /// installation containing this program, then `~/.carillon`.
+    #[arg(long, global = true, value_name = "PATH")]
+    home: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -39,49 +43,35 @@ enum ProviderAction {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Create a new installation.
     Init {
-        #[arg(long)]
-        root: PathBuf,
         #[arg(long)]
         workspace: PathBuf,
         #[arg(long, default_value_t = 43_800)]
         base_port: u16,
     },
+    /// Run the core service with an explicit registry.
     Core {
         #[arg(long)]
         config: PathBuf,
     },
-
+    /// Report core and provider health from the running core.
+    Status,
     Provider {
-        #[arg(long)]
-        config: PathBuf,
         id: String,
         action: ProviderAction,
     },
-    EnableDemoResources {
-        #[arg(long)]
-        config: PathBuf,
-    },
-    Status {
-        #[arg(long)]
-        config: PathBuf,
-    },
+    EnableDemoResources,
     Recent {
-        #[arg(long)]
-        config: PathBuf,
         #[arg(long)]
         event_id: Option<String>,
         #[arg(long, default_value_t = 20)]
         limit: u32,
     },
     Inspect {
-        #[arg(long)]
-        config: PathBuf,
         turn_id: String,
     },
     Backup {
-        #[arg(long)]
-        config: PathBuf,
         #[arg(long)]
         output: PathBuf,
     },
@@ -92,8 +82,8 @@ enum Command {
         target: PathBuf,
     },
     /// `carillon <provider> …` runs `carillon-<provider>` from beside this
-    /// binary or from `PATH`, so provider commands share one entry point
-    /// without core knowing them.
+    /// binary or from `PATH` with the resolved `CARILLON_HOME`, so provider
+    /// commands share one entry point without core knowing them.
     #[command(external_subcommand)]
     External(Vec<OsString>),
 }
@@ -109,47 +99,45 @@ fn initialize_tracing() {
 
 pub(crate) async fn run() -> Result<()> {
     initialize_tracing();
-    match Cli::parse().command {
-        Command::Init {
-            root,
-            workspace,
-            base_port,
-        } => {
-            let path = init(&root, &workspace, base_port)?;
-            println!("{}", path.display());
-        }
+    let Cli { home, command } = Cli::parse();
+    // The service and restore name their files explicitly; everything else
+    // acts on the resolved installation.
+    let home = || home::resolve(home.as_deref());
+    let load = |home: &Path| LoadedConfig::load(&home.join("carillon.toml"));
+    match command {
         Command::Core { config } => {
             let loaded = LoadedConfig::load(&config)?;
             let _lock = ServiceLock::acquire(&loaded.value.data_dir)?;
             serve(loaded).await?;
         }
-        Command::External(arguments) => forward(&arguments)?,
-
-        Command::Provider { config, id, action } => {
-            set_provider(&config, &id, action == ProviderAction::Enable)?;
-            let outcome = match action {
-                ProviderAction::Enable => "enabled",
-                ProviderAction::Disable => "disabled",
-            };
-            println!("{id} {outcome}");
-        }
-        Command::EnableDemoResources { config } => {
-            enable_demo_resources(&LoadedConfig::load(&config)?)?;
-            println!("Pi-native extension and Agent Skill enabled");
-        }
-        Command::Status { config } => print_status(&config).await?,
-        Command::Recent {
-            config,
-            event_id,
-            limit,
-        } => print_recent(&config, event_id.as_deref(), limit).await?,
-        Command::Inspect { config, turn_id } => print_inspection(&config, &turn_id).await?,
-        Command::Backup { config, output } => {
-            backup(&LoadedConfig::load(&config)?, &output)?;
-            println!("{}", output.display());
-        }
         Command::Restore { input, target } => {
             println!("{}", restore(&input, &target)?.display());
+        }
+        Command::Init {
+            workspace,
+            base_port,
+        } => {
+            let path = init(&home()?, &workspace, base_port)?;
+            println!("{}", path.display());
+        }
+        Command::External(arguments) => forward(&arguments, &home()?)?,
+        Command::Status => print_status(&load(&home()?)?).await?,
+        Command::Provider { id, action } => {
+            let enabled = action == ProviderAction::Enable;
+            set_provider(&home()?.join("carillon.toml"), &id, enabled)?;
+            println!("{id} {}", if enabled { "enabled" } else { "disabled" });
+        }
+        Command::EnableDemoResources => {
+            enable_demo_resources(&load(&home()?)?)?;
+            println!("Pi-native extension and Agent Skill enabled");
+        }
+        Command::Recent { event_id, limit } => {
+            print_recent(&load(&home()?)?, event_id.as_deref(), limit).await?;
+        }
+        Command::Inspect { turn_id } => print_inspection(&load(&home()?)?, &turn_id).await?,
+        Command::Backup { output } => {
+            backup(&load(&home()?)?, &output)?;
+            println!("{}", output.display());
         }
     }
     Ok(())
@@ -157,8 +145,9 @@ pub(crate) async fn run() -> Result<()> {
 
 /// Replaces this process with the `carillon-<name>` binary and the remaining
 /// arguments, so signals and the exit status are the provider's own. Only
-/// names that look like provider ids are forwarded.
-fn forward(arguments: &[OsString]) -> Result<()> {
+/// names that look like provider ids are forwarded. The provider receives the
+/// resolved installation as `CARILLON_HOME`.
+fn forward(arguments: &[OsString], home: &Path) -> Result<()> {
     let (name, rest) = arguments
         .split_first()
         .context("provider command name is missing")?;
@@ -168,7 +157,10 @@ fn forward(arguments: &[OsString]) -> Result<()> {
     carillon_installation::config::validate_provider_identity(name)
         .with_context(|| format!("unknown command {name}"))?;
     let binary = provider_binary(name)?;
-    let error = Process::new(&binary).args(rest).exec();
+    let error = Process::new(&binary)
+        .args(rest)
+        .env("CARILLON_HOME", home)
+        .exec();
     Err(error).with_context(|| format!("run {}", binary.display()))
 }
 
@@ -206,29 +198,26 @@ fn locate_provider(name: &str, own: &Path, path: &std::ffi::OsStr) -> Result<Pat
         })
 }
 
-async fn print_status(config: &Path) -> Result<()> {
-    let loaded = LoadedConfig::load(config)?;
-    let report: StatusReport = operator_get(&loaded, operator_url(&loaded, "/v1/status")?).await?;
+async fn print_status(config: &LoadedConfig) -> Result<()> {
+    let report: StatusReport = operator_get(config, operator_url(config, "/v1/status")?).await?;
     print_pretty(&report)
 }
 
-async fn print_recent(config: &Path, event_id: Option<&str>, limit: u32) -> Result<()> {
-    let loaded = LoadedConfig::load(config)?;
-    let mut url = operator_url(&loaded, "/v1/turns")?;
+async fn print_recent(config: &LoadedConfig, event_id: Option<&str>, limit: u32) -> Result<()> {
+    let mut url = operator_url(config, "/v1/turns")?;
     url.query_pairs_mut()
         .append_pair("limit", &limit.to_string());
     if let Some(event_id) = event_id {
         url.query_pairs_mut().append_pair("event_id", event_id);
     }
-    let turns: Vec<TurnSummary> = operator_get(&loaded, url).await?;
+    let turns: Vec<TurnSummary> = operator_get(config, url).await?;
     print_pretty(&turns)
 }
 
-async fn print_inspection(config: &Path, turn_id: &str) -> Result<()> {
-    let loaded = LoadedConfig::load(config)?;
+async fn print_inspection(config: &LoadedConfig, turn_id: &str) -> Result<()> {
     let inspection: TurnInspection = operator_get(
-        &loaded,
-        operator_url(&loaded, &format!("/v1/turns/{turn_id}"))?,
+        config,
+        operator_url(config, &format!("/v1/turns/{turn_id}"))?,
     )
     .await?;
     print_pretty(&inspection)

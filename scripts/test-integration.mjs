@@ -38,12 +38,12 @@ let runtimeConfigPath;
 const services = new Map();
 
 try {
-  run("init", "--root", installation, "--workspace", workspace, "--base-port", String(basePort));
+  run("--home", installation, "init", "--workspace", workspace, "--base-port", String(basePort));
   // Channel 305 is reserved for the model picker so its turns do not disturb
   // the response counters of the conversations below.
   assert.match(
     configureDiscord(
-      configPath(),
+      installation,
       "100",
       "201",
       "200",
@@ -78,7 +78,7 @@ try {
       "simulation must authenticate before participation or runtime work",
     );
   }
-  assert.deepEqual(JSON.parse(run("recent", "--config", configPath())), []);
+  assert.deepEqual(JSON.parse(run("--home", installation, "recent")), []);
   await assert.rejects(
     readFile(join(installation, "state/components/discord-private/participation.json")),
     { code: "ENOENT" },
@@ -96,7 +96,7 @@ try {
   );
   assert.equal(deniedRoute.status, 403, "unconfigured channels must fail closed");
   for (const eventId of ["denied", "denied-user", "denied-dm", "denied-route"]) {
-    const turns = JSON.parse(run("recent", "--config", configPath(), "--event-id", eventId));
+    const turns = JSON.parse(run("--home", installation, "recent", "--event-id", eventId));
     assert.deepEqual(turns, [], "rejected ingress must not create accepted work");
   }
   const ignoredMention = await requestSimulation(
@@ -122,7 +122,7 @@ try {
     "operator diagnostics must require authentication",
   );
 
-  run("enable-demo-resources", "--config", configPath());
+  run("--home", installation, "enable-demo-resources");
   const additions = await simulate("event-2", "use the additions");
   assert.match(additions.delivery.content, /Local provider response 2/u);
   assert.match(additions.delivery.content, /native extension active; skill active/u);
@@ -135,11 +135,9 @@ try {
   const afterRuntimeRestart = await simulate("event-4", "continue after runtime restart");
   assert.match(afterRuntimeRestart.delivery.content, /Local provider response 4/u);
 
-  const firstInspection = JSON.parse(
-    run("inspect", "--config", configPath(), first.receipt.turn_id),
-  );
+  const firstInspection = JSON.parse(run("--home", installation, "inspect", first.receipt.turn_id));
   const laterInspection = JSON.parse(
-    run("inspect", "--config", configPath(), additions.receipt.turn_id),
+    run("--home", installation, "inspect", additions.receipt.turn_id),
   );
   assert.equal(firstInspection.audience_id, laterInspection.audience_id);
   assert.equal(laterInspection.state, "completed");
@@ -190,18 +188,16 @@ try {
   const claimed = await waitForDeliveryClaim("crashed-discord");
   assert.equal(claimed.turn_id, abandoned.turn_id);
   await start("discord");
-  const abandonedInspection = JSON.parse(
-    run("inspect", "--config", configPath(), abandoned.turn_id),
-  );
+  const abandonedInspection = JSON.parse(run("--home", installation, "inspect", abandoned.turn_id));
   assert.equal(abandonedInspection.delivery_state, "uncertain");
 
   const recent = JSON.parse(
-    run("recent", "--config", configPath(), "--event-id", "event-4", "--limit", "5"),
+    run("--home", installation, "recent", "--event-id", "event-4", "--limit", "5"),
   );
   assert.equal(recent.length, 1);
   assert.equal(recent[0].turn_id, afterRuntimeRestart.receipt.turn_id);
 
-  const status = JSON.parse(run("status", "--config", configPath()));
+  const status = JSON.parse(run("--home", installation, "status"));
   assert.ok(status.providers.every((provider) => provider.status === "ready"));
   assert.equal(status.deliveries.uncertain, 1);
 
@@ -236,7 +232,7 @@ try {
   );
   assert.notEqual(ipv6Config, priorConfig);
   await writeFile(configPath(), ipv6Config);
-  run("backup", "--config", configPath(), "--output", backup);
+  run("--home", installation, "backup", "--output", backup);
   await rm(restoredRoot, { recursive: true, force: true });
   run("restore", "--input", backup, "--target", restoredRoot);
   // Prove restoration uses archived runtime state, not the original directory.
@@ -266,7 +262,7 @@ try {
         await assert.rejects(stat(sessions), { code: "ENOENT" });
         // Dispatch is paused, so startup refusals must leave accepted work queued.
         assert.equal(
-          JSON.parse(run("inspect", "--config", configPath(), queued.turn_id)).state,
+          JSON.parse(run("--home", installation, "inspect", queued.turn_id)).state,
           "queued",
         );
       }
@@ -335,12 +331,12 @@ function providerConfigPath() {
   return join(installation, "providers", "discord-private.toml");
 }
 
-function configureDiscord(config, guildId, botUserId, userId, ...routes) {
+function configureDiscord(home, guildId, botUserId, userId, ...routes) {
   return run(
+    "--home",
+    home,
     "discord",
     "configure",
-    "--config",
-    config,
     "--provider",
     "discord-private",
     "--guild-id",
@@ -588,10 +584,11 @@ async function testModelPicker() {
   });
   assert.equal(unauthenticated.status, 403, "interactions require the provider credential");
   // The operator can reload the module in place; an unchanged module is a no-op.
-  assert.deepEqual(
-    JSON.parse(run("discord", "reload", "--config", configPath(), "--provider", "discord-private")),
-    { commands: 1, changed: false, registered: false },
-  );
+  assert.deepEqual(JSON.parse(run("--home", installation, "discord", "reload")), {
+    commands: 1,
+    changed: false,
+    registered: false,
+  });
 }
 
 /**
@@ -686,7 +683,7 @@ async function testResourceStateSeparation(turnId) {
       original.replace('data_dir = "state"', 'data_dir = "agents/default/core-state"'),
     );
     await start("core");
-    assert.equal(JSON.parse(run("inspect", "--config", configPath(), turnId)).state, "queued");
+    assert.equal(JSON.parse(run("--home", installation, "inspect", turnId)).state, "queued");
   } finally {
     await stop("core");
     await writeFile(configPath(), original);
@@ -761,7 +758,7 @@ async function testMissingResourceRoot(turnId) {
   await rename(resources, `${resources}-saved`);
   await rename(privateState, `${privateState}-saved`);
   await start("core");
-  const before = JSON.parse(run("recent", "--config", configPath()));
+  const before = JSON.parse(run("--home", installation, "recent"));
   try {
     for (const missing of [true, false]) {
       if (!missing) await writeFile(resources, "not a directory");
@@ -769,7 +766,7 @@ async function testMissingResourceRoot(turnId) {
       if (missing) await assert.rejects(stat(resources), { code: "ENOENT" });
       else assert.equal(await readFile(resources, "utf8"), "not a directory");
       await assert.rejects(stat(privateState), { code: "ENOENT" });
-      assert.equal(JSON.parse(run("inspect", "--config", configPath(), turnId)).state, "queued");
+      assert.equal(JSON.parse(run("--home", installation, "inspect", turnId)).state, "queued");
       const response = await fetch(`http://127.0.0.1:${String(basePort)}/v1/events`, {
         method: "POST",
         headers: {
@@ -788,7 +785,7 @@ async function testMissingResourceRoot(turnId) {
         }),
       });
       assert.equal(response.status, 500, await response.text());
-      assert.deepEqual(JSON.parse(run("recent", "--config", configPath())), before);
+      assert.deepEqual(JSON.parse(run("--home", installation, "recent")), before);
     }
   } finally {
     await stop("core");
@@ -817,13 +814,13 @@ async function testRuntimeStartupRefusals(turnId) {
       ]);
       await assert.rejects(stat(sessions), { code: "ENOENT" });
       await assert.rejects(stat(privateState), { code: "ENOENT" });
-      assert.equal(JSON.parse(run("inspect", "--config", configPath(), turnId)).state, "queued");
+      assert.equal(JSON.parse(run("--home", installation, "inspect", turnId)).state, "queued");
     }
-    run("provider", "--config", configPath(), "runtime-pi", "disable");
+    run("--home", installation, "provider", "runtime-pi", "disable");
     assertStartupRefused("runtime", /runtime provider runtime-pi is disabled/u);
     await assert.rejects(stat(sessions), { code: "ENOENT" });
     await assert.rejects(stat(privateState), { code: "ENOENT" });
-    assert.equal(JSON.parse(run("inspect", "--config", configPath(), turnId)).state, "queued");
+    assert.equal(JSON.parse(run("--home", installation, "inspect", turnId)).state, "queued");
   } finally {
     await stop("core");
     await writeFile(configPath(), original);
@@ -860,7 +857,7 @@ async function testProviderVersions() {
       assert.equal(health.id, id);
       assert.equal(health.version, version, `${id} must report its build-owned version`);
     }
-    const status = JSON.parse(run("status", "--config", configPath()));
+    const status = JSON.parse(run("--home", installation, "status"));
     for (const [id, version] of expected) {
       const provider = status.providers.find((report) => report.id === id);
       assert.equal(provider.version, version);
@@ -873,7 +870,7 @@ async function testProviderVersions() {
   // Repair the operator expectation and restart, without changing binaries.
   await startAll();
   assert.ok(
-    JSON.parse(run("status", "--config", configPath())).providers.every(
+    JSON.parse(run("--home", installation, "status")).providers.every(
       (provider) => provider.status === "ready",
     ),
   );
@@ -884,16 +881,17 @@ async function testConfigurationSymlinkUpdates() {
   const original = await readFile(configPath(), "utf8");
   const originalDiscord = await readFile(providerConfigPath(), "utf8");
   const previousMode = (await stat(configPath())).mode & 0o777;
-  const link = join(workspace, "admin-config.toml");
-  await symlink(configPath(), link);
+  // An operator's convenient link to the installation is an ordinary --home.
+  const link = join(workspace, "admin-home");
+  await symlink(installation, link);
   const linkInode = (await lstat(link)).ino;
   await chmod(configPath(), 0o640);
   const assertUpdated = async () => {
-    assert.equal((await lstat(link)).ino, linkInode, "CLI must retain the configuration symlink");
+    assert.equal((await lstat(link)).ino, linkInode, "CLI must retain the installation symlink");
     assert.ok((await lstat(link)).isSymbolicLink());
     assert.equal((await stat(configPath())).mode & 0o777, 0o640);
     const canonical = await readFile(configPath(), "utf8");
-    assert.equal(await readFile(link, "utf8"), canonical);
+    assert.equal(await readFile(join(link, "carillon.toml"), "utf8"), canonical);
     assert.match(
       canonical,
       /^data_dir = "state"$/mu,
@@ -902,10 +900,10 @@ async function testConfigurationSymlinkUpdates() {
   };
   try {
     for (const enabled of [false, true]) {
-      run("provider", "--config", link, "runtime-pi", enabled ? "enable" : "disable");
+      run("--home", link, "provider", "runtime-pi", enabled ? "enable" : "disable");
       await assertUpdated();
       await start("core");
-      const status = JSON.parse(run("status", "--config", configPath()));
+      const status = JSON.parse(run("--home", installation, "status"));
       assert.equal(
         status.providers.find((provider) => provider.id === "runtime-pi").status,
         enabled ? "unavailable" : "disabled",
@@ -935,7 +933,7 @@ async function testConfigurationSymlinkUpdates() {
       event("symlink-new-route", "101", "203", "304", null, "no mention"),
     );
     assert.equal(ignored.status, 204);
-    assert.deepEqual(JSON.parse(run("recent", "--config", configPath())), []);
+    assert.deepEqual(JSON.parse(run("--home", installation, "recent")), []);
   } finally {
     await stopAll();
     await rm(link, { force: true });
@@ -1054,9 +1052,9 @@ async function testConfigurationRefusals() {
       .replace("enabled = true", "enabled = false");
     await writeFile(configPath(), disabled);
     await start("core");
-    assert.deepEqual(JSON.parse(run("recent", "--config", configPath())), []);
+    assert.deepEqual(JSON.parse(run("--home", installation, "recent")), []);
     assert.throws(
-      () => run("provider", "--config", configPath(), "discord-private", "enable"),
+      () => run("--home", installation, "provider", "discord-private", "enable"),
       collision,
     );
     assert.equal(await readFile(configPath(), "utf8"), disabled);
@@ -1250,7 +1248,7 @@ async function acknowledgeDelivery(id, instance) {
 async function waitForTurn(turnId, state, deliveryState = null) {
   let inspection;
   for (let attempt = 0; attempt < 200; attempt += 1) {
-    inspection = JSON.parse(run("inspect", "--config", configPath(), turnId));
+    inspection = JSON.parse(run("--home", installation, "inspect", turnId));
     if (
       inspection.state === state &&
       (deliveryState === null || inspection.delivery_state === deliveryState)

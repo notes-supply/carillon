@@ -102,7 +102,7 @@ for scenario in existing:app-stage existing:app-before existing:app-after existi
     for unit in "$UNIT_DIR"/carillon*; do printf '%s\n' '# previous-unit' >>"$unit"; done
     chmod 0640 "$UNIT_DIR/carillon-core.service"
   else
-    "$RELEASE/bin/carillon" init --root "$CARILLON_HOME" --workspace "$HOME/workspace" \
+    "$RELEASE/bin/carillon" --home "$CARILLON_HOME" init --workspace "$HOME/workspace" \
       --base-port "${CARILLON_TEST_BASE_PORT:-44800}" >/dev/null
   fi
   printf '%s\n' test-bot-token >"$CARILLON_HOME/credentials/discord-bot.token"
