@@ -327,11 +327,16 @@ for existing in unrelated stale; do
   fi
 done
 
-# Uninstalling the alternate keeps the default's entry point; the default
-# then removes its own.
+# Uninstalling the alternate keeps the default's entry point and the units
+# registered for it; the default then removes its own.
+rm -f "$TRACE"
 "$ALTERNATE/app/bin/carillon-uninstall" >/dev/null
 [ "$(readlink "$ENTRY")" = "$INSTALLATION/app/bin/carillon" ]
+grep -Fx "Environment=\"CARILLON_HOME=$INSTALLATION\"" "$XDG_CONFIG_HOME/systemd/user/carillon-core.service" >/dev/null
+expect_trace '--user daemon-reload'
 "$INSTALLATION/app/bin/carillon-uninstall" >/dev/null
+expect_trace '--user disable --now carillon.target' '--user daemon-reload'
+[ ! -e "$XDG_CONFIG_HOME/systemd/user/carillon-core.service" ]
 [ ! -L "$ENTRY" ]
 [ -x "$HOME/.local/bin/carillon-review" ]
 printf 'entry point passed: unrelated kept, stale replaced, removed only by its installation\n'

@@ -57,7 +57,20 @@ is_managed_app "$APP" || {
   exit 1
 }
 
-if ! systemctl --user disable --now carillon.target; then
+# The user units may run another installation of the same owner; leave them
+# (and its services) alone. The registration script writes this exact line.
+unit_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/%/%%/g'
+}
+OWN_UNITS=1
+if [ -f "$UNIT_DIR/carillon-core.service" ] &&
+  ! grep -Fqx "Environment=\"CARILLON_HOME=$(unit_escape "$CARILLON_HOME")\"" "$UNIT_DIR/carillon-core.service"
+then
+  OWN_UNITS=0
+  echo "Carillon's user units run another installation; leaving them registered."
+fi
+
+if [ "$OWN_UNITS" -eq 1 ] && ! systemctl --user disable --now carillon.target; then
   # An interrupted uninstall can already have removed the definitions. Only
   # confirmed absence/inactivity permits cleanup; manager/stop failures do not.
   # Definitions may be gone while the manager still caches the old unit.
@@ -67,15 +80,17 @@ if ! systemctl --user disable --now carillon.target; then
     active_state=$(systemctl --user show --property=ActiveState --value carillon.target) &&
     [ "$active_state" = inactive ] || exit 1
 fi
-for unit in \
-  carillon.target \
-  carillon-core.service \
-  carillon-runtime-pi.service \
-  carillon-discord.service
-do
-  rm -f "$UNIT_DIR/$unit"
-done
-[ ! -d "$UNIT_DIR" ] || sync -f -- "$UNIT_DIR"
+if [ "$OWN_UNITS" -eq 1 ]; then
+  for unit in \
+    carillon.target \
+    carillon-core.service \
+    carillon-runtime-pi.service \
+    carillon-discord.service
+  do
+    rm -f "$UNIT_DIR/$unit"
+  done
+  [ ! -d "$UNIT_DIR" ] || sync -f -- "$UNIT_DIR"
+fi
 remove_entry_point
 is_managed_app "$APP" || {
   echo "refusing to remove application path after ownership changed: $APP" >&2
