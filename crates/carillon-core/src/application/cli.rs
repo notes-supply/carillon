@@ -7,14 +7,14 @@ use std::{
     os::unix::process::CommandExt as _,
     path::{Path, PathBuf},
     process::Command as Process,
+    time::Duration,
 };
 
 use anyhow::{Context as _, Result};
 use carillon_installation::{config::LoadedConfig, home};
-use carillon_protocol::model::{StatusReport, TurnInspection, TurnSummary};
+use carillon_protocol::model::{TurnInspection, TurnSummary};
 use clap::{Parser, Subcommand, ValueEnum};
-use reqwest::Url;
-use serde::{Serialize, de::DeserializeOwned};
+use serde::Serialize;
 use tracing_subscriber::EnvFilter;
 
 use super::{
@@ -22,6 +22,11 @@ use super::{
         ServiceLock, backup, enable_demo_resources, initialize as init, restore, set_provider,
     },
     http::serve,
+    operations::{
+        Action, MaintenanceLock, Services, logs, operator_get, operator_url, print_health, status,
+        wait_until_healthy,
+    },
+    update::update,
 };
 
 #[derive(Debug, Parser)]
@@ -41,6 +46,13 @@ enum ProviderAction {
     Disable,
 }
 
+#[derive(Debug, clap::Args)]
+struct Wait {
+    /// Seconds to wait for every enabled provider to answer core.
+    #[arg(long, value_name = "SECONDS", default_value_t = 60)]
+    timeout: u64,
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Create a new installation.
@@ -57,6 +69,28 @@ enum Command {
     },
     /// Report core and provider health from the running core.
     Status,
+    /// Start the installation's user services and wait until they are healthy.
+    Start(Wait),
+    /// Stop the installation's user services.
+    Stop,
+    /// Restart the installation's user services and wait until they are healthy.
+    Restart(Wait),
+    /// Show service logs.
+    Logs {
+        /// Only this log, such as `core` or `discord`.
+        service: Option<String>,
+        #[arg(short = 'n', long, default_value_t = 50)]
+        lines: u32,
+        #[arg(short, long)]
+        follow: bool,
+    },
+    /// Replace the application from a local release archive, keeping
+    /// configuration and state, and restore the previous running state.
+    Update {
+        archive: PathBuf,
+        #[command(flatten)]
+        wait: Wait,
+    },
     Provider {
         id: String,
         action: ProviderAction,
@@ -121,7 +155,30 @@ pub(crate) async fn run() -> Result<()> {
             println!("{}", path.display());
         }
         Command::External(arguments) => forward(&arguments, &home()?)?,
-        Command::Status => print_status(&load(&home()?)?).await?,
+        Command::Status => print_pretty(&status(&load(&home()?)?).await?)?,
+        Command::Start(wait) => {
+            let home = home()?;
+            control(&home, Action::Start)?;
+            report_running(&load(&home)?, &wait).await?;
+        }
+        Command::Stop => {
+            let home = home()?;
+            control(&home, Action::Stop)?;
+            println!("Carillon at {} stopped", home.display());
+        }
+        Command::Restart(wait) => {
+            let home = home()?;
+            control(&home, Action::Restart)?;
+            report_running(&load(&home)?, &wait).await?;
+        }
+        Command::Logs {
+            service,
+            lines,
+            follow,
+        } => logs(&home()?, service.as_deref(), lines, follow)?,
+        Command::Update { archive, wait } => {
+            update(&home()?, &archive, Duration::from_secs(wait.timeout)).await?;
+        }
         Command::Provider { id, action } => {
             let enabled = action == ProviderAction::Enable;
             set_provider(&home()?.join("carillon.toml"), &id, enabled)?;
@@ -136,10 +193,28 @@ pub(crate) async fn run() -> Result<()> {
         }
         Command::Inspect { turn_id } => print_inspection(&load(&home()?)?, &turn_id).await?,
         Command::Backup { output } => {
-            backup(&load(&home()?)?, &output)?;
+            let home = home()?;
+            let _lock = MaintenanceLock::acquire(&home)?;
+            backup(&load(&home)?, &output)?;
             println!("{}", output.display());
         }
     }
+    Ok(())
+}
+
+/// Act on this installation's units, serialized with other maintenance.
+fn control(home: &Path, action: Action) -> Result<()> {
+    let services = Services::registered(home)?;
+    let _lock = MaintenanceLock::acquire(home)?;
+    services.control(action)
+}
+
+async fn report_running(config: &LoadedConfig, wait: &Wait) -> Result<()> {
+    let health = wait_until_healthy(config, Duration::from_secs(wait.timeout))
+        .await
+        .context("inspect `carillon logs` and `carillon status`")?;
+    println!("Carillon at {} is running:", config.root.display());
+    print_health(&health);
     Ok(())
 }
 
@@ -198,11 +273,6 @@ fn locate_provider(name: &str, own: &Path, path: &std::ffi::OsStr) -> Result<Pat
         })
 }
 
-async fn print_status(config: &LoadedConfig) -> Result<()> {
-    let report: StatusReport = operator_get(config, operator_url(config, "/v1/status")?).await?;
-    print_pretty(&report)
-}
-
 async fn print_recent(config: &LoadedConfig, event_id: Option<&str>, limit: u32) -> Result<()> {
     let mut url = operator_url(config, "/v1/turns")?;
     url.query_pairs_mut()
@@ -223,26 +293,6 @@ async fn print_inspection(config: &LoadedConfig, turn_id: &str) -> Result<()> {
     print_pretty(&inspection)
 }
 
-fn operator_url(config: &LoadedConfig, path: &str) -> Result<Url> {
-    Ok(Url::parse(&format!(
-        "http://{}{path}",
-        config.value.core.listen
-    ))?)
-}
-
-async fn operator_get<T: DeserializeOwned>(config: &LoadedConfig, url: Url) -> Result<T> {
-    reqwest::Client::new()
-        .get(url)
-        .bearer_auth(config.credential("operator")?)
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await
-        .map_err(Into::into)
-}
-
 fn print_pretty<T: Serialize>(value: &T) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
@@ -250,10 +300,9 @@ fn print_pretty<T: Serialize>(value: &T) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{os::unix::fs::PermissionsExt as _, time::Duration};
+    use std::os::unix::fs::PermissionsExt as _;
 
     use anyhow::{Context, Result};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn providers_are_found_beside_the_binary_then_on_path() -> Result<()> {
@@ -289,52 +338,6 @@ mod tests {
             super::locate_provider("review", &own, &path)?,
             own.join("carillon-review")
         );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn operator_requests_time_out_on_stalled_headers_and_bodies() -> Result<()> {
-        let directory = tempfile::tempdir()?;
-        let config_path = crate::application::admin::initialize(
-            &directory.path().join("installation"),
-            directory.path(),
-            44_000,
-        )?;
-        let config = super::LoadedConfig::load(&config_path)?;
-        for partial_body in [false, true] {
-            // Keep slow diagnostic fixtures away from backup's 127.0.0.1 probes.
-            let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await?;
-            let url = format!("http://{}/v1/status", listener.local_addr()?).parse()?;
-            let server = tokio::spawn(async move {
-                let (mut stream, _) = listener.accept().await?;
-                let mut request = Vec::new();
-                while !request.ends_with(b"\r\n\r\n") {
-                    request.push(stream.read_u8().await?);
-                }
-                if partial_body {
-                    stream
-                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{")
-                        .await?;
-                }
-                // The request deadline must close this connection without a response.
-                let mut remaining = Vec::new();
-                stream.read_to_end(&mut remaining).await?;
-                Ok::<_, std::io::Error>(())
-            });
-            let result = tokio::time::timeout(
-                Duration::from_secs(7),
-                super::operator_get::<serde_json::Value>(&config, url),
-            )
-            .await;
-            server.abort();
-            let error = result?.err().context("stalled diagnostics succeeded")?;
-            assert!(
-                error
-                    .downcast_ref::<reqwest::Error>()
-                    .context("not an HTTP error")?
-                    .is_timeout()
-            );
-        }
         Ok(())
     }
 }

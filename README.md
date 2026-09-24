@@ -48,7 +48,8 @@ that owns the behavior you want to change:
   module with explicit native operations. An optional leaf, not an application framework.
 
 Application assembly supplies installation paths, credentials, listeners and process
-lifetimes. Find it in [core application](crates/carillon-core/src/application/mod.rs),
+lifetimes, and operates installed services and updates. Find it in
+[core application](crates/carillon-core/src/application/mod.rs),
 [Discord application](crates/carillon-discord/src/application.rs), and
 [Pi CLI](packages/runtime-pi/src/cli.ts). Registry, installation-location and
 filesystem utilities live in [`carillon-installation`](crates/carillon-installation/src/lib.rs);
@@ -119,12 +120,14 @@ Build a release archive with:
 mise run package
 ```
 
-Extract it and run `install.sh` as the Unix user that should own the agent. The installer writes the registry and the Discord provider's settings, then prints the remaining Discord-token, Pi-login, and service-start steps. It installs only:
+Extract it and run `install.sh` as the Unix user that should own the agent. The installer writes the registry and the Discord provider's settings, links `~/.local/bin/carillon`, then prints the remaining Discord-token, Pi-login, and service-start steps. It installs only:
 
 - `carillon-core.service`
 - `carillon-discord.service`
 - `carillon-runtime-pi.service`
 - `carillon.target`
+
+After setup, operate the installation with `carillon status`, `start`, `stop`, `restart`, `logs` and `discord reload`. Update the software from a later archive with `carillon update carillon-VERSION-linux-ARCH.tar.gz`; this keeps configuration, credentials and state, and returns the services to their previous running or stopped state.
 
 See [`docs/product/OPERATIONS.md`](docs/product/OPERATIONS.md) for configuration, service operation, backup, and restore details.
 

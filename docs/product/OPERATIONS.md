@@ -13,7 +13,11 @@ Run `install.sh` as the non-root Unix user that should own Carillon. The install
 
 `CARILLON_HOME` defaults to `~/.carillon`. It contains the registry (`carillon.toml`), provider-owned settings (`providers/`), credentials, agent resources, Pi-private state, SQLite state, logs, and installed application files (`app/bin` for the programs, `app/lib` for the Discord command module). The configured workspace is separate and defaults to the owner's home.
 
-Every `carillon` command acts on one installation, chosen in this order: the global `--home PATH` option, then `CARILLON_HOME`, then the installation whose managed `app/bin` contains the running program (following symbolic links), otherwise `~/.carillon`. The current directory and its ancestors are never searched. `carillon <provider> …` passes the chosen installation to the provider as `CARILLON_HOME`. The services themselves are started with explicit `--config` and credential paths.
+The installer links `~/.local/bin/carillon` to `app/bin/carillon`, a path that stays valid across updates. It creates the link only where nothing exists or where a link into a removed installation's `app/bin` remains; it never replaces another program or the entry point of another existing installation, and says so. It does not edit shell profiles: when `~/.local/bin` is not on `PATH` or another `carillon` precedes it, the installer prints the full path to use instead.
+
+Every `carillon` command acts on one installation, chosen in this order: the global `--home PATH` option, then `CARILLON_HOME`, then the installation whose managed `app/bin` contains the running program (following the entry-point link), otherwise `~/.carillon`. The current directory and its ancestors are never searched. `carillon <provider> …` passes the chosen installation to the provider as `CARILLON_HOME`. The services themselves are started with explicit `--config` and credential paths.
+
+Several installations may belong to one owner, but the user units (`carillon.target` and its services) run one of them at a time. `start`, `stop`, `restart` and `update` refuse to act when the registered units run a different installation; stop that one and run the other installation's `app/bin/carillon-register-services` to switch deliberately.
 
 ## Authority
 
@@ -37,8 +41,8 @@ After installation:
 
 1. write the Discord bot token to the credential path printed by the installer;
 2. authenticate the packaged Pi installation using the printed `carillon-pi` command, then open `/model` and press Ctrl+S on the desired model to save its startup default;
-3. start `carillon.target`; and
-4. inspect it with `carillon status` and `systemctl --user status carillon.target`.
+3. run `carillon start`; and
+4. inspect it with `carillon status` and `carillon logs`.
 
 The bot's Discord application needs the `applications.commands` scope in the guild: the Discord provider registers its slash commands there on first start, and again whenever the application, guild, or command definitions differ from what it last recorded as registered, and refuses to serve if registration fails.
 
@@ -50,9 +54,21 @@ An administrator may run `loginctl enable-linger <owner>` when the services must
 - **Discord** (`carillon discord serve`, the `carillon-discord` program) owns Discord admission, routing, threads, feedback, message delivery, and slash commands.
 - **Pi runtime** (`carillon-runtime-pi`) owns Pi sessions, inference, native tools, extensions, skills, model selection, and private engine settings.
 
-`carillon <provider> …` runs the `carillon-<provider>` program installed beside `carillon`, or else the one found on `PATH`; the subcommands after the provider name belong to that provider. A provider that is not part of the release is installed as `carillon-<provider>` on the owner's `PATH`, not under `app/`, which each upgrade replaces wholesale; the user units carry the owner's `PATH` at registration.
+`carillon <provider> …` runs the `carillon-<provider>` program installed beside `carillon`, or else the one found on `PATH`; the subcommands after the provider name belong to that provider. A provider that is not part of the release is installed as `carillon-<provider>` on the owner's `PATH`, not under `app/`, which each update replaces wholesale; the user units carry the owner's `PATH` at registration.
 
-Restart an individual provider with:
+Everyday operation:
+
+```sh
+carillon status            # core and provider health from the running core
+carillon start             # start carillon.target and wait until providers answer
+carillon stop
+carillon restart
+carillon logs [-f] [-n LINES] [core|discord|runtime-pi]
+carillon discord reload    # replace the running command module
+carillon update /path/to/carillon-VERSION-linux-ARCH.tar.gz
+```
+
+These call `systemctl --user` on `carillon.target` and `tail` on `logs/`. `start` and `restart` report each provider's health; they fail when a provider is still unavailable after `--timeout` seconds (default 60). A version mismatch is reported but is not a failure. Restart an individual provider with:
 
 ```sh
 systemctl --user restart carillon-discord.service
@@ -114,7 +130,7 @@ Restore publishes the installation tree; it does not register services or execut
 ```sh
 carillon restore --input /path/to/private-backup.tar.gz --target /new/carillon
 /new/carillon/app/bin/carillon-register-services
-systemctl --user start carillon.target
+/new/carillon/app/bin/carillon start
 ```
 
 The installed registration helper needs no source checkout or release installer. It derives the root from its own installed location, renders the bundled templates with the current owner's environment, replaces Carillon's user units, reloads the user service manager, and enables—but does not start—`carillon.target`. It leaves configuration, credentials and provider state untouched. Stop the old target before relocation; check the configured external workspace and provider health before restarting. Non-bundled service supervisors/providers retain their own registration procedure.
@@ -125,17 +141,36 @@ Release archive and staging names use the Cargo workspace version. `scripts/pack
 
 The release builder selects the native Rust host explicitly for Cargo and the corresponding Bun executable target, regardless of Cargo environment/config target overrides. Linux GNU x86_64 and aarch64 hosts produce architecture-labelled archives; other build hosts are refused before staging. The Discord command module is built for `wasm32-unknown-unknown` on every host and shipped as data under `lib/`.
 
-Re-running the installer replaces managed application files and user units while preserving the registry, credentials, sessions, and SQLite state; it rewrites the Discord provider's settings from its arguments. It is suitable only when the installed state format is still current.
+`install.sh` is first-time setup. Rerunning it retries a failed setup; it keeps the registry, credentials and state but rewrites the Discord settings from its arguments. Update the software with the release archive instead:
 
-Stop the target before updating. When intentionally changing a provider release, update that provider's expected `version` in `carillon.toml`, restart, and check `carillon status`. The installer does not rewrite provider expectations: an entry may refer to a replacement provider rather than the bundled implementation. Discord's build version is the workspace version; the Pi adapter's is `@carillon/runtime-pi`'s package version, not the underlying Pi engine version. A version mismatch is a diagnostic, not a protocol-compatibility or execution-safety guarantee.
+```sh
+carillon update /path/to/carillon-VERSION-linux-ARCH.tar.gz
+```
 
-Run one administrative operation at a time, with all three services stopped. Application replacement uses GNU `mv --exchange --no-copy` (coreutils 9.5 or newer) on a filesystem supporting atomic rename exchange. GNU `sync -f` persists the staging filesystem before selection and the containing filesystem after publication; these filesystem-wide barriers may wait for unrelated writes. An interrupted replacement leaves either the complete previous application or the complete new one at `app`, never a missing or partly copied application. Unsupported exchange fails without deleting the previous application.
+Update leaves configuration alone. It never runs Discord configuration or `init`, and keeps the registry, provider settings, credentials, agent resources, sessions, SQLite state, Pi state and model selections, logs, and providers installed outside `app/`. It proceeds in this order:
 
-Service registration stages all definitions and modes before replacing live units, then publishes each as a complete file. It separately syncs the user-unit filesystem before publication, afterward, and after enabling the target, including when `XDG_CONFIG_HOME` is on another filesystem. Application files, unit definitions, and systemd are not one transaction: a failed update may leave the new application selected with a mixture of complete old and new unit definitions. There is no automatic rollback. **After failed or interrupted maintenance, rerun the installer successfully before restarting services** (or rerun `carillon-register-services` after standalone registration failure).
+1. It checks that the chosen installation belongs to the invoking non-root user, that `app` carries the ownership marker, and that the user units are this installation's or absent. It takes the maintenance lock and records whether `carillon.target` is running.
+2. It unpacks the archive into a private `.update-*` directory inside the installation, accepting only regular files and directories without absolute names or `..`. The archive must hold exactly one `carillon-VERSION` directory with the published files, and its `bin/carillon --version` must run here and report that version. A refused archive changes nothing and leaves the services as they were.
+3. Only then are running services stopped. The release's own `install.sh --update` uses the same application exchange and service registration as setup, and installs the entry point when it is missing.
+4. Services that were running are started again and must answer within `--timeout` seconds. Stopped services stay stopped.
 
-Failed publication or registration retains private recovery copies at the paths printed by the scripts. Abrupt process death may also leave `.app-new.*` directories under `CARILLON_HOME` or `.carillon-units.*` directories in the user-unit directory. These copies are not selected by services, and later retries do not adopt or delete them. After a successful rerun and inspection, the owner can remove the leftover copies. A sync error does not undo a rename. On a failed first installation, configuration and any complete published application remain for retry; there is no previous release to restore.
+The staging directory is removed afterwards. Failures state what may have changed:
 
-The installed `app/bin/carillon-uninstall` derives the installation root from its canonical location, not an inherited `CARILLON_HOME`. Both uninstall entry points require absolute `HOME` and, when set, `XDG_CONFIG_HOME` before service-manager or filesystem changes. It removes Carillon's user units and managed application files while preserving configuration, credentials, sessions and other data in that installation. It does not remove unrelated owner files or the owner's global Pi directory. Application cleanup keeps its ownership marker until the other entries have been removed and synced. If interrupted removal has deleted the installed helper, retry the release archive's standalone helper as the same owner:
+- **Before step 3:** nothing was replaced.
+- **During publication or registration:** the services stay stopped. `app` may hold either complete application and the units may be mixed. Rerun the same `carillon update` until it succeeds, then `carillon start` if the services were running.
+- **When starting or health checks fail:** the new release stays installed. Inspect `carillon logs` and `carillon status`. To go back, run `carillon update` with the previous release's archive.
+
+There is no automatic rollback, migration step or download service. Update is suitable only when the installed state format is still current.
+
+When intentionally changing a provider release, update that provider's expected `version` in `carillon.toml`, restart, and check `carillon status`. Neither setup nor update rewrites provider expectations: an entry may refer to a replacement provider rather than the bundled implementation. Discord's build version is the workspace version; the Pi adapter's is `@carillon/runtime-pi`'s package version, not the underlying Pi engine version. A version mismatch is a diagnostic, not a protocol-compatibility or execution-safety guarantee.
+
+Maintenance is serialized per installation by an exclusive lock on `CARILLON_HOME/.maintenance.lock`. `update`, `start`, `stop`, `restart`, `backup`, setup reruns and uninstallation take it and refuse at once while another holds it. Direct `systemctl` calls bypass it. Application replacement uses GNU `mv --exchange --no-copy` (coreutils 9.5 or newer) on a filesystem supporting atomic rename exchange. GNU `sync -f` persists the staging filesystem before selection and the containing filesystem after publication; these filesystem-wide barriers may wait for unrelated writes. An interrupted replacement leaves either the complete previous application or the complete new one at `app`, never a missing or partly copied application. Unsupported exchange fails without deleting the previous application.
+
+Service registration stages all definitions and modes before replacing live units, then publishes each as a complete file. It separately syncs the user-unit filesystem before publication, afterward, and after enabling the target, including when `XDG_CONFIG_HOME` is on another filesystem. Application files, unit definitions, and systemd are not one transaction: a failed update may leave the new application selected with a mixture of complete old and new unit definitions. **After failed or interrupted maintenance, rerun it successfully before restarting services**: `carillon update` with the same archive, the installer for a failed first setup, or `carillon-register-services` after standalone registration failure.
+
+Failed publication or registration retains private recovery copies at the paths printed by the scripts. Abrupt process death may also leave `.update-*` or `.app-new.*` directories under `CARILLON_HOME`, or `.carillon-units.*` directories in the user-unit directory. These copies are not selected by services, and later retries do not adopt or delete them. After a successful rerun and inspection, the owner can remove the leftover copies. A sync error does not undo a rename. On a failed first installation, configuration and any complete published application remain for retry; there is no previous release to restore.
+
+The installed `app/bin/carillon-uninstall` derives the installation root from its canonical location, not an inherited `CARILLON_HOME`. Both uninstall entry points require absolute `HOME` and, when set, `XDG_CONFIG_HOME` before service-manager or filesystem changes. It removes Carillon's user units, the `~/.local/bin/carillon` link when it points to this installation, and managed application files. Configuration, credentials, sessions and other data in that installation are kept. It does not remove unrelated owner files or the owner's global Pi directory. Application cleanup keeps its ownership marker until the other entries have been removed and synced. If interrupted removal has deleted the installed helper, retry the release archive's standalone helper as the same owner:
 
 ```sh
 CARILLON_HOME=/path/to/installation /path/to/release/uninstall.sh

@@ -19,6 +19,20 @@ case "$UNIT_DIR" in /*) ;; *) echo "XDG_CONFIG_HOME must be an absolute path" >&
 APP="$CARILLON_HOME/app"
 APP_MARKER=.carillon-managed
 APP_MARKER_VALUE=carillon-managed-application-v1
+ENTRY=$HOME/.local/bin/carillon
+
+# Serialize with updates and reinstallation of the same installation.
+if [ -d "$CARILLON_HOME" ]; then
+  exec 9>>"$CARILLON_HOME/.maintenance.lock"
+  flock -n 9 || { echo "another Carillon maintenance operation is running for $CARILLON_HOME" >&2; exit 1; }
+fi
+
+# Remove the owner's PATH entry point only when it runs this installation.
+remove_entry_point() {
+  if [ -L "$ENTRY" ] && [ "$(readlink -- "$ENTRY")" = "$APP/bin/carillon" ]; then
+    rm -f -- "$ENTRY"
+  fi
+}
 
 is_managed_app() {
   candidate=$1
@@ -33,6 +47,7 @@ is_managed_app "$APP" || {
   # A crash after the final marker unlink leaves only an empty directory (or no
   # directory). Without the marker, never recurse or remove service definitions.
   if [ ! -L "$APP" ] && { [ ! -e "$APP" ] || rmdir -- "$APP" 2>/dev/null; }; then
+    remove_entry_point
     sync -f -- "$CARILLON_HOME"
     systemctl --user daemon-reload
     printf '%s\n' "Application files already removed. Data remains at $CARILLON_HOME."
@@ -61,6 +76,7 @@ do
   rm -f "$UNIT_DIR/$unit"
 done
 [ ! -d "$UNIT_DIR" ] || sync -f -- "$UNIT_DIR"
+remove_entry_point
 is_managed_app "$APP" || {
   echo "refusing to remove application path after ownership changed: $APP" >&2
   exit 1

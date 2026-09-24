@@ -2,6 +2,8 @@
 mod admin;
 mod cli;
 mod http;
+mod operations;
+mod update;
 
 /// Run the installed application's command-line entry point.
 ///

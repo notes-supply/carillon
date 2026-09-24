@@ -169,6 +169,7 @@ for failure in unset stale partial-term partial-kill sync-cleanup marker-kill rm
   diff -r "$TEST_ROOT/credentials-before" "$ROOT/credentials"
   rm -rf "$TEST_ROOT/credentials-before"
   diff -r --no-dereference "$TEST_ROOT/decoy-before" "$DECOY"
+  [ "$(readlink "$OWNER_HOME/.local/bin/carillon")" = "$DECOY/app/bin/carillon" ]
   [ "$(cat "$OWNER_HOME/unrelated")" = unrelated-owner-data ]
   printf 'uninstall recovery passed: %s\n' "$failure"
 done

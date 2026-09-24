@@ -139,6 +139,7 @@ for global_location in directory symlink; do
 done
 
 sh "$ROOT/scripts/test-maintenance.sh" "$RELEASE"
+sh "$ROOT/scripts/test-operations.sh" "$RELEASE"
 
 UNRELATED_HOME=$TEST_ROOT/unrelated-home
 UNRELATED_WORKSPACE=$UNRELATED_HOME/workspace

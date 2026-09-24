@@ -366,8 +366,22 @@ pub fn restore(archive_path: &Path, target: &Path) -> Result<PathBuf> {
 }
 
 fn restore_into(archive_path: &Path, target: &Path) -> Result<()> {
-    let file = fs::File::open(archive_path)
-        .with_context(|| format!("open backup {}", archive_path.display()))?;
+    unpack_regular(archive_path, target)
+        .with_context(|| format!("unpack backup {}", archive_path.display()))?;
+    validate_portable_paths(target)?;
+    let config = LoadedConfig::load(&target.join("carillon.toml"))
+        .context("restored backup is not a valid Carillon installation")?;
+    validate_installation(&config)?;
+    Ok(())
+}
+
+/// Unpack a gzip tar archive of only regular files and directories into an
+/// existing private directory, as the invoking user. Links, devices, absolute
+/// names and `..` components are refused, so no entry can land or point
+/// outside `target`; the caller discards `target` on failure.
+pub(super) fn unpack_regular(archive_path: &Path, target: &Path) -> Result<()> {
+    let file =
+        fs::File::open(archive_path).with_context(|| format!("open {}", archive_path.display()))?;
     let decoder = GzDecoder::new(BufReader::new(file));
     let mut archive = Archive::new(decoder);
     archive.set_preserve_permissions(true);
@@ -380,17 +394,13 @@ fn restore_into(archive_path: &Path, target: &Path) -> Result<()> {
                 .components()
                 .any(|component| matches!(component, std::path::Component::ParentDir))
         {
-            bail!("backup contains unsafe path {}", path.display());
+            bail!("archive contains unsafe path {}", path.display());
         }
         if !entry.header().entry_type().is_file() && !entry.header().entry_type().is_dir() {
-            bail!("backup contains unsupported entry {}", path.display());
+            bail!("archive contains unsupported entry {}", path.display());
         }
         entry.unpack_in(target)?;
     }
-    validate_portable_paths(target)?;
-    let config = LoadedConfig::load(&target.join("carillon.toml"))
-        .context("restored backup is not a valid Carillon installation")?;
-    validate_installation(&config)?;
     Ok(())
 }
 

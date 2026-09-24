@@ -102,6 +102,8 @@ The included release supervises core, Discord, and Pi as separate user services 
 
 The services share the installing Unix identity. Registry and provider configuration are loaded at process start; changes are applied by restarting the affected service. The Discord command module is the exception: it is replaced in the running provider by `carillon discord reload`, without reconnecting the gateway.
 
+Operating an installation belongs to application assembly and the release scripts, not to the durable engine. The core application's `start`, `stop`, `restart` and `logs` call `systemctl --user` and `tail` directly. `update` unpacks a local release archive as regular files and checks the release's identity while the services keep running. It then delegates to that release's `install.sh --update`, which performs the same application exchange and service registration as first-time setup, and finally restores the previous running state. Application files, user units and systemd are not one transaction; failures report what may have changed rather than rolling back. The user units identify the installation they run, so commands for one installation do not control another's services.
+
 ## Trust and authority
 
 Remote admission and local execution are separate boundaries. Interface providers fail closed before runtime work; Discord admits an interaction by guild, user, and channel exactly as it admits a message, before the command module runs. After admission, the services have the ordinary authority of their Unix owner, including that owner's groups, files, executables, applications, and configured passwordless sudo.

@@ -4,9 +4,18 @@ umask 077
 
 usage() {
   echo "usage: install.sh --guild-id ID --bot-user-id ID --user-id ID [--user-id ID ...] --route CHANNEL_ID:mention|always:thread|channel [--route ...] [--base-port PORT] [--workspace PATH]" >&2
+  echo "       install.sh --update    (run by 'carillon update'; publishes this release into an existing installation)" >&2
   exit 2
 }
 
+# First-time setup writes the registry and Discord settings from these
+# arguments. An update only publishes the application and service definitions;
+# it never rewrites configuration, credentials or state.
+MODE=setup
+if [ "$#" -eq 1 ] && [ "$1" = --update ]; then
+  MODE=update
+  shift
+fi
 GUILD_ID=
 BOT_USER_ID=
 USER_IDS=
@@ -24,10 +33,12 @@ while [ "$#" -gt 0 ]; do
     *) usage ;;
   esac
 done
-[ -n "$GUILD_ID" ] || usage
-[ -n "$BOT_USER_ID" ] || usage
-[ -n "$USER_IDS" ] || usage
-[ -n "$ROUTES" ] || usage
+if [ "$MODE" = setup ]; then
+  [ -n "$GUILD_ID" ] || usage
+  [ -n "$BOT_USER_ID" ] || usage
+  [ -n "$USER_IDS" ] || usage
+  [ -n "$ROUTES" ] || usage
+fi
 [ "$(id -u)" -ne 0 ] || { echo "installer must run as the intended non-root owner; root ownership is ambiguous" >&2; exit 1; }
 [ -n "${HOME:-}" ] && [ -d "$HOME" ] || { echo "HOME must name the installing user's existing home directory" >&2; exit 1; }
 [ "$(stat -c %u "$HOME")" -eq "$(id -u)" ] || { echo "HOME is not owned by the installing user" >&2; exit 1; }
@@ -36,8 +47,10 @@ case "$HOME:$WORKSPACE:${CARILLON_HOME:-}" in
   *'
 '*) echo "HOME, workspace, and CARILLON_HOME must not contain newlines" >&2; exit 1 ;;
 esac
-case "$WORKSPACE" in /*) ;; *) echo "workspace must be an absolute path" >&2; exit 1 ;; esac
-[ -d "$WORKSPACE" ] || { echo "workspace does not exist: $WORKSPACE" >&2; exit 1; }
+if [ "$MODE" = setup ]; then
+  case "$WORKSPACE" in /*) ;; *) echo "workspace must be an absolute path" >&2; exit 1 ;; esac
+  [ -d "$WORKSPACE" ] || { echo "workspace does not exist: $WORKSPACE" >&2; exit 1; }
+fi
 
 CARILLON_HOME=${CARILLON_HOME:-"$HOME/.carillon"}
 case "$CARILLON_HOME" in /*) ;; *) echo "CARILLON_HOME must be an absolute path" >&2; exit 1 ;; esac
@@ -45,6 +58,10 @@ CARILLON_HOME=$(realpath -m -- "$CARILLON_HOME")
 GLOBAL_PI=$(realpath -m -- "$HOME/.pi")
 case "$CARILLON_HOME/" in "$GLOBAL_PI/"*) echo "CARILLON_HOME must not overlap the owner's global ~/.pi directory" >&2; exit 1 ;; esac
 case "$GLOBAL_PI/" in "$CARILLON_HOME/"*) echo "CARILLON_HOME must not overlap the owner's global ~/.pi directory" >&2; exit 1 ;; esac
+if [ "$MODE" = update ] && [ ! -f "$CARILLON_HOME/carillon.toml" ]; then
+  echo "no Carillon installation at $CARILLON_HOME; run install.sh with setup options" >&2
+  exit 1
+fi
 
 SOURCE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 OWNER=$(id -un)
@@ -69,15 +86,23 @@ if [ -e "$APP" ] || [ -L "$APP" ]; then
   }
 fi
 
-# Existing per-user installations retain credentials and durable state; only
-# the Discord provider's own settings file is (re)written.
-if [ ! -f "$CARILLON_HOME/carillon.toml" ]; then
+# Setup keeps an existing registry, credentials and durable state; only the
+# Discord provider's own settings file is (re)written from the arguments.
+if [ "$MODE" = setup ] && [ ! -f "$CARILLON_HOME/carillon.toml" ]; then
   "$SOURCE/bin/carillon" --home "$CARILLON_HOME" init --workspace "$WORKSPACE" --base-port "$BASE_PORT"
 fi
-# USER_IDS and ROUTES intentionally expand into repeated, validated CLI arguments.
-# shellcheck disable=SC2086
-"$SOURCE/bin/carillon" --home "$CARILLON_HOME" discord configure --provider discord-private \
-  --guild-id "$GUILD_ID" --bot-user-id "$BOT_USER_ID" $USER_IDS $ROUTES >/dev/null
+# Serialize maintenance with `carillon update`, which holds this lock itself
+# while it runs `install.sh --update`, and with uninstallation.
+if [ "${CARILLON_MAINTENANCE_LOCK:-}" != "$CARILLON_HOME" ]; then
+  exec 9>>"$CARILLON_HOME/.maintenance.lock"
+  flock -n 9 || { echo "another Carillon maintenance operation is running for $CARILLON_HOME" >&2; exit 1; }
+fi
+if [ "$MODE" = setup ]; then
+  # USER_IDS and ROUTES intentionally expand into repeated, validated CLI arguments.
+  # shellcheck disable=SC2086
+  "$SOURCE/bin/carillon" --home "$CARILLON_HOME" discord configure --provider discord-private \
+    --guild-id "$GUILD_ID" --bot-user-id "$BOT_USER_ID" $USER_IDS $ROUTES >/dev/null
+fi
 
 install -d -m 0700 "$CARILLON_HOME" "$CARILLON_HOME/credentials" "$CARILLON_HOME/providers" \
   "$CARILLON_HOME/pi" "$CARILLON_HOME/logs"
@@ -88,7 +113,9 @@ cleanup_staging() {
     if [ "$CLEANUP_APP_NEW" -eq 1 ]; then
       rm -rf -- "$APP_NEW"
     else
-      echo "installation incomplete; inspect $APP and retained tree $APP_NEW; rerun installer before restarting" >&2
+      retry=installer
+      [ "$MODE" = setup ] || retry='carillon update'
+      echo "installation incomplete; inspect $APP and retained tree $APP_NEW; rerun $retry before restarting" >&2
     fi
   fi
 }
@@ -121,16 +148,59 @@ else
   APP_NEW=
 fi
 sync -f -- "$CARILLON_HOME"
-[ -e "$CARILLON_HOME/credentials/discord-bot.token" ] || install -m 0600 /dev/null "$CARILLON_HOME/credentials/discord-bot.token"
-chmod 0700 "$CARILLON_HOME" "$CARILLON_HOME/credentials" "$CARILLON_HOME/providers" \
-  "$CARILLON_HOME/pi" "$CARILLON_HOME/logs"
-chmod 0600 "$CARILLON_HOME/carillon.toml" "$CARILLON_HOME/providers"/*.toml \
-  "$CARILLON_HOME/credentials"/*.token
+if [ "$MODE" = setup ]; then
+  [ -e "$CARILLON_HOME/credentials/discord-bot.token" ] || install -m 0600 /dev/null "$CARILLON_HOME/credentials/discord-bot.token"
+  chmod 0700 "$CARILLON_HOME" "$CARILLON_HOME/credentials" "$CARILLON_HOME/providers" \
+    "$CARILLON_HOME/pi" "$CARILLON_HOME/logs"
+  chmod 0600 "$CARILLON_HOME/carillon.toml" "$CARILLON_HOME/providers"/*.toml \
+    "$CARILLON_HOME/credentials"/*.token
+fi
 
 # Retain the previous application until registration succeeds. On any failure,
 # leave the selected complete application in place and require a successful rerun.
 "$APP/bin/carillon-register-services"
 CLEANUP_APP_NEW=1
+
+# The owner's stable command follows the published application path. Never
+# replace another program or another live installation's entry point; a
+# dangling link into a removed installation's app/bin is stale.
+ENTRY_DIR=$HOME/.local/bin
+ENTRY=$ENTRY_DIR/carillon
+COMMAND=$APP/bin/carillon
+install_entry_point() {
+  if [ -L "$ENTRY" ]; then
+    current=$(readlink -- "$ENTRY")
+    [ "$current" != "$COMMAND" ] || return 0
+    case "$current" in
+      /*/app/bin/carillon)
+        if [ -e "$ENTRY" ]; then
+          echo "$ENTRY runs the installation at ${current%/app/bin/carillon}; left unchanged."
+          return 1
+        fi ;;
+      *) echo "$ENTRY is not a Carillon entry point; left unchanged."; return 1 ;;
+    esac
+  elif [ -e "$ENTRY" ]; then
+    echo "$ENTRY is not a Carillon entry point; left unchanged."
+    return 1
+  fi
+  if ! { (umask 022 && mkdir -p -- "$ENTRY_DIR") && ln -sfn -- "$COMMAND" "$ENTRY"; }; then
+    echo "could not create $ENTRY; the installation is complete without it."
+    return 1
+  fi
+}
+CARILLON=$COMMAND
+if install_entry_point; then
+  if [ "$(command -v carillon || true)" = "$ENTRY" ]; then
+    CARILLON=carillon
+  else
+    echo "Installed $ENTRY, but $ENTRY_DIR is not on PATH or another carillon precedes it."
+  fi
+fi
+
+if [ "$MODE" = update ]; then
+  printf '%s\n' "Published this release at $APP and registered its user units; configuration and state were not changed."
+  exit 0
+fi
 cat <<EOF
 Carillon installed for $OWNER at $CARILLON_HOME and enabled for this user's service manager.
 1. Put the Discord bot token in $CARILLON_HOME/credentials/discord-bot.token (mode 0600).
@@ -138,8 +208,8 @@ Carillon installed for $OWNER at $CARILLON_HOME and enabled for this user's serv
    $APP/bin/carillon-pi --no-session --no-tools --no-approve
    In Pi, authenticate, then open /model and press Ctrl+S on the desired model to save the startup default.
    Authentication alone is not enough: the runtime requires a saved, available default model.
-3. Start deliberately with: systemctl --user start carillon.target
-4. Inspect services with: systemctl --user status carillon.target
-   Inspect the running product with: $APP/bin/carillon status
+3. Start deliberately with: $CARILLON start
+4. Inspect with: $CARILLON status   and   $CARILLON logs
+Update later with: $CARILLON update /path/to/carillon-VERSION-linux-ARCH.tar.gz
 For boot without an interactive login, an administrator may run: loginctl enable-linger $OWNER
 EOF

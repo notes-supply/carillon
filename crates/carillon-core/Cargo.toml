@@ -22,7 +22,7 @@ hex.workspace = true
 http.workspace = true
 reqwest.workspace = true
 rusqlite = { version = "0.40.2", features = ["bundled"] }
-rustix = { version = "1.1.4", features = ["fs"] }
+rustix = { version = "1.1.4", features = ["fs", "process"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
