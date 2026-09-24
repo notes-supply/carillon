@@ -1,16 +1,24 @@
-/** What the runtime tells callers when work fails, and what it keeps in its own log. */
+/**
+ * What the runtime tells callers when work fails, and what it keeps in its own log.
+ *
+ * Failure text often comes from someone else (a model provider, an SDK, a
+ * request) and can quote credentials. These rules are conservative and
+ * best-effort: they withhold or redact the structures that carry credentials,
+ * whatever their length, but cannot prove arbitrary prose secret-free.
+ */
 
 /**
- * A failure explained for the person using the interface. The HTTP adapter
- * sends only these messages to callers, as the response's `error`, so each
- * must already be safe to display. Any other failure is logged and reported
- * without an explanation. `cause` carries diagnostics for the log.
+ * A failure whose message is meant for the person using the interface, such as
+ * a model provider's explanation or a refused model change. The message may
+ * quote external or user-supplied text: the HTTP adapter sends only what
+ * {@link displayableExplanation} keeps of it. Any other failure is internal and
+ * reported without an explanation.
  */
 export class ExplainedFailure extends Error {
   readonly status: number;
 
-  constructor(status: number, message: string, options?: ErrorOptions) {
-    super(message, options);
+  constructor(status: number, message: string) {
+    super(message);
     this.status = status;
   }
 }
@@ -18,21 +26,42 @@ export class ExplainedFailure extends Error {
 /** The most an explanation shows. The full diagnostic stays in the runtime log. */
 export const EXPLANATION_LIMIT = 300;
 
+// A word naming a credential. Letters may not touch it, so `access_token` and
+// `x-api-key` count, while `tokenizer` does not.
+const CREDENTIAL = String.raw`(?<![A-Za-z])(?:api[-_ ]?keys?|access[-_ ]?keys?|private[-_ ]?keys?|keys?|secrets?|passwords?|passphrases?|passwd|tokens?|authorization|cookies?|credentials?|signatures?)(?![A-Za-z])`;
+// That word labelling a value: `password: x`, `"token":"x"`, `API key provided: x`.
+const LABELLED = new RegExp(
+  String.raw`(${CREDENTIAL}["']?(?:[ \t]+[^\s:=]+)?[ \t]*[:=][ \t]*)("[^"]*"|'[^']*'|[^\s,;]+)`,
+  "giu",
+);
+const ASSIGNMENT = /([^\s=&?]+=)("[^"]*"|'[^']*'|[^\s&,;]+)/gu;
+const AUTH_SCHEME = /((?<![A-Za-z])(?:bearer|basic)[ \t]+)(\S+)/giu;
+const URL_PARTS = /([a-z][a-z0-9+.-]*:\/\/)(?:[^\s/?#@]*@)?([^\s?#]*)([?#]\S*)?/giu;
+const USERINFO = /[^\s:/@]+:[^\s/@]*@[^\s@]/u;
+// Unlabelled long runs of token characters: keys, JWT segments, signatures.
+const OPAQUE = /[A-Za-z0-9_+=-]{32,}/gu;
+
 /**
- * Reduces failure text composed by someone else (a model provider, an SDK) to
- * an explanation that is safe to show in a conversation, or undefined when
- * nothing in it is.
- *
- * Such text is meant for a person but is often assembled from HTTP responses:
- * it can be a raw JSON body, an HTML page from a proxy, or carry appended
- * metadata lines and echoed request details. Only the first line counts; a
- * JSON body contributes just its `message`; markup is refused; credential-like
- * runs are redacted; and the result is bounded.
+ * What of failure text is safe to show in a conversation, or undefined when
+ * nothing is. Only the first line counts, and a JSON error body contributes
+ * only its conventional `message`, `error` or `error.message`. The whole
+ * explanation is withheld if it contains markup, a link target, an assignment,
+ * a labelled credential, URL user information or an authorization scheme.
+ * URLs become `[link]`, long opaque runs `[redacted]`, and the result is bounded.
  */
 export function displayableExplanation(text: string): string | undefined {
   const line = withoutJsonBody(text.split(/\r\n|\r|\n/u, 1)[0] ?? "");
-  if (line === undefined || /<[A-Za-z!?/]/u.test(line)) return undefined;
-  const explanation = redactCredentials(line.replace(/\p{Cc}/gu, " "))
+  if (
+    line === undefined ||
+    [/<[A-Za-z!?/]|\]\(|=/u, USERINFO, LABELLED, AUTH_SCHEME].some(
+      (risky) => line.search(risky) !== -1,
+    )
+  )
+    return undefined;
+  const explanation = line
+    .replace(URL_PARTS, "[link]")
+    .replace(OPAQUE, "[redacted]")
+    .replace(/\p{Cc}/gu, " ")
     .split(/\s+/u)
     .filter((word) => word.length > 0)
     .join(" ");
@@ -40,15 +69,24 @@ export function displayableExplanation(text: string): string | undefined {
 }
 
 /**
- * Replaces long unbroken runs of token characters: API keys, bearer tokens,
- * JWT segments and signed URL parameters, which prose, model names and file
- * paths do not contain. Used for both explanations and logged diagnostics.
+ * Removes credential-bearing values while keeping text useful as a
+ * diagnostic: URL user information, queries and fragments; labelled
+ * credentials, assignments and authorization values; and long opaque runs.
  */
 export function redactCredentials(text: string): string {
-  return text.replace(/[A-Za-z0-9_+=-]{32,}/gu, "[redacted]");
+  return text
+    .replace(
+      URL_PARTS,
+      (_, scheme: string, location: string, rest: string | undefined) =>
+        `${scheme}${location}${rest === undefined ? "" : "?[redacted]"}`,
+    )
+    .replace(AUTH_SCHEME, "$1[redacted]")
+    .replace(LABELLED, "$1[redacted]")
+    .replace(ASSIGNMENT, "$1[redacted]")
+    .replace(OPAQUE, "[redacted]");
 }
 
-/** A diagnostic for the runtime log: the stack or message, never the error object and its request data. */
+/** A diagnostic for the runtime log: the redacted stack or message, never the error object and its request data. */
 export function diagnostic(failure: unknown): string {
   const detail = failure instanceof Error ? (failure.stack ?? failure.message) : String(failure);
   return redactCredentials(detail);
@@ -67,15 +105,15 @@ function withoutJsonBody(line: string): string | undefined {
   return message === undefined ? undefined : `${line.slice(0, start)}${message}`;
 }
 
-/** The shallowest string `message` in a JSON error body, the common convention for its human part. */
+/** An error body's human part where providers conventionally put it, and nowhere deeper. */
 function bodyMessage(body: unknown): string | undefined {
-  const pending: unknown[] = [body];
-  for (const value of pending) {
-    if (typeof value !== "object" || value === null) continue;
-    if ("message" in value && typeof value.message === "string") return value.message;
-    const nested: unknown[] = Object.values(value);
-    pending.push(...nested);
-  }
+  if (typeof body !== "object" || body === null) return undefined;
+  if ("message" in body) return typeof body.message === "string" ? body.message : undefined;
+  if (!("error" in body)) return undefined;
+  const { error } = body;
+  if (typeof error === "string") return error;
+  if (typeof error === "object" && error !== null && "message" in error)
+    return typeof error.message === "string" ? error.message : undefined;
   return undefined;
 }
 

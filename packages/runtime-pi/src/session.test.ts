@@ -377,14 +377,11 @@ it.each([false, true])(
 );
 
 it.each([
-  [
-    '403: {"error":{"message":"The usage limit has been reached","type":"usage_limit"}}',
-    "403: The usage limit has been reached",
-  ],
-  ["403: <html><body>Forbidden by gateway</body></html>", undefined],
+  '403: {"error":{"message":"The usage limit has been reached","type":"usage_limit"}}',
+  "403: <html><body>Forbidden by gateway</body></html>",
 ])(
-  "explains a failed provider call only with displayable text: %j",
-  async (errorMessage, explanation) => {
+  "reports a failed provider call as Pi's explanation, once, and continues: %j",
+  async (errorMessage) => {
     const root = await mkdtemp(join(tmpdir(), "carillon-failed-pi-"));
     const key = { interface_id: "discord", agent_id: "default", audience_id: "conversation" };
     const baseRuntime = await ModelRuntime.create({
@@ -434,13 +431,9 @@ it.each([
           "use the provider",
           new AbortController().signal,
         ).catch((thrown: unknown) => thrown);
-        if (explanation === undefined) {
-          expect(failure).not.toBeInstanceOf(ExplainedFailure);
-          expect(failure).toMatchObject({ message: errorMessage });
-        } else {
-          expect(failure).toBeInstanceOf(ExplainedFailure);
-          expect(failure).toMatchObject({ message: explanation, status: 502, cause: errorMessage });
-        }
+        // What of it may be shown is decided where it leaves the runtime.
+        expect(failure).toBeInstanceOf(ExplainedFailure);
+        expect(failure).toMatchObject({ message: errorMessage, status: 502 });
         expect(calls).toBe(1);
       } finally {
         session.dispose();

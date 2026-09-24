@@ -9,7 +9,7 @@ import {
   type ModelQuery,
   type ModelUpdate,
 } from "@carillon/protocol";
-import { diagnostic, ExplainedFailure } from "./failure.ts";
+import { diagnostic, displayableExplanation, ExplainedFailure } from "./failure.ts";
 import type { RuntimeOperations, TurnRequest } from "./operations.ts";
 import packageInfo from "../package.json" with { type: "json" };
 
@@ -38,14 +38,18 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
   if (options.token.length === 0) throw new Error("runtime credential must not be empty");
   return createServer((request, response) => {
     void route(request, response).catch((failure: unknown) => {
-      // Callers receive only explanations; diagnostics stay in this log.
-      if (failure instanceof ExplainedFailure) {
-        if (failure.cause !== undefined) logFailure(request, failure.cause);
-        if (!response.destroyed) writeJson(response, failure.status, { error: failure.message });
-        return;
-      }
-      logFailure(request, failure);
-      if (!response.destroyed) writeJson(response, 500, {});
+      // Callers receive only the displayable part of an explanation; the
+      // diagnostic stays in this log. Refusing a caller's request (4xx) is
+      // an answer, not a runtime failure.
+      const explained = failure instanceof ExplainedFailure;
+      if (!explained || failure.status >= 500) logFailure(request, failure);
+      if (response.destroyed) return;
+      const explanation = explained ? displayableExplanation(failure.message) : undefined;
+      writeJson(
+        response,
+        explained ? failure.status : 500,
+        explanation === undefined ? {} : { error: explanation },
+      );
     });
   });
   async function route(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -148,10 +152,10 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
     return JSON.parse(body) as unknown;
   }
 
+  /** Names the request by method and path: its query carries caller data. */
   function logFailure(request: IncomingMessage, failure: unknown): void {
-    console.error(
-      `${String(request.method)} ${String(request.url)} failed: ${diagnostic(failure)}`,
-    );
+    const path = (request.url ?? "").split("?", 1)[0];
+    console.error(`${String(request.method)} ${String(path)} failed: ${diagnostic(failure)}`);
   }
 
   function writeJson(response: ServerResponse, status: number, value: unknown): void {

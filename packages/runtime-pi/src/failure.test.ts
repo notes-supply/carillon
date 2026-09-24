@@ -1,10 +1,15 @@
 import { expect, it } from "vitest";
-import { diagnostic, displayableExplanation, EXPLANATION_LIMIT } from "./failure.ts";
+import {
+  diagnostic,
+  displayableExplanation,
+  EXPLANATION_LIMIT,
+  redactCredentials,
+} from "./failure.ts";
 
 const key = `sk-proj-${"Ab1".repeat(20)}`;
 
-// Shapes Pi's providers produce: a provider's own sentence, an SDK status with
-// the provider's JSON body, gateway pages, appended metadata and echoed requests.
+// Ordinary usage-limit, rate-limit and authentication failures, in the shapes
+// Pi's providers produce them, stay useful.
 it.each([
   [
     "Codex error: The usage limit has been reached",
@@ -19,31 +24,50 @@ it.each([
     "429 Number of request tokens has exceeded your per-minute rate limit",
   ],
   [
+    "Rate limit reached for gpt-5 in organization org-abc on tokens per min (TPM): Limit 30000, Used 29000. Visit https://platform.example/rate-limits to learn more.",
+    "Rate limit reached for gpt-5 in organization org-abc on tokens per min (TPM): Limit 30000, Used 29000. Visit [link] to learn more.",
+  ],
+  [
     '403: {"message":"Your organization must be verified to use this model.","type":"invalid_request_error","code":null}',
     "403: Your organization must be verified to use this model.",
+  ],
+  ["401 Unauthorized: invalid API key", "401 Unauthorized: invalid API key"],
+  [
+    `Authentication failed for "openai-codex". Credentials may have expired or network is unavailable. Run '/login openai-codex' to re-authenticate.`,
+    `Authentication failed for "openai-codex". Credentials may have expired or network is unavailable. Run '/login openai-codex' to re-authenticate.`,
   ],
   [
     'Provider finish_reason: content_filter\n{"raw":"metadata"}',
     "Provider finish_reason: content_filter",
   ],
-  [
-    `401 Incorrect API key provided: ${key}. You can find your API key in your account.`,
-    "401 Incorrect API key provided: [redacted]. You can find your API key in your account.",
-  ],
+  [`Upstream rejected request ${key} for quota`, "Upstream rejected request [redacted] for quota"],
   ["  Request\tfailed:\u0007 upstream   refused  ", "Request failed: upstream refused"],
 ])("explains %j as %j", (text, explanation) => {
   expect(displayableExplanation(text)).toBe(explanation);
 });
 
+// Credential-bearing structures withhold the whole explanation, whatever the
+// length of the value; so do raw pages and bodies without a conventional message.
 it.each([
-  ["an HTML page from a proxy", "403: <html><head><title>Forbidden</title></head></html>"],
+  ["an assignment", "Authentication failed: password=short-secret"],
+  ["URL user information", "Request failed: https://alice:short-secret@example.invalid"],
+  ["a link target", "Gateway error: [click here](https://example.invalid/?token=short-secret)"],
+  ["a query", "Request to https://example.invalid/v1?key=short-secret failed"],
+  ["a labelled key", "401 Incorrect API key provided: sk-short. Check your key."],
+  ["a labelled JSON credential", '400: {"message":"rejected \\"token\\": short-secret"}'],
+  ["an authorization scheme", "Proxy refused Bearer short-secret"],
+  ["an HTML page", "403: <html><head><title>Forbidden</title></head></html>"],
   ["a JSON body without a message", 'Codex error: {"type":"error","code":"server_is_overloaded"}'],
+  [
+    "a message nested elsewhere in a JSON body",
+    '400 {"detail":"bad","request":{"message":"the user prompt text"}}',
+  ],
   [
     "a truncated JSON body",
     '400: {"error":{"message":"Invalid schema for function"... [truncated 812 chars]',
   ],
   ["nothing", " \n text on a later line"],
-])("has no explanation for %s", (_, text) => {
+])("withholds %s", (_, text) => {
   expect(displayableExplanation(text)).toBeUndefined();
 });
 
@@ -61,13 +85,36 @@ it("bounds an explanation at a word, whatever its length", () => {
   expect(kept).toBe(family.repeat(kept.length / family.length));
 });
 
+// Logs keep the diagnostic but not the values the display boundary withholds.
+it.each([
+  ["Authentication failed: password=short-secret", "Authentication failed: password=[redacted]"],
+  [
+    "Request failed: https://alice:short-secret@example.invalid",
+    "Request failed: https://example.invalid",
+  ],
+  [
+    "Gateway error: [click here](https://example.invalid/?token=short-secret)",
+    "Gateway error: [click here](https://example.invalid/?[redacted]",
+  ],
+  [
+    "401 Incorrect API key provided: sk-short. Check your key.",
+    "401 Incorrect API key provided: [redacted] Check your key.",
+  ],
+  ['{"access_token":"short-secret","expires":3600}', '{"access_token":[redacted],"expires":3600}'],
+  ["authorization: Basic c2hvcnQ6c2VjcmV0", "authorization: [redacted] [redacted]"],
+  ["Proxy refused Bearer short-secret", "Proxy refused Bearer [redacted]"],
+  [`upstream rejected ${key}`, "upstream rejected [redacted]"],
+])("logs %j as %j", (text, logged) => {
+  expect(redactCredentials(text)).toBe(logged);
+});
+
 it("logs the stack without credentials or error properties", () => {
-  const failure = Object.assign(new Error(`upstream rejected ${key}`), {
+  const failure = Object.assign(new Error(`upstream rejected password=short-secret ${key}`), {
     headers: { authorization: "Bearer request-header-secret" },
   });
   const logged = diagnostic(failure);
-  expect(logged).toMatch(/^Error: upstream rejected \[redacted\]\n\s+at /u);
+  expect(logged).toMatch(/^Error: upstream rejected password=\[redacted\] \[redacted\]\n\s+at /u);
   expect(logged).toContain("failure.test.ts");
-  expect(logged).not.toContain(key);
-  expect(logged).not.toContain("request-header-secret");
+  for (const secret of [key, "short-secret", "request-header-secret"])
+    expect(logged).not.toContain(secret);
 });

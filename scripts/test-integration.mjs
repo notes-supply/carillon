@@ -313,7 +313,8 @@ try {
         runtime_outage: "queued and resumed",
         backup_restore: "continued",
         model_picker: "selections reach the runtime, persist, and never wait for a running turn",
-        provider_failure: "explained once without replay, bodies withheld, conversation continues",
+        provider_failure:
+          "explained once without replay, pages and credentials withheld, conversation continues",
       },
       null,
       2,
@@ -770,7 +771,7 @@ async function testProviderFailure() {
       type: "application/json",
       body: JSON.stringify({
         error: {
-          message: `The usage limit has been reached for @everyone and <@200>. Key: ${key}`,
+          message: `The usage limit has been reached for @everyone and <@200> (request ${key}). See https://example.invalid/limits`,
           type: "usage_limit",
         },
       }),
@@ -778,6 +779,10 @@ async function testProviderFailure() {
     {
       type: "text/html",
       body: `<html><body>Gateway refused ${key}</body></html>`,
+    },
+    {
+      type: "application/json",
+      body: JSON.stringify({ error: { message: "Authentication failed: password=short-secret" } }),
     },
   ];
   let requests = 0;
@@ -835,7 +840,7 @@ async function testProviderFailure() {
     const [reason, next] = explained.delivery.content.split("\n");
     assert.match(
       reason,
-      /^That turn was interrupted: .*The usage limit has been reached for @everyone and <@200>\. Key: \[redacted\]$/u,
+      /^That turn was interrupted: .*The usage limit has been reached for @everyone and <@200> \(request \[redacted\]\)\. See \[link\]$/u,
     );
     assert.equal(
       next,
@@ -850,22 +855,29 @@ async function testProviderFailure() {
       `runtime reported failure: ${reason.split(": ").slice(1).join(": ")}`,
     );
 
-    const withheld = await simulate("provider-failure-withheld", "use the provider again");
-    assert.equal(withheld.delivery.turn_state, "interrupted");
-    assert.equal(
-      withheld.delivery.content,
-      "That turn was interrupted. Send another message to continue in this conversation. Actions already taken may have had effects.",
-    );
+    // A raw page, and an explanation carrying a credential, show the generic notice.
+    const withheld = [];
+    for (const attempt of ["page", "credential"]) {
+      const { delivery } = await simulate(`provider-failure-${attempt}`, `try the ${attempt}`);
+      assert.equal(delivery.turn_state, "interrupted");
+      assert.equal(
+        delivery.content,
+        "That turn was interrupted. Send another message to continue in this conversation. Actions already taken may have had effects.",
+      );
+      withheld.push(delivery.content);
+    }
 
     const recovered = await simulate("provider-recovered", "continue");
     assert.equal(recovered.delivery.turn_state, "completed");
     assert.equal(recovered.delivery.content, "Recovered after the provider failures.");
-    assert.equal(requests, 3, "failed turns must not be retried or replayed");
+    assert.equal(requests, 4, "failed turns must not be retried or replayed");
     const diagnostics = log.join("");
     assert.match(diagnostics, /POST \/v1\/turns failed: .*The usage limit has been reached/u);
     assert.match(diagnostics, /POST \/v1\/turns failed: .*Gateway refused \[redacted\]/u);
-    for (const text of [explained.delivery.content, withheld.delivery.content, diagnostics])
-      assert.ok(!text.includes(key), "credentials must not be displayed or logged");
+    assert.match(diagnostics, /POST \/v1\/turns failed: .*password=\[redacted\]/u);
+    for (const text of [explained.delivery.content, ...withheld, diagnostics])
+      for (const secret of [key, "short-secret"])
+        assert.ok(!text.includes(secret), "credentials must not be displayed or logged");
   } finally {
     await stop("runtime");
     provider.close();

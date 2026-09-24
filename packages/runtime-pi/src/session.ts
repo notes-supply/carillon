@@ -10,7 +10,7 @@ import {
 import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { displayableExplanation, ExplainedFailure } from "./failure.ts";
+import { ExplainedFailure } from "./failure.ts";
 
 interface PiExecutionSessionOptions {
   readonly resourceRoot: string;
@@ -71,25 +71,17 @@ export async function promptSession(session: AgentSession, input: string, signal
     signal.throwIfAborted();
     const last = session.messages.at(-1);
     if (last?.role !== "assistant") return;
-    if (last.stopReason === "error") throw piFailure(last.errorMessage);
+    // Pi reports provider and agent-loop failures alike as the assistant's
+    // `errorMessage`, its explanation for Pi's user. Which of it may be shown
+    // is decided where it leaves the runtime.
+    if (last.stopReason === "error")
+      throw last.errorMessage === undefined
+        ? new Error("Pi reported an error without a message")
+        : new ExplainedFailure(502, last.errorMessage);
     if (last.stopReason === "aborted") throw new Error("Pi execution was interrupted");
   } finally {
     signal.removeEventListener("abort", cancel);
     unsubscribe();
     await cancellation;
   }
-}
-
-/**
- * Pi reports a failed turn, whether from the model provider or its agent loop,
- * as the assistant's `errorMessage`: its explanation for Pi's user. What of it
- * is safe to display becomes the turn's explanation; the whole text remains the
- * diagnostic.
- */
-function piFailure(errorMessage: string | undefined): Error {
-  const detail = errorMessage ?? "Pi reported an error without a message";
-  const explanation = displayableExplanation(detail);
-  return explanation === undefined
-    ? new Error(detail)
-    : new ExplainedFailure(502, explanation, { cause: detail });
 }
