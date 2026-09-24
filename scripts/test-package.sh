@@ -85,6 +85,14 @@ for arch in x86_64 aarch64; do
     [ "$(tar -xOf "$archive" "carillon-1.2.3/bin/$binary")" = "bun-linux-$bun_arch" ]
   done
   [ "$(tar -xOf "$archive" carillon-1.2.3/lib/carillon_discord_commands.wasm)" = wasm ]
+  # The manifest lists exactly the shipped files, marking what must be executable.
+  tar -xOf "$archive" carillon-1.2.3/MANIFEST >"$TEST_ROOT/$arch.manifest"
+  for line in 'x install.sh' 'x bin/carillon' 'x bin/carillon-discord' 'x bin/carillon-register-services' \
+    'r lib/carillon_discord_commands.wasm' 'r systemd/example.service'; do
+    grep -Fx "$line" "$TEST_ROOT/$arch.manifest" >/dev/null
+  done
+  [ "$(wc -l <"$TEST_ROOT/$arch.manifest")" -eq \
+    "$(tar -tzvf "$archive" | grep -c '^-' | awk '{ print $1 - 1 }')" ]
   [ "$(wc -l <"$TEST_ROOT/$arch.cargo")" -eq 2 ]
   [ "$(wc -l <"$TEST_ROOT/$arch.bun")" -eq 2 ]
   printf 'package target selection passed: %s\n' "$arch"

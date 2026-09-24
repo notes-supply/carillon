@@ -50,6 +50,11 @@ start() {
   fi
 }
 stop() {
+  if [ "${FAKE_STOP:-ok}" = break-installer ]; then
+    # Make the already checked installer unrunnable once services are down.
+    root=$(sed -n 's/^Environment="CARILLON_HOME=\(.*\)"$/\1/p' "$units/carillon-core.service")
+    chmod a-x "$root"/.update-*/carillon-*/install.sh
+  fi
   running || return 0
   for pid in $(cat "$MANAGER/pids"); do kill "$pid" 2>/dev/null || true; done
   for pid in $(cat "$MANAGER/pids"); do
@@ -120,6 +125,7 @@ release_archive() {
   mkdir -p "$directory"
   cp -a "$RELEASE" "$directory/carillon-$VERSION"
   printf '%s\n' "$name" >"$directory/carillon-$VERSION/lib/release-sentinel"
+  printf '%s\n' 'r lib/release-sentinel' >>"$directory/carillon-$VERSION/MANIFEST"
   printf '%s\n' "$directory/carillon-$VERSION"
 }
 pack() {
@@ -207,9 +213,26 @@ mkdir -p "$TEST_ROOT/traversal/inner"
 printf '%s\n' escaped >"$TEST_ROOT/traversal/escape"
 (cd "$TEST_ROOT/traversal/inner" && tar -P -czf ../../traversal.tar.gz ../escape)
 printf '%s\n' 'not an archive' >"$TEST_ROOT/text.tar.gz"
+# Incomplete or altered payloads are refused against the packager's MANIFEST.
+BAD=$(release_archive missing-provider)
+rm "$BAD/bin/carillon-discord"
+pack "$BAD" "$TEST_ROOT/missing-provider.tar.gz"
+BAD=$(release_archive nonexec-installer)
+chmod 0644 "$BAD/install.sh"
+pack "$BAD" "$TEST_ROOT/nonexec-installer.tar.gz"
+BAD=$(release_archive nonexec-provider)
+chmod 0644 "$BAD/bin/carillon-discord"
+pack "$BAD" "$TEST_ROOT/nonexec-provider.tar.gz"
+BAD=$(release_archive unlisted)
+printf '%s\n' unlisted >"$BAD/bin/unlisted"
+pack "$BAD" "$TEST_ROOT/unlisted.tar.gz"
 snapshot
 for archive in link:'unsupported entry' relabelled:'not version 9.9.9' broken:'reports ""' \
-  traversal:'unsafe path' text:'nothing was changed'; do
+  traversal:'unsafe path' text:'nothing was changed' \
+  missing-provider:'release is incomplete: bin/carillon-discord is missing' \
+  nonexec-installer:'install.sh is missing or not executable' \
+  nonexec-provider:'release file bin/carillon-discord is not executable' \
+  unlisted:'files its MANIFEST does not list'; do
   refuse "refused-${archive%%:*}" carillon update "$TEST_ROOT/${archive%%:*}.tar.gz"
   grep -F "${archive#*:}" "$TEST_ROOT/refused-${archive%%:*}.log" >/dev/null
   grep -F 'nothing was changed' "$TEST_ROOT/refused-${archive%%:*}.log" >/dev/null
@@ -220,7 +243,20 @@ for archive in link:'unsupported entry' relabelled:'not version 9.9.9' broken:'r
   [ ! -e "$INSTALLATION/escape" ]
   assert_preserved
 done
-printf 'update refusals passed: links, traversal, relabelled and unrunnable releases\n'
+printf 'update refusals passed: links, traversal, relabelled, unrunnable and incomplete releases\n'
+
+# An installer that cannot even be started after the services stopped leaves
+# the application unchanged and says how to resume it.
+refuse unrunnable-installer env FAKE_STOP=break-installer carillon update "$TEST_ROOT/next.tar.gz"
+grep -F 'could not run the release installer, so the application was not replaced' \
+  "$TEST_ROOT/unrunnable-installer.log" >/dev/null
+grep -F "Services are stopped (they were running); \`carillon start\` resumes the current release" \
+  "$TEST_ROOT/unrunnable-installer.log" >/dev/null
+[ "$(stat -c %i "$INSTALLATION/app")" = "$app_inode" ]
+stopped
+assert_preserved
+carillon start >/dev/null
+rm -f "$TRACE"
 
 # A running installation is stopped, replaced, restarted and checked.
 carillon update "$TEST_ROOT/next.tar.gz" >"$TEST_ROOT/update.log"
@@ -267,7 +303,7 @@ carillon start >/dev/null
 rm -f "$TRACE"
 refuse start-failure env FAKE_START=fail carillon update "$TEST_ROOT/final.tar.gz"
 grep -F 'restarting the services failed' "$TEST_ROOT/start-failure.log" >/dev/null
-grep -F 'to return to the previous release' "$TEST_ROOT/start-failure.log" >/dev/null
+grep -F 'the previous application was not kept' "$TEST_ROOT/start-failure.log" >/dev/null
 [ "$(cat "$INSTALLATION/app/lib/release-sentinel")" = final ]
 stopped
 carillon start >/dev/null

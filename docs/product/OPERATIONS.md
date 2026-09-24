@@ -68,7 +68,7 @@ carillon discord reload    # replace the running command module
 carillon update /path/to/carillon-VERSION-linux-ARCH.tar.gz
 ```
 
-These call `systemctl --user` on `carillon.target` and `tail` on `logs/`. `start` and `restart` report each provider's health; they fail when a provider is still unavailable after `--timeout` seconds (default 60). A version mismatch is reported but is not a failure. Restart an individual provider with:
+`start`, `stop` and `restart` call `systemctl --user` on `carillon.target`; `logs` runs `tail` on `logs/`. `start` and `restart` report each provider's health; they fail when a provider is still unavailable after `--timeout` seconds (default 60). A version mismatch is reported but is not a failure. Restart an individual provider with:
 
 ```sh
 systemctl --user restart carillon-discord.service
@@ -141,6 +141,8 @@ Release archive and staging names use the Cargo workspace version. `scripts/pack
 
 The release builder selects the native Rust host explicitly for Cargo and the corresponding Bun executable target, regardless of Cargo environment/config target overrides. Linux GNU x86_64 and aarch64 hosts produce architecture-labelled archives; other build hosts are refused before staging. The Discord command module is built for `wasm32-unknown-unknown` on every host and shipped as data under `lib/`.
 
+The packager writes `MANIFEST` last. It lists every shipped file, marked `x` when it must be executable and `r` otherwise. Before changing anything, setup and update refuse a release whose files are missing, not executable where required, unlisted, links or special files. This detects incomplete or altered archives; it is not a signature. Whoever can change the archive can also change its manifest.
+
 `install.sh` is first-time setup. Rerunning it retries a failed setup; it keeps the registry, credentials and state but rewrites the Discord settings from its arguments. Update the software with the release archive instead:
 
 ```sh
@@ -150,15 +152,16 @@ carillon update /path/to/carillon-VERSION-linux-ARCH.tar.gz
 Update leaves configuration alone. It never runs Discord configuration or `init`, and keeps the registry, provider settings, credentials, agent resources, sessions, SQLite state, Pi state and model selections, logs, and providers installed outside `app/`. It proceeds in this order:
 
 1. It checks that the chosen installation belongs to the invoking non-root user, that `app` carries the ownership marker, and that the user units are this installation's or absent. It takes the maintenance lock and records whether `carillon.target` is running.
-2. It unpacks the archive into a private `.update-*` directory inside the installation, accepting only regular files and directories without absolute names or `..`. The archive must hold exactly one `carillon-VERSION` directory with the published files, and its `bin/carillon --version` must run here and report that version. A refused archive changes nothing and leaves the services as they were.
-3. Only then are running services stopped. The release's own `install.sh --update` uses the same application exchange and service registration as setup, and installs the entry point when it is missing.
-4. Services that were running are started again and must answer within `--timeout` seconds. Stopped services stay stopped.
+2. It unpacks the archive into a private `.update-*` directory inside the installation, accepting only regular files and directories without absolute names or `..`. The archive must hold exactly one `carillon-VERSION` directory. Its `install.sh` and `bin/carillon` must be executable, and `bin/carillon --version` must run here and report that version.
+3. The new release checks itself with `install.sh --update --check`, which changes nothing: its payload matches its `MANIFEST`, and `mv --exchange` works in the installation directory.
+4. Only then are running services stopped. The release's own `install.sh --update` uses the same application exchange and service registration as setup, and installs the entry point when it is missing.
+5. Services that were running are started again and must answer within `--timeout` seconds. Stopped services stay stopped.
 
-The staging directory is removed afterwards. Failures state what may have changed:
+A refusal in steps 1–3 changes nothing and leaves the services as they were. The staging directory is removed afterwards. Later failures state what may have changed:
 
-- **Before step 3:** nothing was replaced.
-- **During publication or registration:** the services stay stopped. `app` may hold either complete application and the units may be mixed. Rerun the same `carillon update` until it succeeds, then `carillon start` if the services were running.
-- **When starting or health checks fail:** the new release stays installed. Inspect `carillon logs` and `carillon status`. To go back, run `carillon update` with the previous release's archive.
+- **The installer cannot be started:** the application was not replaced. The services are stopped; `carillon start` resumes the current release.
+- **During publication or registration:** the services stay stopped. `app` may hold either complete application and the units may be mixed. Rerun the same `carillon update` until it succeeds, then `carillon start` if the services should run.
+- **When starting or health checks fail:** the new release stays installed and the previous application is not kept. Inspect `carillon logs` and `carillon status`.
 
 There is no automatic rollback, migration step or download service. Update is suitable only when the installed state format is still current.
 

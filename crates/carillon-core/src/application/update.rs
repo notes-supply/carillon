@@ -1,17 +1,20 @@
 //! Replacing an installation's application from a local release archive.
 //!
-//! The archive is unpacked and checked while the services keep running. The
-//! release's own `install.sh --update` then performs the existing atomic
-//! application exchange and service registration; it does not touch the
-//! registry, credentials, provider settings or state. Application files,
-//! user units and systemd are not one transaction, so failures report what
-//! may have changed and how to finish, instead of rolling back.
+//! The archive is unpacked and checked while the services keep running:
+//! extraction admits only regular files and directories, the release's own
+//! `carillon` must report the archive's version, and the release's
+//! `install.sh --update --check` verifies its payload against the packager's
+//! manifest and its installation prerequisites. Only then are services
+//! stopped and `install.sh --update` performs the existing application
+//! exchange and service registration. Application files, user units and
+//! systemd are not one transaction, so failures report what may have changed
+//! and how to finish, instead of rolling back.
 
 use std::{
     fs,
-    os::unix::fs::MetadataExt as _,
+    os::unix::fs::{MetadataExt as _, PermissionsExt as _},
     path::{Path, PathBuf},
-    process::Command as Process,
+    process::{Command as Process, ExitStatus},
     time::Duration,
 };
 
@@ -24,19 +27,6 @@ use super::{
         Action, Activity, MaintenanceLock, Registration, Services, print_health, wait_until_healthy,
     },
 };
-
-/// Files and directories `install.sh --update` publishes; checked before
-/// anything is stopped.
-const RELEASE_ENTRIES: [&str; 8] = [
-    "install.sh",
-    "uninstall.sh",
-    "bin/carillon",
-    "bin/carillon-register-services",
-    "bin",
-    "lib",
-    "licenses",
-    "systemd",
-];
 
 pub(super) async fn update(home: &Path, archive: &Path, timeout: Duration) -> Result<()> {
     let config = LoadedConfig::load(&home.join("carillon.toml"))
@@ -73,8 +63,9 @@ pub(super) async fn update(home: &Path, archive: &Path, timeout: Duration) -> Re
         .prefix(".update-")
         .tempdir_in(home)
         .with_context(|| format!("create staging directory in {}", home.display()))?;
-    let (release, version) = unpack_release(archive, staging.path())
+    let release = prepare(home, archive, staging.path())
         .with_context(|| format!("refused release {}; nothing was changed", archive.display()))?;
+    let version = &release.version;
     println!(
         "Updating {} to Carillon {version}; services are {activity}.",
         home.display()
@@ -86,30 +77,24 @@ pub(super) async fn update(home: &Path, archive: &Path, timeout: Duration) -> Re
              Inspect `carillon logs`, then run `carillon start` or retry the update",
         )?;
     }
-    let published = Process::new(release.join("install.sh"))
-        .arg("--update")
-        .env("CARILLON_HOME", home)
-        .env(MaintenanceLock::HELD_FOR, home)
-        .status()
-        .context("run the release installer")?;
+    let stopped = match activity {
+        Activity::Running => "Services are stopped (they were running)",
+        Activity::Stopped => "Services are stopped as before",
+    };
+    let published = release.install(home, false).with_context(|| {
+        format!(
+            "could not run the release installer, so the application was not replaced. \
+             {stopped}; `carillon start` resumes the current release"
+        )
+    })?;
     if !published.success() {
         bail!(
             "publishing Carillon {version} failed ({published}). Registry, credentials, provider \
              settings and state were not rewritten, but {} may hold the previous or the new \
-             application and the user units may be mixed. Services are stopped{}. Rerun \
-             `carillon update {}` until it succeeds{}",
+             application and the user units may be mixed. {stopped}. Rerun `carillon update {}` \
+             until it succeeds, then `carillon start` if the services should run",
             app.display(),
-            if activity == Activity::Running {
-                " (they were running)"
-            } else {
-                ""
-            },
             archive.display(),
-            if activity == Activity::Running {
-                ", then `carillon start` if they remain stopped"
-            } else {
-                ""
-            }
         );
     }
 
@@ -118,8 +103,8 @@ pub(super) async fn update(home: &Path, archive: &Path, timeout: Duration) -> Re
         return Ok(());
     }
     let recovery = format!(
-        "Carillon {version} is installed at {}. Inspect `carillon logs` and `carillon status`; \
-         to return to the previous release, run `carillon update` with its archive",
+        "Carillon {version} is installed at {} and the previous application was not kept. \
+         Inspect `carillon logs` and `carillon status`",
         app.display()
     );
     services
@@ -133,10 +118,50 @@ pub(super) async fn update(home: &Path, archive: &Path, timeout: Duration) -> Re
     Ok(())
 }
 
+/// An unpacked release whose identity and payload were checked.
+struct Release {
+    root: PathBuf,
+    version: String,
+}
+
+impl Release {
+    /// Run the release's `install.sh --update`, or only its read-only
+    /// `--check`, for an installation whose maintenance lock is held.
+    fn install(&self, home: &Path, check: bool) -> std::io::Result<ExitStatus> {
+        let mut installer = Process::new(self.root.join("install.sh"));
+        installer.arg("--update");
+        if check {
+            installer.arg("--check");
+        }
+        installer
+            .env("CARILLON_HOME", home)
+            .env(MaintenanceLock::HELD_FOR, home)
+            .status()
+    }
+}
+
+/// Everything that must hold before services are disturbed: a safely
+/// unpacked, correctly identified release whose own preflight accepts its
+/// payload and this system.
+fn prepare(home: &Path, archive: &Path, staging: &Path) -> Result<Release> {
+    let release = unpack_release(archive, staging)?;
+    let preflight = release
+        .install(home, true)
+        .context("run the release's preflight")?;
+    if !preflight.success() {
+        bail!(
+            "the preflight of Carillon {} failed ({preflight}); its reasons are printed above",
+            release.version
+        );
+    }
+    Ok(release)
+}
+
 /// Unpack the archive into `staging` and return the release directory and its
 /// version, requiring one `carillon-VERSION` directory whose `bin/carillon`
-/// runs here and reports that version.
-fn unpack_release(archive: &Path, staging: &Path) -> Result<(PathBuf, String)> {
+/// runs here and reports that version. The rest of the payload is checked by
+/// the release's installer against its manifest.
+fn unpack_release(archive: &Path, staging: &Path) -> Result<Release> {
     unpack_regular(archive, staging)?;
     let mut entries = fs::read_dir(staging)?.collect::<std::io::Result<Vec<_>>>()?;
     let root = match entries.pop() {
@@ -150,9 +175,11 @@ fn unpack_release(archive: &Path, staging: &Path) -> Result<(PathBuf, String)> {
         .filter(|version| !version.is_empty())
         .context("a release archive contains exactly one carillon-VERSION directory")?
         .to_owned();
-    for entry in RELEASE_ENTRIES {
-        if !root.join(entry).exists() {
-            bail!("release is missing {entry}");
+    for program in ["install.sh", "bin/carillon"] {
+        let executable = fs::symlink_metadata(root.join(program))
+            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o100 != 0);
+        if !executable {
+            bail!("release {program} is missing or not executable");
         }
     }
     let output = Process::new(root.join("bin/carillon"))
@@ -166,7 +193,7 @@ fn unpack_release(archive: &Path, staging: &Path) -> Result<(PathBuf, String)> {
             reported.trim()
         );
     }
-    Ok((root, version))
+    Ok(Release { root, version })
 }
 
 #[cfg(test)]
@@ -176,24 +203,21 @@ mod tests {
     use anyhow::{Context as _, Result};
     use flate2::{Compression, write::GzEncoder};
 
+    /// A release whose installer and `carillon` are executable scripts; the
+    /// rest of the payload belongs to the installer's own manifest check.
     fn release(root: &Path, version: &str, reported: &str) -> Result<()> {
         let release = root.join(format!("carillon-{version}"));
-        for directory in ["bin", "lib", "licenses", "systemd"] {
-            fs::create_dir_all(release.join(directory))?;
-        }
-        for file in [
-            "install.sh",
-            "uninstall.sh",
-            "bin/carillon-register-services",
+        fs::create_dir_all(release.join("bin"))?;
+        for (file, script) in [
+            ("install.sh", "#!/bin/sh\n".to_owned()),
+            (
+                "bin/carillon",
+                format!("#!/bin/sh\necho 'carillon {reported}'\n"),
+            ),
         ] {
-            fs::write(release.join(file), "")?;
+            fs::write(release.join(file), script)?;
+            fs::set_permissions(release.join(file), fs::Permissions::from_mode(0o755))?;
         }
-        let carillon = release.join("bin/carillon");
-        fs::write(
-            &carillon,
-            format!("#!/bin/sh\necho 'carillon {reported}'\n"),
-        )?;
-        fs::set_permissions(&carillon, fs::Permissions::from_mode(0o755))?;
         Ok(())
     }
 
@@ -219,9 +243,9 @@ mod tests {
         archive(&source, &path, |_| Ok(()))?;
         let staging = directory.path().join("ok");
         fs::create_dir(&staging)?;
-        let (root, version) = super::unpack_release(&path, &staging)?;
-        assert_eq!(version, "1.2.3");
-        assert_eq!(root, staging.join("carillon-1.2.3"));
+        let unpacked = super::unpack_release(&path, &staging)?;
+        assert_eq!(unpacked.version, "1.2.3");
+        assert_eq!(unpacked.root, staging.join("carillon-1.2.3"));
 
         fs::remove_dir_all(&source)?;
         release(&source, "1.2.3", "9.9.9")?;
@@ -233,6 +257,24 @@ mod tests {
             .context("accepted a relabelled release")?;
         assert!(
             failure.to_string().contains("not version 1.2.3"),
+            "{failure}"
+        );
+
+        // The installer is checked before anything from the release runs.
+        fs::remove_dir_all(&source)?;
+        release(&source, "1.2.3", "1.2.3")?;
+        let installer = source.join("carillon-1.2.3/install.sh");
+        fs::set_permissions(&installer, fs::Permissions::from_mode(0o644))?;
+        archive(&source, &path, |_| Ok(()))?;
+        let staging = directory.path().join("installer");
+        fs::create_dir(&staging)?;
+        let failure = super::unpack_release(&path, &staging)
+            .err()
+            .context("accepted a release whose installer cannot run")?;
+        assert!(
+            failure
+                .to_string()
+                .contains("install.sh is missing or not executable"),
             "{failure}"
         );
         Ok(())

@@ -48,5 +48,17 @@ install -m 0644 "$PI_PACKAGE/package.json" "$PI_PACKAGE/README.md" "$PI_PACKAGE/
 cp -R "$PI_PACKAGE/docs" "$STAGE/bin/docs"
 install -m 0644 licenses/pi-coding-agent.txt "$STAGE/licenses/"
 
+# Installation checks the payload against this list before changing anything:
+# every shipped file, marked `x` when the installer must be able to execute it.
+if [ -n "$(cd "$STAGE" && find . ! -type f ! -type d -o -name '*
+*')" ]; then
+  echo "release staging contains links, special files or newlines in names" >&2
+  exit 1
+fi
+(cd "$STAGE" && find . -type f -printf '%P\n' | LC_ALL=C sort | while IFS= read -r path; do
+  if [ -x "$path" ]; then kind=x; else kind=r; fi
+  printf '%s %s\n' "$kind" "$path"
+done) >"$STAGE.manifest"
+mv -- "$STAGE.manifest" "$STAGE/MANIFEST"
 tar -C "$(dirname -- "$STAGE")" -czf "$OUTPUT" "$(basename -- "$STAGE")"
 printf '%s\n' "$OUTPUT"

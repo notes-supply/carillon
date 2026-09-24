@@ -4,7 +4,7 @@ umask 077
 
 usage() {
   echo "usage: install.sh --guild-id ID --bot-user-id ID --user-id ID [--user-id ID ...] --route CHANNEL_ID:mention|always:thread|channel [--route ...] [--base-port PORT] [--workspace PATH]" >&2
-  echo "       install.sh --update    (run by 'carillon update'; publishes this release into an existing installation)" >&2
+  echo "       install.sh --update [--check]    (run by 'carillon update'; --check changes nothing)" >&2
   exit 2
 }
 
@@ -12,10 +12,11 @@ usage() {
 # arguments. An update only publishes the application and service definitions;
 # it never rewrites configuration, credentials or state.
 MODE=setup
-if [ "$#" -eq 1 ] && [ "$1" = --update ]; then
-  MODE=update
-  shift
-fi
+CHECK=0
+case "$#:$*" in
+  '1:--update') MODE=update; shift ;;
+  '2:--update --check') MODE=update; CHECK=1; shift 2 ;;
+esac
 GUILD_ID=
 BOT_USER_ID=
 USER_IDS=
@@ -84,6 +85,56 @@ if [ -e "$APP" ] || [ -L "$APP" ]; then
     echo "refusing to replace unowned application path: $APP" >&2
     exit 1
   }
+fi
+
+# The packager lists every shipped file in MANIFEST, marked `x` when it must be
+# executable. Refuse a payload that differs before changing anything, rather
+# than discovering a missing program after the services were replaced.
+verify_payload() {
+  manifest=$SOURCE/MANIFEST
+  if [ ! -f "$manifest" ] || [ -L "$manifest" ]; then
+    echo "release is incomplete: $manifest is missing" >&2
+    return 1
+  fi
+  if [ -n "$(find "$SOURCE" ! -type f ! -type d)" ]; then
+    echo "release contains links or special files" >&2
+    return 1
+  fi
+  listed=0
+  while IFS= read -r line; do
+    kind=${line%% *}
+    path=${line#* }
+    listed=$((listed + 1))
+    file=$SOURCE/$path
+    if [ ! -f "$file" ] || [ -L "$file" ]; then
+      echo "release is incomplete: $path is missing" >&2
+      return 1
+    fi
+    case "$kind" in
+      x) [ -x "$file" ] || { echo "release file $path is not executable" >&2; return 1; } ;;
+      r) [ -r "$file" ] || { echo "release file $path is not readable" >&2; return 1; } ;;
+      *) echo "release MANIFEST is malformed: $line" >&2; return 1 ;;
+    esac
+  done <"$manifest"
+  # Every listed file exists, so equal counts mean nothing unlisted was added.
+  if [ "$(find "$SOURCE" -type f ! -path "$SOURCE/MANIFEST" | wc -l)" -ne "$listed" ]; then
+    echo "release contains files its MANIFEST does not list" >&2
+    return 1
+  fi
+}
+verify_payload
+
+if [ "$CHECK" -eq 1 ]; then
+  # Application replacement needs an atomic directory exchange here.
+  probe=$(mktemp -d "$CARILLON_HOME/.update-probe.XXXXXX")
+  mkdir "$probe/a" "$probe/b"
+  if ! mv --exchange --no-copy -T -- "$probe/a" "$probe/b" 2>/dev/null; then
+    rm -rf -- "$probe"
+    echo "cannot exchange directories atomically in $CARILLON_HOME: GNU mv --exchange (coreutils 9.5+) and filesystem support are required" >&2
+    exit 1
+  fi
+  rm -rf -- "$probe"
+  exit 0
 fi
 
 # Setup keeps an existing registry, credentials and durable state; only the

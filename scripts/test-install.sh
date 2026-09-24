@@ -20,6 +20,7 @@ for artifact in \
   bin/carillon-register-services \
   install.sh \
   uninstall.sh \
+  MANIFEST \
   systemd/carillon.target \
   systemd/carillon-core.service \
   systemd/carillon-discord.service \
