@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use carillon_installation::{
-    config::{LoadedConfig, ProviderRole, read_token_file},
+    config::{LoadedConfig, ProviderRole, RELEASE_VERSION, read_token_file},
     home,
 };
 use clap::{Parser, Subcommand};
@@ -77,6 +77,12 @@ enum Command {
         discord_token_file: PathBuf,
         #[arg(long)]
         commands: PathBuf,
+    },
+    /// Check, without changing anything, that this program accepts the
+    /// instance's Discord settings.
+    Check {
+        #[arg(long)]
+        provider: Option<String>,
     },
     /// Ask the running provider to reload its command module.
     Reload {
@@ -150,6 +156,18 @@ pub(crate) async fn run() -> Result<()> {
             let provider = instance(&loaded, provider)?;
             let count = register(&loaded, &provider, &discord_token_file, &commands).await?;
             println!("{count} commands registered");
+        }
+        Command::Check { provider } => {
+            let loaded = installation()?;
+            let provider = instance(&loaded, provider)?;
+            DiscordConfig::load(&loaded, &provider).with_context(|| {
+                format!("carillon-discord {RELEASE_VERSION} cannot use the settings of {provider}")
+            })?;
+            println!(
+                "{} is compatible with carillon-discord {}",
+                loaded.provider_config_path(&provider)?.display(),
+                RELEASE_VERSION
+            );
         }
         Command::Reload { provider } => {
             let loaded = installation()?;

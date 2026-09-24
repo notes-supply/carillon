@@ -4,7 +4,8 @@
 //! extraction admits only regular files and directories, the release's own
 //! `carillon` must report the archive's version, and the release's
 //! `install.sh --update --check` verifies its payload against the packager's
-//! manifest and its installation prerequisites. Only then are services
+//! manifest and lets the release's programs validate the installed registry,
+//! core database and Discord settings read-only. Only then are services
 //! stopped and `install.sh --update` performs the existing application
 //! exchange and service registration. Application files, user units and
 //! systemd are not one transaction, so failures report what may have changed
@@ -104,7 +105,10 @@ pub(super) async fn update(home: &Path, archive: &Path, timeout: Duration) -> Re
     }
     let recovery = format!(
         "Carillon {version} is installed at {} and the previous application was not kept. \
-         Inspect `carillon logs` and `carillon status`",
+         Inspect `carillon logs` and `carillon status`. Another release can be installed with \
+         `carillon update`, which checks the registry, core database and Discord settings \
+         against that release but not other provider-native state such as Pi's, so an older \
+         release is not known to be safe",
         app.display()
     );
     services
@@ -142,7 +146,7 @@ impl Release {
 
 /// Everything that must hold before services are disturbed: a safely
 /// unpacked, correctly identified release whose own preflight accepts its
-/// payload and this system.
+/// payload, this system and the installation's current state.
 fn prepare(home: &Path, archive: &Path, staging: &Path) -> Result<Release> {
     let release = unpack_release(archive, staging)?;
     let preflight = release

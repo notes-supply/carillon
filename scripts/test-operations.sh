@@ -245,6 +245,38 @@ for archive in link:'unsupported entry' relabelled:'not version 9.9.9' broken:'r
 done
 printf 'update refusals passed: links, traversal, relabelled, unrunnable and incomplete releases\n'
 
+# The release's own programs refuse installed state they cannot use, before
+# anything is stopped: a core schema this release does not know, and Discord
+# settings its provider rejects.
+DATABASE=$INSTALLATION/state/carillon.sqlite3
+DISCORD_SETTINGS=$INSTALLATION/providers/discord-private.toml
+cp -p "$DISCORD_SETTINGS" "$TEST_ROOT/discord-settings"
+for state in schema:'database schema is not the current Carillon format' \
+  discord:'cannot use the settings of discord-private'; do
+  case "${state%%:*}" in
+    schema)
+      node -e 'new (require("node:sqlite").DatabaseSync)(process.argv[1]).exec("CREATE TABLE later_release (id INTEGER)")' \
+        "$DATABASE" ;;
+    discord) sed -i 's/^guild_id = .*/guild_id = "not-a-snowflake"/' "$DISCORD_SETTINGS" ;;
+  esac
+  snapshot
+  refuse "incompatible-${state%%:*}" carillon update "$TEST_ROOT/next.tar.gz"
+  grep -F "${state#*:}" "$TEST_ROOT/incompatible-${state%%:*}.log" >/dev/null
+  grep -F 'nothing was changed' "$TEST_ROOT/incompatible-${state%%:*}.log" >/dev/null
+  expect_trace '--user show --property=ActiveState --value carillon.target'
+  [ "$(stat -c %i "$INSTALLATION/app")" = "$app_inode" ]
+  running
+  assert_preserved
+  case "${state%%:*}" in
+    schema)
+      node -e 'new (require("node:sqlite").DatabaseSync)(process.argv[1]).exec("DROP TABLE later_release")' \
+        "$DATABASE" ;;
+    discord) cp -p "$TEST_ROOT/discord-settings" "$DISCORD_SETTINGS" ;;
+  esac
+done
+snapshot
+printf 'update state preflight passed: incompatible core schema and provider settings refused\n'
+
 # An installer that cannot even be started after the services stopped leaves
 # the application unchanged and says how to resume it.
 refuse unrunnable-installer env FAKE_STOP=break-installer carillon update "$TEST_ROOT/next.tar.gz"

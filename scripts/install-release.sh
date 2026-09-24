@@ -134,6 +134,10 @@ if [ "$CHECK" -eq 1 ]; then
     exit 1
   fi
   rm -rf -- "$probe"
+  # This release's own programs must accept the installation as it is now,
+  # read-only: the registry and core database, and the Discord settings.
+  "$SOURCE/bin/carillon" --home "$CARILLON_HOME" check
+  "$SOURCE/bin/carillon" --home "$CARILLON_HOME" discord check --provider discord-private
   exit 0
 fi
 

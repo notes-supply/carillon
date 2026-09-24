@@ -60,6 +60,7 @@ Everyday operation:
 
 ```sh
 carillon status            # core and provider health from the running core
+carillon check             # this program accepts the registry and core database, read-only
 carillon start             # start carillon.target and wait until providers answer
 carillon stop
 carillon restart
@@ -153,7 +154,11 @@ Update leaves configuration alone. It never runs Discord configuration or `init`
 
 1. It checks that the chosen installation belongs to the invoking non-root user, that `app` carries the ownership marker, and that the user units are this installation's or absent. It takes the maintenance lock and records whether `carillon.target` is running.
 2. It unpacks the archive into a private `.update-*` directory inside the installation, accepting only regular files and directories without absolute names or `..`. The archive must hold exactly one `carillon-VERSION` directory. Its `install.sh` and `bin/carillon` must be executable, and `bin/carillon --version` must run here and report that version.
-3. The new release checks itself with `install.sh --update --check`, which changes nothing: its payload matches its `MANIFEST`, and `mv --exchange` works in the installation directory.
+3. The new release checks itself with `install.sh --update --check`, which changes nothing:
+   - its payload matches its `MANIFEST`;
+   - `mv --exchange` works in the installation directory;
+   - its `carillon check` opens the registry and core database exactly as its core service would, requiring the core schema it was built for;
+   - its `carillon discord check` loads the Discord settings.
 4. Only then are running services stopped. The release's own `install.sh --update` uses the same application exchange and service registration as setup, and installs the entry point when it is missing.
 5. Services that were running are started again and must answer within `--timeout` seconds. Stopped services stay stopped.
 
@@ -163,7 +168,11 @@ A refusal in steps 1–3 changes nothing and leaves the services as they were. T
 - **During publication or registration:** the services stay stopped. `app` may hold either complete application and the units may be mixed. Rerun the same `carillon update` until it succeeds, then `carillon start` if the services should run.
 - **When starting or health checks fail:** the new release stays installed and the previous application is not kept. Inspect `carillon logs` and `carillon status`.
 
-There is no automatic rollback, migration step or download service. Update is suitable only when the installed state format is still current.
+There is no automatic rollback, migration step or download service. The state check covers only what it names:
+- It covers the registry, the core database's integrity and exact schema, and the Discord settings.
+- It does not cover Pi's state (sessions, authentication, model selections), other provider-native state, credentials, or whether the services will start and stay healthy.
+
+`carillon update` with an older release runs the same checks, so it refuses a core schema that release does not know. Passing them does not make a downgrade safe for the unchecked state. There is no supported downgrade; restore a backup made before the update instead.
 
 When intentionally changing a provider release, update that provider's expected `version` in `carillon.toml`, restart, and check `carillon status`. Neither setup nor update rewrites provider expectations: an entry may refer to a replacement provider rather than the bundled implementation. Discord's build version is the workspace version; the Pi adapter's is `@carillon/runtime-pi`'s package version, not the underlying Pi engine version. A version mismatch is a diagnostic, not a protocol-compatibility or execution-safety guarantee.
 

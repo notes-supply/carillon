@@ -11,7 +11,10 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
-use carillon_installation::{config::LoadedConfig, home};
+use carillon_installation::{
+    config::{LoadedConfig, RELEASE_VERSION},
+    home,
+};
 use carillon_protocol::model::{TurnInspection, TurnSummary};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
@@ -21,7 +24,7 @@ use super::{
     admin::{
         ServiceLock, backup, enable_demo_resources, initialize as init, restore, set_provider,
     },
-    http::serve,
+    http::{check, serve},
     operations::{
         Action, MaintenanceLock, Services, logs, operator_get, operator_url, print_health, status,
         wait_until_healthy,
@@ -69,6 +72,9 @@ enum Command {
     },
     /// Report core and provider health from the running core.
     Status,
+    /// Check, without changing anything, that this program accepts the
+    /// installation's registry and core database.
+    Check,
     /// Start the installation's user services and wait until they are healthy.
     Start(Wait),
     /// Stop the installation's user services.
@@ -156,6 +162,21 @@ pub(crate) async fn run() -> Result<()> {
         }
         Command::External(arguments) => forward(&arguments, &home()?)?,
         Command::Status => print_pretty(&status(&load(&home()?)?).await?)?,
+        Command::Check => {
+            let home = home()?;
+            check(&load(&home)?).with_context(|| {
+                format!(
+                    "Carillon {} cannot use the installation at {}",
+                    RELEASE_VERSION,
+                    home.display()
+                )
+            })?;
+            println!(
+                "registry and core database at {} are compatible with Carillon {}",
+                home.display(),
+                RELEASE_VERSION
+            );
+        }
         Command::Start(wait) => {
             let home = home()?;
             control(&home, Action::Start)?;

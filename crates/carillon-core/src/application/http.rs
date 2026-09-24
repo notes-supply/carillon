@@ -116,6 +116,13 @@ impl IntoResponse for ApiError {
     }
 }
 
+/// Open the installation's core exactly as [`serve`] does, without listening,
+/// recovering turns or writing: the registry and the current core schema.
+pub fn check(config: &LoadedConfig) -> Result<()> {
+    Core::open(core_options(config))?;
+    Ok(())
+}
+
 pub async fn serve(config: LoadedConfig) -> Result<()> {
     // A failed bind must not recover state or start accepted work.
     let listener = TcpListener::bind(config.value.core.listen).await?;

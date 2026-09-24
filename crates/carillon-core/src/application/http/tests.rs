@@ -1405,3 +1405,24 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
     ));
     Ok(())
 }
+
+#[test]
+fn check_opens_storage_like_the_service_without_writing() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    check(&state.config)?;
+    // State from a release with another schema is refused, and left as it was.
+    let database = state.config.value.data_dir.join("carillon.sqlite3");
+    rusqlite::Connection::open(&database)?
+        .execute_batch("CREATE TABLE later_release (id INTEGER)")?;
+    let before = fs::read(&database)?;
+    let refused = check(&state.config)
+        .err()
+        .context("accepted a schema this release does not know")?;
+    assert!(
+        format!("{refused:#}").contains("not the current Carillon format"),
+        "{refused:#}"
+    );
+    assert_eq!(fs::read(&database)?, before);
+    Ok(())
+}
