@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import { constants } from "node:fs";
 import {
   chmod,
@@ -15,6 +16,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -296,6 +298,7 @@ try {
   const restored = await simulate("event-5", "continue after restore");
   assert.match(restored.delivery.content, /Local provider response 7/u);
   await testModelPicker();
+  await testProviderFailure();
 
   process.stdout.write(
     `${JSON.stringify(
@@ -310,6 +313,7 @@ try {
         runtime_outage: "queued and resumed",
         backup_restore: "continued",
         model_picker: "selections reach the runtime, persist, and never wait for a running turn",
+        provider_failure: "explained once without replay, bodies withheld, conversation continues",
       },
       null,
       2,
@@ -745,6 +749,126 @@ async function testPiModelReadiness() {
     await stop("runtime");
   } finally {
     await stop("runtime");
+    await rm(privateState, { recursive: true, force: true });
+    await rm(sessions, { recursive: true, force: true });
+    await rename(`${privateState}-saved`, privateState);
+    await rename(`${sessions}-saved`, sessions);
+  }
+}
+
+/**
+ * Native Pi against a local model endpoint that fails twice, then answers: a
+ * provider's explanation reaches the conversation, a raw page does not, and
+ * neither failure is replayed or blocks the next message.
+ */
+async function testProviderFailure() {
+  const privateState = join(installation, "pi");
+  const sessions = join(installation, "agents/default/sessions");
+  const key = `sk-proj-${"Ab1".repeat(20)}`;
+  const failures = [
+    {
+      type: "application/json",
+      body: JSON.stringify({
+        error: {
+          message: `The usage limit has been reached for @everyone and <@200>. Key: ${key}`,
+          type: "usage_limit",
+        },
+      }),
+    },
+    {
+      type: "text/html",
+      body: `<html><body>Gateway refused ${key}</body></html>`,
+    },
+  ];
+  let requests = 0;
+  const provider = createServer((request, response) => {
+    request.resume();
+    const failure = failures[requests];
+    requests += 1;
+    if (failure !== undefined) {
+      response.writeHead(403, { "content-type": failure.type });
+      response.end(failure.body);
+      return;
+    }
+    const chunk = (delta, finish) =>
+      `data: ${JSON.stringify({
+        id: "recovered",
+        object: "chat.completion.chunk",
+        created: 0,
+        model: "failure-model",
+        choices: [{ index: 0, delta, finish_reason: finish }],
+      })}\n\n`;
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(
+      `${chunk({ role: "assistant", content: "Recovered after the provider failures." }, null)}${chunk({}, "stop")}data: [DONE]\n\n`,
+    );
+  });
+  provider.listen(0, "127.0.0.1");
+  await once(provider, "listening");
+  await stop("runtime");
+  await rename(privateState, `${privateState}-saved`);
+  await rename(sessions, `${sessions}-saved`);
+  await mkdir(privateState);
+  const log = [];
+  try {
+    await writeFile(
+      join(privateState, "settings.json"),
+      JSON.stringify({ defaultProvider: "failure-fixture", defaultModel: "failure-model" }),
+    );
+    await writeFile(
+      join(privateState, "models.json"),
+      JSON.stringify({
+        providers: {
+          "failure-fixture": {
+            baseUrl: `http://127.0.0.1:${String(provider.address().port)}/v1`,
+            api: "openai-completions",
+            apiKey: "test-only",
+            models: [{ id: "failure-model" }],
+          },
+        },
+      }),
+    );
+    await start("runtime", { nativePi: true, env: { ...process.env, PI_OFFLINE: "1" }, log });
+
+    const explained = await simulate("provider-failure-explained", "use the provider");
+    assert.equal(explained.delivery.turn_state, "interrupted");
+    const [reason, next] = explained.delivery.content.split("\n");
+    assert.match(
+      reason,
+      /^That turn was interrupted: .*The usage limit has been reached for @everyone and <@200>\. Key: \[redacted\]$/u,
+    );
+    assert.equal(
+      next,
+      "Send another message to continue in this conversation. Actions already taken may have had effects.",
+    );
+    const inspection = JSON.parse(
+      run("--home", installation, "inspect", explained.receipt.turn_id),
+    );
+    assert.equal(inspection.state, "interrupted");
+    assert.equal(
+      inspection.error,
+      `runtime reported failure: ${reason.split(": ").slice(1).join(": ")}`,
+    );
+
+    const withheld = await simulate("provider-failure-withheld", "use the provider again");
+    assert.equal(withheld.delivery.turn_state, "interrupted");
+    assert.equal(
+      withheld.delivery.content,
+      "That turn was interrupted. Send another message to continue in this conversation. Actions already taken may have had effects.",
+    );
+
+    const recovered = await simulate("provider-recovered", "continue");
+    assert.equal(recovered.delivery.turn_state, "completed");
+    assert.equal(recovered.delivery.content, "Recovered after the provider failures.");
+    assert.equal(requests, 3, "failed turns must not be retried or replayed");
+    const diagnostics = log.join("");
+    assert.match(diagnostics, /POST \/v1\/turns failed: .*The usage limit has been reached/u);
+    assert.match(diagnostics, /POST \/v1\/turns failed: .*Gateway refused \[redacted\]/u);
+    for (const text of [explained.delivery.content, withheld.delivery.content, diagnostics])
+      assert.ok(!text.includes(key), "credentials must not be displayed or logged");
+  } finally {
+    await stop("runtime");
+    provider.close();
     await rm(privateState, { recursive: true, force: true });
     await rm(sessions, { recursive: true, force: true });
     await rename(`${privateState}-saved`, privateState);
@@ -1304,7 +1428,11 @@ function servicePort(name) {
 
 async function start(name, options = {}) {
   const [program, args] = serviceArguments(name, options);
-  const child = spawn(program, args, { stdio: "ignore", env: options.env });
+  const child = spawn(program, args, {
+    stdio: ["ignore", "ignore", options.log === undefined ? "ignore" : "pipe"],
+    env: options.env,
+  });
+  child.stderr?.setEncoding("utf8").on("data", (text) => options.log.push(text));
   services.set(name, child);
   await waitForHealth(servicePort(name), name === "runtime" ? runtimeHost : "127.0.0.1");
 }

@@ -28,7 +28,7 @@ The workspace must already exist. State includes Pi's `auth.json`, `settings.jso
 
 Replace `modelRuntime`, `settings`, or `selections` independently when supplying your own concrete Pi/model-state collaborators. Omitted collaborators use the same defaults as the service. Supplied collaborators remain caller-owned. `sessionDirectory` permits a separate native-session location; the installed service uses its existing installation path.
 
-`executeTurn` serializes execution within the instance. The tuple of interface, agent and audience identifies the native conversation; a new input in that conversation reopens its native history. Cancellation settles before another turn executes. `close` rejects new work, cancels active/queued execution, and waits for outstanding operations to settle. It does not erase sessions, replay inputs, or dispose caller-owned collaborators. For lower-level native session use, `openConversation`, `createPiExecutionSession`, and `promptSession` are the same primitives used by this runtime.
+`executeTurn` serializes execution within the instance. The tuple of interface, agent and audience identifies the native conversation; a new input in that conversation reopens its native history. Cancellation settles before another turn executes. `close` rejects new work, cancels active/queued execution, and waits for outstanding operations to settle. It does not erase sessions, replay inputs, or dispose caller-owned collaborators. For lower-level native session use, `openConversation`, `createPiExecutionSession`, and `promptSession` are the same primitives used by this runtime. A turn Pi reports as failed rejects with `ExplainedFailure` when Pi's failure text has a part that is safe to display, and with an ordinary `Error` otherwise.
 
 `ModelSelections` reads the selection file as the authority, not a permanently cached
 copy. Its asynchronous reads refresh from disk; updates hold a short cross-process
@@ -51,6 +51,7 @@ mise run example:pi -- --state-dir /path/to/pi-state --workspace /path/to/worksp
 - [`runtime.ts`](src/runtime.ts): instance construction, model operations, execution queue and shutdown.
 - [`session.ts`](src/session.ts), [`namespace.ts`](src/namespace.ts): native Pi sessions/resources/cancellation and conversation identity.
 - [`model.ts`](src/model.ts): persisted selection policy; shared wire shapes come from [`@carillon/protocol`](../protocol/README.md).
-- [`http.ts`](src/http.ts): authenticated transport over runtime operations.
+- [`failure.ts`](src/failure.ts): `ExplainedFailure` and the display-safety rules for failure explanations and logged diagnostics.
+- [`http.ts`](src/http.ts): authenticated transport over runtime operations. It sends callers only `ExplainedFailure` messages and logs every other failure.
 - [`cli.ts`](src/cli.ts): installation arguments, credentials, OAuth registration, listener and signal lifecycle.
 - [`testing.ts`](src/testing.ts): explicit deterministic **service-test substitute**, not Pi execution. Production code does not branch through it during a turn.

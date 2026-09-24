@@ -3,7 +3,16 @@ use crate::TurnFailure;
 use anyhow::anyhow;
 use carillon_protocol::model::{RuntimeTurnRequest, RuntimeTurnResponse};
 use reqwest::Client;
+use serde::Deserialize;
 use std::time::Duration;
+
+/// A runtime's failure response. Its `error` is phrased for the person using
+/// the interface and safe to display; a runtime omits it when it has nothing
+/// to explain.
+#[derive(Deserialize)]
+struct RuntimeFailure {
+    error: String,
+}
 
 #[derive(Clone)]
 pub struct RuntimeClient {
@@ -43,11 +52,25 @@ impl RuntimeClient {
                 } else {
                     TurnFailure::Uncertain(failure)
                 }
-            })?
-            .error_for_status()
-            .map_err(|error| {
-                TurnFailure::Uncertain(anyhow!(error).context("runtime provider rejected turn"))
-            })?
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            // A runtime's `error` explains the failure for the conversation;
+            // its diagnostics stay in the runtime's own log.
+            let explanation = response
+                .json::<RuntimeFailure>()
+                .await
+                .ok()
+                .map(|failure| failure.error)
+                .filter(|explanation| !explanation.trim().is_empty());
+            return Err(match explanation {
+                Some(explanation) => TurnFailure::Explained(explanation),
+                None => TurnFailure::Uncertain(anyhow!(
+                    "runtime provider failed the turn with {status} and no explanation"
+                )),
+            });
+        }
+        let response = response
             .json::<RuntimeTurnResponse>()
             .await
             .map_err(|error| {

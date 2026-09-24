@@ -18,16 +18,8 @@ import {
   type ScopeState,
 } from "@carillon/protocol";
 import { Parse } from "typebox/value";
+import { ExplainedFailure } from "./failure.ts";
 import { Serial } from "./serial.ts";
-
-export class ModelRejection extends Error {
-  readonly status: number;
-
-  constructor(status: number, message: string) {
-    super(message);
-    this.status = status;
-  }
-}
 
 const LedgerSchema = Type.Object({
   agents: Type.Array(Type.Object({ agent_id: Type.String(), selection: SelectionSchema })),
@@ -129,7 +121,7 @@ export class ModelSelections {
     update: ModelUpdate,
   ): Promise<ModelState> {
     if (update.scope === "conversation" && update.audience_id === undefined)
-      throw new ModelRejection(400, "There is no conversation here to set a model for.");
+      throw new ExplainedFailure(400, "There is no conversation here to set a model for.");
     const selection = update.selection === null ? null : validated(available, update.selection);
     return this.#writes.run(async () => {
       // The file is the authority. A short lease covers refresh, precondition,
@@ -152,7 +144,7 @@ export class ModelSelections {
           const current = state[update.scope]?.selection;
           const expected = { ...update.expected, options: update.expected.options ?? {} };
           if (!isDeepStrictEqual(current, expected))
-            throw new ModelRejection(409, "The model settings changed.");
+            throw new ExplainedFailure(409, "The model settings changed.");
         }
         checkLease();
         await this.write(this.next(update, selection));
@@ -256,13 +248,14 @@ export function resolved(available: readonly AvailableModel[], selection: Select
 /** A selection the catalog supports, with unset options omitted. */
 function validated(available: readonly AvailableModel[], selection: Selection): Selection {
   const model = offered(available, selection);
-  if (model === undefined) throw new ModelRejection(422, "That model is not available.");
+  if (model === undefined) throw new ExplainedFailure(422, "That model is not available.");
   const options: Record<string, string> = {};
   for (const [id, choice] of Object.entries(selection.options ?? {})) {
     const option = model.options.find((candidate) => candidate.id === id);
-    if (option === undefined) throw new ModelRejection(422, `${model.name} has no ${id} setting.`);
+    if (option === undefined)
+      throw new ExplainedFailure(422, `${model.name} has no ${id} setting.`);
     if (!option.choices.includes(choice))
-      throw new ModelRejection(
+      throw new ExplainedFailure(
         422,
         `${choice} is not a ${option.name} setting ${model.name} supports.`,
       );

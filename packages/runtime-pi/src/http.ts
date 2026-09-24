@@ -9,7 +9,7 @@ import {
   type ModelQuery,
   type ModelUpdate,
 } from "@carillon/protocol";
-import { ModelRejection } from "./model.ts";
+import { diagnostic, ExplainedFailure } from "./failure.ts";
 import type { RuntimeOperations, TurnRequest } from "./operations.ts";
 import packageInfo from "../package.json" with { type: "json" };
 
@@ -38,10 +38,14 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
   if (options.token.length === 0) throw new Error("runtime credential must not be empty");
   return createServer((request, response) => {
     void route(request, response).catch((failure: unknown) => {
-      if (!response.destroyed)
-        writeJson(response, failure instanceof ModelRejection ? failure.status : 500, {
-          error: failure instanceof Error ? failure.message : String(failure),
-        });
+      // Callers receive only explanations; diagnostics stay in this log.
+      if (failure instanceof ExplainedFailure) {
+        if (failure.cause !== undefined) logFailure(request, failure.cause);
+        if (!response.destroyed) writeJson(response, failure.status, { error: failure.message });
+        return;
+      }
+      logFailure(request, failure);
+      if (!response.destroyed) writeJson(response, 500, {});
     });
   });
   async function route(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -142,6 +146,12 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
       if (Buffer.byteLength(body) > 1_048_576) throw new Error("request body exceeds 1 MiB");
     }
     return JSON.parse(body) as unknown;
+  }
+
+  function logFailure(request: IncomingMessage, failure: unknown): void {
+    console.error(
+      `${String(request.method)} ${String(request.url)} failed: ${diagnostic(failure)}`,
+    );
   }
 
   function writeJson(response: ServerResponse, status: number, value: unknown): void {

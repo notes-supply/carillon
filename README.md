@@ -92,7 +92,7 @@ For changes to service communication, startup, routing, or recovery, also run:
 mise run test:integration
 ```
 
-This builds the command module and starts local core, Discord, and Pi processes to test admission, conversation continuity, deduplication, restarts, delivery recovery, diagnostics, backup/restore, and the `/model` picker end to end through the Wasm module. Discord input and model responses are simulated; it does not test live Discord or a model provider.
+This builds the command module and starts local core, Discord, and Pi processes to test admission, conversation continuity, deduplication, restarts, delivery recovery, diagnostics, backup/restore, and the `/model` picker end to end through the Wasm module. Native Pi runs against a local model endpoint that fails, to check which failure explanations reach the conversation. Discord input and model responses are simulated; it does not test live Discord or a model provider.
 
 For packaging, installer, service-unit, or owner-environment changes—and before a release—run:
 

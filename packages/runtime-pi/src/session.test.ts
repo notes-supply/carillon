@@ -8,7 +8,12 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { openConversation, createPiExecutionSession, promptSession } from "@carillon/runtime-pi";
+import {
+  ExplainedFailure,
+  openConversation,
+  createPiExecutionSession,
+  promptSession,
+} from "@carillon/runtime-pi";
 
 const model: Model<"openai-responses"> = {
   id: "observer-model",
@@ -369,4 +374,88 @@ it.each([false, true])(
     }
   },
   15_000,
+);
+
+it.each([
+  [
+    '403: {"error":{"message":"The usage limit has been reached","type":"usage_limit"}}',
+    "403: The usage limit has been reached",
+  ],
+  ["403: <html><body>Forbidden by gateway</body></html>", undefined],
+])(
+  "explains a failed provider call only with displayable text: %j",
+  async (errorMessage, explanation) => {
+    const root = await mkdtemp(join(tmpdir(), "carillon-failed-pi-"));
+    const key = { interface_id: "discord", agent_id: "default", audience_id: "conversation" };
+    const baseRuntime = await ModelRuntime.create({
+      allowModelNetwork: false,
+      refreshOnCreate: false,
+      modelsPath: null,
+    });
+    let calls = 0;
+    const runtime = new Proxy(baseRuntime, {
+      get(target, property): unknown {
+        if (property === "getAuth") return () => Promise.resolve({ auth: { apiKey: "test-only" } });
+        if (property === "hasConfiguredAuth") return () => true;
+        if (property === "streamSimple")
+          return () => {
+            calls += 1;
+            const stream = createAssistantMessageEventStream();
+            queueMicrotask(() => {
+              if (calls === 1)
+                stream.push({
+                  type: "error",
+                  reason: "error",
+                  error: { ...assistantMessage, stopReason: "error", content: [], errorMessage },
+                });
+              else stream.push({ type: "done", reason: "stop", message: assistantMessage });
+            });
+            return stream;
+          };
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const open = async () =>
+      (
+        await createPiExecutionSession({
+          resourceRoot: root,
+          workspace: root,
+          manager: openConversation(root, join(root, "sessions"), key),
+          modelRuntime: runtime,
+          model,
+        })
+      ).session;
+    try {
+      const session = await open();
+      try {
+        const failure: unknown = await promptSession(
+          session,
+          "use the provider",
+          new AbortController().signal,
+        ).catch((thrown: unknown) => thrown);
+        if (explanation === undefined) {
+          expect(failure).not.toBeInstanceOf(ExplainedFailure);
+          expect(failure).toMatchObject({ message: errorMessage });
+        } else {
+          expect(failure).toBeInstanceOf(ExplainedFailure);
+          expect(failure).toMatchObject({ message: explanation, status: 502, cause: errorMessage });
+        }
+        expect(calls).toBe(1);
+      } finally {
+        session.dispose();
+      }
+      // The failure is recorded in the native session, which continues normally.
+      const next = await open();
+      try {
+        await promptSession(next, "try again", new AbortController().signal);
+        expect(calls).toBe(2);
+        expect(next.messages.filter((message) => message.role === "user")).toHaveLength(2);
+      } finally {
+        next.dispose();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
 );

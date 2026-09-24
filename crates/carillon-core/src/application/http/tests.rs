@@ -1,4 +1,11 @@
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use anyhow::Context as _;
 use axum::{response::IntoResponse as _, routing::post};
@@ -1120,6 +1127,100 @@ async fn interruption_allows_the_next_message_without_replaying() -> Result<()> 
     Ok(())
 }
 
+/// A runtime serving `/v1/turns` with a fixed failure response, counting calls.
+async fn failing_runtime(
+    state: &AppState,
+    status: StatusCode,
+    body: Value,
+) -> Result<(
+    Provider,
+    Arc<AtomicUsize>,
+    tokio::task::JoinHandle<std::io::Result<()>>,
+)> {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = calls.clone();
+    let app = Router::new().route(
+        "/v1/turns",
+        post(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            let body = body.clone();
+            async move { (status, Json(body)) }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let mut runtime = state
+        .config
+        .provider("test-runtime", ProviderRole::Runtime)?
+        .clone();
+    runtime.url = format!("http://{}", listener.local_addr()?);
+    Ok((
+        runtime,
+        calls,
+        tokio::spawn(async move { axum::serve(listener, app).await }),
+    ))
+}
+
+#[tokio::test]
+async fn runtime_explanation_reaches_the_conversation_once_and_it_continues() -> Result<()> {
+    let explanation = "Codex error: The usage limit has been reached";
+    for (status, body, notice) in [
+        (
+            StatusCode::BAD_GATEWAY,
+            json!({"error": explanation}),
+            format!(
+                "That turn was interrupted: {explanation}\nSend another message to continue in this conversation. Actions already taken may have had effects."
+            ),
+        ),
+        // An internal runtime failure carries no explanation, so the
+        // conversation gets the generic notice rather than any diagnostic.
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({}),
+            "That turn was interrupted. Send another message to continue in this conversation. Actions already taken may have had effects.".to_owned(),
+        ),
+    ] {
+        let directory = tempdir()?;
+        let state = installation(directory.path())?;
+        let failed = accept(&state, "one", "conversation").await?;
+        let successor = accept(&state, "two", "conversation").await?;
+        let (runtime, calls, server) = failing_runtime(&state, status, body).await?;
+        assert_eq!(
+            run_next_turn(&state, "test-runtime", async |_, token, request| {
+                call_runtime(&state.client, &runtime, token, request).await
+            })
+            .await?,
+            WorkerStep::Advanced
+        );
+        server.abort();
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "failed work must not be replayed");
+        let inspection = state
+            .core
+            .inspect_turn(&failed.turn_id)?
+            .context("missing turn")?;
+        assert_eq!(inspection.state, TurnState::Interrupted);
+        let delivery = state
+            .core
+            .claim_delivery("test-interface", "instance")?
+            .context("missing notice")?;
+        assert_eq!(delivery.turn_id, failed.turn_id);
+        assert_eq!(delivery.turn_state, TurnState::Interrupted);
+        assert_eq!(delivery.content, notice);
+        if status == StatusCode::BAD_GATEWAY {
+            assert_eq!(
+                inspection.error.as_deref(),
+                Some("runtime reported failure: Codex error: The usage limit has been reached")
+            );
+        }
+        run_next_turn(&state, "test-runtime", async |_, _, request| {
+            assert_eq!(request.correlation_id, successor.turn_id);
+            Ok(completed(request))
+        })
+        .await?;
+        assert_eq!(state.core.turn_counts()?.completed, 1);
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn failed_outcome_write_waits_for_restart_without_blocking_other_conversations() -> Result<()>
 {
@@ -1350,6 +1451,15 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
             match request.input.as_str() {
                 "forbidden" => StatusCode::FORBIDDEN.into_response(),
                 "server error" => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                "unexplained" => {
+                    (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({}))).into_response()
+                }
+                "blank" => (StatusCode::BAD_GATEWAY, Json(json!({"error": " \n"}))).into_response(),
+                "explained" => (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"error": "The usage limit has been reached"})),
+                )
+                    .into_response(),
                 "malformed" => "not json".into_response(),
                 "mismatch" => {
                     Json(json!({"correlation_id": "other", "output": "reply"})).into_response()
@@ -1361,7 +1471,14 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
     // These responses carry no protocol proof of non-admission. This is not
     // a blanket rule for a future explicit rejected-before-execution response.
-    for input in ["forbidden", "server error", "malformed", "mismatch"] {
+    for input in [
+        "forbidden",
+        "server error",
+        "unexplained",
+        "blank",
+        "malformed",
+        "mismatch",
+    ] {
         let mut request = state.core.runtime_request(&turn);
         request.input = input.to_owned();
         let outcome = call_runtime(&state.client, &runtime, "unused", request).await;
@@ -1370,6 +1487,14 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
             "{input}: {outcome:?}"
         );
     }
+    // An explanation is not proof that no model work ran: it is not `Retry`.
+    let mut request = state.core.runtime_request(&turn);
+    request.input = "explained".to_owned();
+    let outcome = call_runtime(&state.client, &runtime, "unused", request).await;
+    assert!(
+        matches!(&outcome, Err(TurnFailure::Explained(text)) if text == "The usage limit has been reached"),
+        "{outcome:?}"
+    );
     let response = call_runtime(
         &state.client,
         &runtime,
@@ -1379,6 +1504,7 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
     .await
     .map_err(|failure| match failure {
         TurnFailure::Retry(error) | TurnFailure::Uncertain(error) => error,
+        TurnFailure::Explained(explanation) => anyhow!(explanation),
     })?;
     assert_eq!(response.correlation_id, turn.turn_id);
     server.abort();

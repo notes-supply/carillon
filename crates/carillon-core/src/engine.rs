@@ -199,11 +199,19 @@ impl Core {
             Err(TurnFailure::Uncertain(failure)) => {
                 let message = failure.to_string();
                 self.database
-                    .interrupt_turn(&turn, &message)
+                    .interrupt_turn(&turn, &message, None)
                     .with_context(|| {
                         format!("record uncertain outcome of turn {}", turn.turn_id)
                     })?;
                 warn!(turn_id = %turn.turn_id, error = %message, "runtime outcome is uncertain");
+                Ok(WorkerStep::Advanced)
+            }
+            Err(TurnFailure::Explained(explanation)) => {
+                let message = format!("runtime reported failure: {explanation}");
+                self.database
+                    .interrupt_turn(&turn, &message, Some(&explanation))
+                    .with_context(|| format!("record failure of turn {}", turn.turn_id))?;
+                warn!(turn_id = %turn.turn_id, error = %message, "runtime reported failure");
                 Ok(WorkerStep::Advanced)
             }
         }
@@ -328,6 +336,10 @@ pub enum TurnFailure {
     Retry(anyhow::Error),
     /// Model work may have run; it must not be automatically replayed.
     Uncertain(anyhow::Error),
+    /// The runtime reported that the turn failed, explaining why in words
+    /// phrased for the conversation and safe to display. As with `Uncertain`,
+    /// model work may have run and is not automatically replayed.
+    Explained(String),
 }
 
 pub(crate) fn validate_response(

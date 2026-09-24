@@ -17,7 +17,7 @@ The example creates temporary storage, accepts and deduplicates a message, invok
 - `claim_delivery`, `acknowledge_delivery` and `reconcile_deliveries` preserve interface-instance ownership and delivery uncertainty. They never infer that ambiguous delivery is safe to repeat.
 - `recover_interrupted` is explicit. Call it only when taking exclusive ownership after the old worker has stopped. Opening another handle or running diagnostics is not a restart. `Core` itself starts no tasks and requires no shutdown routine; the application owns workers, cancellation and the process lock.
 
-`TurnFailure::Retry` means the runtime **provably did not receive** the work. Anything ambiguous is `Uncertain`, terminally interrupting that turn and leaving the conversation usable for later input. A failed database outcome write remains running until explicit startup recovery. There is no alternate lifecycle store, generic repository, or transcript reconstruction.
+`TurnFailure::Retry` means the runtime **provably did not receive** the work. Anything ambiguous is `Uncertain`, terminally interrupting that turn and leaving the conversation usable for later input. `Explained` is a failure the runtime reported with an explanation for the conversation. Core stores it as the turn's error and includes it in the interruption notice, with the same no-replay semantics. A failed database outcome write remains running until explicit startup recovery. There is no alternate lifecycle store, generic repository, or transcript reconstruction.
 
 ## Find the owner
 

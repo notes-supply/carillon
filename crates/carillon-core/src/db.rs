@@ -376,9 +376,16 @@ impl Database {
         Ok(())
     }
 
-    /// Records that the outcome of a running turn cannot be proven, and queues
-    /// a delivery telling the conversation so.
-    pub fn interrupt_turn(&self, turn: &ClaimedTurn, error: &str) -> Result<()> {
+    /// Records that a running turn did not complete, and queues a delivery
+    /// telling the conversation so, with the runtime's explanation when it
+    /// gave one. `error` is the operator's diagnostic.
+    pub fn interrupt_turn(
+        &self,
+        turn: &ClaimedTurn,
+        error: &str,
+        explanation: Option<&str>,
+    ) -> Result<()> {
+        const CONTINUE: &str = "Send another message to continue in this conversation. Actions already taken may have had effects.";
         let mut connection = self.connect()?;
         let transaction = write_transaction(&mut connection)?;
         let now = timestamp()?;
@@ -390,12 +397,11 @@ impl Database {
         if changed != 1 {
             bail!("turn {} was not running", turn.turn_id);
         }
-        enqueue_delivery(
-            &transaction,
-            turn,
-            "That turn was interrupted. Send another message to continue in this conversation. Actions already taken may have had effects.",
-            now,
-        )?;
+        let notice = match explanation {
+            Some(explanation) => format!("That turn was interrupted: {explanation}\n{CONTINUE}"),
+            None => format!("That turn was interrupted. {CONTINUE}"),
+        };
+        enqueue_delivery(&transaction, turn, &notice, now)?;
         transaction.commit()?;
         Ok(())
     }
@@ -790,7 +796,7 @@ mod tests {
         accept(&database, "one", "conversation")?;
         let next = accept(&database, "two", "conversation")?;
         let turn = database.claim_turn("runtime")?.context("missing turn")?;
-        database.interrupt_turn(&turn, "runtime disconnected")?;
+        database.interrupt_turn(&turn, "runtime disconnected", None)?;
         let claim = database
             .claim_delivery("discord", "live")?
             .context("missing notice")?;
@@ -1021,7 +1027,7 @@ mod tests {
             let first = database.claim_turn("runtime")?.context("first missing")?;
             assert_eq!(first.turn_id, "z-first");
             assert!(database.claim_turn("runtime")?.is_none());
-            database.interrupt_turn(&first, "interrupted")?;
+            database.interrupt_turn(&first, "interrupted", None)?;
             let second = database.claim_turn("runtime")?.context("second missing")?;
             assert_eq!(second.turn_id, "a-second");
         }
@@ -1119,8 +1125,12 @@ mod tests {
         let uncertain = database
             .claim_turn("runtime")?
             .context("uncertain turn was not queued")?;
-        database.interrupt_turn(&uncertain, "ambiguous")?;
-        assert!(database.interrupt_turn(&uncertain, "ambiguous").is_err());
+        database.interrupt_turn(&uncertain, "ambiguous", None)?;
+        assert!(
+            database
+                .interrupt_turn(&uncertain, "ambiguous", None)
+                .is_err()
+        );
         assert!(database.requeue_turn(&uncertain).is_err());
 
         accept(&database, "requeued", "two")?;
@@ -1129,7 +1139,11 @@ mod tests {
             .context("requeued turn was not queued")?;
         database.requeue_turn(&requeued)?;
         assert!(database.requeue_turn(&requeued).is_err());
-        assert!(database.interrupt_turn(&requeued, "ambiguous").is_err());
+        assert!(
+            database
+                .interrupt_turn(&requeued, "ambiguous", None)
+                .is_err()
+        );
 
         let requeued = database
             .claim_turn("runtime")?
@@ -1141,7 +1155,11 @@ mod tests {
         database.complete_turn(&requeued, &response)?;
         assert!(database.complete_turn(&requeued, &response).is_err());
         assert!(database.requeue_turn(&requeued).is_err());
-        assert!(database.interrupt_turn(&requeued, "ambiguous").is_err());
+        assert!(
+            database
+                .interrupt_turn(&requeued, "ambiguous", None)
+                .is_err()
+        );
         let inspection = database
             .inspect_turn(&requeued.turn_id)?
             .context("completed turn disappeared")?;
