@@ -135,3 +135,4 @@ backend = "core:rust"
 [tools.rust.options]
 components = "clippy,rustfmt"
 profile = "minimal"
+targets = "wasm32-unknown-unknown"
