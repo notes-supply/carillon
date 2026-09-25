@@ -2,7 +2,7 @@
 //! `carillon.toml`. Core never reads it; only the provider and its
 //! `configure` command know the schema.
 
-use std::{collections::BTreeSet, fs, str::FromStr};
+use std::{collections::BTreeSet, fs, path::PathBuf, str::FromStr};
 
 use anyhow::{Context as _, Result, bail};
 use carillon_installation::config::{LoadedConfig, ProviderRole};
@@ -255,6 +255,12 @@ pub(crate) fn configure(
     discord.allowed_user_ids = allowed_user_ids.to_vec();
     discord.routes = routes.to_vec();
     discord.write(config, provider_id)
+}
+
+/// The instance's private state: participation, the installed command
+/// module and the command registration record.
+pub(crate) fn state_directory(config: &LoadedConfig, provider_id: &str) -> PathBuf {
+    config.value.data_dir.join("components").join(provider_id)
 }
 
 fn valid_snowflake(value: &str) -> bool {

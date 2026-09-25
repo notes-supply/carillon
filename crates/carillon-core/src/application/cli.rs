@@ -14,6 +14,7 @@ use anyhow::{Context as _, Result};
 use carillon_installation::{
     config::{LoadedConfig, RELEASE_VERSION},
     home,
+    maintenance::MaintenanceLock,
 };
 use carillon_protocol::model::{TurnInspection, TurnSummary};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -26,14 +27,21 @@ use super::{
     },
     http::{check, serve},
     operations::{
-        Action, MaintenanceLock, Services, logs, operator_get, operator_url, print_health, status,
+        Action, Services, logs, operator_get, operator_url, print_health, status,
         wait_until_healthy,
     },
     update::update,
 };
 
 #[derive(Debug, Parser)]
-#[command(name = "carillon", version, about = "Self-hosted agent service")]
+#[command(
+    name = "carillon",
+    version,
+    about = "Self-hosted agent service",
+    after_help = "Provider commands: `carillon <provider> …` runs that provider's own program, \
+                  for example `carillon discord --help` for Discord settings and slash-command \
+                  modules."
+)]
 struct Cli {
     /// Installation to act on. Defaults to `CARILLON_HOME`, then the
     /// installation containing this program, then `~/.carillon`.
@@ -97,27 +105,36 @@ enum Command {
         #[command(flatten)]
         wait: Wait,
     },
+    /// Enable or disable a provider in the registry; restart to apply.
     Provider {
+        /// The provider's registry ID.
         id: String,
         action: ProviderAction,
     },
+    /// Add the example Pi extension and Agent Skill to the agent resources.
     EnableDemoResources,
+    /// List recent turns from the running core.
     Recent {
+        /// Only the turn for this external event.
         #[arg(long)]
         event_id: Option<String>,
         #[arg(long, default_value_t = 20)]
         limit: u32,
     },
-    Inspect {
-        turn_id: String,
-    },
+    /// Show one turn's state, output or failure explanation.
+    Inspect { turn_id: String },
+    /// Archive the stopped installation, including credentials and state.
     Backup {
+        /// Archive to create, outside the installation.
         #[arg(long)]
         output: PathBuf,
     },
+    /// Publish an installation from a backup archive.
     Restore {
+        /// Archive created by `carillon backup`.
         #[arg(long)]
         input: PathBuf,
+        /// Installation directory to create; must be absent or empty.
         #[arg(long)]
         target: PathBuf,
     },

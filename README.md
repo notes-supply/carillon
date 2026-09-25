@@ -20,7 +20,7 @@ Discord <-> carillon-discord <-> carillon <-> carillon-runtime-pi <-> Pi
 
 Core is platform-neutral. Each provider is a separate program installed beside it and launched through the one command line: `carillon discord serve …` runs `carillon-discord`. A provider keeps its own settings in `providers/<id>.toml`; `carillon.toml` is the registry of provider identities, roles, and loopback credentials. The included installation runs the three parts as separate user services, and configuration can describe multiple interface and runtime provider instances while each agent selects a runtime.
 
-Discord's slash commands—currently `/model`, which shows and changes the model and engine settings for a conversation or the agent default—live in a WebAssembly module the provider loads and can replace while running (`carillon discord reload`), without reconnecting its gateway. The shared `carillon-wasm` crate hosts such modules with bounded memory and time; the module can only ask the provider for the native operations it exposes.
+Discord's slash commands—currently `/model`, which shows and changes the model and engine settings for a conversation or the agent default—live in a WebAssembly module the provider loads and can replace while running (`carillon discord commands install FILE`), without reconnecting its gateway. An installed module keeps serving across restarts and updates until `carillon discord commands reset`. The shared `carillon-wasm` crate hosts such modules with bounded memory and time; the module can only ask the provider for the native operations it exposes.
 
 Carillon does not define its own command permissions or filesystem sandbox. Services run with the authority of the Unix user that installed them. Pi extensions and tools use Pi's native mechanisms.
 
@@ -127,7 +127,7 @@ Extract it and run `install.sh` as the Unix user that should own the agent. The 
 - `carillon-runtime-pi.service`
 - `carillon.target`
 
-After setup, operate the installation with `carillon status`, `start`, `stop`, `restart`, `logs` and `discord reload`. Update the software from a later archive with `carillon update carillon-VERSION-linux-ARCH.tar.gz`; this keeps configuration, credentials and state, and returns the services to their previous running or stopped state.
+After setup, operate the installation with `carillon status`, `start`, `stop`, `restart`, `logs` and `discord commands`. Update the software from a later archive with `carillon update carillon-VERSION-linux-ARCH.tar.gz`; this keeps configuration, credentials and state, and returns the services to their previous running or stopped state.
 
 See [`docs/product/OPERATIONS.md`](docs/product/OPERATIONS.md) for configuration, service operation, backup, and restore details.
 

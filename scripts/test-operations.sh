@@ -168,7 +168,15 @@ printf '%s\n' 'not a registry' >"$TEST_ROOT/decoy/carillon.toml"
 case "$(simulate installed-1)" in *'Local provider response 1'*) ;; *) fail 'first turn failed' ;; esac
 
 # Provider commands receive the resolved installation and infer the only Discord instance.
-carillon discord reload | grep -F '"commands"' >/dev/null
+MODULE=$INSTALLATION/app/lib/carillon_discord_commands.wasm
+INSTALLED=$INSTALLATION/state/components/discord-private/command-module.wasm
+carillon discord commands | grep -Fx 'discord-private serves the release command module: /model.' >/dev/null
+carillon discord commands check "$MODULE" | grep -F 'is a usable command module' >/dev/null
+# The running provider takes the installation's maintenance lock for its own changes.
+refuse locked-install flock "$INSTALLATION/.maintenance.lock" carillon discord commands install "$MODULE"
+grep -F 'another Carillon maintenance operation is running' "$TEST_ROOT/locked-install.log" >/dev/null
+grep -F 'Still serving the release command module: /model.' "$TEST_ROOT/locked-install.log" >/dev/null
+[ ! -e "$INSTALLED" ]
 carillon discord configure --guild-id 100 --bot-user-id 201 --user-id 200 --user-id 250 \
   --route 300:always:channel >/dev/null
 grep -F '"250"' "$INSTALLATION/providers/discord-private.toml" >/dev/null
@@ -185,7 +193,7 @@ refuse locked flock "$INSTALLATION/.maintenance.lock" carillon stop
 grep -F 'another Carillon maintenance operation is running' "$TEST_ROOT/locked.log" >/dev/null
 [ ! -e "$TRACE" ]
 running
-printf 'operations passed: entry point, resolution, start/restart, logs, provider commands, lock\n'
+printf 'operations passed: entry point, resolution, start/restart, logs, provider commands, command module, lock\n'
 
 # An independently installed provider survives application replacement.
 cat >"$HOME/.local/bin/carillon-review" <<'PROVIDER'
@@ -252,12 +260,15 @@ DATABASE=$INSTALLATION/state/carillon.sqlite3
 DISCORD_SETTINGS=$INSTALLATION/providers/discord-private.toml
 cp -p "$DISCORD_SETTINGS" "$TEST_ROOT/discord-settings"
 for state in schema:'database schema is not the current Carillon format' \
-  discord:'cannot use the settings of discord-private'; do
+  discord:'cannot use the settings of discord-private' \
+  module:'has an installed command module this release cannot serve'; do
   case "${state%%:*}" in
     schema)
       node -e 'new (require("node:sqlite").DatabaseSync)(process.argv[1]).exec("CREATE TABLE later_release (id INTEGER)")' \
         "$DATABASE" ;;
     discord) sed -i 's/^guild_id = .*/guild_id = "not-a-snowflake"/' "$DISCORD_SETTINGS" ;;
+    # An installed module the new release cannot serve, as after a contract change.
+    module) mkdir -p "${INSTALLED%/*}" && printf '%s\n' 'not a module' >"$INSTALLED" ;;
   esac
   snapshot
   refuse "incompatible-${state%%:*}" carillon update "$TEST_ROOT/next.tar.gz"
@@ -272,10 +283,11 @@ for state in schema:'database schema is not the current Carillon format' \
       node -e 'new (require("node:sqlite").DatabaseSync)(process.argv[1]).exec("DROP TABLE later_release")' \
         "$DATABASE" ;;
     discord) cp -p "$TEST_ROOT/discord-settings" "$DISCORD_SETTINGS" ;;
+    module) rm "$INSTALLED" ;;
   esac
 done
 snapshot
-printf 'update state preflight passed: incompatible core schema and provider settings refused\n'
+printf 'update state preflight passed: incompatible core schema, provider settings and command module refused\n'
 
 # An installer that cannot even be started after the services stopped leaves
 # the application unchanged and says how to resume it.
@@ -290,8 +302,15 @@ assert_preserved
 carillon start >/dev/null
 rm -f "$TRACE"
 
-# A running installation is stopped, replaced, restarted and checked.
+# A running installation is stopped, replaced, restarted and checked. An
+# installed command module lives outside the replaced application and is
+# checked by the new release before anything stops.
+carillon discord commands install "$MODULE" >"$TEST_ROOT/commands-install.log"
+grep -Fx 'discord-private now serves the installed command module: /model.' \
+  "$TEST_ROOT/commands-install.log" >/dev/null
+cmp "$MODULE" "$INSTALLED"
 carillon update "$TEST_ROOT/next.tar.gz" >"$TEST_ROOT/update.log"
+grep -F "installed command module $INSTALLED is usable" "$TEST_ROOT/update.log" >/dev/null
 grep -Fx "Updated to Carillon $VERSION; services are running again:" "$TEST_ROOT/update.log" >/dev/null
 expect_trace '--user show --property=ActiveState --value carillon.target' \
   '--user stop carillon.target' '--user daemon-reload' '--user enable carillon.target' \
@@ -303,6 +322,9 @@ assert_preserved
 [ "$(carillon recent)" = "$recent_before" ]
 case "$(simulate installed-2)" in *'Local provider response 2'*) ;; *) fail 'conversation did not continue' ;; esac
 [ "$(carillon review check)" = "review $INSTALLATION check" ]
+carillon discord commands | grep -Fx 'discord-private serves the installed command module: /model.' >/dev/null
+carillon discord commands reset | grep -Fx 'discord-private now serves the release command module: /model.' >/dev/null
+[ ! -e "$INSTALLED" ]
 
 # A stopped installation stays stopped.
 carillon stop >/dev/null

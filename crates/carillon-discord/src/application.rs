@@ -8,8 +8,11 @@ use crate::{
 use crate::{
     InterfaceError,
     client::CoreClient,
-    commands::{Commands, DiscordApp, ModelCalls, ReloadError, ReloadReport},
-    config::DiscordConfig,
+    commands::{
+        Change, ChangeError, CommandFiles, Commands, DiscordApp, MODULE_LIMIT, ModelCalls, Refusal,
+        Status,
+    },
+    config::{DiscordConfig, state_directory},
     conversations::{
         IncomingMessage, Participation, admit_identity, admit_message,
         prepare_deterministic_conversation,
@@ -24,6 +27,7 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use axum::{
     Json, Router,
+    body::Body,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -110,15 +114,15 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
     let listener = TcpListener::bind(address)
         .await
         .with_context(|| format!("bind Discord interface provider to {address}"))?;
-    let component_dir = config.value.data_dir.join("components").join(&provider.id);
     let participation = Arc::new(Participation::load(
-        component_dir.join("participation.json"),
+        state_directory(&config, &provider.id).join("participation.json"),
     )?);
     let commands = Arc::new(
-        Commands::load(
+        Commands::load(CommandFiles::of(
+            &config,
+            &provider.id,
             options.commands.to_path_buf(),
-            component_dir.join("commands.json"),
-        )
+        ))
         .await?,
     );
     let core = CoreClient::new(
@@ -195,10 +199,7 @@ async fn connect(
         application_id,
         guild_id: guild(&state.discord)?,
     });
-    let definitions = state.commands.definitions();
-    if !state.commands.registered(&app, &definitions) {
-        state.commands.register(&app, &definitions).await?;
-    }
+    state.commands.reconcile(&app).await?;
     state.app = Some(app);
     for target in reconciled.feedback_target_ids {
         terminal_feedback(&http, &state.discord, &target, Feedback::Uncertain).await;
@@ -237,9 +238,12 @@ fn guild(discord: &DiscordConfig) -> Result<Id<twilight_model::id::marker::Guild
 }
 
 fn discord_router(state: DiscordState, deterministic: bool) -> Router {
-    let router = Router::new()
-        .route("/health", get(discord_health))
-        .route("/v1/commands/reload", post(reload_commands));
+    let router = Router::new().route("/health", get(discord_health)).route(
+        "/v1/commands",
+        get(command_status)
+            .put(install_commands)
+            .delete(reset_commands),
+    );
     if deterministic {
         router
             .route("/v1/simulate", post(simulate))
@@ -274,46 +278,132 @@ fn authorize_interface(state: &DiscordState, headers: &HeaderMap) -> Result<(), 
     Ok(())
 }
 
-/// Operator-requested replacement of the command module from its configured
-/// path. When the provider has a Discord application, definitions Discord
-/// does not hold yet are registered first; the replacement serves only once
-/// Discord confirmed them, so a refused or unanswered registration leaves the
-/// previous module in place.
-async fn reload_commands(
-    State(state): State<DiscordState>,
-    headers: HeaderMap,
-) -> Result<Json<ReloadReport>, InterfaceError> {
-    if !token_matches(&state.operator_token_hash, bearer(&headers)) {
+/// Operator actions need the operator credential, not the interface's.
+fn authorize_operator(state: &DiscordState, headers: &HeaderMap) -> Result<(), InterfaceError> {
+    if !token_matches(&state.operator_token_hash, bearer(headers)) {
         return Err(InterfaceError {
             status: StatusCode::FORBIDDEN,
-            message: "command reload requires the operator credential".to_owned(),
+            message: "command module operations require the operator credential".to_owned(),
         });
     }
-    state
-        .commands
-        .reload(state.app.as_deref())
-        .await
-        .map(Json)
-        .map_err(|failure| match failure {
-            ReloadError::Prepare(failure) => failure.into(),
-            ReloadError::Register(failure) => {
-                error!(error = %failure, "command registration failed");
-                InterfaceError {
-                    status: StatusCode::BAD_GATEWAY,
-                    message: registration_failure(&failure),
-                }
-            }
-        })
+    Ok(())
 }
 
-/// Why a reload stopped before activating the candidate, for the operator.
-fn registration_failure(failure: &anyhow::Error) -> String {
-    let outcome = if discord_failure_is_terminal(failure) {
-        "Discord rejected the commands"
-    } else {
-        "Discord did not confirm the commands; whether it applied them is unknown, so reload again once it answers"
+async fn command_status(
+    State(state): State<DiscordState>,
+    headers: HeaderMap,
+) -> Result<Json<Status>, InterfaceError> {
+    authorize_operator(&state, &headers)?;
+    Ok(Json(state.commands.status(state.app.as_deref())))
+}
+
+/// Serves the uploaded module and saves it as the installed module. When the
+/// provider has a Discord application, definitions the record does not show
+/// registered are registered first; the module serves only once Discord
+/// confirmed them. The body is read only after authentication.
+async fn install_commands(
+    State(state): State<DiscordState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Response, InterfaceError> {
+    authorize_operator(&state, &headers)?;
+    let bytes = axum::body::to_bytes(body, MODULE_LIMIT)
+        .await
+        .map_err(|_| InterfaceError {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            message: format!(
+                "a command module may be at most {} MiB; nothing was changed",
+                MODULE_LIMIT >> 20
+            ),
+        })?;
+    let (commands, app) = (state.commands.clone(), state.app.clone());
+    let change = tokio::spawn(async move { commands.install(&bytes, app.as_deref()).await });
+    Ok(changed(&state, change.await))
+}
+
+/// Serves the release's module again and removes the installed one.
+async fn reset_commands(
+    State(state): State<DiscordState>,
+    headers: HeaderMap,
+) -> Result<Response, InterfaceError> {
+    authorize_operator(&state, &headers)?;
+    let (commands, app) = (state.commands.clone(), state.app.clone());
+    let change = tokio::spawn(async move { commands.reset(app.as_deref()).await });
+    Ok(changed(&state, change.await))
+}
+
+/// A change, or why the serving module stayed in place and what the
+/// operator can do about it. Changes run as their own task, so an operator
+/// who stops waiting cannot cancel one between registration and activation.
+fn changed(
+    state: &DiscordState,
+    result: Result<Result<Change, ChangeError>, tokio::task::JoinError>,
+) -> Response {
+    let failure = match result {
+        Ok(Ok(change)) => return Json(change).into_response(),
+        Ok(Err(failure)) => failure,
+        Err(failure) => {
+            error!(error = %failure, "command module change failed");
+            return InterfaceError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                message: format!(
+                    "the command module change failed unexpectedly ({failure}); check \
+                     `carillon discord commands` and run the same command again"
+                ),
+            }
+            .into_response();
+        }
     };
-    format!("{outcome}: {failure:#}; the previous command module keeps serving")
+    error!(error = %failure, "command module change refused");
+    let (status, error) = match failure {
+        ChangeError::Busy(installation) => (
+            StatusCode::CONFLICT,
+            format!(
+                "another Carillon maintenance operation is running for {}; nothing was changed. \
+                 Run the same command again once it finishes",
+                installation.display()
+            ),
+        ),
+        ChangeError::Lock(failure) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("could not take the maintenance lock: {failure:#}; nothing was changed"),
+        ),
+        ChangeError::Unusable(failure) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("not a usable command module: {failure:#}; nothing was changed"),
+        ),
+        ChangeError::Record(failure) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "could not clear the command registration record ({failure}), so Discord was \
+                 not contacted and nothing was changed. Check the provider's state directory, \
+                 then run the same command again"
+            ),
+        ),
+        ChangeError::Register(failure) if discord_failure_is_terminal(&failure) => (
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "Discord rejected the commands: {failure:#}. The serving and saved modules are \
+                 unchanged; correct the module's command definitions and try again"
+            ),
+        ),
+        ChangeError::Register(failure) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            format!(
+                "Discord did not confirm the commands: {failure:#}. It may have applied them; \
+                 the serving and saved modules are unchanged. Run the same command again once \
+                 Discord answers"
+            ),
+        ),
+    };
+    (
+        status,
+        Json(Refusal {
+            error,
+            serving: state.commands.serving(),
+        }),
+    )
+        .into_response()
 }
 
 async fn simulate(

@@ -295,9 +295,11 @@ dependencies = [
  "carillon-wasm",
  "clap",
  "emojis",
+ "hex",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "toml",
@@ -326,6 +328,7 @@ name = "carillon-installation"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "fs2",
  "hex",
  "serde",
  "sha2",

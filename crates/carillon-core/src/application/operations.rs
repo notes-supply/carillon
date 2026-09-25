@@ -1,11 +1,11 @@
 //! Everyday operation of an installed release: the owner's `carillon.target`
-//! user service, its logs and health, and the lock that serializes
-//! maintenance. `systemctl` and `tail` are used directly; Carillon does not
-//! supervise processes itself.
+//! user service, its logs and health. `systemctl` and `tail` are used
+//! directly; Carillon does not supervise processes itself. Maintenance is
+//! serialized by `carillon_installation::maintenance::MaintenanceLock`.
 
 use std::{
     fmt, fs,
-    os::unix::{fs::OpenOptionsExt as _, process::CommandExt as _},
+    os::unix::process::CommandExt as _,
     path::{Path, PathBuf},
     process::Command as Process,
     time::{Duration, Instant},
@@ -14,42 +14,12 @@ use std::{
 use anyhow::{Context as _, Result, bail};
 use carillon_installation::config::{LoadedConfig, validate_provider_identity};
 use carillon_protocol::model::{Health, StatusReport};
-use fs2::FileExt as _;
 use reqwest::Url;
 use serde::de::DeserializeOwned;
 
 const TARGET: &str = "carillon.target";
 /// The registered core unit records which installation the units run.
 const CORE_UNIT: &str = "carillon-core.service";
-
-/// Exclusive, non-blocking lock serializing maintenance of one installation.
-/// The release scripts take the same `flock(2)` lock unless a caller already
-/// holds it for them and says so through [`MaintenanceLock::HELD_FOR`].
-pub(super) struct MaintenanceLock {
-    _file: fs::File,
-}
-
-impl MaintenanceLock {
-    pub(super) const HELD_FOR: &str = "CARILLON_MAINTENANCE_LOCK";
-
-    pub(super) fn acquire(home: &Path) -> Result<Self> {
-        let path = home.join(".maintenance.lock");
-        let file = fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .mode(0o600)
-            .open(&path)
-            .with_context(|| format!("open maintenance lock {}", path.display()))?;
-        file.try_lock_exclusive().with_context(|| {
-            format!(
-                "another Carillon maintenance operation is running for {}",
-                home.display()
-            )
-        })?;
-        Ok(Self { _file: file })
-    }
-}
 
 /// Which installation, if any, the owner's Carillon user units belong to.
 #[derive(Debug, Eq, PartialEq)]
@@ -297,7 +267,8 @@ pub(super) async fn status(config: &LoadedConfig) -> Result<StatusReport> {
         .await
         .with_context(|| {
             format!(
-                "core at {} did not answer; start Carillon with `carillon start`",
+                "core at {} did not answer. If Carillon is stopped, `carillon start` starts it; \
+                 otherwise `carillon logs core` shows why",
                 config.value.core.listen
             )
         })

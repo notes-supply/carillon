@@ -17,7 +17,7 @@ carillon-protocol = { path = "../carillon-protocol" }
 carillon-installation = { path = "../carillon-installation" }
 clap.workspace = true
 flate2 = "1.1.9"
-fs2 = "0.4.3"
+fs2.workspace = true
 hex.workspace = true
 http.workspace = true
 reqwest.workspace = true

@@ -20,13 +20,13 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail};
-use carillon_installation::{config::LoadedConfig, home::is_managed_application};
+use carillon_installation::{
+    config::LoadedConfig, home::is_managed_application, maintenance::MaintenanceLock,
+};
 
 use super::{
     admin::unpack_regular,
-    operations::{
-        Action, Activity, MaintenanceLock, Registration, Services, print_health, wait_until_healthy,
-    },
+    operations::{Action, Activity, Registration, Services, print_health, wait_until_healthy},
 };
 
 pub(super) async fn update(home: &Path, archive: &Path, timeout: Duration) -> Result<()> {

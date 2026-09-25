@@ -1,9 +1,17 @@
-//! Hosting of the replaceable command module: loading it, learning which
-//! commands it defines, registering those with Discord, and running each
-//! interaction through it with the native model operations it may ask for.
+//! Hosting of the replaceable command module: choosing the module to serve,
+//! learning which commands it defines, registering those with Discord,
+//! running each interaction through it with the native model operations it
+//! may ask for, and installing or resetting the module while serving.
+//!
+//! Three facts have separate owners. Memory holds the generation serving now.
+//! The disk holds what the next start serves: the operator-installed module
+//! when one exists, otherwise the release's module. The registration record
+//! holds what Discord last confirmed. Changes serialize on the installation's
+//! maintenance lock, and every change converges these facts in one order:
+//! validate, register when the record does not match, activate, then save.
 
 use std::{
-    fs,
+    fmt, fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
@@ -13,11 +21,16 @@ use anyhow::{Context as _, Result, bail};
 use carillon_discord_commands::contract::{
     CONTRACT, Description, HostReply, HostRequest, Interaction, Invocation, Outcome, Reply,
 };
-use carillon_installation::filesystem::atomic_write;
+use carillon_installation::{
+    config::LoadedConfig,
+    filesystem::{PublishError, atomic_write, publish, remove, sync_ancestors},
+    maintenance::MaintenanceLock,
+};
 use carillon_protocol::model::{ModelQuery, ModelScope, ModelUpdate};
 use carillon_wasm::{Host, Module, Native};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use tracing::{info, warn};
 use twilight_http::Client as DiscordHttp;
 use twilight_model::{
@@ -34,6 +47,8 @@ use crate::client::CoreClient;
 const DEADLINE: Duration = Duration::from_secs(10);
 /// Description is pure computation; a module that needs longer is broken.
 const DESCRIBE_DEADLINE: Duration = Duration::from_secs(2);
+/// The largest module an operator may install.
+pub const MODULE_LIMIT: usize = 16 << 20;
 
 /// The Discord application the provider acts as, once the token is known,
 /// and the guild whose commands it owns.
@@ -105,12 +120,219 @@ impl ModelCalls {
     }
 }
 
+/// Where a module comes from.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Source {
+    /// The module shipped with the release, served when none is installed.
+    Release,
+    /// The module an operator installed, which takes precedence.
+    Installed,
+}
+
+impl fmt::Display for Source {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Release => "release",
+            Self::Installed => "installed",
+        })
+    }
+}
+
+/// The files of one provider instance's commands.
+#[derive(Clone, Debug)]
+pub struct CommandFiles {
+    /// The release's module; release updates replace it.
+    pub release: PathBuf,
+    /// The operator-installed module, outside the release's files.
+    pub installed: PathBuf,
+    /// What Discord last confirmed as registered.
+    pub record: PathBuf,
+    /// The installation whose maintenance lock serializes changes.
+    pub installation: PathBuf,
+}
+
+impl CommandFiles {
+    /// The files of a configured instance whose release module is `release`.
+    pub fn of(config: &LoadedConfig, provider_id: &str, release: PathBuf) -> Self {
+        let state = crate::config::state_directory(config, provider_id);
+        Self {
+            release,
+            installed: state.join("command-module.wasm"),
+            record: state.join("commands.json"),
+            installation: config.root.clone(),
+        }
+    }
+
+    /// The module the next start serves: the installed one when it exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the chosen file cannot be read.
+    pub fn selected(&self) -> Result<(Source, Vec<u8>)> {
+        match fs::read(&self.installed) {
+            Ok(bytes) => Ok((Source::Installed, bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let bytes = fs::read(&self.release).with_context(|| {
+                    format!("read release command module {}", self.release.display())
+                })?;
+                Ok((Source::Release, bytes))
+            }
+            Err(error) => Err(error).with_context(|| {
+                format!("read installed command module {}", self.installed.display())
+            }),
+        }
+    }
+}
+
 /// One immutable module and the definitions it described. In-flight calls
 /// retain their generation when a replacement starts serving.
 struct Generation {
     module: Module,
     definitions: Vec<Value>,
+    source: Source,
+    digest: String,
 }
+
+impl Generation {
+    fn summary(&self) -> ModuleSummary {
+        ModuleSummary {
+            source: self.source,
+            commands: self
+                .definitions
+                .iter()
+                .filter_map(|definition| definition["name"].as_str())
+                .map(str::to_owned)
+                .collect(),
+            digest: self.digest.clone(),
+        }
+    }
+}
+
+/// A module as the operator sees it.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ModuleSummary {
+    pub source: Source,
+    /// Command names, without the leading slash.
+    pub commands: Vec<String>,
+    /// SHA-256 of the module bytes.
+    pub digest: String,
+}
+
+/// What a change needed from Discord.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Registration {
+    /// The record already showed these definitions registered.
+    Unchanged,
+    /// Discord confirmed the definitions.
+    Registered,
+    /// Deterministic mode: there is no Discord application.
+    NotConnected,
+}
+
+/// Whether a change also holds for the next start.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum Saved {
+    /// The next start serves the new module, even after a system crash.
+    Durable,
+    /// The file was not changed: the next start serves what it served before.
+    Failed { error: String },
+    /// The file was changed, but a system crash may still undo that.
+    Unsynced { error: String },
+}
+
+impl Saved {
+    /// The outcome of publishing or removing `path`.
+    fn of(path: &Path, result: Result<(), PublishError>) -> Self {
+        match result {
+            Ok(()) => Self::Durable,
+            Err(PublishError::NotPublished(error)) => Self::Failed {
+                error: format!("{}: {error}", path.display()),
+            },
+            Err(PublishError::Unsynced(error)) => Self::Unsynced {
+                error: format!("sync the directory of {}: {error}", path.display()),
+            },
+        }
+    }
+}
+
+/// A completed install or reset: the new module serves.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Change {
+    pub serving: ModuleSummary,
+    pub previous: ModuleSummary,
+    pub discord: Registration,
+    pub saved: Saved,
+}
+
+/// What serves now, and what the next start would serve.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Status {
+    pub serving: ModuleSummary,
+    pub next_start: NextStart,
+    /// Whether the record shows the serving definitions registered for this
+    /// application and guild; absent without a Discord application.
+    pub registered: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum NextStart {
+    /// The module on disk is the one serving.
+    Same,
+    /// The next start would serve another module from this source.
+    Different { source: Source },
+    /// The module on disk could not be read.
+    Unknown { error: String },
+}
+
+/// The operator's answer to a refused install or reset: why, with what to
+/// do next, and the module that still serves.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Refusal {
+    pub error: String,
+    pub serving: ModuleSummary,
+}
+
+/// Why an install or reset left the serving module in place.
+#[derive(Debug)]
+pub enum ChangeError {
+    /// Another maintenance operation holds the installation's lock.
+    Busy(PathBuf),
+    /// The maintenance lock could not be taken.
+    Lock(anyhow::Error),
+    /// The candidate is not a usable command module.
+    Unusable(anyhow::Error),
+    /// The registration record could not be cleared durably, so Discord was
+    /// not contacted.
+    Record(PublishError),
+    /// Discord refused the definitions or did not confirm them.
+    Register(anyhow::Error),
+}
+
+impl fmt::Display for ChangeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Busy(installation) => write!(
+                formatter,
+                "another Carillon maintenance operation is running for {}",
+                installation.display()
+            ),
+            Self::Lock(error) => write!(formatter, "take the maintenance lock: {error:#}"),
+            Self::Unusable(error) => write!(formatter, "{error:#}"),
+            Self::Record(error) => {
+                write!(formatter, "clear the command registration record: {error}")
+            }
+            Self::Register(error) => {
+                write!(formatter, "register Discord guild commands: {error:#}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ChangeError {}
 
 /// What Discord last confirmed, bound to the application and guild it was
 /// registered with; a record for another target does not count.
@@ -121,143 +343,116 @@ struct Record {
     commands: Vec<Value>,
 }
 
-/// The module in use, its command definitions, and the record of what was
-/// last registered with Discord.
+/// The module in use, its command definitions, and the files that decide
+/// what the next start serves and what Discord holds.
 pub struct Commands {
     host: Host<Calls>,
-    module_path: PathBuf,
-    record_path: PathBuf,
+    files: CommandFiles,
     current: Mutex<Arc<Generation>>,
-    reload: tokio::sync::Mutex<()>,
-}
-
-#[derive(Serialize)]
-pub struct ReloadReport {
-    commands: usize,
-    changed: bool,
-    registered: bool,
-}
-
-#[derive(Debug)]
-pub enum ReloadError {
-    Prepare(anyhow::Error),
-    Register(anyhow::Error),
+    /// Queues changes within this process; the maintenance lock refuses
+    /// changes from other processes.
+    changes: tokio::sync::Mutex<()>,
 }
 
 impl Commands {
-    /// Reloads one generation at a time, including remote registration. A
-    /// failed replacement leaves current invocations and definitions alone.
-    pub async fn reload(&self, app: Option<&DiscordApp>) -> Result<ReloadReport, ReloadError> {
-        let _reload = self.reload.lock().await;
-        let candidate = self.prepare().await.map_err(ReloadError::Prepare)?;
-        let mut report = ReloadReport {
-            commands: candidate.definitions.len(),
-            changed: self.changed(&candidate),
-            registered: false,
-        };
-        if let Some(app) = app
-            && !self.registered(app, &candidate.definitions)
-        {
-            self.register(app, &candidate.definitions)
-                .await
-                .map_err(ReloadError::Register)?;
-            report.registered = true;
-        }
-        self.activate(candidate);
-        Ok(report)
-    }
-
-    /// Loads the module at `module_path` and learns its commands. The record
-    /// of registered commands lives at `record_path`.
-    pub async fn load(module_path: PathBuf, record_path: PathBuf) -> Result<Self> {
+    /// Loads the module the next start serves and learns its commands.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the selected module is unusable; an unusable
+    /// installed module is named so the operator can remove it.
+    pub async fn load(files: CommandFiles) -> Result<Self> {
         let host = Host::new()?;
-        let candidate = prepare(&host, &module_path).await?;
+        let (source, bytes) = files.selected()?;
+        let generation = prepare(&host, &bytes, source).await.map_err(|error| {
+            if source == Source::Installed {
+                error.context(format!(
+                    "installed command module {} is unusable; remove it to serve the release's module",
+                    files.installed.display()
+                ))
+            } else {
+                error.context(format!(
+                    "release command module {} is unusable",
+                    files.release.display()
+                ))
+            }
+        })?;
         Ok(Self {
             host,
-            module_path,
-            record_path,
-            current: Mutex::new(Arc::new(candidate)),
-            reload: tokio::sync::Mutex::new(()),
+            files,
+            current: Mutex::new(Arc::new(generation)),
+            changes: tokio::sync::Mutex::new(()),
         })
     }
 
-    /// Re-reads the module file without putting it into service; a broken
-    /// file changes nothing. The candidate serves once [`Self::activate`]
-    /// accepts it, after any registration its definitions need.
-    async fn prepare(&self) -> Result<Generation> {
-        prepare(&self.host, &self.module_path).await
+    /// Serves `bytes` as the installed module and saves it for later starts.
+    /// Repeating an install of the serving module still reconciles the
+    /// registration and completes the save.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the serving module was left in place.
+    pub async fn install(
+        &self,
+        bytes: &[u8],
+        app: Option<&DiscordApp>,
+    ) -> Result<Change, ChangeError> {
+        let _exclusive = self.exclusive().await?;
+        self.apply(Source::Installed, bytes, app).await
     }
 
-    /// Whether the candidate defines other commands than the module in use.
-    fn changed(&self, candidate: &Generation) -> bool {
-        self.current().definitions != candidate.definitions
-    }
-
-    /// Replaces the module in use with the candidate.
-    fn activate(&self, candidate: Generation) {
-        *self.current.lock().unwrap_or_else(PoisonError::into_inner) = Arc::new(candidate);
-        info!(path = %self.module_path.display(), "command module reloaded");
-    }
-
-    pub fn definitions(&self) -> Vec<Value> {
-        self.current().definitions.clone()
-    }
-
-    /// Whether Discord already holds `definitions` for this application and
-    /// guild.
-    pub fn registered(&self, app: &DiscordApp, definitions: &[Value]) -> bool {
-        fs::read(&self.record_path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Record>(&bytes).ok())
-            .is_some_and(|record| {
-                record.application_id == app.application_id
-                    && record.guild_id == app.guild_id
-                    && record.commands == definitions
+    /// Serves the release's module again and removes the installed one.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the serving module was left in place.
+    pub async fn reset(&self, app: Option<&DiscordApp>) -> Result<Change, ChangeError> {
+        let _exclusive = self.exclusive().await?;
+        let bytes = fs::read(&self.files.release)
+            .with_context(|| {
+                format!(
+                    "read release command module {}",
+                    self.files.release.display()
+                )
             })
+            .map_err(ChangeError::Unusable)?;
+        self.apply(Source::Release, &bytes, app).await
     }
 
-    /// Replaces the guild's commands with `definitions`, invalidating the
-    /// disposable cache first and recording only Discord's confirmation.
-    /// Cache persistence cannot veto an already-confirmed registration.
-    pub async fn register(&self, app: &DiscordApp, definitions: &[Value]) -> Result<()> {
-        let commands = definitions
-            .iter()
-            .map(command)
-            .collect::<Result<Vec<_>>>()?;
-        // This cache must not attest to the old definitions if Discord
-        // applies the new ones but recording its confirmation fails.
-        match fs::remove_file(&self.record_path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error).context("invalidate command registration cache"),
-        }
-        app.http
-            .interaction(app.application_id)
-            .set_guild_commands(app.guild_id, &commands)
-            .await
-            .context("register Discord guild commands")?;
-        let record = Record {
-            application_id: app.application_id,
-            guild_id: app.guild_id,
-            commands: definitions.to_vec(),
-        };
-        let record_result = (|| -> Result<()> {
-            if let Some(parent) = self.record_path.parent() {
-                fs::create_dir_all(parent)?;
+    /// Registers the serving definitions unless the record shows Discord
+    /// already holds them.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the definitions could not be registered.
+    pub async fn reconcile(&self, app: &DiscordApp) -> Result<Registration, ChangeError> {
+        let _changes = self.changes.lock().await;
+        let definitions = self.current().definitions.clone();
+        self.reconcile_definitions(Some(app), &definitions).await
+    }
+
+    /// The serving module, the one the next start would serve, and whether
+    /// the record shows the serving definitions registered.
+    pub fn status(&self, app: Option<&DiscordApp>) -> Status {
+        let serving = self.current();
+        let next_start = match self.files.selected() {
+            Ok((source, bytes)) if source == serving.source && digest(&bytes) == serving.digest => {
+                NextStart::Same
             }
-            atomic_write(&self.record_path, &serde_json::to_vec(&record)?, 0o600)?;
-            Ok(())
-        })();
-        if let Err(error) = record_result {
-            // Discord confirmed the candidate. A cache failure cannot undo
-            // that mutation or justify keeping the previous module active.
-            warn!(%error, path = %self.record_path.display(), "commands registered but confirmation cache could not be written; registration will be retried");
+            Ok((source, _)) => NextStart::Different { source },
+            Err(error) => NextStart::Unknown {
+                error: format!("{error:#}"),
+            },
+        };
+        Status {
+            serving: serving.summary(),
+            next_start,
+            registered: app.map(|app| self.registered(app, &serving.definitions)),
         }
-        info!(
-            commands = commands.len(),
-            "Discord guild commands registered"
-        );
-        Ok(())
+    }
+
+    pub fn serving(&self) -> ModuleSummary {
+        self.current().summary()
     }
 
     /// Runs one interaction through the module.
@@ -280,23 +475,170 @@ impl Commands {
             }
         }
     }
-}
 
-impl Commands {
+    async fn exclusive(
+        &self,
+    ) -> Result<(tokio::sync::MutexGuard<'_, ()>, MaintenanceLock), ChangeError> {
+        let changes = self.changes.lock().await;
+        let lock = MaintenanceLock::try_acquire(&self.files.installation)
+            .map_err(ChangeError::Lock)?
+            .ok_or_else(|| ChangeError::Busy(self.files.installation.clone()))?;
+        Ok((changes, lock))
+    }
+
+    /// Validate, register when needed, activate, then save. The caller holds
+    /// both locks.
+    async fn apply(
+        &self,
+        source: Source,
+        bytes: &[u8],
+        app: Option<&DiscordApp>,
+    ) -> Result<Change, ChangeError> {
+        let candidate = prepare(&self.host, bytes, source)
+            .await
+            .map_err(ChangeError::Unusable)?;
+        let discord = self
+            .reconcile_definitions(app, &candidate.definitions)
+            .await?;
+        let serving = candidate.summary();
+        let previous = self.activate(candidate).summary();
+        let saved = match source {
+            Source::Installed => ensure_directory(&self.files.installed)
+                .map_err(PublishError::NotPublished)
+                .and_then(|()| publish(&self.files.installed, bytes, 0o600)),
+            Source::Release => remove(&self.files.installed),
+        };
+        let saved = Saved::of(&self.files.installed, saved);
+        if saved != Saved::Durable {
+            warn!(?saved, path = %self.files.installed.display(), "command module serves but its saved state is not confirmed");
+        }
+        Ok(Change {
+            serving,
+            previous,
+            discord,
+            saved,
+        })
+    }
+
+    async fn reconcile_definitions(
+        &self,
+        app: Option<&DiscordApp>,
+        definitions: &[Value],
+    ) -> Result<Registration, ChangeError> {
+        let Some(app) = app else {
+            return Ok(Registration::NotConnected);
+        };
+        if self.registered(app, definitions) {
+            return Ok(Registration::Unchanged);
+        }
+        self.register(app, definitions).await?;
+        Ok(Registration::Registered)
+    }
+
+    /// Replaces the module in use with the candidate, returning the previous one.
+    fn activate(&self, candidate: Generation) -> Arc<Generation> {
+        let source = candidate.source;
+        let previous = std::mem::replace(
+            &mut *self.current.lock().unwrap_or_else(PoisonError::into_inner),
+            Arc::new(candidate),
+        );
+        info!(%source, "command module activated");
+        previous
+    }
+
+    /// Whether Discord already holds `definitions` for this application and
+    /// guild.
+    fn registered(&self, app: &DiscordApp, definitions: &[Value]) -> bool {
+        fs::read(&self.files.record)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Record>(&bytes).ok())
+            .is_some_and(|record| {
+                record.application_id == app.application_id
+                    && record.guild_id == app.guild_id
+                    && record.commands == definitions
+            })
+    }
+
+    /// Replaces the guild's commands with `definitions`, durably clearing the
+    /// record first and recording only Discord's confirmation. Recording
+    /// cannot veto an already-confirmed registration.
+    async fn register(&self, app: &DiscordApp, definitions: &[Value]) -> Result<(), ChangeError> {
+        let commands = definitions
+            .iter()
+            .map(command)
+            .collect::<Result<Vec<_>>>()
+            .map_err(ChangeError::Unusable)?;
+        // The record must not attest to the old definitions, even after a
+        // system crash, if Discord applies the new ones and recording its
+        // confirmation fails.
+        ensure_directory(&self.files.record)
+            .map_err(PublishError::NotPublished)
+            .and_then(|()| remove(&self.files.record))
+            .map_err(ChangeError::Record)?;
+        app.http
+            .interaction(app.application_id)
+            .set_guild_commands(app.guild_id, &commands)
+            .await
+            .map_err(|error| ChangeError::Register(error.into()))?;
+        let record = Record {
+            application_id: app.application_id,
+            guild_id: app.guild_id,
+            commands: definitions.to_vec(),
+        };
+        let recorded = serde_json::to_vec(&record)
+            .map_err(anyhow::Error::from)
+            .and_then(|bytes| Ok(atomic_write(&self.files.record, &bytes, 0o600)?));
+        if let Err(error) = recorded {
+            // Discord confirmed the candidate. A record failure cannot undo
+            // that mutation or justify keeping the previous module active.
+            warn!(%error, path = %self.files.record.display(), "commands registered but the record could not be saved; registration will be repeated");
+        }
+        info!(
+            commands = commands.len(),
+            "Discord guild commands registered"
+        );
+        Ok(())
+    }
+
     fn current(&self) -> Arc<Generation> {
         Arc::clone(&self.current.lock().unwrap_or_else(PoisonError::into_inner))
     }
 }
 
-async fn prepare(host: &Host<Calls>, path: &Path) -> Result<Generation> {
-    let bytes =
-        fs::read(path).with_context(|| format!("read command module {}", path.display()))?;
-    let module = host
-        .load(&bytes)
-        .with_context(|| format!("load command module {}", path.display()))?;
+/// Validates `bytes` as a command module this provider can serve, without
+/// serving it: the commands it defines, or why it is unusable.
+///
+/// # Errors
+///
+/// Returns why the module is unusable.
+pub async fn check(bytes: &[u8]) -> Result<ModuleSummary> {
+    Ok(prepare(&Host::new()?, bytes, Source::Installed)
+        .await?
+        .summary())
+}
+
+/// Creates the directory holding `path` durably when it does not exist yet.
+fn ensure_directory(path: &Path) -> std::io::Result<()> {
+    let Some(directory) = path.parent() else {
+        return Ok(());
+    };
+    if directory.is_dir() {
+        return Ok(());
+    }
+    fs::create_dir_all(directory)?;
+    sync_ancestors(directory)
+}
+
+fn digest(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+async fn prepare(host: &Host<Calls>, bytes: &[u8], source: Source) -> Result<Generation> {
+    let module = host.load(bytes)?;
     let payload = serde_json::to_vec(&Invocation::Describe)?;
     let description = match outcome(host, &module, Calls::Refused, &payload, DESCRIBE_DEADLINE)
-        .await?
+        .await
+        .context("describe command module")?
     {
         Outcome::Description(description) => description,
         Outcome::Reply(_) | Outcome::Failure(_) => bail!("command module did not describe itself"),
@@ -311,6 +653,8 @@ async fn prepare(host: &Host<Calls>, path: &Path) -> Result<Generation> {
     Ok(Generation {
         module,
         definitions: commands,
+        source,
+        digest: digest(bytes),
     })
 }
 
@@ -345,19 +689,22 @@ pub(crate) mod tests {
         path::Path,
         sync::{
             Arc,
-            atomic::{AtomicU16, Ordering},
+            atomic::{AtomicU16, AtomicUsize, Ordering},
         },
     };
 
     use axum::{Router, http::StatusCode, routing::put};
     use carillon_discord_commands::contract::{Interaction, InteractionKind};
+    use carillon_installation::maintenance::MaintenanceLock;
     use serde_json::{Value, json};
 
-    use super::{Commands, DiscordApp};
+    use super::{
+        ChangeError, CommandFiles, Commands, DiscordApp, NextStart, Registration, Saved, Source,
+    };
 
     /// A module that answers `Describe` with `description` and every other
-    /// invocation with `reply`, written to `path` in binary form.
-    pub(crate) fn write_module(path: &Path, description: &str, reply: &str) -> anyhow::Result<()> {
+    /// invocation with `reply`, in binary form.
+    pub(crate) fn module(description: &str, reply: &str) -> anyhow::Result<Vec<u8>> {
         let escape = |text: &str| text.replace('\\', "\\\\").replace('"', "\\\"");
         let describe_length =
             serde_json::to_vec(&carillon_discord_commands::contract::Invocation::Describe)?.len();
@@ -381,7 +728,12 @@ pub(crate) mod tests {
             description.len(),
             reply.len(),
         );
-        std::fs::write(path, wat::parse_str(text)?)?;
+        Ok(wat::parse_str(text)?)
+    }
+
+    /// [`module`], written to `path`.
+    pub(crate) fn write_module(path: &Path, description: &str, reply: &str) -> anyhow::Result<()> {
+        std::fs::write(path, module(description, reply)?)?;
         Ok(())
     }
 
@@ -395,6 +747,37 @@ pub(crate) mod tests {
 
     pub(crate) fn definition(name: &str) -> Value {
         json!({"type": 1, "name": name, "description": "A test command"})
+    }
+
+    /// Command files in `root`: the release module at `release.wasm`, state
+    /// under `state/`, and `root` as the installation.
+    pub(crate) fn files(root: &Path) -> CommandFiles {
+        CommandFiles {
+            release: root.join("release.wasm"),
+            installed: root.join("state/command-module.wasm"),
+            record: root.join("state/commands.json"),
+            installation: root.to_path_buf(),
+        }
+    }
+
+    /// Commands whose release module defines `names` and replies `reply`.
+    pub(crate) async fn release_commands(
+        root: &Path,
+        names: &[&str],
+        reply: &str,
+    ) -> anyhow::Result<Commands> {
+        let definitions: Vec<Value> = names.iter().map(|name| definition(name)).collect();
+        write_module(
+            &root.join("release.wasm"),
+            &describing(&definitions),
+            &replying(reply, &[]),
+        )?;
+        Commands::load(files(root)).await
+    }
+
+    fn variant(names: &[&str], reply: &str) -> anyhow::Result<Vec<u8>> {
+        let definitions: Vec<Value> = names.iter().map(|name| definition(name)).collect();
+        module(&describing(&definitions), &replying(reply, &[]))
     }
 
     /// The application and guild a provider would act for, talking to the
@@ -415,18 +798,32 @@ pub(crate) mod tests {
 
     /// A Discord API that answers command registration with whatever status
     /// `status` holds when the request arrives, with an error body in
-    /// Discord's shape for failures.
+    /// Discord's shape for failures, counting the requests it receives.
     pub(crate) async fn registration_server(
         status: Arc<AtomicU16>,
     ) -> anyhow::Result<(
         std::net::SocketAddr,
         tokio::task::JoinHandle<std::io::Result<()>>,
     )> {
+        let (address, server, _) = counting_registration_server(status).await?;
+        Ok((address, server))
+    }
+
+    async fn counting_registration_server(
+        status: Arc<AtomicU16>,
+    ) -> anyhow::Result<(
+        std::net::SocketAddr,
+        tokio::task::JoinHandle<std::io::Result<()>>,
+        Arc<AtomicUsize>,
+    )> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counted = requests.clone();
         let router = Router::new().route(
             "/api/v10/applications/{application}/guilds/{guild}/commands",
             put(move || async move {
+                counted.fetch_add(1, Ordering::SeqCst);
                 let status = StatusCode::from_u16(status.load(Ordering::SeqCst))
                     .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
                 let body = if status.is_success() {
@@ -440,6 +837,7 @@ pub(crate) mod tests {
         Ok((
             address,
             tokio::spawn(async move { axum::serve(listener, router).await }),
+            requests,
         ))
     }
 
@@ -463,11 +861,14 @@ pub(crate) mod tests {
         }
     }
 
+    async fn reply(commands: &Commands) -> anyhow::Result<String> {
+        Ok(commands.invoke(calls(), interaction()).await?.content)
+    }
+
     #[tokio::test]
     async fn loading_checks_the_contract_and_definitions() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
-        let module = directory.path().join("commands.wasm");
-        let record = directory.path().join("commands.json");
+        let release = directory.path().join("release.wasm");
         let reply = replying("unused", &[]);
         for description in [
             json!({"Description": {"contract": carillon_discord_commands::contract::CONTRACT + 1, "commands": []}}).to_string(),
@@ -475,66 +876,214 @@ pub(crate) mod tests {
             reply.clone(),
             "not json".to_owned(),
         ] {
-            write_module(&module, &description, &reply)?;
+            let bytes = module(&description, &reply)?;
+            assert!(super::check(&bytes).await.is_err(), "accepted {description}");
+            std::fs::write(&release, bytes)?;
             assert!(
-                Commands::load(module.clone(), record.clone())
-                    .await
-                    .is_err(),
+                Commands::load(files(directory.path())).await.is_err(),
                 "accepted {description}"
             );
         }
-        write_module(&module, &describing(&[definition("model")]), &reply)?;
-        let commands = Commands::load(module, record).await?;
-        assert_eq!(commands.definitions(), vec![definition("model")]);
-        assert!(!commands.registered(&app("127.0.0.1:1", 1, 100), &commands.definitions()));
+        assert!(super::check(b"\0asm broken").await.is_err());
+        let summary = super::check(&variant(&["model"], "unused")?).await?;
+        assert_eq!(summary.commands, ["model"]);
+        let commands = release_commands(directory.path(), &["model"], "unused").await?;
+        assert_eq!(commands.serving().source, Source::Release);
+        assert_eq!(commands.serving().commands, ["model"]);
+        assert!(!commands.registered(&app("127.0.0.1:1", 1, 100), &commands.current().definitions));
         Ok(())
     }
 
     #[tokio::test]
-    async fn candidates_serve_only_once_activated() -> anyhow::Result<()> {
+    async fn installs_serve_only_usable_modules_and_start_from_the_saved_one() -> anyhow::Result<()>
+    {
         let directory = tempfile::tempdir()?;
-        let module = directory.path().join("commands.wasm");
-        let record = directory.path().join("commands.json");
-        write_module(
-            &module,
-            &describing(&[definition("model")]),
-            &replying("one", &[]),
-        )?;
-        let commands = Commands::load(module.clone(), record).await?;
-        std::fs::write(&module, b"\0asm broken")?;
-        assert!(commands.prepare().await.is_err());
-        assert_eq!(commands.definitions(), vec![definition("model")]);
-        assert_eq!(
-            commands.invoke(calls(), interaction()).await?.content,
-            "one"
+        let root = directory.path();
+        let commands = release_commands(root, &["model"], "release").await?;
+        let installed = files(root).installed;
+
+        // A refused candidate changes neither memory nor disk.
+        assert!(matches!(
+            commands.install(b"\0asm broken", None).await,
+            Err(ChangeError::Unusable(_))
+        ));
+        assert_eq!(reply(&commands).await?, "release");
+        assert!(!installed.exists());
+        assert!(
+            !root.join(".maintenance.lock").exists()
+                || MaintenanceLock::try_acquire(root)?.is_some()
         );
-        write_module(
-            &module,
-            &describing(&[definition("model")]),
-            &replying("two", &[]),
-        )?;
-        let candidate = commands.prepare().await?;
-        assert!(!commands.changed(&candidate));
-        assert_eq!(
-            commands.invoke(calls(), interaction()).await?.content,
-            "one"
+
+        // Behaviour-only and definition changes both serve and save.
+        let behaviour = variant(&["model"], "installed")?;
+        let change = commands.install(&behaviour, None).await?;
+        assert_eq!(change.previous.source, Source::Release);
+        assert_eq!(change.serving.source, Source::Installed);
+        assert_eq!(change.serving.commands, ["model"]);
+        assert_ne!(change.serving.digest, change.previous.digest);
+        assert_eq!(change.discord, Registration::NotConnected);
+        assert_eq!(change.saved, Saved::Durable);
+        assert_eq!(reply(&commands).await?, "installed");
+        assert_eq!(std::fs::read(&installed)?, behaviour);
+        assert_eq!(commands.status(None).next_start, NextStart::Same);
+
+        let wider = variant(&["model", "other"], "wider")?;
+        let change = commands.install(&wider, None).await?;
+        assert_eq!(change.serving.commands, ["model", "other"]);
+        assert_eq!(reply(&commands).await?, "wider");
+
+        // A restart serves the saved module, even though the release differs.
+        let restarted = Commands::load(files(root)).await?;
+        assert_eq!(restarted.serving(), change.serving);
+        assert_eq!(reply(&restarted).await?, "wider");
+
+        // An unusable installed module refuses startup, naming the file.
+        std::fs::write(&installed, b"\0asm broken")?;
+        let failure = Commands::load(files(root))
+            .await
+            .err()
+            .map(|error| format!("{error:#}"))
+            .unwrap_or_default();
+        assert!(
+            failure.contains("command-module.wasm is unusable; remove it"),
+            "{failure}"
         );
-        commands.activate(candidate);
+
+        // Reset serves the release and removes the installed module.
+        let change = commands.reset(None).await?;
+        assert_eq!(change.serving.source, Source::Release);
+        assert_eq!(change.saved, Saved::Durable);
+        assert!(!installed.exists());
+        assert_eq!(reply(&commands).await?, "release");
+        assert_eq!(Commands::load(files(root)).await?.serving(), change.serving);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn changes_wait_for_other_maintenance_and_change_nothing() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        let commands = release_commands(root, &["model"], "release").await?;
+        let status = Arc::new(AtomicU16::new(200));
+        let (address, server, requests) = counting_registration_server(status).await?;
+        let target = app(&address.to_string(), 1, 100);
+        let held = MaintenanceLock::acquire(root)?;
+        let candidate = variant(&["other"], "installed")?;
+        assert!(matches!(
+            commands.install(&candidate, Some(&target)).await,
+            Err(ChangeError::Busy(_))
+        ));
+        assert!(matches!(
+            commands.reset(Some(&target)).await,
+            Err(ChangeError::Busy(_))
+        ));
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        assert!(!files(root).installed.exists());
+        assert_eq!(reply(&commands).await?, "release");
+        drop(held);
+        commands.install(&candidate, Some(&target)).await?;
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        // The provider releases the lock once its change is complete.
+        assert!(MaintenanceLock::try_acquire(root)?.is_some());
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn refused_registration_keeps_the_module_and_forgets_the_record() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        let commands = release_commands(root, &["model"], "release").await?;
+        let status = Arc::new(AtomicU16::new(200));
+        let (address, server, requests) = counting_registration_server(status.clone()).await?;
+        let target = app(&address.to_string(), 1, 100);
+        assert_eq!(commands.reconcile(&target).await?, Registration::Registered);
+        assert_eq!(commands.reconcile(&target).await?, Registration::Unchanged);
+        assert_eq!(commands.status(Some(&target)).registered, Some(true));
+
+        let candidate = variant(&["model", "other"], "installed")?;
+        for code in [400, 500] {
+            status.store(code, Ordering::SeqCst);
+            assert!(matches!(
+                commands.install(&candidate, Some(&target)).await,
+                Err(ChangeError::Register(_))
+            ));
+            assert_eq!(reply(&commands).await?, "release");
+            assert!(!files(root).installed.exists());
+            // Discord may hold either definition set now, so the record
+            // attests to neither and the next change or start registers.
+            assert!(!files(root).record.exists());
+            assert_eq!(commands.status(Some(&target)).registered, Some(false));
+        }
+
+        // Repeating a change reconciles Discord even when the requested
+        // module is already serving.
+        status.store(200, Ordering::SeqCst);
+        let before = requests.load(Ordering::SeqCst);
+        let change = commands.reset(Some(&target)).await?;
+        assert_eq!(change.previous, change.serving);
+        assert_eq!(change.discord, Registration::Registered);
+        assert_eq!(requests.load(Ordering::SeqCst), before + 1);
+        assert_eq!(commands.status(Some(&target)).registered, Some(true));
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_record_that_cannot_be_cleared_stops_before_discord() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        let commands = release_commands(root, &["model"], "release").await?;
+        let (address, server, requests) =
+            counting_registration_server(Arc::new(AtomicU16::new(200))).await?;
+        let target = app(&address.to_string(), 1, 100);
+        // A directory where the record belongs cannot be removed as a file.
+        std::fs::create_dir_all(files(root).record.join("occupied"))?;
+        assert!(matches!(
+            commands
+                .install(&variant(&["other"], "installed")?, Some(&target))
+                .await,
+            Err(ChangeError::Record(
+                carillon_installation::filesystem::PublishError::NotPublished(_)
+            ))
+        ));
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        assert_eq!(reply(&commands).await?, "release");
+        assert!(!files(root).installed.exists());
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_unsaved_module_serves_and_a_repeat_finishes_the_save() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        let commands = release_commands(root, &["model"], "release").await?;
+        let installed = files(root).installed;
+        // A directory where the module belongs cannot be replaced by a file.
+        std::fs::create_dir_all(installed.join("occupied"))?;
+        let candidate = variant(&["model"], "installed")?;
+        let change = commands.install(&candidate, None).await?;
+        assert!(matches!(change.saved, Saved::Failed { .. }), "{change:?}");
+        assert_eq!(reply(&commands).await?, "installed");
+        // Memory serves the installed module; the next start would not.
+        assert!(matches!(
+            commands.status(None).next_start,
+            NextStart::Unknown { .. }
+        ));
+
+        std::fs::remove_dir_all(&installed)?;
         assert_eq!(
-            commands.invoke(calls(), interaction()).await?.content,
-            "two"
+            commands.status(None).next_start,
+            NextStart::Different {
+                source: Source::Release
+            }
         );
-        write_module(
-            &module,
-            &describing(&[definition("model"), definition("other")]),
-            &replying("three", &[]),
-        )?;
-        let candidate = commands.prepare().await?;
-        assert!(commands.changed(&candidate));
-        assert_eq!(candidate.definitions.len(), 2);
-        assert_eq!(commands.definitions().len(), 1);
-        commands.activate(candidate);
-        assert_eq!(commands.definitions().len(), 2);
+        let change = commands.install(&candidate, None).await?;
+        assert_eq!(change.previous, change.serving);
+        assert_eq!(change.saved, Saved::Durable);
+        assert_eq!(std::fs::read(&installed)?, candidate);
+        assert_eq!(commands.status(None).next_start, NextStart::Same);
         Ok(())
     }
 
@@ -561,19 +1110,12 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn overlapping_reloads_register_and_activate_in_order() -> anyhow::Result<()> {
+    async fn overlapping_installs_register_and_activate_in_order() -> anyhow::Result<()> {
         use std::time::Duration;
         use tokio::sync::{Semaphore, mpsc};
 
         let directory = tempfile::tempdir()?;
-        let module = directory.path().join("commands.wasm");
-        let record = directory.path().join("commands.json");
-        write_module(
-            &module,
-            &describing(&[definition("initial")]),
-            &replying("initial", &[]),
-        )?;
-        let commands = Commands::load(module.clone(), record).await?;
+        let commands = release_commands(directory.path(), &["initial"], "initial").await?;
         let retained = commands.current();
         let (sent, mut received) = mpsc::unbounded_channel();
         let release = Arc::new(Semaphore::new(0));
@@ -581,44 +1123,30 @@ pub(crate) mod tests {
         let target = app(&listener.local_addr()?.to_string(), 1, 100);
         let router = gated_registration(sent, release.clone());
         let server = tokio::spawn(async move { axum::serve(listener, router).await });
-        write_module(
-            &module,
-            &describing(&[definition("first")]),
-            &replying("first", &[]),
-        )?;
-        let first = commands.reload(Some(&target));
+        let first_module = variant(&["first"], "first")?;
+        let first = commands.install(&first_module, Some(&target));
         tokio::pin!(first);
         let registration = tokio::select! {
-            _ = &mut first => anyhow::bail!("reload completed before confirmation"),
+            _ = &mut first => anyhow::bail!("install completed before confirmation"),
             request = received.recv() => request.ok_or_else(|| anyhow::anyhow!("registration closed"))?,
         };
         assert_eq!(registration[0]["name"], "first");
-        write_module(
-            &module,
-            &describing(&[definition("second")]),
-            &replying("second", &[]),
-        )?;
-        let second = commands.reload(Some(&target));
+        let second_module = variant(&["second"], "second")?;
+        let second = commands.install(&second_module, Some(&target));
         tokio::pin!(second);
         // Poll both operations while registration is blocked. The second
         // must not send a request or activate; ordinary invocations still work.
         tokio::select! {
             _ = &mut first => anyhow::bail!("first activated before confirmation"),
-            _ = &mut second => anyhow::bail!("second bypassed the first reload"),
+            _ = &mut second => anyhow::bail!("second bypassed the first install"),
             request = received.recv() => anyhow::bail!("overlapping registration: {request:?}"),
             () = tokio::time::sleep(Duration::from_millis(100)) => {},
         }
-        assert_eq!(
-            commands.invoke(calls(), interaction()).await?.content,
-            "initial"
-        );
+        assert_eq!(reply(&commands).await?, "initial");
         release.add_permits(1);
         assert!(first.await.is_ok());
-        assert_eq!(commands.definitions(), vec![definition("first")]);
-        assert_eq!(
-            commands.invoke(calls(), interaction()).await?.content,
-            "first"
-        );
+        assert_eq!(commands.serving().commands, ["first"]);
+        assert_eq!(reply(&commands).await?, "first");
         let registration = tokio::select! {
             _ = &mut second => anyhow::bail!("second completed before confirmation"),
             request = received.recv() => request.ok_or_else(|| anyhow::anyhow!("registration closed"))?,
@@ -626,11 +1154,12 @@ pub(crate) mod tests {
         assert_eq!(registration[0]["name"], "second");
         release.add_permits(1);
         assert!(second.await.is_ok());
-        assert_eq!(commands.definitions(), vec![definition("second")]);
-        assert!(commands.registered(&target, &commands.definitions()));
+        assert_eq!(commands.serving().commands, ["second"]);
+        assert!(commands.registered(&target, &commands.current().definitions));
+        assert_eq!(reply(&commands).await?, "second");
         assert_eq!(
-            commands.invoke(calls(), interaction()).await?.content,
-            "second"
+            std::fs::read(files(directory.path()).installed)?,
+            second_module
         );
         // A previously captured generation keeps both its code and metadata.
         assert_eq!(retained.definitions, vec![definition("initial")]);
@@ -661,20 +1190,15 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn registration_is_recorded_for_its_target_once_confirmed() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
-        let module = directory.path().join("commands.wasm");
-        let record = directory.path().join("commands.json");
-        write_module(
-            &module,
-            &describing(&[definition("model")]),
-            &replying("unused", &[]),
-        )?;
-        let commands = Commands::load(module, record.clone()).await?;
-        let definitions = commands.definitions();
+        let commands = release_commands(directory.path(), &["model"], "unused").await?;
+        let record = files(directory.path()).record;
+        let definitions = commands.current().definitions.clone();
         let status = Arc::new(AtomicU16::new(200));
         let (address, server) = registration_server(status.clone()).await?;
         let target = app(&address.to_string(), 1, 100);
 
         // A record in the shape an earlier provider wrote names no target.
+        std::fs::create_dir_all(record.parent().unwrap_or(directory.path()))?;
         std::fs::write(&record, serde_json::to_vec(&definitions)?)?;
         assert!(!commands.registered(&target, &definitions));
 
@@ -698,17 +1222,10 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn confirmed_reload_activates_even_when_recording_fails() -> anyhow::Result<()> {
+    async fn confirmed_install_activates_even_when_recording_fails() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
-        let module = directory.path().join("commands.wasm");
-        let record = directory.path().join("commands.json");
-        write_module(
-            &module,
-            &describing(&[definition("old")]),
-            &replying("old", &[]),
-        )?;
-        let commands = Commands::load(module.clone(), record.clone()).await?;
-        let blocked = record.clone();
+        let commands = release_commands(directory.path(), &["old"], "old").await?;
+        let blocked = files(directory.path()).record;
         let router = Router::new().route(
             "/api/v10/applications/{application}/guilds/{guild}/commands",
             put(move || {
@@ -724,18 +1241,50 @@ pub(crate) mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let target = app(&listener.local_addr()?.to_string(), 1, 100);
         let server = tokio::spawn(async move { axum::serve(listener, router).await });
-        write_module(
-            &module,
-            &describing(&[definition("new")]),
-            &replying("new", &[]),
-        )?;
-        assert!(commands.reload(Some(&target)).await.is_ok());
-        assert_eq!(commands.definitions(), vec![definition("new")]);
-        assert_eq!(
-            commands.invoke(calls(), interaction()).await?.content,
-            "new"
+        let change = commands
+            .install(&variant(&["new"], "new")?, Some(&target))
+            .await?;
+        assert_eq!(change.discord, Registration::Registered);
+        assert_eq!(change.saved, Saved::Durable);
+        assert_eq!(reply(&commands).await?, "new");
+        assert!(!commands.registered(&target, &commands.current().definitions));
+        server.abort();
+        Ok(())
+    }
+
+    /// Run under the persistence suite's syscall fault injection: one change
+    /// reports where its save stopped, then a repeat must confirm it.
+    #[tokio::test]
+    async fn saving_reports_its_boundary_and_a_repeat_confirms_it() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        let commands = release_commands(root, &["model"], "release").await?;
+        // An existing state directory: the first sync of it clears the record.
+        std::fs::create_dir(root.join("state"))?;
+        let (address, server, requests) =
+            counting_registration_server(Arc::new(AtomicU16::new(200))).await?;
+        let target = app(&address.to_string(), 1, 100);
+        let candidate = variant(&["model", "other"], "installed")?;
+        let first = match commands.install(&candidate, Some(&target)).await {
+            Ok(change) => match change.saved {
+                Saved::Durable => "saved: durable".to_owned(),
+                Saved::Failed { error } => format!("saved: failed ({error})"),
+                Saved::Unsynced { error } => format!("saved: unsynced ({error})"),
+            },
+            Err(ChangeError::Record(error)) => format!("refused: record ({error})"),
+            Err(error) => anyhow::bail!("unexpected refusal: {error}"),
+        };
+        eprintln!(
+            "first change {first}; Discord requests {}",
+            requests.load(Ordering::SeqCst)
         );
-        assert!(!commands.registered(&target, &commands.definitions()));
+        let change = commands.install(&candidate, Some(&target)).await?;
+        assert_eq!(change.saved, Saved::Durable);
+        assert_eq!(std::fs::read(files(root).installed)?, candidate);
+        assert!(commands.registered(&target, &commands.current().definitions));
+        assert_eq!(commands.status(Some(&target)).next_start, NextStart::Same);
+        assert_eq!(reply(&commands).await?, "installed");
+        eprintln!("repeat saved: durable");
         server.abort();
         Ok(())
     }
@@ -790,15 +1339,13 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn interactions_receive_the_module_reply_or_a_failure() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
-        let module = directory.path().join("commands.wasm");
-        let record = directory.path().join("commands.json");
         let button = json!({"type": 1, "components": [{"type": 2, "style": 2, "custom_id": "x", "label": "X"}]});
         write_module(
-            &module,
+            &directory.path().join("release.wasm"),
             &describing(&[]),
             &replying("hello", std::slice::from_ref(&button)),
         )?;
-        let commands = Commands::load(module.clone(), record.clone()).await?;
+        let commands = Commands::load(files(directory.path())).await?;
         let reply = commands.invoke(calls(), interaction()).await?;
         assert_eq!(reply.content, "hello");
         assert_eq!(reply.components, vec![button]);
@@ -807,8 +1354,9 @@ pub(crate) mod tests {
             describing(&[]),
             "{broken".to_owned(),
         ] {
-            write_module(&module, &describing(&[]), &output)?;
-            commands.activate(commands.prepare().await?);
+            commands
+                .install(&module(&describing(&[]), &output)?, None)
+                .await?;
             assert!(
                 commands.invoke(calls(), interaction()).await.is_err(),
                 "accepted {output}"

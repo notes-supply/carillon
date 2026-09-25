@@ -31,8 +31,10 @@ use crate::{
     CoreClient,
     client::test_client as core_client,
     commands::{
-        Commands,
-        tests::{app, definition, describing, registration_server, replying, write_module},
+        Commands, MODULE_LIMIT, Source,
+        tests::{
+            app, definition, describing, files, module, registration_server, replying, write_module,
+        },
     },
     config::{DiscordActivation, DiscordConversation},
 };
@@ -40,11 +42,12 @@ use crate::{
 /// A command module in `directory` that defines `/model` and answers
 /// every interaction with `reply`.
 async fn stub_commands(directory: &Path, reply: &str) -> anyhow::Result<Arc<Commands>> {
-    let module = directory.join("commands.wasm");
-    write_module(&module, &describing(&[definition("model")]), reply)?;
-    Ok(Arc::new(
-        Commands::load(module, directory.join("commands.json")).await?,
-    ))
+    write_module(
+        &directory.join("release.wasm"),
+        &describing(&[definition("model")]),
+        reply,
+    )?;
+    Ok(Arc::new(Commands::load(files(directory)).await?))
 }
 
 async fn discord_state(core: CoreClient, directory: &Path) -> anyhow::Result<DiscordState> {
@@ -594,67 +597,118 @@ async fn deterministic_interactions_run_the_module_and_check_replies() -> anyhow
     Ok(())
 }
 
-async fn reload(state: &DiscordState, bearer: Option<&str>) -> anyhow::Result<(StatusCode, Value)> {
-    let mut request = Request::builder()
-        .method(Method::POST)
-        .uri("/v1/commands/reload");
+async fn operate(
+    state: &DiscordState,
+    method: Method,
+    bearer: Option<&str>,
+    body: Vec<u8>,
+) -> anyhow::Result<(StatusCode, Value)> {
+    let mut request = Request::builder().method(method).uri("/v1/commands");
     if let Some(bearer) = bearer {
         request = request.header("authorization", format!("Bearer {bearer}"));
     }
     let response = discord_router(state.clone(), false)
-        .oneshot(request.body(Body::empty())?)
+        .oneshot(request.body(Body::from(body))?)
         .await?;
     let status = response.status();
     let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
     Ok((status, serde_json::from_slice(&body)?))
 }
 
+fn names(module: &Value) -> Vec<&str> {
+    module["commands"]
+        .as_array()
+        .map(|names| names.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default()
+}
+
 #[tokio::test]
-async fn command_reload_requires_the_operator_credential() -> anyhow::Result<()> {
+async fn command_module_operations_require_the_operator_credential() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let state = discord_state(
         core_client("http://127.0.0.1:1".to_owned()),
         directory.path(),
     )
     .await?;
-    let module = directory.path().join("commands.wasm");
-    for bearer in [None, Some("token"), Some("wrong")] {
-        let (status, _) = reload(&state, bearer).await?;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{bearer:?}");
-    }
-    let (status, body) = reload(&state, Some("operator")).await?;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        body,
-        json!({"commands": 1, "changed": false, "registered": false})
-    );
-
-    write_module(
-        &module,
+    let wider = module(
         &describing(&[definition("model"), definition("other")]),
-        &replying("unused", &[]),
+        &replying("wider", &[]),
     )?;
-    let (status, body) = reload(&state, Some("operator")).await?;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        body,
-        json!({"commands": 2, "changed": true, "registered": false})
-    );
+    for method in [Method::GET, Method::PUT, Method::DELETE] {
+        for bearer in [None, Some("token"), Some("wrong")] {
+            let (status, _) = operate(&state, method.clone(), bearer, wider.clone()).await?;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {bearer:?}");
+        }
+    }
+    assert_eq!(state.commands.serving().source, Source::Release);
 
-    std::fs::write(&module, b"\0asm broken")?;
-    let (status, body) = reload(&state, Some("operator")).await?;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let (status, body) = operate(&state, Method::GET, Some("operator"), Vec::new()).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["serving"]["source"], "release");
+    assert_eq!(names(&body["serving"]), ["model"]);
+    assert_eq!(body["next_start"], json!({"outcome": "same"}));
+    assert_eq!(body["registered"], Value::Null);
+
+    let (status, body) = operate(&state, Method::PUT, Some("operator"), wider.clone()).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["serving"]["source"], "installed");
+    assert_eq!(names(&body["serving"]), ["model", "other"]);
+    assert_eq!(names(&body["previous"]), ["model"]);
+    assert_eq!(body["discord"], "not_connected");
+    assert_eq!(body["saved"], json!({"outcome": "durable"}));
+
+    // A refusal says why and what still serves.
+    let (status, body) = operate(
+        &state,
+        Method::PUT,
+        Some("operator"),
+        b"\0asm broken".to_vec(),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(
         body["error"]
             .as_str()
-            .is_some_and(|error| error.contains("load command module"))
+            .is_some_and(|error| error.starts_with("not a usable command module")
+                && error.ends_with("nothing was changed")),
+        "{body}"
     );
-    assert_eq!(state.commands.definitions().len(), 2);
+    assert_eq!(body["serving"]["source"], "installed");
+    assert_eq!(names(&body["serving"]), ["model", "other"]);
+
+    let (status, _) = operate(
+        &state,
+        Method::PUT,
+        Some("operator"),
+        vec![0; MODULE_LIMIT + 1],
+    )
+    .await?;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
+    // Another maintenance operation refuses changes, not status.
+    let held = carillon_installation::maintenance::MaintenanceLock::acquire(directory.path())?;
+    let (status, body) = operate(&state, Method::DELETE, Some("operator"), Vec::new()).await?;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("another Carillon maintenance operation")),
+        "{body}"
+    );
+    let (status, _) = operate(&state, Method::GET, Some("operator"), Vec::new()).await?;
+    assert_eq!(status, StatusCode::OK);
+    drop(held);
+
+    let (status, body) = operate(&state, Method::DELETE, Some("operator"), Vec::new()).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["serving"]["source"], "release");
+    assert_eq!(names(&body["serving"]), ["model"]);
+    assert!(!files(directory.path()).installed.exists());
     Ok(())
 }
 
 #[tokio::test]
-async fn reloads_serve_the_replacement_only_once_discord_confirmed_it() -> anyhow::Result<()> {
+async fn installs_serve_the_replacement_only_once_discord_confirmed_it() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let status = Arc::new(AtomicU16::new(200));
     let (address, server) = registration_server(status.clone()).await?;
@@ -664,51 +718,51 @@ async fn reloads_serve_the_replacement_only_once_discord_confirmed_it() -> anyho
     )
     .await?;
     state.app = Some(Arc::new(app(&address.to_string(), 1, 100)));
-    let module = directory.path().join("commands.wasm");
+    let (_, body) = operate(&state, Method::GET, Some("operator"), Vec::new()).await?;
+    assert_eq!(body["registered"], false);
 
-    // Nothing is recorded yet, so even unchanged definitions register.
-    let (code, body) = reload(&state, Some("operator")).await?;
-    assert_eq!(code, StatusCode::OK, "{body}");
-    assert_eq!(
-        body,
-        json!({"commands": 1, "changed": false, "registered": true})
-    );
-    let (_, body) = reload(&state, Some("operator")).await?;
-    assert_eq!(
-        body,
-        json!({"commands": 1, "changed": false, "registered": false})
-    );
+    // Nothing is recorded yet, so even the serving module's definitions
+    // register; a repeat finds them recorded.
+    let release = std::fs::read(files(directory.path()).release)?;
+    for expected in ["registered", "unchanged"] {
+        let (code, body) = operate(&state, Method::PUT, Some("operator"), release.clone()).await?;
+        assert_eq!(code, StatusCode::OK, "{body}");
+        assert_eq!(body["discord"], expected);
+    }
+    let (_, body) = operate(&state, Method::GET, Some("operator"), Vec::new()).await?;
+    assert_eq!(body["registered"], true);
 
-    write_module(
-        &module,
+    let replacement = module(
         &describing(&[definition("model"), definition("other")]),
         &replying("replacement", &[]),
     )?;
-    for (code, expected) in [
-        (400, "Discord rejected the commands"),
-        (500, "Discord did not confirm the commands"),
+    for (code, expected, returned) in [
+        (
+            400,
+            "Discord rejected the commands",
+            StatusCode::BAD_GATEWAY,
+        ),
+        (
+            500,
+            "Discord did not confirm the commands",
+            StatusCode::GATEWAY_TIMEOUT,
+        ),
     ] {
         status.store(code, Ordering::SeqCst);
-        let (status, body) = reload(&state, Some("operator")).await?;
-        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        let (status, body) =
+            operate(&state, Method::PUT, Some("operator"), replacement.clone()).await?;
+        assert_eq!(status, returned, "{body}");
         let error = body["error"].as_str().unwrap_or_default();
         assert!(error.starts_with(expected), "{error}");
-        assert!(
-            error.ends_with("the previous command module keeps serving"),
-            "{error}"
-        );
-        assert_eq!(state.commands.definitions().len(), 1);
+        assert_eq!(names(&body["serving"]), ["model"]);
         let (_, reply) = interact(&state, Some("token"), &interaction("300", None)).await?;
         assert_eq!(reply["content"], "stub reply");
     }
 
     status.store(200, Ordering::SeqCst);
-    let (code, body) = reload(&state, Some("operator")).await?;
+    let (code, body) = operate(&state, Method::PUT, Some("operator"), replacement).await?;
     assert_eq!(code, StatusCode::OK, "{body}");
-    assert_eq!(
-        body,
-        json!({"commands": 2, "changed": true, "registered": true})
-    );
+    assert_eq!(body["discord"], "registered");
     let (_, reply) = interact(&state, Some("token"), &interaction("300", None)).await?;
     assert_eq!(reply["content"], "replacement");
     server.abort();

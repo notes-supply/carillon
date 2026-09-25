@@ -10,8 +10,9 @@ memory limit applies to guest linear memory, not the whole process. A deadline
 cannot undo a native side effect that already happened.
 
 For a production caller, see [Discord command hosting](../carillon-discord/src/commands.rs).
-It owns contract validation, registration and replacement: failed candidates leave
-the last good generation serving, while in-flight requests retain their generation.
+It owns contract validation, registration, replacement and the installed module:
+failed candidates leave the last good generation serving, while in-flight requests
+retain their generation.
 Those are provider policies, not responsibilities of this host.
 
 ```sh
@@ -21,4 +22,4 @@ mise run test:integration
 
 The host's local tests cover ABI validation, isolation, memory and deadlines.
 The service integration suite exercises the compiled Discord command module and
-reload path. A provider that does not need replaceable modules need not use Wasm.
+its install/reset path. A provider that does not need replaceable modules need not use Wasm.

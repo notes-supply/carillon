@@ -18,9 +18,11 @@ carillon-installation = { path = "../carillon-installation" }
 carillon-wasm = { path = "../carillon-wasm" }
 clap.workspace = true
 emojis = "0.8.2"
+hex.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true

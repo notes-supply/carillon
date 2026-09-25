@@ -19,7 +19,7 @@ An operator can:
 3. converse through Pi with channel- or thread-scoped continuity;
 4. use Pi-native tools, extensions, and skills with the owner's Unix authority;
 5. choose the model and its engine settings for the agent or for one conversation with `/model` in Discord;
-6. restart the Discord or Pi provider independently, and replace Discord's command module without restarting it;
+6. restart the Discord or Pi provider independently, and install or reset Discord's command module without restarting it, keeping an installed module across restarts and updates;
 7. inspect recent turns and current provider/resource identity; and
 8. back up and restore the stopped installation.
 
@@ -52,7 +52,7 @@ The runtime provider owns native sessions, model execution, tools, extensions, s
 
 ### Model selection
 
-`/model` shows the effective provider, model, and settings for the conversation it is used in and for the agent default, and whether the conversation follows the default or overrides it. Either scope can be changed or returned to its default through Discord-native controls. The agent default is that agent's, not every agent sharing a runtime. The panel opens on the selected scope's active provider and model. Browsing another provider only filters the model list; it does not change either scope. Choosing a model applies it. Every model the runtime offers remains reachable: each provider's models are paged 25 at a time, with the visible range and total shown for overflow. Provider-menu overflow has navigation in the menu itself. Settings are shown for the active model when browsing its provider, at the values that will run: a setting no scope has chosen shows the model's default. Every change is confirmed by the runtime before it is shown as made; a refused change is shown with the runtime's reason, and a control left over from an earlier catalogue is reported rather than misapplied.
+`/model` shows the effective provider, model, and settings for the conversation it is used in and for the agent default, and whether the conversation follows the default or overrides it. Either scope can be changed or returned to its default through Discord-native controls. The agent default is that agent's, not every agent sharing a runtime. The panel opens on the selected scope's active provider and model. Browsing another provider only filters the model list; it does not change either scope. Choosing a model applies it. Every model the runtime offers remains reachable: each provider's models are paged 25 at a time, with the visible range and total shown for overflow. Provider-menu overflow has navigation in the menu itself. Settings are shown for the active model when browsing its provider, at the values that will run: a setting no scope has chosen shows the model's default. Every change is confirmed by the runtime before it is shown as made; a refused or unconfirmed change is shown with the runtime's reason above the current settings and their controls, without being retried, and a control left over from an earlier catalogue is reported rather than misapplied.
 
 Selection stays within the conversation's runtime; it is not runtime migration. Queued work runs with the selection in force when it starts; running work keeps the selection it started with.
 

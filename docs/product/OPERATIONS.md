@@ -11,7 +11,7 @@ The release installs four user units:
 
 Run `install.sh` as the non-root Unix user that should own Carillon. The installer rejects root, creates no users or groups, changes no sudo policy, and does not enable lingering. It enables but does not start `carillon.target`.
 
-`CARILLON_HOME` defaults to `~/.carillon`. It contains the registry (`carillon.toml`), provider-owned settings (`providers/`), credentials, agent resources, Pi-private state, SQLite state, logs, and installed application files (`app/bin` for the programs, `app/lib` for the Discord command module). The configured workspace is separate and defaults to the owner's home.
+`CARILLON_HOME` defaults to `~/.carillon`. It contains the registry (`carillon.toml`), provider-owned settings (`providers/`), credentials, agent resources, Pi-private state, SQLite state, logs, and installed application files (`app/bin` for the programs, `app/lib` for the release's Discord command module). An operator-installed command module is Discord provider state, not an application file. The configured workspace is separate and defaults to the owner's home.
 
 The installer links `~/.local/bin/carillon` to `app/bin/carillon`, a path that stays valid across updates. It creates the link only where nothing exists or where a link into a removed installation's `app/bin` remains; it never replaces another program or the entry point of another existing installation, and says so. It does not edit shell profiles: when `~/.local/bin` is not on `PATH` or another `carillon` precedes it, the installer prints the full path to use instead.
 
@@ -35,7 +35,7 @@ Installation requires:
 
 `carillon init` writes the registry and credentials; the installer then writes the Discord settings with `carillon discord configure`, which owns `providers/discord-private.toml`. Run `carillon discord configure --guild-id … --bot-user-id … --user-id … --route …` to change the guild, users, or routes; it rewrites the file completely, keeping any tuned feedback settings, and leaves it untouched when the input is invalid. Restart the Discord service afterwards.
 
-Discord commands that act on a configured instance (`configure`, `register`, `reload`) use the only interface provider with Discord settings. When there is none or several, they list the choices and require `--provider ID`.
+Discord commands that act on a configured instance (`configure`, `check`, `commands`) use the only interface provider with Discord settings. When there is none or several, they list the choices and require `--provider ID`.
 
 After installation:
 
@@ -65,7 +65,7 @@ carillon start             # start carillon.target and wait until providers answ
 carillon stop
 carillon restart
 carillon logs [-f] [-n LINES] [core|discord|runtime-pi]
-carillon discord reload    # replace the running command module
+carillon discord commands  # the command module serving slash commands
 carillon update /path/to/carillon-VERSION-linux-ARCH.tar.gz
 ```
 
@@ -80,15 +80,33 @@ Core is restarted separately. Registry and provider configuration are static unt
 
 ### Discord commands
 
-`/model` shows the models the runtime offers and lets an allowlisted user change the conversation's selection or the agent default from Discord-native menus. It is admitted like a message: only in the configured guild, from allowlisted users, and in a routed channel or a thread under a thread route. Outside a conversation it changes only the agent default.
+`/model` shows the models the runtime offers and lets an allowlisted user change the conversation's selection or the agent default from Discord-native menus. It is admitted like a message: only in the configured guild, from allowlisted users, and in a routed channel or a thread under a thread route. Outside a conversation it changes only the agent default. A change the runtime refuses or does not confirm is shown with its reason above the settings as read again afterwards, with working controls; it is not retried.
 
-The commands and their controls come from `app/lib/carillon_discord_commands.wasm`, which the provider loads at startup and registers with the guild unless its record shows the same definitions already registered for this application and guild. To replace the module without restarting the provider or reconnecting its gateway, put the new file at that path and run:
+The commands and their controls come from a WebAssembly command module. The release ships one at `app/lib/carillon_discord_commands.wasm`. An operator can install another in the running provider; it is kept at `<data_dir>/components/<provider>/command-module.wasm` (by default `state/components/discord-private/command-module.wasm`), outside the release's files, so it keeps serving after restarts and `carillon update`. At startup the provider serves the installed module when there is one, otherwise the release's module, and registers its commands with the guild unless its record shows the same definitions already registered for this application and guild.
 
 ```sh
-carillon discord reload
+carillon discord commands                 # what serves now
+carillon discord commands check FILE      # can this program serve FILE? (offline)
+carillon discord commands install FILE    # serve FILE now and after restarts
+carillon discord commands reset           # serve the release's module again
 ```
 
-The reply reports the number of commands, whether their definitions changed, and whether they were re-registered with Discord. A module that fails to load or describe itself is refused and the previous one keeps serving. When the definitions changed, the new module is registered before it serves: if Discord rejects the commands, the reply says so and the previous module keeps serving, so fix the module and rerun `reload`; if Discord does not answer, whether it applied them is unknown, the previous module keeps serving, and rerunning `reload` once Discord answers settles it. Interactions already running finish against the module they started with. `carillon discord register` registers the module's commands using the bot token without serving, for example after changing the guild.
+`check` needs neither an installation nor a running provider; it loads the file exactly as the provider would, and reports its commands or why it is unusable. `install` and `reset` are performed by the running provider, without restarting it or reconnecting its gateway:
+
+1. It takes the installation's maintenance lock, refusing while an update or other maintenance holds it.
+2. It validates the module (compilation, exports, its description, contract version and command definitions). An unusable module changes nothing.
+3. When Discord's registration, as the provider last recorded it, differs from the module's definitions, it registers them first. It clears that record, durably, before contacting Discord. If Discord rejects the commands, nothing else changes; if Discord does not answer, it may have applied them, the previous module keeps serving, and the next install, reset or provider start registers again.
+4. The module serves. Interactions already running finish on the module they started with.
+5. It saves the change for later starts: `install` writes the installed module; `reset` removes it.
+
+A refusal says why, what to do next, and which module still serves. Success is one or two lines naming the source (`installed` or `release`) and the commands. A save has two failure modes, which are reported differently and exit with an error:
+
+- **Not saved**: the file did not change, so the module serves now but a restart returns to the previously saved one.
+- **Not confirmed durable**: the file changed, so a restart serves the new module, but syncing its directory failed and a system crash may still bring the previous state back.
+
+Running the same command again finishes the change in either case, including registration, even when the requested module already serves. `carillon discord commands` also says when a restart would serve something other than what serves now.
+
+`carillon update` keeps an installed module and has the new release check it before any service stops; an update whose provider cannot serve it is refused. Run `carillon discord commands reset` before such an update, then install a module built for the new release. A provider refuses to start with an installed module it cannot use and names the file; remove that file (the provider then serves the release's module), or replace it with a working module.
 
 Each bundled provider reports its own build version, not the `providers[].version` expectation in configuration. Core's status reports the observed version with `version_mismatch` when the provider ID and role match but its version differs. Unreachable or wrong-identity providers are `unavailable`, with the configured identity and expected version instead.
 
@@ -110,7 +128,7 @@ Discord delivery uses a separate outbox. An unclaimed delivery can be retried. A
 
 ## Credentials
 
-Platform credentials belong to interface providers. Engine credentials and settings belong to the runtime provider. Internal loopback tokens authenticate provider-to-core traffic and interface-to-provider simulation; the operator credential authorizes diagnostics and command reloads. Provider IDs `operator` and `discord-bot` are reserved because those credential filenames already belong to the installation. Credentials stay outside prompts, session history, diagnostics, ordinary logs, and the command module.
+Platform credentials belong to interface providers. Engine credentials and settings belong to the runtime provider. Internal loopback tokens authenticate provider-to-core traffic and interface-to-provider simulation; the operator credential authorizes diagnostics and command module changes. Provider IDs `operator` and `discord-bot` are reserved because those credential filenames already belong to the installation. Credentials stay outside prompts, session history, diagnostics, ordinary logs, and the command module.
 
 The packaged Pi state uses `CARILLON_HOME/pi`, not the owner's global `~/.pi/agent`. Model selections made through `/model` are kept there in `model-selection.json`; Pi's own default model remains the runtime default.
 
@@ -158,7 +176,7 @@ Update leaves configuration alone. It never runs Discord configuration or `init`
    - its payload matches its `MANIFEST`;
    - `mv --exchange` works in the installation directory;
    - its `carillon check` opens the registry and core database exactly as its core service would, requiring the core schema it was built for;
-   - its `carillon discord check` loads the Discord settings.
+   - its `carillon discord check` loads the Discord settings and checks that it can serve an installed command module.
 4. Only then are running services stopped. The release's own `install.sh --update` uses the same application exchange and service registration as setup, and installs the entry point when it is missing.
 5. Services that were running are started again and must answer within `--timeout` seconds. Stopped services stay stopped.
 
@@ -169,14 +187,14 @@ A refusal in steps 1–3 changes nothing and leaves the services as they were. T
 - **When starting or health checks fail:** the new release stays installed and the previous application is not kept. Inspect `carillon logs` and `carillon status`.
 
 There is no automatic rollback, migration step or download service. The state check covers only what it names:
-- It covers the registry, the core database's integrity and exact schema, and the Discord settings.
+- It covers the registry, the core database's integrity and exact schema, the Discord settings, and an installed command module.
 - It does not cover Pi's state (sessions, authentication, model selections), other provider-native state, credentials, or whether the services will start and stay healthy.
 
 `carillon update` with an older release runs the same checks, so it refuses a core schema that release does not know. Passing them does not make a downgrade safe for the unchecked state. There is no supported downgrade; restore a backup made before the update instead.
 
 When intentionally changing a provider release, update that provider's expected `version` in `carillon.toml`, restart, and check `carillon status`. Neither setup nor update rewrites provider expectations: an entry may refer to a replacement provider rather than the bundled implementation. Discord's build version is the workspace version; the Pi adapter's is `@carillon/runtime-pi`'s package version, not the underlying Pi engine version. A version mismatch is a diagnostic, not a protocol-compatibility or execution-safety guarantee.
 
-Maintenance is serialized per installation by an exclusive lock on `CARILLON_HOME/.maintenance.lock`. `update`, `start`, `stop`, `restart`, `backup`, setup reruns and uninstallation take it and refuse at once while another holds it. Direct `systemctl` calls bypass it. Application replacement uses GNU `mv --exchange --no-copy` (coreutils 9.5 or newer) on a filesystem supporting atomic rename exchange. GNU `sync -f` persists the staging filesystem before selection and the containing filesystem after publication; these filesystem-wide barriers may wait for unrelated writes. An interrupted replacement leaves either the complete previous application or the complete new one at `app`, never a missing or partly copied application. Unsupported exchange fails without deleting the previous application.
+Maintenance is serialized per installation by an exclusive lock on `CARILLON_HOME/.maintenance.lock`. `update`, `start`, `stop`, `restart`, `backup`, setup reruns and uninstallation take it and refuse at once while another holds it. The running Discord provider takes the same lock for each command module install or reset, so neither overlaps an update's checks and service stop. Direct `systemctl` calls bypass it. Application replacement uses GNU `mv --exchange --no-copy` (coreutils 9.5 or newer) on a filesystem supporting atomic rename exchange. GNU `sync -f` persists the staging filesystem before selection and the containing filesystem after publication; these filesystem-wide barriers may wait for unrelated writes. An interrupted replacement leaves either the complete previous application or the complete new one at `app`, never a missing or partly copied application. Unsupported exchange fails without deleting the previous application.
 
 Service registration stages all definitions and modes before replacing live units, then publishes each as a complete file. It separately syncs the user-unit filesystem before publication, afterward, and after enabling the target, including when `XDG_CONFIG_HOME` is on another filesystem. Application files, unit definitions, and systemd are not one transaction: a failed update may leave the new application selected with a mixture of complete old and new unit definitions. **After failed or interrupted maintenance, rerun it successfully before restarting services**: `carillon update` with the same archive, the installer for a failed first setup, or `carillon-register-services` after standalone registration failure.
 

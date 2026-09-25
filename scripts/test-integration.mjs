@@ -588,12 +588,46 @@ async function testModelPicker() {
     body: JSON.stringify(interaction("305", null, "command", "model", [])),
   });
   assert.equal(unauthenticated.status, 403, "interactions require the provider credential");
-  // The operator can reload the module in place; an unchanged module is a no-op.
-  assert.deepEqual(JSON.parse(run("--home", installation, "discord", "reload")), {
-    commands: 1,
-    changed: false,
-    registered: false,
-  });
+  await testCommandModuleOperations();
+}
+
+/**
+ * The operator replaces the running command module and returns to the
+ * release's; every installed module keeps serving through the same Wasm host.
+ */
+async function testCommandModuleOperations() {
+  const commands = (...args) => run("--home", installation, "discord", "commands", ...args);
+  assert.equal(commands(), "discord-private serves the release command module: /model.");
+  assert.match(commands("check", commandsModule), /is a usable command module .*: \/model\.$/u);
+  assert.equal(
+    commands("install", commandsModule),
+    "discord-private now serves the installed command module: /model.",
+  );
+  assert.match((await interact("305", null, "command", "model")).content, /Agent default:/u);
+  // Repeating an install finishes its save; it serves the same module.
+  assert.equal(
+    commands("install", commandsModule),
+    "discord-private was already serving the installed command module: /model.",
+  );
+  const broken = join(workspace, "broken-commands.wasm");
+  await writeFile(broken, "\0asm broken");
+  for (const args of [
+    ["check", broken],
+    ["install", broken],
+  ]) {
+    const refused = spawnSync(binary, ["--home", installation, "discord", "commands", ...args], {
+      encoding: "utf8",
+    });
+    assert.notEqual(refused.status, 0, `${args[0]} accepted a broken module`);
+    assert.match(refused.stderr, /^error: .*not a usable command module/u);
+    if (args[0] === "install") {
+      assert.match(refused.stderr, /Still serving the installed command module: \/model\.$/mu);
+    }
+  }
+  await rm(broken);
+  assert.equal(commands(), "discord-private serves the installed command module: /model.");
+  assert.equal(commands("reset"), "discord-private now serves the release command module: /model.");
+  assert.match((await interact("305", null, "command", "model")).content, /Agent default:/u);
 }
 
 /**
@@ -1097,11 +1131,22 @@ async function testConfigurationRefusals() {
     }
     const brokenModule = join(workspace, "broken.wasm");
     await writeFile(brokenModule, "\0asm broken");
-    assertStartupRefused("discord", /read command module/u, [], {
+    assertStartupRefused("discord", /read release command module/u, [], {
       commands: join(workspace, "missing.wasm"),
     });
-    assertStartupRefused("discord", /load command module/u, [], { commands: brokenModule });
-    await rm(brokenModule);
+    assertStartupRefused("discord", /release command module .* is unusable/u, [], {
+      commands: brokenModule,
+    });
+    // An unusable installed module refuses startup, naming the file to remove,
+    // even though the release's module is usable.
+    const installed = join(installation, "state/components/discord-private/command-module.wasm");
+    await mkdir(join(installed, ".."), { recursive: true });
+    await rename(brokenModule, installed);
+    assertStartupRefused(
+      "discord",
+      /installed command module .*command-module\.wasm is unusable; remove it/u,
+    );
+    await rm(installed);
     for (const id of ["runtime-pi", "discord-private"]) {
       // Matching hashes must not turn a provider credential into operator identity;
       // differing hashes must not leave an impossible-to-authenticate provider.

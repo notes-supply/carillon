@@ -27,8 +27,12 @@ retain the actual Wasm path rather than substituting this direct native call.
   concrete core and Discord clients. It does not own a second delivery queue.
   Delivered content is sent as given, split at Discord's length limit, with mentions
   disabled.
-- [`commands`](src/commands.rs) hosts replaceable command generations and registers
-  them with Discord. [Command presentation](../carillon-discord-commands/src/model.rs)
+- [`commands`](src/commands.rs) hosts replaceable command generations, registers
+  them with Discord, and owns the installed module: `Commands::install`/`reset`
+  validate, register, activate and save under the installation's maintenance lock,
+  reporting activation, registration and save durability separately. Construct it
+  with `CommandFiles` naming the release module, installed module, registration
+  record and installation. [Command presentation](../carillon-discord-commands/src/model.rs)
   lives in the separate guest library; [`HostCalls`](../carillon-discord-commands/src/lib.rs)
   is the existing native-operation boundary, also used by the example.
 - [`inbound`](src/inbound.rs) prepares native conversations, emits feedback and retries
@@ -38,7 +42,8 @@ retain the actual Wasm path rather than substituting this direct native call.
   and assembles these pieces. [`cli`](src/cli.rs) supplies installation-derived paths
   and credentials. Importing the library starts none of these services.
 
-For ordinary service use, keep using `carillon discord serve …`; no new CLI is required.
+For ordinary service use, keep using `carillon discord serve …`. Operators change the
+command module with `carillon discord commands`, which asks the running provider.
 Thread creation/reconciliation and delivery stay native. Pass the admitted plan to
 `prepare_conversation(&participation, &discord_http, plan)`: it creates or reconciles
 threads, persists participation, and returns the resolved event. Channel routes make
@@ -51,7 +56,7 @@ writers is not supported.
 
 Admission and identity tests live [beside conversations](src/conversations/tests.rs).
 Change picker layout in the [command library](../carillon-discord-commands/src/model.rs),
-not in core or Pi. Host/reload tests live in `commands.rs`; HTTP/gateway composition,
+not in core or Pi. Host, install and reset tests live in `commands.rs`; HTTP/gateway composition,
 tests live in [application tests](src/application/tests.rs). Transport-failure tests
 live [beside the core client](src/client/tests.rs), native delivery recovery tests
 [beside delivery](src/delivery/tests.rs), and message retry/feedback tests
@@ -65,5 +70,19 @@ mise run test:integration
 ```
 
 The last task uses simulated Discord input/model responses with the real Wasm host.
+
+To try a command change in an installation, build the module, check it against the
+installed provider program, and install it into the running provider:
+
+```sh
+mise run build:commands
+module=target/wasm32-unknown-unknown/wasm/carillon_discord_commands.wasm
+carillon discord commands check "$module"
+carillon discord commands install "$module"
+carillon discord commands reset    # back to the release's module
+```
+
+`check` only reads the file. `install` serves the module at once, registers changed
+definitions first, and keeps it across restarts and updates until `reset`.
 It does not connect to Discord. Live operation and recovery belong in
 [OPERATIONS.md](../../docs/product/OPERATIONS.md).

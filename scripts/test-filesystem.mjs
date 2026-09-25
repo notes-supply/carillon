@@ -10,7 +10,7 @@ import { setTimeout as delay } from "node:timers/promises";
 // application fault switches, mocked storage, or service-manager interaction.
 const [mode, artifact] = process.argv.slice(2);
 assert.ok(
-  ["init", "resources", "restore", "participation", "config"].includes(mode),
+  ["init", "resources", "restore", "participation", "config", "commands"].includes(mode),
   "unknown filesystem test mode",
 );
 const binary = resolve(mode === "init" ? join(artifact, "bin/carillon") : artifact);
@@ -50,10 +50,12 @@ try {
   } else if (mode === "restore") await testRestore();
   else if (mode === "participation") await testParticipation();
   else if (mode === "config") await testConfiguration();
+  else if (mode === "commands") await testCommandModule();
   else {
     await testConfiguration();
     await testResources();
     await testParticipation();
+    await testCommandModule();
   }
 } finally {
   await rm(scratch, { recursive: true, force: true });
@@ -389,7 +391,8 @@ async function testRestore() {
   }
 }
 
-async function testParticipation() {
+/** The provider's library test binary, built for syscall tracing. */
+function providerTestBinary() {
   const messages = execFileSync(
     "cargo",
     ["test", "--locked", "-p", "carillon-discord", "--lib", "--no-run", "--message-format=json"],
@@ -404,8 +407,12 @@ async function testParticipation() {
         message.reason === "compiler-artifact" && message.executable && message.profile.test,
     );
   assert.equal(artifacts.length, 1, "one provider test binary must be built");
+  return artifacts[0].executable;
+}
+
+async function testParticipation() {
   const args = [
-    artifacts[0].executable,
+    providerTestBinary(),
     "--exact",
     "conversations::tests::participation_persistence_retries_without_bypassing_activation",
     "--nocapture",
@@ -482,6 +489,98 @@ async function testParticipation() {
         `participation durability failure passed: ${index === 0 ? "adoption" : "creation"} / ${boundary}`,
       );
     }
+  }
+}
+
+/**
+ * Installing a command module clears the registration record durably before
+ * contacting Discord, then saves the module with a synced file and directory.
+ * A failure at each boundary must be reported as what it is, and repeating the
+ * install must finish the change.
+ */
+async function testCommandModule() {
+  const args = [
+    providerTestBinary(),
+    "--exact",
+    "commands::tests::saving_reports_its_boundary_and_a_repeat_confirms_it",
+    "--nocapture",
+    "--test-threads=1",
+  ];
+  const options = [
+    ...traceOptions.slice(0, -1),
+    "trace=mkdir,rename,fsync,fdatasync,unlink,unlinkat",
+  ];
+  const trace = join(scratch, "commands.trace");
+  const baseline = spawnSync("strace", [...options, "-o", trace, ...args], {
+    encoding: "utf8",
+    timeout: 60_000,
+  });
+  assert.equal(baseline.status, 0, `${baseline.stdout}\n${baseline.stderr}`);
+  assert.match(baseline.stderr, /first change saved: durable; Discord requests 1/u);
+  const lines = (await readFile(trace, "utf8")).split("\n");
+  const invalidation = lines.findIndex((line) =>
+    /unlink(at)?\(.*\/state\/commands\.json"/u.test(line),
+  );
+  assert.ok(invalidation >= 0, "the record must be removed before registering");
+  const state = /"([^"]+)\/commands\.json"/u.exec(lines[invalidation])[1];
+  const recordSync = lines.findIndex(
+    (line, position) =>
+      position > invalidation && line.includes(" fsync(") && line.includes(`<${state}>`),
+  );
+  const publication = lines.findIndex(
+    (line) => line.includes(" rename(") && line.includes(`, "${state}/command-module.wasm")`),
+  );
+  const firstRegistration = lines.findIndex(
+    (line) => line.includes(" rename(") && line.includes(`, "${state}/commands.json")`),
+  );
+  assert.ok(
+    recordSync > invalidation && firstRegistration > recordSync && publication > firstRegistration,
+    "record clearing must be synced before registering, and the module saved after",
+  );
+  const temporary = /rename\("([^"]+)",/u.exec(lines[publication])[1];
+  const fileSync = lines.findLastIndex(
+    (line, position) =>
+      position < publication && line.includes(" fsync(") && line.includes(`<${temporary}>`),
+  );
+  const directorySync = lines.findIndex(
+    (line, position) =>
+      position > publication && line.includes(" fsync(") && line.includes(`<${state}>`),
+  );
+  assert.ok(
+    fileSync >= 0 && directorySync > publication,
+    "module save must sync file and directory",
+  );
+  for (const [boundary, position, expected] of [
+    ["record", recordSync, /first change refused: record .*; Discord requests 0/u],
+    ["file", fileSync, /first change saved: failed/u],
+    ["directory", directorySync, /first change saved: unsynced/u],
+  ]) {
+    const tid = lines[position].trim().split(/\s+/u)[0];
+    const ordinal = lines
+      .slice(0, position + 1)
+      .filter((line) => line.trim().startsWith(`${tid} `) && line.includes(" fsync(")).length;
+    const log = join(scratch, `commands-${boundary}.trace`);
+    const result = spawnSync(
+      "strace",
+      [...options, "-o", log, "-e", `inject=fsync:error=EIO:when=${ordinal}`, ...args],
+      { encoding: "utf8", timeout: 60_000 },
+    );
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /1 passed; 0 failed/u);
+    assert.match(result.stderr, expected, `wrong report for the ${boundary} boundary`);
+    assert.match(result.stderr, /repeat saved: durable/u);
+    const injected = (await readFile(log, "utf8"))
+      .split("\n")
+      .filter((line) => line.includes("INJECTED"));
+    assert.equal(injected.length, 1, "only the intended test-thread syscall may fail");
+    // Each run has its own temporary installation, so compare within it.
+    assert.match(
+      injected[0],
+      boundary === "file" ? /\/state\/\.tmp[^/>]*>\)/u : /\/state>\)/u,
+      `wrong command module boundary: ${injected[0]}`,
+    );
+    console.log(`command module durability failure passed: ${boundary}`);
   }
 }
 
