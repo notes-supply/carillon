@@ -481,11 +481,11 @@ fn report_change(provider: &str, requested: Source, change: &Change) -> Result<(
         (Saved::Durable, _) => Ok(()),
         (Saved::Failed { error }, Source::Installed) => bail!(
             "it serves now, but saving it failed: {error}. The saved state on disk is \
-             unchanged, so a restart would not serve this module. {again}."
+             unchanged; restart selection still depends on that saved state. {again}."
         ),
         (Saved::Failed { error }, Source::Release) => bail!(
-            "it serves now, but removing the installed module failed: {error}. The installed \
-             module is still on disk, so a restart would select it again. {again}."
+            "it serves now, but saving the reset failed: {error}. The saved state on disk is \
+             unchanged; restart selection still depends on that saved state. {again}."
         ),
         (Saved::Unsynced { error }, Source::Installed) => bail!(
             "it serves now and is written to disk, but the write is not confirmed durable: \
@@ -506,6 +506,38 @@ mod tests {
     use carillon_installation::config::{Provider, ProviderRole};
 
     use super::instance;
+
+    #[test]
+    fn failed_saves_do_not_infer_restart_selection() -> Result<()> {
+        use crate::commands::{Change, ModuleSummary, Registration, Saved, Source};
+
+        // Retrying may request the same bytes already on disk, and a reset
+        // may fail before it even inspects an absent override. Neither error
+        // alone establishes what a restart would load.
+        for source in [Source::Installed, Source::Release] {
+            let summary = ModuleSummary {
+                source,
+                commands: vec!["model".to_owned()],
+                digest: "same-module".to_owned(),
+            };
+            let change = Change {
+                serving: summary.clone(),
+                previous: summary,
+                discord: Registration::Unchanged,
+                saved: Saved::Failed {
+                    error: "directory sync failed".to_owned(),
+                },
+            };
+            let message = super::report_change("discord", source, &change)
+                .err()
+                .context("a failed save must exit with an error")?
+                .to_string();
+            assert!(message.contains("saved state on disk is unchanged"));
+            assert!(message.contains("restart selection still depends on that saved state"));
+            assert!(message.contains("again"));
+        }
+        Ok(())
+    }
 
     #[test]
     fn only_an_unambiguous_discord_instance_is_inferred() -> Result<()> {

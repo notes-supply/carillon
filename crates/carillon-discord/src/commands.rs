@@ -237,9 +237,8 @@ pub enum Registration {
 pub enum Saved {
     /// The next start serves the new module, even after a system crash.
     Durable,
-    /// The saved file was not changed, so the next start does not select
-    /// this module; it selects whatever was saved before, which may itself be
-    /// unusable.
+    /// The saved file was not changed. The next start selects whatever was
+    /// saved before, which may already be this module or may be unusable.
     Failed { error: String },
     /// The saved file was changed, but a system crash may still undo that.
     Unsynced { error: String },

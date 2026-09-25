@@ -101,7 +101,7 @@ carillon discord commands reset           # serve the release's module again
 
 A refusal says why, what to do next, and which module still serves. Success is one or two lines naming the source (`installed` or `release`) and the commands. A save has two failure modes, which are reported differently and exit with an error:
 
-- **Not saved**: the saved state on disk did not change, so the module serves now but a restart would not serve it. A restart selects whatever was saved before; this does not show that that module is usable.
+- **Not saved**: the module serves now, but the saved state on disk did not change. A restart selects whatever was saved before, which may already be this module; the failure alone does not establish what that state contains or whether it is usable.
 - **Not confirmed durable**: the file changed, so a restart serves the new module, but syncing its directory failed and a system crash may still bring the previous state back.
 
 Running the same command again finishes the change in either case, including registration, even when the requested module already serves. `carillon discord commands` also says when a restart would serve something other than what serves now.
