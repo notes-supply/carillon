@@ -433,8 +433,8 @@ fn print_status(provider: &str, status: &Status) {
     match next_start {
         NextStart::Same => {}
         NextStart::Different { source } => println!(
-            "After a restart it would serve a different {source} module: the last install or \
-             reset did not finish saving. Run it again."
+            "The {source} module on disk is not the one serving, so a restart would select it; \
+             the last install or reset may not have finished saving. Run it again."
         ),
         NextStart::Unknown { error } => {
             println!("The module for the next start cannot be read: {error}.");
@@ -480,22 +480,20 @@ fn report_change(provider: &str, requested: Source, change: &Change) -> Result<(
     match (saved, requested) {
         (Saved::Durable, _) => Ok(()),
         (Saved::Failed { error }, Source::Installed) => bail!(
-            "it serves now, but saving it failed: {error}. After a restart the provider serves \
-             the previously saved module. {again}."
+            "it serves now, but saving it failed: {error}. The saved state on disk is \
+             unchanged, so a restart would not serve this module. {again}."
         ),
         (Saved::Failed { error }, Source::Release) => bail!(
-            "it serves now, but removing the installed module failed: {error}. After a restart \
-             the provider serves the installed module again. {again}."
+            "it serves now, but removing the installed module failed: {error}. The installed \
+             module is still on disk, so a restart would select it again. {again}."
         ),
         (Saved::Unsynced { error }, Source::Installed) => bail!(
-            "it serves now and is saved, but the save is not confirmed durable: {error}. A \
-             restart serves it; after a system crash the previously saved module may return. \
-             {again}."
+            "it serves now and is written to disk, but the write is not confirmed durable: \
+             {error}. A system crash may undo it. {again}."
         ),
         (Saved::Unsynced { error }, Source::Release) => bail!(
-            "it serves now and the installed module is removed, but the removal is not \
-             confirmed durable: {error}. After a system crash the installed module may return. \
-             {again}."
+            "it serves now and the installed module is removed from disk, but the removal is \
+             not confirmed durable: {error}. A system crash may undo it. {again}."
         ),
     }
 }

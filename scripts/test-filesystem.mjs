@@ -50,12 +50,15 @@ try {
   } else if (mode === "restore") await testRestore();
   else if (mode === "participation") await testParticipation();
   else if (mode === "config") await testConfiguration();
-  else if (mode === "commands") await testCommandModule();
-  else {
+  else if (mode === "commands") {
+    await testCommandModule();
+    await testCommandDirectory();
+  } else {
     await testConfiguration();
     await testResources();
     await testParticipation();
     await testCommandModule();
+    await testCommandDirectory();
   }
 } finally {
   await rm(scratch, { recursive: true, force: true });
@@ -581,6 +584,87 @@ async function testCommandModule() {
       `wrong command module boundary: ${injected[0]}`,
     );
     console.log(`command module durability failure passed: ${boundary}`);
+  }
+}
+
+/**
+ * The first install creates the provider's state directory. A failed sync of
+ * that directory or its parent must be reported as a save that did not
+ * happen, and a repeat must sync both again before publishing: an existing
+ * directory does not show that its entry is durable.
+ */
+async function testCommandDirectory() {
+  const args = [
+    providerTestBinary(),
+    "--exact",
+    "commands::tests::a_new_state_directory_is_synced_again_by_a_repeat",
+    "--nocapture",
+    "--test-threads=1",
+  ];
+  const trace = join(scratch, "command-directory.trace");
+  const baseline = spawnSync("strace", [...traceOptions, "-o", trace, ...args], {
+    encoding: "utf8",
+    timeout: 60_000,
+  });
+  assert.equal(baseline.status, 0, `${baseline.stdout}\n${baseline.stderr}`);
+  assert.match(baseline.stderr, /first save: durable/u);
+  // Each run has its own temporary installation, so paths are read per trace.
+  const created = (lines) => {
+    const index = lines.findIndex((line) => / mkdir\("[^"]+\/state", /u.test(line));
+    assert.ok(index >= 0, "the first save must create the state directory");
+    const state = /mkdir\("([^"]+)"/u.exec(lines[index])[1];
+    return { index, state, parent: dirname(state) };
+  };
+  const synced = (line, path) => line.includes(" fsync(") && line.includes(`<${path}>)`);
+  const lines = (await readFile(trace, "utf8")).split("\n");
+  const baselineDirectory = created(lines);
+  for (const boundary of ["state", "parent"]) {
+    const position = lines.findIndex(
+      (line, index) => index > baselineDirectory.index && synced(line, baselineDirectory[boundary]),
+    );
+    assert.ok(position > baselineDirectory.index, `the new directory's ${boundary} must be synced`);
+    const tid = lines[position].trim().split(/\s+/u)[0];
+    const ordinal = lines
+      .slice(0, position + 1)
+      .filter((line) => line.trim().startsWith(`${tid} `) && line.includes(" fsync(")).length;
+    const log = join(scratch, `command-directory-${boundary}.trace`);
+    const result = spawnSync(
+      "strace",
+      [...traceOptions, "-o", log, "-e", `inject=fsync:error=EIO:when=${ordinal}`, ...args],
+      { encoding: "utf8", timeout: 60_000 },
+    );
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /1 passed; 0 failed/u);
+    assert.match(result.stderr, /first save: failed/u, `wrong report for the ${boundary} sync`);
+    assert.match(result.stderr, /repeat saved: durable/u);
+    const observed = (await readFile(log, "utf8")).split("\n");
+    const failures = observed.filter((line) => line.includes("INJECTED"));
+    assert.equal(failures.length, 1, "only the intended test-thread syscall may fail");
+    const injected = observed.indexOf(failures[0]);
+    const directory = created(observed);
+    assert.ok(
+      synced(observed[injected], directory[boundary]),
+      `wrong directory boundary: ${observed[injected]}`,
+    );
+    const publication = observed.findIndex(
+      (line, index) =>
+        index > injected && line.includes(" rename(") && line.includes('/command-module.wasm")'),
+    );
+    assert.ok(publication > injected, "the repeat must publish the module");
+    for (const path of ["state", "parent"]) {
+      assert.ok(
+        observed.some(
+          (line, index) =>
+            index > injected &&
+            index < publication &&
+            synced(line, directory[path]) &&
+            line.endsWith("= 0"),
+        ),
+        `the repeat must sync the ${path} directory again before publishing`,
+      );
+    }
+    console.log(`command module directory failure passed: ${boundary}`);
   }
 }
 

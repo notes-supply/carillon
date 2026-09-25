@@ -237,9 +237,11 @@ pub enum Registration {
 pub enum Saved {
     /// The next start serves the new module, even after a system crash.
     Durable,
-    /// The file was not changed: the next start serves what it served before.
+    /// The saved file was not changed, so the next start does not select
+    /// this module; it selects whatever was saved before, which may itself be
+    /// unusable.
     Failed { error: String },
-    /// The file was changed, but a system crash may still undo that.
+    /// The saved file was changed, but a system crash may still undo that.
     Unsynced { error: String },
 }
 
@@ -503,10 +505,12 @@ impl Commands {
         let serving = candidate.summary();
         let previous = self.activate(candidate).summary();
         let saved = match source {
-            Source::Installed => ensure_directory(&self.files.installed)
+            Source::Installed => publish_directory(&self.files.installed)
                 .map_err(PublishError::NotPublished)
                 .and_then(|()| publish(&self.files.installed, bytes, 0o600)),
-            Source::Release => remove(&self.files.installed),
+            Source::Release => publish_directory(&self.files.installed)
+                .map_err(PublishError::NotPublished)
+                .and_then(|()| remove(&self.files.installed)),
         };
         let saved = Saved::of(&self.files.installed, saved);
         if saved != Saved::Durable {
@@ -571,7 +575,7 @@ impl Commands {
         // The record must not attest to the old definitions, even after a
         // system crash, if Discord applies the new ones and recording its
         // confirmation fails.
-        ensure_directory(&self.files.record)
+        publish_directory(&self.files.record)
             .map_err(PublishError::NotPublished)
             .and_then(|()| remove(&self.files.record))
             .map_err(ChangeError::Record)?;
@@ -617,14 +621,14 @@ pub async fn check(bytes: &[u8]) -> Result<ModuleSummary> {
         .summary())
 }
 
-/// Creates the directory holding `path` durably when it does not exist yet.
-fn ensure_directory(path: &Path) -> std::io::Result<()> {
+/// Creates the directory holding `path` when needed, then syncs it and its
+/// ancestors. This runs on every change: an existing directory does not show
+/// that its entry survives a system crash, and repeating a change must finish
+/// a sync an earlier attempt could not.
+fn publish_directory(path: &Path) -> std::io::Result<()> {
     let Some(directory) = path.parent() else {
         return Ok(());
     };
-    if directory.is_dir() {
-        return Ok(());
-    }
     fs::create_dir_all(directory)?;
     sync_ancestors(directory)
 }
@@ -633,7 +637,16 @@ fn digest(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+/// Validates a module for serving. Every path applies the same checks,
+/// including the size an operator may install, so `check` never accepts a
+/// module that installation or startup would refuse.
 async fn prepare(host: &Host<Calls>, bytes: &[u8], source: Source) -> Result<Generation> {
+    if bytes.len() > MODULE_LIMIT {
+        bail!(
+            "the module has {} bytes; a command module may have at most {MODULE_LIMIT} bytes (16 MiB)",
+            bytes.len()
+        );
+    }
     let module = host.load(bytes)?;
     let payload = serde_json::to_vec(&Invocation::Describe)?;
     let description = match outcome(host, &module, Calls::Refused, &payload, DESCRIBE_DEADLINE)
@@ -699,7 +712,8 @@ pub(crate) mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        ChangeError, CommandFiles, Commands, DiscordApp, NextStart, Registration, Saved, Source,
+        ChangeError, CommandFiles, Commands, DiscordApp, MODULE_LIMIT, NextStart, Registration,
+        Saved, Source,
     };
 
     /// A module that answers `Describe` with `description` and every other
@@ -775,7 +789,7 @@ pub(crate) mod tests {
         Commands::load(files(root)).await
     }
 
-    fn variant(names: &[&str], reply: &str) -> anyhow::Result<Vec<u8>> {
+    pub(crate) fn variant(names: &[&str], reply: &str) -> anyhow::Result<Vec<u8>> {
         let definitions: Vec<Value> = names.iter().map(|name| definition(name)).collect();
         module(&describing(&definitions), &replying(reply, &[]))
     }
@@ -1087,7 +1101,9 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    fn gated_registration(
+    /// A Discord API that reports each registration on `sent` and confirms it
+    /// only once `gate` grants a permit.
+    pub(crate) fn gated_registration(
         sent: tokio::sync::mpsc::UnboundedSender<Vec<Value>>,
         gate: Arc<tokio::sync::Semaphore>,
     ) -> Router {
@@ -1249,6 +1265,108 @@ pub(crate) mod tests {
         assert_eq!(reply(&commands).await?, "new");
         assert!(!commands.registered(&target, &commands.current().definitions));
         server.abort();
+        Ok(())
+    }
+
+    /// `bytes` with a custom section appended so the module has exactly
+    /// `total` bytes. Custom sections do not change what a module does.
+    pub(crate) fn padded(mut bytes: Vec<u8>, total: usize) -> anyhow::Result<Vec<u8>> {
+        fn leb128(mut value: usize, into: &mut Vec<u8>) {
+            loop {
+                let byte = u8::try_from(value & 0x7f).unwrap_or_default();
+                value >>= 7;
+                if value == 0 {
+                    into.push(byte);
+                    return;
+                }
+                into.push(byte | 0x80);
+            }
+        }
+        let name = b"padding";
+        for width in 1..=5 {
+            let size = total
+                .checked_sub(bytes.len() + 1 + width)
+                .ok_or_else(|| anyhow::anyhow!("module already exceeds {total} bytes"))?;
+            let mut header = vec![0];
+            leb128(size, &mut header);
+            if header.len() != 1 + width {
+                continue;
+            }
+            let payload = size - 1 - name.len();
+            bytes.extend(header);
+            bytes.push(u8::try_from(name.len())?);
+            bytes.extend(name);
+            bytes.resize(bytes.len() + payload, 0);
+            anyhow::ensure!(bytes.len() == total);
+            return Ok(bytes);
+        }
+        anyhow::bail!("cannot pad to {total} bytes")
+    }
+
+    #[tokio::test]
+    async fn checking_installing_and_starting_share_one_size_limit() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        let commands = release_commands(root, &["model"], "release").await?;
+        let base = variant(&["model"], "padded")?;
+        let at_limit = padded(base.clone(), MODULE_LIMIT)?;
+        let over = padded(base, MODULE_LIMIT + 1)?;
+
+        let refusal = super::check(&over)
+            .await
+            .err()
+            .map(|error| format!("{error:#}"))
+            .unwrap_or_default();
+        assert!(
+            refusal.contains(&format!("has {} bytes", MODULE_LIMIT + 1))
+                && refusal.contains(&format!("at most {MODULE_LIMIT} bytes")),
+            "{refusal}"
+        );
+        assert!(matches!(
+            commands.install(&over, None).await,
+            Err(ChangeError::Unusable(_))
+        ));
+        assert!(!files(root).installed.exists());
+        assert_eq!(reply(&commands).await?, "release");
+
+        assert_eq!(super::check(&at_limit).await?.commands, ["model"]);
+        assert_eq!(
+            commands.install(&at_limit, None).await?.saved,
+            Saved::Durable
+        );
+        assert_eq!(reply(&commands).await?, "padded");
+        assert_eq!(
+            Commands::load(files(root)).await?.serving().commands,
+            ["model"]
+        );
+
+        // A module placed on disk by other means obeys the same limit at startup.
+        std::fs::write(files(root).installed, &over)?;
+        assert!(Commands::load(files(root)).await.is_err());
+        Ok(())
+    }
+
+    /// Run under the persistence suite's syscall fault injection: the first
+    /// save creates the state directory, and a repeat must sync that
+    /// directory and its ancestors again rather than trust that it exists.
+    #[tokio::test]
+    async fn a_new_state_directory_is_synced_again_by_a_repeat() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        let commands = release_commands(root, &["model"], "release").await?;
+        assert!(!root.join("state").exists());
+        let candidate = variant(&["model"], "installed")?;
+        let first = match commands.install(&candidate, None).await?.saved {
+            Saved::Durable => "durable".to_owned(),
+            Saved::Failed { error } => format!("failed ({error})"),
+            Saved::Unsynced { error } => format!("unsynced ({error})"),
+        };
+        eprintln!("first save: {first}");
+        let change = commands.install(&candidate, None).await?;
+        assert_eq!(change.saved, Saved::Durable);
+        assert_eq!(std::fs::read(files(root).installed)?, candidate);
+        assert_eq!(commands.status(None).next_start, NextStart::Same);
+        eprintln!("repeat saved: durable");
         Ok(())
     }
 

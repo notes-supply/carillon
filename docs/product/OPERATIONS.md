@@ -91,17 +91,17 @@ carillon discord commands install FILE    # serve FILE now and after restarts
 carillon discord commands reset           # serve the release's module again
 ```
 
-`check` needs neither an installation nor a running provider; it loads the file exactly as the provider would, and reports its commands or why it is unusable. `install` and `reset` are performed by the running provider, without restarting it or reconnecting its gateway:
+`check` needs neither an installation nor a running provider; it applies exactly the checks installation and startup apply, including the 16 MiB (16,777,216-byte) size limit, and reports the module's commands or why it is unusable. `install` and `reset` are performed by the running provider, without restarting it or reconnecting its gateway:
 
 1. It takes the installation's maintenance lock, refusing while an update or other maintenance holds it.
 2. It validates the module (compilation, exports, its description, contract version and command definitions). An unusable module changes nothing.
 3. When Discord's registration, as the provider last recorded it, differs from the module's definitions, it registers them first. It clears that record, durably, before contacting Discord. If Discord rejects the commands, nothing else changes; if Discord does not answer, it may have applied them, the previous module keeps serving, and the next install, reset or provider start registers again.
 4. The module serves. Interactions already running finish on the module they started with.
-5. It saves the change for later starts: `install` writes the installed module; `reset` removes it.
+5. It saves the change for later starts: `install` writes the installed module; `reset` removes it. Each change first syncs the provider's state directory and its ancestors, creating the directory when needed, so repeating a change also finishes a directory sync an earlier attempt could not.
 
 A refusal says why, what to do next, and which module still serves. Success is one or two lines naming the source (`installed` or `release`) and the commands. A save has two failure modes, which are reported differently and exit with an error:
 
-- **Not saved**: the file did not change, so the module serves now but a restart returns to the previously saved one.
+- **Not saved**: the saved state on disk did not change, so the module serves now but a restart would not serve it. A restart selects whatever was saved before; this does not show that that module is usable.
 - **Not confirmed durable**: the file changed, so a restart serves the new module, but syncing its directory failed and a system crash may still bring the previous state back.
 
 Running the same command again finishes the change in either case, including registration, even when the requested module already serves. `carillon discord commands` also says when a restart would serve something other than what serves now.

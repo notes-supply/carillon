@@ -312,8 +312,7 @@ async fn install_commands(
         .map_err(|_| InterfaceError {
             status: StatusCode::PAYLOAD_TOO_LARGE,
             message: format!(
-                "a command module may be at most {} MiB; nothing was changed",
-                MODULE_LIMIT >> 20
+                "a command module may have at most {MODULE_LIMIT} bytes (16 MiB); nothing was changed"
             ),
         })?;
     let (commands, app) = (state.commands.clone(), state.app.clone());

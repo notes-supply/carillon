@@ -33,7 +33,8 @@ use crate::{
     commands::{
         Commands, MODULE_LIMIT, Source,
         tests::{
-            app, definition, describing, files, module, registration_server, replying, write_module,
+            app, definition, describing, files, gated_registration, module, padded,
+            registration_server, replying, variant, write_module,
         },
     },
     config::{DiscordActivation, DiscordConversation},
@@ -676,7 +677,8 @@ async fn command_module_operations_require_the_operator_credential() -> anyhow::
     assert_eq!(body["serving"]["source"], "installed");
     assert_eq!(names(&body["serving"]), ["model", "other"]);
 
-    let (status, _) = operate(
+    // The body limit refuses before reading more; a module at the limit installs.
+    let (status, body) = operate(
         &state,
         Method::PUT,
         Some("operator"),
@@ -684,6 +686,16 @@ async fn command_module_operations_require_the_operator_credential() -> anyhow::
     )
     .await?;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        body["error"],
+        format!(
+            "a command module may have at most {MODULE_LIMIT} bytes (16 MiB); nothing was changed"
+        )
+    );
+    let at_limit = padded(variant(&["model", "other"], "at limit")?, MODULE_LIMIT)?;
+    let (status, body) = operate(&state, Method::PUT, Some("operator"), at_limit).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["saved"], json!({"outcome": "durable"}));
 
     // Another maintenance operation refuses changes, not status.
     let held = carillon_installation::maintenance::MaintenanceLock::acquire(directory.path())?;
@@ -765,6 +777,70 @@ async fn installs_serve_the_replacement_only_once_discord_confirmed_it() -> anyh
     assert_eq!(body["discord"], "registered");
     let (_, reply) = interact(&state, Some("token"), &interaction("300", None)).await?;
     assert_eq!(reply["content"], "replacement");
+    server.abort();
+    Ok(())
+}
+
+/// The operator's request only starts a change: abandoning it, as a CLI
+/// that times out does, must neither cancel the change between Discord's
+/// confirmation and activation nor release the maintenance lock early.
+#[tokio::test]
+async fn an_abandoned_install_completes_while_holding_the_maintenance_lock() -> anyhow::Result<()> {
+    use carillon_installation::maintenance::MaintenanceLock;
+    use tokio::sync::{Semaphore, mpsc};
+
+    let directory = tempfile::tempdir()?;
+    let (sent, mut received) = mpsc::unbounded_channel();
+    let gate = Arc::new(Semaphore::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let target = app(&listener.local_addr()?.to_string(), 1, 100);
+    let router = gated_registration(sent, gate.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await });
+    let mut state = discord_state(
+        core_client("http://127.0.0.1:1".to_owned()),
+        directory.path(),
+    )
+    .await?;
+    state.app = Some(Arc::new(target));
+    let replacement = variant(&["model", "other"], "replacement")?;
+
+    // Drive the request until Discord has the registration, then drop it.
+    let request = operate(&state, Method::PUT, Some("operator"), replacement.clone());
+    let registration = tokio::select! {
+        _ = request => anyhow::bail!("install answered before Discord confirmed"),
+        registration = received.recv() => registration.context("registration closed")?,
+    };
+    assert_eq!(registration.len(), 2);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        MaintenanceLock::try_acquire(directory.path())?.is_none(),
+        "the change must hold the maintenance lock while Discord is registering"
+    );
+    assert_eq!(state.commands.serving().source, Source::Release);
+    let (_, reply) = interact(&state, Some("token"), &interaction("300", None)).await?;
+    assert_eq!(reply["content"], "stub reply");
+    assert!(!files(directory.path()).installed.exists());
+
+    gate.add_permits(1);
+    // The lock is released only when the change has finished, save included.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while MaintenanceLock::try_acquire(directory.path())?.is_none() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        anyhow::Ok(())
+    })
+    .await
+    .context("the abandoned install did not finish")??;
+    assert_eq!(
+        std::fs::read(files(directory.path()).installed)?,
+        replacement
+    );
+    assert_eq!(state.commands.serving().source, Source::Installed);
+    let (_, reply) = interact(&state, Some("token"), &interaction("300", None)).await?;
+    assert_eq!(reply["content"], "replacement");
+    let (_, status) = operate(&state, Method::GET, Some("operator"), Vec::new()).await?;
+    assert_eq!(status["registered"], true);
+    assert_eq!(status["next_start"], json!({"outcome": "same"}));
     server.abort();
     Ok(())
 }
