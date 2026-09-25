@@ -1,4 +1,4 @@
-//! The reloadable Discord command module: definitions, handlers, and
+//! The replaceable Discord command module: definitions, handlers, and
 //! presentation for the commands the Discord provider serves. The provider
 //! keeps the gateway connection, admission, and every Discord or core call;
 //! this module only decides what to show and what to ask for.

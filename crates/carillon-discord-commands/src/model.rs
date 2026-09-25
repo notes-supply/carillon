@@ -1,7 +1,9 @@
 //! `/model`: show the effective model for the conversation and the agent,
 //! and change either scope through Discord components. Every change is
 //! applied immediately and the panel re-renders from the runtime's confirmed
-//! state; the module keeps nothing between interactions, so the displayed
+//! state. A change the runtime refuses, or does not confirm, is reported
+//! above the state read afterwards, with controls bound to it; it is never
+//! retried. The module keeps nothing between interactions, so the displayed
 //! scope and page travel in component custom IDs.
 //!
 //! Select values and custom ID arguments are fingerprints of catalogue
@@ -35,6 +37,9 @@ const PAGE: usize = 25;
 const SETTING_ROWS: usize = 2;
 /// Discord's length limit for select labels, values, and descriptions.
 const TEXT_LIMIT: usize = 100;
+/// Bound for a runtime's explanation shown above the panel, which leaves
+/// room for both scopes' summaries within Discord's message limit.
+const NOTE_LIMIT: usize = 400;
 const PRIMARY: u8 = 1;
 const SECONDARY: u8 = 2;
 const STALE_PROVIDER: &str = "That provider is no longer available; the list below is current.";
@@ -67,60 +72,62 @@ pub fn interact(host: &mut impl HostCalls, interaction: &Interaction) -> Outcome
     let state = match action {
         Action::Show(shown) => {
             view = shown;
-            host.model_state()
+            host.model_state().map_err(Unavailable::Read)
         }
-        Action::Default { scope } => host.set_model(scope, None),
-        Action::ChooseModel { scope, model } => host.model_state().and_then(|state| {
-            let chosen = state
-                .available
-                .iter()
-                .find(|candidate| model_key(candidate) == model);
-            // A new model starts from its own defaults; the runtime reports
-            // them and the settings rows show them.
-            if let Some(model) = chosen {
-                host.set_model(
-                    scope,
-                    Some(Selection {
-                        provider: model.provider.clone(),
-                        model: model.model.clone(),
-                        options: BTreeMap::new(),
-                    }),
-                )
-            } else {
-                view.note = Some(STALE_MODEL);
-                Ok(state)
-            }
-        }),
+        Action::Default { scope } => host.set_model(scope, None).map_err(Unavailable::Write),
+        Action::ChooseModel { scope, model } => {
+            host.model_state()
+                .map_err(Unavailable::Read)
+                .and_then(|state| {
+                    let chosen = state
+                        .available
+                        .iter()
+                        .find(|candidate| model_key(candidate) == model);
+                    // A new model starts from its own defaults; the runtime
+                    // reports them and the settings rows show them.
+                    if let Some(model) = chosen {
+                        host.set_model(
+                            scope,
+                            Some(Selection {
+                                provider: model.provider.clone(),
+                                model: model.model.clone(),
+                                options: BTreeMap::new(),
+                            }),
+                        )
+                        .map_err(Unavailable::Write)
+                    } else {
+                        view.note = Some(STALE_MODEL.to_owned());
+                        Ok(state)
+                    }
+                })
+        }
         Action::ChooseOption {
             scope,
             model,
             option,
             choice,
-        } => host.model_state().and_then(|state| {
-            if let Some(selection) = next_selection(&state, scope, &model, &option, &choice) {
-                view.setting = Some(option);
-                host.call(HostRequest::SetModel {
-                    scope,
-                    selection: Some(selection),
-                    expected: effective(&state, scope).and_then(|scope| scope.selection.clone()),
-                })
-            } else {
-                view.note = Some(STALE_SETTING);
-                Ok(state)
-            }
-        }),
+        } => host
+            .model_state()
+            .map_err(Unavailable::Read)
+            .and_then(|state| {
+                if let Some(selection) = next_selection(&state, scope, &model, &option, &choice) {
+                    view.setting = Some(option);
+                    host.call(HostRequest::SetModel {
+                        scope,
+                        selection: Some(selection),
+                        expected: effective(&state, scope)
+                            .and_then(|scope| scope.selection.clone()),
+                    })
+                    .map_err(Unavailable::Write)
+                } else {
+                    view.note = Some(STALE_SETTING.to_owned());
+                    Ok(state)
+                }
+            }),
     };
-    let state = match state {
+    let state = match settle(host, &mut view, state) {
         Ok(state) => state,
-        Err(error) => {
-            return Outcome::Reply(Reply {
-                content: format!(
-                    "Model settings are unavailable: {} Reopen /model to refresh.",
-                    shorten(&error, 1700)
-                ),
-                components: Vec::new(),
-            });
-        }
+        Err(outcome) => return outcome,
     };
     let scope = view
         .scope
@@ -133,6 +140,53 @@ pub fn interact(host: &mut impl HostCalls, interaction: &Interaction) -> Outcome
             },
         );
     Outcome::Reply(render(&state, scope, &view))
+}
+
+/// The state to render, or the reply to send when there is none. The
+/// runtime's answer to a refused or unconfirmed change is shown over its
+/// current state, read once more; the change is not retried.
+fn settle(
+    host: &mut impl HostCalls,
+    view: &mut View,
+    state: Result<ModelState, Unavailable>,
+) -> Result<ModelState, Outcome> {
+    match state {
+        Ok(state) => Ok(state),
+        Err(Unavailable::Write(refusal)) => match host.model_state() {
+            Ok(state) => {
+                view.note = Some(format!(
+                    "Your change was not confirmed: {} The settings below are current.",
+                    shorten(&refusal, NOTE_LIMIT)
+                ));
+                Ok(state)
+            }
+            Err(error) => Err(unavailable(&format!(
+                "Your change was not confirmed: {} Model settings are unavailable: {}",
+                shorten(&refusal, NOTE_LIMIT),
+                shorten(&error, NOTE_LIMIT)
+            ))),
+        },
+        Err(Unavailable::Read(error)) => Err(unavailable(&format!(
+            "Model settings are unavailable: {}",
+            shorten(&error, 1700)
+        ))),
+    }
+}
+
+/// Why the panel could not be rendered from a confirmed state.
+enum Unavailable {
+    /// Reading the runtime's state failed.
+    Read(String),
+    /// A change was refused, or its outcome is unknown.
+    Write(String),
+}
+
+/// A reply without controls, telling the user how to continue.
+fn unavailable(explanation: &str) -> Outcome {
+    Outcome::Reply(Reply {
+        content: format!("{explanation} Reopen /model to refresh."),
+        components: Vec::new(),
+    })
 }
 
 enum Action {
@@ -175,7 +229,7 @@ struct View {
     /// The setting (by fingerprint) whose choices to show when settings
     /// outnumber their rows.
     setting: Option<String>,
-    note: Option<&'static str>,
+    note: Option<String>,
 }
 
 /// Custom IDs follow `model:<control>:<scope>[:<argument>]`, where the
@@ -286,7 +340,7 @@ fn find_model<'a>(
 
 fn render(state: &ModelState, scope: Scope, view: &View) -> Reply {
     let mut content = summary(state);
-    if let Some(note) = view.note {
+    if let Some(note) = &view.note {
         content.push_str(note);
         content.push('\n');
     }
@@ -731,12 +785,33 @@ mod tests {
         state: ModelState,
         requests: Vec<HostRequest>,
         failure: Option<String>,
+        /// Refuse every change with this reason, as a runtime does when the
+        /// scope changed since the panel was read.
+        refusal: Option<String>,
+        /// The other writer's selection the conversation holds after a refusal.
+        concurrent: Option<Selection>,
+        /// Fail every call after the first refusal.
+        then_fail: Option<String>,
     }
 
     impl HostCalls for FakeRuntime {
         fn call(&mut self, request: HostRequest) -> Result<ModelState, String> {
             if let Some(failure) = &self.failure {
                 return Err(failure.clone());
+            }
+            if let (HostRequest::SetModel { .. }, Some(refusal)) = (&request, &self.refusal) {
+                let refusal = refusal.clone();
+                if let (Some(selection), Some(conversation)) =
+                    (self.concurrent.take(), self.state.conversation.as_mut())
+                {
+                    *conversation = ScopeState {
+                        selection: Some(selection),
+                        overridden: true,
+                    };
+                }
+                self.failure = self.then_fail.take();
+                self.requests.push(request);
+                return Err(refusal);
             }
             if let HostRequest::SetModel {
                 scope, selection, ..
@@ -837,6 +912,9 @@ mod tests {
             },
             requests: Vec::new(),
             failure: None,
+            refusal: None,
+            concurrent: None,
+            then_fail: None,
         }
     }
 
@@ -855,6 +933,14 @@ mod tests {
         assert!(reply.content.contains("This conversation:"));
         assert!(reply.content.contains("Agent default:"));
         assert!(reply.content.contains('…'));
+        assert!(!reply.components.is_empty());
+        host.refusal = Some(long.clone());
+        let reply = expect_reply(interact(
+            &mut host,
+            &component("model:default:conversation", &[]),
+        ))?;
+        assert!(reply.content.contains("Your change was not confirmed:"));
+        assert!(reply.content.contains("Agent default:"));
         assert!(!reply.components.is_empty());
         host.failure = Some(long);
         let reply = expect_reply(interact(&mut host, &command(true)))?;
@@ -1665,6 +1751,68 @@ mod tests {
             }
         );
         assert_eq!(selected(&reply, &speed), Some(fingerprint(&["two"])));
+        Ok(())
+    }
+
+    #[test]
+    fn a_refused_change_shows_the_current_state_without_retrying() -> Result<(), String> {
+        let mut host = runtime(true);
+        host.refusal = Some("The model settings changed.".to_owned());
+        host.concurrent = Some(selection("anthropic", "opus", Some("high")));
+        let high = fingerprint(&["high"]);
+        let reply = expect_reply(interact(
+            &mut host,
+            &component(&thinking_control("conversation"), &[&high]),
+        ))?;
+        assert!(
+            reply.content.contains(
+                "Your change was not confirmed: The model settings changed. The settings below are current."
+            ),
+            "{}",
+            reply.content
+        );
+        // The panel is rebuilt from the state read after the refusal, so it
+        // shows the other writer's change and controls bound to it.
+        assert!(reply.content.contains("This conversation: opus name"));
+        assert!(custom_ids(&reply).contains(&option_control(
+            "conversation",
+            "anthropic",
+            "opus",
+            "thinking"
+        )));
+        assert_eq!(
+            host.requests
+                .iter()
+                .filter(|request| matches!(request, HostRequest::SetModel { .. }))
+                .count(),
+            1,
+            "a refused change is not retried"
+        );
+        assert_eq!(host.requests.last(), Some(&HostRequest::ModelState));
+
+        for control in [
+            component("model:default:agent", &[]),
+            component("model:model:agent", &[&key("openai", "gpt")]),
+        ] {
+            let reply = expect_reply(interact(&mut host, &control))?;
+            assert!(reply.content.contains("Your change was not confirmed"));
+            assert!(reply.content.contains("Changing the agent selection"));
+            assert!(custom_ids(&reply).contains(&"model:default:agent".to_owned()));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_refused_change_without_current_state_says_both() -> Result<(), String> {
+        let mut host = runtime(true);
+        let long = "🦀".repeat(3000);
+        host.refusal = Some(long.clone());
+        host.then_fail = Some(long);
+        let reply = expect_reply(interact(&mut host, &component("model:default:agent", &[])))?;
+        assert!(reply.content.starts_with("Your change was not confirmed: "));
+        assert!(reply.content.contains("Model settings are unavailable: "));
+        assert!(reply.content.ends_with("Reopen /model to refresh."));
+        assert!(reply.components.is_empty());
         Ok(())
     }
 
