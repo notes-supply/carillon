@@ -296,6 +296,7 @@ impl Core {
             agent_id: turn.agent_id.clone(),
             audience_id: turn.audience_id.clone(),
             input: turn.input.clone(),
+            native: turn.native.clone(),
             resource_root: resources::root(&self.snapshot_store(), &turn.resource_snapshot_id)
                 .display()
                 .to_string(),

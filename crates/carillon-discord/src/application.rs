@@ -238,12 +238,15 @@ fn guild(discord: &DiscordConfig) -> Result<Id<twilight_model::id::marker::Guild
 }
 
 fn discord_router(state: DiscordState, deterministic: bool) -> Router {
-    let router = Router::new().route("/health", get(discord_health)).route(
-        "/v1/commands",
-        get(command_status)
-            .put(install_commands)
-            .delete(reset_commands),
-    );
+    let router = Router::new()
+        .route("/health", get(discord_health))
+        .route("/v1/operations", post(discord_operation))
+        .route(
+            "/v1/commands",
+            get(command_status)
+                .put(install_commands)
+                .delete(reset_commands),
+        );
     if deterministic {
         router
             .route("/v1/simulate", post(simulate))
@@ -283,10 +286,43 @@ fn authorize_operator(state: &DiscordState, headers: &HeaderMap) -> Result<(), I
     if !token_matches(&state.operator_token_hash, bearer(headers)) {
         return Err(InterfaceError {
             status: StatusCode::FORBIDDEN,
-            message: "command module operations require the operator credential".to_owned(),
+            message: "Discord operator endpoints require the operator credential".to_owned(),
         });
     }
     Ok(())
+}
+
+async fn discord_operation(
+    State(state): State<DiscordState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Response, InterfaceError> {
+    authorize_operator(&state, &headers)?;
+    let bytes = axum::body::to_bytes(body, 6 * 1024 * 1024)
+        .await
+        .map_err(|_| InterfaceError {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            message: "Discord operation exceeds 6 MiB; nothing was changed".to_owned(),
+        })?;
+    let operation: crate::operations::Operation =
+        serde_json::from_slice(&bytes).map_err(|_| InterfaceError {
+            status: StatusCode::BAD_REQUEST,
+            message: "Invalid Discord operation; check the action and its fields".to_owned(),
+        })?;
+    let Some(app) = &state.app else {
+        return Ok((StatusCode::SERVICE_UNAVAILABLE, Json(json!({"outcome":"unavailable","message":"Discord operations require a connected provider; deterministic mode does not call Discord."}))).into_response());
+    };
+    Ok(match operation.execute(&app.http, app.guild_id).await {
+        Ok(result) => Json(result).into_response(),
+        Err(failure) => {
+            let status = match failure.outcome {
+                "rejected" => StatusCode::BAD_REQUEST,
+                "unavailable" => StatusCode::SERVICE_UNAVAILABLE,
+                _ => StatusCode::BAD_GATEWAY,
+            };
+            (status, Json(failure)).into_response()
+        }
+    })
 }
 
 async fn command_status(

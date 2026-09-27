@@ -38,6 +38,9 @@ retain the actual Wasm path rather than substituting this direct native call.
 - [`inbound`](src/inbound.rs) prepares native conversations, emits feedback and retries
   only ambiguous transport submission with the same event identity. It receives its
   core client, configuration and participation store explicitly.
+- [`operations`](src/operations.rs) owns authenticated assistant actions using the existing
+  Discord client, independently of admission and the delivery outbox. The optional
+  [Pi extension](../../packages/discord-pi/README.md) exposes them on demand.
 - [`application`](src/application.rs) binds the operator server, connects the gateway,
   and assembles these pieces. [`cli`](src/cli.rs) supplies installation-derived paths
   and credentials. Importing the library starts none of these services.

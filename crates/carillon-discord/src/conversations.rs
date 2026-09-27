@@ -329,6 +329,14 @@ fn thread_title(content: &str) -> String {
 
 fn resolved_message(plan: MessagePlan, target: String) -> ResolvedMessage {
     let conversation_id = format!("discord-{}-{target}", plan.guild_id);
+    let origin = json!({
+        "guild_id": plan.guild_id,
+        "channel_id": target,
+        "source_channel_id": plan.channel_id,
+        "message_id": plan.message_id,
+        "user_id": plan.user_id,
+        "parent_channel_id": if target == plan.route_channel_id { None } else { Some(&plan.route_channel_id) },
+    });
     ResolvedMessage {
         event: ExternalEvent {
             event_id: plan.message_id.clone(),
@@ -339,6 +347,7 @@ fn resolved_message(plan: MessagePlan, target: String) -> ResolvedMessage {
             feedback_target_id: format!("{}:{}", plan.channel_id, plan.message_id),
             content: plan.content,
             native: json!({
+                "origin": origin,
                 "discord": plan.native,
                 "guild_id": plan.guild_id,
                 "route_channel_id": plan.route_channel_id,

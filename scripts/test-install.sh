@@ -14,6 +14,7 @@ for artifact in \
   bin/carillon \
   bin/carillon-discord \
   lib/carillon_discord_commands.wasm \
+  lib/carillon-discord-pi.js \
   bin/carillon-runtime-pi \
   bin/pi \
   bin/carillon-pi \
@@ -278,6 +279,16 @@ mv "$CARILLON_HOME/app/bin/pi.real" "$CARILLON_HOME/app/bin/pi"
 
 APP=$CARILLON_HOME/app/bin
 CONFIG=$CARILLON_HOME/carillon.toml
+
+# The integration is opt-in and enters captured agent resources, not mutable app paths.
+[ ! -e "$CARILLON_HOME/agents/default/extensions/carillon-discord.js" ]
+env CARILLON_HOME="$CARILLON_HOME" "$APP/carillon" discord tools install
+cmp "$CARILLON_HOME/app/lib/carillon-discord-pi.js" "$CARILLON_HOME/agents/default/extensions/carillon-discord.js"
+grep -Fq 'enable_discord' "$CARILLON_HOME/agents/default/skills/discord/SKILL.md"
+env CARILLON_HOME="$CARILLON_HOME" "$APP/carillon" discord tools install
+cmp "$CARILLON_HOME/app/lib/carillon-discord-pi.js" "$CARILLON_HOME/agents/default/extensions/carillon-discord.js"
+bun -e 'const extension = await import(process.argv[1]); if (typeof extension.default !== "function") throw new Error("missing extension export")' "$CARILLON_HOME/agents/default/extensions/carillon-discord.js"
+
 
 start_runtime() {
   env HOME="$OWNER_HOME" USER="$OWNER" LOGNAME="$OWNER" SHELL="$OWNER_SHELL" PATH="$PATH" \

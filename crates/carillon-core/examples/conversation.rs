@@ -42,16 +42,25 @@ async fn conversation() -> Result<()> {
         delivery_target_id: "conversation-1".to_owned(),
         feedback_target_id: "message-1".to_owned(),
         content: "Hello building blocks".to_owned(),
-        native: serde_json::Value::Null,
+        native: serde_json::json!({"origin":{"message_id":"original"}}),
     };
     let receipt = core.accept(&interface, &event)?;
     ensure!(
-        core.accept(&interface, &event)?.duplicate,
+        core.accept(
+            &interface,
+            &ExternalEvent {
+                native: serde_json::json!({"changed":true}),
+                ..event.clone()
+            }
+        )?
+        .duplicate,
         "duplicate acceptance changed the turn"
     );
     std::fs::write(resources.join("SYSTEM.md"), "Changed after acceptance")?;
     let step = core
         .execute_next("echo", async |request| {
+            // Opaque interface data is captured on acceptance, not supplied by a duplicate.
+            assert_eq!(request.native, event.native);
             // This deterministic test runtime is deliberately not Pi. The snapshot is real.
             let captured = std::fs::read_to_string(
                 std::path::Path::new(&request.resource_root).join("SYSTEM.md"),

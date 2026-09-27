@@ -61,6 +61,7 @@ pub struct ClaimedTurn {
     pub feedback_target_id: String,
     pub input: String,
     pub resource_snapshot_id: String,
+    pub native: Value,
 }
 
 /// Lifecycle states are stored by their wire names. The wire types live in
@@ -314,7 +315,7 @@ impl Database {
         let turn = transaction
             .query_row(
                 "SELECT id, interface_id, agent_id, audience_id, runtime_id,
-                        target_id, feedback_target_id, input, resource_snapshot_id
+                        target_id, feedback_target_id, input, resource_snapshot_id, native_json
                  FROM turns t
                  WHERE runtime_id = ?1 AND state = 'queued'
                    AND NOT EXISTS (
@@ -338,6 +339,7 @@ impl Database {
                         feedback_target_id: row.get(6)?,
                         input: row.get(7)?,
                         resource_snapshot_id: row.get(8)?,
+                        native: json_column(row, 9)?,
                     })
                 },
             )

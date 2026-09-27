@@ -33,6 +33,8 @@ export interface PiRuntimeOptions {
   readonly selections?: ModelSelections;
   /** Explicitly opt into catalogue network discovery during construction. */
   readonly allowModelNetwork?: boolean;
+  /** Host-supplied native-extension context; no integration knowledge in the runtime. */
+  readonly extensionContext?: (request: TurnRequest) => unknown;
 }
 
 /** Construction is explicit; importing this module does not discover providers or open files.
@@ -188,6 +190,7 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
     const runtime = modelRuntime;
     const created = await createPiExecutionSession({
       resourceRoot: root,
+      extensionContext: options.extensionContext?.(request),
       workspace: workspace,
       manager,
       modelRuntime: runtime,

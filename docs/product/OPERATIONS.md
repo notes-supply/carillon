@@ -110,6 +110,31 @@ Running the same command again finishes the change in either case, including reg
 
 Each bundled provider reports its own build version, not the `providers[].version` expectation in configuration. Core's status reports the observed version with `version_mismatch` when the provider ID and role match but its version differs. Unreachable or wrong-identity providers are `unavailable`, with the configured identity and expected version instead.
 
+### Assistant Discord tools
+
+The optional [native Pi integration](../../packages/discord-pi/README.md) lets the
+assistant read and manage Discord, independently of slash commands:
+
+```sh
+carillon discord tools install
+```
+
+It copies this release's extension and skill into the configured agent resources.
+It replaces only `extensions/carillon-discord.js` and `skills/discord/SKILL.md`.
+Newly accepted turns capture them; queued turns retain their old resources. It
+needs no gateway restart. Run it again after updating the release to update the
+optional integration, or remove those two files to stop capturing it. The regular
+installer does not silently enable administration tools.
+
+A fresh conversation sees `enable_discord`; detailed tools become model-visible
+on demand. Pi retains activation in that conversation's native transcript.
+The provider executes actions with its existing bot credential, bounded to its
+configured guild and Discord permissions/hierarchy. Routes determine which
+messages start turns, not which channels the assistant can administer. These
+native tools have the installing Unix user's authority; lazy activation is not
+an authorization boundary. Explicit sends differ from ordinary final replies.
+A write with an uncertain outcome must be inspected before being repeated.
+
 ## Failure behavior
 
 A turn is queued before acceptance is acknowledged. Runtime work is executed only after the turn is durably claimed as running.
@@ -128,7 +153,7 @@ Discord delivery uses a separate outbox. An unclaimed delivery can be retried. A
 
 ## Credentials
 
-Platform credentials belong to interface providers. Engine credentials and settings belong to the runtime provider. Internal loopback tokens authenticate provider-to-core traffic and interface-to-provider simulation; the operator credential authorizes diagnostics and command module changes. Provider IDs `operator` and `discord-bot` are reserved because those credential filenames already belong to the installation. Credentials stay outside prompts, session history, diagnostics, ordinary logs, and the command module.
+Platform credentials belong to interface providers. Engine credentials and settings belong to the runtime provider. Internal loopback tokens authenticate provider-to-core traffic and interface-to-provider simulation; the operator credential authorizes diagnostics, command module changes, and assistant Discord operations. Provider IDs `operator` and `discord-bot` are reserved because those credential filenames already belong to the installation. Credentials stay outside prompts, session history, diagnostics, ordinary logs, and the command module.
 
 The packaged Pi state uses `CARILLON_HOME/pi`, not the owner's global `~/.pi/agent`. Model selections made through `/model` are kept there in `model-selection.json`; Pi's own default model remains the runtime default.
 

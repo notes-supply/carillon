@@ -96,6 +96,12 @@ async fn native_preparation_creates_once_and_persists_activation() -> Result<()>
             .is_err()
     );
     let resolved = prepare_conversation(&participation, &http, plan.clone()).await?;
+    assert_eq!(
+        resolved.event.native["origin"],
+        json!({
+            "guild_id":"1", "channel_id":"200", "source_channel_id":"100", "message_id":"200", "user_id":"2", "parent_channel_id":"100"
+        })
+    );
     assert_eq!(resolved.event.delivery_target_id, "200");
     assert_eq!(resolved.event.audience_id, "discord-1-200");
     let reopened = Participation::load(path)?;

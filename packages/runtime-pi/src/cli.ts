@@ -22,6 +22,8 @@ interface Config {
   readonly resourceRoot: string;
   readonly workspace: string;
   readonly runtime: RuntimeProviderConfig;
+  readonly interfaces: RuntimeProviderConfig[];
+  readonly operatorTokenHash: string;
 }
 
 const ProviderIdentitySchema = Type.String({
@@ -39,6 +41,7 @@ const ProviderSchema = Type.Object({
 });
 const FileConfigSchema = Type.Object({
   data_dir: Type.String(),
+  core: Type.Object({ operator_token_hash: Type.String({ pattern: "^[a-f0-9]{64}$" }) }),
   agent: Type.Object({ resource_root: Type.String(), workspace: Type.String() }),
   providers: Type.Array(ProviderSchema),
 });
@@ -71,6 +74,21 @@ async function main(values: readonly string[]): Promise<void> {
         stateDirectory,
         sessionDirectory,
         allowModelNetwork: true,
+        extensionContext: (request) => {
+          const provider = config.interfaces.find((item) => item.id === request.interface_id);
+          return {
+            interface_id: request.interface_id,
+            native: request.native,
+            connection:
+              provider === undefined
+                ? undefined
+                : {
+                    url: provider.url,
+                    token_file: join(config.root, "credentials", "operator.token"),
+                    token_hash: config.operatorTokenHash,
+                  },
+          };
+        },
       });
   const server = createRuntimeServer({
     runtime,
@@ -122,6 +140,10 @@ async function loadConfig(path: string, providerId: string): Promise<Config> {
     resourceRoot: resolve(root, parsed.agent.resource_root),
     workspace: resolve(root, parsed.agent.workspace),
     runtime,
+    interfaces: parsed.providers.filter(
+      (provider) => provider.role === "interface" && provider.enabled,
+    ),
+    operatorTokenHash: parsed.core.operator_token_hash,
   };
 }
 

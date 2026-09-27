@@ -42,6 +42,30 @@ An interface provider owns its platform credential and protocol. It authenticate
 
 The Discord provider (`carillon-discord`) additionally owns guild/user/route admission, mention handling, Discord thread creation and adoption, typing, reactions, message splitting, mention-free delivery (delivered text never notifies users, roles, `@everyone` or `@here`), application-command registration, and interaction handling. Core does not model Discord hierarchy or interactions. Its library exposes message/interaction admission with explicit configuration and participation state, and a concrete authenticated `CoreClient` independent of command hosting. Native delivery consumes those clients; the application assembles the gateway and operator server. Gateway and deterministic ingress use the same `IncomingMessage` admission path. See [the Discord component guide](../../crates/carillon-discord/README.md) for the gateway-free example and component-local tests.
 
+### Assistant operations
+
+The Discord operator API also accepts `POST /v1/operations`, authenticated with the
+operator credential. Concrete provider-owned operations use the existing Discord
+client, validate channel/role targets against the configured guild, and rely on
+Discord's own permissions and role hierarchy. They neither alter admission routes
+nor create core delivery intents. Ambiguous side effects are reported as uncertain
+and are not automatically replayed.
+
+The optional [`discord-pi`](../../packages/discord-pi/README.md) package is a native
+Pi extension plus skill, not a Wasm capability. A small activation tool enables
+its detailed schemas in the current conversation; native Pi system messages retain
+the loadout. No selection model or separate activation store exists.
+`carillon discord tools install` copies the bundled extension/skill into ordinary
+agent resources. Core captures their bytes with accepted work, as for any resource.
+
+Core forwards the event's opaque `native` metadata on runtime requests. Discord
+constructs `native.origin` from admitted input and the resolved delivery target;
+core does not interpret it. Pi's application assembly supplies the current interface
+connection and opaque metadata through a per-session `carillon:context` event.
+Credentials and endpoint selection stay outside prompts and captured resources.
+The generic runtime/session component knows nothing about Discord. Native extension
+activation is an input-context optimization, not an authorization mechanism.
+
 ### Replaceable command module
 
 Discord's slash commands and their interactive controls live in a WebAssembly module that the provider loads at startup and can replace while running. The release ships `carillon_discord_commands.wasm`; an operator may install another. The module defines the commands, handles each interaction, and decides what to show. The provider keeps everything native: the gateway connection, admission of the interaction, every Discord and core call, authority, and deadlines.
@@ -67,7 +91,7 @@ Replacement is that one explicit operation. There is one module per provider ins
 
 ## Runtime providers
 
-A runtime provider receives a claimed turn containing agent, interface, audience, input, and resource identity. It owns the conversation's native session and returns nonblank output. A response without usable output interrupts the turn rather than completing it silently or sending an empty reply.
+A runtime provider receives a claimed turn containing agent, interface, audience, input, resource identity, and opaque interface-owned native metadata. It owns the conversation's native session and returns nonblank output. A response without usable output interrupts the turn rather than completing it silently or sending an empty reply.
 
 A runtime's failure response may carry `{"error": "…"}`. That text explains the failure to the person in the conversation, so the runtime owns deciding what of it may be displayed. Core and interfaces show it as given and apply no text policy of their own. A runtime omits `error` when it has nothing it can safely explain, and keeps technical diagnostics in its own log. The same rule covers model calls, whose `error` Discord shows in `/model`.
 

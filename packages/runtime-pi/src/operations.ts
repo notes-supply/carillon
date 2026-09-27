@@ -6,6 +6,7 @@ export interface TurnRequest {
   readonly agent_id: string;
   readonly audience_id: string;
   readonly input: string;
+  readonly native?: unknown;
   readonly resource_root: string;
 }
 

@@ -616,6 +616,41 @@ async fn operate(
     Ok((status, serde_json::from_slice(&body)?))
 }
 
+#[tokio::test]
+async fn agent_operations_authenticate_before_parsing_and_refuse_simulation() -> anyhow::Result<()>
+{
+    let directory = tempfile::tempdir()?;
+    let state = discord_state(
+        core_client("http://127.0.0.1:1".to_owned()),
+        directory.path(),
+    )
+    .await?;
+    for (token, body, expected) in [
+        ("wrong", vec![0; 6 * 1024 * 1024 + 1], StatusCode::FORBIDDEN),
+        ("token", b"not json".to_vec(), StatusCode::FORBIDDEN),
+        (
+            "operator",
+            vec![0; 6 * 1024 * 1024 + 1],
+            StatusCode::PAYLOAD_TOO_LARGE,
+        ),
+        ("operator", b"not json".to_vec(), StatusCode::BAD_REQUEST),
+        (
+            "operator",
+            br#"{"action":"server.info"}"#.to_vec(),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+    ] {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/operations")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(body))?;
+        let response = discord_router(state.clone(), true).oneshot(request).await?;
+        assert_eq!(response.status(), expected);
+    }
+    Ok(())
+}
+
 fn names(module: &Value) -> Vec<&str> {
     module["commands"]
         .as_array()

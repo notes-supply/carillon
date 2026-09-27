@@ -41,6 +41,9 @@ that owns the behavior you want to change:
   conversation mapping, native delivery and command hosting.
   [Render the model picker](crates/carillon-discord/examples/model_picker.rs)
   without a gateway: `mise run example:discord`.
+- **[Discord agent tools](packages/discord-pi/README.md)** — optional native Pi
+  extension and skill, activated per conversation. Provider-owned Discord operations
+  stay separate from slash commands and normal reply delivery.
 - **[Wire contracts](packages/protocol/README.md)** — identities and requests in
   Rust; shared model vocabulary in Rust/TypeScript with common conformance fixtures.
   No installation or credential discovery.

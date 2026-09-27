@@ -146,6 +146,9 @@ pub struct RuntimeTurnRequest {
     /// The captured resource snapshot the turn was accepted with, as a
     /// directory the runtime reads in place.
     pub resource_root: String,
+    /// Interface-owned metadata captured with the accepted event.
+    #[serde(default)]
+    pub native: Value,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

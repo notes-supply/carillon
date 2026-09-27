@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
+base64 = "0.22.1"
 carillon-discord-commands = { path = "../carillon-discord-commands" }
 carillon-protocol = { path = "../carillon-protocol" }
 carillon-installation = { path = "../carillon-installation" }

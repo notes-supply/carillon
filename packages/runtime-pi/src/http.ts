@@ -32,6 +32,7 @@ const TurnRequestSchema = Type.Object({
   audience_id: Type.String(),
   input: Type.String(),
   resource_root: Type.String(),
+  native: Type.Optional(Type.Unknown()),
 });
 
 export function createRuntimeServer(options: RuntimeServerOptions) {

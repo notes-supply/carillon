@@ -92,6 +92,11 @@ enum Command {
         #[arg(long)]
         provider: Option<String>,
     },
+    /// Install the optional native Pi tools and skill into captured agent resources.
+    Tools {
+        #[command(subcommand)]
+        action: ToolsAction,
+    },
     /// Show which command module the running provider serves, or change it.
     #[command(after_help = "\
 Without a subcommand, shows the serving module and its commands.
@@ -108,6 +113,12 @@ they started with.")]
         #[command(subcommand)]
         action: Option<CommandsAction>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum ToolsAction {
+    /// Copy this release's tools and skill. Replaces only the two owned files.
+    Install,
 }
 
 #[derive(Debug, Subcommand)]
@@ -190,10 +201,45 @@ pub(crate) async fn run() -> Result<()> {
             );
             check_installed(&loaded, &provider).await?;
         }
+        Command::Tools {
+            action: ToolsAction::Install,
+        } => install_tools(&installation()?)?,
         Command::Commands { provider, action } => {
             manage_commands(installation, provider, action).await?;
         }
     }
+    Ok(())
+}
+
+fn install_tools(config: &LoadedConfig) -> Result<()> {
+    use carillon_installation::{
+        filesystem::{publish, sync_ancestors},
+        maintenance::MaintenanceLock,
+    };
+    let _lock = MaintenanceLock::acquire(&config.root)?;
+    let executable = std::env::current_exe()?.canonicalize()?;
+    let lib = executable
+        .parent()
+        .and_then(Path::parent)
+        .context("cannot locate release library")?
+        .join("lib");
+    // Read both before changing resources. The operator explicitly replaces these two files.
+    let extension = fs::read(lib.join("carillon-discord-pi.js"))
+        .context("release has no bundled Discord Pi tools; use a packaged installation")?;
+    let skill = fs::read(lib.join("carillon-discord-SKILL.md"))?;
+    let root = &config.value.agent.resource_root;
+    let extensions = root.join("extensions");
+    let skills = root.join("skills/discord");
+    fs::create_dir_all(&extensions)?;
+    fs::create_dir_all(&skills)?;
+    sync_ancestors(&extensions)?;
+    sync_ancestors(&skills)?;
+    publish(&extensions.join("carillon-discord.js"), &extension, 0o600)?;
+    publish(&skills.join("SKILL.md"), &skill, 0o600)?;
+    println!(
+        "Installed Discord tools and skill in {}. New accepted turns capture them; existing turns keep their resources.",
+        root.display()
+    );
     Ok(())
 }
 

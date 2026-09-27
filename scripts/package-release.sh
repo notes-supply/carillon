@@ -26,6 +26,9 @@ PI_PACKAGE=${PI_DIST%/dist}
 rm -rf "$STAGE"
 mkdir -p "$STAGE/bin/theme" "$STAGE/bin/assets" "$STAGE/lib" "$STAGE/licenses" "$STAGE/systemd" "$(dirname -- "$OUTPUT")"
 
+bun build --target=bun packages/discord-pi/src/index.ts --outfile "$STAGE/lib/carillon-discord-pi.js"
+install -m 0644 packages/discord-pi/skill/SKILL.md "$STAGE/lib/carillon-discord-SKILL.md"
+
 cargo build --release --locked --target "$TARGET" --target-dir "$ROOT/target" --bin carillon --bin carillon-discord
 # The Discord command module runs in the provider's Wasm sandbox; it is data,
 # not a native binary, and is built for the wasm32 target regardless of host.

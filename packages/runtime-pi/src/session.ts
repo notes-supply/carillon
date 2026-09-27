@@ -1,5 +1,6 @@
 import {
   createAgentSession,
+  createEventBus,
   type AgentSession,
   DefaultResourceLoader,
   type ModelRuntime,
@@ -21,6 +22,8 @@ interface PiExecutionSessionOptions {
   readonly thinkingLevel?: ModelThinkingLevel;
 
   readonly customTools?: ToolDefinition[];
+  /** Per-session host data, delivered to native extensions but never to the model. */
+  readonly extensionContext?: unknown;
 }
 
 export async function createPiExecutionSession(options: PiExecutionSessionOptions) {
@@ -32,13 +35,16 @@ export async function createPiExecutionSession(options: PiExecutionSessionOption
     },
   );
   const settingsManager = SettingsManager.create(options.workspace, options.resourceRoot);
+  const eventBus = createEventBus();
   const loader = new DefaultResourceLoader({
+    eventBus,
     cwd: options.workspace,
     agentDir: options.resourceRoot,
     settingsManager,
     ...(systemPrompt === undefined ? {} : { systemPromptOverride: () => systemPrompt }),
   });
   await loader.reload();
+  eventBus.emit("carillon:context", options.extensionContext);
   const created = await createAgentSession({
     cwd: options.workspace,
     agentDir: options.resourceRoot,

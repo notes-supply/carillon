@@ -134,6 +134,15 @@ importers:
         specifier: 4.1.11
         version: 4.1.11(@types/node@26.4.0)(vite@8.2.2(@types/node@26.4.0)(esbuild@0.28.2)(jiti@2.7.0)(yaml@2.9.0))
 
+  packages/discord-pi:
+    dependencies:
+      '@earendil-works/pi-coding-agent':
+        specifier: 0.87.1
+        version: 0.87.1(ws@8.21.3)
+      typebox:
+        specifier: 1.0.65
+        version: 1.0.65
+
   packages/protocol:
     dependencies:
       typebox:
