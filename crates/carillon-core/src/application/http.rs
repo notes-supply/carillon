@@ -306,18 +306,31 @@ const ACTIVITY_TIMEOUT: Duration = Duration::from_secs(2);
 /// The caller's queued and running turns, each running turn with its
 /// runtime's latest snapshot when the runtime supplies one. The durable
 /// states come from storage; `activity: null` never means the turn ended.
+/// Runtimes are asked at once, so the list takes one snapshot timeout at
+/// most however many runtimes cannot answer. Each runtime runs at most one
+/// turn at a time, so there is one request per configured runtime at most.
 async fn active_turns(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<ActiveTurn>>, ApiError> {
     let interface = interface_provider(&headers, &state.config)?;
-    let mut turns = Vec::new();
-    for (runtime_id, mut turn) in state.core.active_turns(&interface.id)? {
+    let listed = state.core.active_turns(&interface.id)?;
+    let mut snapshots = tokio::task::JoinSet::new();
+    for (index, (runtime_id, turn)) in listed.iter().enumerate() {
         if turn.state == TurnState::Running {
-            turn.activity =
-                runtime_activity(&state, &runtime_id, &interface.id, &turn.turn_id).await;
+            let (state, runtime_id) = (state.clone(), runtime_id.clone());
+            let (interface_id, turn_id) = (interface.id.clone(), turn.turn_id.clone());
+            snapshots.spawn(async move {
+                let activity = runtime_activity(&state, &runtime_id, &interface_id, &turn_id);
+                (index, activity.await)
+            });
         }
-        turns.push(turn);
+    }
+    let mut turns = listed.into_iter().map(|(_, turn)| turn).collect::<Vec<_>>();
+    while let Some(snapshot) = snapshots.join_next().await {
+        if let Ok((index, activity)) = snapshot {
+            turns[index].activity = activity;
+        }
     }
     Ok(Json(turns))
 }

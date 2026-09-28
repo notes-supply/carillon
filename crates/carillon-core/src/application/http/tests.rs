@@ -1667,15 +1667,16 @@ fn foreign_turn(state: &mut AppState, directory: &Path) -> Result<EventReceipt> 
 /// Claims the next turn, which must be `turn_id`, and keeps it running until released.
 async fn hold_running(
     state: &AppState,
+    runtime_id: &str,
     turn_id: &str,
 ) -> Result<(
     tokio::sync::oneshot::Sender<()>,
     tokio::task::JoinHandle<Result<WorkerStep>>,
 )> {
     let (release, held) = tokio::sync::oneshot::channel::<()>();
-    let worker_state = state.clone();
+    let (worker_state, runtime_id) = (state.clone(), runtime_id.to_owned());
     let worker = tokio::spawn(async move {
-        run_next_turn(&worker_state, "test-runtime", async |_, _, request| {
+        run_next_turn(&worker_state, &runtime_id, async |_, _, request| {
             let _ = held.await;
             Ok(completed(request))
         })
@@ -1717,7 +1718,7 @@ async fn activity_lists_only_the_callers_active_turns_with_runtime_snapshots() -
     let running = accept(&state, "running", "conversation").await?;
     let queued = accept(&state, "queued", "conversation").await?;
     let foreign = foreign_turn(&mut state, directory.path())?;
-    let (release, worker) = hold_running(&state, &running.turn_id).await?;
+    let (release, worker) = hold_running(&state, "test-runtime", &running.turn_id).await?;
 
     let (status, body) = activity_call(&state, "test-interface", Some("test-only")).await?;
     assert_eq!(status, StatusCode::OK);
@@ -1794,5 +1795,73 @@ async fn activity_lists_only_the_callers_active_turns_with_runtime_snapshots() -
     let (_, body) = activity_call(&state, "test-interface", Some("test-only")).await?;
     assert_eq!(body.as_array().map(Vec::len), Some(1));
     assert_eq!(body[0]["turn_id"], json!(queued.turn_id));
+    Ok(())
+}
+
+#[tokio::test]
+async fn activity_answers_promptly_when_several_runtimes_cannot_describe_their_turns() -> Result<()>
+{
+    let directory = tempdir()?;
+    let mut state = installation(directory.path())?;
+    let (sent, _received) = tokio::sync::mpsc::unbounded_channel();
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let mut services = tokio::task::JoinSet::new();
+    let runtime = activity_runtime(Arc::new(std::sync::Mutex::new(Snapshot::Hanging)), sent);
+    services.spawn(async move { axum::serve(listener, runtime).await });
+    let mut accepted = Vec::new();
+    let mut held = Vec::new();
+    for index in 0..6 {
+        let id = format!("runtime-{index}");
+        let mut provider = state
+            .config
+            .provider("test-runtime", ProviderRole::Runtime)?
+            .clone();
+        provider.id.clone_from(&id);
+        provider.url.clone_from(&url);
+        fs::write(
+            directory.path().join(format!("credentials/{id}.token")),
+            "test-only",
+        )?;
+        state.config.value.providers.push(provider);
+        // New conversations belong to the runtime that is the default when they start.
+        state.config.value.agent.runtime_provider.clone_from(&id);
+        let receipt = accept(
+            &state,
+            &format!("event-{index}"),
+            &format!("conversation-{index}"),
+        )
+        .await?;
+        held.push(hold_running(&state, &id, &receipt.turn_id).await?);
+        accepted.push(receipt.turn_id);
+    }
+    let started = std::time::Instant::now();
+    let (status, body) = activity_call(&state, "test-interface", Some("test-only")).await?;
+    let elapsed = started.elapsed();
+    assert_eq!(status, StatusCode::OK);
+    let listed = body
+        .as_array()
+        .context("list")?
+        .iter()
+        .map(|turn| {
+            (
+                turn["turn_id"].as_str().map(str::to_owned),
+                turn["activity"].clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        listed,
+        accepted
+            .into_iter()
+            .map(|turn| (Some(turn), serde_json::Value::Null))
+            .collect::<Vec<_>>()
+    );
+    // Well within an interface's ten-second request deadline.
+    assert!(elapsed < Duration::from_secs(4), "{elapsed:?}");
+    for (release, worker) in held {
+        let _ = release.send(());
+        worker.await??;
+    }
     Ok(())
 }
