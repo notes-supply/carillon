@@ -1552,3 +1552,247 @@ fn check_opens_storage_like_the_service_without_writing() -> Result<()> {
     assert_eq!(fs::read(&database)?, before);
     Ok(())
 }
+
+/// How the runtime substitute answers an activity request.
+#[derive(Clone, Copy)]
+enum Snapshot {
+    Current,
+    Missing,
+    Malformed,
+    Hanging,
+}
+
+async fn activity_call(
+    state: &AppState,
+    provider: &str,
+    token: Option<&str>,
+) -> Result<(StatusCode, serde_json::Value)> {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt as _;
+
+    let router = Router::new()
+        .route("/v1/activity", get(active_turns))
+        .with_state(configured(state));
+    let mut request = Request::builder()
+        .uri("/v1/activity")
+        .header(PROVIDER_HEADER, provider);
+    if let Some(token) = token {
+        request = request.header(http::header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    let response = tokio::time::timeout(
+        Duration::from_secs(10),
+        router.oneshot(request.body(Body::empty())?),
+    )
+    .await??;
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), 65536).await?;
+    Ok((status, serde_json::from_slice(&body)?))
+}
+
+/// A runtime that records each activity request and answers as `mode` says.
+fn activity_runtime(
+    mode: Arc<std::sync::Mutex<Snapshot>>,
+    sent: tokio::sync::mpsc::UnboundedSender<serde_json::Value>,
+) -> Router {
+    Router::new().route(
+        "/v1/turns/{id}/activity",
+        get(
+            move |AxumPath(id): AxumPath<String>,
+                  Query(query): Query<std::collections::HashMap<String, String>>,
+                  headers: HeaderMap| {
+                let mode = *mode
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _ = sent.send(json!({
+                    "id": id,
+                    "query": query,
+                    "auth": headers.get(http::header::AUTHORIZATION).and_then(|v| v.to_str().ok()),
+                }));
+                async move {
+                    match mode {
+                        Snapshot::Current => Json(json!({
+                            "phase": "tools",
+                            "running": [{"tool": "bash", "detail": "cargo test", "started_at": 1}],
+                            "recent": [],
+                            "tool_calls": 1,
+                        }))
+                        .into_response(),
+                        Snapshot::Missing => StatusCode::NOT_FOUND.into_response(),
+                        Snapshot::Malformed => Json(json!({"phase": "thinking"})).into_response(),
+                        Snapshot::Hanging => {
+                            tokio::time::sleep(Duration::from_secs(30)).await;
+                            StatusCode::NOT_FOUND.into_response()
+                        }
+                    }
+                }
+            },
+        ),
+    )
+}
+
+/// Registers `other-interface` and accepts one turn for it.
+fn foreign_turn(state: &mut AppState, directory: &Path) -> Result<EventReceipt> {
+    use carillon_installation::config::hash_token;
+
+    let mut other = state
+        .config
+        .provider("test-interface", ProviderRole::Interface)?
+        .clone();
+    "other-interface".clone_into(&mut other.id);
+    other.token_hash = hash_token("other-only");
+    state.config.value.providers.push(other);
+    fs::write(
+        directory.join("credentials/other-interface.token"),
+        "other-only",
+    )?;
+    Ok(configured(state).core.accept(
+        &selected_provider(
+            state
+                .config
+                .provider("other-interface", ProviderRole::Interface)?,
+        ),
+        &ExternalEvent {
+            event_id: "foreign".to_owned(),
+            agent_id: "test-agent".to_owned(),
+            user_id: "someone".to_owned(),
+            audience_id: "elsewhere".to_owned(),
+            delivery_target_id: "foreign-destination".to_owned(),
+            feedback_target_id: "foreign-feedback".to_owned(),
+            content: "not yours".to_owned(),
+            native: serde_json::Value::Null,
+        },
+    )?)
+}
+
+/// Claims the next turn, which must be `turn_id`, and keeps it running until released.
+async fn hold_running(
+    state: &AppState,
+    turn_id: &str,
+) -> Result<(
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<Result<WorkerStep>>,
+)> {
+    let (release, held) = tokio::sync::oneshot::channel::<()>();
+    let worker_state = state.clone();
+    let worker = tokio::spawn(async move {
+        run_next_turn(&worker_state, "test-runtime", async |_, _, request| {
+            let _ = held.await;
+            Ok(completed(request))
+        })
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while state
+            .core
+            .database
+            .inspect_turn(turn_id)?
+            .map(|turn| turn.state)
+            != Some(TurnState::Running)
+        {
+            tokio::task::yield_now().await;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
+    Ok((release, worker))
+}
+
+#[tokio::test]
+async fn activity_lists_only_the_callers_active_turns_with_runtime_snapshots() -> Result<()> {
+    let directory = tempdir()?;
+    let mut state = installation(directory.path())?;
+    let mode = Arc::new(std::sync::Mutex::new(Snapshot::Current));
+    let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    state.config.value.providers[1].url = format!("http://{}", listener.local_addr()?);
+    let mut services = tokio::task::JoinSet::new();
+    let runtime = activity_runtime(mode.clone(), sent);
+    services.spawn(async move { axum::serve(listener, runtime).await });
+
+    let finished = accept(&state, "finished", "earlier").await?;
+    run_next_turn(&state, "test-runtime", async |_, _, request| {
+        Ok(completed(request))
+    })
+    .await?;
+    let running = accept(&state, "running", "conversation").await?;
+    let queued = accept(&state, "queued", "conversation").await?;
+    let foreign = foreign_turn(&mut state, directory.path())?;
+    let (release, worker) = hold_running(&state, &running.turn_id).await?;
+
+    let (status, body) = activity_call(&state, "test-interface", Some("test-only")).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        json!([
+            {
+                "turn_id": running.turn_id,
+                "state": "running",
+                "target_id": "test-destination",
+                "accepted_at": body[0]["accepted_at"],
+                "activity": {
+                    "phase": "tools",
+                    "running": [{"tool": "bash", "detail": "cargo test", "started_at": 1}],
+                    "recent": [],
+                    "tool_calls": 1,
+                },
+            },
+            {
+                "turn_id": queued.turn_id,
+                "state": "queued",
+                "target_id": "test-destination",
+                "accepted_at": body[1]["accepted_at"],
+                "activity": null,
+            },
+        ])
+    );
+    assert!(body[0]["accepted_at"].as_i64().is_some_and(|time| time > 0));
+    assert_ne!(body[0]["turn_id"], json!(finished.turn_id));
+    // Only running turns are relayed, with the runtime credential, naming the caller.
+    assert_eq!(
+        received.try_recv()?,
+        json!({
+            "id": running.turn_id,
+            "query": {"interface_id": "test-interface"},
+            "auth": "Bearer test-only",
+        })
+    );
+    assert!(received.try_recv().is_err());
+
+    // Another interface sees its own work and nothing of this one's.
+    let (_, body) = activity_call(&state, "other-interface", Some("other-only")).await?;
+    assert_eq!(body.as_array().map(Vec::len), Some(1));
+    assert_eq!(body[0]["turn_id"], json!(foreign.turn_id));
+
+    // A snapshot the runtime cannot supply is absent, never a shorter list.
+    for snapshot in [Snapshot::Missing, Snapshot::Malformed, Snapshot::Hanging] {
+        *mode
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot;
+        let started = std::time::Instant::now();
+        let (status, body) = activity_call(&state, "test-interface", Some("test-only")).await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body[0]["state"], "running");
+        assert_eq!(body[0]["activity"], serde_json::Value::Null);
+        assert_eq!(body.as_array().map(Vec::len), Some(2));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    for (provider, token) in [
+        ("test-interface", None),
+        ("test-interface", Some("wrong")),
+        ("test-interface", Some("other-only")),
+        ("test-interface", Some("test-operator")),
+        ("test-runtime", Some("test-only")),
+        ("unknown", Some("test-only")),
+    ] {
+        let (status, _) = activity_call(&state, provider, token).await?;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{provider} {token:?}");
+    }
+
+    let _ = release.send(());
+    assert_eq!(worker.await??, WorkerStep::Advanced);
+    let (_, body) = activity_call(&state, "test-interface", Some("test-only")).await?;
+    assert_eq!(body.as_array().map(Vec::len), Some(1));
+    assert_eq!(body[0]["turn_id"], json!(queued.turn_id));
+    Ok(())
+}

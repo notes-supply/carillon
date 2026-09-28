@@ -5,9 +5,9 @@ use crate::{
 };
 use anyhow::{Context as _, Result, anyhow};
 use carillon_protocol::model::{
-    Delivery, DeliveryAck, DeliveryReconciliation, EventReceipt, ExternalEvent, ModelQuery,
-    RuntimeTurnRequest, RuntimeTurnResponse, SelectedProvider, StateCounts, TurnInspection,
-    TurnSummary,
+    ActiveTurn, Delivery, DeliveryAck, DeliveryReconciliation, EventReceipt, ExternalEvent,
+    ModelQuery, RuntimeTurnRequest, RuntimeTurnResponse, SelectedProvider, StateCounts,
+    TurnInspection, TurnSummary,
 };
 use std::path::PathBuf;
 use tracing::warn;
@@ -259,6 +259,15 @@ impl Core {
             )));
         }
         Ok(())
+    }
+
+    /// Queued and running turns of an authenticated interface, in acceptance
+    /// order, each with the ID of the runtime that owns it. `activity` is
+    /// left empty: snapshots belong to the runtime.
+    /// # Errors
+    /// Returns storage errors.
+    pub fn active_turns(&self, interface: &str) -> Result<Vec<(String, ActiveTurn)>> {
+        self.database.active_turns(interface)
     }
 
     /// Inspect a turn, without granting external operator authority.

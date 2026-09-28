@@ -20,16 +20,16 @@ use carillon_installation::config::{
     LoadedConfig, Provider, ProviderRole, RELEASE_VERSION, token_matches,
 };
 use carillon_protocol::model::{
-    Delivery, DeliveryAck, DeliveryReconciliation, EventReceipt, ExternalEvent, Health,
+    ActiveTurn, Delivery, DeliveryAck, DeliveryReconciliation, EventReceipt, ExternalEvent, Health,
     INSTANCE_HEADER, ModelQuery, ModelUpdate, PROVIDER_HEADER, RuntimeModelQuery,
     RuntimeModelUpdate, RuntimeTurnRequest, RuntimeTurnResponse, SelectedProvider, StatusReport,
-    TurnInspection, TurnSummary,
+    TurnActivity, TurnInspection, TurnState, TurnSummary,
 };
 use reqwest::{Client, RequestBuilder, Url};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     Core, CoreError, CoreOptions, RuntimeClient, RuntimeProvider, TurnFailure, WorkerStep,
@@ -154,6 +154,7 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
     let router = Router::new()
         .route("/health", get(health))
         .route("/v1/events", post(accept_event))
+        .route("/v1/activity", get(active_turns))
         .route("/v1/deliveries", get(claim_delivery))
         .route("/v1/deliveries/reconcile", post(reconcile_delivery_claims))
         .route("/v1/deliveries/{id}/ack", post(acknowledge_delivery))
@@ -296,6 +297,66 @@ async fn relay_model_call(request: RequestBuilder) -> Result<Response, ApiError>
         )
     })?;
     Ok((status, Json(body)).into_response())
+}
+
+/// A snapshot is cosmetic: a runtime that is slow to describe a turn costs
+/// the snapshot, not a slow list.
+const ACTIVITY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The caller's queued and running turns, each running turn with its
+/// runtime's latest snapshot when the runtime supplies one. The durable
+/// states come from storage; `activity: null` never means the turn ended.
+async fn active_turns(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ActiveTurn>>, ApiError> {
+    let interface = interface_provider(&headers, &state.config)?;
+    let mut turns = Vec::new();
+    for (runtime_id, mut turn) in state.core.active_turns(&interface.id)? {
+        if turn.state == TurnState::Running {
+            turn.activity =
+                runtime_activity(&state, &runtime_id, &interface.id, &turn.turn_id).await;
+        }
+        turns.push(turn);
+    }
+    Ok(Json(turns))
+}
+
+async fn runtime_activity(
+    state: &AppState,
+    runtime_id: &str,
+    interface_id: &str,
+    turn_id: &str,
+) -> Option<TurnActivity> {
+    let snapshot = async {
+        let runtime = state.config.provider(runtime_id, ProviderRole::Runtime)?;
+        let token = runtime_token(&state.config, runtime)?;
+        let mut url = Url::parse(&runtime.url)?;
+        url.path_segments_mut()
+            .map_err(|()| anyhow!("runtime provider URL cannot have a path"))?
+            .extend(["v1", "turns", turn_id, "activity"]);
+        url.query_pairs_mut()
+            .append_pair("interface_id", interface_id);
+        let response = state
+            .client
+            .get(url)
+            .bearer_auth(token)
+            .timeout(ACTIVITY_TIMEOUT)
+            .send()
+            .await?;
+        // Not yet or no longer executing in the runtime.
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Ok::<_, anyhow::Error>(Some(
+            response.error_for_status()?.json::<TurnActivity>().await?,
+        ))
+    };
+    // Interfaces ask every few seconds; an unavailable snapshot is routine.
+    snapshot.await.unwrap_or_else(|error| {
+        debug!(runtime_id, turn_id, %error, "runtime activity is unavailable");
+        None
+    })
 }
 
 async fn runtime_worker(state: AppState, runtime_id: String) {

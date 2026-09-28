@@ -39,8 +39,8 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use carillon_protocol::model::{
-    Delivery, DeliveryOutcome, DeliveryState, EventReceipt, ExternalEvent, RuntimeTurnResponse,
-    StateCounts, TurnInspection, TurnState, TurnSummary,
+    ActiveTurn, Delivery, DeliveryOutcome, DeliveryState, EventReceipt, ExternalEvent,
+    RuntimeTurnResponse, StateCounts, TurnInspection, TurnState, TurnSummary,
 };
 
 #[derive(Clone)]
@@ -601,6 +601,30 @@ impl Database {
                 },
             )
             .optional()?)
+    }
+
+    /// Queued and running turns of one interface in acceptance order, each
+    /// with the runtime that owns it. `activity` is left for the caller.
+    pub fn active_turns(&self, interface_id: &str) -> Result<Vec<(String, ActiveTurn)>> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT runtime_id, id, state, target_id, accepted_at FROM turns
+             WHERE interface_id = ?1 AND state IN ('queued', 'running')
+             ORDER BY acceptance_sequence",
+        )?;
+        let rows = statement.query_map([interface_id], |row| {
+            Ok((
+                row.get(0)?,
+                ActiveTurn {
+                    turn_id: row.get(1)?,
+                    state: state_column(row, 2)?,
+                    target_id: row.get(3)?,
+                    accepted_at: row.get(4)?,
+                    activity: None,
+                },
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     pub fn turn_counts(&self) -> Result<StateCounts> {
