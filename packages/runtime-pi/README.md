@@ -30,6 +30,8 @@ Replace `modelRuntime`, `settings`, or `selections` independently when supplying
 
 `executeTurn` serializes execution within the instance. The tuple of interface, agent and audience identifies the native conversation; a new input in that conversation reopens its native history. Cancellation settles before another turn executes. `close` rejects new work, cancels active/queued execution, and waits for outstanding operations to settle. It does not erase sessions, replay inputs, or dispose caller-owned collaborators. For lower-level native session use, `openConversation`, `createPiExecutionSession`, and `promptSession` are the same primitives used by this runtime. A turn Pi reports as failed rejects with `ExplainedFailure` carrying Pi's failure text as is; the HTTP adapter decides what of it may be displayed.
 
+While a turn executes, `activity(correlation_id, interface_id)` returns a bounded snapshot of what it is doing, derived from Pi's native session events, or `undefined` for a turn that is not executing for that interface. The snapshot exists from before session preparation until the turn settles; it is never stored. Tool inputs are described in [`activity.ts`](src/activity.ts), beside the tools' semantics, and pass the same best-effort redaction as diagnostics. The HTTP adapter serves it at `GET /v1/turns/{id}/activity?interface_id=…`.
+
 `ModelSelections` reads the selection file as the authority, not a permanently cached
 copy. Its asynchronous reads refresh from disk; updates hold a short cross-process
 `proper-lockfile` lease around refresh, precondition checking and atomic persistence.
@@ -51,6 +53,7 @@ mise run example:pi -- --state-dir /path/to/pi-state --workspace /path/to/worksp
 - [`runtime.ts`](src/runtime.ts): instance construction, model operations, execution queue and shutdown.
 - [`session.ts`](src/session.ts), [`namespace.ts`](src/namespace.ts): native Pi sessions/resources/cancellation and conversation identity.
 - [`model.ts`](src/model.ts): persisted selection policy; shared wire shapes come from [`@carillon/protocol`](../protocol/README.md).
+- [`activity.ts`](src/activity.ts): a running turn's snapshot and the deny-by-default description of tool inputs, including the Bash command-header policy.
 - [`failure.ts`](src/failure.ts): `ExplainedFailure` and the conservative, best-effort rules for what of an explanation may be displayed and how diagnostics are redacted.
 - [`http.ts`](src/http.ts): authenticated transport over runtime operations. It sends callers only the displayable part of `ExplainedFailure` messages, and logs other failures and runtime-side explanations by method and path.
 - [`cli.ts`](src/cli.ts): installation arguments, credentials, OAuth registration, listener and signal lifecycle.

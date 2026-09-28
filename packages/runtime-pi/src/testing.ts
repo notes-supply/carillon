@@ -42,6 +42,9 @@ export async function createDeterministicRuntime(
         return executeDeterministic(request);
       });
     },
+    activity() {
+      return undefined;
+    },
     async modelState(query) {
       shutdown.signal.throwIfAborted();
       return await selections.state(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, query);

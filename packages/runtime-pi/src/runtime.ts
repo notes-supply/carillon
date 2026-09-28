@@ -17,6 +17,7 @@ import type {
 } from "@carillon/protocol";
 import { mkdir, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { trackActivity, type ActivityTracker } from "./activity.ts";
 import { ModelSelections } from "./model.ts";
 import { openConversation } from "./namespace.ts";
 import { Serial } from "./serial.ts";
@@ -64,6 +65,11 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
   const turns = new Serial();
   const shutdown = new AbortController();
   const pending = new Set<Promise<unknown>>();
+  /** Executing turns by correlation ID, from before preparation until they settle. */
+  const executing = new Map<
+    string,
+    { readonly interfaceId: string; readonly activity: ActivityTracker }
+  >();
   const THINKING_OPTION = "thinking";
   await selectedPiModel();
 
@@ -88,6 +94,10 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
           return executePi(request, combined);
         }),
       );
+    },
+    activity(correlationId, interfaceId) {
+      const turn = executing.get(correlationId);
+      return turn?.interfaceId === interfaceId ? turn.activity.snapshot() : undefined;
     },
     modelState(query: ModelQuery): Promise<ModelState> {
       return track(
@@ -172,7 +182,22 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
     return model;
   }
 
+  /** The turn's activity is visible from before preparation, and removed however it ends. */
   async function executePi(request: TurnRequest, signal: AbortSignal): Promise<TurnResponse> {
+    const activity = trackActivity(workspace);
+    executing.set(request.correlation_id, { interfaceId: request.interface_id, activity });
+    try {
+      return await runPi(request, signal, activity);
+    } finally {
+      executing.delete(request.correlation_id);
+    }
+  }
+
+  async function runPi(
+    request: TurnRequest,
+    signal: AbortSignal,
+    activity: ActivityTracker,
+  ): Promise<TurnResponse> {
     const root = resolve(request.resource_root);
     const manager = openConversation(workspace, sessionDirectory, request);
     // The effective selection is applied to every turn, so a continued session
@@ -202,6 +227,7 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
       assertExtensionsLoaded(extensionsResult.errors);
       let output = "";
       const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
+        activity.observe(event);
         if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta")
           output += event.assistantMessageEvent.delta;
       });

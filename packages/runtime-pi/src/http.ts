@@ -2,7 +2,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { Type } from "typebox";
-import { Parse } from "typebox/value";
+import { Check, Parse } from "typebox/value";
 import {
   ModelQuerySchema,
   ModelUpdateSchema,
@@ -106,6 +106,26 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
     }
 
     const url = new URL(request.url ?? "/", "http://localhost");
+    const activityPath = /^\/v1\/turns\/([^/]+)\/activity$/u.exec(url.pathname);
+    if (request.method === "GET" && activityPath?.[1] !== undefined) {
+      let correlationId: string;
+      try {
+        correlationId = decodeURIComponent(activityPath[1]);
+      } catch {
+        correlationId = "";
+      }
+      const interfaceId = url.searchParams.get("interface_id");
+      if (correlationId.length === 0 || !Check(ProviderIdentitySchema, interfaceId)) {
+        writeJson(response, 400, { error: "invalid activity query" });
+        return;
+      }
+      // The interface must match the executing request, as a correlation
+      // check: a turn is only ever described to the interface it serves.
+      const activity = options.runtime.activity(correlationId, interfaceId);
+      if (activity === undefined) writeJson(response, 404, { error: "turn is not executing" });
+      else writeJson(response, 200, activity);
+      return;
+    }
     if (request.method === "GET" && url.pathname === "/v1/model") {
       let query: ModelQuery;
       try {

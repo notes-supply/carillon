@@ -118,11 +118,11 @@ function bodyMessage(body: unknown): string | undefined {
 }
 
 /** Cut between graphemes, at a word where there is one, with length in UTF-16 units: never more characters than Discord counts. */
-function bounded(text: string): string {
-  if (text.length <= EXPLANATION_LIMIT) return text;
+export function bounded(text: string, limit = EXPLANATION_LIMIT): string {
+  if (text.length <= limit) return text;
   let kept = "";
   for (const { segment } of new Intl.Segmenter().segment(text)) {
-    if (kept.length + segment.length >= EXPLANATION_LIMIT) break;
+    if (kept.length + segment.length >= limit) break;
     kept += segment;
   }
   const space = kept.lastIndexOf(" ");

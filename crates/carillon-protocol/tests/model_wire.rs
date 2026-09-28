@@ -1,7 +1,7 @@
 //! Both languages consume the same wire examples, including canonical round trips.
 use anyhow::Result;
 use carillon_protocol::{
-    model::{RuntimeModelQuery, RuntimeModelUpdate},
+    model::{RuntimeModelQuery, RuntimeModelUpdate, TurnActivity},
     models::ModelState,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -49,6 +49,26 @@ fn shared_model_wire_fixtures() -> Result<()> {
     }
     for value in fixtures.accepted_updates {
         serde_json::from_value::<RuntimeModelUpdate>(value)?;
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct ActivityFixtures {
+    activities: Vec<Value>,
+    invalid_activities: Vec<Value>,
+}
+
+#[test]
+fn shared_activity_wire_fixtures() -> Result<()> {
+    let fixtures: ActivityFixtures = serde_json::from_str(include_str!(
+        "../../../packages/protocol/fixtures/activity.json"
+    ))?;
+    for value in &fixtures.activities {
+        round_trip::<TurnActivity>(value)?;
+    }
+    for value in fixtures.invalid_activities {
+        assert!(serde_json::from_value::<TurnActivity>(value).is_err());
     }
     Ok(())
 }

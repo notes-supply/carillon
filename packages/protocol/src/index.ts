@@ -49,3 +49,41 @@ export const ModelUpdateSchema = Type.Object({
   expected: Type.Optional(SelectionSchema),
 });
 export type ModelUpdate = Static<typeof ModelUpdateSchema>;
+
+/**
+ * What a runtime is doing in one executing turn, for display while it runs.
+ * The runtime formats each `detail` from its own tool semantics; consumers
+ * show it as given and never receive raw tool arguments.
+ */
+export const ActivityPhaseSchema = Type.Union([
+  Type.Literal("starting"),
+  Type.Literal("model"),
+  Type.Literal("tools"),
+  Type.Literal("retrying"),
+  Type.Literal("compacting"),
+]);
+export type ActivityPhase = Static<typeof ActivityPhaseSchema>;
+export const RunningToolSchema = Type.Object({
+  tool: Type.String({ minLength: 1 }),
+  detail: Type.Optional(Type.String({ minLength: 1 })),
+  /** Unix seconds. */
+  started_at: Type.Integer(),
+});
+export type RunningTool = Static<typeof RunningToolSchema>;
+export const FinishedToolSchema = Type.Object({
+  tool: Type.String({ minLength: 1 }),
+  detail: Type.Optional(Type.String({ minLength: 1 })),
+  ok: Type.Boolean(),
+});
+export type FinishedTool = Static<typeof FinishedToolSchema>;
+export const TurnActivitySchema = Type.Object({
+  phase: ActivityPhaseSchema,
+  /** The model's own latest public commentary, when it wrote any. */
+  headline: Type.Optional(Type.String({ minLength: 1 })),
+  running: Type.Array(RunningToolSchema),
+  /** The most recently finished calls, oldest first. */
+  recent: Type.Array(FinishedToolSchema),
+  /** Every call started in the turn, including those no longer listed. */
+  tool_calls: Type.Integer({ minimum: 0 }),
+});
+export type TurnActivity = Static<typeof TurnActivitySchema>;

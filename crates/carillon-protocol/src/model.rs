@@ -179,6 +179,77 @@ pub struct DeliveryAck {
     pub outcome: DeliveryOutcome,
 }
 
+/// A queued or running turn of the requesting interface, as core reports it
+/// for display while the turn is in progress. `activity` is the owning
+/// runtime's latest snapshot for a running turn, or `None` when core has none.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ActiveTurn {
+    pub turn_id: String,
+    pub state: TurnState,
+    pub target_id: String,
+    /// Unix seconds.
+    pub accepted_at: i64,
+    #[serde(deserialize_with = "crate::models::required_nullable")]
+    pub activity: Option<TurnActivity>,
+}
+
+/// What a runtime is doing in one executing turn. The runtime formats each
+/// `detail` from its own tool semantics; consumers show it as given and
+/// never receive raw tool arguments.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TurnActivity {
+    pub phase: ActivityPhase,
+    /// The model's own latest public commentary, when it wrote any.
+    #[serde(
+        default,
+        deserialize_with = "crate::models::optional_nonempty_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub headline: Option<String>,
+    pub running: Vec<RunningTool>,
+    /// The most recently finished calls, oldest first.
+    pub recent: Vec<FinishedTool>,
+    /// Every call started in the turn, including those no longer listed.
+    pub tool_calls: u32,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityPhase {
+    Starting,
+    Model,
+    Tools,
+    Retrying,
+    Compacting,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RunningTool {
+    #[serde(deserialize_with = "crate::models::nonempty_string")]
+    pub tool: String,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::optional_nonempty_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub detail: Option<String>,
+    /// Unix seconds.
+    pub started_at: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct FinishedTool {
+    #[serde(deserialize_with = "crate::models::nonempty_string")]
+    pub tool: String,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::optional_nonempty_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub detail: Option<String>,
+    pub ok: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TurnInspection {
     pub turn_id: String,

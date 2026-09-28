@@ -26,6 +26,10 @@ async function serve() {
           ? new Error(`extension state at /private/state rejected ${key}`)
           : new ExplainedFailure(502, request.input),
       ),
+    activity: (correlationId, interfaceId) =>
+      correlationId === "turn/1" && interfaceId === "discord-private"
+        ? { phase: "tools", running: [], recent: [{ tool: "read", ok: true }], tool_calls: 1 }
+        : undefined,
     modelState: () => Promise.reject(new Error("model catalogue file is corrupt")),
     setModel: (update) => selections.update(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, update),
     close: () => Promise.resolve(),
@@ -41,10 +45,10 @@ async function serve() {
   await once(server, "listening");
   const address = server.address();
   if (address === null || typeof address === "string") throw new Error("expected a TCP listener");
-  const call = async (method: string, path: string, body?: unknown) => {
+  const call = async (method: string, path: string, body?: unknown, token = "test-only") => {
     const response = await fetch(`http://127.0.0.1:${String(address.port)}${path}`, {
       method,
-      headers: { authorization: "Bearer test-only", "content-type": "application/json" },
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     const answer: unknown = await response.json();
@@ -123,4 +127,29 @@ it("sends callers only the displayable part of explanations and logs redacted di
   );
   expect(logged[6]).toMatch(/^GET \/v1\/model failed: Error: model catalogue file is corrupt\n/u);
   for (const secret of [key, "short-secret"]) expect(logged.join("\n")).not.toContain(secret);
+});
+
+it("describes an executing turn only to its own interface, after authentication", async () => {
+  const { call, close } = await serve();
+  const path = "/v1/turns/turn%2F1/activity";
+  try {
+    expect(await call("GET", `${path}?interface_id=discord-private`)).toEqual({
+      status: 200,
+      body: { phase: "tools", running: [], recent: [{ tool: "read", ok: true }], tool_calls: 1 },
+    });
+    expect(
+      (await call("GET", `${path}?interface_id=discord-private`, undefined, "wrong")).status,
+    ).toBe(403);
+    expect((await call("GET", `${path}?interface_id=other-interface`)).status).toBe(404);
+    expect(
+      (await call("GET", "/v1/turns/turn-2/activity?interface_id=discord-private")).status,
+    ).toBe(404);
+    for (const query of ["", "?interface_id=", "?interface_id=a%20b"])
+      expect((await call("GET", `${path}${query}`)).status).toBe(400);
+    expect(
+      (await call("GET", "/v1/turns/%E0%A4%A/activity?interface_id=discord-private")).status,
+    ).toBe(400);
+  } finally {
+    await close();
+  }
 });
