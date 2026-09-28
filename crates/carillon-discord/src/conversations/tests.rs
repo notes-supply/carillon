@@ -229,6 +229,7 @@ pub(crate) fn discord_config(
             conversation,
         }],
         typing: true,
+        activity: true,
         reactions: true,
         processing_emoji: "👀".to_owned(),
         delivered_emoji: "✅".to_owned(),

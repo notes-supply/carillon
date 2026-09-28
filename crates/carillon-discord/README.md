@@ -27,6 +27,11 @@ retain the actual Wasm path rather than substituting this direct native call.
   concrete core and Discord clients. It does not own a second delivery queue.
   Delivered content is sent as given, split at Discord's length limit, with mentions
   disabled.
+- [`activity`](src/activity.rs) shows temporary activity cards and typing while turns
+  run. It reads core's activity list, receives each turn's outcome from the delivery
+  loop, and records only the channel and message of cards it created, so a restart
+  can remove them before showing a replacement. Every Discord call is bounded,
+  including rate-limiter waits and Twilight's 429 retries.
 - [`commands`](src/commands.rs) hosts replaceable command generations, registers
   them with Discord, and owns the installed module: `Commands::install`/`reset`
   validate, register, activate and save under the installation's maintenance lock,
@@ -62,7 +67,8 @@ Change picker layout in the [command library](../carillon-discord-commands/src/m
 not in core or Pi. Host, install and reset tests live in `commands.rs`; HTTP/gateway composition,
 tests live in [application tests](src/application/tests.rs). Transport-failure tests
 live [beside the core client](src/client/tests.rs), native delivery recovery tests
-[beside delivery](src/delivery/tests.rs), and message retry/feedback tests
+[beside delivery](src/delivery/tests.rs), activity card tests, several with Twilight's real
+rate limiter, [beside activity](src/activity/tests.rs), and message retry/feedback tests
 [beside inbound processing](src/inbound/tests.rs). The [external conversation tests](tests/conversations.rs)
 exercise native thread preparation with a local Discord HTTP substitute, not a gateway.
 

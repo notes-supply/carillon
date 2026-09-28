@@ -7,7 +7,7 @@ use crate::{
         IncomingMessage, Participation, admit_message, discord_parent_channel, prepare_conversation,
     },
     delivery::{
-        Feedback, clear_processing_feedback, processing_feedback, start_typing, terminal_feedback,
+        Feedback, clear_processing_feedback, processing_feedback, terminal_feedback, trigger_typing,
     },
     error::discord_failure_is_terminal,
 };
@@ -80,11 +80,8 @@ pub(crate) async fn message_worker(
             }
         };
         processing_feedback(&http, discord, &resolved.event.feedback_target_id).await;
-        let typing = start_typing(http.clone(), discord, &resolved.event.delivery_target_id).await;
+        trigger_typing(&http, discord, &resolved.event.delivery_target_id).await;
         let receipt = submit_event_with_retry(&core, &resolved.event).await;
-        if let Some(task) = typing {
-            task.abort();
-        }
         match receipt {
             Ok(receipt) if receipt.duplicate => {
                 clear_processing_feedback(&http, discord, &resolved.event.feedback_target_id).await;

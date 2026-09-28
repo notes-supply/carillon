@@ -2,8 +2,8 @@
 use crate::InterfaceError;
 use anyhow::Result;
 use carillon_protocol::model::{
-    Delivery, DeliveryAck, DeliveryOutcome, DeliveryReconciliation, EventReceipt, ExternalEvent,
-    INSTANCE_HEADER, ModelQuery, ModelUpdate, PROVIDER_HEADER,
+    ActiveTurn, Delivery, DeliveryAck, DeliveryOutcome, DeliveryReconciliation, EventReceipt,
+    ExternalEvent, INSTANCE_HEADER, ModelQuery, ModelUpdate, PROVIDER_HEADER,
 };
 use carillon_protocol::models::ModelState;
 use reqwest::{Client, IntoUrl, Method, RequestBuilder, Url};
@@ -101,6 +101,16 @@ impl CoreClient {
     pub async fn reconcile(&self) -> Result<DeliveryReconciliation, InterfaceError> {
         let request = self.request(Method::POST, self.url("/v1/deliveries/reconcile"));
         core_json(request, "reconcile abandoned delivery claims").await
+    }
+
+    /// This provider's queued and running turns, with the runtime's latest
+    /// activity for running ones when it has any.
+    ///
+    /// # Errors
+    /// Returns core rejection, transport, or malformed-response failures.
+    pub async fn active_turns(&self) -> Result<Vec<ActiveTurn>, InterfaceError> {
+        let request = self.request(Method::GET, self.url("/v1/activity"));
+        core_json(request, "read active turns from core").await
     }
 
     pub(crate) fn authenticates(&self, token: &str) -> bool {

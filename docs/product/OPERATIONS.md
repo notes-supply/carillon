@@ -110,6 +110,16 @@ Running the same command again finishes the change in either case, including reg
 
 Each bundled provider reports its own build version, not the `providers[].version` expectation in configuration. Core's status reports the observed version with `version_mismatch` when the provider ID and role match but its version differs. Unreachable or wrong-identity providers are `unavailable`, with the configured identity and expected version instead.
 
+### Activity cards
+
+While a turn runs, Discord shows a temporary message in the conversation, two seconds after the message was accepted: whether it is queued or working, the model's latest public commentary, the calls running now with how long they have run, and the last few finished calls (`✓` or `✗`) with a count of earlier ones. Bash calls show the command's first line only, without heredoc or script bodies, substitutions or long quoted arguments; file tools show the path, searches the pattern, and Discord tools the action and IDs it targets. Tool output, file contents and private reasoning are never shown. The card is edited only when its text changes, at most every three seconds, and never notifies anyone. The typing indicator continues while the turn runs.
+
+When the answer of a completed turn is delivered, the card is removed. An interrupted turn leaves the card saying it stopped before finishing, and a delivery that may not have arrived is stated on the card, including when both apply. When core is briefly unreachable the card keeps what it last showed.
+
+Redaction of what cards show is best-effort. Known credential shapes (labelled values, `name=value` assignments, authorization headers, URL user information and queries, values after options such as `--password`, and long opaque tokens) are hidden, but a short secret passed as an ordinary argument can appear. Cards go only to the conversation that started the turn. Turn cards off with `activity = false` in `providers/<id>.toml` and restart the Discord service; `typing = false` turns off typing independently.
+
+The provider remembers its cards in `<data_dir>/components/<provider>/activity-cards.json` until it removes or finalizes them. After a restart it deletes remembered cards before showing any replacement; if a card cannot be deleted, that turn gets no new card and the record is kept for the next start. A card created just before a crash, before it was recorded, is not removed automatically. Progress messages share Discord's rate limits with answers: they are bounded and never block delivery in the provider, but Discord can make an answer wait for its share of a common limit.
+
 ### Assistant Discord tools
 
 The optional [native Pi integration](../../packages/discord-pi/README.md) lets the

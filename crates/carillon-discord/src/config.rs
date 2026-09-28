@@ -20,6 +20,9 @@ pub struct DiscordConfig {
     pub routes: Vec<DiscordRoute>,
     #[serde(default = "enabled")]
     pub typing: bool,
+    /// Show a temporary card of what a running turn is doing.
+    #[serde(default = "enabled")]
+    pub activity: bool,
     #[serde(default = "enabled")]
     pub reactions: bool,
     #[serde(default = "processing_emoji")]
@@ -149,6 +152,7 @@ impl DiscordConfig {
             allowed_user_ids,
             routes,
             typing: enabled(),
+            activity: enabled(),
             reactions: enabled(),
             processing_emoji: processing_emoji(),
             delivered_emoji: delivered_emoji(),
@@ -360,6 +364,7 @@ allowed_user_ids = ["200"]
         assert!(config.bot_user_id.is_empty());
         assert!(config.routes.is_empty());
         assert!(config.typing);
+        assert!(config.activity);
         assert!(config.reactions);
         assert_eq!(config.processing_emoji, "👀");
         assert_eq!(config.delivered_emoji, "✅");

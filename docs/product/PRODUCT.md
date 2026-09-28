@@ -17,7 +17,7 @@ An operator can:
 1. install Carillon as an ordinary Unix user;
 2. configure a private Discord guild, allowlisted users, and explicit channel routes;
 3. converse through Pi with channel- or thread-scoped continuity;
-4. use Pi-native tools, extensions, and skills with the owner's Unix authority;
+4. use Pi-native tools, extensions, and skills with the owner's Unix authority, and follow what a running turn is doing in a temporary Discord message;
 5. choose the model and its engine settings for the agent or for one conversation with `/model` in Discord;
 6. restart the Discord or Pi provider independently, and install or reset Discord's command module without restarting it, keeping an installed module across restarts and updates;
 7. inspect recent turns and current provider/resource identity; and
@@ -45,6 +45,10 @@ Discord rejects direct messages and any event outside its configured guild, immu
 Once core accepts an event, it persists a queued turn. A core worker claims queued work and submits it to the selected runtime provider. Ambiguous execution is not automatically replayed; this is not an exactly-once guarantee for model or tool side effects. Completion stores the output and delivery intent atomically.
 
 A running turn whose outcome can no longer be proved, or that the runtime reports as failed, becomes interrupted. It is not automatically replayed. The conversation is told, with the runtime's explanation when it has one that is safe to show, such as a provider's usage limit. The next user message uses the same saved native session without an operator decision; already queued user messages proceed in order once the runtime is idle. Delivery has a separate durable outbox so a lost interface connection does not require rerunning the model.
+
+### Activity visibility
+
+While a turn is queued or running, its Discord conversation shows a temporary card after a short delay: the current operation with its relevant target (a Bash command's first line, a file path, a search pattern, a Discord action and target), a few recent calls, and a phase label when no call runs. Rapid work updates the card at most every three seconds and only when it changes. It never shows tool output, full scripts or private reasoning; redaction of what it does show is best-effort. The card is removed once a completed turn's answer is delivered and otherwise says honestly how the turn ended. Delivery of the answer never depends on the card.
 
 ### Runtime ownership
 

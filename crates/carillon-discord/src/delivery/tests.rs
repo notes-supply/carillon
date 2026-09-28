@@ -11,7 +11,7 @@ use axum::{
     response::IntoResponse as _,
     routing::{get, post},
 };
-use carillon_protocol::model::{Delivery, DeliveryReconciliation, TurnState};
+use carillon_protocol::model::{Delivery, DeliveryOutcome, DeliveryReconciliation, TurnState};
 use serde_json::json;
 use std::{
     sync::{
@@ -104,8 +104,12 @@ async fn ambiguous_claim_failures_reconcile_before_polling_again() -> anyhow::Re
             .ratelimiter(None)
             .build(),
     );
-    let outcome =
-        tokio::time::timeout(Duration::from_secs(5), delivery_loop(core, config, http)).await;
+    let (outcomes, _) = tokio::sync::mpsc::unbounded_channel();
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        delivery_loop(core, config, http, outcomes),
+    )
+    .await;
     server.abort();
     assert!(
         outcome?
@@ -260,12 +264,14 @@ async fn deliveries_reach_discord_verbatim_without_notifying_anyone() -> anyhow:
             .ratelimiter(None)
             .build(),
     );
+    let (outcomes, mut observed) = tokio::sync::mpsc::unbounded_channel();
     let outcome = tokio::time::timeout(
         Duration::from_secs(5),
         delivery_loop(
             core_client(format!("http://{address}")),
             discord_config(DiscordActivation::Always, DiscordConversation::Channel),
             http,
+            outcomes,
         ),
     )
     .await;
@@ -299,5 +305,16 @@ async fn deliveries_reach_discord_verbatim_without_notifying_anyone() -> anyhow:
     assert_eq!(acks.len(), 2);
     assert!(acks.iter().all(|ack| ack["outcome"] == "delivered"));
     assert_eq!(acks[0]["native_ref"], "901");
+    // Each outcome is reported after its acknowledgement, for activity cards.
+    let reported = std::iter::from_fn(|| observed.try_recv().ok())
+        .map(|outcome| (outcome.turn_id, outcome.turn_state, outcome.delivery))
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        reported.as_slice(),
+        [
+            (first, TurnState::Interrupted, DeliveryOutcome::Delivered),
+            (second, TurnState::Completed, DeliveryOutcome::Delivered),
+        ] if first == "turn-1" && second == "turn-2"
+    ));
     Ok(())
 }

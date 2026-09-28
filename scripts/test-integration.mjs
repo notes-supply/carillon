@@ -299,6 +299,7 @@ try {
   assert.match(restored.delivery.content, /Local provider response 7/u);
   await testModelPicker();
   await testProviderFailure();
+  await testActivityVisibility();
 
   process.stdout.write(
     `${JSON.stringify(
@@ -315,6 +316,7 @@ try {
         model_picker: "selections reach the runtime, persist, and never wait for a running turn",
         provider_failure:
           "explained once without replay, pages and credentials withheld, conversation continues",
+        activity: "a slow native command is visible to its interface before the answer",
       },
       null,
       2,
@@ -920,6 +922,124 @@ async function testProviderFailure() {
     await rename(`${privateState}-saved`, privateState);
     await rename(`${sessions}-saved`, sessions);
   }
+}
+
+/**
+ * Native Pi runs a real, deliberately slow `bash` call. While it runs, core's
+ * interface-authenticated activity view shows the command; afterwards the
+ * turn is gone from the view and the answer is delivered as before.
+ */
+async function testActivityVisibility() {
+  const privateState = join(installation, "pi");
+  const sessions = join(installation, "agents/default/sessions");
+  const marker = "activity-release";
+  const command = `until [ -e ${marker} ]; do sleep 0.1; done; echo released`;
+  let requests = 0;
+  const provider = createServer((request, response) => {
+    request.resume();
+    requests += 1;
+    const chunk = (delta, finish) =>
+      `data: ${JSON.stringify({
+        id: `activity-${String(requests)}`,
+        object: "chat.completion.chunk",
+        created: 0,
+        model: "activity-model",
+        choices: [{ index: 0, delta, finish_reason: finish }],
+      })}\n\n`;
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(
+      requests === 1
+        ? `${chunk(
+            {
+              role: "assistant",
+              content: "Waiting for the release marker.",
+              tool_calls: [
+                {
+                  index: 0,
+                  id: "call_slow",
+                  type: "function",
+                  function: { name: "bash", arguments: JSON.stringify({ command }) },
+                },
+              ],
+            },
+            null,
+          )}${chunk({}, "tool_calls")}data: [DONE]\n\n`
+        : `${chunk({ role: "assistant", content: "The marker appeared." }, null)}${chunk({}, "stop")}data: [DONE]\n\n`,
+    );
+  });
+  provider.listen(0, "127.0.0.1");
+  await once(provider, "listening");
+  await stop("runtime");
+  await rename(privateState, `${privateState}-saved`);
+  await rename(sessions, `${sessions}-saved`);
+  await mkdir(privateState);
+  try {
+    await writeFile(
+      join(privateState, "settings.json"),
+      JSON.stringify({ defaultProvider: "activity-fixture", defaultModel: "activity-model" }),
+    );
+    await writeFile(
+      join(privateState, "models.json"),
+      JSON.stringify({
+        providers: {
+          "activity-fixture": {
+            baseUrl: `http://127.0.0.1:${String(provider.address().port)}/v1`,
+            api: "openai-completions",
+            apiKey: "test-only",
+            models: [{ id: "activity-model" }],
+          },
+        },
+      }),
+    );
+    await start("runtime", { nativePi: true, env: { ...process.env, PI_OFFLINE: "1" } });
+    const answered = simulate("activity-slow", "wait for the marker");
+    answered.catch(() => undefined);
+    let running;
+    for (let attempt = 0; running === undefined && attempt < 200; attempt += 1) {
+      const turns = await activeTurns(`Bearer ${await credentialValue("discord-private")}`);
+      assert.equal(turns.status, 200);
+      running = turns.body.find((turn) => turn.activity?.running.length > 0);
+      if (running === undefined) await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    }
+    assert.ok(running, "the running command never became visible");
+    assert.equal(running.state, "running");
+    assert.equal(running.target_id, "300");
+    assert.deepEqual(
+      running.activity.running.map(({ tool, detail }) => ({ tool, detail })),
+      [{ tool: "bash", detail: command }],
+    );
+    assert.equal(running.activity.headline, "Waiting for the release marker.");
+    assert.equal(running.activity.phase, "tools");
+    for (const authorization of [null, `Bearer ${await credentialValue("operator")}`])
+      assert.equal((await activeTurns(authorization)).status, 403);
+
+    await writeFile(join(workspace, marker), "");
+    const { receipt, delivery } = await answered;
+    assert.equal(receipt.turn_id, running.turn_id);
+    assert.equal(delivery.turn_state, "completed");
+    assert.match(delivery.content, /The marker appeared\.$/u);
+    const after = await activeTurns(`Bearer ${await credentialValue("discord-private")}`);
+    assert.deepEqual(after.body, []);
+    assert.equal(requests, 2);
+  } finally {
+    await stop("runtime");
+    provider.close();
+    await rm(join(workspace, marker), { force: true });
+    await rm(privateState, { recursive: true, force: true });
+    await rm(sessions, { recursive: true, force: true });
+    await rename(`${privateState}-saved`, privateState);
+    await rename(`${sessions}-saved`, sessions);
+  }
+}
+
+async function activeTurns(authorization) {
+  const response = await fetch(`http://127.0.0.1:${String(basePort)}/v1/activity`, {
+    headers: {
+      "x-carillon-provider": "discord-private",
+      ...(authorization === null ? {} : { authorization }),
+    },
+  });
+  return { status: response.status, body: await response.json() };
 }
 
 async function testMissingResourceRoot(turnId) {

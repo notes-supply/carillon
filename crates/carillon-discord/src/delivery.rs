@@ -1,12 +1,13 @@
 //! Native delivery and feedback. Core remains the owner of delivery claims/outcomes.
 use crate::{
+    activity::Outcome,
     client::CoreClient,
     config::{DiscordConfig, DiscordEmoji},
 };
 use anyhow::{Context, Result, bail};
 use carillon_protocol::model::{Delivery, DeliveryOutcome};
 use std::{sync::Arc, time::Duration};
-use tokio::{task::JoinHandle, time::sleep};
+use tokio::{sync::mpsc, time::sleep};
 use tracing::warn;
 use twilight_http::{Client as DiscordHttp, request::channel::reaction::RequestReactionType};
 use twilight_model::{
@@ -111,38 +112,31 @@ fn feedback_ids(target: &str) -> Result<(Id<ChannelMarker>, Id<MessageMarker>)> 
     ))
 }
 
-pub(crate) async fn start_typing(
-    http: Arc<DiscordHttp>,
-    config: &DiscordConfig,
-    target: &str,
-) -> Option<JoinHandle<()>> {
+/// One typing indicator at admission. While the turn then runs, the
+/// activity monitor keeps typing.
+pub(crate) async fn trigger_typing(http: &DiscordHttp, config: &DiscordConfig, target: &str) {
     if !config.typing {
-        return None;
+        return;
     }
     let channel = match target.parse::<Id<ChannelMarker>>() {
         Ok(channel) => channel,
         Err(failure) => {
             warn!(error = %failure, "Discord typing target is invalid");
-            return None;
+            return;
         }
     };
     if let Err(failure) = http.create_typing_trigger(channel).await {
         warn!(error = %failure, "Discord typing trigger failed");
     }
-    Some(tokio::spawn(async move {
-        loop {
-            sleep(Duration::from_secs(8)).await;
-            if let Err(failure) = http.create_typing_trigger(channel).await {
-                warn!(error = %failure, "Discord typing refresh failed");
-            }
-        }
-    }))
 }
 
+/// Claims, sends and acknowledges deliveries. Each recorded outcome is
+/// reported to `outcomes` without waiting for whoever receives it.
 pub(crate) async fn delivery_loop(
     core: CoreClient,
     config: DiscordConfig,
     http: Arc<DiscordHttp>,
+    outcomes: mpsc::UnboundedSender<Outcome>,
 ) -> Result<()> {
     loop {
         let delivery = match core.claim_delivery().await {
@@ -181,6 +175,12 @@ pub(crate) async fn delivery_loop(
                 Err(failure) => bail!("delivery acknowledgement rejected: {}", failure.message),
             }
         }
+        // Nobody may be listening: activity cards can be disabled.
+        let _ = outcomes.send(Outcome {
+            turn_id: delivery.turn_id.clone(),
+            turn_state: delivery.turn_state,
+            delivery: outcome,
+        });
         terminal_feedback(&http, &config, &delivery.feedback_target_id, feedback).await;
     }
 }

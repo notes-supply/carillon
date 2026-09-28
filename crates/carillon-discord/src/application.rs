@@ -7,6 +7,7 @@ use crate::{
 
 use crate::{
     InterfaceError,
+    activity::{CardRecords, activity_monitor},
     client::CoreClient,
     commands::{
         Change, ChangeError, CommandFiles, Commands, DiscordApp, MODULE_LIMIT, ModelCalls, Refusal,
@@ -163,11 +164,14 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
     let discord_token_path = options
         .discord_token_file
         .context("--discord-token-file is required outside deterministic mode")?;
+    let cards =
+        CardRecords::load(state_directory(&config, &provider.id).join("activity-cards.json"))?;
     connect(
         state,
         listener,
         read_token_file(discord_token_path)?,
         reconciled,
+        cards,
     )
     .await
 }
@@ -180,6 +184,7 @@ async fn connect(
     listener: TcpListener,
     discord_token: String,
     reconciled: DeliveryReconciliation,
+    cards: CardRecords,
 ) -> Result<()> {
     let http = Arc::new(DiscordHttp::new(discord_token.clone()));
     let current_user = http.current_user().await?.model().await?;
@@ -219,14 +224,23 @@ async fn connect(
         .await;
     });
     let router = discord_router(state.clone(), false);
+    let (outcomes, observed) = mpsc::unbounded_channel();
+    let monitor = activity_monitor(
+        state.core.clone(),
+        http.clone(),
+        state.discord.clone(),
+        Arc::new(cards),
+        observed,
+    );
     tokio::select! {
         result = axum::serve(listener, router).into_future() => result.map_err(Into::into),
         result = gateway_loop(state, discord_token, messages) => {
             result.context("Discord gateway stopped")
         },
-        result = delivery_loop(delivery_state.core, delivery_state.discord, http) => {
+        result = delivery_loop(delivery_state.core, delivery_state.discord, http, outcomes) => {
             result.context("Discord delivery worker stopped")
         },
+        () = monitor => bail!("Discord activity monitor stopped"),
     }
 }
 
