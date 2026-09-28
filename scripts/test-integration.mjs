@@ -1249,6 +1249,17 @@ async function testConfigurationRefusals() {
     } finally {
       await rename(`${providerConfigPath()}-saved`, providerConfigPath());
     }
+    // Invalid inline presentation fails before the provider starts any work.
+    const discordSettings = await readFile(providerConfigPath(), "utf8");
+    try {
+      const invalidMarker = discordSettings.replace(/^working = .*$/mu, 'working = "@everyone"');
+      assert.notEqual(invalidMarker, discordSettings);
+      await writeFile(providerConfigPath(), invalidMarker);
+      assertStartupRefused("discord", /activity_markers\.working/u);
+      assert.deepEqual(await readFile(database), previousDatabase);
+    } finally {
+      await writeFile(providerConfigPath(), discordSettings);
+    }
     const brokenModule = join(workspace, "broken.wasm");
     await writeFile(brokenModule, "\0asm broken");
     assertStartupRefused("discord", /read release command module/u, [], {

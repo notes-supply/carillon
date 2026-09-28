@@ -1,7 +1,7 @@
 //! The monitor against a local substitute serving both core's activity list
 //! and Discord's API through a real Twilight client. Cases marked as using
 //! the rate limiter run Twilight's own limiter, permit queue and 429 retries.
-use super::{CardRecords, Outcome, active_text, activity_monitor, final_text, finishing_text};
+use super::{CardRecords, Outcome, activity_monitor};
 use crate::{
     client::test_client as core_client,
     config::{DiscordActivation, DiscordConfig, DiscordConversation},
@@ -364,7 +364,18 @@ async fn a_slow_turn_gets_one_delayed_card_that_follows_it_and_is_removed_after_
         running("fast", "301", accepted, None),
     ]);
     let started = Instant::now();
-    let (outcomes, monitor) = discord.monitor(discord.http(false), config(false), &records);
+    // Exercise configured inline presentation through the real outbound requests.
+    let mut configured = config(false);
+    configured.activity_markers = toml::from_str(
+        r#"
+working = "<a:working:123>"
+running = "<:tool:456>"
+succeeded = "✔"
+failed = ""
+finishing = "◇"
+"#,
+    )?;
+    let (outcomes, monitor) = discord.monitor(discord.http(false), configured, &records);
     // A turn that ends before the appearance delay never shows a card.
     tokio::time::sleep(Duration::from_millis(500)).await;
     discord.list(vec![slow(testing())]);
@@ -380,9 +391,13 @@ async fn a_slow_turn_gets_one_delayed_card_that_follows_it_and_is_removed_after_
         "appeared too soon"
     );
     let text = card.content();
-    assert!(text.starts_with(&format!("⏳ Working · started <t:{accepted}:R>")));
+    assert!(text.starts_with(&format!(
+        "<a:working:123> Working · started <t:{accepted}:R>"
+    )));
     assert!(text.contains("> @everyone: checking <@200>'s tests"));
-    assert!(text.contains("↳ bash `cargo test -p carillon-discord …` · <t:1790000000:R>"));
+    assert!(
+        text.contains("<:tool:456> bash `cargo test -p carillon-discord …` · <t:1790000000:R>")
+    );
     assert_eq!(card.body["allowed_mentions"], json!({"parse": []}));
     let expected = json!({"channel_id": "300", "message_id": "901"});
     assert_eq!(recorded(&records)?["slow"], expected);
@@ -404,9 +419,12 @@ async fn a_slow_turn_gets_one_delayed_card_that_follows_it_and_is_removed_after_
         "edited too soon"
     );
     let text = edited[0].content();
-    assert!(text.contains("✓ read `src/lib.rs`"));
-    assert!(text.contains("✗ bash `cargo test -p carillon-discord …`"));
-    assert!(text.contains("↳ bash `cargo build`"));
+    assert!(text.lines().any(|line| line == "✔ read `src/lib.rs`"));
+    assert!(
+        text.lines()
+            .any(|line| line == "bash `cargo test -p carillon-discord …`")
+    );
+    assert!(text.contains("<:tool:456> bash `cargo build`"));
     assert_eq!(edited[0].body["allowed_mentions"], json!({"parse": []}));
     // An unchanged turn is not edited again.
     tokio::time::sleep(Duration::from_millis(3_500)).await;
@@ -418,8 +436,8 @@ async fn a_slow_turn_gets_one_delayed_card_that_follows_it_and_is_removed_after_
         .wait_for(&Method::PATCH, "/channels/300/messages/901", 2)
         .await?;
     let text = finishing[1].content();
-    assert!(text.starts_with("⏳ Finishing up") && text.contains("✓ read `src/lib.rs`"));
-    assert!(!text.contains('↳'));
+    assert!(text.starts_with("◇ Finishing up") && text.contains("read `src/lib.rs`"));
+    assert!(!text.contains("cargo build"));
 
     settle(&outcomes, "slow", completed, delivered)?;
     let deleted = discord
@@ -497,14 +515,14 @@ async fn ended_turns_keep_an_honest_card_and_stale_reads_cannot_revive_them() ->
             .map(|seen| seen.content().to_owned())
             .unwrap_or_default()
     };
-    assert!(text("300").starts_with("⚠️ Finished, but the reply may not have been delivered."));
-    assert!(text("301").starts_with("⏹️ Stopped before finishing.\n"));
-    assert!(text("302").starts_with(
-        "⏹️ Stopped before finishing; the notice about it may not have been delivered."
-    ));
+    assert!(text("300").contains("reply may not have been delivered"));
+    assert!(text("301").contains("Stopped before finishing"));
+    assert!(!text("301").contains("may not have been delivered"));
+    assert!(text("302").contains("Stopped before finishing"));
+    assert!(text("302").contains("notice about it may not have been delivered"));
     for channel in ["300", "301", "302"] {
-        assert!(text(channel).contains("✓ read `Makefile`"));
-        assert!(!text(channel).contains('↳'));
+        assert!(text(channel).contains("read `Makefile`"));
+        assert!(!text(channel).contains("make deploy"));
     }
     tokio::time::sleep(Duration::from_millis(4_000)).await;
     let seen = discord.seen();
@@ -738,7 +756,8 @@ async fn disabled_cards_still_type_while_turns_run_and_an_unreachable_core_chang
     let finishing = discord
         .wait_for(&Method::PATCH, "/channels/300/messages/901", 1)
         .await?;
-    assert!(finishing[0].content().starts_with("⏳ Finishing up"));
+    assert!(finishing[0].content().contains("Finishing up"));
+    assert!(!finishing[0].content().contains("bash `x`"));
     monitor.abort();
     Ok(())
 }
@@ -908,80 +927,6 @@ async fn an_answer_waits_for_progress_only_in_a_bucket_discord_shares() -> anyho
     Ok(())
 }
 
-#[test]
-fn cards_show_bounded_safe_text() {
-    let mut last = None;
-    let queued = ActiveTurn {
-        state: TurnState::Queued,
-        ..running("t", "300", 1_790_000_000, None)
-    };
-    assert_eq!(
-        active_text(&queued, &mut last),
-        "⏳ Waiting for earlier work to finish · queued <t:1790000000:R>"
-    );
-    let mut busy = tools(
-        Some(&"long commentary ".repeat(20)),
-        &[
-            ("bash", "echo `id` > x"),
-            ("read", "a"),
-            ("read", "b"),
-            ("read", "c"),
-            ("read", "d"),
-        ],
-        &[
-            ("discord_messages", "messages.send channel 300", true),
-            ("mcp<@1>", "x", false),
-        ],
-    );
-    busy.tool_calls = 12;
-    let text = active_text(
-        &running("t", "300", 1_790_000_000, Some(busy.clone())),
-        &mut last,
-    );
-    let lines = text.lines().collect::<Vec<_>>();
-    assert_eq!(lines[0], "⏳ Working · started <t:1790000000:R>");
-    assert_eq!(lines[1].chars().count(), 102);
-    assert_eq!(lines[2], "… 5 earlier calls");
-    assert_eq!(lines[3], "✓ discord_messages `messages.send channel 300`");
-    assert_eq!(lines[4], "✗ mcp??1? `x`");
-    assert_eq!(lines[5], "↳ bash `echo ˋidˋ > x` · <t:1790000000:R>");
-    assert_eq!(lines[8], "↳ … and 2 more running");
-    assert_eq!(lines.len(), 9);
-    // Without a current snapshot the last one's history remains, nothing runs.
-    let unknown = active_text(&running("t", "300", 1_790_000_000, None), &mut last);
-    assert!(unknown.starts_with("⏳ Working · started <t:1790000000:R>\n… 10 earlier calls"));
-    assert!(!unknown.contains('↳') && !unknown.contains("long commentary"));
-    assert_eq!(
-        finishing_text(last.as_ref()).lines().next(),
-        Some("⏳ Finishing up")
-    );
-    busy.phase = ActivityPhase::Retrying;
-    busy.running.clear();
-    assert!(
-        active_text(&running("t", "300", 1, Some(busy.clone())), &mut last)
-            .starts_with("⏳ Working · Retrying the model request · started <t:1:R>")
-    );
-    assert_eq!(
-        final_text(
-            TurnState::Completed,
-            DeliveryOutcome::Delivered,
-            Some(&busy)
-        ),
-        None
-    );
-    busy.recent = vec![
-        FinishedTool {
-            tool: "bash".to_owned(),
-            detail: Some("x".repeat(3_000)),
-            ok: true,
-        };
-        5
-    ];
-    let long = active_text(&running("t", "300", 1, Some(busy)), &mut last);
-    assert!(long.chars().count() < 2_000);
-    assert!(long.lines().all(|line| line.chars().count() <= 130));
-}
-
 #[tokio::test]
 async fn a_card_whose_edits_are_refused_is_still_removed_after_delivery() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
@@ -1069,8 +1014,9 @@ async fn a_finishing_card_that_failed_to_update_is_retried_until_it_stops_showin
         .await?;
     assert!(edits[1].at - edits[0].at >= Duration::from_millis(2_900));
     for edit in &edits {
-        assert!(edit.content().starts_with("⏳ Finishing up"));
-        assert!(!edit.content().contains('↳'));
+        assert!(edit.content().contains("Finishing up"));
+        assert!(edit.content().contains("read `a.rs`"));
+        assert!(!edit.content().contains("cargo test"));
     }
     // Once shown, the same text is not sent again.
     tokio::time::sleep(Duration::from_millis(4_000)).await;

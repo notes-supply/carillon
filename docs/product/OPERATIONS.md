@@ -112,11 +112,66 @@ Each bundled provider reports its own build version, not the `providers[].versio
 
 ### Activity cards
 
-While a turn runs, Discord shows a temporary message in the conversation, two seconds after the message was accepted: whether it is queued or working, the model's latest public commentary, the calls running now with how long they have run, and the last few finished calls (`✓` or `✗`) with a count of earlier ones. Bash calls show the command's first line only, without heredoc or script bodies, substitutions or long quoted arguments; file tools show the path, searches the pattern, and Discord tools the action and IDs it targets. Tool output, file contents and private reasoning are never shown. The card is edited only when its text changes, at most every three seconds, and never notifies anyone. The typing indicator continues while the turn runs.
+While a turn runs, Discord shows a temporary message in the conversation, two seconds after the message was accepted: whether it is queued or working, the model's latest public commentary, the calls running now with how long they have run, and the last few finished calls (`✓` or `✗` by default) with a count of earlier ones. Bash calls show the command's first line only, without heredoc or script bodies, substitutions or long quoted arguments; file tools show the path, searches the pattern, and Discord tools the action and IDs it targets. Tool output, file contents and private reasoning are never shown. The card is edited only when its text changes, at most every three seconds, and never notifies anyone. The typing indicator continues while the turn runs.
 
 When the answer of a completed turn is delivered, the card is removed. An interrupted turn leaves the card saying it stopped before finishing, and a delivery that may not have arrived is stated on the card, including when both apply. When core is briefly unreachable the card keeps what it last showed.
 
 Redaction of what cards show is best-effort. Known credential shapes (labelled values, `name=value` assignments, authorization headers, URL user information and queries, values after options such as `--password`, and long opaque tokens) are hidden, but a short secret passed as an ordinary argument can appear. Cards go only to the conversation that started the turn. Turn cards off with `activity = false` in `providers/<id>.toml` and restart the Discord service; `typing = false` turns off typing independently.
+
+Configure card markers in that same provider file. Omitting the `[activity_markers]` table, or any field within it, uses these defaults:
+
+```toml
+[activity_markers]
+working = "⏳"
+queued = "⏳"
+finishing = "⏳"
+running = "↳"
+succeeded = "✓"
+failed = "✗"
+uncertain = "⚠️"
+stopped = "⏹️"
+```
+
+`working`, `queued` and `finishing` prefix the card's current status. `running` prefixes running tools, while `succeeded` and `failed` mark recent tool results. `uncertain` marks a completed turn whose reply may not have arrived; `stopped` marks an interrupted turn, including when its notice may not have arrived.
+
+Ordinary Unicode emoji and symbols such as `✓` and `↳` are supported. Custom Discord emotes use message syntax: `<:name:id>` for static emotes and `<a:name:id>` for animated emotes. Use an empty string to omit a marker and its separating space. For example, this partial table overrides three fields and leaves the others at their defaults:
+
+```toml
+[activity_markers]
+working = "<a:working:123>"
+running = "<:tool:456>"
+succeeded = ""
+```
+
+Replace those sample emote names and IDs with emotes available to the bot. Custom names must contain 2–32 ASCII letters, digits or underscores, and IDs must be positive decimal Discord IDs without leading zeros. Validation checks syntax, not an emote's availability on Discord.
+
+Each marker is limited to 64 UTF-8 bytes and must be empty, a complete recognized Unicode emoji sequence, a custom emote, or ordinary Unicode symbols/punctuation. Whitespace, control or invisible formatting characters, plain text, and Discord mention/Markdown syntax are rejected; joined emoji sequences remain supported. Invalid values report the specific `activity_markers.FIELD` to repair.
+
+To keep all card text with no markers:
+
+```toml
+[activity_markers]
+working = ""
+queued = ""
+finishing = ""
+running = ""
+succeeded = ""
+failed = ""
+uncertain = ""
+stopped = ""
+```
+
+Reactions remain independent: the top-level `processing_emoji`, `delivered_emoji`, `failed_emoji` and `uncertain_emoji` fields still accept a Unicode emoji or reaction syntax such as `working:123`. Reaction syntax alone is not valid card-marker syntax. Set these top-level fields outside `[activity_markers]`; disabling reactions with `reactions = false` does not disable card markers. `carillon discord configure` preserves both tuned reactions and activity markers when rewriting admission settings.
+
+After editing the file, validate it and use the existing restart workflow:
+
+```sh
+carillon discord check
+systemctl --user restart carillon-discord.service
+carillon status
+```
+
+Use `carillon discord check --provider ID` when several Discord providers are configured. Settings take effect at provider startup; invalid markers fail configuration validation before work starts. Card requests continue to disable all mentions, including with custom markers.
 
 The provider remembers its cards in `<data_dir>/components/<provider>/activity-cards.json` until it removes or finalizes them. After a restart it deletes remembered cards before showing any replacement; if a card cannot be deleted, or its creation was never confirmed, that turn gets no new card. If the file cannot be read (for example it is malformed or not a readable file), the provider logs `activity cards are off until their records can be read`, starts without cards and leaves the file untouched; typing and delivery continue. Inspect it, delete any stale cards it names by hand, then remove or repair it and restart the Discord service. A card created just before a crash, before it was recorded, is not removed automatically. Progress messages share Discord's rate limits with answers: they are bounded and never block delivery in the provider, but Discord can make an answer wait for its share of a common limit.
 

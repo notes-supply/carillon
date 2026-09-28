@@ -32,6 +32,9 @@ retain the actual Wasm path rather than substituting this direct native call.
   loop, and records only the channel and message of cards it created, so a restart
   can remove them before showing a replacement. Every Discord call is bounded,
   including rate-limiter waits and Twilight's 429 retries.
+  Its ordinary [`render` module](src/activity/render.rs) owns pure card text rendering,
+  using the concrete activity markers from [`config`](src/config.rs). Markers have
+  configurable defaults, independently of reactions; see [activity card settings](../../docs/product/OPERATIONS.md#activity-cards).
 - [`commands`](src/commands.rs) hosts replaceable command generations, registers
   them with Discord, and owns the installed module: `Commands::install`/`reset`
   validate, register, activate and save under the installation's maintenance lock,
@@ -67,8 +70,9 @@ Change picker layout in the [command library](../carillon-discord-commands/src/m
 not in core or Pi. Host, install and reset tests live in `commands.rs`; HTTP/gateway composition,
 tests live in [application tests](src/application/tests.rs). Transport-failure tests
 live [beside the core client](src/client/tests.rs), native delivery recovery tests
-[beside delivery](src/delivery/tests.rs), activity card tests, several with Twilight's real
-rate limiter, [beside activity](src/activity/tests.rs), and message retry/feedback tests
+[beside delivery](src/delivery/tests.rs), activity lifecycle tests, several with Twilight's real
+rate limiter, [beside activity](src/activity/tests.rs), literal card rendering tests
+[beside the renderer](src/activity/render/tests.rs), and message retry/feedback tests
 [beside inbound processing](src/inbound/tests.rs). The [external conversation tests](tests/conversations.rs)
 exercise native thread preparation with a local Discord HTTP substitute, not a gateway.
 

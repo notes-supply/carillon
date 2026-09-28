@@ -15,9 +15,7 @@
 use crate::{client::CoreClient, config::DiscordConfig};
 use anyhow::{Context as _, Result};
 use carillon_installation::filesystem::atomic_write;
-use carillon_protocol::model::{
-    ActiveTurn, ActivityPhase, DeliveryOutcome, FinishedTool, TurnActivity, TurnState,
-};
+use carillon_protocol::model::{ActiveTurn, DeliveryOutcome, TurnState};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
@@ -49,6 +47,8 @@ use twilight_model::{
     },
 };
 
+mod render;
+
 /// How often core is asked which turns are active.
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// A turn that finishes sooner after acceptance never shows a card.
@@ -70,11 +70,6 @@ const RETRY_DELAY: Duration = Duration::from_secs(2);
 /// Recently settled turns, so a read taken before a settle cannot show a
 /// finished turn again. Turn IDs are never reused.
 const SETTLED_MEMORY: usize = 256;
-const RECENT_LINES: usize = 5;
-const RUNNING_LINES: usize = 3;
-const DETAIL_LIMIT: usize = 120;
-const HEADLINE_LIMIT: usize = 100;
-const MESSAGE_LIMIT: usize = 2_000;
 
 /// How the delivery loop saw a turn end, reported after core recorded it.
 #[derive(Clone, Debug)]
@@ -441,6 +436,7 @@ async fn follow_card(
     channel: Id<ChannelMarker>,
     turn: &ActiveTurn,
 ) {
+    let markers = &cards.config.activity_markers;
     let appear = Instant::now() + until_after(turn.accepted_at, APPEAR_AFTER);
     if timeout_at(appear, view.wait_for(|view| !view.is_active()))
         .await
@@ -453,7 +449,10 @@ async fn follow_card(
         let View::Active(turn) = view.borrow_and_update().clone() else {
             return;
         };
-        let text = active_text(&turn, &mut last);
+        let text = render::active_text(&turn, last.as_ref(), markers);
+        if turn.state != TurnState::Queued {
+            last = turn.activity.or(last);
+        }
         match cards.create(channel, &text, view).await {
             Call::Done(message_id) => {
                 let card = Card {
@@ -501,8 +500,14 @@ async fn follow_card(
                 turn_state,
                 delivery,
             } => break (turn_state, delivery),
-            View::Active(turn) => active_text(&turn, &mut last),
-            View::Finishing => finishing_text(last.as_ref()),
+            View::Active(turn) => {
+                let text = render::active_text(&turn, last.as_ref(), markers);
+                if turn.state != TurnState::Queued {
+                    last = turn.activity.or(last);
+                }
+                text
+            }
+            View::Finishing => render::finishing_text(last.as_ref(), markers),
             View::Unread => continue,
         };
         if !editable || text == shown {
@@ -527,7 +532,7 @@ async fn follow_card(
         next_edit = Instant::now() + EDIT_INTERVAL;
     };
     let status = if editable {
-        final_text(turn_state, delivery, last.as_ref())
+        render::final_text(turn_state, delivery, last.as_ref(), markers)
     } else {
         // A card that cannot say how the turn ended is removed instead of
         // left claiming work.
@@ -773,133 +778,6 @@ async fn unwanted(wanted: Option<Wanted>) {
             let _ = view.wait_for(|view| !holds(view)).await;
         }
         None => pending().await,
-    }
-}
-
-/// A running or queued turn's card. Remembers the latest snapshot so a turn
-/// the runtime cannot describe right now keeps its recent history, without
-/// claiming anything is still running.
-fn active_text(turn: &ActiveTurn, last: &mut Option<TurnActivity>) -> String {
-    let started = format!("<t:{}:R>", turn.accepted_at);
-    if turn.state == TurnState::Queued {
-        return format!("⏳ Waiting for earlier work to finish · queued {started}");
-    }
-    if let Some(activity) = &turn.activity {
-        *last = Some(activity.clone());
-    }
-    let Some(activity) = &turn.activity else {
-        return card_text(
-            &format!("⏳ Working · started {started}"),
-            last.as_ref(),
-            false,
-        );
-    };
-    let label = match activity.phase {
-        ActivityPhase::Starting => " · Starting",
-        ActivityPhase::Model => " · Waiting for the model",
-        ActivityPhase::Tools => "",
-        ActivityPhase::Retrying => " · Retrying the model request",
-        ActivityPhase::Compacting => " · Compacting the conversation",
-    };
-    card_text(
-        &format!("⏳ Working{label} · started {started}"),
-        Some(activity),
-        true,
-    )
-}
-
-/// Core has stopped listing the turn: it no longer runs, and its answer or
-/// notice is on its way. Nothing is shown as still running.
-fn finishing_text(last: Option<&TurnActivity>) -> String {
-    card_text("⏳ Finishing up", last, false)
-}
-
-/// What a card says after its turn ended, or `None` when it is removed.
-fn final_text(
-    turn_state: TurnState,
-    delivery: DeliveryOutcome,
-    last: Option<&TurnActivity>,
-) -> Option<String> {
-    let status = match (turn_state, delivery) {
-        (TurnState::Completed, DeliveryOutcome::Delivered) => return None,
-        (TurnState::Completed, DeliveryOutcome::Uncertain) => {
-            "⚠️ Finished, but the reply may not have been delivered."
-        }
-        (_, DeliveryOutcome::Delivered) => "⏹️ Stopped before finishing.",
-        (_, DeliveryOutcome::Uncertain) => {
-            "⏹️ Stopped before finishing; the notice about it may not have been delivered."
-        }
-    };
-    Some(card_text(status, last, false))
-}
-
-fn card_text(header: &str, activity: Option<&TurnActivity>, running: bool) -> String {
-    let mut lines = vec![header.to_owned()];
-    if let Some(activity) = activity {
-        if running && let Some(headline) = &activity.headline {
-            lines.push(format!("> {}", cut(headline, HEADLINE_LIMIT)));
-        }
-        let shown_running = if running { activity.running.len() } else { 0 };
-        let earlier = usize::try_from(activity.tool_calls)
-            .unwrap_or(usize::MAX)
-            .saturating_sub(activity.recent.len() + shown_running);
-        if earlier > 0 {
-            lines.push(format!(
-                "… {earlier} earlier call{}",
-                if earlier == 1 { "" } else { "s" }
-            ));
-        }
-        let recent = activity.recent.len().saturating_sub(RECENT_LINES);
-        for FinishedTool { tool, detail, ok } in &activity.recent[recent..] {
-            lines.push(tool_line(
-                if *ok { "✓" } else { "✗" },
-                tool,
-                detail.as_deref(),
-            ));
-        }
-        if running {
-            for tool in activity.running.iter().take(RUNNING_LINES) {
-                lines.push(format!(
-                    "{} · <t:{}:R>",
-                    tool_line("↳", &tool.tool, tool.detail.as_deref()),
-                    tool.started_at
-                ));
-            }
-            let more = activity.running.len().saturating_sub(RUNNING_LINES);
-            if more > 0 {
-                lines.push(format!("↳ … and {more} more running"));
-            }
-        }
-    }
-    cut(&lines.join("\n"), MESSAGE_LIMIT)
-}
-
-/// A tool as plain text and its detail as inline code, so neither can
-/// format, mention or link anything.
-fn tool_line(mark: &str, tool: &str, detail: Option<&str>) -> String {
-    let tool = tool
-        .chars()
-        .map(|character| {
-            if character.is_alphanumeric() || "_.:-".contains(character) {
-                character
-            } else {
-                '?'
-            }
-        })
-        .collect::<String>();
-    match detail {
-        Some(detail) => format!(
-            "{mark} {tool} `{}`",
-            cut(&detail.replace('`', "ˋ"), DETAIL_LIMIT)
-        ),
-        None => format!("{mark} {tool}"),
-    }
-}
-
-fn cut(text: &str, limit: usize) -> String {
-    match text.char_indices().nth(limit - 1) {
-        Some((end, _)) if text[end..].chars().count() > 1 => format!("{}…", &text[..end]),
-        _ => text.to_owned(),
     }
 }
 

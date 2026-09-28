@@ -230,6 +230,7 @@ pub(crate) fn discord_config(
         }],
         typing: true,
         activity: true,
+        activity_markers: crate::config::ActivityMarkers::default(),
         reactions: true,
         processing_emoji: "👀".to_owned(),
         delivered_emoji: "✅".to_owned(),

@@ -8,6 +8,7 @@ use anyhow::{Context as _, Result, bail};
 use carillon_installation::config::{LoadedConfig, ProviderRole};
 use carillon_installation::filesystem::atomic_write;
 use serde::{Deserialize, Serialize};
+use unicode_general_category::{GeneralCategory, get_general_category};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct DiscordConfig {
@@ -23,6 +24,8 @@ pub struct DiscordConfig {
     /// Show a temporary card of what a running turn is doing.
     #[serde(default = "enabled")]
     pub activity: bool,
+    #[serde(default)]
+    pub activity_markers: ActivityMarkers,
     #[serde(default = "enabled")]
     pub reactions: bool,
     #[serde(default = "processing_emoji")]
@@ -53,6 +56,100 @@ fn failed_emoji() -> String {
 
 fn uncertain_emoji() -> String {
     "⚠️".to_owned()
+}
+
+/// Inline card markers, independent of the provider's reaction emoji.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ActivityMarkers {
+    pub working: String,
+    pub queued: String,
+    pub finishing: String,
+    pub running: String,
+    pub succeeded: String,
+    pub failed: String,
+    pub uncertain: String,
+    pub stopped: String,
+}
+
+impl Default for ActivityMarkers {
+    fn default() -> Self {
+        Self {
+            working: "⏳".to_owned(),
+            queued: "⏳".to_owned(),
+            finishing: "⏳".to_owned(),
+            running: "↳".to_owned(),
+            succeeded: "✓".to_owned(),
+            failed: "✗".to_owned(),
+            uncertain: "⚠️".to_owned(),
+            stopped: "⏹️".to_owned(),
+        }
+    }
+}
+
+impl ActivityMarkers {
+    fn validate(&self) -> Result<()> {
+        for (field, value) in [
+            ("working", &self.working),
+            ("queued", &self.queued),
+            ("finishing", &self.finishing),
+            ("running", &self.running),
+            ("succeeded", &self.succeeded),
+            ("failed", &self.failed),
+            ("uncertain", &self.uncertain),
+            ("stopped", &self.stopped),
+        ] {
+            validate_activity_marker(value)
+                .with_context(|| format!("invalid Discord activity_markers.{field}"))?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_activity_marker(value: &str) -> Result<()> {
+    if value.len() > 64 {
+        bail!("activity marker must be at most 64 UTF-8 bytes");
+    }
+    if value.is_empty() || emojis::get(value).is_some() {
+        return Ok(());
+    }
+    if value.contains(':') || value.starts_with('<') {
+        let emoji = value
+            .strip_prefix("<a:")
+            .or_else(|| value.strip_prefix("<:"))
+            .and_then(|emoji| emoji.strip_suffix('>'))
+            .map(DiscordEmoji::parse);
+        if matches!(emoji, Some(Ok(DiscordEmoji::Custom { .. }))) {
+            return Ok(());
+        }
+        bail!(
+            "custom activity marker must use <:name:id> (static) or <a:name:id> (animated), with a 2–32 character ASCII emoji name and canonical snowflake ID"
+        );
+    }
+    // Recognized emoji above may contain joiners or variation selectors. Other
+    // markers must be visible symbols, without Discord mention/markdown syntax.
+    if !value.chars().all(|character| {
+        !"<>@`*_~|\\[]()#+-".contains(character)
+            && matches!(
+                get_general_category(character),
+                GeneralCategory::MathSymbol
+                    | GeneralCategory::CurrencySymbol
+                    | GeneralCategory::ModifierSymbol
+                    | GeneralCategory::OtherSymbol
+                    | GeneralCategory::DashPunctuation
+                    | GeneralCategory::OtherPunctuation
+                    | GeneralCategory::OpenPunctuation
+                    | GeneralCategory::ClosePunctuation
+                    | GeneralCategory::InitialPunctuation
+                    | GeneralCategory::FinalPunctuation
+            )
+    }) {
+        bail!(
+            "activity marker must be empty, Unicode emoji/symbols, or a custom Discord emote; \
+             whitespace, mentions, markdown, and control characters are not allowed"
+        );
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -153,6 +250,7 @@ impl DiscordConfig {
             routes,
             typing: enabled(),
             activity: enabled(),
+            activity_markers: ActivityMarkers::default(),
             reactions: enabled(),
             processing_emoji: processing_emoji(),
             delivered_emoji: delivered_emoji(),
@@ -224,6 +322,7 @@ impl DiscordConfig {
         ] {
             DiscordEmoji::parse(emoji)?;
         }
+        self.activity_markers.validate()?;
         config.provider(provider_id, ProviderRole::Interface)?;
         if self.agent != config.value.agent.id {
             bail!("Discord interface selects an unknown agent");
@@ -277,12 +376,14 @@ fn valid_snowflake(value: &str) -> bool {
 pub(crate) mod tests {
     use std::{fs, path::Path, str::FromStr};
 
+    use anyhow::Context as _;
     use carillon_installation::config::{
         AgentConfig, Config, CoreConfig, LoadedConfig, Provider, ProviderRole, hash_token,
     };
 
     use super::{
-        DiscordActivation, DiscordConfig, DiscordConversation, DiscordEmoji, DiscordRoute,
+        ActivityMarkers, DiscordActivation, DiscordConfig, DiscordConversation, DiscordEmoji,
+        DiscordRoute, validate_activity_marker,
     };
 
     /// A complete installation on disk: `carillon.toml`, credentials, and
@@ -370,6 +471,163 @@ allowed_user_ids = ["200"]
         assert_eq!(config.delivered_emoji, "✅");
         assert_eq!(config.failed_emoji, "❌");
         assert_eq!(config.uncertain_emoji, "⚠️");
+        assert_eq!(
+            config.activity_markers,
+            ActivityMarkers {
+                working: "⏳".to_owned(),
+                queued: "⏳".to_owned(),
+                finishing: "⏳".to_owned(),
+                running: "↳".to_owned(),
+                succeeded: "✓".to_owned(),
+                failed: "✗".to_owned(),
+                uncertain: "⚠️".to_owned(),
+                stopped: "⏹️".to_owned(),
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn activity_markers_default_individually() -> anyhow::Result<()> {
+        let partial: ActivityMarkers = toml::from_str(
+            r#"
+working = "<a:working:123>"
+failed = ""
+"#,
+        )?;
+        assert_eq!(partial.working, "<a:working:123>");
+        assert_eq!(partial.queued, "⏳");
+        assert_eq!(partial.finishing, "⏳");
+        assert_eq!(partial.running, "↳");
+        assert_eq!(partial.succeeded, "✓");
+        assert_eq!(partial.failed, "");
+        assert_eq!(partial.uncertain, "⚠️");
+        assert_eq!(partial.stopped, "⏹️");
+        partial.validate()?;
+
+        assert!(toml::from_str::<ActivityMarkers>("suceeded = '✓'").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn activity_markers_accept_symbols_emoji_and_canonical_inline_emotes() -> anyhow::Result<()> {
+        for marker in [
+            "",
+            "✓",
+            "↳",
+            "◇",
+            "•",
+            "⚠️",
+            "👩🏽‍💻",
+            "🇺🇦",
+            "1️⃣",
+            "<:tool:456>",
+            "<a:working:123>",
+        ] {
+            validate_activity_marker(marker)
+                .with_context(|| format!("rejected valid marker {marker:?}"))?;
+        }
+        validate_activity_marker(&"✓".repeat(21))?;
+        assert!(validate_activity_marker(&"✓".repeat(22)).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn activity_markers_reject_mentions_markdown_controls_and_malformed_emotes() {
+        for marker in [
+            "@everyone",
+            "@here",
+            "<@123>",
+            "<@&123>",
+            "<#123>",
+            "working:123",
+            "<:x:123>",
+            "<:working:0123>",
+            "<a:working:0>",
+            "<:working:18446744073709551616>",
+            "<a:working:not-an-id>",
+            "<a:bad-name:123>",
+            "<A:working:123>",
+            "<:✓>",
+            "<:working:123><:tool:456>",
+            "<:working:123>suffix",
+            "✓\n↳",
+            "✓\r↳",
+            "✓\t↳",
+            " ✓",
+            "✓ ",
+            "✓\u{2028}↳",
+            "✓\u{2029}↳",
+            "✓\u{0000}",
+            "✓\u{007f}",
+            "✓\u{0085}",
+            "\u{202e}✓",
+            "\u{2066}✓\u{2069}",
+            "\u{200b}",
+            "\u{200d}",
+            "\u{feff}",
+            "`✓`",
+            "**✓**",
+            "__✓__",
+            "~~✓~~",
+            "||✓||",
+            "[✓](https://example.test)",
+            ">",
+            "#",
+            "-",
+            "+",
+            "\\",
+            "word",
+        ] {
+            assert!(
+                validate_activity_marker(marker).is_err(),
+                "accepted invalid marker {marker:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn activity_marker_errors_identify_each_field_and_prevent_load_or_write() -> anyhow::Result<()>
+    {
+        for field in [
+            "working",
+            "queued",
+            "finishing",
+            "running",
+            "succeeded",
+            "failed",
+            "uncertain",
+            "stopped",
+        ] {
+            let markers: ActivityMarkers = toml::from_str(&format!("{field} = '@everyone'"))?;
+            let error = markers.validate().err().context("accepted mention")?;
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("activity_markers.{field}"))
+            );
+        }
+
+        let directory = tempfile::tempdir()?;
+        let config = installation(directory.path(), "discord-private", 45_310)?;
+        let path = config.provider_config_path("discord-private")?;
+        let original = fs::read_to_string(&path)?;
+        let mut invalid = DiscordConfig::load(&config, "discord-private")?;
+        invalid.activity = false;
+        "working:123".clone_into(&mut invalid.activity_markers.working);
+        let error = invalid
+            .write(&config, "discord-private")
+            .err()
+            .context("wrote invalid marker")?;
+        assert!(error.to_string().contains("activity_markers.working"));
+        assert!(format!("{error:#}").contains("<a:name:id>"));
+        assert_eq!(fs::read_to_string(&path)?, original);
+
+        fs::write(&path, toml::to_string(&invalid)?)?;
+        let error = DiscordConfig::load(&config, "discord-private")
+            .err()
+            .context("loaded invalid marker")?;
+        assert!(error.to_string().contains("activity_markers.working"));
         Ok(())
     }
 
@@ -384,6 +642,18 @@ allowed_user_ids = ["200"]
         let mut tuned = DiscordConfig::load(&config, "discord-private")?;
         tuned.reactions = false;
         "⏳".clone_into(&mut tuned.processing_emoji);
+        tuned.activity_markers = toml::from_str(
+            r#"
+working = "<a:working:123>"
+queued = "⌛"
+finishing = "◇"
+running = "<:tool:456>"
+succeeded = "✔"
+failed = ""
+uncertain = "？"
+stopped = "■"
+"#,
+        )?;
         tuned.write(&config, "discord-private")?;
         super::configure(
             &config,
@@ -400,6 +670,19 @@ allowed_user_ids = ["200"]
         assert_eq!(reloaded.routes[0].channel_id, "310");
         assert!(!reloaded.reactions);
         assert_eq!(reloaded.processing_emoji, "⏳");
+        assert_eq!(
+            reloaded.activity_markers,
+            ActivityMarkers {
+                working: "<a:working:123>".to_owned(),
+                queued: "⌛".to_owned(),
+                finishing: "◇".to_owned(),
+                running: "<:tool:456>".to_owned(),
+                succeeded: "✔".to_owned(),
+                failed: String::new(),
+                uncertain: "？".to_owned(),
+                stopped: "■".to_owned(),
+            }
+        );
         assert!(
             super::configure(
                 &config,

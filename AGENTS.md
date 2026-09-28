@@ -10,6 +10,8 @@ Use mature runtime, platform, and library facilities where they fit; do not repr
 
 Carillon is the installing user's general-purpose agent. Preserve that user's native operating-system authority and Pi's native tool and extension semantics; do not add a parallel permission system. Keep authenticated remote ingress fail-closed before runtime work.
 
+Provider-authored emotes and adornments should be configurable defaults in that provider's configuration. Keep this scope narrow: prose, punctuation and safety deadlines do not each need a user setting.
+
 ## Code and verification
 
 Write idiomatic Rust and TypeScript. If it looks like a Python developer wrote it, it is bad Rust or TypeScript.
