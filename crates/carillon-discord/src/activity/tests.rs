@@ -54,6 +54,8 @@ enum Reply {
     Status(u16),
     /// A user-scoped 429 asking to wait this many seconds.
     Limited(u32),
+    /// Discord performed the request, but its answer was lost.
+    Lost,
 }
 
 type Script = Arc<dyn Fn(&Seen, usize) -> Reply + Send + Sync>;
@@ -171,16 +173,16 @@ impl Substitute {
         http: Arc<twilight_http::Client>,
         config: DiscordConfig,
         records: &Path,
-    ) -> anyhow::Result<(mpsc::UnboundedSender<Outcome>, JoinHandle<()>)> {
+    ) -> (mpsc::UnboundedSender<Outcome>, JoinHandle<()>) {
         let (outcomes, observed) = mpsc::unbounded_channel();
         let monitor = activity_monitor(
             core_client(format!("http://{}", self.address)),
             http,
             config,
-            Arc::new(CardRecords::load(records.to_path_buf())?),
+            CardRecords::open(records.to_path_buf()).map(Arc::new),
             observed,
         );
-        Ok((outcomes, tokio::spawn(monitor)))
+        (outcomes, tokio::spawn(monitor))
     }
 }
 
@@ -233,6 +235,7 @@ fn answer(request: &Seen, reply: Reply, creates: usize) -> Response {
             Json(json!({"code": 0, "message": "substitute refusal"})),
         )
             .into_response(),
+        Reply::Lost => (StatusCode::OK, "{truncated").into_response(),
         Reply::Limited(retry_after) => {
             let mut response = (
                 StatusCode::TOO_MANY_REQUESTS,
@@ -361,7 +364,7 @@ async fn a_slow_turn_gets_one_delayed_card_that_follows_it_and_is_removed_after_
         running("fast", "301", accepted, None),
     ]);
     let started = Instant::now();
-    let (outcomes, monitor) = discord.monitor(discord.http(false), config(false), &records)?;
+    let (outcomes, monitor) = discord.monitor(discord.http(false), config(false), &records);
     // A turn that ends before the appearance delay never shows a card.
     tokio::time::sleep(Duration::from_millis(500)).await;
     discord.list(vec![slow(testing())]);
@@ -472,7 +475,7 @@ async fn ended_turns_keep_an_honest_card_and_stale_reads_cannot_revive_them() ->
             .map(|(turn, channel, ..)| running(turn, channel, now() - 60, Some(history.clone())))
             .collect(),
     );
-    let (outcomes, monitor) = discord.monitor(discord.http(false), config(true), &records)?;
+    let (outcomes, monitor) = discord.monitor(discord.http(false), config(true), &records);
     for channel in ["300", "301", "302"] {
         discord
             .wait_for(&Method::POST, &format!("/channels/{channel}/messages"), 1)
@@ -558,7 +561,7 @@ async fn uncertain_or_refused_cards_are_never_created_or_edited_again() -> anyho
             .collect()
     };
     discord.list(turns("first"));
-    let (outcomes, monitor) = discord.monitor(discord.http(false), config(true), &records)?;
+    let (outcomes, monitor) = discord.monitor(discord.http(false), config(true), &records);
     for channel in ["300", "301", "302"] {
         discord
             .wait_for(&Method::POST, &format!("/channels/{channel}/messages"), 1)
@@ -585,7 +588,8 @@ async fn uncertain_or_refused_cards_are_never_created_or_edited_again() -> anyho
             .len()
             >= 2
     );
-    assert_eq!(recorded(&records)?, json!({}));
+    // Only the uncertain creation is remembered, without a card to name.
+    assert_eq!(recorded(&records)?, json!({"300": {"channel_id": "300"}}));
     settle(
         &outcomes,
         "300",
@@ -594,6 +598,7 @@ async fn uncertain_or_refused_cards_are_never_created_or_edited_again() -> anyho
     )?;
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(discord.matching(&Method::DELETE, "/channels").is_empty());
+    assert_eq!(recorded(&records)?, json!({}));
     monitor.abort();
     Ok(())
 }
@@ -631,7 +636,7 @@ async fn a_restart_removes_recorded_cards_before_any_replacement_and_keeps_uncle
         .map(|(turn, channel)| running(turn, channel, long_ago, activity.clone()))
         .collect(),
     );
-    let (_outcomes, monitor) = discord.monitor(discord.http(false), config(false), &records)?;
+    let (_outcomes, monitor) = discord.monitor(discord.http(false), config(false), &records);
     let replacement = discord
         .wait_for(&Method::POST, "/channels/300/messages", 1)
         .await?;
@@ -695,7 +700,7 @@ async fn disabled_cards_still_type_while_turns_run_and_an_unreachable_core_chang
         now() - 60,
         Some(tools(None, &[("bash", "x")], &[])),
     )]);
-    let (_outcomes, monitor) = discord.monitor(discord.http(false), disabled, &records)?;
+    let (_outcomes, monitor) = discord.monitor(discord.http(false), disabled, &records);
     discord
         .wait_for(&Method::POST, "/channels/300/typing", 1)
         .await?;
@@ -722,7 +727,7 @@ async fn disabled_cards_still_type_while_turns_run_and_an_unreachable_core_chang
         now() - 60,
         Some(tools(None, &[("bash", "x")], &[])),
     )]);
-    let (_outcomes, monitor) = discord.monitor(discord.http(false), config(false), &records)?;
+    let (_outcomes, monitor) = discord.monitor(discord.http(false), config(false), &records);
     discord
         .wait_for(&Method::POST, "/channels/300/messages", 1)
         .await?;
@@ -756,7 +761,7 @@ async fn rate_limited_creation_retries_inside_twilight_and_makes_one_card() -> a
         now() - 60,
         Some(tools(None, &[("bash", "x")], &[])),
     )]);
-    let (_outcomes, monitor) = discord.monitor(discord.http(true), config(false), &records)?;
+    let (_outcomes, monitor) = discord.monitor(discord.http(true), config(false), &records);
     let attempts = discord
         .wait_for(&Method::POST, "/channels/300/messages", 3)
         .await?;
@@ -807,7 +812,7 @@ async fn progress_stuck_behind_the_limiter_yields_to_outcomes_and_answers() -> a
         ]
     };
     discord.list(turns("one"));
-    let (outcomes, monitor) = discord.monitor(http.clone(), config(false), &records)?;
+    let (outcomes, monitor) = discord.monitor(http.clone(), config(false), &records);
     discord
         .wait_for(&Method::POST, "/channels/300/messages", 1)
         .await?;
@@ -883,7 +888,9 @@ async fn an_answer_waits_for_progress_only_in_a_bucket_discord_shares() -> anyho
         let cards = super::Cards {
             http: http.clone(),
             config: config(false),
-            records: Arc::new(CardRecords::load(directory.path().join("cards.json"))?),
+            records: Arc::new(
+                CardRecords::open(directory.path().join("cards.json")).context("records")?,
+            ),
         };
         assert_eq!(
             cards.edit(card, "progress", None).await,
@@ -973,4 +980,211 @@ fn cards_show_bounded_safe_text() {
     let long = active_text(&running("t", "300", 1, Some(busy)), &mut last);
     assert!(long.chars().count() < 2_000);
     assert!(long.lines().all(|line| line.chars().count() <= 130));
+}
+
+#[tokio::test]
+async fn a_card_whose_edits_are_refused_is_still_removed_after_delivery() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let records = directory.path().join("activity-cards.json");
+    let discord = Substitute::start(Arc::new(|seen, _| {
+        match (&seen.method, seen.path.as_str()) {
+            (&Method::PATCH, path) if path.starts_with("/channels/300/") => Reply::Status(403),
+            (&Method::PATCH, _) => Reply::Status(404),
+            _ => Reply::Success,
+        }
+    }))
+    .await?;
+    let long_ago = now() - 60;
+    let turns = |detail: &str| {
+        ["300", "301"]
+            .iter()
+            .map(|channel| {
+                let activity = tools(None, &[("bash", detail)], &[]);
+                running(channel, channel, long_ago, Some(activity))
+            })
+            .collect()
+    };
+    discord.list(turns("first"));
+    let (outcomes, monitor) = discord.monitor(discord.http(false), config(false), &records);
+    discord
+        .wait_for(&Method::POST, "/channels/300/messages", 1)
+        .await?;
+    discord
+        .wait_for(&Method::POST, "/channels/301/messages", 1)
+        .await?;
+    discord.list(turns("second"));
+    discord
+        .wait_for(&Method::PATCH, "/channels/300/", 1)
+        .await?;
+    discord
+        .wait_for(&Method::PATCH, "/channels/301/", 1)
+        .await?;
+    discord.list(turns("third"));
+    tokio::time::sleep(Duration::from_millis(3_500)).await;
+    // Refused edits are not retried.
+    assert_eq!(discord.matching(&Method::PATCH, "/channels").len(), 2);
+    let (completed, delivered) = (TurnState::Completed, DeliveryOutcome::Delivered);
+    settle(&outcomes, "300", completed, delivered)?;
+    settle(&outcomes, "301", completed, delivered)?;
+    // A refused edit does not show that removal is refused too.
+    discord
+        .wait_for(&Method::DELETE, "/channels/300/messages/901", 1)
+        .await?;
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    // A card Discord no longer has is neither removed nor replaced.
+    assert!(
+        discord
+            .matching(&Method::DELETE, "/channels/301/")
+            .is_empty()
+    );
+    assert_eq!(discord.matching(&Method::POST, "/channels/30").len(), 2);
+    assert_eq!(recorded(&records)?, json!({}));
+    monitor.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_finishing_card_that_failed_to_update_is_retried_until_it_stops_showing_work()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let records = directory.path().join("activity-cards.json");
+    let discord = Substitute::start(Arc::new(|seen, earlier| {
+        if seen.method == Method::PATCH && earlier == 0 {
+            Reply::Status(500)
+        } else {
+            Reply::Success
+        }
+    }))
+    .await?;
+    let activity = tools(None, &[("bash", "cargo test")], &[("read", "a.rs", true)]);
+    discord.list(vec![running("turn", "300", now() - 60, Some(activity))]);
+    let (outcomes, monitor) = discord.monitor(discord.http(false), config(false), &records);
+    discord
+        .wait_for(&Method::POST, "/channels/300/messages", 1)
+        .await?;
+    // Core reads keep succeeding with the turn absent; its outcome is withheld.
+    discord.list(Vec::new());
+    let edits = discord
+        .wait_for(&Method::PATCH, "/channels/300/messages/901", 2)
+        .await?;
+    assert!(edits[1].at - edits[0].at >= Duration::from_millis(2_900));
+    for edit in &edits {
+        assert!(edit.content().starts_with("⏳ Finishing up"));
+        assert!(!edit.content().contains('↳'));
+    }
+    // Once shown, the same text is not sent again.
+    tokio::time::sleep(Duration::from_millis(4_000)).await;
+    assert_eq!(discord.matching(&Method::PATCH, "/channels").len(), 2);
+    settle(
+        &outcomes,
+        "turn",
+        TurnState::Completed,
+        DeliveryOutcome::Delivered,
+    )?;
+    discord
+        .wait_for(&Method::DELETE, "/channels/300/messages/901", 1)
+        .await?;
+    monitor.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_uncertain_card_is_not_created_again_after_an_orderly_restart() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let records = directory.path().join("activity-cards.json");
+    // The card is created, but the provider never learns its identity.
+    let discord = Substitute::start(Arc::new(|seen, _| {
+        if seen.method == Method::POST && seen.path.ends_with("/messages") {
+            Reply::Lost
+        } else {
+            Reply::Success
+        }
+    }))
+    .await?;
+    let turn = || {
+        let activity = tools(None, &[("bash", "sleep 600")], &[]);
+        vec![running("turn", "300", now() - 60, Some(activity))]
+    };
+    discord.list(turn());
+    let (_outcomes, monitor) = discord.monitor(discord.http(false), config(false), &records);
+    discord
+        .wait_for(&Method::POST, "/channels/300/messages", 1)
+        .await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    monitor.abort();
+    let _ = monitor.await;
+
+    // The same turn is still running when the provider starts again.
+    let (_outcomes, monitor) = discord.monitor(discord.http(false), config(false), &records);
+    tokio::time::sleep(Duration::from_millis(4_000)).await;
+    assert_eq!(
+        discord
+            .matching(&Method::POST, "/channels/300/messages")
+            .len(),
+        1
+    );
+    assert!(discord.matching(&Method::DELETE, "/channels").is_empty());
+    // Once the turn has ended, the unnamed card no longer holds anything back.
+    discord.list(Vec::new());
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while recorded(&records).is_ok_and(|records| records != json!({})) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await?;
+    monitor.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn unreadable_card_records_turn_cards_off_but_keep_typing_and_the_evidence()
+-> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = tempfile::tempdir()?;
+    let occupied = directory.path().join("occupied.json");
+    std::fs::create_dir(&occupied)?;
+    let malformed = directory.path().join("malformed.json");
+    std::fs::write(&malformed, "{not json")?;
+    let unreadable = directory.path().join("unreadable.json");
+    std::fs::write(
+        &unreadable,
+        r#"{"turn": {"channel_id": "300", "message_id": "555"}}"#,
+    )?;
+    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000))?;
+    let mut faults = vec![occupied.clone(), malformed.clone()];
+    // The owner of the file can read it regardless when running as root.
+    if std::fs::read(&unreadable).is_err() {
+        faults.push(unreadable.clone());
+    }
+    for records in faults {
+        assert!(
+            CardRecords::open(records.clone()).is_none(),
+            "{}",
+            records.display()
+        );
+        let discord = Substitute::start(succeed()).await?;
+        let activity = tools(None, &[("bash", "sleep 600")], &[]);
+        discord.list(vec![running("turn", "300", now() - 60, Some(activity))]);
+        let (_outcomes, monitor) = discord.monitor(discord.http(false), config(true), &records);
+        discord
+            .wait_for(&Method::POST, "/channels/300/typing", 1)
+            .await?;
+        tokio::time::sleep(Duration::from_millis(3_500)).await;
+        // No card, no attempt to remove one nobody can name, and typing continues.
+        let seen = discord.seen();
+        assert!(
+            seen.iter().all(|seen| seen.path == "/channels/300/typing"),
+            "{seen:#?}"
+        );
+        monitor.abort();
+    }
+    assert!(occupied.is_dir());
+    assert_eq!(std::fs::read(&malformed)?, b"{not json");
+    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o600))?;
+    assert_eq!(
+        std::fs::read_to_string(&unreadable)?,
+        r#"{"turn": {"channel_id": "300", "message_id": "555"}}"#
+    );
+    Ok(())
 }

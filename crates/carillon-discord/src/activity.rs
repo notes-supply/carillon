@@ -10,7 +10,8 @@
 //!
 //! Every Discord call is bounded, and its outcome is classified by what it
 //! proves: a card is created at most once per turn, and a card whose cleanup
-//! cannot be established is never replaced.
+//! cannot be established is never replaced. Cards are shown only while their
+//! records can be read, so a restart knows which old cards may exist.
 use crate::{client::CoreClient, config::DiscordConfig};
 use anyhow::{Context as _, Result};
 use carillon_installation::filesystem::atomic_write;
@@ -34,7 +35,7 @@ use tokio::{
     task::JoinSet,
     time::{Instant, MissedTickBehavior, interval, sleep, timeout, timeout_at},
 };
-use tracing::warn;
+use tracing::{error, warn};
 use twilight_http::{
     Client as DiscordHttp,
     error::ErrorType,
@@ -114,43 +115,71 @@ pub(crate) struct Card {
     message_id: Id<MessageMarker>,
 }
 
+/// What a later start must know of a turn's card: the card, or, when its
+/// creation was never confirmed, that a card may exist which nobody can name.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+struct Recorded {
+    channel_id: Id<ChannelMarker>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    message_id: Option<Id<MessageMarker>>,
+}
+
+impl From<Card> for Recorded {
+    fn from(card: Card) -> Self {
+        Self {
+            channel_id: card.channel_id,
+            message_id: Some(card.message_id),
+        }
+    }
+}
+
 /// Cards this provider created and has not yet removed or finalized, by
 /// turn, so a restart can remove them. A card is recorded only after Discord
 /// confirms it: a crash in between leaves one card no later start knows of.
+/// A creation whose outcome is unknown is recorded without a message, so a
+/// restart does not create a second card for the same running turn.
 pub(crate) struct CardRecords {
     path: PathBuf,
-    cards: Mutex<BTreeMap<String, Card>>,
+    cards: Mutex<BTreeMap<String, Recorded>>,
 }
 
 impl CardRecords {
-    /// Open the records. Unreadable contents only cost stale cards, so they
-    /// are reported and replaced rather than preventing startup.
-    pub(crate) fn load(path: PathBuf) -> Result<Self> {
-        fs::create_dir_all(path.parent().context("card records path has no parent")?)?;
+    /// Opens the records, or returns `None` when they cannot be read: without
+    /// them nobody knows which old cards exist, so cards stay off for this
+    /// start rather than risk replacements. The file is left as it is for
+    /// the operator. An absent file is simply no records.
+    pub(crate) fn open(path: PathBuf) -> Option<Self> {
         let cards = match fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
-                warn!(path = %path.display(), %error, "ignoring unreadable activity card records");
-                BTreeMap::new()
-            }),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
-            Err(error) => {
-                return Err(error).with_context(|| format!("read {}", path.display()));
+            Ok(bytes) => {
+                serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))
             }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+            Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
         };
-        Ok(Self {
-            path,
-            cards: Mutex::new(cards),
-        })
+        match cards {
+            Ok(cards) => Some(Self {
+                path,
+                cards: Mutex::new(cards),
+            }),
+            Err(failure) => {
+                error!(
+                    error = format!("{failure:#}"),
+                    "activity cards are off until their records can be read"
+                );
+                None
+            }
+        }
     }
 
-    fn recorded(&self) -> BTreeMap<String, Card> {
+    fn recorded(&self) -> BTreeMap<String, Recorded> {
         self.cards
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
     }
 
-    fn insert(&self, turn_id: &str, card: Card) {
+    fn insert(&self, turn_id: &str, card: impl Into<Recorded>) {
+        let card = card.into();
         self.change(|cards| cards.insert(turn_id.to_owned(), card) != Some(card));
     }
 
@@ -158,7 +187,25 @@ impl CardRecords {
         self.change(|cards| cards.remove(turn_id).is_some());
     }
 
-    fn change(&self, change: impl FnOnce(&mut BTreeMap<String, Card>) -> bool) {
+    /// Forgets a card nobody can name once its turn has ended: it can no
+    /// longer cause a replacement, and there is nothing to remove.
+    fn forget_unnamed(&self, turn_id: &str) {
+        self.change(|cards| {
+            let unnamed = cards
+                .get(turn_id)
+                .is_some_and(|card| card.message_id.is_none());
+            if unnamed {
+                cards.remove(turn_id);
+                warn!(
+                    turn_id,
+                    "an activity card of unknown identity may remain in Discord"
+                );
+            }
+            unnamed
+        });
+    }
+
+    fn change(&self, change: impl FnOnce(&mut BTreeMap<String, Recorded>) -> bool) {
         let mut cards = self.cards.lock().unwrap_or_else(PoisonError::into_inner);
         if !change(&mut cards) {
             return;
@@ -182,25 +229,34 @@ struct Cards {
 
 /// Follows this provider's active turns until `outcomes` closes. Cards
 /// recorded before this start are removed before any replacement is shown.
+/// Without readable `records` there are no cards, only typing.
 pub(crate) async fn activity_monitor(
     core: CoreClient,
     http: Arc<DiscordHttp>,
     config: DiscordConfig,
-    records: Arc<CardRecords>,
+    records: Option<Arc<CardRecords>>,
     mut outcomes: mpsc::UnboundedReceiver<Outcome>,
 ) {
-    let cards = Cards {
+    let typing = config.typing.then(|| http.clone());
+    let cards = records.map(|records| Cards {
         http,
         config,
         records,
-    };
+    });
     let mut tasks = JoinSet::new();
     let (reads_sender, mut reads) = mpsc::channel(1);
     tasks.spawn(poll_core(core, reads_sender));
     let mut turns = HashMap::new();
-    for (turn_id, card) in cards.records.recorded() {
+    for (turn_id, card) in cards.iter().flat_map(|cards| cards.records.recorded()) {
         let (view, watched) = watch::channel(View::Unread);
-        spawn_turn(&mut tasks, &cards, &turn_id, watched, Some(card));
+        spawn_turn(
+            &mut tasks,
+            typing.as_ref(),
+            cards.as_ref(),
+            &turn_id,
+            watched,
+            Some(card),
+        );
         turns.insert(turn_id, view);
     }
     let mut settled = VecDeque::new();
@@ -244,19 +300,16 @@ pub(crate) async fn activity_monitor(
                     } else {
                         let turn_id = turn.turn_id.clone();
                         let (view, watched) = watch::channel(View::Active(turn));
-                        spawn_turn(&mut tasks, &cards, &turn_id, watched, None);
+                        let (typing, cards) = (typing.as_ref(), cards.as_ref());
+                        spawn_turn(&mut tasks, typing, cards, &turn_id, watched, None);
                         turns.insert(turn_id, view);
                     }
                 }
+                // Every read that still misses a turn says so again, so a
+                // card whose finishing edit failed is tried again.
                 for (turn_id, view) in &turns {
                     if !listed.contains(turn_id) {
-                        view.send_if_modified(|view| {
-                            let active = view.is_active();
-                            if active {
-                                *view = View::Finishing;
-                            }
-                            active
-                        });
+                        view.send_replace(View::Finishing);
                     }
                 }
                 // A turn whose tasks have ended is forgotten; a turn stays
@@ -284,15 +337,18 @@ async fn poll_core(
 
 fn spawn_turn(
     tasks: &mut JoinSet<()>,
-    cards: &Cards,
+    typing: Option<&Arc<DiscordHttp>>,
+    cards: Option<&Cards>,
     turn_id: &str,
     view: watch::Receiver<View>,
-    old: Option<Card>,
+    old: Option<Recorded>,
 ) {
-    if cards.config.typing {
-        tasks.spawn(keep_typing(cards.http.clone(), view.clone()));
+    if let Some(http) = typing {
+        tasks.spawn(keep_typing(http.clone(), view.clone()));
     }
-    tasks.spawn(show_card(cards.clone(), turn_id.to_owned(), view, old));
+    if let Some(cards) = cards {
+        tasks.spawn(show_card(cards.clone(), turn_id.to_owned(), view, old));
+    }
 }
 
 /// Types in a running turn's channel until the turn leaves core's list.
@@ -321,39 +377,70 @@ async fn keep_typing(http: Arc<DiscordHttp>, mut view: watch::Receiver<View>) {
     }
 }
 
-/// One turn's card: remove a card left by an earlier start, wait out the
-/// appearance delay, create the card once, edit it as the turn changes, and
-/// remove or finalize it when the delivery loop reports the outcome.
+/// One turn's card: remove a card left by an earlier start, then show the
+/// turn's card unless an earlier card may still exist. A card nobody can name
+/// is forgotten once its turn has ended.
 async fn show_card(
     cards: Cards,
     turn_id: String,
     mut view: watch::Receiver<View>,
-    old: Option<Card>,
+    old: Option<Recorded>,
 ) {
     let cleared = match old {
-        Some(old) => cards.sweep(&turn_id, old).await,
         None => true,
+        Some(Recorded {
+            channel_id,
+            message_id: Some(message_id),
+        }) => {
+            let card = Card {
+                channel_id,
+                message_id,
+            };
+            cards.sweep(&turn_id, card).await
+        }
+        Some(Recorded {
+            message_id: None, ..
+        }) => false,
     };
     let turn = loop {
         match &*view.borrow_and_update() {
-            View::Active(turn) => break turn.clone(),
+            View::Active(turn) => break Some(turn.clone()),
             View::Unread => {}
-            View::Finishing | View::Settled { .. } => return,
+            View::Finishing | View::Settled { .. } => break None,
         }
         if view.changed().await.is_err() {
             return;
         }
     };
-    let channel = turn.target_id.parse::<Id<ChannelMarker>>();
-    if !cleared || !cards.config.activity || channel.is_err() {
-        if let Err(error) = channel {
-            warn!(%error, "activity card target is not a Discord channel");
+    let channel = turn.map(|turn| (turn.target_id.parse::<Id<ChannelMarker>>(), turn));
+    match channel {
+        Some((Ok(channel), turn)) if cleared && cards.config.activity => {
+            follow_card(&cards, &turn_id, &mut view, channel, &turn).await;
         }
-        // Stay tracked, so the turn never gets a card while active.
-        let _ = view.wait_for(|view| !view.is_active()).await;
-        return;
+        Some((target, _)) => {
+            if let Err(error) = target {
+                warn!(%error, "activity card target is not a Discord channel");
+            }
+            // Stay tracked, so the turn never gets a card while active.
+            let _ = view.wait_for(|view| !view.is_active()).await;
+        }
+        None => {}
     }
-    let Ok(channel) = channel else { return };
+    if !view.borrow().is_active() {
+        cards.records.forget_unnamed(&turn_id);
+    }
+}
+
+/// Waits out the appearance delay, creates the card once, edits it as the
+/// turn changes, and removes or finalizes it when the delivery loop reports
+/// the outcome.
+async fn follow_card(
+    cards: &Cards,
+    turn_id: &str,
+    view: &mut watch::Receiver<View>,
+    channel: Id<ChannelMarker>,
+    turn: &ActiveTurn,
+) {
     let appear = Instant::now() + until_after(turn.accepted_at, APPEAR_AFTER);
     if timeout_at(appear, view.wait_for(|view| !view.is_active()))
         .await
@@ -367,15 +454,13 @@ async fn show_card(
             return;
         };
         let text = active_text(&turn, &mut last);
-        match cards.create(channel, &text, &view).await {
+        match cards.create(channel, &text, view).await {
             Call::Done(message_id) => {
-                break (
-                    Card {
-                        channel_id: channel,
-                        message_id,
-                    },
-                    text,
-                );
+                let card = Card {
+                    channel_id: channel,
+                    message_id,
+                };
+                break (card, text);
             }
             Call::NotSent => {
                 if view.changed().await.is_err() {
@@ -384,15 +469,24 @@ async fn show_card(
             }
             outcome @ (Call::Refused(_) | Call::Unknown) => {
                 // Discord refused it, or may hold a card this task cannot
-                // name: either way the turn gets no card.
+                // name: either way the turn gets no card, even after a restart.
+                if outcome == Call::Unknown {
+                    let unnamed = Recorded {
+                        channel_id: channel,
+                        message_id: None,
+                    };
+                    cards.records.insert(turn_id, unnamed);
+                }
                 warn!(turn_id, refused = ?outcome.refused(), "no activity card for this turn");
                 let _ = view.wait_for(|view| !view.is_active()).await;
                 return;
             }
         }
     };
-    cards.records.insert(&turn_id, card);
+    cards.records.insert(turn_id, card);
     let mut next_edit = Instant::now() + EDIT_INTERVAL;
+    // Discord may refuse edits (403) yet allow removal; only removal remains then.
+    let mut editable = true;
     let (turn_state, delivery) = loop {
         if !view.borrow().is_settled() {
             if view.changed().await.is_err() && !view.borrow().is_settled() {
@@ -411,28 +505,35 @@ async fn show_card(
             View::Finishing => finishing_text(last.as_ref()),
             View::Unread => continue,
         };
-        if text == shown {
+        if !editable || text == shown {
             continue;
         }
-        match cards.edit(card, &text, Some(not_settled(&view))).await {
+        match cards.edit(card, &text, Some(not_settled(view))).await {
             Call::Done(()) => shown = text,
             // The next read brings the latest text again.
             Call::NotSent | Call::Unknown => {}
-            Call::Refused(status) => {
-                // Deleted by someone, or no longer editable: never replace it.
-                if status == 404 {
-                    cards.records.remove(&turn_id);
-                }
-                warn!(turn_id, status, "activity card can no longer be edited");
+            Call::Refused(404) => {
+                // Deleted by someone: never replace it.
+                cards.records.remove(turn_id);
+                warn!(turn_id, "activity card was deleted in Discord");
                 let _ = view.wait_for(|view| !view.is_active()).await;
                 return;
+            }
+            Call::Refused(status) => {
+                warn!(turn_id, status, "activity card can no longer be edited");
+                editable = false;
             }
         }
         next_edit = Instant::now() + EDIT_INTERVAL;
     };
-    cards
-        .finish(&turn_id, card, turn_state, delivery, last.as_ref())
-        .await;
+    let status = if editable {
+        final_text(turn_state, delivery, last.as_ref())
+    } else {
+        // A card that cannot say how the turn ended is removed instead of
+        // left claiming work.
+        None
+    };
+    cards.finish(turn_id, card, status).await;
 }
 
 /// Time from now until `after` past a Unix-seconds timestamp.
@@ -475,17 +576,8 @@ impl Cards {
         false
     }
 
-    /// Removes the card of a completed, delivered turn; otherwise leaves it
-    /// saying honestly how the turn ended.
-    async fn finish(
-        &self,
-        turn_id: &str,
-        card: Card,
-        turn_state: TurnState,
-        delivery: DeliveryOutcome,
-        last: Option<&TurnActivity>,
-    ) {
-        let kept = final_text(turn_state, delivery, last);
+    /// Leaves the card saying `status`, or removes it without one.
+    async fn finish(&self, turn_id: &str, card: Card, kept: Option<String>) {
         for attempt in 1..=FINAL_ATTEMPTS {
             let call = match &kept {
                 None => self.delete(card).await,

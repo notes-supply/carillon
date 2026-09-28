@@ -164,8 +164,9 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
     let discord_token_path = options
         .discord_token_file
         .context("--discord-token-file is required outside deterministic mode")?;
+    // Cosmetic: records that cannot be read turn cards off, not the provider.
     let cards =
-        CardRecords::load(state_directory(&config, &provider.id).join("activity-cards.json"))?;
+        CardRecords::open(state_directory(&config, &provider.id).join("activity-cards.json"));
     connect(
         state,
         listener,
@@ -184,7 +185,7 @@ async fn connect(
     listener: TcpListener,
     discord_token: String,
     reconciled: DeliveryReconciliation,
-    cards: CardRecords,
+    cards: Option<CardRecords>,
 ) -> Result<()> {
     let http = Arc::new(DiscordHttp::new(discord_token.clone()));
     let current_user = http.current_user().await?.model().await?;
@@ -229,7 +230,7 @@ async fn connect(
         state.core.clone(),
         http.clone(),
         state.discord.clone(),
-        Arc::new(cards),
+        cards.map(Arc::new),
         observed,
     );
     tokio::select! {
