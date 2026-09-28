@@ -145,24 +145,27 @@ export function describe(tool: string, args: unknown, workspace: string): string
 
 /**
  * The command's first line: never a later line, a heredoc or here-string, a
- * command or process substitution, the script after an inline-script flag,
- * or a long quoted argument. Such cuts are marked with ` …`, as is any
- * omitted later line. These cuts fall on shell syntax, never inside a word,
- * so what remains is redacted whole, with values after credential-named
- * options, before anything is cut for length.
+ * command or process substitution, the program given to an interpreter,
+ * a long quoted argument, anything after a credential-named option, or a
+ * quoted argument the redaction had to change. Such cuts are marked with
+ * ` …`, as is any omitted later line.
+ *
+ * The whole command is redacted before anything is cut, with the spaces of
+ * escaped words and substitutions kept inside them, so no cut can split a
+ * value into a part the redaction hides and a part it misses.
  *
  * This is a display boundary, not a sanitiser: a short secret passed as an
  * ordinary argument, or one the redaction does not recognise, is shown.
  */
 export function commandHeader(command: unknown): string | undefined {
   if (typeof command !== "string") return undefined;
-  const lines = command.split(/\r\n|\r|\n/u);
+  const lines = redactCredentials(withWordSpaces(command)).split(/\r\n|\r|\n/u);
   const index = lines.findIndex((line) => line.trim().length > 0);
   const first = lines[index]?.trim();
   if (first === undefined || first.startsWith("#")) return undefined;
   let omitted = lines.slice(index + 1).some((line) => line.trim().length > 0);
-  let header = withoutOptionSecrets(first);
-  if (first.length > COMMAND_LINE_LIMIT) {
+  let header = first;
+  if (header.length > COMMAND_LINE_LIMIT) {
     header = header.split(/\s/u, 1)[0] ?? "";
     omitted = true;
   }
@@ -171,44 +174,47 @@ export function commandHeader(command: unknown): string | undefined {
     header = header.slice(0, cut);
     omitted = true;
   }
-  const shown = displayed(header);
+  const shown = displayed(header.replaceAll(ESCAPED_SPACE, "\\ ").replaceAll(INNER_SPACE, " "));
   if (shown === undefined) return omitted ? "…" : undefined;
   return omitted && !shown.endsWith("…") ? `${shown} …` : shown;
 }
 
-const SUBSTITUTION = /<<|\$\(|`|[<>]\(/u;
-// An interpreter given its program as an argument: `python3 -c …`, `bash -lc …`, `perl -ne …`.
-const INLINE_SCRIPT =
-  /(?:^|[\s;&|(])(?:[^\s;&|()]*\/)?(?:python[0-9.]*|node|bun|deno|perl|ruby|php|lua|Rscript|osascript|pwsh|powershell|bash|sh|zsh|dash|ksh|fish)(?:\s+[^\s;&|]+)*?\s+(?:-[A-Za-z]*[ceE]|--eval|--exec|--command|-Command)(?=\s|$)/u;
-const LONG_QUOTED = new RegExp(String.raw`(["'])(?:(?!\1).){${String(QUOTED_LIMIT + 1)},}`, "u");
+/** Stand for a backslash-escaped space and a space inside `$(…)` or backticks. */
+const ESCAPED_SPACE = "\uE000";
+const INNER_SPACE = "\uE001";
 
-/** Where the part of a command line that may be a script or payload begins. */
+/** Keeps each escaped word and innermost substitution one word for the redaction. */
+function withWordSpaces(command: string): string {
+  return command
+    .replace(/\\[ \t]/gu, ESCAPED_SPACE)
+    .replace(/\$\([^()\n]*\)|`[^`\n]*`/gu, (inner) => inner.replace(/[ \t]/gu, INNER_SPACE));
+}
+
+const SUBSTITUTION = /<<|\$\(|`|[<>]\(/u;
+// An interpreter given its program as an argument, attached or not:
+// `python3 -c …`, `python3 -c"…"`, `bash -lc …`, `perl -ne …`.
+const INLINE_SCRIPT =
+  /(?:^|[\s;&|(])(?:[^\s;&|()]*\/)?(?:python[0-9.]*|node|bun|deno|perl|ruby|php|lua|Rscript|osascript|pwsh|powershell|bash|sh|zsh|dash|ksh|fish)(?:\s+[^\s;&|]+)*?\s+(?:-[A-Za-z]*[ceE]|--eval|--exec|--command|-Command)/u;
+const LONG_QUOTED = new RegExp(String.raw`(["'])(?:(?!\1).){${String(QUOTED_LIMIT + 1)},}`, "u");
+// Options whose value is a credential, in either form: `--password x`, `--api-key=x`.
+const SECRET_OPTION =
+  /(?:^|\s)--?(?:[a-z0-9]+-)*(?:pass|password|passwd|passphrase|token|secret|api-?key|key|auth|credentials?|cookie)(?=[=\s]|$)/iu;
+// `curl -u user:password`, but not `systemctl --user restart`.
+const USER_OPTION = /(?:^|\s)(?:-u|--user)(?=(?:=|\s+)\S*:)/u;
+// A quoted argument part of which was redacted: its other words may belong to the same value.
+const REDACTED_QUOTE = /(["'])(?:(?!\1).)*?\[redacted\]/u;
+
+/** Where the part of a command line that may be a script, payload or credential begins. */
 function opaqueStart(header: string): number | undefined {
   const starts = [
     header.search(SUBSTITUTION),
     header.search(LONG_QUOTED),
-    ...[INLINE_SCRIPT.exec(header)].map((flag) =>
-      flag === null ? -1 : flag.index + flag[0].length,
-    ),
+    header.search(REDACTED_QUOTE),
+    ...[INLINE_SCRIPT, SECRET_OPTION, USER_OPTION]
+      .map((pattern) => pattern.exec(header))
+      .map((match) => (match === null ? -1 : match.index + match[0].length)),
   ].filter((index) => index !== -1);
   return starts.length === 0 ? undefined : Math.min(...starts);
-}
-
-// Options whose next argument is a credential: `--password x`, `--api-key x`.
-const SECRET_OPTION =
-  /^--?(?:[a-z0-9]+-)*(?:pass|password|passwd|passphrase|token|secret|api-?key|key|auth|credentials?|cookie)$/iu;
-// `curl -u user:password`.
-const USER_OPTION = /^(?:-u|--user)$/u;
-
-function withoutOptionSecrets(text: string): string {
-  const words = text.split(/(\s+)/u);
-  for (let index = 2; index < words.length; index += 2) {
-    const option = words[index - 2] ?? "";
-    const value = words[index] ?? "";
-    if (SECRET_OPTION.test(option) || (USER_OPTION.test(option) && value.includes(":")))
-      words[index] = "[redacted]";
-  }
-  return words.join("");
 }
 
 /** An operation-shaped argument's action and numeric target IDs, such as Discord's. */
