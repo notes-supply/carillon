@@ -106,12 +106,12 @@ pub(crate) async fn serve_cdn(files: HashMap<String, Serve>) -> Result<(u16, Arc
                         let block = vec![0x5a_u8; 256 * 1024];
                         let mut sent = 0;
                         while sent < length {
-                            let part = usize::try_from((length - sent).min(block.len() as u64))
+                            let chunk = usize::try_from((length - sent).min(block.len() as u64))
                                 .unwrap_or(block.len());
-                            if stream.write_all(&block[..part]).await.is_err() {
+                            if stream.write_all(&block[..chunk]).await.is_err() {
                                 return;
                             }
-                            sent += part as u64;
+                            sent += chunk as u64;
                         }
                         Vec::new()
                     }

@@ -614,3 +614,102 @@ async fn status_and_staging_belong_to_the_authenticated_interface() -> Result<()
     assert_eq!(anonymous.status, StatusCode::FORBIDDEN);
     Ok(())
 }
+
+#[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "the held lock is what stalls the blocking copy"
+)]
+async fn a_capture_that_loses_to_an_earlier_acceptance_is_removed() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    let staged = stage(&state, "late", &[("late.bin", b"late bytes")])?;
+    let held = state
+        .core
+        .intake
+        .signals
+        .stall
+        .lock()
+        .map_err(|_| anyhow!("poisoned"))?;
+    let capturing = {
+        let (state, event) = (state.clone(), event("raced", "", staged.clone()));
+        tokio::spawn(async move { submit(&state, event).await })
+    };
+    wait_for_capture(&state, "raced").await?;
+    // The same event is accepted another way while the copy is stalled.
+    let won = submit(
+        &state,
+        ExternalEvent {
+            attachments: None,
+            ..event("raced", "without files", staged)
+        },
+    )
+    .await
+    .map_err(|error| anyhow!(error.message))?;
+    assert!(!won.duplicate);
+    drop(held);
+    let joined = capturing.await?.map_err(|error| anyhow!(error.message))?;
+    assert!(joined.duplicate);
+    assert_eq!(joined.turn_id, won.turn_id);
+    // The losing copy was removed once the database showed nothing uses it.
+    assert!(captures(&state)?.is_empty());
+    assert!(state.core.database.captures()?.is_empty());
+    assert_eq!(
+        *state
+            .core
+            .intake
+            .reserved
+            .lock()
+            .map_err(|_| anyhow!("poisoned"))?,
+        0
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_reservations_never_oversell_the_storage_budget() -> Result<()> {
+    let directory = tempdir()?;
+    let mut state = installation(directory.path())?;
+    with_limits(
+        &mut state,
+        AttachmentLimits {
+            max_files: 1,
+            max_file_mib: 1,
+            max_event_mib: 1,
+            storage_mib: 2,
+            free_space_mib: 0,
+            concurrent_captures: 8,
+        },
+    )?;
+    let bytes = vec![7_u8; 600 * 1024];
+    let mut submissions = tokio::task::JoinSet::new();
+    for index in 0..8 {
+        let staged = stage(&state, &format!("event-{index}"), &[("part", &bytes)])?;
+        let (state, event) = (state.clone(), event(&format!("event-{index}"), "", staged));
+        submissions.spawn(async move { submit(&state, event).await });
+    }
+    let (mut accepted, mut refused) = (0, 0);
+    while let Some(outcome) = submissions.join_next().await {
+        match outcome? {
+            Ok(_) => accepted += 1,
+            Err(refusal) => {
+                assert_eq!(refusal.status, StatusCode::INSUFFICIENT_STORAGE);
+                refused += 1;
+            }
+        }
+    }
+    // 2 MiB holds three 600 KiB captures, however the reservations interleave.
+    assert_eq!((accepted, refused), (3, 5));
+    assert_eq!(state.core.database.captured_bytes()?, 3 * 600 * 1024);
+    assert_eq!(captures(&state)?.len(), 3);
+    assert_eq!(
+        *state
+            .core
+            .intake
+            .reserved
+            .lock()
+            .map_err(|_| anyhow!("poisoned"))?,
+        0
+    );
+    Ok(())
+}

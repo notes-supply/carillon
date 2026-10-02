@@ -654,3 +654,56 @@ async fn a_file_only_root_message_starts_a_thread_named_after_its_file() -> Resu
     assert_eq!(core.submissions[0].content, "");
     Ok(())
 }
+
+#[tokio::test]
+async fn a_new_thread_holds_its_lane_until_its_first_message_settles() -> Result<()> {
+    let (cdn, log) = serve_cdn(HashMap::from([(
+        "/attachments/300/601/slow.bin".to_owned(),
+        Serve::Slow(Duration::from_millis(300), vec![1; 16]),
+    )]))
+    .await?;
+    let world = world(Vec::new(), Vec::new()).await?;
+    let mut config = discord_config(DiscordActivation::Always, DiscordConversation::Thread);
+    config.typing = false;
+    let root = || {
+        message(
+            "70",
+            "300",
+            "200",
+            "",
+            vec![attachment(cdn, "601", "slow.bin", 16)],
+        )
+    };
+    run(
+        &world,
+        config,
+        cdn,
+        vec![
+            root(),
+            // Sent in the new thread while its first message is still downloading.
+            message("71", "70", "200", "in the thread", Vec::new()),
+            // The gateway delivering the first message again.
+            root(),
+        ],
+    )
+    .await?;
+    let trace = trace(&world)?;
+    let (thread, first, child) = (
+        position(&trace, "thread 70 ")?,
+        position(&trace, "submit 70")?,
+        position(&trace, "submit 71")?,
+    );
+    assert!(thread < first && first < child, "{trace:?}");
+    assert_eq!(
+        trace.iter().filter(|entry| *entry == "submit 70").count(),
+        1,
+        "{trace:?}"
+    );
+    assert_eq!(
+        log.lock().map_err(|_| anyhow!("poisoned"))?.requests.len(),
+        1
+    );
+    let core = world.core.lock().map_err(|_| anyhow!("poisoned"))?;
+    assert_eq!(core.submissions[1].audience_id, "discord-100-70");
+    Ok(())
+}

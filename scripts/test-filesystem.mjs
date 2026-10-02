@@ -10,7 +10,9 @@ import { setTimeout as delay } from "node:timers/promises";
 // application fault switches, mocked storage, or service-manager interaction.
 const [mode, artifact] = process.argv.slice(2);
 assert.ok(
-  ["init", "resources", "restore", "participation", "config", "commands"].includes(mode),
+  ["init", "resources", "restore", "participation", "config", "commands", "attachments"].includes(
+    mode,
+  ),
   "unknown filesystem test mode",
 );
 const binary = resolve(mode === "init" ? join(artifact, "bin/carillon") : artifact);
@@ -42,6 +44,10 @@ const discordOptions = [
 ];
 const traceOptions = ["-f", "-qq", "-yy", "-s", "4096", "-e", "trace=mkdir,rename,fsync,fdatasync"];
 const run = (...args) => execFileSync(binary, args, { encoding: "utf8", timeout: 30_000 });
+/** Attachment files staged per capture attempt: enough that the capture
+ * thread's injected call comes later than any other thread's same call, since
+ * strace applies `when=N` to each thread's own count. */
+const STAGED_FILES = 32;
 
 try {
   if (mode === "init") {
@@ -50,12 +56,14 @@ try {
   } else if (mode === "restore") await testRestore();
   else if (mode === "participation") await testParticipation();
   else if (mode === "config") await testConfiguration();
+  else if (mode === "attachments") await testAttachments();
   else if (mode === "commands") {
     await testCommandModule();
     await testCommandDirectory();
   } else {
     await testConfiguration();
     await testResources();
+    await testAttachments();
     await testParticipation();
     await testCommandModule();
     await testCommandDirectory();
@@ -803,6 +811,198 @@ async function resourceAttempt(name, fault) {
     assert.equal(duplicate.status, 200);
     assert.equal((await duplicate.json()).turn_id, receipt.turn_id);
     return (await readFile(log, "utf8")).split("\n");
+  } finally {
+    try {
+      process.kill(-server.pid, "SIGTERM");
+    } catch (error) {
+      if (error.code !== "ESRCH") throw error;
+    }
+    const forceStop = setTimeout(() => {
+      try {
+        process.kill(-server.pid, "SIGKILL");
+      } catch (error) {
+        if (error.code !== "ESRCH") throw error;
+      }
+    }, 5_000);
+    try {
+      await exited;
+    } finally {
+      clearTimeout(forceStop);
+    }
+  }
+}
+
+/** Fail each durability step of an attachment capture in the real core. */
+async function testAttachments() {
+  const baseline = await attachmentAttempt("attachments-baseline", null);
+  const last = STAGED_FILES - 1;
+  const copying = baseline.find((line) => /\/attachments\/\.partial-[^/>]+\/0>/u.test(line));
+  assert.ok(copying, "captured files must be synced before publication");
+  const worker = copying.split(" ")[0];
+  const calls = (name, thread = worker) =>
+    baseline.filter(
+      (line) => line.startsWith(`${thread} `) && new RegExp(` ${name}\\(`, "u").test(line),
+    );
+  const others = (name) => {
+    const threads = new Set(baseline.map((line) => line.split(" ")[0]).filter(Boolean));
+    threads.delete(worker);
+    return Math.max(0, ...[...threads].map((thread) => calls(name, thread).length));
+  };
+  const publication = calls("renameat2");
+  assert.equal(publication.length, 1, "a capture is published by one rename");
+  const order = (line) => baseline.indexOf(line);
+  const lastFile = new RegExp(`/attachments/\\.partial-[^/>]+/${String(last)}>`, "u");
+  const points = [
+    ["file", "fsync", (line) => lastFile.test(line)],
+    ["directory", "fsync", (line) => /\/attachments\/\.partial-[^/>]+>/u.test(line)],
+    ["publication", "renameat2", (line) => line.includes("renameat2(")],
+    ["store", "fsync", (line) => /\/state\/attachments>/u.test(line)],
+    ["full", "write", (line) => lastFile.test(line)],
+  ];
+  for (const [name, call, predicate] of points) {
+    const candidates = calls(call);
+    const index = candidates.findIndex(predicate);
+    assert.ok(index >= 0, `missing capture boundary: ${name}`);
+    assert.ok(index + 1 > others(call), `injection must not hit another thread: ${name}`);
+    const published = order(publication[0]);
+    if (name === "store") assert.ok(order(candidates[index]) > published, "store sync follows");
+    else if (call !== "renameat2")
+      assert.ok(order(candidates[index]) < published, `${name} precedes publication`);
+    const error = name === "full" ? "ENOSPC" : "EIO";
+    await attachmentAttempt(name, { call, error, ordinal: index + 1, predicate });
+    console.log(`attachment durability failure passed: ${name}`);
+  }
+}
+
+async function attachmentAttempt(name, fault) {
+  const root = join(scratch, name);
+  run("--home", root, "init", "--workspace", scratch, ...initOptions);
+  const config = join(root, "carillon.toml");
+  // Captures here must not depend on the host's free space.
+  await writeFile(
+    config,
+    `\n[core.attachments]\nfree_space_mib = 0\nmax_files = ${String(STAGED_FILES)}\n`,
+    { flag: "a" },
+  );
+  run("--home", root, "provider", "runtime-pi", "enable");
+  const batch = join(root, "state/components/discord-private/incoming/batch");
+  await mkdir(batch, { recursive: true });
+  const files = Array.from(
+    { length: STAGED_FILES },
+    (_, ordinal) => `attached file ${String(ordinal)}`,
+  );
+  for (const [ordinal, content] of files.entries())
+    await writeFile(join(batch, String(ordinal)), content);
+  const token = (await readFile(join(root, "credentials/discord-private.token"), "utf8")).trim();
+  const accept = (base) =>
+    fetch(`${base}/v1/events`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-carillon-provider": "discord-private",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        event_id: "attached",
+        agent_id: "default",
+        user_id: "200",
+        audience_id: "test",
+        delivery_target_id: "300",
+        feedback_target_id: "300:attached",
+        content: "",
+        attachments: {
+          batch: "batch",
+          files: files.map((content, ordinal) => ({
+            name: `${String(ordinal)}.txt`,
+            size: Buffer.byteLength(content),
+          })),
+        },
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+  const store = join(root, "state/attachments");
+  const entries = async () => {
+    try {
+      return (await readdir(store)).sort();
+    } catch (error) {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    }
+  };
+  // What core kept: one published directory holding every file.
+  const verify = async () => {
+    const [turn] = JSON.parse(run("--home", root, "recent"));
+    const inspection = JSON.parse(run("--home", root, "inspect", turn.turn_id));
+    assert.equal(inspection.attachments.length, STAGED_FILES);
+    assert.deepEqual(await entries(), [inspection.attachments[0].path.split("/")[0]]);
+    for (const [ordinal, attachment] of inspection.attachments.entries())
+      assert.equal(await readFile(join(store, attachment.path), "utf8"), files[ordinal]);
+  };
+  const log = join(scratch, `${name}.trace`);
+  const trace = "trace=mkdir,rename,renameat2,fsync,fdatasync,write";
+  const args = ["-f", "-qq", "-yy", "-s", "256", "-e", trace, "-o", log];
+  if (fault)
+    args.push("-e", `inject=${fault.call}:error=${fault.error}:when=${String(fault.ordinal)}`);
+  await withCore(["strace", [...args, binary, "core", "--config", config]], async (base) => {
+    const response = await accept(base);
+    const body = await response.text();
+    if (fault === null) {
+      assert.equal(response.status, 200, body);
+      await verify();
+      return;
+    }
+    assert.equal(response.status, fault.error === "ENOSPC" ? 507 : 500, body);
+    const injected = (await readFile(log, "utf8"))
+      .split("\n")
+      .filter((line) => line.includes("INJECTED"));
+    assert.equal(injected.length, 1, injected.join("\n"));
+    assert.ok(fault.predicate(injected[0]), `wrong injection boundary: ${injected[0]}`);
+    assert.deepEqual(
+      JSON.parse(run("--home", root, "recent")),
+      [],
+      "a failed capture accepted work",
+    );
+    assert.ok(
+      (await entries()).every((entry) => !entry.startsWith(".partial-")),
+      "an unpublished copy survived its failure",
+    );
+  });
+  if (fault !== null) {
+    // Exclusive startup removes a published copy no turn references, and
+    // the same submission then succeeds.
+    await withCore([binary, ["core", "--config", config]], async (base) => {
+      assert.deepEqual(await entries(), []);
+      const response = await accept(base);
+      assert.equal(response.status, 200, await response.text());
+      await verify();
+    });
+  }
+  return (await readFile(log, "utf8")).split("\n");
+}
+
+/** Run core, wait until it listens, run `body`, then stop it. */
+async function withCore([command, args], body) {
+  const server = spawn(command, args, {
+    env: { ...process.env, TOKIO_WORKER_THREADS: "1" },
+    detached: true,
+    stdio: "ignore",
+  });
+  const exited = once(server, "exit");
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const deadline = Date.now() + 10_000;
+    while (true) {
+      assert.equal(server.exitCode, null, "core exited before listening");
+      try {
+        const response = await fetch(`${base}/health`, { signal: AbortSignal.timeout(500) });
+        if (response.status === 200) break;
+      } catch {
+        /* Listener is not ready yet. */
+      }
+      assert.ok(Date.now() < deadline, "core did not become ready");
+      await delay(25);
+    }
+    return await body(base);
   } finally {
     try {
       process.kill(-server.pid, "SIGTERM");

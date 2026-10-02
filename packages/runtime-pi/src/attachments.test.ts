@@ -421,15 +421,29 @@ it("applies the inline policy's count and byte limits and leaves other files alo
   expect(sized.note).toContain("larger than 1 MiB");
   expect(sized.note).toContain("inline images may total 1 MiB per message");
 
+  // A 2x2 BMP: an image, but not a format passed inline.
+  const bmp = Buffer.alloc(70);
+  bmp.write("BM", 0, "ascii");
+  bmp.writeUInt32LE(70, 2);
+  bmp.writeUInt32LE(54, 10);
+  bmp.writeUInt32LE(40, 14);
+  bmp.writeInt32LE(2, 18);
+  bmp.writeInt32LE(2, 22);
+  bmp.writeUInt16LE(1, 26);
+  bmp.writeUInt16LE(24, 28);
   const none = await prepareAttachments(
     root,
     await capture(root, [
       { name: "notes.txt", bytes: Buffer.from("text") },
       { name: "empty", bytes: Buffer.alloc(0) },
+      { name: "archive.zip", bytes: Buffer.from("PK\u0003\u0004 archive bytes") },
+      { name: "program", bytes: Buffer.from("\u007fELF executable bytes") },
+      { name: "picture.bmp", bytes: bmp },
     ]),
     DEFAULT_INLINE_IMAGES,
   );
   expect(none.images).toEqual([]);
-  expect(none.note?.split("\n").filter((line) => line.endsWith("; file"))).toHaveLength(2);
+  expect(none.note?.split("\n").filter((line) => line.endsWith("; file"))).toHaveLength(4);
+  expect(none.note).toContain("not passed as an inline image: BMP images are not passed inline");
   expect(await prepareAttachments(root, [], DEFAULT_INLINE_IMAGES)).toEqual({ images: [] });
 });
