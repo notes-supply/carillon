@@ -15,13 +15,17 @@ use std::{
     sync::Arc,
 };
 
-use tokio::{sync::mpsc, task::JoinSet};
+use serde_json::Value;
+use tokio::{
+    sync::{Semaphore, mpsc},
+    task::JoinSet,
+};
 use tracing::warn;
 
 use super::{Ingress, QueuedMessage, prepare};
 use crate::{
     config::{DiscordConfig, DiscordConversation},
-    conversations::IncomingMessage,
+    conversations::{IncomingMessage, admit_message},
     delivery::{Feedback, explain, terminal_feedback},
 };
 
@@ -29,6 +33,8 @@ use crate::{
 pub(crate) const MAX_PENDING: usize = 64;
 /// Messages waiting or in preparation in one conversation.
 pub(crate) const MAX_PER_LANE: usize = 16;
+/// Overload replies being sent at once; beyond them refusals are only logged.
+const REFUSALS: usize = 4;
 
 /// The conversation a message will belong to, before any Discord lookup:
 /// its own thread when it starts one, otherwise its channel or thread.
@@ -49,6 +55,7 @@ pub(crate) async fn dispatch(ingress: Arc<Ingress>, mut messages: mpsc::Receiver
     let mut lanes: HashMap<String, VecDeque<QueuedMessage>> = HashMap::new();
     let mut pending = 0_usize;
     let mut running = JoinSet::new();
+    let refusals = Arc::new(Semaphore::new(REFUSALS));
     let mut open = true;
     loop {
         tokio::select! {
@@ -63,7 +70,7 @@ pub(crate) async fn dispatch(ingress: Arc<Ingress>, mut messages: mpsc::Receiver
                     if queue.is_empty() {
                         lanes.remove(&key);
                     }
-                    tokio::spawn(refuse_overloaded(ingress.clone(), message.request));
+                    refuse_overloaded(&ingress, &refusals, message.request);
                     continue;
                 }
                 pending += 1;
@@ -113,18 +120,47 @@ fn start(
     }
 }
 
-async fn refuse_overloaded(ingress: Arc<Ingress>, message: IncomingMessage) {
+/// Refuse a message beyond the bounds. Only a message admission would
+/// activate is answered, so overload never replies to messages Carillon
+/// would ignore; a thread the provider has not yet seen is not answered.
+pub(crate) fn refuse_overloaded(
+    ingress: &Arc<Ingress>,
+    refusals: &Arc<Semaphore>,
+    message: IncomingMessage,
+) {
     warn!(
         channel = %message.channel_id,
         message = %message.event_id,
         "Discord message refused: too many messages are waiting"
     );
-    let source = format!("{}:{}", message.channel_id, message.event_id);
-    explain(
-        &ingress.http,
-        &source,
-        "Carillon is too busy to take this message right now; please send it again shortly.",
-    )
-    .await;
-    terminal_feedback(&ingress.http, &ingress.config, &source, Feedback::Failed).await;
+    let mut request = message.clone();
+    if request.parent_channel_id.is_none() {
+        request.parent_channel_id = ingress.participation.parent_route(&request.channel_id);
+    }
+    if !matches!(
+        admit_message(
+            &ingress.config,
+            &ingress.participation,
+            request,
+            Value::Null
+        ),
+        Ok(Some(_))
+    ) {
+        return;
+    }
+    let Ok(permit) = refusals.clone().try_acquire_owned() else {
+        return;
+    };
+    let ingress = ingress.clone();
+    tokio::spawn(async move {
+        let source = format!("{}:{}", message.channel_id, message.event_id);
+        explain(
+            &ingress.http,
+            &source,
+            "Carillon is too busy to take this message right now; please send it again shortly.",
+        )
+        .await;
+        terminal_feedback(&ingress.http, &ingress.config, &source, Feedback::Failed).await;
+        drop(permit);
+    });
 }

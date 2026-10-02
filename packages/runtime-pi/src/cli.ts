@@ -4,7 +4,7 @@ import { once } from "node:events";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { Type } from "typebox";
-import { Parse } from "typebox/value";
+import { Check, Errors, Parse } from "typebox/value";
 import { parse as parseToml } from "smol-toml";
 import { createPiRuntime } from "./index.ts";
 import {
@@ -171,7 +171,15 @@ async function loadInlineImages(path: string): Promise<InlineImagePolicy> {
       return DEFAULT_INLINE_IMAGES;
     throw failure;
   }
-  const settings = Parse(ProviderFileSchema, parseToml(text));
+  // Checked, not parsed: an unknown or mistyped setting is an error, never
+  // silently dropped or converted.
+  const settings: unknown = parseToml(text);
+  if (!Check(ProviderFileSchema, settings)) {
+    const [first] = Errors(ProviderFileSchema, settings);
+    throw new Error(
+      `${path}: ${first === undefined ? "invalid settings" : `${first.instancePath || "/"} ${first.message}`}`,
+    );
+  }
   const policy = { ...DEFAULT_INLINE_IMAGES, ...settings.inline_images };
   if (policy.max_total_mib < policy.max_image_mib)
     throw new Error(`${path}: inline_images.max_total_mib must be at least max_image_mib`);

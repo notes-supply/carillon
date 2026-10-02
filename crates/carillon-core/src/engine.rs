@@ -1,6 +1,6 @@
 //! Admission, runtime ownership, execution and delivery over one SQLite authority.
 use crate::{
-    attachments::{self, Capture, Reconciled},
+    attachments::{self, Capture, Reconciled, Unusable},
     db::{ClaimedTurn, Database},
     intake::Intake,
     resources,
@@ -67,6 +67,9 @@ impl CoreError {
 /// An attachment that no longer matches its capture runs nothing.
 const ALTERED_ATTACHMENT: &str = "a file attached to that message was changed or removed after \
 Carillon accepted it, so the message was not run";
+/// Nor does one that cannot be read when the turn starts.
+const UNREADABLE_ATTACHMENT: &str = "a file attached to that message could not be read, so the \
+message was not run";
 
 /// A core handle does not spawn workers or initialize any provider.
 /// Clones share the same SQLite authority. The application owns the exclusive worker lifetime.
@@ -126,6 +129,12 @@ impl Core {
     /// Their submissions are refused as unavailable and may be retried.
     pub fn stop_capturing(&self) {
         self.intake.stop();
+    }
+
+    /// Wait until every capture in progress has returned and settled, so
+    /// exclusive ownership can be released without a copy still running.
+    pub async fn captures_settled(&self) {
+        self.intake.settled().await;
     }
 
     pub(crate) fn snapshot_store(&self) -> PathBuf {
@@ -271,12 +280,15 @@ impl Core {
         let Some(turn) = self.database.claim_turn(runtime_id)? else {
             return Ok(WorkerStep::Idle);
         };
-        if let Err(failure) = self.verify_attachments(&turn).await {
-            let message = format!("{failure:#}");
+        if let Err(unusable) = self.check_attachments(&turn).await {
+            let (message, explanation) = match &unusable {
+                Unusable::Altered(message) => (message.clone(), ALTERED_ATTACHMENT),
+                Unusable::Unreadable(error) => (format!("{error:#}"), UNREADABLE_ATTACHMENT),
+            };
             self.database
-                .interrupt_turn(&turn, &message, Some(ALTERED_ATTACHMENT))
+                .interrupt_turn(&turn, &message, Some(explanation))
                 .with_context(|| format!("record unrunnable turn {}", turn.turn_id))?;
-            warn!(turn_id = %turn.turn_id, error = %message, "captured attachment is not intact; turn not run");
+            warn!(turn_id = %turn.turn_id, error = %message, "captured attachment is not usable; turn not run");
             return Ok(WorkerStep::Advanced);
         }
         let outcome = async {
@@ -427,7 +439,7 @@ impl Core {
 
     /// Re-read a claimed turn's captured files before any runtime sees them,
     /// off the async reactor.
-    async fn verify_attachments(&self, turn: &ClaimedTurn) -> Result<()> {
+    async fn check_attachments(&self, turn: &ClaimedTurn) -> Result<(), Unusable> {
         if turn.attachments.is_empty() {
             return Ok(());
         }
@@ -438,9 +450,10 @@ impl Core {
         tokio::task::spawn_blocking(move || {
             files
                 .iter()
-                .try_for_each(|file| attachments::verify(&data, file))
+                .try_for_each(|file| attachments::check(&data, file))
         })
-        .await?
+        .await
+        .map_err(|error| Unusable::Unreadable(error.into()))?
     }
 
     fn admit(&self, event: &ExternalEvent) -> Result<(), CoreError> {

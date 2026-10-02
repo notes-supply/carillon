@@ -17,7 +17,7 @@ use std::{
 use anyhow::anyhow;
 use carillon_installation::config::{AttachmentLimits, MIB};
 use carillon_protocol::model::{EventReceipt, ExternalEvent, SelectedProvider, StagedAttachments};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, watch};
 use tracing::warn;
 
 use crate::{
@@ -39,6 +39,8 @@ pub(crate) struct Intake {
     limits: AttachmentLimits,
     pub(crate) workers: Arc<Semaphore>,
     capturing: Mutex<HashMap<Key, watch::Receiver<Outcome>>>,
+    /// Woken whenever the last capture in progress settles.
+    settled: Notify,
     pub(crate) reserved: Arc<Mutex<u64>>,
     /// Shared by every capture's signal; stopping it stops them all.
     pub(crate) signals: Cancel,
@@ -68,9 +70,10 @@ pub(crate) fn admit(
                 "attachment names must have 1-{MAX_NAME_BYTES} bytes"
             ));
         }
+        // Parameters such as `text/plain; charset=utf-8` include spaces.
         if file.content_type.as_ref().is_some_and(|value| {
             value.len() > MAX_CONTENT_TYPE_BYTES
-                || !value.bytes().all(|byte| byte.is_ascii_graphic())
+                || !value.bytes().all(|byte| matches!(byte, b' '..=b'~'))
         }) {
             return refuse("attachment media types must be short printable ASCII".into());
         }
@@ -104,6 +107,7 @@ impl Intake {
             workers: Arc::new(Semaphore::new(limits.concurrent_captures as usize)),
             limits,
             capturing: Mutex::default(),
+            settled: Notify::new(),
             reserved: Arc::default(),
             signals: Cancel::default(),
         }
@@ -111,6 +115,20 @@ impl Intake {
 
     pub(crate) fn stop(&self) {
         self.signals.stop_all();
+    }
+
+    /// Wait until no capture is in progress: every copy has returned and its
+    /// outcome is settled in the database.
+    pub(crate) async fn settled(&self) {
+        loop {
+            let settled = self.settled.notified();
+            tokio::pin!(settled);
+            settled.as_mut().enable();
+            if lock(&self.capturing).is_empty() {
+                return;
+            }
+            settled.await;
+        }
     }
 
     pub(crate) fn capturing(&self, interface: &str, event_id: &str) -> bool {
@@ -129,6 +147,13 @@ impl Intake {
             let mut capturing = lock(&self.capturing);
             if let Some(running) = capturing.get(&key) {
                 running.clone()
+            } else if let Some(receipt) = core
+                .database
+                .event_receipt(&interface.id, &event.event_id)?
+            {
+                // A capture of this event committed and left since the
+                // caller last looked: its turn is the answer, not a new copy.
+                return Ok(receipt);
             } else {
                 let staged = event
                     .attachments
@@ -228,7 +253,11 @@ impl Run {
         // kept or removed with a losing capture.
         drop(reservation);
         let _ = sender.send(Some(outcome.map_err(Arc::new)));
-        lock(&self.core.intake.capturing).remove(&self.key);
+        let mut capturing = lock(&self.core.intake.capturing);
+        capturing.remove(&self.key);
+        if capturing.is_empty() {
+            self.core.intake.settled.notify_waiters();
+        }
     }
 
     async fn capture_and_commit(

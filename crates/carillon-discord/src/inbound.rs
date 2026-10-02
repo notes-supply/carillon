@@ -123,9 +123,9 @@ async fn prepare_text(ingress: &Ingress, plan: MessagePlan) {
     }
 }
 
-/// Download, stage and submit a message with files. Its processing reaction
-/// appears only once core has accepted the files; while they download the
-/// sender sees typing.
+/// Download, stage and submit a message with files. While they download the
+/// sender sees typing; the processing reaction appears once they are handed
+/// to core.
 async fn prepare_files(ingress: &Ingress, plan: MessagePlan) {
     let (discord, http) = (&ingress.config, &*ingress.http);
     let source = format!("{}:{}", plan.channel_id, plan.message_id);
@@ -165,16 +165,15 @@ async fn prepare_files(ingress: &Ingress, plan: MessagePlan) {
         return;
     };
     resolved.event.attachments = Some(staged.manifest.clone());
+    // As for text, the processing reaction precedes submission, so the
+    // delivered or failed reaction that follows always replaces it.
+    processing_feedback(http, discord, &resolved.event.feedback_target_id).await;
     let settled = submit_files(ingress, &resolved.event, deadline).await;
     typing.abort();
     // Core holds its own copy once it answers; the staged files go.
     drop(staged);
-    match settled {
-        Ok(receipt) if !receipt.duplicate => {
-            processing_feedback(http, discord, &resolved.event.feedback_target_id).await;
-        }
-        Ok(_) => {}
-        Err(refusal) => refuse(refusal).await,
+    if let Err(refusal) = settled {
+        refuse(refusal).await;
     }
 }
 

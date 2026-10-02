@@ -1,16 +1,29 @@
 // The packaged runtime with real Pi: attached images reach inference as Pi's
 // normalized native input and every file is listed. Controlled local inference.
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
+import { realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { createRequire } from "node:module";
+import { dirname, join, resolve } from "node:path";
 import { deflateSync } from "node:zlib";
 
 const release = resolve(process.argv[2] ?? "target/package/carillon-0.0.0");
+const pi = realpathSync(
+  resolve(
+    import.meta.dirname,
+    "../packages/runtime-pi/node_modules/@earendil-works/pi-coding-agent",
+  ),
+);
+const photon = dirname(
+  createRequire(join(pi, "package.json")).resolve("@silvia-odwyer/photon-node/package.json"),
+);
+const namespace = ["--user", "--map-root-user", "--mount"];
+const hidePhoton = spawnSync("unshare", [...namespace, "true"]).status === 0;
 const root = await mkdtemp(join(tmpdir(), "carillon-packaged-images-"));
 const token = "test-only-component-token";
 const hash = createHash("sha256").update(token).digest("hex");
@@ -112,20 +125,35 @@ try {
     `data_dir = "state"\n[core]\noperator_token_hash = "${hash}"\n[agent]\nresource_root = "resources"\nworkspace = ${JSON.stringify(root)}\n[[providers]]\nid = "runtime-pi"\nrole = "runtime"\nversion = "0.0.0"\nurl = "${url}"\ntoken_hash = "${hash}"\nenabled = true\n`,
   );
   let logs = "";
-  runtime = spawn(
+  const program = [
     join(release, "bin/carillon-runtime-pi"),
-    [
-      "--config",
-      config,
-      "--provider",
-      "runtime-pi",
-      "--token-file",
-      tokenFile,
-      "--state-dir",
-      state,
-    ],
-    { cwd: root, env: { ...process.env, PI_OFFLINE: "1", PI_CODING_AGENT_DIR: state } },
-  );
+    "--config",
+    config,
+    "--provider",
+    "runtime-pi",
+    "--token-file",
+    tokenFile,
+    "--state-dir",
+    state,
+  ];
+  // A compiled Pi first loads Photon from the build tree it was built in,
+  // which installed owners cannot read. Hide that tree in a private mount
+  // namespace, where available, so only the release's own copy can serve.
+  const [command, ...args] = hidePhoton
+    ? [
+        "unshare",
+        ...namespace,
+        "sh",
+        "-c",
+        'mount -t tmpfs none "$0" && exec "$@"',
+        photon,
+        ...program,
+      ]
+    : program;
+  runtime = spawn(command, args, {
+    cwd: root,
+    env: { ...process.env, PI_OFFLINE: "1", PI_CODING_AGENT_DIR: state },
+  });
   runtime.stdout.on("data", (part) => {
     logs += part;
   });
@@ -177,12 +205,12 @@ try {
   // Pi decoded and resized it with the packaged Photon module.
   assert.match(text, /\[Image: original 2400x300, displayed at 2000x250\./u, text);
   assert.doesNotMatch(text, /Image omitted/u);
-  assert.match(text, /name: "wide\.png"; .*sent as inline image 1/u);
+  assert.match(text, /name: "wide\.png"; .*sent inline as an image/u);
   assert.match(text, /name: "notes\.txt"; .*; file$/mu);
   // The release ships Photon's module beside the executables.
   assert.ok((await readFile(join(release, "bin/photon_rs_bg.wasm"))).length > 0);
   console.log(
-    "runtime: packaged Pi normalized an attached image natively and listed every file (local inference fixture)",
+    `runtime: packaged Pi normalized an attached image natively and listed every file (local inference fixture; ${hidePhoton ? "build-tree Photon hidden, release copy used" : "build-tree Photon visible: no user namespaces here"})`,
   );
 } finally {
   if (runtime && runtime.exitCode === null) {

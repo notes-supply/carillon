@@ -713,3 +713,110 @@ async fn concurrent_reservations_never_oversell_the_storage_budget() -> Result<(
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn declared_media_types_may_carry_parameters_but_not_controls() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    let mut staged = stage(&state, "typed", &[("notes.txt", b"plain notes")])?;
+    staged.files[0].content_type = Some("text/plain; charset=utf-8".to_owned());
+    let receipt = submit(&state, event("typed", "", staged.clone()))
+        .await
+        .map_err(|error| anyhow!(error.message))?;
+    let inspection = state.core.inspect_turn(&receipt.turn_id)?.context("turn")?;
+    assert_eq!(
+        inspection.attachments[0].content_type.as_deref(),
+        Some("text/plain; charset=utf-8")
+    );
+    staged.files[0].content_type = Some("text/plain\u{7}".to_owned());
+    let refusal = submit(&state, event("controlled", "", staged))
+        .await
+        .err()
+        .context("control character accepted")?;
+    assert_eq!(refusal.status, StatusCode::BAD_REQUEST);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unreadable_capture_is_not_reported_as_altered() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    let staged = stage(&state, "batch", &[("a", b"original")])?;
+    let receipt = submit(&state, event("unreadable", "read it", staged))
+        .await
+        .map_err(|error| anyhow!(error.message))?;
+    let inspection = state.core.inspect_turn(&receipt.turn_id)?.context("turn")?;
+    let file = state
+        .config
+        .value
+        .data_dir
+        .join("attachments")
+        .join(&inspection.attachments[0].path);
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o000))?;
+    let step = run_next_turn(&state, "test-runtime", async |_, _, _| {
+        Err(TurnFailure::Uncertain(anyhow!(
+            "the runtime must not be called"
+        )))
+    })
+    .await;
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o440))?;
+    assert_eq!(step?, WorkerStep::Advanced);
+    let notice = state
+        .core
+        .claim_delivery("test-interface", "instance")?
+        .context("no interruption notice")?;
+    assert!(
+        notice.content.contains("could not be read"),
+        "{}",
+        notice.content
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "the held lock is what stalls the blocking copy"
+)]
+async fn shutdown_waits_for_running_captures_to_settle() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    let staged = stage(&state, "settling", &[("a", b"bytes")])?;
+    let held = state
+        .core
+        .intake
+        .signals
+        .stall
+        .lock()
+        .map_err(|_| anyhow!("poisoned"))?;
+    let submission = {
+        let (state, event) = (state.clone(), event("settling", "", staged));
+        tokio::spawn(async move { submit(&state, event).await })
+    };
+    wait_for_capture(&state, "settling").await?;
+    state.core.stop_capturing();
+    let settled = {
+        let core = state.core.clone();
+        tokio::spawn(async move { core.captures_settled().await })
+    };
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    assert!(!settled.is_finished());
+    drop(held);
+    settled.await?;
+    let refusal = submission
+        .await?
+        .err()
+        .context("a stopped capture was accepted")?;
+    assert_eq!(refusal.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(captures(&state)?.is_empty());
+    // A stopped core refuses new captures before any work.
+    let later = stage(&state, "later", &[("b", b"bytes")])?;
+    let refused = submit(&state, event("later", "", later))
+        .await
+        .err()
+        .context("capture accepted after shutdown")?;
+    assert_eq!(refused.status, StatusCode::SERVICE_UNAVAILABLE);
+    Ok(())
+}

@@ -19,6 +19,7 @@ import { mkdir, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { trackActivity, type ActivityTracker } from "./activity.ts";
 import {
+  ATTACHMENT_NOTE,
   attachmentContext,
   DEFAULT_INLINE_IMAGES,
   prepareAttachments,
@@ -229,7 +230,7 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
     const created = await createPiExecutionSession({
       resourceRoot: root,
       extensionContext: options.extensionContext?.(request),
-      attachmentContext: attachmentContext(request.attachment_root, attachments.note),
+      attachmentContext: attachmentContext(request.attachment_root),
       workspace: workspace,
       manager,
       modelRuntime: runtime,
@@ -246,6 +247,14 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
           output += event.assistantMessageEvent.delta;
       });
       try {
+        // Recorded before the prompt, so files sent with a command or with
+        // input an extension handles are still known to later turns.
+        if (attachments.note !== undefined)
+          await session.sendCustomMessage({
+            customType: ATTACHMENT_NOTE,
+            content: attachments.note,
+            display: false,
+          });
         await promptSession(session, request.input, signal, attachments.images);
         return {
           correlation_id: request.correlation_id,

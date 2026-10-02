@@ -1126,6 +1126,18 @@ async function testRuntimeStartupRefusals(turnId) {
       await assert.rejects(stat(privateState), { code: "ENOENT" });
       assert.equal(JSON.parse(run("--home", installation, "inspect", turnId)).state, "queued");
     }
+    // The runtime's own settings are checked, not silently ignored.
+    const runtimeSettings = join(installation, "providers/runtime-pi.toml");
+    for (const [settings, expected] of [
+      ["[inline_images]\nmax_megapixel = 10\n", /runtime-pi\.toml/u],
+      ["[inline_images]\nmax_image_mib = 1.5\n", /runtime-pi\.toml/u],
+      ["[inline_images]\nmax_image_mib = 8\nmax_total_mib = 4\n", /max_total_mib/u],
+    ]) {
+      await writeFile(runtimeSettings, settings);
+      assertStartupRefused("runtime", expected);
+      await assert.rejects(stat(sessions), { code: "ENOENT" });
+    }
+    await rm(runtimeSettings);
     run("--home", installation, "provider", "runtime-pi", "disable");
     assertStartupRefused("runtime", /runtime provider runtime-pi is disabled/u);
     await assert.rejects(stat(sessions), { code: "ENOENT" });
@@ -1534,6 +1546,12 @@ async function testAttachments() {
     files: [{ name: "token", size: operatorToken.size }],
   });
   assert.equal(linked.status, 400, await linked.text());
+  const store = join(installation, "state/attachments");
+  assert.deepEqual(
+    await readdir(store).catch(() => []),
+    [],
+    "a refused capture left a copy behind",
+  );
   const response = await postCoreEvent("attachments-1", "", {
     batch: "batch",
     files: [

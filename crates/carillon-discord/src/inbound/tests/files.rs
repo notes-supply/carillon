@@ -362,13 +362,14 @@ async fn a_message_with_files_is_accepted_whole_with_metadata_only() -> Result<(
         let wire = serde_json::to_string(event)?;
         assert!(wire.len() < 2_000, "{} bytes", wire.len());
         assert!(!wire.contains("hm=") && !wire.contains("127.0.0.1") && !wire.contains("incoming"));
-        // Accepted, then shown as queued; staging is released.
+        // Shown as processing once downloaded, before core can deliver an
+        // answer that replaces the reaction; staging is then released.
         let submitted = position(&core.trace, "submit 10")?;
         let reacted = position(
             &core.trace,
             "PUT /api/v10/channels/300/messages/10/reactions/",
         )?;
-        assert!(submitted < reacted);
+        assert!(reacted < submitted);
         assert_eq!(
             log.lock().map_err(|_| anyhow!("poisoned"))?.requests.len(),
             2
@@ -706,4 +707,52 @@ async fn a_new_thread_holds_its_lane_until_its_first_message_settles() -> Result
     let core = world.core.lock().map_err(|_| anyhow!("poisoned"))?;
     assert_eq!(core.submissions[1].audience_id, "discord-100-70");
     Ok(())
+}
+
+#[tokio::test]
+async fn overload_replies_only_to_messages_admission_would_activate() -> Result<()> {
+    let world = world(Vec::new(), Vec::new()).await?;
+    let mut config = channel_config();
+    config.routes[0].activation = DiscordActivation::Mention;
+    let ingress = Arc::new(crate::inbound::Ingress {
+        downloads: crate::attachments::Downloads::open(world.staging.clone(), config.attachments)?,
+        core: test_client(format!("http://{}", world.address)),
+        participation: Arc::new(Participation::load(
+            world.staging.with_file_name("participation.json"),
+        )?),
+        http: world.http.clone(),
+        config,
+    });
+    let refusals = Arc::new(tokio::sync::Semaphore::new(4));
+    for ignored in [
+        // A mention route, not mentioned.
+        message("80", "300", "200", "just chatting", Vec::new()),
+        // A thread the provider has not seen.
+        message("81", "999", "200", "hello", Vec::new()),
+        // Not allowlisted.
+        message("82", "301", "999", "hello", Vec::new()),
+    ] {
+        lanes::refuse_overloaded(&ingress, &refusals, ignored.request);
+    }
+    lanes::refuse_overloaded(
+        &ingress,
+        &refusals,
+        message("83", "301", "200", "hello", Vec::new()).request,
+    );
+    for _ in 0..200 {
+        let trace = trace(&world)?;
+        if trace
+            .iter()
+            .any(|entry| entry.contains("/messages/83/reactions/"))
+        {
+            assert!(trace.iter().all(|entry| entry.contains("83")), "{trace:?}");
+            assert!(
+                trace.iter().any(|entry| entry.contains("too busy")),
+                "{trace:?}"
+            );
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    Err(anyhow!("no overload refusal for an activated message"))
 }

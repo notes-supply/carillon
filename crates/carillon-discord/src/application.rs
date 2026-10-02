@@ -635,13 +635,30 @@ async fn gateway_loop(
 /// files are core's captures, not CDN links.
 fn native_message(message: &twilight_model::channel::Message) -> Value {
     let mut native = serde_json::to_value(message).unwrap_or(Value::Null);
-    if let Some(attachments) = native.get_mut("attachments").and_then(Value::as_array_mut) {
-        for attachment in attachments.iter_mut().filter_map(Value::as_object_mut) {
-            attachment.remove("url");
-            attachment.remove("proxy_url");
-        }
-    }
+    strip_attachment_addresses(&mut native);
     native
+}
+
+/// Remove signed addresses from every attachment list, including those of
+/// referenced and forwarded messages nested in the payload.
+fn strip_attachment_addresses(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            for (key, nested) in object.iter_mut() {
+                if key == "attachments"
+                    && let Value::Array(attachments) = nested
+                {
+                    for attachment in attachments.iter_mut().filter_map(Value::as_object_mut) {
+                        attachment.remove("url");
+                        attachment.remove("proxy_url");
+                    }
+                }
+                strip_attachment_addresses(nested);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(strip_attachment_addresses),
+        _ => {}
+    }
 }
 
 /// Hands a message to the worker without waiting for room. The gateway must

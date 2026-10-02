@@ -224,6 +224,18 @@ function users(sent: Sent) {
   return sent.messages.filter((message) => message.role === "user");
 }
 
+/** The person's message: the last user message of the request. */
+function prompt(sent: Sent | undefined) {
+  return users(sent ?? { messages: [] }).at(-1);
+}
+
+/** The attachment notes the request carries, in order. */
+function notes(sent: Sent | undefined): string[] {
+  return users(sent ?? { messages: [] })
+    .map((message) => text(message.content))
+    .filter((content) => content.startsWith("[Carillon attachments]"));
+}
+
 function system(sent: Sent): string {
   return sent.messages
     .filter((message) => message.role === "system" || message.role === "developer")
@@ -254,25 +266,24 @@ it("passes suitable images natively, lists every file and escapes hostile names"
   );
   const [request] = sent;
   if (request === undefined) throw new Error("Pi made no model request");
-  const [message, note] = users(request);
+  const message = prompt(request);
+  const [listed = ""] = notes(request);
   // Pi's own normalization passed the small images through, in order.
   expect(text(message?.content)).toBe("Compare these.");
   expect(images(message?.content)).toEqual([
     `data:image/png;base64,${first.toString("base64")}`,
     `data:image/png;base64,${second.toString("base64")}`,
   ]);
-  const listed = text(note?.content);
   expect(listed).toContain("[Carillon attachments]");
   expect(listed).toContain(`1. path: ${attachments[0]?.path ?? ""}; name: "first.png"`);
-  expect(listed).toContain("sent as inline image 1");
+  expect(listed.match(/sent inline as an image/gu)).toHaveLength(2);
   expect(listed).toMatch(
     /2\. path: \S+; name: "report.pdf"; size: \S+ bytes; declared type: "application\/pdf"; file$/mu,
   );
-  expect(listed).toContain('name: "evil\\nname\\u202e.png"');
+  expect(listed).toContain('name: "evil\\nname\\u{202e}.png"');
   expect(listed).toContain(
     "not passed as an inline image: 1.2 megapixels exceeds the 1 megapixel limit",
   );
-  expect(listed).toContain("sent as inline image 2");
   expect(listed).not.toContain("‮");
   expect(listed).not.toContain(store);
   const instructions = system(request);
@@ -338,7 +349,7 @@ it("gives text-only models Pi's native image placeholder", async () => {
   expect(await execute(runtime, turn(resources, store, "What is this?", attachments))).toBe(
     "no eyes",
   );
-  const [message] = users(sent[0] ?? { messages: [] });
+  const message = prompt(sent[0]);
   expect(images(message?.content)).toEqual([]);
   expect(text(message?.content)).toContain("image omitted: model does not support images");
 });
@@ -350,16 +361,16 @@ it("leaves a corrupt image to Pi's omission hint and keeps it a file", async () 
   corrupt.fill(0, 41, corrupt.length - 12);
   const attachments = await capture(store, [{ name: "broken.png", bytes: corrupt }]);
   await execute(runtime, turn(resources, store, "Look.", attachments));
-  const [message, note] = users(sent[0] ?? { messages: [] });
+  const message = prompt(sent[0]);
   expect(images(message?.content)).toEqual([]);
   expect(text(message?.content)).toContain("[Image omitted");
-  expect(text(note?.content)).toContain('name: "broken.png"');
+  expect(notes(sent[0]).join("\n")).toContain('name: "broken.png"');
 });
 
 it("keeps slash commands and input handlers native when files are attached", async () => {
   const { root, resources, runtime, sent, workspace } = await setup(
     ["text", "image"],
-    ["described"],
+    ["started", "described"],
   );
   await mkdir(join(resources, "extensions"));
   const record = join(workspace, "observed.json");
@@ -382,15 +393,23 @@ export default function observer(pi) {
     { name: "a.png", bytes: png(8, 8) },
     { name: "b.png", bytes: png(9, 9) },
   ]);
+  // An established conversation: Pi persists a new session from its first answer.
+  await execute(runtime, turn(resources, store, "hello", [], "start"));
   await execute(runtime, turn(resources, store, "/note hello there", attachments, "command"));
-  expect(sent).toHaveLength(0);
+  expect(sent).toHaveLength(1);
   await execute(runtime, turn(resources, store, "describe", attachments, "prompt"));
   const observed = (await readFile(record, "utf8"))
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line) as unknown);
-  expect(observed).toEqual([{ command: "hello there" }, { input: "describe", images: 2 }]);
-  expect(images(users(sent[0] ?? { messages: [] })[0]?.content)).toHaveLength(2);
+  expect(observed).toEqual([
+    { input: "hello", images: 0 },
+    { command: "hello there" },
+    { input: "describe", images: 2 },
+  ]);
+  expect(images(prompt(sent[1])?.content)).toHaveLength(2);
+  // The files sent with the command are recorded too.
+  expect(notes(sent[1])).toHaveLength(2);
 });
 
 it("applies the inline policy's count and byte limits and leaves other files alone", async () => {
@@ -446,8 +465,8 @@ it("applies the inline policy's count and byte limits and leaves other files alo
     DEFAULT_INLINE_IMAGES,
   );
   expect(none.images).toEqual([]);
-  expect(none.note?.split("\n").filter((line) => line.endsWith("; file"))).toHaveLength(4);
-  expect(none.note).toContain("not passed as an inline image: BMP images are not passed inline");
+  // Only PNG, JPEG, WebP and GIF are treated as images; a BMP is a file.
+  expect(none.note?.split("\n").filter((line) => line.endsWith("; file"))).toHaveLength(5);
   expect(await prepareAttachments(root, [], DEFAULT_INLINE_IMAGES)).toEqual({ images: [] });
 });
 
@@ -476,7 +495,7 @@ it("lets an extension choose the model before Pi prepares the images", async () 
   // Pi's own placeholder for it.
   const [request] = sent;
   expect(JSON.stringify(request)).toContain('"model":"reader"');
-  const [message] = users(request ?? { messages: [] });
+  const message = prompt(request);
   expect(images(message?.content)).toEqual([]);
   expect(text(message?.content)).toContain("image omitted: model does not support images");
 });

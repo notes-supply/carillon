@@ -146,8 +146,15 @@ pub(crate) fn capture(
     let id = uuid::Uuid::now_v7().to_string();
     let partial = store.join(format!("{PARTIAL}{id}"));
     fs::DirBuilder::new().mode(0o700).create(&partial)?;
-    let copied = copy_batch(data_directory, interface, staged, &partial, cancel)
-        .and_then(|digests| publish(&store, &partial, &id).map(|()| digests));
+    let copied =
+        copy_batch(data_directory, interface, staged, &partial, cancel).and_then(|digests| {
+            // A deadline or shutdown that arrived during the last sync still
+            // stops the capture before anything is published.
+            if cancel.requested() {
+                return Err(CaptureError::Cancelled);
+            }
+            publish(&store, &partial, &id).map(|()| digests)
+        });
     match copied {
         Ok(digests) => Ok(Capture { id, digests }),
         Err(error) => {
@@ -355,34 +362,69 @@ impl CapturedFile {
     }
 }
 
-/// Check that a referenced file is the regular file core captured: same
-/// length and digest. Blocking: reads the whole file.
-pub(crate) fn verify(data_directory: &Path, reference: &CapturedFile) -> Result<()> {
-    let path = file(data_directory, reference)?;
-    let metadata = fs::symlink_metadata(&path)
-        .with_context(|| format!("captured attachment {} is missing", path.display()))?;
+/// Why a captured file cannot be used.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum Unusable {
+    /// It is missing, not a regular file, or not the bytes accepted.
+    #[error("{0}")]
+    Altered(String),
+    /// It could not be read now; its bytes are unknown.
+    #[error(transparent)]
+    Unreadable(#[from] anyhow::Error),
+}
+
+/// Check a captured file for dispatch, telling a file that is no longer the
+/// accepted one from one that could not be read.
+pub(crate) fn check(data_directory: &Path, reference: &CapturedFile) -> Result<(), Unusable> {
+    let path =
+        file(data_directory, reference).map_err(|error| Unusable::Altered(error.to_string()))?;
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(Unusable::Altered(format!(
+                "captured attachment {} is missing",
+                path.display()
+            )));
+        }
+        Err(error) => return Err(Unusable::Unreadable(error.into())),
+    };
     if !metadata.file_type().is_file() || metadata.len() != reference.size {
-        bail!(
+        return Err(Unusable::Altered(format!(
             "captured attachment {} is not the file that was accepted",
             path.display()
-        );
+        )));
     }
-    let mut source = fs::File::open(&path)?;
+    if digest(&path).map_err(|error| Unusable::Unreadable(error.into()))? != reference.sha256 {
+        return Err(Unusable::Altered(format!(
+            "captured attachment {} was changed after it was accepted",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn digest(path: &Path) -> io::Result<String> {
+    let mut source = fs::File::open(path)?;
     let mut buffer = vec![0; CHUNK];
     let mut digest = Sha256::new();
     loop {
-        match source.read(&mut buffer)? {
-            0 => break,
-            read => digest.update(&buffer[..read]),
+        match source.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => digest.update(&buffer[..read]),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
         }
     }
-    if hex::encode(digest.finalize()) != reference.sha256 {
-        bail!(
-            "captured attachment {} was changed after it was accepted",
-            path.display()
-        );
-    }
-    Ok(())
+    Ok(hex::encode(digest.finalize()))
+}
+
+/// Check that a referenced file is the regular file core captured: same
+/// length and digest. Blocking: reads the whole file.
+pub(crate) fn verify(data_directory: &Path, reference: &CapturedFile) -> Result<()> {
+    check(data_directory, reference).map_err(|unusable| match unusable {
+        Unusable::Altered(message) => anyhow::anyhow!(message),
+        Unusable::Unreadable(error) => error,
+    })
 }
 
 /// Validate a stopped installation's capture store against every committed
