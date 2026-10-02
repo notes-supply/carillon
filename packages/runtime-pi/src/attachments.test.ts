@@ -7,7 +7,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { Type, type Static } from "typebox";
 import { Parse } from "typebox/value";
 import { once } from "node:events";
-import { mkdir, mkdtemp, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -95,6 +95,7 @@ async function setup(
   others: { id: string; input: ("text" | "image")[] }[] = [],
 ) {
   const root = await mkdtemp(join(tmpdir(), "carillon-attachments-"));
+  cleanup.push(() => rm(root, { recursive: true, force: true }));
   const state = join(root, "pi");
   const resources = join(root, "resources");
   const workspace = join(root, "workspace");
@@ -394,6 +395,7 @@ export default function observer(pi) {
 
 it("applies the inline policy's count and byte limits and leaves other files alone", async () => {
   const root = await mkdtemp(join(tmpdir(), "carillon-inline-policy-"));
+  cleanup.push(() => rm(root, { recursive: true, force: true }));
   const small = [8, 9, 10, 11, 12].map((size) => ({
     name: `${String(size)}.png`,
     bytes: png(size, size),
