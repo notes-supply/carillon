@@ -175,6 +175,56 @@ Use `carillon discord check --provider ID` when several Discord providers are co
 
 The provider remembers its cards in `<data_dir>/components/<provider>/activity-cards.json` until it removes or finalizes them. After a restart it deletes remembered cards before showing any replacement; if a card cannot be deleted, or its creation was never confirmed, that turn gets no new card. If the file cannot be read (for example it is malformed or not a readable file), the provider logs `activity cards are off until their records can be read`, starts without cards and leaves the file untouched; typing and delivery continue. Inspect it, delete any stale cards it names by hand, then remove or repair it and restart the Discord service. A card created just before a crash, before it was recorded, is not removed automatically. Progress messages share Discord's rate limits with answers: they are bounded and never block delivery in the provider, but Discord can make an answer wait for its share of a common limit.
 
+### Attachments
+
+Allowlisted people can attach files to a message the agent would answer: any file type, with or without text. Discord admits the message by author, guild, route and activation first and fetches nothing for anyone else. It then downloads the message's files from Discord's attachment CDN while showing typing, and core keeps its own copy before it accepts the message; the processing reaction appears once core has accepted it. A message is accepted with all of its files or not at all: when a file cannot be downloaded, is larger than allowed, or cannot be kept, the sender gets a short reply saying why (which never notifies anyone) and the failure reaction, and nothing of the message runs. Only files uploaded directly with the triggering message are taken; embeds, links, forwarded or quoted attachments and stickers are not.
+
+Messages of one conversation are prepared one at a time in arrival order, through acceptance or refusal, so a text message sent after a large file waits for it. Other conversations proceed independently; at most `concurrent_messages` messages download at once. Up to 64 messages may wait across all conversations and 16 in one conversation; beyond that a message is refused with a "too busy" reply. Waiting messages live in memory: a Discord provider restart before a message was accepted loses it, and its sender sends it again. A file whose download link expired is looked up once more on the same message; a deleted message or a replaced file refuses the message. Downloads go to `<data_dir>/components/<provider>/incoming`, under generated names, are removed once core answers, and whatever a stopped provider left there is removed when it starts.
+
+Core keeps accepted files at `<data_dir>/attachments/<capture>/<n>` (read-only, mode 0440) with the turn that received them, including failed and interrupted turns, until the installation is reset; nothing expires them. Turns record only their capture name, order, name, size, declared type and SHA-256 digest; no absolute path is stored, so a relocated installation finds the same files. Before a turn runs, core checks each of its files against the recorded length and digest; a changed or missing file interrupts the turn with an explanation instead of running it. Read-only modes guard against accidental edits, not against the owning Unix user: copy a file into the workspace before changing it.
+
+Pi receives a note listing every file of the message (its path relative to the attachment directory, its name, size, declared type, and whether it was sent inline) and the current attachment directory as part of its instructions, so files from earlier messages remain reachable with ordinary tools. Suitable PNG, JPEG, WebP and GIF images are also passed as Pi's native image input; Pi resizes them for the model that runs and gives text-only models a placeholder instead. Larger images, other image formats and all other files stay files: nothing is extracted, converted or executed when a message is accepted.
+
+Each owner has its own limits; changes take effect when that service restarts. Discord, in `providers/<id>.toml`:
+
+```toml
+[attachments]
+enabled = true            # false refuses messages with files, with an explanation
+max_files = 10            # per message (Discord's own maximum is 10)
+max_file_mib = 1024
+max_message_mib = 2048
+concurrent_messages = 2   # messages downloading at once
+staging_mib = 2048        # downloaded bytes held until core answers
+```
+
+Core, in `carillon.toml`, for whichever interface submits:
+
+```toml
+[core.attachments]
+max_files = 10            # 0 refuses every attachment
+max_file_mib = 1024
+max_event_mib = 2048
+storage_mib = 10240       # all kept files plus captures in progress
+free_space_mib = 2048     # space a capture must leave free on the disk
+concurrent_captures = 2   # further submissions are refused as busy and retried
+```
+
+When kept files would exceed `storage_mib`, or a capture would leave less than `free_space_mib` free, new files are refused; accepted files are never removed to make room. `free_space_mib` counts the disk as a whole, so set it to what this host can actually spare. The Pi runtime, in `providers/runtime-pi.toml` (the file is optional):
+
+```toml
+[inline_images]
+max_count = 4             # images per message passed inline
+max_image_mib = 16
+max_total_mib = 32
+max_megapixels = 40       # checked from the image header, before Pi decodes it
+```
+
+Decoding an image takes memory in the runtime while Pi resizes it: about 0.7 GiB at peak for a 38-megapixel PNG on the reference host. Lower `max_megapixels` on hosts with little memory to spare.
+
+Fixed deadlines bound the work: a download that receives nothing for a minute fails, preparing one message's files may take 30 minutes, and core cancels a capture after 5 minutes. A copy that is cancelled, or interrupted by a crash, never becomes part of an accepted turn; core removes such copies, and complete copies no turn references, when it starts. When core's answer to a submission is lost, Discord asks core whether the message was accepted rather than assuming it was not.
+
+`carillon backup` carries kept files and checks every recorded file against its length and digest before archiving, and `restore` checks them again before publishing. Backup first removes abandoned and unreferenced copies, as core startup would, and leaves interface download staging out of the archive.
+
 ### Assistant Discord tools
 
 The optional [native Pi integration](../../packages/discord-pi/README.md) lets the
@@ -230,7 +280,7 @@ The backup contains the entire `CARILLON_HOME` tree, including the registry, pro
 
 Backup requires `data_dir` and `agent.resource_root` to be installation-relative paths without `..`, resolving inside `CARILLON_HOME`. Absolute paths are rejected even when they point inside the source installation: use `state` and `agents/default`, for example, so a restored configuration cannot refer back to the source. The destination must resolve outside that tree. An external user workspace is allowed, but is not included in this backup.
 
-Before creating a backup or publishing a restore, Carillon checks the configured resource directory, matching operator/provider loopback credentials, the core database's integrity, foreign keys and current schema, and every recorded resource snapshot against its content address, which covers each captured file's path, bytes, and executability. Missing or altered captured resources are rejected, not reconstructed from the live resource root. This archive integrity check is not ongoing tamper protection against the owning Unix user. Restore accepts only regular files and directories and validates in a temporary directory. Validation or prepublication failure leaves the target absent or empty and retryable. A persistence error after publication can leave the complete restored tree at the target; inspect it before retrying rather than assuming publication was undone. This private beta does not migrate obsolete schemas.
+Before creating a backup or publishing a restore, Carillon checks the configured resource directory, matching operator/provider loopback credentials, the core database's integrity, foreign keys and current schema, every recorded resource snapshot against its content address, which covers each captured file's path, bytes, and executability, and every kept attachment against its recorded length and digest, refusing unexpected entries in the attachment store. Backup removes attachment copies no accepted turn references and leaves interfaces' download staging out of the archive. Missing or altered captured resources are rejected, not reconstructed from the live resource root. This archive integrity check is not ongoing tamper protection against the owning Unix user. Restore accepts only regular files and directories and validates in a temporary directory. Validation or prepublication failure leaves the target absent or empty and retryable. A persistence error after publication can leave the complete restored tree at the target; inspect it before retrying rather than assuming publication was undone. This private beta does not migrate obsolete schemas.
 
 This is not a provider-native health check: individual resource files are optional, and providers own their native sessions, settings, and authentication requirements. The entire installation tree is copied, but restore cannot infer whether arbitrary provider-private files were omitted from a manually edited archive. Check the provider after restoring; a successful restore does not attest that external credentials are still valid. Use a backup made by the same current state format, or perform a fresh installation.
 
@@ -279,6 +329,8 @@ A refusal in steps 1–3 changes nothing and leaves the services as they were. T
 There is no automatic rollback, migration step or download service. The state check covers only what it names:
 - It covers the registry, the core database's integrity and exact schema, the Discord settings, and an installed command module.
 - It does not cover Pi's state (sessions, authentication, model selections), other provider-native state, credentials, or whether the services will start and stay healthy.
+
+Releases with attachment support record attached files in the core database (`turn_attachments`). Their update check refuses a database written by an earlier release, before any service stops ("database schema is not the current Carillon format"); moving such an installation forward is an explicit cutover, taken from a verified backup, not something `update` performs.
 
 `carillon update` with an older release runs the same checks, so it refuses a core schema that release does not know. Passing them does not make a downgrade safe for the unchecked state. There is no supported downgrade; restore a backup made before the update instead.
 

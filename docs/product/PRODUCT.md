@@ -16,7 +16,7 @@ An operator can:
 
 1. install Carillon as an ordinary Unix user;
 2. configure a private Discord guild, allowlisted users, and explicit channel routes;
-3. converse through Pi with channel- or thread-scoped continuity;
+3. converse through Pi with channel- or thread-scoped continuity, including files and images attached to messages;
 4. use Pi-native tools, extensions, and skills with the owner's Unix authority, and follow what a running turn is doing in a temporary Discord message;
 5. choose the model and its engine settings for the agent or for one conversation with `/model` in Discord;
 6. restart the Discord or Pi provider independently, and install or reset Discord's command module without restarting it, keeping an installed module across restarts and updates;
@@ -39,6 +39,10 @@ Providers are independently installed programs. Core is platform-neutral and is 
 ### Admission
 
 Discord rejects direct messages and any event outside its configured guild, immutable user allowlist, and immutable channel routes before submitting work to core. Routes choose mention or always activation and thread- or channel-scoped continuity. Repeated submission of the same external event does not start another turn.
+
+### Attachments
+
+Files uploaded with an admitted Discord message are downloaded only after admission and kept by core with the turn; the message is accepted with all its files or refused with a short explanation. Every file is available to the agent's ordinary tools, and suitable images are also given to the model as images. Nothing is extracted, converted or executed on arrival. Interface, core and runtime each bound counts, sizes, concurrency and storage, and accepted files are never deleted to make room.
 
 ### Operation lifecycle
 

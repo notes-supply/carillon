@@ -43,9 +43,13 @@ retain the actual Wasm path rather than substituting this direct native call.
   record and installation. [Command presentation](../carillon-discord-commands/src/model.rs)
   lives in the separate guest library; [`HostCalls`](../carillon-discord-commands/src/lib.rs)
   is the existing native-operation boundary, also used by the example.
-- [`inbound`](src/inbound.rs) prepares native conversations, emits feedback and retries
-  only ambiguous transport submission with the same event identity. It receives its
-  core client, configuration and participation store explicitly.
+- [`inbound`](src/inbound.rs) settles one admitted message: it prepares the native
+  conversation, emits feedback and retries only ambiguous transport submission with
+  the same event identity. Its [`lanes`](src/inbound/lanes.rs) run messages one at a
+  time per conversation, in arrival order, with bounded queues; a message with files
+  is downloaded by [`attachments`](src/attachments.rs) into the provider's staging and
+  submitted as a staged batch, accepted whole or refused with an explanation. It
+  receives its core client, configuration, participation store and downloads explicitly.
 - [`operations`](src/operations.rs) owns authenticated assistant actions using the existing
   Discord client, independently of admission and the delivery outbox. The optional
   [Pi extension](../../packages/discord-pi/README.md) exposes them on demand.

@@ -17,6 +17,7 @@ try {
     audience_id: "conversation-1",
     input: "Hello",
     resource_root: "/path/to/resources",
+    attachment_root: "/path/to/attachments",
   });
   console.log(answer.output);
 } finally {
@@ -31,6 +32,8 @@ Carillon loads Pi's native `codemode`, `tool_search` and MCP extensions, with th
 Replace `modelRuntime`, `settings`, or `selections` independently when supplying your own concrete Pi/model-state collaborators. Omitted collaborators use the same defaults as the service. Supplied collaborators remain caller-owned. `sessionDirectory` permits a separate native-session location; the installed service uses its existing installation path.
 
 `executeTurn` serializes execution within the instance. The tuple of interface, agent and audience identifies the native conversation; a new input in that conversation reopens its native history. Cancellation settles before another turn executes. `close` rejects new work, cancels active/queued execution, and waits for outstanding operations to settle. It does not erase sessions, replay inputs, or dispose caller-owned collaborators. For lower-level native session use, `openConversation`, `createPiExecutionSession`, and `promptSession` are the same primitives used by this runtime. A turn Pi reports as failed rejects with `ExplainedFailure` carrying Pi's failure text as is; the HTTP adapter decides what of it may be displayed.
+
+A turn may carry `attachments`: files below `attachment_root`, named by relative path. [`attachments.ts`](src/attachments.ts) passes PNG, JPEG, WebP and GIF images within the inline policy (`inlineImages`; dimensions are read from headers with `image-size` before Pi decodes anything) to `session.prompt` as Pi's native images, and a per-turn native extension adds a note listing every file to the session plus the current attachment directory to the system prompt while the conversation has such notes. The text is passed unchanged, so commands and input handlers keep their meaning. Pi normalizes the images for the model that runs and gives text-only models its own placeholder. The installed service reads `inline_images` limits from its optional `providers/<id>.toml`. The release ships Photon's WebAssembly beside the compiled programs, where Pi's compiled image resizing looks for it.
 
 While a turn executes, `activity(correlation_id, interface_id)` returns a bounded snapshot of what it is doing, derived from Pi's native session events, or `undefined` for a turn that is not executing for that interface. The snapshot exists from before session preparation until the turn settles; it is never stored. Tool inputs are described in [`activity.ts`](src/activity.ts), beside the tools' semantics, and pass the same best-effort redaction as diagnostics. The HTTP adapter serves it at `GET /v1/turns/{id}/activity?interface_id=…`.
 

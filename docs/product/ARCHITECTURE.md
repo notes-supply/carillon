@@ -15,7 +15,7 @@ The included providers are Discord and Pi. They are examples of the two provider
 The Rust core (`carillon-core`, the `carillon` executable) owns:
 
 - configured agent, interface, and runtime identities;
-- accepted external events and duplicate suppression;
+- accepted external events and duplicate suppression, including immutable copies of the files they carry;
 - conversation continuity and runtime selection;
 - the queued, running, completed, and interrupted turn states;
 - delivery intents and their outcomes;
@@ -40,7 +40,7 @@ A provider's own settings live in `providers/<id>.toml` beside `carillon.toml`. 
 
 An interface provider owns its platform credential and protocol. It authenticates ingress, maps platform conversations to Carillon audience IDs, submits admitted events, claims delivery work, and performs native delivery.
 
-The Discord provider (`carillon-discord`) additionally owns guild/user/route admission, mention handling, Discord thread creation and adoption, typing, reactions, temporary activity cards, message splitting, mention-free delivery (delivered text never notifies users, roles, `@everyone` or `@here`), application-command registration, and interaction handling. Core does not model Discord hierarchy or interactions. Its library exposes message/interaction admission with explicit configuration and participation state, and a concrete authenticated `CoreClient` independent of command hosting. Native delivery consumes those clients; the application assembles the gateway and operator server. Gateway and deterministic ingress use the same `IncomingMessage` admission path. See [the Discord component guide](../../crates/carillon-discord/README.md) for the gateway-free example and component-local tests.
+The Discord provider (`carillon-discord`) additionally owns guild/user/route admission, mention handling, downloading admitted messages' attachments, Discord thread creation and adoption, typing, reactions, temporary activity cards, message splitting, mention-free delivery (delivered text never notifies users, roles, `@everyone` or `@here`), application-command registration, and interaction handling. Core does not model Discord hierarchy or interactions. Its library exposes message/interaction admission with explicit configuration and participation state, and a concrete authenticated `CoreClient` independent of command hosting. Native delivery consumes those clients; the application assembles the gateway and operator server. Gateway and deterministic ingress use the same `IncomingMessage` admission path. See [the Discord component guide](../../crates/carillon-discord/README.md) for the gateway-free example and component-local tests.
 
 ### Activity while a turn runs
 
@@ -55,6 +55,16 @@ Discord's [`activity/render.rs`](../../crates/carillon-discord/src/activity/rend
 Every Discord call the monitor makes is bounded, including Twilight's rate-limiter waits, its internal 429 retries and response decoding: Twilight's pre-flight check stops a queued request once its wait has passed or it is no longer wanted, and an outer timeout bounds the rest. A card is created at most once per turn: a creation Discord may have performed without confirming it, or refused, leaves the turn without a card. The provider records a card's channel and message in `activity-cards.json` in its state directory after Discord confirms it, and removes the record once the card is removed or finalized. An unconfirmed creation is recorded without a message, so a restart during the same turn does not create another; it is forgotten when the turn ends. At startup the provider deletes recorded cards before showing a replacement; a card whose removal cannot be established stays recorded and its turn gets no replacement. When the records cannot be read the provider starts without cards, leaving the file as it is, and still types and delivers. A crash between creating a card and recording it, or a failure to save the record, leaves one card no later start knows of.
 
 Delivery never waits on the monitor, but both use the same Discord budget: Discord may place edits and messages in one learned bucket, and the global limit is always shared, so progress can delay an answer by at most what those requests consume. There is no priority scheme; progress traffic is bounded to one card creation, change-only edits at most every three seconds, one removal per turn, and one typing indicator per running turn every eight seconds.
+
+### Attachments
+
+Files people attach have three owners, with one path for images and other files alike:
+
+- **Discord** decides whether anything is fetched. It admits the message by authenticated author, guild, route and activation before downloading, then streams each file from Discord's attachment CDN (HTTPS only, no redirects, no bot credential, never beyond the size Discord declared, one refresh of an expired link on the same message) into its own staging, `<data_dir>/components/<provider>/incoming/<batch>/<n>`. Generated names identify files; uploaders' names are display text. Messages are prepared in per-conversation lanes held in memory: a conversation's messages are settled one at a time in arrival order, including text behind a slow file; different conversations proceed concurrently up to a bound on active downloads and staged bytes; and a full lane or queue is refused at once. The provider removes a batch once core answers, and its whole staging at startup.
+- **Core** owns accepted files. The event names a staged batch and lists each file's name, size and declared type, never a path or bytes; core derives the batch's directory from the authenticated interface with the installation layout helper in `carillon-installation`. A capture opens each staged file beneath that directory without following links, requires a regular file of the declared length, and copies it into a fresh directory while hashing it, then syncs and publishes the directory without replacing anything. Only then does the acceptance transaction recheck the event's uniqueness and commit the turn with ordered `turn_attachments` references (capture, ordinal, name, size, declared type, SHA-256). Captures are core's own tasks, not the request's: a retry of the same event joins the running copy, a bounded number run at once and further submissions are refused as busy before any work, each reserves its bytes against a storage budget and free-space floor until the database decides, and its worker stays taken until the blocking copy has actually returned, even after its deadline. A duplicate's losing copy is removed once the database shows it unreferenced; startup and backup reconcile abandoned and unreferenced copies under exclusive ownership. `GET /v1/events/{id}` tells an interface whether an event was accepted or is still being captured, so a lost answer is settled by asking rather than by copying again.
+- **The runtime** receives, with every turn, the installation's current attachment directory and the turn's files by relative path, and checks nothing is outside it. Core verifies each file's length and digest before dispatch and interrupts the turn instead when one changed. Pi's runtime adds a native extension per turn: it puts a note listing the files into the session as a custom message, and the current attachment directory into a system prompt section whenever the conversation has such notes, so earlier relative paths resolve after reopening or relocation without rewriting Pi's history. Images within the runtime's inline policy, checked from their headers with an established library, are passed as Pi's native prompt images; Pi normalizes them after extensions choose the model, and substitutes its own placeholder for text-only models. The user's text is passed unchanged.
+
+No component inspects, converts or executes a file's contents when it is accepted, and the read-only copies are no sandbox for the owning user.
 
 ### Assistant operations
 
@@ -105,7 +115,7 @@ Replacement is that one explicit operation. There is one module per provider ins
 
 ## Runtime providers
 
-A runtime provider receives a claimed turn containing agent, interface, audience, input, resource identity, and opaque interface-owned native metadata. It owns the conversation's native session and returns nonblank output. A response without usable output interrupts the turn rather than completing it silently or sending an empty reply.
+A runtime provider receives a claimed turn containing agent, interface, audience, input, resource identity, the attachment directory with the turn's files by relative path, and opaque interface-owned native metadata. It owns the conversation's native session and returns nonblank output. A response without usable output interrupts the turn rather than completing it silently or sending an empty reply.
 
 A runtime's failure response may carry `{"error": "…"}`. That text explains the failure to the person in the conversation, so the runtime owns deciding what of it may be displayed. Core and interfaces show it as given and apply no text policy of their own. A runtime omits `error` when it has nothing it can safely explain, and keeps technical diagnostics in its own log. The same rule covers model calls, whose `error` Discord shows in `/model`.
 
@@ -138,7 +148,7 @@ Pi keeps Carillon's selections in `pi/model-selection.json` beside its private s
 ## Operation lifecycle
 
 1. An interface provider authenticates and admits an external event.
-2. Core durably records the accepted event as a queued turn, capturing the current agent resources, then returns a queued receipt.
+2. Core durably records the accepted event as a queued turn, capturing the current agent resources and any attached files, then returns a queued receipt.
 3. Core runs a worker for each enabled runtime, including non-default owners of accepted work. Each claims its next eligible turn and marks it running.
 4. The runtime attempts execution. Carillon does not guarantee exactly-once model or tool side effects.
 5. On success, core atomically stores completed output and a delivery intent.
