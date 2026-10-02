@@ -5,7 +5,7 @@ use crate::conversations::{
 use crate::{
     attachments::Downloads,
     error::discord_failure_is_terminal,
-    inbound::{Ingress, QueuedMessage, lanes},
+    inbound::{Ingress, PREPARATION_DEADLINE, QueuedMessage, lanes},
 };
 
 use crate::{
@@ -42,7 +42,8 @@ use carillon_installation::config::{
     LoadedConfig, ProviderRole, RELEASE_VERSION, attachment_staging, read_token_file, token_matches,
 };
 use carillon_protocol::model::{
-    Delivery, DeliveryOutcome, DeliveryReconciliation, EventReceipt, Health, ModelQuery,
+    Delivery, DeliveryOutcome, DeliveryReconciliation, EventReceipt, EventStatus, Health,
+    ModelQuery,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -50,7 +51,7 @@ use std::{path::Path, sync::Arc, time::Duration};
 use tokio::{
     net::TcpListener,
     sync::mpsc,
-    time::{sleep, timeout},
+    time::{Instant, sleep, timeout},
 };
 use tracing::{error, info, warn};
 use twilight_gateway::{Event, EventTypeFlags, Intents, Shard, ShardId, StreamExt as _};
@@ -89,6 +90,8 @@ struct DiscordState {
     commands: Arc<Commands>,
     /// Absent in deterministic mode, where no Discord application exists.
     app: Option<Arc<DiscordApp>>,
+    /// The provider's attachment downloads and staging, in either mode.
+    downloads: Arc<Downloads>,
     operator_token_hash: String,
 }
 
@@ -150,6 +153,12 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
         version: RELEASE_VERSION.to_owned(),
         status: "ready".to_owned(),
     };
+    // This instance owns the provider's state: staging left by an earlier
+    // one is abandoned and removed.
+    let downloads = Arc::new(Downloads::open(
+        attachment_staging(&config.value.data_dir, &provider.id),
+        discord.attachments,
+    )?);
     let state = DiscordState {
         discord,
         health,
@@ -157,6 +166,7 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
         participation,
         commands,
         app: None,
+        downloads,
         operator_token_hash: config.value.core.operator_token_hash.clone(),
     };
     info!(url = %provider.url, deterministic = options.deterministic, "Discord interface provider ready");
@@ -170,19 +180,12 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
     // Cosmetic: records that cannot be read turn cards off, not the provider.
     let cards =
         CardRecords::open(state_directory(&config, &provider.id).join("activity-cards.json"));
-    // This instance owns the provider's state: staging left by an earlier
-    // one is abandoned and removed.
-    let downloads = Downloads::open(
-        attachment_staging(&config.value.data_dir, &provider.id),
-        state.discord.attachments,
-    )?;
     connect(
         state,
         listener,
         read_token_file(discord_token_path)?,
         reconciled,
         cards,
-        downloads,
     )
     .await
 }
@@ -196,7 +199,6 @@ async fn connect(
     discord_token: String,
     reconciled: DeliveryReconciliation,
     cards: Option<CardRecords>,
-    downloads: Downloads,
 ) -> Result<()> {
     let http = Arc::new(DiscordHttp::new(discord_token.clone()));
     let current_user = http.current_user().await?.model().await?;
@@ -228,7 +230,7 @@ async fn connect(
         config: state.discord.clone(),
         participation: state.participation.clone(),
         http: http.clone(),
-        downloads,
+        downloads: state.downloads.clone(),
     });
     tokio::spawn(lanes::dispatch(ingress, receiver));
     let router = discord_router(state.clone(), false);
@@ -469,12 +471,6 @@ async fn simulate(
     Json(request): Json<IncomingMessage>,
 ) -> Result<Response, InterfaceError> {
     authorize_interface(&state, &headers)?;
-    if !request.attachments.is_empty() {
-        return Err(InterfaceError {
-            status: StatusCode::BAD_REQUEST,
-            message: "deterministic mode does not download attachments".to_owned(),
-        });
-    }
     let Some(plan) = admit_message(
         &state.discord,
         &state.participation,
@@ -484,12 +480,45 @@ async fn simulate(
     else {
         return Ok(StatusCode::NO_CONTENT.into_response());
     };
-    let resolved = prepare_deterministic_conversation(&state.participation, plan)?;
+    // Files of an admitted message follow the gateway's rules: checked
+    // against the provider's policy, then fetched from Discord's CDN,
+    // unless core already holds the message. Without a Discord session, an
+    // expired address cannot be refreshed.
+    let refused = |refusal: crate::attachments::Refusal| InterfaceError {
+        status: StatusCode::UNPROCESSABLE_ENTITY,
+        message: refusal.0,
+    };
+    let mut known = None;
+    let mut staged = None;
+    if !plan.attachments.is_empty() {
+        state.downloads.admit(&plan.attachments).map_err(refused)?;
+        if let EventStatus::Accepted(receipt) = state.core.event_status(&plan.message_id).await? {
+            known = Some(receipt);
+        } else {
+            let deadline = Instant::now() + PREPARATION_DEADLINE;
+            staged = Some(
+                state
+                    .downloads
+                    .stage(None, &plan, deadline)
+                    .await
+                    .map_err(refused)?,
+            );
+        }
+    }
+    let mut resolved = prepare_deterministic_conversation(&state.participation, plan)?;
+    resolved.event.attachments = staged.as_ref().map(|staged| staged.manifest.clone());
     let mut feedback = Vec::new();
     if state.discord.reactions {
         feedback.push("processing".to_owned());
     }
-    let receipt = state.core.submit_event(&resolved.event).await?;
+    let receipt = if let Some(receipt) = known {
+        receipt
+    } else {
+        let submitted = state.core.submit_event(&resolved.event).await;
+        // Core holds its own copy once it answers; the staged files go.
+        drop(staged);
+        submitted?
+    };
     let delivery = if receipt.duplicate {
         None
     } else {

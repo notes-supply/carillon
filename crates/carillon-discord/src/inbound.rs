@@ -25,16 +25,22 @@ use axum::http::StatusCode;
 use carillon_protocol::model::{EventReceipt, EventStatus, ExternalEvent};
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
-use tokio::time::{Instant, sleep};
+use tokio::time::{Instant, sleep, timeout_at};
 use tracing::warn;
 use twilight_http::Client as DiscordHttp;
 
 pub(crate) mod lanes;
 
-/// How long a message's files may take, from admission to core's answer.
-const PREPARATION_DEADLINE: Duration = Duration::from_mins(30);
+/// How long a message's files may take from admission until they are
+/// submitted. A submission core may have received is then settled by asking
+/// core, however long that takes.
+pub(crate) const PREPARATION_DEADLINE: Duration = Duration::from_mins(30);
 /// The longest wait between attempts to submit downloaded files.
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// The wait between attempts to resolve a route or open a conversation.
+const RETRY: Duration = Duration::from_millis(250);
+/// Why a message whose preparation ran out of time was not accepted.
+const LATE: &str = "Carillon could not accept these attachments in time, so this message was not accepted. Please send it again.";
 
 #[derive(Clone, Debug)]
 pub(crate) struct QueuedMessage {
@@ -48,7 +54,7 @@ pub(crate) struct Ingress {
     pub(crate) config: DiscordConfig,
     pub(crate) participation: Arc<Participation>,
     pub(crate) http: Arc<DiscordHttp>,
-    pub(crate) downloads: Downloads,
+    pub(crate) downloads: Arc<Downloads>,
 }
 
 /// Settle one gateway message: by the time this returns it was accepted,
@@ -77,7 +83,7 @@ pub(crate) async fn prepare(ingress: &Ingress, mut inbound: QueuedMessage) {
             }
             Err(failure) => {
                 warn!(error = %failure, "waiting to resolve Discord message route");
-                sleep(Duration::from_millis(250)).await;
+                sleep(RETRY).await;
             }
         }
     };
@@ -99,7 +105,7 @@ pub(crate) async fn prepare(ingress: &Ingress, mut inbound: QueuedMessage) {
 async fn prepare_text(ingress: &Ingress, plan: MessagePlan) {
     let (discord, http) = (&ingress.config, &*ingress.http);
     let source = format!("{}:{}", plan.channel_id, plan.message_id);
-    let Some(resolved) = open_conversation(ingress, plan, &source).await else {
+    let Some(resolved) = open_conversation(ingress, plan, &source, None).await else {
         return;
     };
     processing_feedback(http, discord, &resolved.event.feedback_target_id).await;
@@ -125,7 +131,7 @@ async fn prepare_text(ingress: &Ingress, plan: MessagePlan) {
 
 /// Download, stage and submit a message with files. While they download the
 /// sender sees typing; the processing reaction appears once they are handed
-/// to core.
+/// to core. Everything before submission ends by the preparation deadline.
 async fn prepare_files(ingress: &Ingress, plan: MessagePlan) {
     let (discord, http) = (&ingress.config, &*ingress.http);
     let source = format!("{}:{}", plan.channel_id, plan.message_id);
@@ -137,13 +143,16 @@ async fn prepare_files(ingress: &Ingress, plan: MessagePlan) {
         refuse(refusal).await;
         return;
     }
+    let deadline = Instant::now() + PREPARATION_DEADLINE;
     // A message core already holds, such as one the gateway replayed, is
     // not downloaded again.
-    if known_receipt(&ingress.core, &plan.message_id)
-        .await
-        .is_some()
-    {
-        return;
+    match timeout_at(deadline, known_receipt(&ingress.core, &plan.message_id)).await {
+        Ok(Some(_)) => return,
+        Ok(None) => {}
+        Err(_) => {
+            refuse(Refusal(LATE.to_owned())).await;
+            return;
+        }
     }
     let typing = tokio::spawn(keep_typing(
         ingress.http.clone(),
@@ -151,8 +160,7 @@ async fn prepare_files(ingress: &Ingress, plan: MessagePlan) {
         plan.channel_id.clone(),
     ));
     let typing = typing.abort_handle();
-    let deadline = Instant::now() + PREPARATION_DEADLINE;
-    let staged = match ingress.downloads.stage(http, &plan, deadline).await {
+    let staged = match ingress.downloads.stage(Some(http), &plan, deadline).await {
         Ok(staged) => staged,
         Err(refusal) => {
             typing.abort();
@@ -160,7 +168,7 @@ async fn prepare_files(ingress: &Ingress, plan: MessagePlan) {
             return;
         }
     };
-    let Some(mut resolved) = open_conversation(ingress, plan, &source).await else {
+    let Some(mut resolved) = open_conversation(ingress, plan, &source, Some(deadline)).await else {
         typing.abort();
         return;
     };
@@ -177,11 +185,13 @@ async fn prepare_files(ingress: &Ingress, plan: MessagePlan) {
     }
 }
 
-/// Create or adopt the message's conversation, retrying what may succeed.
+/// Create or adopt the message's conversation, retrying what may succeed
+/// until `deadline`, if there is one; the sender is told when it passes.
 async fn open_conversation(
     ingress: &Ingress,
     plan: MessagePlan,
     source: &str,
+    deadline: Option<Instant>,
 ) -> Option<ResolvedMessage> {
     loop {
         match prepare_conversation(&ingress.participation, &ingress.http, plan.clone()).await {
@@ -193,7 +203,13 @@ async fn open_conversation(
             }
             Err(failure) => {
                 warn!(error = %failure, "waiting to prepare Discord conversation");
-                sleep(Duration::from_millis(250)).await;
+                if deadline.is_some_and(|deadline| Instant::now() + RETRY >= deadline) {
+                    explain(&ingress.http, source, LATE).await;
+                    terminal_feedback(&ingress.http, &ingress.config, source, Feedback::Failed)
+                        .await;
+                    return None;
+                }
+                sleep(RETRY).await;
             }
         }
     }
@@ -227,37 +243,45 @@ async fn known_receipt(core: &CoreClient, event_id: &str) -> Option<EventReceipt
 }
 
 /// Submit staged files until core accepts or refuses them. Retries hold no
-/// slot for active work while they wait; once the deadline has passed, an
-/// unanswered submission is settled by asking core rather than assumed lost.
+/// slot for active work while they wait, and no attempt starts once the
+/// deadline has passed, even one that waited for a slot. An unanswered
+/// submission is then settled by asking core rather than assumed lost.
 async fn submit_files(
     ingress: &Ingress,
     event: &ExternalEvent,
     deadline: Instant,
 ) -> Result<EventReceipt, Refusal> {
     let mut delay = Duration::from_secs(1);
+    let mut submitted = false;
     loop {
-        let attempt = {
-            let _active = ingress.downloads.active().await;
-            ingress.core.submit_event(event).await
+        let Ok(active) = timeout_at(deadline, ingress.downloads.active()).await else {
+            break;
         };
+        if Instant::now() >= deadline {
+            break;
+        }
+        submitted = true;
+        let attempt = ingress.core.submit_event(event).await;
+        drop(active);
         let failure = match attempt {
             Ok(receipt) => return Ok(receipt),
             Err(failure) if !failure.is_transient() => return Err(refusal(&failure)),
             Err(failure) => failure,
         };
         warn!(error = %failure.message, event_id = %event.event_id, "waiting to submit Discord attachments");
-        if Instant::now() + delay > deadline {
-            return known_receipt(&ingress.core, &event.event_id)
-                .await
-                .ok_or_else(|| {
-                    Refusal(
-                        "Carillon could not accept these attachments in time, so this message was not accepted. Please send it again."
-                            .to_owned(),
-                    )
-                });
+        if Instant::now() + delay >= deadline {
+            break;
         }
         sleep(delay).await;
         delay = (delay * 2).min(MAX_BACKOFF);
+    }
+    let late = || Refusal(LATE.to_owned());
+    if submitted {
+        known_receipt(&ingress.core, &event.event_id)
+            .await
+            .ok_or_else(late)
+    } else {
+        Err(late())
     }
 }
 

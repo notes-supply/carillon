@@ -245,14 +245,15 @@ impl Downloads {
     }
 
     /// Download the message's files in order, waiting for staging room
-    /// first. A file whose address expired is looked up once more on the
-    /// same message; a replaced or deleted file fails the whole message.
+    /// first. With `http`, a file whose address expired is looked up once
+    /// more on the same message; a replaced or deleted file fails the whole
+    /// message.
     ///
     /// # Errors
     /// Returns the explanation for the message's sender.
     pub(crate) async fn stage(
         &self,
-        http: &DiscordHttp,
+        http: Option<&DiscordHttp>,
         plan: &MessagePlan,
         deadline: Instant,
     ) -> Result<Staged, Refusal> {
@@ -312,7 +313,7 @@ impl Downloads {
 
     async fn fetch_file(
         &self,
-        http: &DiscordHttp,
+        http: Option<&DiscordHttp>,
         plan: &MessagePlan,
         file: &SourceAttachment,
         destination: &Path,
@@ -331,15 +332,17 @@ impl Downloads {
             match self.download(&url, file.size, destination).await {
                 Ok(()) => return Ok(()),
                 Err(Failure::Refused(refusal)) => return Err(refusal),
-                Err(Failure::Expired) if !refreshed => {
-                    refreshed = true;
-                    current = refresh(http, plan, file).await?;
-                }
-                Err(Failure::Expired) => {
-                    return Err(Refusal(format!(
-                        "Discord no longer serves {name}, so this message was not accepted."
-                    )));
-                }
+                Err(Failure::Expired) => match http {
+                    Some(http) if !refreshed => {
+                        refreshed = true;
+                        current = refresh(http, plan, file).await?;
+                    }
+                    _ => {
+                        return Err(Refusal(format!(
+                            "Discord no longer serves {name}, so this message was not accepted."
+                        )));
+                    }
+                },
                 Err(Failure::Transient(reason)) if attempt < ATTEMPTS => {
                     warn!(file = %redacted(&url), %reason, "attachment download failed; trying again");
                     tokio::time::sleep(Duration::from_secs(u64::from(attempt))).await;

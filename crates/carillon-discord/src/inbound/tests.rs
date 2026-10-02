@@ -30,10 +30,10 @@ pub(crate) fn ingress(
     directory: &std::path::Path,
 ) -> anyhow::Result<Arc<super::Ingress>> {
     Ok(Arc::new(super::Ingress {
-        downloads: crate::attachments::Downloads::open(
+        downloads: Arc::new(crate::attachments::Downloads::open(
             directory.join("incoming"),
             config.attachments,
-        )?,
+        )?),
         core,
         config,
         participation,

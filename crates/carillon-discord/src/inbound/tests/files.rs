@@ -18,7 +18,7 @@ use axum::{
 };
 use carillon_protocol::model::{EventReceipt, EventStatus, ExternalEvent, TurnState};
 use serde_json::{Value, json};
-use tokio::{net::TcpListener, sync::mpsc};
+use tokio::{net::TcpListener, sync::mpsc, time::Instant};
 
 use crate::{
     attachments::tests::{Serve, attachment, serve_cdn},
@@ -40,11 +40,22 @@ struct Core {
     answers: VecDeque<Answer>,
     /// Event IDs core already accepted, as a replay would find them.
     known: Vec<String>,
+    /// Event IDs whose submissions core never answers usefully.
+    unavailable: Vec<String>,
+    /// Events core received although their submissions failed, with how
+    /// many status lookups after the first submission still find them
+    /// capturing before they are accepted.
+    received: HashMap<String, usize>,
+    /// Whether Discord fails every thread creation, as during an outage.
+    threads_fail: bool,
     submissions: Vec<ExternalEvent>,
     /// The staged bytes core found for each submission.
     staged: Vec<Vec<Vec<u8>>>,
-    /// Everything that happened, in order: submissions and Discord calls.
+    /// Everything that happened, in order: submissions, status lookups and
+    /// Discord calls.
     trace: Vec<String>,
+    /// When each submission and status lookup happened.
+    times: Vec<(String, Instant)>,
 }
 
 type Shared = Arc<Mutex<Core>>;
@@ -80,12 +91,7 @@ async fn world(answers: Vec<Answer>, known: Vec<String>) -> Result<World> {
             "/v1/events/{event_id}",
             get(
                 |State(core): State<Shared>, AxumPath(event_id): AxumPath<String>| async move {
-                    let known = core.lock().is_ok_and(|core| core.known.contains(&event_id));
-                    Json(if known {
-                        EventStatus::Accepted(receipt(&event_id, true))
-                    } else {
-                        EventStatus::Unknown
-                    })
+                    status(&core, &event_id)
                 },
             ),
         )
@@ -99,9 +105,13 @@ async fn world(answers: Vec<Answer>, known: Vec<String>) -> Result<World> {
                         &core,
                         format!("thread {message} {}", String::from_utf8_lossy(&body)),
                     );
+                    if core.lock().is_ok_and(|core| core.threads_fail) {
+                        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    }
                     Json(
                         json!({"id": message, "type": 11, "parent_id": channel, "guild_id": "100"}),
                     )
+                    .into_response()
                 },
             ),
         )
@@ -162,11 +172,39 @@ fn receipt(event_id: &str, duplicate: bool) -> EventReceipt {
     }
 }
 
+fn status(core: &Shared, event_id: &str) -> Response {
+    let Ok(mut core) = core.lock() else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let entry = format!("status {event_id}");
+    core.trace.push(entry.clone());
+    core.times.push((entry, Instant::now()));
+    let submitted = core
+        .submissions
+        .iter()
+        .any(|event| event.event_id == event_id);
+    if submitted && let Some(capturing) = core.received.get_mut(event_id) {
+        if *capturing > 0 {
+            *capturing -= 1;
+            return Json(EventStatus::Capturing).into_response();
+        }
+        core.known.push(event_id.to_owned());
+    }
+    Json(if core.known.iter().any(|known| known == event_id) {
+        EventStatus::Accepted(receipt(event_id, true))
+    } else {
+        EventStatus::Unknown
+    })
+    .into_response()
+}
+
 fn submit(core: &Shared, staging: &std::path::Path, event: &ExternalEvent) -> Response {
     let Ok(mut core) = core.lock() else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
-    core.trace.push(format!("submit {}", event.event_id));
+    let entry = format!("submit {}", event.event_id);
+    core.trace.push(entry.clone());
+    core.times.push((entry, Instant::now()));
     let staged = event
         .attachments
         .as_ref()
@@ -181,6 +219,13 @@ fn submit(core: &Shared, staging: &std::path::Path, event: &ExternalEvent) -> Re
         .unwrap_or_default();
     core.staged.push(staged);
     core.submissions.push(event.clone());
+    if core.unavailable.contains(&event.event_id) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "fake core is unavailable"})),
+        )
+            .into_response();
+    }
     match core.answers.pop_front().unwrap_or(Answer::Accept) {
         Answer::Accept => {
             let duplicate = core.known.contains(&event.event_id);
@@ -221,22 +266,43 @@ async fn run(
     cdn: u16,
     messages: Vec<QueuedMessage>,
 ) -> Result<()> {
-    let ingress = Arc::new(crate::inbound::Ingress {
-        downloads: crate::attachments::Downloads::open(world.staging.clone(), config.attachments)?
-            .with_fixture_cdn(cdn),
+    run_for(world, config, cdn, messages, Duration::from_secs(20)).await
+}
+
+fn ingress(
+    world: &World,
+    config: crate::config::DiscordConfig,
+    cdn: u16,
+) -> Result<Arc<crate::inbound::Ingress>> {
+    Ok(Arc::new(crate::inbound::Ingress {
+        downloads: Arc::new(
+            crate::attachments::Downloads::open(world.staging.clone(), config.attachments)?
+                .with_fixture_cdn(cdn),
+        ),
         core: test_client(format!("http://{}", world.address)),
         participation: Arc::new(Participation::load(
             world.staging.with_file_name("participation.json"),
         )?),
         http: world.http.clone(),
         config,
-    });
+    }))
+}
+
+/// Run lanes over `messages` until all settle, failing after `limit`.
+async fn run_for(
+    world: &World,
+    config: crate::config::DiscordConfig,
+    cdn: u16,
+    messages: Vec<QueuedMessage>,
+    limit: Duration,
+) -> Result<()> {
+    let ingress = ingress(world, config, cdn)?;
     let (send, receive) = mpsc::channel(lanes::MAX_PENDING);
     for message in messages {
         send.send(message).await?;
     }
     drop(send);
-    tokio::time::timeout(Duration::from_secs(20), lanes::dispatch(ingress, receive)).await?;
+    tokio::time::timeout(limit, lanes::dispatch(ingress, receive)).await?;
     Ok(())
 }
 
@@ -715,7 +781,10 @@ async fn overload_replies_only_to_messages_admission_would_activate() -> Result<
     let mut config = channel_config();
     config.routes[0].activation = DiscordActivation::Mention;
     let ingress = Arc::new(crate::inbound::Ingress {
-        downloads: crate::attachments::Downloads::open(world.staging.clone(), config.attachments)?,
+        downloads: Arc::new(crate::attachments::Downloads::open(
+            world.staging.clone(),
+            config.attachments,
+        )?),
         core: test_client(format!("http://{}", world.address)),
         participation: Arc::new(Participation::load(
             world.staging.with_file_name("participation.json"),
@@ -755,4 +824,199 @@ async fn overload_replies_only_to_messages_admission_would_activate() -> Result<
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     Err(anyhow!("no overload refusal for an activated message"))
+}
+
+/// Past the preparation deadline, in a paused clock's virtual time.
+const PAST_DEADLINE: Duration = Duration::from_mins(45);
+const DEADLINE: Duration = Duration::from_mins(30);
+
+fn script(world: &World, change: impl FnOnce(&mut Core)) -> Result<()> {
+    change(&mut *world.core.lock().map_err(|_| anyhow!("poisoned"))?);
+    Ok(())
+}
+
+/// When each `entry` happened.
+fn times(world: &World, entry: &str) -> Result<Vec<Instant>> {
+    Ok(world
+        .core
+        .lock()
+        .map_err(|_| anyhow!("poisoned"))?
+        .times
+        .iter()
+        .filter(|(seen, _)| seen == entry)
+        .map(|(_, at)| *at)
+        .collect())
+}
+
+/// The explanation sent in reply to `message`.
+fn explanation(trace: &[String], message: &str) -> Result<String> {
+    trace
+        .iter()
+        .find(|entry| {
+            entry.starts_with("POST /api/v10/channels/")
+                && entry.contains(&format!("\"message_id\":\"{message}\""))
+        })
+        .cloned()
+        .with_context(|| format!("no explanation for {message} in {trace:?}"))
+}
+
+async fn released(world: &World) -> Result<()> {
+    for _ in 0..200 {
+        if std::fs::read_dir(&world.staging)?.count() == 0 {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    Err(anyhow!("staging was not released"))
+}
+
+#[tokio::test(start_paused = true)]
+async fn preparation_that_outlasts_its_deadline_ends_without_submitting() -> Result<()> {
+    let (cdn, _) = serve_cdn(HashMap::from([(
+        "/attachments/300/601/a.bin".to_owned(),
+        Serve::Bytes(vec![1; 8]),
+    )]))
+    .await?;
+    let world = world(Vec::new(), Vec::new()).await?;
+    // The files are staged, but Discord keeps failing to create the thread.
+    script(&world, |core| core.threads_fail = true)?;
+    let mut config = discord_config(DiscordActivation::Always, DiscordConversation::Thread);
+    config.typing = false;
+    let started = Instant::now();
+    run_for(
+        &world,
+        config,
+        cdn,
+        vec![message(
+            "85",
+            "300",
+            "200",
+            "",
+            vec![attachment(cdn, "601", "a.bin", 8)],
+        )],
+        PAST_DEADLINE,
+    )
+    .await?;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed > Duration::from_mins(29) && elapsed < Duration::from_mins(31),
+        "{elapsed:?}"
+    );
+    let trace = trace(&world)?;
+    assert!(position(&trace, "thread 85").is_ok());
+    assert!(
+        !trace.iter().any(|entry| entry.starts_with("submit")),
+        "{trace:?}"
+    );
+    assert!(explanation(&trace, "85")?.contains("in time"));
+    position(
+        &trace,
+        "PUT /api/v10/channels/300/messages/85/reactions/%E2%9D%8C",
+    )?;
+    released(&world).await
+}
+
+#[tokio::test(start_paused = true)]
+async fn expired_submissions_are_settled_by_core_before_their_lane_moves_on() -> Result<()> {
+    let (cdn, _) = serve_cdn(HashMap::from([(
+        "/attachments/300/601/a.bin".to_owned(),
+        Serve::Bytes(vec![1; 8]),
+    )]))
+    .await?;
+    let world = world(Vec::new(), Vec::new()).await?;
+    // Core never answers either message's submissions in time. It turns out
+    // to have received the first, still capturing it for a while; the second
+    // it never received.
+    script(&world, |core| {
+        core.unavailable = vec!["90".to_owned(), "95".to_owned()];
+        core.received.insert("90".to_owned(), 2);
+    })?;
+    let started = Instant::now();
+    run_for(
+        &world,
+        channel_config(),
+        cdn,
+        vec![
+            message(
+                "90",
+                "300",
+                "200",
+                "",
+                vec![attachment(cdn, "601", "a.bin", 8)],
+            ),
+            message("91", "300", "200", "after the file", Vec::new()),
+            message(
+                "95",
+                "301",
+                "200",
+                "",
+                vec![attachment(cdn, "601", "a.bin", 8)],
+            ),
+        ],
+        PAST_DEADLINE,
+    )
+    .await?;
+    let deadline = started + DEADLINE;
+    for event in ["90", "95"] {
+        let submitted = times(&world, &format!("submit {event}"))?;
+        // Retried with backoff, but no attempt started after the deadline;
+        // after it, only core is asked.
+        assert!(submitted.len() > 1, "{event}: {submitted:?}");
+        assert!(submitted.iter().all(|at| *at < deadline), "{event}");
+        let last = submitted.iter().max().copied();
+        let asked = times(&world, &format!("status {event}"))?;
+        assert!(asked.iter().any(|at| Some(*at) > last), "{event}");
+    }
+    // The first message's lane waited while core was still capturing it,
+    // then moved on once core had accepted it.
+    let capturing = world
+        .core
+        .lock()
+        .map_err(|_| anyhow!("poisoned"))?
+        .received
+        .get("90")
+        .copied();
+    assert_eq!(capturing, Some(0));
+    let settled = times(&world, "status 90")?.into_iter().max();
+    let next = times(&world, "submit 91")?.into_iter().min();
+    assert!(settled.is_some() && settled < next, "{settled:?} {next:?}");
+    let trace = trace(&world)?;
+    assert!(explanation(&trace, "90").is_err(), "{trace:?}");
+    // The second was never accepted, and its sender is told.
+    assert!(explanation(&trace, "95")?.contains("in time"));
+    released(&world).await
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_submission_still_waiting_for_a_slot_at_the_deadline_is_never_made() -> Result<()> {
+    let world = world(Vec::new(), Vec::new()).await?;
+    let config = channel_config();
+    let ingress = ingress(&world, config.clone(), 1)?;
+    // Every slot for active work is busy, as with long transfers elsewhere.
+    let mut busy = Vec::new();
+    for _ in 0..config.attachments.concurrent_messages {
+        busy.push(ingress.downloads.active().await);
+    }
+    let event = ExternalEvent {
+        event_id: "99".to_owned(),
+        agent_id: "default".to_owned(),
+        user_id: "200".to_owned(),
+        audience_id: "discord-100-300".to_owned(),
+        delivery_target_id: "300".to_owned(),
+        feedback_target_id: "300:99".to_owned(),
+        content: String::new(),
+        native: Value::Null,
+        attachments: None,
+    };
+    let started = Instant::now();
+    let refusal = crate::inbound::submit_files(&ingress, &event, started + DEADLINE)
+        .await
+        .err()
+        .context("submitted after the deadline")?;
+    assert!(refusal.0.contains("in time"), "{}", refusal.0);
+    assert!(started.elapsed() <= DEADLINE + Duration::from_secs(1));
+    // Nothing was sent, so nothing is ambiguous: core is not even asked.
+    assert!(trace(&world)?.is_empty());
+    drop(busy);
+    Ok(())
 }

@@ -326,7 +326,7 @@ async fn files_stream_to_generated_names_without_credentials_and_staging_is_rele
         .admit(&files)
         .map_err(|refusal| anyhow!(refusal.0))?;
     let staged = downloads
-        .stage(&http, &plan(files), soon())
+        .stage(Some(&http), &plan(files), soon())
         .await
         .map_err(|refusal| anyhow!(refusal.0))?;
     let directory = staging.path().join(&staged.manifest.batch);
@@ -451,7 +451,7 @@ async fn bodies_must_match_the_announced_length_and_redirects_are_not_followed()
         ),
     ] {
         let refusal = downloads
-            .stage(&http, &plan(vec![file]), soon())
+            .stage(Some(&http), &plan(vec![file]), soon())
             .await
             .err()
             .with_context(|| format!("accepted {case}"))?;
@@ -485,7 +485,7 @@ async fn a_stalled_download_fails_within_the_idle_bound() -> Result<()> {
     let started = Instant::now();
     let refusal = downloads
         .stage(
-            &http,
+            Some(&http),
             &plan(vec![attachment(port, "601", "stalled", 100)]),
             Instant::now() + Duration::from_secs(3600),
         )
@@ -520,7 +520,7 @@ async fn an_expired_address_is_refreshed_once_from_the_same_message() -> Result<
     let (http, lookups) =
         serve_discord(Some(vec![described(port, "601", "stale.bin", 11, fresh)])).await?;
     let staged = downloads
-        .stage(&http, &plan(vec![stale.clone()]), soon())
+        .stage(Some(&http), &plan(vec![stale.clone()]), soon())
         .await
         .map_err(|refusal| anyhow!(refusal.0))?;
     assert_eq!(
@@ -560,7 +560,7 @@ async fn an_expired_address_is_refreshed_once_from_the_same_message() -> Result<
             stale.clone()
         };
         let refusal = downloads
-            .stage(&http, &plan(vec![file]), soon())
+            .stage(Some(&http), &plan(vec![file]), soon())
             .await
             .err()
             .with_context(|| format!("{case} accepted"))?;
@@ -605,7 +605,7 @@ async fn a_later_failure_discards_earlier_files_of_the_message() -> Result<()> {
     assert!(
         downloads
             .stage(
-                &http,
+                Some(&http),
                 &plan(vec![
                     attachment(port, "601", "ok.bin", 1000),
                     attachment(port, "602", "bad.bin", 1),
@@ -666,7 +666,7 @@ async fn download_memory() -> Result<()> {
     let started = std::time::Instant::now();
     let staged = downloads
         .stage(
-            &http,
+            Some(&http),
             &plan(vec![attachment(port, "601", "large.bin", size)]),
             soon(),
         )

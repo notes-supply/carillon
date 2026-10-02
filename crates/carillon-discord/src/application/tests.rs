@@ -29,6 +29,10 @@ use super::{
 };
 use crate::{
     CoreClient,
+    attachments::{
+        Downloads,
+        tests::{Serve, attachment, serve_cdn},
+    },
     client::test_client as core_client,
     commands::{
         Commands, MODULE_LIMIT, Source,
@@ -52,8 +56,13 @@ async fn stub_commands(directory: &Path, reply: &str) -> anyhow::Result<Arc<Comm
 }
 
 async fn discord_state(core: CoreClient, directory: &Path) -> anyhow::Result<DiscordState> {
+    let discord = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
     Ok(DiscordState {
-        discord: discord_config(DiscordActivation::Always, DiscordConversation::Channel),
+        downloads: Arc::new(Downloads::open(
+            directory.join("incoming"),
+            discord.attachments,
+        )?),
+        discord,
         health: Health {
             id: "discord".to_owned(),
             role: "interface".to_owned(),
@@ -968,5 +977,205 @@ fn native_messages_keep_attachment_metadata_without_signed_addresses() -> anyhow
         "earlier.pdf"
     );
     assert!(native["attachments"][0].get("url").is_none());
+    Ok(())
+}
+
+/// A core for simulation: it accepts events with whatever their staging
+/// holds, offers each new turn as a delivery, and reports what it holds.
+#[derive(Default)]
+struct SimulatedCore {
+    events: Vec<carillon_protocol::model::ExternalEvent>,
+    staged: Vec<Vec<Vec<u8>>>,
+    pending: Option<carillon_protocol::model::Delivery>,
+}
+
+type SharedCore = Arc<std::sync::Mutex<SimulatedCore>>;
+
+async fn simulated_core(staging: PathBuf) -> anyhow::Result<(std::net::SocketAddr, SharedCore)> {
+    use axum::extract::{Path as AxumPath, State};
+    use carillon_protocol::model::{Delivery, EventReceipt, EventStatus, ExternalEvent, TurnState};
+    let shared = SharedCore::default();
+    let receipt = |event_id: &str, duplicate| EventReceipt {
+        event_id: event_id.to_owned(),
+        turn_id: format!("turn-{event_id}"),
+        state: TurnState::Queued,
+        duplicate,
+    };
+    let app = Router::new()
+        .route(
+            "/v1/events",
+            post(
+                move |State(core): State<SharedCore>, Json(event): Json<ExternalEvent>| async move {
+                    let Ok(mut core) = core.lock() else {
+                        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    };
+                    let staged = event.attachments.as_ref().map(|batch| {
+                        (0..batch.files.len())
+                            .map(|ordinal| {
+                                std::fs::read(staging.join(&batch.batch).join(ordinal.to_string()))
+                                    .unwrap_or_default()
+                            })
+                            .collect()
+                    });
+                    let duplicate = core.events.iter().any(|seen| seen.event_id == event.event_id);
+                    if !duplicate {
+                        core.pending = Some(Delivery {
+                            turn_state: TurnState::Completed,
+                            id: 1,
+                            turn_id: format!("turn-{}", event.event_id),
+                            target_id: event.delivery_target_id.clone(),
+                            feedback_target_id: event.feedback_target_id.clone(),
+                            content: "answer".to_owned(),
+                        });
+                        core.staged.push(staged.unwrap_or_default());
+                        core.events.push(event.clone());
+                    }
+                    Json(receipt(&event.event_id, duplicate)).into_response()
+                },
+            ),
+        )
+        .route(
+            "/v1/events/{event_id}",
+            get(
+                move |State(core): State<SharedCore>, AxumPath(event_id): AxumPath<String>| async move {
+                    let known = core.lock().is_ok_and(|core| {
+                        core.events.iter().any(|event| event.event_id == event_id)
+                    });
+                    Json(if known {
+                        EventStatus::Accepted(receipt(&event_id, true))
+                    } else {
+                        EventStatus::Unknown
+                    })
+                },
+            ),
+        )
+        .route(
+            "/v1/deliveries",
+            get(|State(core): State<SharedCore>| async move {
+                Json(core.lock().ok().and_then(|mut core| core.pending.take()))
+            }),
+        )
+        .route(
+            "/v1/deliveries/{id}/ack",
+            post(|| async { StatusCode::NO_CONTENT }),
+        )
+        .with_state(shared.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    Ok((address, shared))
+}
+
+/// Send `files` from `user` through deterministic simulation.
+async fn simulate(
+    state: &DiscordState,
+    id: &str,
+    user: &str,
+    files: &[crate::conversations::SourceAttachment],
+) -> anyhow::Result<(StatusCode, Value)> {
+    let message = json!({
+        "event_id": id, "guild_id": "100", "user_id": user, "channel_id": "300",
+        "content": "", "attachments": files,
+    });
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/simulate")
+        .header("authorization", "Bearer token")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&message)?))?;
+    let response = discord_router(state.clone(), true).oneshot(request).await?;
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    let body = if body.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&body)?
+    };
+    Ok((status, body))
+}
+
+#[tokio::test]
+async fn simulation_admits_then_downloads_files_under_the_provider_policy() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let staging = directory.path().join("staging");
+    let (cdn, log) = serve_cdn(std::collections::HashMap::from([
+        (
+            "/attachments/300/601/a.png".to_owned(),
+            Serve::Bytes(vec![7; 32]),
+        ),
+        (
+            "/attachments/300/602/gone.png".to_owned(),
+            Serve::Status(404),
+        ),
+    ]))
+    .await?;
+    let (core_address, core) = simulated_core(staging.clone()).await?;
+    let mut state = discord_state(
+        core_client(format!("http://{core_address}")),
+        directory.path(),
+    )
+    .await?;
+    state.downloads = Arc::new(
+        Downloads::open(staging.clone(), state.discord.attachments)?.with_fixture_cdn(cdn),
+    );
+    let requests = || log.lock().map_or(usize::MAX, |log| log.requests.len());
+    let file = attachment(cdn, "601", "a.png", 32);
+
+    // Admission comes first: a sender who is not allowed, or a message that
+    // would not activate, causes no fetch.
+    let (status, _) = simulate(&state, "1", "999", std::slice::from_ref(&file)).await?;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    state.discord.routes[0].activation = DiscordActivation::Mention;
+    let (status, _) = simulate(&state, "1", "200", std::slice::from_ref(&file)).await?;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    state.discord.routes[0].activation = DiscordActivation::Always;
+    assert_eq!(requests(), 0);
+    // The provider's address policy refuses before any request.
+    let mut elsewhere = file.clone();
+    "https://example.com/attachments/300/601/a.png".clone_into(&mut elsewhere.url);
+    let (status, body) = simulate(&state, "2", "200", &[elsewhere]).await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("not a Discord attachment"))
+    );
+    assert_eq!(requests(), 0);
+    // Without a Discord session an expired address is not refreshed.
+    let (status, body) =
+        simulate(&state, "3", "200", &[attachment(cdn, "602", "gone.png", 4)]).await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("no longer serves"))
+    );
+
+    // An admitted message's files are staged for core, which takes them whole.
+    let (status, body) = simulate(&state, "4", "200", std::slice::from_ref(&file)).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["receipt"]["duplicate"], false);
+    {
+        let core = core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
+        let [event] = core.events.as_slice() else {
+            anyhow::bail!("expected one accepted event");
+        };
+        let batch = event.attachments.as_ref().context("no manifest")?;
+        assert_eq!(batch.files[0].name, "a.png");
+        assert_eq!(core.staged[0], vec![vec![7; 32]]);
+    }
+    for _ in 0..200 {
+        if std::fs::read_dir(&staging)?.count() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(std::fs::read_dir(&staging)?.count(), 0);
+    let fetched = requests();
+    // A message core already holds is not fetched again.
+    let (status, body) = simulate(&state, "4", "200", &[file]).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["receipt"]["duplicate"], true);
+    assert_eq!(requests(), fetched);
     Ok(())
 }
