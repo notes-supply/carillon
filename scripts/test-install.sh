@@ -34,6 +34,8 @@ done
   exit 1
 }
 
+node "$ROOT/scripts/test-codemode.mjs" "$RELEASE"
+
 CARILLON_CORE_BINARY="$RELEASE/bin/carillon" CARILLON_RUNTIME_BINARY="$RELEASE/bin/carillon-runtime-pi" \
   CARILLON_COMMANDS_MODULE="$RELEASE/lib/carillon_discord_commands.wasm" \
   node "$ROOT/scripts/test-integration.mjs"

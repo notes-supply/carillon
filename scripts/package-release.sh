@@ -22,9 +22,21 @@ OUTPUT=${2:-"$ROOT/dist/carillon-$VERSION-linux-$ARCH.tar.gz"}
 STAGE="$ROOT/target/package/carillon-$VERSION"
 PI_DIST=packages/runtime-pi/node_modules/@earendil-works/pi-coding-agent/dist
 PI_PACKAGE=${PI_DIST%/dist}
+BUNDLE="$ROOT/target/pi-bundle"
 
 rm -rf "$STAGE"
 mkdir -p "$STAGE/bin/theme" "$STAGE/bin/assets" "$STAGE/lib" "$STAGE/licenses" "$STAGE/systemd" "$(dirname -- "$OUTPUT")"
+
+# Pi's native Bun setup embeds QuickJS. Its worker specifiers use the source
+# layout, so keep those entrypoint identities even when building from npm's dist.
+mkdir -p "$BUNDLE/src/extensions/codemode" "$BUNDLE/src/utils"
+printf 'import "%s";\n' "$ROOT/$PI_DIST/bun/runtime-setup.js" \
+  "$ROOT/packages/runtime-pi/src/cli.ts" >"$BUNDLE/runtime.ts"
+printf 'import "%s";\n' "$ROOT/$PI_DIST/bun/cli.js" >"$BUNDLE/pi.ts"
+printf 'import "%s";\n' "$ROOT/$PI_DIST/extensions/codemode/worker.js" \
+  >"$BUNDLE/src/extensions/codemode/worker.ts"
+printf 'import "%s";\n' "$ROOT/$PI_DIST/utils/image-resize-worker.js" \
+  >"$BUNDLE/src/utils/image-resize-worker.ts"
 
 bun build --target=bun packages/discord-pi/src/index.ts --outfile "$STAGE/lib/carillon-discord-pi.js"
 install -m 0644 packages/discord-pi/skill/SKILL.md "$STAGE/lib/carillon-discord-SKILL.md"
@@ -33,9 +45,12 @@ cargo build --release --locked --target "$TARGET" --target-dir "$ROOT/target" --
 # The Discord command module runs in the provider's Wasm sandbox; it is data,
 # not a native binary, and is built for the wasm32 target regardless of host.
 cargo build --locked --profile wasm --target wasm32-unknown-unknown --target-dir "$ROOT/target" -p carillon-discord-commands
-bun build --compile --target "$BUN_TARGET" packages/runtime-pi/src/cli.ts --outfile "$STAGE/bin/carillon-runtime-pi"
+bun build --compile --target "$BUN_TARGET" --root "$BUNDLE" \
+  "$BUNDLE/runtime.ts" "$BUNDLE/src/extensions/codemode/worker.ts" \
+  "$BUNDLE/src/utils/image-resize-worker.ts" --outfile "$STAGE/bin/carillon-runtime-pi"
 bun build --compile --target "$BUN_TARGET" --no-compile-autoload-bunfig \
-  "$PI_DIST/bun/cli.js" "$PI_DIST/utils/image-resize-worker.js" \
+  --root "$BUNDLE" "$BUNDLE/pi.ts" "$BUNDLE/src/extensions/codemode/worker.ts" \
+  "$BUNDLE/src/utils/image-resize-worker.ts" \
   --outfile "$STAGE/bin/pi"
 install -m 0755 "target/$TARGET/release/carillon" "$STAGE/bin/carillon"
 install -m 0755 "target/$TARGET/release/carillon-discord" "$STAGE/bin/carillon-discord"

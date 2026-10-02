@@ -1,6 +1,9 @@
 import {
   createAgentSession,
+  createCodemodeExtension,
   createEventBus,
+  createMcpExtension,
+  createToolSearchExtension,
   type AgentSession,
   DefaultResourceLoader,
   type ModelRuntime,
@@ -41,6 +44,16 @@ export async function createPiExecutionSession(options: PiExecutionSessionOption
     cwd: options.workspace,
     agentDir: options.resourceRoot,
     settingsManager,
+    extensionFactories: [
+      { name: "codemode", factory: createCodemodeExtension(), builtin: true, replaceable: true },
+      {
+        name: "tool-search",
+        factory: createToolSearchExtension(),
+        builtin: true,
+        replaceable: true,
+      },
+      { name: "mcp", factory: createMcpExtension(), builtin: true, replaceable: true },
+    ],
     ...(systemPrompt === undefined ? {} : { systemPromptOverride: () => systemPrompt }),
   });
   await loader.reload();

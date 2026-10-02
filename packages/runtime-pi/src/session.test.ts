@@ -169,7 +169,7 @@ export default function observer(pi) {
           parameters,
           undefined,
           undefined,
-          session.extensionRunner.createContext(),
+          session.extensionRunner.createToolContext("authority-test", undefined),
         );
       };
       await executeTool("write", { path: "workspace.txt", content: "created in workspace\n" });
