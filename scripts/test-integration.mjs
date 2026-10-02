@@ -1532,6 +1532,22 @@ function value(reply, customId, text) {
 
 /** Files staged as the Discord provider stages them, captured through core. */
 async function testAttachments() {
+  // Simulation fetches an admitted message's files only from Discord's CDN:
+  // the built provider refuses anything else before a request is made.
+  const local = await requestSimulation({
+    ...event("attachments-local", "100", "200", "300", null, ""),
+    attachments: [
+      {
+        id: "601",
+        filename: "local.png",
+        size: 4,
+        url: `http://127.0.0.1:${String(basePort)}/attachments/300/601/local.png`,
+      },
+    ],
+  });
+  const refusal = await local.text();
+  assert.equal(local.status, 422, refusal);
+  assert.match(refusal, /not a Discord attachment/u);
   const incoming = join(installation, "state/components/discord-private/incoming");
   const report = Buffer.from("%PDF-1.7 integration bytes");
   await mkdir(join(incoming, "batch"), { recursive: true });
