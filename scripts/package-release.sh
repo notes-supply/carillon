@@ -64,6 +64,11 @@ install -m 0644 "$PI_DIST"/modes/interactive/theme/*.json "$STAGE/bin/theme/"
 install -m 0644 "$PI_DIST"/modes/interactive/assets/*.png "$STAGE/bin/assets/"
 install -m 0644 "$PI_PACKAGE/package.json" "$PI_PACKAGE/README.md" "$PI_PACKAGE/CHANGELOG.md" "$STAGE/bin/"
 cp -R "$PI_PACKAGE/docs" "$STAGE/bin/docs"
+# Pi normalizes images with Photon. A compiled executable cannot read the
+# build tree, so Photon's loader looks for its WebAssembly beside the
+# executable; without it Pi omits every image.
+PHOTON=$(node -p 'require("path").dirname(require.resolve("@silvia-odwyer/photon-node/package.json", {paths: [require("fs").realpathSync(process.argv[1])]}))' "$PI_PACKAGE")
+install -m 0644 "$PHOTON/photon_rs_bg.wasm" "$STAGE/bin/"
 install -m 0644 licenses/pi-coding-agent.txt "$STAGE/licenses/"
 
 # Installation checks the payload against this list before changing anything:

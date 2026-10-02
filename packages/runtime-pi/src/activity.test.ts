@@ -229,6 +229,7 @@ const request = (root: string, correlation_id: string) => ({
   audience_id: "conversation",
   input: "check the workspace",
   resource_root: join(root, "resources"),
+  attachment_root: join(root, "attachments"),
 });
 
 it("reports a real turn's phases, slow and parallel tools, failures and bursts until it settles", async () => {

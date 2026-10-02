@@ -1,0 +1,117 @@
+{
+  "requests": [
+    {
+      "correlation_id": "01a0fc1d-4683-7ea1-96a9-e57e9a67e63f",
+      "interface_id": "discord-private",
+      "agent_id": "default",
+      "audience_id": "discord-100-300",
+      "input": "What do you make of these?",
+      "resource_root": "/home/owner/.carillon/state/resource-snapshots/419ebb9a13f728315bc30ff6cb2523105de7a2da7f0eed72753185fb511cb9c4",
+      "native": { "origin": { "message_id": "500" } },
+      "attachment_root": "/home/owner/.carillon/state/attachments",
+      "attachments": [
+        {
+          "path": "01a0fc1d-46ae-7273-aa08-9ed09bbe9845/0",
+          "name": "holiday photo.png",
+          "size": 48213,
+          "content_type": "image/png",
+          "sha256": "2209f2d23d0129ba9d9e6dc4d048509230a203ae6ed8539695b1818f99162b95"
+        },
+        {
+          "path": "01a0fc1d-46ae-7273-aa08-9ed09bbe9845/1",
+          "name": "notes\nwith a newline.txt",
+          "size": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "correlation_id": "01a0fc1d-8f2f-76a1-8ea1-0cd3a764ffcc",
+      "interface_id": "discord-private",
+      "agent_id": "default",
+      "audience_id": "discord-100-300",
+      "input": "And now without files.",
+      "resource_root": "/home/owner/.carillon/state/resource-snapshots/419ebb9a13f728315bc30ff6cb2523105de7a2da7f0eed72753185fb511cb9c4",
+      "native": {},
+      "attachment_root": "/home/owner/.carillon/state/attachments"
+    }
+  ],
+  "invalid_requests": [
+    {
+      "correlation_id": "missing root",
+      "interface_id": "discord-private",
+      "agent_id": "default",
+      "audience_id": "a",
+      "input": "x",
+      "resource_root": "/r"
+    },
+    {
+      "correlation_id": "absolute path",
+      "interface_id": "discord-private",
+      "agent_id": "default",
+      "audience_id": "a",
+      "input": "x",
+      "resource_root": "/r",
+      "attachment_root": "/a",
+      "attachments": [
+        {
+          "path": "/etc/passwd",
+          "name": "p",
+          "size": 1,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "correlation_id": "traversal",
+      "interface_id": "discord-private",
+      "agent_id": "default",
+      "audience_id": "a",
+      "input": "x",
+      "resource_root": "/r",
+      "attachment_root": "/a",
+      "attachments": [
+        {
+          "path": "../../credentials/operator.token",
+          "name": "p",
+          "size": 1,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    },
+    {
+      "correlation_id": "malformed digest",
+      "interface_id": "discord-private",
+      "agent_id": "default",
+      "audience_id": "a",
+      "input": "x",
+      "resource_root": "/r",
+      "attachment_root": "/a",
+      "attachments": [
+        {
+          "path": "01a0fc1d-46ae-7273-aa08-9ed09bbe9845/0",
+          "name": "p",
+          "size": 1,
+          "sha256": "nope"
+        }
+      ]
+    },
+    {
+      "correlation_id": "negative size",
+      "interface_id": "discord-private",
+      "agent_id": "default",
+      "audience_id": "a",
+      "input": "x",
+      "resource_root": "/r",
+      "attachment_root": "/a",
+      "attachments": [
+        {
+          "path": "01a0fc1d-46ae-7273-aa08-9ed09bbe9845/0",
+          "name": "p",
+          "size": -1,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    }
+  ]
+}

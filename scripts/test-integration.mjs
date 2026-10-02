@@ -41,6 +41,14 @@ const services = new Map();
 
 try {
   run("--home", installation, "init", "--workspace", workspace, "--base-port", String(basePort));
+  // Attachment captures here must not depend on the host's free space. The
+  // setting survives core's own rewrite of the registry, which also puts it
+  // in canonical form for the byte comparisons below.
+  await writeFile(configPath(), "\n[core.attachments]\nfree_space_mib = 0\n", { flag: "a" });
+  run("--home", installation, "provider", "runtime-pi", "enable");
+  const rewritten = await readFile(configPath(), "utf8");
+  assert.match(rewritten, /^\[core\.attachments\]$/mu);
+  assert.match(rewritten, /^free_space_mib = 0$/mu);
   // Channel 305 is reserved for the model picker so its turns do not disturb
   // the response counters of the conversations below.
   assert.match(
@@ -193,6 +201,8 @@ try {
   const abandonedInspection = JSON.parse(run("--home", installation, "inspect", abandoned.turn_id));
   assert.equal(abandonedInspection.delivery_state, "uncertain");
 
+  const attachmentTurn = await testAttachments();
+
   const recent = JSON.parse(
     run("--home", installation, "recent", "--event-id", "event-4", "--limit", "5"),
   );
@@ -295,6 +305,13 @@ try {
   await acknowledgeDelivery(resumedDelivery.id, "resumed-discord");
   const resumed = await waitForTurn(queued.turn_id, "completed", "delivered");
   assert.equal(resumed.delivery_state, "delivered");
+  // The restored installation carries the captured files and resolves them
+  // under its own root.
+  const restoredAttachments = JSON.parse(run("--home", installation, "inspect", attachmentTurn));
+  for (const attachment of restoredAttachments.attachments) {
+    const captured = await stat(join(installation, "state/attachments", attachment.path));
+    assert.equal(captured.size, attachment.size);
+  }
   const restored = await simulate("event-5", "continue after restore");
   assert.match(restored.delivery.content, /Local provider response 7/u);
   await testModelPicker();
@@ -317,6 +334,8 @@ try {
         provider_failure:
           "explained once without replay, pages and credentials withheld, conversation continues",
         activity: "a slow native command is visible to its interface before the answer",
+        attachments:
+          "staged files captured by core, linked staging refused, files reach the runtime by relative path and survive backup",
       },
       null,
       2,
@@ -655,6 +674,7 @@ async function holdTurn(correlationId) {
       audience_id: `discord-100-${correlationId}`,
       input: "held",
       resource_root: fixture,
+      attachment_root: fixture,
     }),
   });
   response.catch(() => undefined);
@@ -1496,6 +1516,73 @@ function value(reply, customId, text) {
   );
   assert.ok(option, `${customId} offers ${text}`);
   return option.value;
+}
+
+/** Files staged as the Discord provider stages them, captured through core. */
+async function testAttachments() {
+  const incoming = join(installation, "state/components/discord-private/incoming");
+  const report = Buffer.from("%PDF-1.7 integration bytes");
+  await mkdir(join(incoming, "batch"), { recursive: true });
+  await writeFile(join(incoming, "batch", "0"), report);
+  await writeFile(join(incoming, "batch", "1"), "notes");
+  // Staging that links elsewhere is refused before anything is copied.
+  await mkdir(join(incoming, "linked"));
+  await symlink(credential("operator"), join(incoming, "linked", "0"));
+  const operatorToken = await stat(credential("operator"));
+  const linked = await postCoreEvent("attachments-linked", "", {
+    batch: "linked",
+    files: [{ name: "token", size: operatorToken.size }],
+  });
+  assert.equal(linked.status, 400, await linked.text());
+  const response = await postCoreEvent("attachments-1", "", {
+    batch: "batch",
+    files: [
+      { name: "report.pdf", size: report.length, content_type: "application/pdf" },
+      { name: "notes.txt", size: 5 },
+    ],
+  });
+  const body = await response.text();
+  assert.equal(response.status, 200, body);
+  const receipt = JSON.parse(body);
+  const status = await fetch(`http://127.0.0.1:${String(basePort)}/v1/events/attachments-1`, {
+    headers: {
+      authorization: `Bearer ${await credentialValue("discord-private")}`,
+      "x-carillon-provider": "discord-private",
+    },
+  });
+  assert.deepEqual(await status.json(), { status: "accepted", ...receipt, duplicate: true });
+  // The interface's staging is its own; accepted files no longer need it.
+  await rm(incoming, { recursive: true });
+  const inspection = await waitForTurn(receipt.turn_id, "completed", "pending");
+  assert.match(inspection.output, /attachment report\.pdf 26 bytes intact/u);
+  assert.match(inspection.output, /attachment notes\.txt 5 bytes intact/u);
+  assert.equal(inspection.attachments.length, 2);
+  assert.match(inspection.attachments[0].path, /^[0-9a-f-]{36}\/0$/u);
+  const delivery = await waitForDeliveryClaim("attachments-check");
+  assert.equal(delivery.turn_id, receipt.turn_id);
+  await acknowledgeDelivery(delivery.id, "attachments-check");
+  return receipt.turn_id;
+}
+
+async function postCoreEvent(eventId, content, attachments) {
+  return await fetch(`http://127.0.0.1:${String(basePort)}/v1/events`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${await credentialValue("discord-private")}`,
+      "x-carillon-provider": "discord-private",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      event_id: eventId,
+      agent_id: "default",
+      user_id: "200",
+      audience_id: "discord-100-306",
+      delivery_target_id: "306",
+      feedback_target_id: `306:${eventId}`,
+      content,
+      attachments,
+    }),
+  });
 }
 
 async function submitCoreEvent(eventId, content) {

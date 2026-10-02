@@ -170,6 +170,7 @@ it("close waits for accepted operations and prevents queued execution from start
     correlation_id: "one",
     input: "Do not execute",
     resource_root: root,
+    attachment_root: root,
   };
   try {
     const active = runtime.executeTurn(request);

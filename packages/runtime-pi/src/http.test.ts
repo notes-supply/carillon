@@ -68,6 +68,7 @@ const turn = (input: string) => ({
   audience_id: "conversation",
   input,
   resource_root: "/unused",
+  attachment_root: "/unused",
 });
 
 const option = (id: string) => ({

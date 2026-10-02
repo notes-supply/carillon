@@ -1,14 +1,12 @@
-import type { ModelQuery, ModelUpdate, ModelState, TurnActivity } from "@carillon/protocol";
+import type {
+  ModelQuery,
+  ModelUpdate,
+  ModelState,
+  RuntimeTurnRequest,
+  TurnActivity,
+} from "@carillon/protocol";
 
-export interface TurnRequest {
-  readonly correlation_id: string;
-  readonly interface_id: string;
-  readonly agent_id: string;
-  readonly audience_id: string;
-  readonly input: string;
-  readonly native?: unknown;
-  readonly resource_root: string;
-}
+export type TurnRequest = RuntimeTurnRequest;
 
 export interface TurnResponse {
   readonly correlation_id: string;

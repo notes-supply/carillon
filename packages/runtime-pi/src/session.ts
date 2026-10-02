@@ -6,12 +6,13 @@ import {
   createToolSearchExtension,
   type AgentSession,
   DefaultResourceLoader,
+  type ExtensionFactory,
   type ModelRuntime,
   type SessionManager,
   SettingsManager,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { Api, ImageContent, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ExplainedFailure } from "./failure.ts";
@@ -27,6 +28,8 @@ interface PiExecutionSessionOptions {
   readonly customTools?: ToolDefinition[];
   /** Per-session host data, delivered to native extensions but never to the model. */
   readonly extensionContext?: unknown;
+  /** Host context for this turn's attachments, as a native extension. */
+  readonly attachmentContext?: ExtensionFactory;
 }
 
 export async function createPiExecutionSession(options: PiExecutionSessionOptions) {
@@ -53,6 +56,9 @@ export async function createPiExecutionSession(options: PiExecutionSessionOption
         replaceable: true,
       },
       { name: "mcp", factory: createMcpExtension(), builtin: true, replaceable: true },
+      ...(options.attachmentContext === undefined
+        ? []
+        : [{ name: "carillon-attachments", factory: options.attachmentContext, hidden: true }]),
     ],
     ...(systemPrompt === undefined ? {} : { systemPromptOverride: () => systemPrompt }),
   });
@@ -73,8 +79,16 @@ export async function createPiExecutionSession(options: PiExecutionSessionOption
   return created;
 }
 
-/** Cancel native execution on disconnect, and settle it before releasing the serial queue. */
-export async function promptSession(session: AgentSession, input: string, signal: AbortSignal) {
+/**
+ * Cancel native execution on disconnect, and settle it before releasing the serial queue.
+ * Images are Pi's native prompt input; the text keeps its command semantics.
+ */
+export async function promptSession(
+  session: AgentSession,
+  input: string,
+  signal: AbortSignal,
+  images: ImageContent[] = [],
+) {
   signal.throwIfAborted();
   let cancellation: Promise<void> | undefined;
   const cancel = () => {
@@ -86,7 +100,7 @@ export async function promptSession(session: AgentSession, input: string, signal
     if (event.type === "agent_start" && signal.aborted) cancel();
   });
   try {
-    await session.prompt(input);
+    await session.prompt(input, images.length === 0 ? undefined : { images });
     signal.throwIfAborted();
     const last = session.messages.at(-1);
     if (last?.role !== "assistant") return;

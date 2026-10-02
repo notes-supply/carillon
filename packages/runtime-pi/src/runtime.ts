@@ -18,6 +18,12 @@ import type {
 import { mkdir, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { trackActivity, type ActivityTracker } from "./activity.ts";
+import {
+  attachmentContext,
+  DEFAULT_INLINE_IMAGES,
+  prepareAttachments,
+  type InlineImagePolicy,
+} from "./attachments.ts";
 import { ModelSelections } from "./model.ts";
 import { openConversation } from "./namespace.ts";
 import { Serial } from "./serial.ts";
@@ -36,6 +42,8 @@ export interface PiRuntimeOptions {
   readonly allowModelNetwork?: boolean;
   /** Host-supplied native-extension context; no integration knowledge in the runtime. */
   readonly extensionContext?: (request: TurnRequest) => unknown;
+  /** Which attached images are passed to Pi inline; the rest stay files. */
+  readonly inlineImages?: InlineImagePolicy;
 }
 
 /** Construction is explicit; importing this module does not discover providers or open files.
@@ -213,9 +221,15 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
     const model = piModel(models, selection);
     const thinking = selection.options?.[THINKING_OPTION];
     const runtime = modelRuntime;
+    const attachments = await prepareAttachments(
+      request.attachment_root,
+      request.attachments ?? [],
+      options.inlineImages ?? DEFAULT_INLINE_IMAGES,
+    );
     const created = await createPiExecutionSession({
       resourceRoot: root,
       extensionContext: options.extensionContext?.(request),
+      attachmentContext: attachmentContext(request.attachment_root, attachments.note),
       workspace: workspace,
       manager,
       modelRuntime: runtime,
@@ -232,7 +246,7 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
           output += event.assistantMessageEvent.delta;
       });
       try {
-        await promptSession(session, request.input, signal);
+        await promptSession(session, request.input, signal, attachments.images);
         return {
           correlation_id: request.correlation_id,
           output,

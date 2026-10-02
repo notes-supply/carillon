@@ -1,11 +1,12 @@
 /** Authenticated HTTP adapter. Creating a server does not bind a listener. */
 import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { Type } from "typebox";
 import { Check, Parse } from "typebox/value";
 import {
   ModelQuerySchema,
   ModelUpdateSchema,
+  ProviderIdentitySchema,
+  RuntimeTurnRequestSchema,
   type ModelQuery,
   type ModelUpdate,
 } from "@carillon/protocol";
@@ -20,20 +21,6 @@ interface RuntimeServerOptions {
   readonly provider: "pi" | "deterministic-local-substitute";
   readonly workspace: string;
 }
-const ProviderIdentitySchema = Type.String({
-  minLength: 1,
-  maxLength: 128,
-  pattern: "^[A-Za-z0-9_-]+$",
-});
-const TurnRequestSchema = Type.Object({
-  correlation_id: Type.String(),
-  interface_id: ProviderIdentitySchema,
-  agent_id: Type.String(),
-  audience_id: Type.String(),
-  input: Type.String(),
-  resource_root: Type.String(),
-  native: Type.Optional(Type.Unknown()),
-});
 
 export function createRuntimeServer(options: RuntimeServerOptions) {
   if (options.token.length === 0) throw new Error("runtime credential must not be empty");
@@ -85,7 +72,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
     if (request.method === "POST" && request.url === "/v1/turns") {
       let parsed: TurnRequest;
       try {
-        parsed = Parse(TurnRequestSchema, await readJson(request));
+        parsed = Parse(RuntimeTurnRequestSchema, await readJson(request));
       } catch {
         writeJson(response, 400, { error: "invalid runtime turn request" });
         return;

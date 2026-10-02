@@ -1,6 +1,6 @@
 /** Direct native Pi execution: no Carillon HTTP server or Discord. */
 import { parseArgs } from "node:util";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { createPiRuntime, type RuntimeOperations } from "@carillon/runtime-pi";
 
 /** The same example is exercised with Pi's real adapter and a controlled model in tests. */
@@ -10,6 +10,7 @@ export async function runSessionExample(runtime: RuntimeOperations, resourceRoot
     agent_id: "example",
     audience_id: "native-session",
     resource_root: resourceRoot,
+    attachment_root: join(resourceRoot, "attachments"),
   };
   const first = await runtime.executeTurn({
     ...conversation,

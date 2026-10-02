@@ -155,6 +155,7 @@ try {
           audience_id: "code-check",
           input: "Run the verification.",
           resource_root: resources,
+          attachment_root: join(work, "attachments"),
         }),
         signal: AbortSignal.timeout(20_000),
       });

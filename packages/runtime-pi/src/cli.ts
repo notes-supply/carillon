@@ -7,6 +7,11 @@ import { Type } from "typebox";
 import { Parse } from "typebox/value";
 import { parse as parseToml } from "smol-toml";
 import { createPiRuntime } from "./index.ts";
+import {
+  DEFAULT_INLINE_IMAGES,
+  InlineImagePolicySchema,
+  type InlineImagePolicy,
+} from "./attachments.ts";
 import { createDeterministicRuntime } from "./testing.ts";
 import { createRuntimeServer } from "./http.ts";
 import { runtimeListenAddress } from "./endpoint.ts";
@@ -24,7 +29,14 @@ interface Config {
   readonly runtime: RuntimeProviderConfig;
   readonly interfaces: RuntimeProviderConfig[];
   readonly operatorTokenHash: string;
+  readonly inlineImages: InlineImagePolicy;
 }
+
+/** The runtime's own settings, `providers/<id>.toml`; every setting is optional. */
+const ProviderFileSchema = Type.Object(
+  { inline_images: Type.Optional(Type.Partial(InlineImagePolicySchema)) },
+  { additionalProperties: false },
+);
 
 const ProviderIdentitySchema = Type.String({
   minLength: 1,
@@ -74,6 +86,7 @@ async function main(values: readonly string[]): Promise<void> {
         stateDirectory,
         sessionDirectory,
         allowModelNetwork: true,
+        inlineImages: config.inlineImages,
         extensionContext: (request) => {
           const provider = config.interfaces.find((item) => item.id === request.interface_id);
           return {
@@ -144,7 +157,25 @@ async function loadConfig(path: string, providerId: string): Promise<Config> {
       (provider) => provider.role === "interface" && provider.enabled,
     ),
     operatorTokenHash: parsed.core.operator_token_hash,
+    inlineImages: await loadInlineImages(join(root, "providers", `${providerId}.toml`)),
   };
+}
+
+/** Inline-image limits from the provider's own file, when it sets any. */
+async function loadInlineImages(path: string): Promise<InlineImagePolicy> {
+  let text: string;
+  try {
+    text = await readFile(path, "utf8");
+  } catch (failure) {
+    if (failure instanceof Error && "code" in failure && failure.code === "ENOENT")
+      return DEFAULT_INLINE_IMAGES;
+    throw failure;
+  }
+  const settings = Parse(ProviderFileSchema, parseToml(text));
+  const policy = { ...DEFAULT_INLINE_IMAGES, ...settings.inline_images };
+  if (policy.max_total_mib < policy.max_image_mib)
+    throw new Error(`${path}: inline_images.max_total_mib must be at least max_image_mib`);
+  return policy;
 }
 
 function parseArguments(values: readonly string[]): ReadonlyMap<string, string> {

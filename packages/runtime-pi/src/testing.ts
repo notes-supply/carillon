@@ -1,9 +1,11 @@
 /** Service-test substitute. Does not exercise Pi or make model calls. */
 import type { AvailableModel, Selection } from "@carillon/protocol";
+import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { Type } from "typebox";
 import { Parse } from "typebox/value";
+import { capturedPath } from "./attachments.ts";
 import { ModelSelections } from "./model.ts";
 import { Serial } from "./serial.ts";
 import { conversationDirectory } from "./namespace.ts";
@@ -80,6 +82,7 @@ export async function createDeterministicRuntime(
       extensionActive ? "native extension active" : "native extension inactive",
       skillActive ? "skill active" : "skill inactive",
       `model ${describeSelection(selection)}`,
+      ...(await describeAttachments(request)),
     ];
     const output = `Local provider response ${String(prior.turns.length + 1)}: ${request.input}. ${markers.join("; ")}.`;
     const next: DeterministicSession = {
@@ -95,6 +98,17 @@ export async function createDeterministicRuntime(
     };
   }
 }
+/** Each attached file as found under the attachment root, checked against its digest. */
+async function describeAttachments(request: TurnRequest): Promise<string[]> {
+  return await Promise.all(
+    (request.attachments ?? []).map(async (attachment) => {
+      const bytes = await readFile(capturedPath(request.attachment_root, attachment));
+      const intact = createHash("sha256").update(bytes).digest("hex") === attachment.sha256;
+      return `attachment ${attachment.name} ${String(bytes.length)} bytes ${intact ? "intact" : "altered"}`;
+    }),
+  );
+}
+
 async function readDeterministicSession(path: string): Promise<DeterministicSession> {
   try {
     const content = await readFile(path, "utf8");

@@ -87,3 +87,43 @@ export const TurnActivitySchema = Type.Object({
   tool_calls: Type.Integer({ minimum: 0 }),
 });
 export type TurnActivity = Static<typeof TurnActivitySchema>;
+
+/** A configured provider's registry identity. */
+export const ProviderIdentitySchema = Type.String({
+  minLength: 1,
+  maxLength: 128,
+  pattern: "^[A-Za-z0-9_-]+$",
+});
+
+/** A file core captured with an accepted turn. */
+export const TurnAttachmentSchema = Type.Object({
+  /** A capture and ordinal relative to the request's `attachment_root`; never a free path. */
+  path: Type.String({
+    pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/(0|[1-9][0-9]{0,2})$",
+  }),
+  /** The uploader's name for the file: display text, never a path. */
+  name: Type.String({ minLength: 1, maxLength: 1024 }),
+  size: Type.Integer({ minimum: 0 }),
+  /** The media type the platform declared, unverified. */
+  content_type: Type.Optional(Type.String({ maxLength: 255 })),
+  sha256: Type.String({ pattern: "^[0-9a-f]{64}$" }),
+});
+export type TurnAttachment = Static<typeof TurnAttachmentSchema>;
+
+/** Core's request to run one claimed turn. */
+export const RuntimeTurnRequestSchema = Type.Object({
+  correlation_id: Type.String(),
+  interface_id: ProviderIdentitySchema,
+  agent_id: Type.String(),
+  audience_id: Type.String(),
+  input: Type.String(),
+  /** The captured resource snapshot, read in place. */
+  resource_root: Type.String(),
+  /** Interface-owned metadata captured with the accepted event. */
+  native: Type.Optional(Type.Unknown()),
+  /** Where every captured attachment of the installation is now. */
+  attachment_root: Type.String({ minLength: 1 }),
+  /** This turn's captured files, in message order. */
+  attachments: Type.Optional(Type.Array(TurnAttachmentSchema, { maxItems: 100 })),
+});
+export type RuntimeTurnRequest = Static<typeof RuntimeTurnRequestSchema>;

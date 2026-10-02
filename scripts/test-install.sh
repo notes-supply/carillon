@@ -17,6 +17,7 @@ for artifact in \
   lib/carillon-discord-pi.js \
   bin/carillon-runtime-pi \
   bin/pi \
+  bin/photon_rs_bg.wasm \
   bin/carillon-pi \
   bin/carillon-register-services \
   install.sh \
@@ -35,6 +36,7 @@ done
 }
 
 node "$ROOT/scripts/test-codemode.mjs" "$RELEASE"
+node "$ROOT/scripts/test-images.mjs" "$RELEASE"
 
 CARILLON_CORE_BINARY="$RELEASE/bin/carillon" CARILLON_RUNTIME_BINARY="$RELEASE/bin/carillon-runtime-pi" \
   CARILLON_COMMANDS_MODULE="$RELEASE/lib/carillon_discord_commands.wasm" \
