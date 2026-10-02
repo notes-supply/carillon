@@ -282,10 +282,13 @@ impl Database {
                 size INTEGER NOT NULL,
                 content_type TEXT,
                 sha256 TEXT NOT NULL,
+                noted INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(turn_id, ordinal)
             );
             CREATE INDEX IF NOT EXISTS turn_attachments_capture
-                ON turn_attachments(capture_id);",
+                ON turn_attachments(capture_id);
+            CREATE INDEX IF NOT EXISTS turn_attachments_pending
+                ON turn_attachments(turn_id) WHERE noted = 0;",
         )?;
         Ok(())
     }
@@ -453,10 +456,11 @@ impl Database {
         Ok(Some(turn))
     }
 
-    /// The captured files of `turn`'s conversation accepted after its last
-    /// completed turn and before `turn`, oldest first. Taken newest first
-    /// while together they hold at most `files` files and `bytes` bytes.
-    pub(crate) fn unanswered_files(
+    /// Files of `turn`'s conversation, accepted before it, that no completed
+    /// turn has carried yet: whole turns, oldest first. The first is always
+    /// taken; later ones while together they hold at most `files` files and
+    /// `bytes` bytes. The rest wait for later turns.
+    pub(crate) fn unnoted_files(
         &self,
         turn: &ClaimedTurn,
         files: u32,
@@ -464,40 +468,48 @@ impl Database {
     ) -> Result<Vec<TurnFiles>> {
         let connection = self.connect()?;
         let mut statement = connection.prepare(
-            "SELECT earlier.id FROM turns current JOIN turns earlier
-               ON earlier.interface_id = current.interface_id
-              AND earlier.agent_id = current.agent_id
-              AND earlier.audience_id = current.audience_id
-              AND earlier.acceptance_sequence < current.acceptance_sequence
-             WHERE current.id = ?1
-               AND earlier.acceptance_sequence > COALESCE((
-                 SELECT MAX(answered.acceptance_sequence) FROM turns answered
-                 WHERE answered.interface_id = current.interface_id
-                   AND answered.agent_id = current.agent_id
-                   AND answered.audience_id = current.audience_id
-                   AND answered.acceptance_sequence < current.acceptance_sequence
-                   AND answered.state = 'completed'
-               ), 0)
-               AND EXISTS (SELECT 1 FROM turn_attachments WHERE turn_id = earlier.id)
-             ORDER BY earlier.acceptance_sequence DESC",
+            "SELECT DISTINCT earlier.id, earlier.acceptance_sequence
+             FROM turn_attachments pending
+             JOIN turns earlier ON earlier.id = pending.turn_id
+             JOIN turns current ON current.id = ?1
+             WHERE pending.noted = 0
+               AND earlier.interface_id = current.interface_id
+               AND earlier.agent_id = current.agent_id
+               AND earlier.audience_id = current.audience_id
+               AND earlier.acceptance_sequence < current.acceptance_sequence
+             ORDER BY earlier.acceptance_sequence",
         )?;
         let mut rows = statement.query([&turn.turn_id])?;
-        let (mut unanswered, mut count, mut total) = (Vec::new(), 0_u64, 0_u64);
+        let (mut unnoted, mut count, mut total) = (Vec::new(), 0_u64, 0_u64);
         while let Some(row) = rows.next()? {
             let turn_id: String = row.get(0)?;
             let captured = captured_files(&connection, Some(&turn_id))?;
             count += captured.len() as u64;
             total += captured.iter().map(|file| file.size).sum::<u64>();
-            if count > u64::from(files) || total > bytes {
+            if !unnoted.is_empty() && (count > u64::from(files) || total > bytes) {
                 break;
             }
-            unanswered.push(TurnFiles {
+            unnoted.push(TurnFiles {
                 turn_id,
                 files: captured,
             });
         }
-        unanswered.reverse();
-        Ok(unanswered)
+        Ok(unnoted)
+    }
+
+    /// Record that a completed turn carried the files of `turns` to its
+    /// runtime, whose conversation therefore holds them.
+    pub(crate) fn mark_noted(&self, turns: &[String]) -> Result<()> {
+        let mut connection = self.connect()?;
+        let transaction = write_transaction(&mut connection)?;
+        for turn in turns {
+            transaction.execute(
+                "UPDATE turn_attachments SET noted = 1 WHERE turn_id = ?1 AND noted = 0",
+                [turn],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Commits a successful runtime response: completed output and the

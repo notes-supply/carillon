@@ -659,9 +659,26 @@ fn selected_provider(provider: &Provider) -> SelectedProvider {
     }
 }
 
+/// Interrupt or termination, as the service manager stops core.
 async fn shutdown(core: Core) {
-    if let Err(error) = tokio::signal::ctrl_c().await {
-        error!(%error, "failed to install shutdown signal handler");
+    let terminated = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                terminate.recv().await;
+            }
+            Err(error) => {
+                error!(%error, "failed to install termination signal handler");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    tokio::select! {
+        interrupted = tokio::signal::ctrl_c() => {
+            if let Err(error) = interrupted {
+                error!(%error, "failed to install shutdown signal handler");
+            }
+        }
+        () = terminated => {}
     }
     // Waiting submissions then answer promptly; interfaces retry them.
     core.stop_capturing();

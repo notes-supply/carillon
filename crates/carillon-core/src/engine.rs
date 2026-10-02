@@ -1,7 +1,7 @@
 //! Admission, runtime ownership, execution and delivery over one SQLite authority.
 use crate::{
     attachments::{self, Capture, Reconciled, Unusable},
-    db::{ClaimedTurn, Database},
+    db::{ClaimedTurn, Database, TurnFiles},
     intake::Intake,
     resources,
 };
@@ -172,6 +172,7 @@ impl Core {
         if event.attachments.is_some() {
             return self.intake.accept(self, interface, event).await;
         }
+        self.intake.ensure_in_order(&interface.id, event)?;
         self.commit(interface, event, None)
     }
 
@@ -291,7 +292,16 @@ impl Core {
             warn!(turn_id = %turn.turn_id, error = %message, "captured attachment is not usable; turn not run");
             return Ok(WorkerStep::Advanced);
         }
-        let unanswered = self.unanswered(&turn).await?;
+        let limits = &self.options.attachments;
+        let earlier =
+            self.database
+                .unnoted_files(&turn, limits.max_files, limits.max_event_bytes())?;
+        // The files this turn carries to the runtime: its own and the earlier
+        // ones offered with it.
+        let carried = std::iter::once(turn.turn_id.clone())
+            .chain(earlier.iter().map(|earlier| earlier.turn_id.clone()))
+            .collect::<Vec<_>>();
+        let unanswered = self.offer(earlier).await?;
         let outcome = async {
             let request = self.runtime_request(&turn, unanswered);
             let correlation_id = request.correlation_id.clone();
@@ -306,7 +316,15 @@ impl Core {
         // `running`, which blocks only its conversation and is never claimed
         // again; startup recovery then records it as interrupted.
         match outcome {
-            Ok(()) => Ok(WorkerStep::Advanced),
+            Ok(()) => {
+                // An answered turn's conversation was saved with everything
+                // it carried. Should recording that fail, the files are
+                // offered again and the runtime skips those it holds.
+                if let Err(error) = self.database.mark_noted(&carried) {
+                    warn!(turn_id = %turn.turn_id, %error, "attachments carried by an answered turn were not recorded as noted");
+                }
+                Ok(WorkerStep::Advanced)
+            }
             Err(TurnFailure::Retry(failure)) => {
                 self.database
                     .requeue_turn(&turn)
@@ -443,15 +461,10 @@ impl Core {
         }
     }
 
-    /// Files sent earlier in the turn's conversation that its runtime may
-    /// never have recorded, because their turns got no answer: those since
-    /// the conversation's last completed turn, at most one event's worth,
-    /// and only files that are still the ones accepted.
-    async fn unanswered(&self, turn: &ClaimedTurn) -> Result<Vec<UnansweredTurn>> {
-        let limits = &self.options.attachments;
-        let earlier =
-            self.database
-                .unanswered_files(turn, limits.max_files, limits.max_event_bytes())?;
+    /// The earlier files offered to a turn, without any that are no longer
+    /// the files accepted: those are logged and, once the turn is answered,
+    /// not offered again.
+    async fn offer(&self, earlier: Vec<TurnFiles>) -> Result<Vec<UnansweredTurn>> {
         if earlier.is_empty() {
             return Ok(Vec::new());
         }

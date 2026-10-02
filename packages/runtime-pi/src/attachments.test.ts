@@ -169,8 +169,8 @@ function png(width: number, height: number, noisy = false): Buffer {
 async function capture(
   root: string,
   files: { name: string; bytes: Buffer; type?: string }[],
+  capture = "0190a6e0-0000-7000-8000-0000000000a1",
 ): Promise<TurnAttachment[]> {
-  const capture = "0190a6e0-0000-7000-8000-0000000000a1";
   await mkdir(join(root, capture), { recursive: true });
   return await Promise.all(
     files.map(async (file, ordinal) => {
@@ -424,7 +424,7 @@ it("keeps slash commands and input handlers native when files are attached", asy
   expect(notes(sent[1])).toHaveLength(2);
 });
 
-it("keeps files sent with a command that opens a conversation", async () => {
+it("keeps files sent with commands that open a conversation", async () => {
   const { root, resources, runtime, sent, state, workspace } = await setup(
     ["text", "image"],
     ["described", "recalled"],
@@ -435,33 +435,48 @@ it("keeps files sent with a command that opens a conversation", async () => {
     { name: "a.png", bytes: png(8, 8) },
     { name: "b.png", bytes: png(9, 9) },
   ]);
-  // The conversation's first message is a command: Pi saves nothing yet.
+  const report = await capture(
+    store,
+    [{ name: "report.txt", bytes: Buffer.from("figures\n") }],
+    "0190a6e0-0000-7000-8000-0000000000a2",
+  );
+  // The conversation's first messages are commands: Pi saves nothing yet.
   expect(
     await execute(runtime, turn(resources, store, "/note hello there", attachments, "command")),
   ).toBe("");
+  expect(await execute(runtime, turn(resources, store, "/note again", report, "again"))).toBe("");
   expect(sent).toHaveLength(0);
   const directory = conversationDirectory(join(state, "sessions"), turn(resources, store, ""));
   expect(await readdir(directory).catch(() => [])).toEqual([]);
-  // That turn got no answer, so core offers its files with the next one.
+  // Those turns got no answer, so core offers their files with the next one.
   await execute(runtime, {
     ...turn(resources, store, "describe", attachments, "prompt"),
-    unanswered: [{ correlation_id: "command", attachments }],
+    unanswered: [
+      { correlation_id: "command", attachments },
+      { correlation_id: "again", attachments: report },
+    ],
   });
-  expect(await observed()).toEqual([{ command: "hello there" }, { input: "describe", images: 2 }]);
+  expect(await observed()).toEqual([
+    { command: "hello there" },
+    { command: "again" },
+    { input: "describe", images: 2 },
+  ]);
   expect(images(prompt(sent[0])?.content)).toHaveLength(2);
-  const [earlier = "", own = ""] = notes(sent[0]);
-  expect(notes(sent[0])).toHaveLength(2);
-  expect(earlier).toContain("an earlier message that did not reach you");
-  expect(earlier).toMatch(/^1\. path: \S+; name: "a\.png"; size: \S+ bytes; file$/mu);
-  expect(earlier).not.toContain("inline");
+  const [first = "", second = "", own = ""] = notes(sent[0]);
+  expect(notes(sent[0])).toHaveLength(3);
+  expect(first).toContain("an earlier message that did not reach you");
+  expect(first).toMatch(/^1\. path: \S+; name: "a\.png"; size: \S+ bytes; file$/mu);
+  expect(first).not.toContain("inline");
+  expect(second).toMatch(/^1\. path: \S+a2\/0; name: "report\.txt"; size: \S+ bytes; file$/mu);
   expect(own).toContain("sent inline as an image");
-  // Pi saved both with the message: a later turn has them from history.
-  await execute(runtime, turn(resources, store, "What came with the command?", [], "later"));
+  // Pi saved them with the message: a later turn has them from history.
+  await execute(runtime, turn(resources, store, "What came with the commands?", [], "later"));
   expect(notes(sent[1])).toEqual(notes(sent[0]));
   expect(system(sent[1] ?? { messages: [] })).toContain(`kept in ${store}.`);
   const [file] = await readdir(directory);
   const history = await readFile(join(directory, file ?? ""), "utf8");
   expect(history).toContain('"details":{"turn":"command"}');
+  expect(history).toContain('"details":{"turn":"again"}');
 });
 
 it("applies the inline policy's count and byte limits and leaves other files alone", async () => {

@@ -720,7 +720,8 @@ async fn files_of_unanswered_turns_are_offered_again_until_a_turn_is_answered() 
 }
 
 #[tokio::test]
-async fn unanswered_files_fit_one_event_and_leave_out_altered_files() -> Result<()> {
+async fn every_file_of_initial_commands_is_offered_until_an_answered_turn_carries_it() -> Result<()>
+{
     let directory = tempdir()?;
     let mut state = installation(directory.path())?;
     with_limits(
@@ -731,46 +732,143 @@ async fn unanswered_files_fit_one_event_and_leave_out_altered_files() -> Result<
             ..AttachmentLimits::default()
         },
     )?;
-    let older = stage(&state, "older", &[("1", b"1"), ("2", b"2")])?;
-    submit(&state, event("older", "", older))
-        .await
-        .map_err(|error| anyhow!(error.message))?;
-    offered(&state, "").await?;
-    let newer = stage(&state, "newer", &[("3", b"3"), ("4", b"4")])?;
-    let newer = submit(&state, event("newer", "", newer))
-        .await
-        .map_err(|error| anyhow!(error.message))?;
-    offered(&state, "").await?;
-    let accepted = state
-        .core
-        .inspect_turn(&newer.turn_id)?
-        .context("turn")?
-        .attachments;
+    // Three commands open the conversation with two files each: more than
+    // one event's worth, and none of them answered.
+    let mut commands = Vec::new();
+    for name in ["first", "second", "third"] {
+        let staged = stage(&state, name, &[("a", name.as_bytes()), ("b", b"b")])?;
+        let receipt = submit(&state, event(name, "/note", staged))
+            .await
+            .map_err(|error| anyhow!(error.message))?;
+        offered(&state, "").await?;
+        let files = state
+            .core
+            .inspect_turn(&receipt.turn_id)?
+            .context("turn")?
+            .attachments;
+        commands.push(UnansweredTurn {
+            correlation_id: receipt.turn_id,
+            attachments: files,
+        });
+    }
+    let [first, second, third] = commands.as_slice() else {
+        bail!("expected three commands");
+    };
     let altered = state
         .config
         .value
         .data_dir
         .join("attachments")
-        .join(&accepted[1].path);
+        .join(&second.attachments[1].path);
     fs::set_permissions(&altered, fs::Permissions::from_mode(0o640))?;
-    fs::write(&altered, b"5")?;
-    let ask = accept(&state, "ask", "files").await?;
-    // Only the newest turn fits one event's two files, without its altered
-    // file; the asking turn itself still runs.
+    fs::write(&altered, b"c")?;
+    let ask = async |id: &str, answer: &str| {
+        accept(&state, id, "files").await?;
+        offered(&state, answer).await
+    };
+    // Each answered turn carries the oldest files still waiting, one
+    // event's worth at a time; an unanswered one carries nothing for good.
+    assert_eq!(ask("ask-1", "an answer").await?, vec![first.clone()]);
+    let intact = UnansweredTurn {
+        correlation_id: second.correlation_id.clone(),
+        attachments: vec![second.attachments[0].clone()],
+    };
+    assert_eq!(ask("ask-2", "").await?, vec![intact.clone()]);
+    // A file no longer the one accepted is left out, and not offered again
+    // once a turn has been answered without it.
+    assert_eq!(ask("ask-3", "an answer").await?, vec![intact]);
+    assert_eq!(ask("ask-4", "an answer").await?, vec![third.clone()]);
+    assert!(ask("ask-5", "an answer").await?.is_empty());
+    // A turn's own files are carried by the turn itself once it is answered.
+    let staged = stage(&state, "own", &[("own", b"own")])?;
+    submit(&state, event("own", "look", staged))
+        .await
+        .map_err(|error| anyhow!(error.message))?;
+    assert!(offered(&state, "seen").await?.is_empty());
+    assert!(ask("ask-6", "an answer").await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "the held lock is what stalls the blocking copy"
+)]
+async fn a_conversations_later_messages_wait_for_its_capture_in_progress() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    let staged = stage(&state, "first", &[("a", b"first")])?;
+    let held = state
+        .core
+        .intake
+        .signals
+        .stall
+        .lock()
+        .map_err(|_| anyhow!("poisoned"))?;
+    let first = {
+        let (state, event) = (state.clone(), event("first", "", staged.clone()));
+        tokio::spawn(async move { submit(&state, event).await })
+    };
+    wait_for_capture(&state, "first").await?;
+    // Whichever instance of the interface sends them, later messages of the
+    // conversation wait rather than overtake it: text, and files before any
+    // copying starts.
+    let mut later = event("later", "after the file", staged.clone());
+    later.attachments = None;
+    let refused = submit(&state, later.clone())
+        .await
+        .err()
+        .context("a later message overtook a capture in progress")?;
+    assert_eq!(refused.status, StatusCode::SERVICE_UNAVAILABLE);
+    let more = stage(&state, "more", &[("b", b"more")])?;
+    let refused = submit(&state, event("more", "", more.clone()))
+        .await
+        .err()
+        .context("later files overtook a capture in progress")?;
+    assert_eq!(refused.status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
-        offered(&state, "an answer").await?,
-        vec![UnansweredTurn {
-            correlation_id: newer.turn_id,
-            attachments: vec![accepted[0].clone()],
-        }]
-    );
-    assert_eq!(
-        state
+        *state
             .core
-            .inspect_turn(&ask.turn_id)?
-            .context("turn")?
-            .state,
-        TurnState::Completed
+            .intake
+            .reserved
+            .lock()
+            .map_err(|_| anyhow!("poisoned"))?,
+        5
+    );
+    // Other conversations are not held up.
+    let mut elsewhere = later.clone();
+    "elsewhere".clone_into(&mut elsewhere.event_id);
+    "other".clone_into(&mut elsewhere.audience_id);
+    submit(&state, elsewhere)
+        .await
+        .map_err(|error| anyhow!(error.message))?;
+    drop(held);
+    let first = first.await?.map_err(|error| anyhow!(error.message))?;
+    let later = submit(&state, later)
+        .await
+        .map_err(|error| anyhow!(error.message))?;
+    submit(&state, event("more", "", more))
+        .await
+        .map_err(|error| anyhow!(error.message))?;
+    // The conversation's turns run in the order its messages were sent.
+    let mut order = Vec::new();
+    for _ in 0..4 {
+        let ran = Arc::new(std::sync::Mutex::new(String::new()));
+        let record = ran.clone();
+        run_next_turn(&state, "test-runtime", async move |_, _, request| {
+            record
+                .lock()
+                .map_err(|_| TurnFailure::Uncertain(anyhow!("poisoned")))?
+                .clone_from(&request.correlation_id);
+            Ok(completed(request))
+        })
+        .await?;
+        order.push(ran.lock().map_err(|_| anyhow!("poisoned"))?.clone());
+    }
+    let position = |turn: &str| order.iter().position(|ran| ran == turn);
+    assert!(
+        position(&first.turn_id) < position(&later.turn_id),
+        "{order:?}"
     );
     Ok(())
 }
@@ -891,9 +989,12 @@ async fn concurrent_reservations_never_oversell_the_storage_budget() -> Result<(
     )?;
     let bytes = vec![7_u8; 600 * 1024];
     let mut submissions = tokio::task::JoinSet::new();
+    // Separate conversations, so their captures may run together.
     for index in 0..8 {
         let staged = stage(&state, &format!("event-{index}"), &[("part", &bytes)])?;
-        let (state, event) = (state.clone(), event(&format!("event-{index}"), "", staged));
+        let mut event = event(&format!("event-{index}"), "", staged);
+        event.audience_id = format!("conversation-{index}");
+        let state = state.clone();
         submissions.spawn(async move { submit(&state, event).await });
     }
     let (mut accepted, mut refused) = (0, 0);

@@ -7,6 +7,10 @@
 //! at once; a submission beyond them is refused as unavailable before any
 //! work starts. Each capture reserves its bytes against the storage budget
 //! until the database decides whether its turn exists.
+//!
+//! While an event's capture runs, other events of its conversation wait:
+//! they are refused as unavailable, so whichever interface instance sends
+//! them retries, and none overtakes the earlier message.
 
 use std::{
     collections::HashMap,
@@ -33,12 +37,19 @@ const MAX_NAME_BYTES: usize = 1024;
 const MAX_CONTENT_TYPE_BYTES: usize = 255;
 
 type Outcome = Option<Result<EventReceipt, Arc<CoreError>>>;
+/// An interface's event.
 type Key = (String, String);
+
+/// A capture in progress: the conversation it belongs to and its outcome.
+struct Capturing {
+    audience: String,
+    outcome: watch::Receiver<Outcome>,
+}
 
 pub(crate) struct Intake {
     limits: AttachmentLimits,
     pub(crate) workers: Arc<Semaphore>,
-    capturing: Mutex<HashMap<Key, watch::Receiver<Outcome>>>,
+    capturing: Mutex<HashMap<Key, Capturing>>,
     /// Woken whenever the last capture in progress settles.
     settled: Notify,
     pub(crate) reserved: Arc<Mutex<u64>>,
@@ -135,6 +146,16 @@ impl Intake {
         lock(&self.capturing).contains_key(&(interface.to_owned(), event_id.to_owned()))
     }
 
+    /// Refuse `event` while another event of its conversation is being
+    /// captured: accepting it first would put it ahead of that message.
+    pub(crate) fn ensure_in_order(
+        &self,
+        interface: &str,
+        event: &ExternalEvent,
+    ) -> Result<(), CoreError> {
+        earlier_capture(&lock(&self.capturing), interface, event)
+    }
+
     /// Join the capture of this event, or start one when a worker is free.
     pub(crate) async fn accept(
         &self,
@@ -146,7 +167,7 @@ impl Intake {
         let mut outcome = {
             let mut capturing = lock(&self.capturing);
             if let Some(running) = capturing.get(&key) {
-                running.clone()
+                running.outcome.clone()
             } else if let Some(receipt) = core
                 .database
                 .event_receipt(&interface.id, &event.event_id)?
@@ -162,6 +183,7 @@ impl Intake {
                 if self.signals.stopped() {
                     return Err(CoreError::Unavailable("Carillon is shutting down".into()));
                 }
+                earlier_capture(&capturing, &interface.id, event)?;
                 let permit = self.workers.clone().try_acquire_owned().map_err(|_| {
                     CoreError::Unavailable(
                         "Carillon is already capturing as many attachments as it can; try again shortly"
@@ -170,7 +192,13 @@ impl Intake {
                 })?;
                 let reservation = self.reserve(core, total(staged))?;
                 let (sender, receiver) = watch::channel(None);
-                capturing.insert(key.clone(), receiver.clone());
+                capturing.insert(
+                    key.clone(),
+                    Capturing {
+                        audience: event.audience_id.clone(),
+                        outcome: receiver.clone(),
+                    },
+                );
                 let run = Run {
                     core: core.clone(),
                     interface: interface.clone(),
@@ -220,6 +248,23 @@ impl Intake {
             bytes,
         })
     }
+}
+
+fn earlier_capture(
+    capturing: &HashMap<Key, Capturing>,
+    interface: &str,
+    event: &ExternalEvent,
+) -> Result<(), CoreError> {
+    let busy = capturing.iter().any(|((owner, event_id), running)| {
+        owner == interface && running.audience == event.audience_id && *event_id != event.event_id
+    });
+    if busy {
+        return Err(CoreError::Unavailable(
+            "an earlier message of this conversation is still being accepted; try again shortly"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Bytes held against the budget; released exactly once, on drop.
