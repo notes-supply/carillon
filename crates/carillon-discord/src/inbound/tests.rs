@@ -38,6 +38,7 @@ pub(crate) fn ingress(
         config,
         participation,
         http,
+        stopping: tokio_util::sync::CancellationToken::new(),
     }))
 }
 

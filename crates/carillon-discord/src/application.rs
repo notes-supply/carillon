@@ -5,7 +5,7 @@ use crate::conversations::{
 use crate::{
     attachments::Downloads,
     error::discord_failure_is_terminal,
-    inbound::{Ingress, PREPARATION_DEADLINE, QueuedMessage, lanes},
+    inbound::{Ingress, PREPARATION_DEADLINE, QueuedMessage, known_receipt, lanes},
 };
 
 use crate::{
@@ -42,17 +42,18 @@ use carillon_installation::config::{
     LoadedConfig, ProviderRole, RELEASE_VERSION, attachment_staging, read_token_file, token_matches,
 };
 use carillon_protocol::model::{
-    Delivery, DeliveryOutcome, DeliveryReconciliation, EventReceipt, EventStatus, Health,
-    ModelQuery,
+    Delivery, DeliveryOutcome, DeliveryReconciliation, EventReceipt, Health, ModelQuery,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc, time::Duration};
 use tokio::{
     net::TcpListener,
+    signal::unix::{SignalKind, signal},
     sync::mpsc,
-    time::{Instant, sleep, timeout},
+    time::{Instant, sleep, timeout, timeout_at},
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use twilight_gateway::{Event, EventTypeFlags, Intents, Shard, ShardId, StreamExt as _};
 use twilight_http::Client as DiscordHttp;
@@ -225,14 +226,17 @@ async fn connect(
     }
     let (messages, receiver) = mpsc::channel(lanes::MAX_PENDING);
     let delivery_state = state.clone();
+    let stopping = CancellationToken::new();
     let ingress = Arc::new(Ingress {
         core: state.core.clone(),
         config: state.discord.clone(),
         participation: state.participation.clone(),
         http: http.clone(),
         downloads: state.downloads.clone(),
+        stopping: stopping.clone(),
     });
-    tokio::spawn(lanes::dispatch(ingress, receiver));
+    let dispatcher = tokio::spawn(lanes::dispatch(ingress, receiver));
+    let mut terminate = signal(SignalKind::terminate()).context("handle termination")?;
     let router = discord_router(state.clone(), false);
     let (outcomes, observed) = mpsc::unbounded_channel();
     let monitor = activity_monitor(
@@ -242,7 +246,7 @@ async fn connect(
         cards.map(Arc::new),
         observed,
     );
-    tokio::select! {
+    let outcome = tokio::select! {
         result = axum::serve(listener, router).into_future() => result.map_err(Into::into),
         result = gateway_loop(state, discord_token, messages) => {
             result.context("Discord gateway stopped")
@@ -250,8 +254,18 @@ async fn connect(
         result = delivery_loop(delivery_state.core, delivery_state.discord, http, outcomes) => {
             result.context("Discord delivery worker stopped")
         },
-        () = monitor => bail!("Discord activity monitor stopped"),
-    }
+        () = monitor => Err(anyhow::anyhow!("Discord activity monitor stopped")),
+        interrupted = tokio::signal::ctrl_c() => interrupted.context("handle interruption"),
+        _ = terminate.recv() => Ok(()),
+    };
+    // No new message is taken. Preparation not yet handed to core ends; a
+    // submission core may have received is settled, so its staged files
+    // stay until core no longer needs them.
+    stopping.cancel();
+    dispatcher
+        .await
+        .context("Discord message preparation failed")?;
+    outcome
 }
 
 fn guild(discord: &DiscordConfig) -> Result<Id<twilight_model::id::marker::GuildMarker>> {
@@ -492,10 +506,15 @@ async fn simulate(
     let mut staged = None;
     if !plan.attachments.is_empty() {
         state.downloads.admit(&plan.attachments).map_err(refused)?;
-        if let EventStatus::Accepted(receipt) = state.core.event_status(&plan.message_id).await? {
-            known = Some(receipt);
-        } else {
-            let deadline = Instant::now() + PREPARATION_DEADLINE;
+        let deadline = Instant::now() + PREPARATION_DEADLINE;
+        // A message core holds or is still capturing is not fetched again.
+        known = timeout_at(deadline, known_receipt(&state.core, &plan.message_id))
+            .await
+            .map_err(|_| InterfaceError {
+                status: StatusCode::GATEWAY_TIMEOUT,
+                message: "core did not say whether it holds this message in time".to_owned(),
+            })?;
+        if known.is_none() {
             staged = Some(
                 state
                     .downloads
@@ -514,10 +533,19 @@ async fn simulate(
     let receipt = if let Some(receipt) = known {
         receipt
     } else {
-        let submitted = state.core.submit_event(&resolved.event).await;
-        // Core holds its own copy once it answers; the staged files go.
+        let settled = match state.core.submit_event(&resolved.event).await {
+            // Core may still be capturing the staged files: they stay until
+            // core settles the submission.
+            Err(failure) if staged.is_some() && failure.is_transient() => {
+                known_receipt(&state.core, &resolved.event.event_id)
+                    .await
+                    .ok_or(failure)
+            }
+            outcome => outcome,
+        };
+        // Core holds its own copy once it has answered; the staged files go.
         drop(staged);
-        submitted?
+        settled?
     };
     let delivery = if receipt.duplicate {
         None

@@ -133,8 +133,8 @@ export const RuntimeTurnRequestSchema = Type.Object({
   /** This turn's captured files, in message order. */
   attachments: Type.Optional(Type.Array(TurnAttachmentSchema, { maxItems: 100 })),
   /**
-   * Files of earlier turns in this conversation since its last answered one,
-   * oldest first, which the runtime's conversation may not have recorded.
+   * Files of earlier turns in this conversation that no answered turn has
+   * carried yet, oldest first, which the runtime's conversation may not hold.
    */
   unanswered: Type.Optional(Type.Array(UnansweredTurnSchema, { maxItems: 100 })),
 });

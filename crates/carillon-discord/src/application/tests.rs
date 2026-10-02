@@ -1,5 +1,6 @@
 use crate::conversations::tests::{discord_config, interaction};
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -981,15 +982,36 @@ fn native_messages_keep_attachment_metadata_without_signed_addresses() -> anyhow
 }
 
 /// A core for simulation: it accepts events with whatever their staging
-/// holds, offers each new turn as a delivery, and reports what it holds.
+/// holds when it captures them, offers each new turn as a delivery, and
+/// reports what it holds.
 #[derive(Default)]
 struct SimulatedCore {
     events: Vec<carillon_protocol::model::ExternalEvent>,
     staged: Vec<Vec<Vec<u8>>>,
     pending: Option<carillon_protocol::model::Delivery>,
+    /// Events core is still capturing, for this many more status lookups.
+    capturing: HashMap<String, (usize, carillon_protocol::model::ExternalEvent)>,
+    /// An event whose next submission core receives but whose answer is lost.
+    lose: Option<String>,
 }
 
 type SharedCore = Arc<std::sync::Mutex<SimulatedCore>>;
+
+impl SimulatedCore {
+    /// Capture `event` from staging as it is now, and keep it.
+    fn capture(&mut self, staging: &Path, event: carillon_protocol::model::ExternalEvent) {
+        let staged = event.attachments.as_ref().map_or_else(Vec::new, |batch| {
+            (0..batch.files.len())
+                .map(|ordinal| {
+                    std::fs::read(staging.join(&batch.batch).join(ordinal.to_string()))
+                        .unwrap_or_default()
+                })
+                .collect()
+        });
+        self.staged.push(staged);
+        self.events.push(event);
+    }
+}
 
 async fn simulated_core(staging: PathBuf) -> anyhow::Result<(std::net::SocketAddr, SharedCore)> {
     use axum::extract::{Path as AxumPath, State};
@@ -1001,6 +1023,7 @@ async fn simulated_core(staging: PathBuf) -> anyhow::Result<(std::net::SocketAdd
         state: TurnState::Queued,
         duplicate,
     };
+    let (submitted, looked_up) = (staging.clone(), staging);
     let app = Router::new()
         .route(
             "/v1/events",
@@ -1009,14 +1032,11 @@ async fn simulated_core(staging: PathBuf) -> anyhow::Result<(std::net::SocketAdd
                     let Ok(mut core) = core.lock() else {
                         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
                     };
-                    let staged = event.attachments.as_ref().map(|batch| {
-                        (0..batch.files.len())
-                            .map(|ordinal| {
-                                std::fs::read(staging.join(&batch.batch).join(ordinal.to_string()))
-                                    .unwrap_or_default()
-                            })
-                            .collect()
-                    });
+                    if core.lose.as_deref() == Some(event.event_id.as_str()) {
+                        core.lose = None;
+                        core.capturing.insert(event.event_id.clone(), (1, event));
+                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                    }
                     let duplicate = core.events.iter().any(|seen| seen.event_id == event.event_id);
                     if !duplicate {
                         core.pending = Some(Delivery {
@@ -1027,8 +1047,7 @@ async fn simulated_core(staging: PathBuf) -> anyhow::Result<(std::net::SocketAdd
                             feedback_target_id: event.feedback_target_id.clone(),
                             content: "answer".to_owned(),
                         });
-                        core.staged.push(staged.unwrap_or_default());
-                        core.events.push(event.clone());
+                        core.capture(&submitted, event.clone());
                     }
                     Json(receipt(&event.event_id, duplicate)).into_response()
                 },
@@ -1038,14 +1057,25 @@ async fn simulated_core(staging: PathBuf) -> anyhow::Result<(std::net::SocketAdd
             "/v1/events/{event_id}",
             get(
                 move |State(core): State<SharedCore>, AxumPath(event_id): AxumPath<String>| async move {
-                    let known = core.lock().is_ok_and(|core| {
-                        core.events.iter().any(|event| event.event_id == event_id)
-                    });
+                    let Ok(mut core) = core.lock() else {
+                        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    };
+                    if let Some((lookups, _)) = core.capturing.get_mut(&event_id)
+                        && *lookups > 0
+                    {
+                        *lookups -= 1;
+                        return Json(EventStatus::Capturing).into_response();
+                    }
+                    if let Some((_, event)) = core.capturing.remove(&event_id) {
+                        core.capture(&looked_up, event);
+                    }
+                    let known = core.events.iter().any(|event| event.event_id == event_id);
                     Json(if known {
                         EventStatus::Accepted(receipt(&event_id, true))
                     } else {
                         EventStatus::Unknown
                     })
+                    .into_response()
                 },
             ),
         )
@@ -1098,7 +1128,7 @@ async fn simulate(
 async fn simulation_admits_then_downloads_files_under_the_provider_policy() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let staging = directory.path().join("staging");
-    let (cdn, log) = serve_cdn(std::collections::HashMap::from([
+    let (cdn, log) = serve_cdn(HashMap::from([
         (
             "/attachments/300/601/a.png".to_owned(),
             Serve::Bytes(vec![7; 32]),
@@ -1173,9 +1203,32 @@ async fn simulation_admits_then_downloads_files_under_the_provider_policy() -> a
     assert_eq!(std::fs::read_dir(&staging)?.count(), 0);
     let fetched = requests();
     // A message core already holds is not fetched again.
-    let (status, body) = simulate(&state, "4", "200", &[file]).await?;
+    let (status, body) = simulate(&state, "4", "200", std::slice::from_ref(&file)).await?;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["receipt"]["duplicate"], true);
     assert_eq!(requests(), fetched);
+    // Nor is one core is still capturing: simulation waits for it.
+    let mut replay = core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?.events[0].clone();
+    "5".clone_into(&mut replay.event_id);
+    core.lock()
+        .map_err(|_| anyhow::anyhow!("poisoned"))?
+        .capturing
+        .insert("5".to_owned(), (1, replay));
+    let (status, body) = simulate(&state, "5", "200", std::slice::from_ref(&file)).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["receipt"]["event_id"], "5");
+    assert_eq!(requests(), fetched);
+    // When core's answer is lost while it captures, the staged files stay
+    // until core settles the submission.
+    core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?.lose = Some("6".to_owned());
+    let (status, body) = simulate(&state, "6", "200", &[file]).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["receipt"]["event_id"], "6");
+    let core = core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
+    assert_eq!(
+        core.events.last().map(|event| event.event_id.as_str()),
+        Some("6")
+    );
+    assert_eq!(core.staged.last(), Some(&vec![vec![7; 32]]));
     Ok(())
 }

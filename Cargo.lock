@@ -303,6 +303,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+ "tokio-util",
  "toml",
  "tower",
  "tracing",

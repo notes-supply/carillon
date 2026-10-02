@@ -10,6 +10,10 @@
 //! conversation and, through the download slots, at most the configured
 //! number of other transfers. The dispatcher itself never waits on the
 //! network.
+//!
+//! When the provider stops, waiting messages are dropped, as a crash would
+//! drop them, and running ones end their preparation or settle what they
+//! handed to core before the dispatcher returns.
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
@@ -50,7 +54,8 @@ pub(crate) fn lane(config: &DiscordConfig, message: &IncomingMessage) -> String 
 }
 
 /// Prepare messages as they arrive until the gateway stops sending them and
-/// every lane has drained.
+/// every lane has drained, or until the provider stops and running
+/// preparations have settled.
 pub(crate) async fn dispatch(ingress: Arc<Ingress>, mut messages: mpsc::Receiver<QueuedMessage>) {
     let mut lanes: HashMap<String, VecDeque<QueuedMessage>> = HashMap::new();
     let mut pending = 0_usize;
@@ -94,10 +99,17 @@ pub(crate) async fn dispatch(ingress: Arc<Ingress>, mut messages: mpsc::Receiver
                     continue;
                 };
                 queue.pop_front();
-                if queue.is_empty() {
+                if queue.is_empty() || ingress.stopping.is_cancelled() {
                     lanes.remove(&key);
                 } else {
                     start(&mut running, &ingress, key, queue);
+                }
+            }
+            () = ingress.stopping.cancelled(), if open => {
+                open = false;
+                let waiting = pending - running.len();
+                if waiting > 0 {
+                    warn!(waiting, "Discord stopped before preparing waiting messages");
                 }
             }
             else => break,

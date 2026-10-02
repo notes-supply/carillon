@@ -7,7 +7,10 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use carillon_protocol::model::{Delivery, DeliveryOutcome};
 use std::{sync::Arc, time::Duration};
-use tokio::{sync::mpsc, time::sleep};
+use tokio::{
+    sync::mpsc,
+    time::{sleep, timeout},
+};
 use tracing::warn;
 use twilight_http::{Client as DiscordHttp, request::channel::reaction::RequestReactionType};
 use twilight_model::{
@@ -17,6 +20,19 @@ use twilight_model::{
         marker::{ChannelMarker, EmojiMarker, MessageMarker},
     },
 };
+/// How long one feedback request may take, rate-limit waits included:
+/// feedback must not hold up the work it reports on.
+const FEEDBACK_LIMIT: Duration = Duration::from_secs(30);
+
+/// A feedback request, bounded as a whole.
+async fn bounded<T>(
+    request: impl IntoFuture<Output = Result<T, twilight_http::Error>>,
+) -> Result<T> {
+    Ok(timeout(FEEDBACK_LIMIT, request)
+        .await
+        .context("Discord did not answer in time")??)
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum Feedback {
     Delivered,
@@ -71,8 +87,7 @@ async fn create_feedback_reaction(
 ) -> Result<()> {
     let (channel, message) = feedback_ids(target)?;
     let emoji = DiscordEmoji::parse(configured)?;
-    http.create_reaction(channel, message, &reaction_type(&emoji))
-        .await?;
+    bounded(http.create_reaction(channel, message, &reaction_type(&emoji))).await?;
     Ok(())
 }
 
@@ -83,8 +98,7 @@ async fn delete_feedback_reaction(
 ) -> Result<()> {
     let (channel, message) = feedback_ids(target)?;
     let emoji = DiscordEmoji::parse(configured)?;
-    http.delete_current_user_reaction(channel, message, &reaction_type(&emoji))
-        .await?;
+    bounded(http.delete_current_user_reaction(channel, message, &reaction_type(&emoji))).await?;
     Ok(())
 }
 
@@ -123,13 +137,14 @@ pub(crate) async fn explain(http: &DiscordHttp, source: &str, text: &str) {
         }
     };
     let silent = AllowedMentions::default();
-    if let Err(failure) = http
-        .create_message(channel)
-        .reply(message)
-        .fail_if_not_exists(false)
-        .allowed_mentions(Some(&silent))
-        .content(text)
-        .await
+    if let Err(failure) = bounded(
+        http.create_message(channel)
+            .reply(message)
+            .fail_if_not_exists(false)
+            .allowed_mentions(Some(&silent))
+            .content(text),
+    )
+    .await
     {
         warn!(error = %failure, "Discord explanation failed");
     }
@@ -148,7 +163,7 @@ pub(crate) async fn trigger_typing(http: &DiscordHttp, config: &DiscordConfig, t
             return;
         }
     };
-    if let Err(failure) = http.create_typing_trigger(channel).await {
+    if let Err(failure) = bounded(http.create_typing_trigger(channel)).await {
         warn!(error = %failure, "Discord typing trigger failed");
     }
 }

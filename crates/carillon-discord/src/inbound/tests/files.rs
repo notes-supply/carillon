@@ -285,6 +285,7 @@ fn ingress(
         )?),
         http: world.http.clone(),
         config,
+        stopping: tokio_util::sync::CancellationToken::new(),
     }))
 }
 
@@ -791,6 +792,7 @@ async fn overload_replies_only_to_messages_admission_would_activate() -> Result<
         )?),
         http: world.http.clone(),
         config,
+        stopping: tokio_util::sync::CancellationToken::new(),
     });
     let refusals = Arc::new(tokio::sync::Semaphore::new(4));
     for ignored in [
@@ -1019,4 +1021,149 @@ async fn a_submission_still_waiting_for_a_slot_at_the_deadline_is_never_made() -
     assert!(trace(&world)?.is_empty());
     drop(busy);
     Ok(())
+}
+
+#[tokio::test]
+async fn stopping_settles_what_core_may_hold_and_drops_the_rest() -> Result<()> {
+    let (cdn, log) = serve_cdn(HashMap::from([
+        (
+            "/attachments/300/601/a.bin".to_owned(),
+            Serve::Bytes(vec![1; 8]),
+        ),
+        ("/attachments/300/602/stalled".to_owned(), Serve::Stall),
+    ]))
+    .await?;
+    let world = world(Vec::new(), Vec::new()).await?;
+    // Core receives the first message's files, but its answer is lost and
+    // it is still capturing them for two more lookups.
+    script(&world, |core| {
+        core.unavailable = vec!["110".to_owned()];
+        core.received.insert("110".to_owned(), 2);
+    })?;
+    let ingress = ingress(&world, channel_config(), cdn)?;
+    let stopping = ingress.stopping.clone();
+    let (send, receive) = mpsc::channel(lanes::MAX_PENDING);
+    for queued in [
+        message(
+            "110",
+            "300",
+            "200",
+            "",
+            vec![attachment(cdn, "601", "a.bin", 8)],
+        ),
+        message("111", "300", "200", "after the file", Vec::new()),
+        message(
+            "112",
+            "301",
+            "200",
+            "",
+            vec![attachment(cdn, "602", "stalled", 100)],
+        ),
+    ] {
+        send.send(queued).await?;
+    }
+    let dispatcher = tokio::spawn(lanes::dispatch(ingress, receive));
+    // Stop once the first message is with core and the other is downloading.
+    for _ in 0..2000 {
+        let downloading = log
+            .lock()
+            .map_err(|_| anyhow!("poisoned"))?
+            .requests
+            .iter()
+            .any(|request| request.contains("stalled"));
+        if downloading && trace(&world)?.iter().any(|entry| entry == "submit 110") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    stopping.cancel();
+    // The stop, not the gateway closing, ends dispatch.
+    tokio::time::timeout(Duration::from_secs(20), dispatcher).await??;
+    let trace = trace(&world)?;
+    // What core may have received was settled with core first.
+    let settled = world
+        .core
+        .lock()
+        .map_err(|_| anyhow!("poisoned"))?
+        .known
+        .contains(&"110".to_owned());
+    assert!(settled, "{trace:?}");
+    assert!(explanation(&trace, "110").is_err(), "{trace:?}");
+    // The waiting message is dropped, and the interrupted download is not
+    // submitted; its sender is told.
+    assert!(
+        !trace
+            .iter()
+            .any(|entry| entry == "submit 111" || entry == "submit 112"),
+        "{trace:?}"
+    );
+    let stopped = explanation(&trace, "112")?;
+    assert!(stopped.contains("restarting"), "{stopped}");
+    released(&world).await?;
+    drop(send);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_conversation_attempt_stalled_in_discords_answer_is_bounded() -> Result<()> {
+    // Looking up the message's thread, Discord answers but never finishes
+    // the body, which Twilight's own request timeout does not cover.
+    let (port, log) = serve_cdn(HashMap::from([
+        (
+            "/attachments/300/601/a.bin".to_owned(),
+            Serve::Bytes(vec![1; 8]),
+        ),
+        ("/api/v10/channels/86".to_owned(), Serve::Stall),
+    ]))
+    .await?;
+    let world = world(Vec::new(), Vec::new()).await?;
+    let mut config = discord_config(DiscordActivation::Always, DiscordConversation::Thread);
+    config.typing = false;
+    let mut ingress = ingress(&world, config, port)?;
+    Arc::get_mut(&mut ingress).context("shared ingress")?.http = Arc::new(
+        twilight_http::Client::builder()
+            .token("test-only".to_owned())
+            .proxy(format!("127.0.0.1:{port}"), true)
+            .ratelimiter(None)
+            .build(),
+    );
+    let (send, receive) = mpsc::channel(1);
+    send.send(message(
+        "86",
+        "300",
+        "200",
+        "",
+        vec![attachment(port, "601", "a.bin", 8)],
+    ))
+    .await?;
+    drop(send);
+    let started = Instant::now();
+    tokio::time::timeout(PAST_DEADLINE, lanes::dispatch(ingress, receive)).await?;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed > Duration::from_mins(29) && elapsed < Duration::from_mins(31),
+        "{elapsed:?}"
+    );
+    let requests = log
+        .lock()
+        .map_err(|_| anyhow!("poisoned"))?
+        .requests
+        .clone();
+    // Each attempt was cut off and tried again; the sender was told.
+    let attempts = requests
+        .iter()
+        .filter(|request| *request == "/api/v10/channels/86")
+        .count();
+    assert!(attempts > 1, "{requests:?}");
+    assert!(
+        requests
+            .iter()
+            .any(|request| request == "/api/v10/channels/300/messages")
+    );
+    assert!(
+        !trace(&world)?
+            .iter()
+            .any(|entry| entry.starts_with("submit"))
+    );
+    released(&world).await
 }
