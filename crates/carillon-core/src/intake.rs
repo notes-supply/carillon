@@ -234,6 +234,22 @@ impl Drop for Reservation {
     }
 }
 
+/// An event's entry in the in-progress set, removed when dropped.
+struct Registered {
+    intake: Arc<Intake>,
+    key: Key,
+}
+
+impl Drop for Registered {
+    fn drop(&mut self) {
+        let mut capturing = lock(&self.intake.capturing);
+        capturing.remove(&self.key);
+        if capturing.is_empty() {
+            self.intake.settled.notify_waiters();
+        }
+    }
+}
+
 struct Run {
     core: Core,
     interface: SelectedProvider,
@@ -248,16 +264,17 @@ impl Run {
         reservation: Reservation,
         sender: watch::Sender<Outcome>,
     ) {
+        // Leaves the in-progress set however this task ends, so shutdown
+        // never waits for a capture that can no longer settle.
+        let _registered = Registered {
+            intake: self.core.intake.clone(),
+            key: self.key.clone(),
+        };
         let outcome = self.capture_and_commit(permit).await;
         // The database has decided: the bytes are now either counted as
         // kept or removed with a losing capture.
         drop(reservation);
         let _ = sender.send(Some(outcome.map_err(Arc::new)));
-        let mut capturing = lock(&self.core.intake.capturing);
-        capturing.remove(&self.key);
-        if capturing.is_empty() {
-            self.core.intake.settled.notify_waiters();
-        }
     }
 
     async fn capture_and_commit(

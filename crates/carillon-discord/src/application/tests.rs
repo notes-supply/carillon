@@ -926,13 +926,18 @@ fn native_messages_keep_attachment_metadata_without_signed_addresses() -> anyhow
     let message: twilight_model::channel::Message = serde_json::from_value(json!({
         "id": "500", "channel_id": "300",
         "author": {"id": "200", "username": "sender", "discriminator": "0"},
-        "content": "", "embeds": [], "mention_everyone": false, "mention_roles": [],
+        "content": "", "mention_everyone": false, "mention_roles": [],
         "mentions": [], "pinned": false, "tts": false, "type": 0,
         "timestamp": "2026-01-01T00:00:00.000000+00:00",
         "attachments": [{
             "id": "600", "filename": "photo.png", "size": 10, "content_type": "image/png",
             "url": "https://cdn.discordapp.com/attachments/300/600/photo.png?ex=1&hm=signed",
             "proxy_url": "https://media.discordapp.net/attachments/300/600/photo.png?ex=1&hm=signed"
+        }],
+        "embeds": [{
+            "type": "image",
+            "url": "https://cdn.discordapp.com/attachments/300/602/shown.png?ex=1&hm=embedded",
+            "image": {"url": "https://media.discordapp.net/attachments/300/602/shown.png?ex=1&hm=embedded"}
         }],
         // A reply carries the replied-to message, with its own attachments.
         "referenced_message": {
@@ -953,6 +958,11 @@ fn native_messages_keep_attachment_metadata_without_signed_addresses() -> anyhow
     assert_eq!(native["attachments"][0]["size"], 10);
     assert!(!native.to_string().contains("hm=signed"));
     assert!(!native.to_string().contains("hm=nested"));
+    assert!(!native.to_string().contains("hm=embedded"));
+    assert_eq!(
+        native["embeds"][0]["url"],
+        "https://cdn.discordapp.com/attachments/300/602/shown.png"
+    );
     assert_eq!(
         native["referenced_message"]["attachments"][0]["filename"],
         "earlier.pdf"

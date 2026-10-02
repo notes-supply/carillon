@@ -1,6 +1,6 @@
 /** A native Pi runtime with instance-owned execution and model state. */
 import { ModelRuntime, SettingsManager } from "@earendil-works/pi-coding-agent";
-import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import {
   clampThinkingLevel,
   getSupportedThinkingLevels,
@@ -24,6 +24,7 @@ import {
   DEFAULT_INLINE_IMAGES,
   prepareAttachments,
   type InlineImagePolicy,
+  type PreparedAttachments,
 } from "./attachments.ts";
 import { ModelSelections } from "./model.ts";
 import { openConversation } from "./namespace.ts";
@@ -230,7 +231,7 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
     const created = await createPiExecutionSession({
       resourceRoot: root,
       extensionContext: options.extensionContext?.(request),
-      attachmentContext: attachmentContext(request.attachment_root),
+      attachmentContext: attachmentContext(request.attachment_root, attachments.note !== undefined),
       workspace: workspace,
       manager,
       modelRuntime: runtime,
@@ -247,15 +248,7 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
           output += event.assistantMessageEvent.delta;
       });
       try {
-        // Recorded before the prompt, so files sent with a command or with
-        // input an extension handles are still known to later turns.
-        if (attachments.note !== undefined)
-          await session.sendCustomMessage({
-            customType: ATTACHMENT_NOTE,
-            content: attachments.note,
-            display: false,
-          });
-        await promptSession(session, request.input, signal, attachments.images);
+        await promptWithNote(session, request, signal, attachments);
         return {
           correlation_id: request.correlation_id,
           output,
@@ -266,6 +259,50 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
     } finally {
       session.dispose();
     }
+  }
+
+  /**
+   * Prompt with the turn's images, its attachment note travelling with the
+   * message after any compaction. A command or input an extension handles
+   * consumes the prompt without a message; the note is then kept on its own,
+   * so the files remain known to later turns.
+   */
+  async function promptWithNote(
+    session: AgentSession,
+    request: TurnRequest,
+    signal: AbortSignal,
+    attachments: PreparedAttachments,
+  ): Promise<void> {
+    const note =
+      attachments.note === undefined
+        ? undefined
+        : {
+            customType: ATTACHMENT_NOTE,
+            content: attachments.note,
+            display: false,
+            details: { turn: request.correlation_id },
+          };
+    if (note !== undefined) await session.sendCustomMessage(note, { deliverAs: "nextTurn" });
+    try {
+      await promptSession(session, request.input, signal, attachments.images);
+    } finally {
+      if (note !== undefined && !signal.aborted && !noted(session, request.correlation_id))
+        await session.sendCustomMessage(note);
+    }
+  }
+
+  function noted(session: AgentSession, turn: string): boolean {
+    return session.sessionManager
+      .getBranch()
+      .some(
+        (entry) =>
+          entry.type === "custom_message" &&
+          entry.customType === ATTACHMENT_NOTE &&
+          typeof entry.details === "object" &&
+          entry.details !== null &&
+          "turn" in entry.details &&
+          entry.details.turn === turn,
+      );
   }
 
   function isThinkingLevel(

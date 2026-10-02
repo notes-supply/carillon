@@ -640,7 +640,8 @@ fn native_message(message: &twilight_model::channel::Message) -> Value {
 }
 
 /// Remove signed addresses from every attachment list, including those of
-/// referenced and forwarded messages nested in the payload.
+/// referenced and forwarded messages nested in the payload, and the signature
+/// of any other attachment address, such as an embed's.
 fn strip_attachment_addresses(value: &mut Value) {
     match value {
         Value::Object(object) => {
@@ -657,6 +658,19 @@ fn strip_attachment_addresses(value: &mut Value) {
             }
         }
         Value::Array(items) => items.iter_mut().for_each(strip_attachment_addresses),
+        Value::String(text) => {
+            if let Ok(mut url) = reqwest::Url::parse(text)
+                && matches!(
+                    url.host_str(),
+                    Some("cdn.discordapp.com" | "media.discordapp.net")
+                )
+                && url.path().starts_with("/attachments/")
+                && url.query().is_some()
+            {
+                url.set_query(None);
+                *text = url.to_string();
+            }
+        }
         _ => {}
     }
 }

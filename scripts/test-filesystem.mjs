@@ -875,7 +875,8 @@ async function testAttachments() {
 }
 
 async function attachmentAttempt(name, fault) {
-  const root = join(scratch, name);
+  // Distinct from the other cases sharing this scratch directory.
+  const root = join(scratch, `capture-${name}`);
   run("--home", root, "init", "--workspace", scratch, ...initOptions);
   const config = join(root, "carillon.toml");
   // Captures here must not depend on the host's free space.
@@ -938,7 +939,7 @@ async function attachmentAttempt(name, fault) {
     for (const [ordinal, attachment] of inspection.attachments.entries())
       assert.equal(await readFile(join(store, attachment.path), "utf8"), files[ordinal]);
   };
-  const log = join(scratch, `${name}.trace`);
+  const log = join(scratch, `capture-${name}.trace`);
   const trace = "trace=mkdir,rename,renameat2,fsync,fdatasync,write";
   const args = ["-f", "-qq", "-yy", "-s", "256", "-e", trace, "-o", log];
   if (fault)

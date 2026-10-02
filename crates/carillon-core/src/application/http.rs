@@ -179,13 +179,14 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
         .route("/v1/status", get(status))
         .with_state(state.clone());
     info!(listen = %config.value.core.listen, "Carillon core ready");
-    axum::serve(listener, router)
+    let served = axum::serve(listener, router)
         .with_graceful_shutdown(shutdown(state.core.clone()))
-        .await?;
-    // The caller releases the service lock when this returns; no copy may
-    // still be publishing then.
+        .await;
+    // The caller releases the service lock when this returns, however the
+    // server ended; no copy may still be publishing then.
     state.core.stop_capturing();
     state.core.captures_settled().await;
+    served?;
     Ok(())
 }
 

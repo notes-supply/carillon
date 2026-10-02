@@ -224,9 +224,11 @@ function users(sent: Sent) {
   return sent.messages.filter((message) => message.role === "user");
 }
 
-/** The person's message: the last user message of the request. */
+/** The person's message: the last user message that is not a note. */
 function prompt(sent: Sent | undefined) {
-  return users(sent ?? { messages: [] }).at(-1);
+  return users(sent ?? { messages: [] })
+    .filter((message) => !text(message.content).startsWith("[Carillon attachments]"))
+    .at(-1);
 }
 
 /** The attachment notes the request carries, in order. */

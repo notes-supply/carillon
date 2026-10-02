@@ -34,7 +34,11 @@ interface Config {
 
 /** The runtime's own settings, `providers/<id>.toml`; every setting is optional. */
 const ProviderFileSchema = Type.Object(
-  { inline_images: Type.Optional(Type.Partial(InlineImagePolicySchema)) },
+  {
+    inline_images: Type.Optional(
+      Type.Partial(InlineImagePolicySchema, { additionalProperties: false }),
+    ),
+  },
   { additionalProperties: false },
 );
 
