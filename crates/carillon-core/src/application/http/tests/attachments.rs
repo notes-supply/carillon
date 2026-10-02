@@ -459,6 +459,92 @@ async fn a_capture_past_its_deadline_is_refused_only_after_the_copy_returns() ->
     Ok(())
 }
 
+#[tokio::test(start_paused = true)]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "the held lock is what stalls the publishing copy"
+)]
+async fn a_capture_cancelled_while_publishing_makes_no_new_acceptance() -> Result<()> {
+    use std::sync::atomic::Ordering;
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    let signals = &state.core.intake.signals;
+    // Run `event` until its copy is publishing, pass the deadline there,
+    // with `meanwhile` happening, then let publication finish.
+    let past_deadline_while_publishing = async |event: ExternalEvent, meanwhile| {
+        signals.publishing.store(false, Ordering::SeqCst);
+        let held = signals
+            .publication
+            .lock()
+            .map_err(|_| anyhow!("poisoned"))?;
+        let submission = {
+            let state = state.clone();
+            tokio::spawn(async move { submit(&state, event).await })
+        };
+        for _ in 0..100_000 {
+            if signals.publishing.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        anyhow::ensure!(
+            signals.publishing.load(Ordering::SeqCst),
+            "the copy never reached publication"
+        );
+        tokio::time::advance(crate::intake::CAPTURE_DEADLINE * 2).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        anyhow::ensure!(
+            !submission.is_finished(),
+            "decided before the copy returned"
+        );
+        if let Some(text) = meanwhile {
+            submit(&state, text)
+                .await
+                .map_err(|error| anyhow!(error.message))?;
+        }
+        drop(held);
+        Ok(submission.await?)
+    };
+    let staged = stage(&state, "publishing", &[("a.bin", &[1; 64])])?;
+    let refusal = past_deadline_while_publishing(event("publishing", "", staged.clone()), None)
+        .await?
+        .err()
+        .context("a capture cancelled while publishing was accepted")?;
+    assert_eq!(refusal.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(captures(&state)?.is_empty());
+    assert!(matches!(
+        status(&state, "publishing").await?,
+        EventStatus::Unknown
+    ));
+    assert_eq!(state.core.intake.workers.available_permits(), 2);
+    // An event accepted another way while its copy published keeps that
+    // acceptance; the copy is still removed.
+    let mut text = event("accepted", "words only", staged.clone());
+    text.attachments = None;
+    let receipt = past_deadline_while_publishing(event("accepted", "", staged.clone()), Some(text))
+        .await?
+        .map_err(|error| anyhow!(error.message))?;
+    assert!(receipt.duplicate);
+    assert!(
+        state
+            .core
+            .inspect_turn(&receipt.turn_id)?
+            .context("turn")?
+            .attachments
+            .is_empty()
+    );
+    assert!(captures(&state)?.is_empty());
+    // Nothing is left behind: the event can be sent again.
+    let retried = submit(&state, event("publishing", "", staged))
+        .await
+        .map_err(|error| anyhow!(error.message))?;
+    assert!(!retried.duplicate);
+    assert_eq!(captures(&state)?.len(), 1);
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_failed_commit_leaves_no_capture_and_the_event_can_be_retried() -> Result<()> {
     let directory = tempdir()?;

@@ -250,6 +250,11 @@ impl Drop for Registered {
     }
 }
 
+/// A capture stopped by its deadline or shutdown before it was accepted.
+fn late() -> CoreError {
+    CoreError::Unavailable("capturing these attachments did not finish in time".into())
+}
+
 struct Run {
     core: Core,
     interface: SelectedProvider,
@@ -314,13 +319,19 @@ impl Run {
                     "the disk filled up while these attachments were being captured".into(),
                 ));
             }
-            Err(CaptureError::Cancelled) => {
-                return Err(CoreError::Unavailable(
-                    "capturing these attachments did not finish in time".into(),
-                ));
-            }
+            Err(CaptureError::Cancelled) => return Err(late()),
             Err(CaptureError::Io(error)) => return Err(CoreError::Storage(error)),
         };
+        // A deadline or shutdown that arrived while the copy was publishing
+        // makes no new acceptance; the published copy is not referenced.
+        if cancel.requested() {
+            self.discard(&capture.id).await;
+            return self
+                .core
+                .database
+                .event_receipt(&self.interface.id, &self.event.event_id)?
+                .ok_or_else(late);
+        }
         match self
             .core
             .commit(&self.interface, &self.event, Some(&capture))

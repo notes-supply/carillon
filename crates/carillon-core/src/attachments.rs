@@ -85,6 +85,12 @@ pub(crate) struct Cancel {
     /// Tests hold this to stall a copy between chunks, as a slow disk would.
     #[cfg(test)]
     pub(crate) stall: Arc<std::sync::Mutex<()>>,
+    /// Tests hold this to stall a copy that passed its last check while it
+    /// publishes, as a slow sync would; `publishing` shows it got there.
+    #[cfg(test)]
+    pub(crate) publication: Arc<std::sync::Mutex<()>>,
+    #[cfg(test)]
+    pub(crate) publishing: Arc<AtomicBool>,
 }
 
 impl Cancel {
@@ -110,10 +116,16 @@ impl Cancel {
         self.shutdown.load(Ordering::SeqCst)
     }
 
-    fn requested(&self) -> bool {
+    /// Whether a deadline or shutdown asked the capture to stop.
+    pub(crate) fn requested(&self) -> bool {
+        self.own.load(Ordering::SeqCst) || self.shutdown.load(Ordering::SeqCst)
+    }
+
+    /// The copy's check between chunks.
+    fn checkpoint(&self) -> bool {
         #[cfg(test)]
         drop(self.stall.lock());
-        self.own.load(Ordering::SeqCst) || self.shutdown.load(Ordering::SeqCst)
+        self.requested()
     }
 }
 
@@ -150,8 +162,13 @@ pub(crate) fn capture(
         copy_batch(data_directory, interface, staged, &partial, cancel).and_then(|digests| {
             // A deadline or shutdown that arrived during the last sync still
             // stops the capture before anything is published.
-            if cancel.requested() {
+            if cancel.checkpoint() {
                 return Err(CaptureError::Cancelled);
+            }
+            #[cfg(test)]
+            {
+                cancel.publishing.store(true, Ordering::SeqCst);
+                drop(cancel.publication.lock());
             }
             publish(&store, &partial, &id).map(|()| digests)
         });
@@ -235,7 +252,7 @@ fn copy_file(
     let mut digest = Sha256::new();
     let mut copied = 0_u64;
     loop {
-        if cancel.requested() {
+        if cancel.checkpoint() {
             return Err(CaptureError::Cancelled);
         }
         let read = match source.read(&mut buffer) {
