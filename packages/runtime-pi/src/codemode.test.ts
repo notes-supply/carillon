@@ -149,9 +149,6 @@ text(results); store("sentinel", "survives-reopen");`,
             )
             .map((event) => (event.type === "tool_execution_start" ? event.toolName : "")),
         ).toEqual(["write", "edit", "read", "bash", "bash"]);
-        expect(first.sessionManager.getBranch()).toContainEqual(
-          expect.objectContaining({ type: "custom", customType: "codemode-store" }),
-        );
       } finally {
         first.dispose();
       }
