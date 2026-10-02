@@ -1,15 +1,18 @@
 //! Admission, runtime ownership, execution and delivery over one SQLite authority.
 use crate::{
+    attachments::{self, Capture, Reconciled},
     db::{ClaimedTurn, Database},
+    intake::Intake,
     resources,
 };
 use anyhow::{Context as _, Result, anyhow};
+use carillon_installation::config::AttachmentLimits;
 use carillon_protocol::model::{
-    ActiveTurn, Delivery, DeliveryAck, DeliveryReconciliation, EventReceipt, ExternalEvent,
-    ModelQuery, RuntimeTurnRequest, RuntimeTurnResponse, SelectedProvider, StateCounts,
-    TurnInspection, TurnSummary,
+    ActiveTurn, Delivery, DeliveryAck, DeliveryReconciliation, EventReceipt, EventStatus,
+    ExternalEvent, ModelQuery, RuntimeTurnRequest, RuntimeTurnResponse, SelectedProvider,
+    StateCounts, TurnInspection, TurnSummary,
 };
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 use tracing::warn;
 
 /// Runtime identity and availability, without credentials or a transport implementation.
@@ -29,6 +32,7 @@ pub struct CoreOptions {
     pub resource_root: PathBuf,
     pub default_runtime: String,
     pub runtimes: Vec<RuntimeProvider>,
+    pub attachments: AttachmentLimits,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -37,9 +41,32 @@ pub enum CoreError {
     InvalidInput(String),
     #[error("{0}")]
     Conflict(String),
+    /// Not now: retrying the same submission later may succeed.
+    #[error("{0}")]
+    Unavailable(String),
+    /// The attachment storage budget or free space would be exceeded.
+    #[error("{0}")]
+    InsufficientStorage(String),
     #[error(transparent)]
     Storage(#[from] anyhow::Error),
 }
+
+impl CoreError {
+    /// The same refusal for another waiter on a shared outcome.
+    pub(crate) fn share(&self) -> Self {
+        match self {
+            Self::InvalidInput(message) => Self::InvalidInput(message.clone()),
+            Self::Conflict(message) => Self::Conflict(message.clone()),
+            Self::Unavailable(message) => Self::Unavailable(message.clone()),
+            Self::InsufficientStorage(message) => Self::InsufficientStorage(message.clone()),
+            Self::Storage(error) => Self::Storage(anyhow!("{error:#}")),
+        }
+    }
+}
+
+/// An attachment that no longer matches its capture runs nothing.
+const ALTERED_ATTACHMENT: &str = "a file attached to that message was changed or removed after \
+Carillon accepted it, so the message was not run";
 
 /// A core handle does not spawn workers or initialize any provider.
 /// Clones share the same SQLite authority. The application owns the exclusive worker lifetime.
@@ -47,6 +74,7 @@ pub enum CoreError {
 pub struct Core {
     pub(crate) database: Database,
     pub(crate) options: CoreOptions,
+    pub(crate) intake: Arc<Intake>,
 }
 
 impl Core {
@@ -56,7 +84,7 @@ impl Core {
     pub fn create(options: CoreOptions) -> Result<Self> {
         validate_options(&options)?;
         let database = Database::create(&options.data_directory.join("carillon.sqlite3"))?;
-        Ok(Self { database, options })
+        Ok(Self::assemble(database, options))
     }
 
     /// Open existing operation storage without creating it or recovering running turns.
@@ -65,7 +93,15 @@ impl Core {
     pub fn open(options: CoreOptions) -> Result<Self> {
         validate_options(&options)?;
         let database = Database::open(&options.data_directory.join("carillon.sqlite3"))?;
-        Ok(Self { database, options })
+        Ok(Self::assemble(database, options))
+    }
+
+    fn assemble(database: Database, options: CoreOptions) -> Self {
+        Self {
+            intake: Arc::new(Intake::new(options.attachments)),
+            database,
+            options,
+        }
     }
 
     /// Mark orphaned running turns interrupted, never replaying their input.
@@ -76,15 +112,38 @@ impl Core {
         self.database.recover_running_turns()
     }
 
+    /// Remove abandoned capture copies and captures no committed turn
+    /// references. Call only with exclusive ownership of the state, before
+    /// accepting events: an acceptance in progress elsewhere would lose its
+    /// capture.
+    /// # Errors
+    /// Returns storage errors.
+    pub fn reconcile_attachments(&self) -> Result<Reconciled> {
+        attachments::reconcile(&self.options.data_directory, &self.database.captures()?)
+    }
+
+    /// Ask captures in progress to stop at their next chunk, for shutdown.
+    /// Their submissions are refused as unavailable and may be retried.
+    pub fn stop_capturing(&self) {
+        self.intake.stop();
+    }
+
     pub(crate) fn snapshot_store(&self) -> PathBuf {
         self.options.data_directory.join("resource-snapshots")
     }
 
     /// Admit an event from an already authenticated interface, before acknowledging it.
     /// Duplicate receipts do not recapture mutable resources or reconsider runtime ownership.
+    ///
+    /// An event with attachments is accepted only once all its staged files
+    /// are captured and published. The capture belongs to core, not to the
+    /// caller: it continues if the caller goes away, a retry of the same
+    /// event waits for it instead of copying again, and at most the
+    /// configured number run at once.
     /// # Errors
-    /// Returns invalid input, unavailable runtime ownership or storage/resource errors.
-    pub fn accept(
+    /// Returns invalid input, unavailable runtime ownership, busy or full
+    /// attachment storage, or storage/resource errors.
+    pub async fn accept(
         &self,
         interface: &SelectedProvider,
         event: &ExternalEvent,
@@ -101,6 +160,19 @@ impl Core {
         {
             return Ok(receipt);
         }
+        if event.attachments.is_some() {
+            return self.intake.accept(self, interface, event).await;
+        }
+        self.commit(interface, event, None)
+    }
+
+    /// Record the turn, referencing a published capture of its attachments.
+    pub(crate) fn commit(
+        &self,
+        interface: &SelectedProvider,
+        event: &ExternalEvent,
+        capture: Option<&Capture>,
+    ) -> Result<EventReceipt, CoreError> {
         let runtime = self.runtime_for(
             &interface.id,
             &ModelQuery {
@@ -118,9 +190,34 @@ impl Core {
         };
         let providers =
             serde_json::to_value([interface, &selected]).map_err(anyhow::Error::from)?;
+        Ok(self.database.accept_event(
+            &interface.id,
+            &runtime.id,
+            event,
+            &providers,
+            &resources,
+            capture,
+        )?)
+    }
+
+    /// What core knows about an event of an authenticated interface: its
+    /// receipt, a capture still in progress, or nothing. An interface asks
+    /// before acquiring attachments again, and to settle a submission whose
+    /// answer it lost; only the transactional acceptance decides.
+    /// # Errors
+    /// Returns storage errors.
+    pub fn event_status(&self, interface: &str, event_id: &str) -> Result<EventStatus> {
+        if let Some(receipt) = self.database.event_receipt(interface, event_id)? {
+            return Ok(EventStatus::Accepted(receipt));
+        }
+        if self.intake.capturing(interface, event_id) {
+            return Ok(EventStatus::Capturing);
+        }
+        // A capture leaves the in-progress set only after its commit settled.
         Ok(self
             .database
-            .accept_event(&interface.id, &runtime.id, event, &providers, &resources)?)
+            .event_receipt(interface, event_id)?
+            .map_or(EventStatus::Unknown, EventStatus::Accepted))
     }
 
     /// Resolve the pinned conversation owner, or the default for a new conversation.
@@ -174,6 +271,14 @@ impl Core {
         let Some(turn) = self.database.claim_turn(runtime_id)? else {
             return Ok(WorkerStep::Idle);
         };
+        if let Err(failure) = self.verify_attachments(&turn).await {
+            let message = format!("{failure:#}");
+            self.database
+                .interrupt_turn(&turn, &message, Some(ALTERED_ATTACHMENT))
+                .with_context(|| format!("record unrunnable turn {}", turn.turn_id))?;
+            warn!(turn_id = %turn.turn_id, error = %message, "captured attachment is not intact; turn not run");
+            return Ok(WorkerStep::Advanced);
+        }
         let outcome = async {
             let request = self.runtime_request(&turn);
             let correlation_id = request.correlation_id.clone();
@@ -309,7 +414,33 @@ impl Core {
             resource_root: resources::root(&self.snapshot_store(), &turn.resource_snapshot_id)
                 .display()
                 .to_string(),
+            attachment_root: attachments::store(&self.options.data_directory)
+                .display()
+                .to_string(),
+            attachments: turn
+                .attachments
+                .iter()
+                .map(attachments::CapturedFile::wire)
+                .collect(),
         }
+    }
+
+    /// Re-read a claimed turn's captured files before any runtime sees them,
+    /// off the async reactor.
+    async fn verify_attachments(&self, turn: &ClaimedTurn) -> Result<()> {
+        if turn.attachments.is_empty() {
+            return Ok(());
+        }
+        let (data, files) = (
+            self.options.data_directory.clone(),
+            turn.attachments.clone(),
+        );
+        tokio::task::spawn_blocking(move || {
+            files
+                .iter()
+                .try_for_each(|file| attachments::verify(&data, file))
+        })
+        .await?
     }
 
     fn admit(&self, event: &ExternalEvent) -> Result<(), CoreError> {
@@ -319,15 +450,18 @@ impl Core {
             || event.audience_id.is_empty()
             || event.delivery_target_id.is_empty()
             || event.feedback_target_id.is_empty()
-            || event.content.trim().is_empty()
+            || (event.content.trim().is_empty() && event.attachments.is_none())
         {
             return Err(CoreError::InvalidInput(
-                "event identity, agent, audience, targets, user, and content are required"
+                "event identity, agent, audience, targets, user, and content or attachments are required"
                     .to_owned(),
             ));
         }
         if event.agent_id != self.options.agent_id {
             return Err(CoreError::InvalidInput("unknown agent".to_owned()));
+        }
+        if let Some(staged) = &event.attachments {
+            crate::intake::admit(&self.options.attachments, staged)?;
         }
         Ok(())
     }

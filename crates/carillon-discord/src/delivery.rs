@@ -112,6 +112,29 @@ fn feedback_ids(target: &str) -> Result<(Id<ChannelMarker>, Id<MessageMarker>)> 
     ))
 }
 
+/// Tell the sender of an admitted message why it was not accepted, replying
+/// to it without notifying anyone.
+pub(crate) async fn explain(http: &DiscordHttp, source: &str, text: &str) {
+    let (channel, message) = match feedback_ids(source) {
+        Ok(ids) => ids,
+        Err(failure) => {
+            warn!(error = %failure, "Discord explanation target is invalid");
+            return;
+        }
+    };
+    let silent = AllowedMentions::default();
+    if let Err(failure) = http
+        .create_message(channel)
+        .reply(message)
+        .fail_if_not_exists(false)
+        .allowed_mentions(Some(&silent))
+        .content(text)
+        .await
+    {
+        warn!(error = %failure, "Discord explanation failed");
+    }
+}
+
 /// One typing indicator at admission. While the turn then runs, the
 /// activity monitor keeps typing.
 pub(crate) async fn trigger_typing(http: &DiscordHttp, config: &DiscordConfig, target: &str) {

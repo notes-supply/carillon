@@ -1,6 +1,7 @@
 //! Discord components. Importing this library never connects a gateway or starts a server.
 mod activity;
 pub mod application;
+mod attachments;
 mod cli;
 mod client;
 mod commands;

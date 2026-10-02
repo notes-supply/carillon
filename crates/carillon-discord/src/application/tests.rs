@@ -258,6 +258,7 @@ async fn ambiguous_thread_creation_recovers_native_thread_before_retrying() -> a
         channel_id: "100".to_owned(),
         route_channel_id: "100".to_owned(),
         content: "hello".to_owned(),
+        attachments: Vec::new(),
         create_thread: true,
         adopt_thread: false,
         native: Value::Null,
@@ -361,6 +362,7 @@ async fn thread_lookup_failures_do_not_speculatively_create() -> anyhow::Result<
             channel_id: "100".to_owned(),
             route_channel_id: "100".to_owned(),
             content: "hello".to_owned(),
+            attachments: Vec::new(),
             create_thread: true,
             adopt_thread: false,
             native: Value::Null,
@@ -891,6 +893,7 @@ async fn a_full_message_queue_refuses_instead_of_holding_the_gateway() -> anyhow
             channel_id: "300".to_owned(),
             parent_channel_id: None,
             content: "hello".to_owned(),
+            attachments: Vec::new(),
         },
         native: Value::Null,
     };
@@ -916,4 +919,26 @@ fn discord_route_errors_distinguish_terminal_responses() {
     assert!(!discord_status_is_terminal(
         DiscordStatusCode::GATEWAY_UNAVAILABLE
     ));
+}
+
+#[test]
+fn native_messages_keep_attachment_metadata_without_signed_addresses() -> anyhow::Result<()> {
+    let message: twilight_model::channel::Message = serde_json::from_value(json!({
+        "id": "500", "channel_id": "300",
+        "author": {"id": "200", "username": "sender", "discriminator": "0"},
+        "content": "", "embeds": [], "mention_everyone": false, "mention_roles": [],
+        "mentions": [], "pinned": false, "tts": false, "type": 0,
+        "timestamp": "2026-01-01T00:00:00.000000+00:00",
+        "attachments": [{
+            "id": "600", "filename": "photo.png", "size": 10, "content_type": "image/png",
+            "url": "https://cdn.discordapp.com/attachments/300/600/photo.png?ex=1&hm=signed",
+            "proxy_url": "https://media.discordapp.net/attachments/300/600/photo.png?ex=1&hm=signed"
+        }]
+    }))?;
+    let native = super::native_message(&message);
+    assert_eq!(native["attachments"][0]["filename"], "photo.png");
+    assert_eq!(native["attachments"][0]["size"], 10);
+    assert!(!native.to_string().contains("hm=signed"));
+    assert!(native["attachments"][0].get("url").is_none());
+    Ok(())
 }

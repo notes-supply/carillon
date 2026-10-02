@@ -32,6 +32,114 @@ pub struct Config {
 pub struct CoreConfig {
     pub listen: SocketAddr,
     pub operator_token_hash: String,
+    #[serde(default, skip_serializing_if = "AttachmentLimits::is_default")]
+    pub attachments: AttachmentLimits,
+}
+
+/// Core's bounds on the files it captures with accepted events, whichever
+/// interface submits them. Interfaces apply their own, possibly smaller,
+/// limits before staging; these protect core's storage. Changes apply when
+/// core restarts.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct AttachmentLimits {
+    /// Files one event may carry; 0 refuses every attachment.
+    pub max_files: u32,
+    pub max_file_mib: u64,
+    pub max_event_mib: u64,
+    /// Bytes kept by accepted captures together with captures in progress.
+    /// New captures are refused beyond it; accepted files are never removed
+    /// to make room.
+    pub storage_mib: u64,
+    /// Space a capture must leave free on the attachment filesystem.
+    pub free_space_mib: u64,
+    /// Captures copied at once; further submissions are refused as busy.
+    pub concurrent_captures: u32,
+}
+
+impl Default for AttachmentLimits {
+    fn default() -> Self {
+        Self {
+            max_files: 10,
+            max_file_mib: 1024,
+            max_event_mib: 2048,
+            storage_mib: 10 * 1024,
+            free_space_mib: 2048,
+            concurrent_captures: 2,
+        }
+    }
+}
+
+/// One MiB, the unit of configured attachment sizes.
+pub const MIB: u64 = 1024 * 1024;
+
+impl AttachmentLimits {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    #[must_use]
+    pub const fn max_file_bytes(&self) -> u64 {
+        self.max_file_mib * MIB
+    }
+
+    #[must_use]
+    pub const fn max_event_bytes(&self) -> u64 {
+        self.max_event_mib * MIB
+    }
+
+    #[must_use]
+    pub const fn storage_bytes(&self) -> u64 {
+        self.storage_mib * MIB
+    }
+
+    #[must_use]
+    pub const fn free_space_bytes(&self) -> u64 {
+        self.free_space_mib * MIB
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error naming the first setting outside its range.
+    pub fn validate(&self) -> Result<()> {
+        // A terabyte bounds every size so byte arithmetic cannot overflow.
+        const MAX_MIB: u64 = 1024 * 1024;
+        if self.max_files > 100 {
+            bail!("core.attachments.max_files must be at most 100");
+        }
+        if !(1..=MAX_MIB).contains(&self.max_file_mib) {
+            bail!("core.attachments.max_file_mib must be between 1 and {MAX_MIB}");
+        }
+        if !(self.max_file_mib..=MAX_MIB).contains(&self.max_event_mib) {
+            bail!("core.attachments.max_event_mib must be between max_file_mib and {MAX_MIB}");
+        }
+        if !(self.max_event_mib..=MAX_MIB).contains(&self.storage_mib) {
+            bail!("core.attachments.storage_mib must be between max_event_mib and {MAX_MIB}");
+        }
+        if self.free_space_mib > MAX_MIB {
+            bail!("core.attachments.free_space_mib must be at most {MAX_MIB}");
+        }
+        if !(1..=16).contains(&self.concurrent_captures) {
+            bail!("core.attachments.concurrent_captures must be between 1 and 16");
+        }
+        Ok(())
+    }
+}
+
+/// A provider instance's private state directory, `<data_dir>/components/<id>`,
+/// for a registry identity (which loading has already validated).
+#[must_use]
+pub fn component_directory(data_dir: &Path, provider_id: &str) -> PathBuf {
+    data_dir.join("components").join(provider_id)
+}
+
+/// Where interface `provider_id` stages files for core to capture:
+/// `incoming` in its component directory, one subdirectory per event batch.
+/// Interface and core both derive it from the installation, so events never
+/// carry filesystem paths. The staged files belong to the interface.
+#[must_use]
+pub fn attachment_staging(data_dir: &Path, provider_id: &str) -> PathBuf {
+    component_directory(data_dir, provider_id).join("incoming")
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -216,6 +324,7 @@ impl Config {
                 "operator diagnostics credential hash must be 64 lowercase hexadecimal characters"
             );
         }
+        self.core.attachments.validate()?;
         if self.agent.id.trim().is_empty() {
             bail!("agent identity must not be empty");
         }

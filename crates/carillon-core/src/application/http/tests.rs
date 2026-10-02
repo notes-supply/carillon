@@ -50,6 +50,11 @@ fn installation(root: &Path) -> Result<AppState> {
         core: CoreConfig {
             listen: "127.0.0.1:1".parse()?,
             operator_token_hash: hash_token("test-operator"),
+            // Captures in these tests must not depend on the host's free space.
+            attachments: carillon_installation::config::AttachmentLimits {
+                free_space_mib: 0,
+                ..carillon_installation::config::AttachmentLimits::default()
+            },
         },
         providers,
         agent: AgentConfig {
@@ -111,6 +116,7 @@ async fn accept(state: &AppState, id: &str, audience: &str) -> Result<EventRecei
             feedback_target_id: "test-feedback".to_owned(),
             content: id.to_owned(),
             native: serde_json::Value::Null,
+            attachments: None,
         }),
     )
     .await
@@ -856,6 +862,7 @@ async fn unavailable_conversation_owner_rejects_input_as_configuration_conflict(
                         feedback_target_id: "feedback".to_owned(),
                         content: "new input".to_owned(),
                         native: serde_json::Value::Null,
+                        attachments: None,
                     })?))?,
             )
             .await?;
@@ -1631,7 +1638,7 @@ fn activity_runtime(
 }
 
 /// Registers `other-interface` and accepts one turn for it.
-fn foreign_turn(state: &mut AppState, directory: &Path) -> Result<EventReceipt> {
+async fn foreign_turn(state: &mut AppState, directory: &Path) -> Result<EventReceipt> {
     use carillon_installation::config::hash_token;
 
     let mut other = state
@@ -1645,23 +1652,27 @@ fn foreign_turn(state: &mut AppState, directory: &Path) -> Result<EventReceipt> 
         directory.join("credentials/other-interface.token"),
         "other-only",
     )?;
-    Ok(configured(state).core.accept(
-        &selected_provider(
-            state
-                .config
-                .provider("other-interface", ProviderRole::Interface)?,
-        ),
-        &ExternalEvent {
-            event_id: "foreign".to_owned(),
-            agent_id: "test-agent".to_owned(),
-            user_id: "someone".to_owned(),
-            audience_id: "elsewhere".to_owned(),
-            delivery_target_id: "foreign-destination".to_owned(),
-            feedback_target_id: "foreign-feedback".to_owned(),
-            content: "not yours".to_owned(),
-            native: serde_json::Value::Null,
-        },
-    )?)
+    Ok(configured(state)
+        .core
+        .accept(
+            &selected_provider(
+                state
+                    .config
+                    .provider("other-interface", ProviderRole::Interface)?,
+            ),
+            &ExternalEvent {
+                event_id: "foreign".to_owned(),
+                agent_id: "test-agent".to_owned(),
+                user_id: "someone".to_owned(),
+                audience_id: "elsewhere".to_owned(),
+                delivery_target_id: "foreign-destination".to_owned(),
+                feedback_target_id: "foreign-feedback".to_owned(),
+                content: "not yours".to_owned(),
+                native: serde_json::Value::Null,
+                attachments: None,
+            },
+        )
+        .await?)
 }
 
 /// Claims the next turn, which must be `turn_id`, and keeps it running until released.
@@ -1717,7 +1728,7 @@ async fn activity_lists_only_the_callers_active_turns_with_runtime_snapshots() -
     .await?;
     let running = accept(&state, "running", "conversation").await?;
     let queued = accept(&state, "queued", "conversation").await?;
-    let foreign = foreign_turn(&mut state, directory.path())?;
+    let foreign = foreign_turn(&mut state, directory.path()).await?;
     let (release, worker) = hold_running(&state, "test-runtime", &running.turn_id).await?;
 
     let (status, body) = activity_call(&state, "test-interface", Some("test-only")).await?;
@@ -1865,3 +1876,4 @@ async fn activity_answers_promptly_when_several_runtimes_cannot_describe_their_t
     }
     Ok(())
 }
+mod attachments;

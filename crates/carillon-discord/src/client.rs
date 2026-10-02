@@ -3,7 +3,7 @@ use crate::InterfaceError;
 use anyhow::Result;
 use carillon_protocol::model::{
     ActiveTurn, Delivery, DeliveryAck, DeliveryOutcome, DeliveryReconciliation, EventReceipt,
-    ExternalEvent, INSTANCE_HEADER, ModelQuery, ModelUpdate, PROVIDER_HEADER,
+    EventStatus, ExternalEvent, INSTANCE_HEADER, ModelQuery, ModelUpdate, PROVIDER_HEADER,
 };
 use carillon_protocol::models::ModelState;
 use reqwest::{Client, IntoUrl, Method, RequestBuilder, Url};
@@ -51,7 +51,9 @@ impl CoreClient {
             .header(INSTANCE_HEADER, &self.instance_id)
     }
 
-    /// Submit an event with its stable platform event ID.
+    /// Submit an event with its stable platform event ID. With attachments,
+    /// core answers once it has captured them, so the wait is longer than
+    /// core's own capture deadline; other calls keep their short one.
     ///
     /// # Errors
     /// Returns core rejection, transport, or malformed-response failures.
@@ -59,10 +61,30 @@ impl CoreClient {
         &self,
         event: &ExternalEvent,
     ) -> Result<EventReceipt, InterfaceError> {
-        let request = self
+        let mut request = self
             .request(Method::POST, self.url("/v1/events"))
             .json(event);
+        if event.attachments.is_some() {
+            request = request.timeout(CAPTURE_SUBMISSION_TIMEOUT);
+        }
         core_json(request, "submit event to core").await
+    }
+
+    /// What core knows about one of this provider's events.
+    ///
+    /// # Errors
+    /// Returns core rejection, transport, or malformed-response failures.
+    pub async fn event_status(&self, event_id: &str) -> Result<EventStatus, InterfaceError> {
+        let mut url = Url::parse(&self.url("/v1/events"))
+            .map_err(|error| InterfaceError::protocol(error.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| InterfaceError::protocol("core URL cannot have a path".to_owned()))?
+            .push(event_id);
+        core_json(
+            self.request(Method::GET, url),
+            "read event status from core",
+        )
+        .await
     }
 
     /// Claim the next delivery for this provider instance.
@@ -149,6 +171,9 @@ impl CoreClient {
         model_json(request).await
     }
 }
+
+/// Core captures an event's files for at most five minutes before it answers.
+const CAPTURE_SUBMISSION_TIMEOUT: Duration = Duration::from_mins(6);
 
 /// Model calls answer a waiting user and run inside the command module's
 /// deadline, so they give up well before it.

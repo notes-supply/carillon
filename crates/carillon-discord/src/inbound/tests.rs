@@ -21,6 +21,26 @@ use std::{
     time::Duration,
 };
 
+/// Message preparation with staging under `directory`.
+pub(crate) fn ingress(
+    core: crate::CoreClient,
+    config: crate::config::DiscordConfig,
+    participation: Arc<Participation>,
+    http: Arc<twilight_http::Client>,
+    directory: &std::path::Path,
+) -> anyhow::Result<Arc<super::Ingress>> {
+    Ok(Arc::new(super::Ingress {
+        downloads: crate::attachments::Downloads::open(
+            directory.join("incoming"),
+            config.attachments,
+        )?,
+        core,
+        config,
+        participation,
+        http,
+    }))
+}
+
 #[tokio::test]
 async fn discord_retries_ambiguous_submission_with_the_same_event_id() -> anyhow::Result<()> {
     let attempts = Arc::new(AtomicUsize::new(0));
@@ -62,6 +82,7 @@ async fn discord_retries_ambiguous_submission_with_the_same_event_id() -> anyhow
         feedback_target_id: "feedback".to_owned(),
         content: "hello".to_owned(),
         native: Value::Null,
+        attachments: None,
     };
 
     let receipt = tokio::time::timeout(
@@ -93,6 +114,7 @@ async fn interrupted_success_receipt_recovers_the_committed_turn() -> anyhow::Re
         feedback_target_id: "feedback".to_owned(),
         content: "hello".to_owned(),
         native: Value::Null,
+        attachments: None,
     };
     let server = tokio::spawn(async move {
         for attempt in 0..2 {
@@ -161,7 +183,8 @@ async fn interrupted_success_receipt_recovers_the_committed_turn() -> anyhow::Re
     clippy::too_many_lines,
     reason = "one observable rejection/feedback/admission trace"
 )]
-async fn configuration_rejection_does_not_block_the_next_discord_message() -> anyhow::Result<()> {
+async fn configuration_rejection_does_not_block_the_next_message_in_its_conversation()
+-> anyhow::Result<()> {
     let (trace, mut observed) = tokio::sync::mpsc::unbounded_channel();
     let core_trace = trace.clone();
     let app = Router::new()
@@ -212,14 +235,12 @@ async fn configuration_rejection_does_not_block_the_next_discord_message() -> an
     )?);
     let mut config = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
     config.typing = false;
-    let mut other = config.routes[0].clone();
-    other.channel_id = "301".to_owned();
-    config.routes.push(other);
     config.failed_emoji = "❌".to_owned();
     let mut services = tokio::task::JoinSet::new();
     services.spawn(async move { axum::serve(listener, app).await });
     let (send, receive) = tokio::sync::mpsc::channel(2);
-    for (event, channel) in [("400", "300"), ("401", "301")] {
+    // One conversation: the second message waits for the first to settle.
+    for (event, channel) in [("400", "300"), ("401", "300")] {
         send.send(super::QueuedMessage {
             request: IncomingMessage {
                 event_id: event.to_owned(),
@@ -228,15 +249,17 @@ async fn configuration_rejection_does_not_block_the_next_discord_message() -> an
                 channel_id: channel.to_owned(),
                 parent_channel_id: None,
                 content: "hello".to_owned(),
+                attachments: Vec::new(),
             },
             native: Value::Null,
         })
         .await?;
     }
     drop(send);
+    let ingress = ingress(core, config, participation, http, directory.path())?;
     tokio::time::timeout(
         Duration::from_secs(3),
-        super::message_worker(core, config, participation, http, receive),
+        super::lanes::dispatch(ingress, receive),
     )
     .await?;
     let mut requests = Vec::new();
@@ -251,7 +274,7 @@ async fn configuration_rejection_does_not_block_the_next_discord_message() -> an
             .collect::<Vec<_>>(),
         ["submit 400", "submit 401"]
     );
-    // Observe actual failure feedback before the unrelated event's admission.
+    // Observe actual failure feedback before the next message's admission.
     let failure = requests
         .iter()
         .position(|request| {
@@ -262,7 +285,7 @@ async fn configuration_rejection_does_not_block_the_next_discord_message() -> an
     let next = requests
         .iter()
         .position(|request| request == "submit 401")
-        .context("unrelated message not submitted")?;
+        .context("next message not submitted")?;
     assert!(failure < next);
     Ok(())
 }
@@ -290,6 +313,7 @@ async fn complete_invalid_receipt_is_not_retried_forever() -> anyhow::Result<()>
         feedback_target_id: "feedback".to_owned(),
         content: "hello".to_owned(),
         native: Value::Null,
+        attachments: None,
     };
     let outcome = tokio::time::timeout(
         Duration::from_secs(2),
@@ -302,3 +326,5 @@ async fn complete_invalid_receipt_is_not_retried_forever() -> anyhow::Result<()>
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
     Ok(())
 }
+
+mod files;

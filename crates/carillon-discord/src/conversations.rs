@@ -37,6 +37,23 @@ pub struct IncomingMessage {
     #[serde(default)]
     pub parent_channel_id: Option<String>,
     pub content: String,
+    /// Files uploaded with the message, in message order. Nothing is
+    /// fetched for them before the message is admitted and activated.
+    #[serde(default)]
+    pub attachments: Vec<SourceAttachment>,
+}
+
+/// What Discord says about a file uploaded with a message.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SourceAttachment {
+    pub id: String,
+    /// The uploader's name for the file: display text only.
+    pub filename: String,
+    pub size: u64,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    /// A signed CDN address; never logged or shown with its query.
+    pub url: String,
 }
 /// Durable record of the threads this provider participates in.
 ///
@@ -143,6 +160,7 @@ pub struct MessagePlan {
     /// thread children).
     pub(crate) route_channel_id: String,
     pub(crate) content: String,
+    pub(crate) attachments: Vec<SourceAttachment>,
     pub(crate) create_thread: bool,
     pub(crate) adopt_thread: bool,
     pub(crate) native: Value,
@@ -192,7 +210,7 @@ fn resolve_message(
         DiscordActivation::Always => true,
         DiscordActivation::Mention => mentioned || adopted,
     };
-    if !activated || content.is_empty() {
+    if !activated || (content.is_empty() && request.attachments.is_empty()) {
         return Ok(None);
     }
     Ok(Some(MessagePlan {
@@ -203,6 +221,7 @@ fn resolve_message(
         channel_id: request.channel_id,
         route_channel_id: route.channel_id.clone(),
         content,
+        attachments: request.attachments,
         create_thread: !child && route.conversation == DiscordConversation::Thread,
         adopt_thread: child
             && route.activation == DiscordActivation::Mention
@@ -307,7 +326,7 @@ pub(crate) async fn create_conversation_thread(
         Err(error) => return Err(error).context("resolve existing Discord conversation thread"),
     }
     Ok(http
-        .create_thread_from_message(channel, message, &thread_title(&plan.content))
+        .create_thread_from_message(channel, message, &thread_title(plan))
         .await
         .context("create Discord conversation thread")?
         .model()
@@ -317,14 +336,24 @@ pub(crate) async fn create_conversation_thread(
         .to_string())
 }
 
-fn thread_title(content: &str) -> String {
-    content
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(80)
-        .collect()
+/// The message's words, or for a file-only message the first file's name.
+fn thread_title(plan: &MessagePlan) -> String {
+    let words = |text: &str| -> String {
+        text.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(80)
+            .collect()
+    };
+    let title = words(&plan.content);
+    if !title.is_empty() {
+        return title;
+    }
+    match plan.attachments.first().map(|file| words(&file.filename)) {
+        Some(name) if !name.is_empty() => name,
+        _ => "Attachment".to_owned(),
+    }
 }
 
 fn resolved_message(plan: MessagePlan, target: String) -> ResolvedMessage {
@@ -352,6 +381,7 @@ fn resolved_message(plan: MessagePlan, target: String) -> ResolvedMessage {
                 "guild_id": plan.guild_id,
                 "route_channel_id": plan.route_channel_id,
             }),
+            attachments: None,
         },
         conversation_id,
     }

@@ -50,6 +50,7 @@ async fn core_requests_timeout_on_stalled_headers_and_bodies() -> anyhow::Result
                                 feedback_target_id: "feedback".to_owned(),
                                 content: "hello".to_owned(),
                                 native: Value::Null,
+                                attachments: None,
                             })
                             .await
                             .map(|_| ()),

@@ -20,10 +20,10 @@ use carillon_installation::config::{
     LoadedConfig, Provider, ProviderRole, RELEASE_VERSION, token_matches,
 };
 use carillon_protocol::model::{
-    ActiveTurn, Delivery, DeliveryAck, DeliveryReconciliation, EventReceipt, ExternalEvent, Health,
-    INSTANCE_HEADER, ModelQuery, ModelUpdate, PROVIDER_HEADER, RuntimeModelQuery,
-    RuntimeModelUpdate, RuntimeTurnRequest, RuntimeTurnResponse, SelectedProvider, StatusReport,
-    TurnActivity, TurnInspection, TurnState, TurnSummary,
+    ActiveTurn, Delivery, DeliveryAck, DeliveryReconciliation, EventReceipt, EventStatus,
+    ExternalEvent, Health, INSTANCE_HEADER, ModelQuery, ModelUpdate, PROVIDER_HEADER,
+    RuntimeModelQuery, RuntimeModelUpdate, RuntimeTurnRequest, RuntimeTurnResponse,
+    SelectedProvider, StatusReport, TurnActivity, TurnInspection, TurnState, TurnSummary,
 };
 use reqwest::{Client, RequestBuilder, Url};
 use serde::Deserialize;
@@ -55,6 +55,7 @@ fn core_options(config: &LoadedConfig) -> CoreOptions {
         agent_id: config.value.agent.id.clone(),
         resource_root: config.value.agent.resource_root.clone(),
         default_runtime: config.value.agent.runtime_provider.clone(),
+        attachments: config.value.core.attachments,
         runtimes: config
             .value
             .providers
@@ -105,6 +106,10 @@ impl From<CoreError> for ApiError {
         match error {
             CoreError::InvalidInput(message) => Self::new(StatusCode::BAD_REQUEST, message),
             CoreError::Conflict(message) => Self::new(StatusCode::CONFLICT, message),
+            CoreError::Unavailable(message) => Self::new(StatusCode::SERVICE_UNAVAILABLE, message),
+            CoreError::InsufficientStorage(message) => {
+                Self::new(StatusCode::INSUFFICIENT_STORAGE, message)
+            }
             CoreError::Storage(error) => error.into(),
         }
     }
@@ -133,6 +138,15 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
     if recovered_turns > 0 {
         warn!(recovered_turns, "running turns were interrupted by restart");
     }
+    // Exclusive: the service lock is held and nothing is accepted yet.
+    let reconciled = core.reconcile_attachments()?;
+    if reconciled.partial + reconciled.unreferenced > 0 {
+        warn!(
+            partial = reconciled.partial,
+            unreferenced = reconciled.unreferenced,
+            "removed attachment captures no accepted turn references"
+        );
+    }
 
     let state = AppState {
         config: config.clone(),
@@ -154,6 +168,7 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
     let router = Router::new()
         .route("/health", get(health))
         .route("/v1/events", post(accept_event))
+        .route("/v1/events/{event_id}", get(event_status))
         .route("/v1/activity", get(active_turns))
         .route("/v1/deliveries", get(claim_delivery))
         .route("/v1/deliveries/reconcile", post(reconcile_delivery_claims))
@@ -162,10 +177,10 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
         .route("/v1/turns/{id}", get(inspect_turn))
         .route("/v1/model", get(model_state).put(set_model))
         .route("/v1/status", get(status))
-        .with_state(state);
+        .with_state(state.clone());
     info!(listen = %config.value.core.listen, "Carillon core ready");
     axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown())
+        .with_graceful_shutdown(shutdown(state.core))
         .await?;
     Ok(())
 }
@@ -190,8 +205,20 @@ async fn accept_event(
 ) -> Result<Json<EventReceipt>, ApiError> {
     let interface = interface_provider(&headers, &state.config)?;
     Ok(Json(
-        state.core.accept(&selected_provider(interface), &event)?,
+        state
+            .core
+            .accept(&selected_provider(interface), &event)
+            .await?,
     ))
+}
+
+async fn event_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(event_id): AxumPath<String>,
+) -> Result<Json<EventStatus>, ApiError> {
+    let interface = interface_provider(&headers, &state.config)?;
+    Ok(Json(state.core.event_status(&interface.id, &event_id)?))
 }
 
 /// Model calls answer a waiting user; they give up well before the
@@ -627,8 +654,10 @@ fn selected_provider(provider: &Provider) -> SelectedProvider {
     }
 }
 
-async fn shutdown() {
+async fn shutdown(core: Core) {
     if let Err(error) = tokio::signal::ctrl_c().await {
         error!(%error, "failed to install shutdown signal handler");
     }
+    // Waiting submissions then answer promptly; interfaces retry them.
+    core.stop_capturing();
 }

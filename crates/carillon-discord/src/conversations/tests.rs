@@ -31,6 +31,7 @@ fn participation_persistence_retries_without_bypassing_activation() -> anyhow::R
             channel_id: "400".to_owned(),
             parent_channel_id: recovered.parent_route("400"),
             content: "continue without a mention".to_owned(),
+            attachments: Vec::new(),
         },
         serde_json::json!({}),
         &recovered.lock(),
@@ -109,15 +110,92 @@ fn interaction_admission_follows_routes_and_conversations() -> anyhow::Result<()
     Ok(())
 }
 
+fn titled(content: &str, files: &[&str]) -> MessagePlan {
+    MessagePlan {
+        message_id: "500".to_owned(),
+        guild_id: "100".to_owned(),
+        user_id: "200".to_owned(),
+        agent_id: "default".to_owned(),
+        channel_id: "300".to_owned(),
+        route_channel_id: "300".to_owned(),
+        content: content.to_owned(),
+        attachments: files
+            .iter()
+            .map(|name| SourceAttachment {
+                id: "600".to_owned(),
+                filename: (*name).to_owned(),
+                size: 1,
+                content_type: None,
+                url: "https://cdn.discordapp.com/attachments/300/600/file".to_owned(),
+            })
+            .collect(),
+        create_thread: true,
+        adopt_thread: false,
+        native: serde_json::Value::Null,
+    }
+}
+
 #[test]
 fn thread_titles_preserve_short_text_and_fit_discord() {
-    assert_eq!(thread_title("  Plan   the weekend  "), "Plan the weekend");
+    assert_eq!(
+        thread_title(&titled("  Plan   the weekend  ", &[])),
+        "Plan the weekend"
+    );
     for content in ["a long discussion ".repeat(20), "🦀".repeat(150)] {
-        let title = thread_title(&content);
+        let title = thread_title(&titled(&content, &[]));
         assert!(!title.trim().is_empty());
         assert!(title.chars().count() <= 100);
-        assert_eq!(title, thread_title(&content));
+        assert_eq!(title, thread_title(&titled(&content, &[])));
     }
+    // A file-only message is named after its first file, or generically.
+    assert_eq!(
+        thread_title(&titled("", &["holiday  photo.jpg", "b.txt"])),
+        "holiday photo.jpg"
+    );
+    assert_eq!(thread_title(&titled("", &["  "])), "Attachment");
+    assert!(
+        thread_title(&titled("", &[&"x".repeat(300)]))
+            .chars()
+            .count()
+            <= 100
+    );
+}
+
+#[test]
+fn file_only_messages_activate_like_text_and_carry_their_files() -> anyhow::Result<()> {
+    let config = discord_config(DiscordActivation::Mention, DiscordConversation::Thread);
+    let participation = ParticipationState::default();
+    let file = titled("", &["photo.png"]).attachments;
+    let mut mentioned = request("300", None, "<@201>");
+    mentioned.attachments.clone_from(&file);
+    let plan = accepted(resolve_message(
+        &config,
+        mentioned,
+        json!({}),
+        &participation,
+    ))?;
+    assert_eq!(plan.content, "");
+    assert_eq!(plan.attachments, file);
+    // Files do not activate a mention route by themselves.
+    let mut unmentioned = request("300", None, "");
+    unmentioned.attachments.clone_from(&file);
+    assert!(
+        resolve_message(&config, unmentioned, json!({}), &participation)
+            .map_err(|failure| anyhow!(failure.message))?
+            .is_none()
+    );
+    // Neither words nor files: nothing to do.
+    assert!(
+        resolve_message(
+            &config,
+            request("300", None, "<@201>"),
+            json!({}),
+            &participation
+        )
+        .map_err(|failure| anyhow!(failure.message))?
+        .is_none()
+    );
+    Ok(())
 }
 
 #[test]
@@ -231,6 +309,7 @@ pub(crate) fn discord_config(
         typing: true,
         activity: true,
         activity_markers: crate::config::ActivityMarkers::default(),
+        attachments: crate::config::AttachmentPolicy::default(),
         reactions: true,
         processing_emoji: "👀".to_owned(),
         delivered_emoji: "✅".to_owned(),
@@ -255,6 +334,7 @@ fn request(channel_id: &str, parent_channel_id: Option<&str>, content: &str) -> 
         channel_id: channel_id.to_owned(),
         parent_channel_id: parent_channel_id.map(str::to_owned),
         content: content.to_owned(),
+        attachments: Vec::new(),
     }
 }
 

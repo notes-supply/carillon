@@ -1,6 +1,7 @@
 //! A complete durable conversation with no HTTP, Discord or model account.
 use anyhow::{Context as _, Result, ensure};
 use carillon_core::{Core, CoreOptions, RuntimeProvider, WorkerStep};
+use carillon_installation::config::AttachmentLimits;
 use carillon_protocol::model::{
     DeliveryAck, DeliveryOutcome, ExternalEvent, RuntimeTurnResponse, SelectedProvider, TurnState,
 };
@@ -26,6 +27,7 @@ async fn conversation() -> Result<()> {
             url: "in-process".to_owned(),
             enabled: true,
         }],
+        attachments: AttachmentLimits::default(),
     })?;
     // An application authenticates the caller before supplying this interface identity.
     let interface = SelectedProvider {
@@ -43,8 +45,9 @@ async fn conversation() -> Result<()> {
         feedback_target_id: "message-1".to_owned(),
         content: "Hello building blocks".to_owned(),
         native: serde_json::json!({"origin":{"message_id":"original"}}),
+        attachments: None,
     };
-    let receipt = core.accept(&interface, &event)?;
+    let receipt = core.accept(&interface, &event).await?;
     ensure!(
         core.accept(
             &interface,
@@ -52,7 +55,8 @@ async fn conversation() -> Result<()> {
                 native: serde_json::json!({"changed":true}),
                 ..event.clone()
             }
-        )?
+        )
+        .await?
         .duplicate,
         "duplicate acceptance changed the turn"
     );

@@ -51,6 +51,7 @@ async fn example() -> Result<Value> {
         channel_id: "300".to_owned(),
         parent_channel_id: None,
         content: "Hello".to_owned(),
+        attachments: Vec::new(),
     };
     let admitted = admit_message(&config, &participation, message.clone(), Value::Null)?
         .context("configured message was not admitted")?;

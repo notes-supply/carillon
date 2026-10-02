@@ -22,6 +22,9 @@
 //!   transaction.
 //! - Transitions are guarded conditional updates that succeed exactly once, so
 //!   a stale caller fails instead of overwriting newer state.
+//! - A turn's attachment references commit with the turn, and only after the
+//!   capture they name is published and synced; a losing duplicate's capture
+//!   is never referenced.
 
 use std::{
     os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
@@ -43,6 +46,8 @@ use carillon_protocol::model::{
     RuntimeTurnResponse, StateCounts, TurnInspection, TurnState, TurnSummary,
 };
 
+use crate::attachments::{Capture, CapturedFile};
+
 #[derive(Clone)]
 pub struct Database {
     path: PathBuf,
@@ -62,6 +67,7 @@ pub struct ClaimedTurn {
     pub input: String,
     pub resource_snapshot_id: String,
     pub native: Value,
+    pub attachments: Vec<CapturedFile>,
 }
 
 /// Lifecycle states are stored by their wire names. The wire types live in
@@ -184,6 +190,44 @@ impl Database {
         Ok(())
     }
 
+    /// Every committed attachment reference, for validating the store before
+    /// archiving or restoring.
+    pub fn captured_files(&self) -> Result<Vec<CapturedFile>> {
+        let connection =
+            Connection::open_with_flags(&self.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        captured_files(&connection, None)
+    }
+
+    /// The captures committed turns reference.
+    pub fn captures(&self) -> Result<std::collections::BTreeSet<String>> {
+        let connection = self.connect()?;
+        let mut statement =
+            connection.prepare("SELECT DISTINCT capture_id FROM turn_attachments")?;
+        let captures = statement
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        Ok(captures)
+    }
+
+    /// Whether a committed turn references this capture.
+    pub fn capture_referenced(&self, capture: &str) -> Result<bool> {
+        Ok(self.connect()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM turn_attachments WHERE capture_id = ?1)",
+            [capture],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Bytes kept by every committed capture.
+    pub fn captured_bytes(&self) -> Result<u64> {
+        let bytes: i64 = self.connect()?.query_row(
+            "SELECT COALESCE(SUM(size), 0) FROM turn_attachments",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(u64::try_from(bytes)?)
+    }
+
     fn initialize_connection(connection: &Connection) -> Result<()> {
         connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS turns (
@@ -222,7 +266,19 @@ impl Database {
                 claim_owner TEXT,
                 updated_at INTEGER NOT NULL,
                 FOREIGN KEY(turn_id) REFERENCES turns(id)
-            );",
+            );
+            CREATE TABLE IF NOT EXISTS turn_attachments (
+                turn_id TEXT NOT NULL REFERENCES turns(id),
+                ordinal INTEGER NOT NULL,
+                capture_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                content_type TEXT,
+                sha256 TEXT NOT NULL,
+                PRIMARY KEY(turn_id, ordinal)
+            );
+            CREATE INDEX IF NOT EXISTS turn_attachments_capture
+                ON turn_attachments(capture_id);",
         )?;
         Ok(())
     }
@@ -249,6 +305,8 @@ impl Database {
 
     /// Records an admitted event as a queued turn, or returns the receipt of
     /// the turn a previous submission of the same event already created.
+    /// A published capture of the event's attachments is referenced only by
+    /// the turn this call creates; a duplicate receipt leaves it unreferenced.
     pub fn accept_event(
         &self,
         interface_id: &str,
@@ -256,6 +314,7 @@ impl Database {
         event: &ExternalEvent,
         providers: &Value,
         resource_snapshot_id: &str,
+        capture: Option<&Capture>,
     ) -> Result<EventReceipt> {
         let mut connection = self.connect()?;
         let transaction = write_transaction(&mut connection)?;
@@ -296,6 +355,32 @@ impl Database {
                 timestamp()?,
             ],
         )?;
+        if let Some(capture) = capture {
+            let files = event
+                .attachments
+                .as_ref()
+                .map(|staged| staged.files.as_slice())
+                .unwrap_or_default();
+            if files.len() != capture.digests.len() {
+                bail!("captured attachments do not match the event");
+            }
+            for (ordinal, (file, digest)) in files.iter().zip(&capture.digests).enumerate() {
+                transaction.execute(
+                    "INSERT INTO turn_attachments(turn_id, ordinal, capture_id, name, size,
+                         content_type, sha256)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        turn_id,
+                        u32::try_from(ordinal)?,
+                        capture.id,
+                        file.name,
+                        i64::try_from(file.size)?,
+                        file.content_type,
+                        digest,
+                    ],
+                )?;
+            }
+        }
         transaction.commit()?;
         Ok(EventReceipt {
             event_id: event.event_id.clone(),
@@ -340,11 +425,12 @@ impl Database {
                         input: row.get(7)?,
                         resource_snapshot_id: row.get(8)?,
                         native: json_column(row, 9)?,
+                        attachments: Vec::new(),
                     })
                 },
             )
             .optional()?;
-        let Some(turn) = turn else {
+        let Some(mut turn) = turn else {
             transaction.commit()?;
             return Ok(None);
         };
@@ -355,6 +441,7 @@ impl Database {
         if changed != 1 {
             bail!("turn {} could not be claimed", turn.turn_id);
         }
+        turn.attachments = captured_files(&transaction, Some(&turn.turn_id))?;
         transaction.commit()?;
         Ok(Some(turn))
     }
@@ -575,8 +662,8 @@ impl Database {
     }
 
     pub fn inspect_turn(&self, turn_id: &str) -> Result<Option<TurnInspection>> {
-        Ok(self
-            .connect()?
+        let connection = self.connect()?;
+        let inspection = connection
             .query_row(
                 "SELECT t.id, t.event_id, t.audience_id, t.user_id, t.input, t.state, t.output,
                         t.provider_snapshot_json, t.resource_snapshot_id, d.state, d.native_ref, t.error
@@ -597,10 +684,19 @@ impl Database {
                         delivery_state: optional_state_column(row, 9)?,
                         delivery_native_ref: row.get(10)?,
                         error: row.get(11)?,
+                        attachments: Vec::new(),
                     })
                 },
             )
-            .optional()?)
+            .optional()?;
+        let Some(mut inspection) = inspection else {
+            return Ok(None);
+        };
+        inspection.attachments = captured_files(&connection, Some(turn_id))?
+            .iter()
+            .map(CapturedFile::wire)
+            .collect();
+        Ok(Some(inspection))
     }
 
     /// Queued and running turns of one interface in acceptance order, each
@@ -748,6 +844,27 @@ fn conversation_runtime(
         .optional()?)
 }
 
+/// A turn's captured files in message order, or every committed reference.
+fn captured_files(connection: &Connection, turn_id: Option<&str>) -> Result<Vec<CapturedFile>> {
+    let mut statement = connection.prepare(
+        "SELECT capture_id, ordinal, name, size, content_type, sha256 FROM turn_attachments
+         WHERE ?1 IS NULL OR turn_id = ?1 ORDER BY turn_id, ordinal",
+    )?;
+    let files = statement.query_map([turn_id], |row| {
+        Ok(CapturedFile {
+            capture: row.get(0)?,
+            ordinal: row.get(1)?,
+            name: row.get(2)?,
+            size: u64::try_from(row.get::<_, i64>(3)?).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(3, Type::Integer, Box::new(error))
+            })?,
+            content_type: row.get(4)?,
+            sha256: row.get(5)?,
+        })
+    })?;
+    files.collect::<Result<_, _>>().map_err(Into::into)
+}
+
 fn event_receipt(
     connection: &Connection,
     interface_id: &str,
@@ -802,6 +919,7 @@ mod tests {
             feedback_target_id: "message".to_owned(),
             content: "hello".to_owned(),
             native: json!({}),
+            attachments: None,
         }
     }
 
@@ -812,6 +930,7 @@ mod tests {
             &event(id, audience),
             &json!([]),
             "resources",
+            None,
         )
     }
 
@@ -913,7 +1032,14 @@ mod tests {
         let second = event("two", "conversation");
         assert!(
             database
-                .accept_event("discord", "replacement", &second, &json!([]), "resources")
+                .accept_event(
+                    "discord",
+                    "replacement",
+                    &second,
+                    &json!([]),
+                    "resources",
+                    None
+                )
                 .is_err()
         );
         assert!(database.event_receipt("discord", "two")?.is_none());
@@ -926,7 +1052,8 @@ mod tests {
                     "replacement",
                     &event("one", "conversation"),
                     &json!([]),
-                    "resources"
+                    "resources",
+                    None
                 )?
                 .duplicate
         );

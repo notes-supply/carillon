@@ -12,6 +12,7 @@ fn options(root: &std::path::Path) -> CoreOptions {
         resource_root: root.into(),
         default_runtime: "test".into(),
         runtimes: vec![],
+        attachments: carillon_installation::config::AttachmentLimits::default(),
     }
 }
 

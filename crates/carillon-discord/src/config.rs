@@ -5,7 +5,7 @@
 use std::{collections::BTreeSet, fs, path::PathBuf, str::FromStr};
 
 use anyhow::{Context as _, Result, bail};
-use carillon_installation::config::{LoadedConfig, ProviderRole};
+use carillon_installation::config::{LoadedConfig, ProviderRole, component_directory};
 use carillon_installation::filesystem::atomic_write;
 use serde::{Deserialize, Serialize};
 use unicode_general_category::{GeneralCategory, get_general_category};
@@ -26,6 +26,9 @@ pub struct DiscordConfig {
     pub activity: bool,
     #[serde(default)]
     pub activity_markers: ActivityMarkers,
+    /// Files uploaded with admitted messages.
+    #[serde(default)]
+    pub attachments: AttachmentPolicy,
     #[serde(default = "enabled")]
     pub reactions: bool,
     #[serde(default = "processing_emoji")]
@@ -152,6 +155,60 @@ fn validate_activity_marker(value: &str) -> Result<()> {
     Ok(())
 }
 
+/// What the provider downloads from Discord for an admitted message before
+/// core captures it. Sizes are MiB. Downloads wait for staging room; core
+/// applies its own limits again. Changes apply when the provider restarts.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct AttachmentPolicy {
+    /// Without it, a message carrying files is refused with an explanation
+    /// rather than accepted without them.
+    pub enabled: bool,
+    /// Discord allows at most 10 files on one message.
+    pub max_files: u32,
+    pub max_file_mib: u64,
+    pub max_message_mib: u64,
+    /// Messages downloading files at once, across conversations.
+    pub concurrent_messages: u32,
+    /// Bytes reserved for downloaded files until core has captured them.
+    pub staging_mib: u64,
+}
+
+impl Default for AttachmentPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_files: 10,
+            max_file_mib: 1024,
+            max_message_mib: 2048,
+            concurrent_messages: 2,
+            staging_mib: 2048,
+        }
+    }
+}
+
+impl AttachmentPolicy {
+    fn validate(&self) -> Result<()> {
+        const MAX_MIB: u64 = 1024 * 1024;
+        if !(1..=10).contains(&self.max_files) {
+            bail!("attachments.max_files must be between 1 and 10");
+        }
+        if !(1..=MAX_MIB).contains(&self.max_file_mib) {
+            bail!("attachments.max_file_mib must be between 1 and {MAX_MIB}");
+        }
+        if !(self.max_file_mib..=MAX_MIB).contains(&self.max_message_mib) {
+            bail!("attachments.max_message_mib must be between max_file_mib and {MAX_MIB}");
+        }
+        if !(self.max_message_mib..=MAX_MIB).contains(&self.staging_mib) {
+            bail!("attachments.staging_mib must be between max_message_mib and {MAX_MIB}");
+        }
+        if !(1..=16).contains(&self.concurrent_messages) {
+            bail!("attachments.concurrent_messages must be between 1 and 16");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DiscordRoute {
     pub channel_id: String,
@@ -251,6 +308,7 @@ impl DiscordConfig {
             typing: enabled(),
             activity: enabled(),
             activity_markers: ActivityMarkers::default(),
+            attachments: AttachmentPolicy::default(),
             reactions: enabled(),
             processing_emoji: processing_emoji(),
             delivered_emoji: delivered_emoji(),
@@ -323,6 +381,9 @@ impl DiscordConfig {
             DiscordEmoji::parse(emoji)?;
         }
         self.activity_markers.validate()?;
+        self.attachments
+            .validate()
+            .context("invalid Discord attachments settings")?;
         config.provider(provider_id, ProviderRole::Interface)?;
         if self.agent != config.value.agent.id {
             bail!("Discord interface selects an unknown agent");
@@ -361,9 +422,9 @@ pub(crate) fn configure(
 }
 
 /// The instance's private state: participation, the installed command
-/// module and the command registration record.
+/// module, the command registration record and attachment staging.
 pub(crate) fn state_directory(config: &LoadedConfig, provider_id: &str) -> PathBuf {
-    config.value.data_dir.join("components").join(provider_id)
+    component_directory(&config.value.data_dir, provider_id)
 }
 
 fn valid_snowflake(value: &str) -> bool {
@@ -429,6 +490,7 @@ pub(crate) mod tests {
             core: CoreConfig {
                 listen: format!("127.0.0.1:{core_port}").parse()?,
                 operator_token_hash: hash_token("operator"),
+                attachments: carillon_installation::config::AttachmentLimits::default(),
             },
             providers,
             agent: AgentConfig {

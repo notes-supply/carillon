@@ -18,12 +18,12 @@ use tar::{Archive, Builder};
 use uuid::Uuid;
 
 use carillon_installation::config::{
-    AgentConfig, Config, CoreConfig, LoadedConfig, Provider, ProviderRole, RELEASE_VERSION,
-    hash_token, new_token, validate_provider_identity,
+    AgentConfig, AttachmentLimits, Config, CoreConfig, LoadedConfig, Provider, ProviderRole,
+    RELEASE_VERSION, hash_token, new_token, validate_provider_identity,
 };
 use carillon_installation::filesystem::{atomic_write, sync_ancestors, sync_tree};
 
-use crate::db::Database;
+use crate::{attachments, db::Database};
 
 const DEFAULT_SYSTEM: &str = r"You are Carillon, a capable general-purpose agent.
 
@@ -89,6 +89,7 @@ pub fn initialize(root: &Path, workspace: &Path, base_port: u16) -> Result<PathB
         core: CoreConfig {
             listen: SocketAddr::new(loopback, base_port),
             operator_token_hash: hash_token(&operator_token),
+            attachments: AttachmentLimits::default(),
         },
         providers: default_providers(base_port, &discord_token, &runtime_token)?,
         agent: AgentConfig {
@@ -296,7 +297,19 @@ pub fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
     }
     validate_portable_paths(&root)?;
     let _lock = ensure_stopped(config)?;
+    // Exclusive, as at core startup: copies no accepted turn references are
+    // not durable input and are not archived.
+    let data = &config.value.data_dir;
+    attachments::reconcile(
+        data,
+        &Database::open(&data.join("carillon.sqlite3"))?.captures()?,
+    )?;
     validate_installation(config)?;
+    // Interfaces' attachment staging is disposable scratch, never archived.
+    let components = data
+        .canonicalize()
+        .context("resolve backup data_dir")?
+        .join("components");
     let staging = parent.join(format!(
         ".{}.backup-{}",
         name.to_string_lossy(),
@@ -313,7 +326,7 @@ pub fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
         // Keep the writer inside restore's regular-file/directory format even
         // when installed binaries or provider files have filesystem holes.
         archive.sparse(false);
-        append_directory(&mut archive, &root, &root)?;
+        append_directory(&mut archive, &root, &root, &components)?;
         archive.finish()?;
         let encoder = archive.into_inner()?;
         let mut writer = encoder.finish()?;
@@ -442,9 +455,11 @@ fn validate_installation(config: &LoadedConfig) -> Result<()> {
             bail!("backup credential for {id} does not match the configuration");
         }
     }
-    Database::open(&config.value.data_dir.join("carillon.sqlite3"))
-        .context("backup does not contain a valid current core database")?
-        .validate_resource_snapshots(&config.value.data_dir.join("resource-snapshots"))
+    let database = Database::open(&config.value.data_dir.join("carillon.sqlite3"))
+        .context("backup does not contain a valid current core database")?;
+    database.validate_resource_snapshots(&config.value.data_dir.join("resource-snapshots"))?;
+    attachments::validate_store(&config.value.data_dir, &database.captured_files()?)
+        .context("backup has missing, altered or unexpected captured attachments")
 }
 
 fn ensure_stopped(config: &LoadedConfig) -> Result<ServiceLock> {
@@ -463,15 +478,23 @@ fn ensure_stopped(config: &LoadedConfig) -> Result<ServiceLock> {
     Ok(lock)
 }
 
+/// Archive `directory` below `root`, leaving out each component's `incoming`
+/// staging under `components`.
 fn append_directory<W: std::io::Write>(
     archive: &mut Builder<W>,
     root: &Path,
     directory: &Path,
+    components: &Path,
 ) -> Result<()> {
     let mut entries = fs::read_dir(directory)?.collect::<Result<Vec<_>, _>>()?;
     entries.sort_by_key(fs::DirEntry::file_name);
     for entry in entries {
         let path = entry.path();
+        if entry.file_name() == "incoming"
+            && path.parent().and_then(Path::parent) == Some(components)
+        {
+            continue;
+        }
         let relative = path.strip_prefix(root)?;
         let file_type = entry.file_type()?;
         if file_type.is_symlink() {
@@ -482,7 +505,7 @@ fn append_directory<W: std::io::Write>(
         }
         if file_type.is_dir() {
             archive.append_dir(relative, &path)?;
-            append_directory(archive, root, &path)?;
+            append_directory(archive, root, &path, components)?;
         } else if file_type.is_file() {
             archive.append_path_with_name(&path, relative)?;
         } else {
@@ -874,7 +897,7 @@ mod tests {
     fn archive_test_tree(root: &Path, destination: &Path) -> Result<()> {
         let encoder = GzEncoder::new(fs::File::create(destination)?, Compression::default());
         let mut archive = Builder::new(encoder);
-        super::append_directory(&mut archive, root, root)?;
+        super::append_directory(&mut archive, root, root, Path::new("/nonexistent"))?;
         archive.into_inner()?.finish()?;
         Ok(())
     }
@@ -1018,9 +1041,11 @@ mod tests {
                         feedback_target_id: "feedback".to_owned(),
                         content: "use captured resources".to_owned(),
                         native: serde_json::json!({}),
+                        attachments: None,
                     },
                     &serde_json::json!([]),
                     &snapshot,
+                    None,
                 )?;
                 let expected_state = if uncertain {
                     assert!(db.claim_turn("runtime-pi")?.is_some());
@@ -1082,6 +1107,185 @@ mod tests {
                     fs::remove_dir_all(&target)?;
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// A core over an initialized installation, as the service opens it.
+    fn installed_core(config: &LoadedConfig) -> Result<crate::Core> {
+        use carillon_installation::config::AttachmentLimits;
+
+        crate::Core::open(crate::CoreOptions {
+            data_directory: config.value.data_dir.clone(),
+            agent_id: config.value.agent.id.clone(),
+            resource_root: config.value.agent.resource_root.clone(),
+            default_runtime: "runtime-pi".to_owned(),
+            runtimes: vec![crate::RuntimeProvider {
+                id: "runtime-pi".to_owned(),
+                version: "test".to_owned(),
+                url: "http://127.0.0.1:1".to_owned(),
+                enabled: true,
+            }],
+            attachments: AttachmentLimits {
+                free_space_mib: 0,
+                ..AttachmentLimits::default()
+            },
+        })
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one backup, relocation and damage trace over the same installation"
+    )]
+    async fn backups_carry_validated_attachments_and_leave_scratch_behind() -> Result<()> {
+        use carillon_protocol::model::{
+            ExternalEvent, RuntimeTurnResponse, SelectedProvider, StagedAttachments, StagedFile,
+        };
+
+        let directory = tempdir()?;
+        let source = directory.path().join("source");
+        let config = LoadedConfig::load(&initialize_test_installation(
+            &source,
+            directory.path(),
+            44_950,
+        )?)?;
+        let core = installed_core(&config)?;
+        let staging = config
+            .value
+            .data_dir
+            .join("components/discord-private/incoming");
+        let interface = SelectedProvider {
+            id: "discord-private".to_owned(),
+            role: "interface".to_owned(),
+            version: "test".to_owned(),
+            url: "http://127.0.0.1:2".to_owned(),
+        };
+        let mut turns = Vec::new();
+        for (event_id, bytes) in [
+            ("completed", b"done file".as_slice()),
+            ("queued", b"queued file"),
+        ] {
+            fs::create_dir_all(staging.join(event_id))?;
+            fs::write(staging.join(event_id).join("0"), bytes)?;
+            let receipt = core
+                .accept(
+                    &interface,
+                    &ExternalEvent {
+                        event_id: event_id.to_owned(),
+                        agent_id: "default".to_owned(),
+                        user_id: "user".to_owned(),
+                        audience_id: event_id.to_owned(),
+                        delivery_target_id: "target".to_owned(),
+                        feedback_target_id: "feedback".to_owned(),
+                        content: String::new(),
+                        native: serde_json::Value::Null,
+                        attachments: Some(StagedAttachments {
+                            batch: event_id.to_owned(),
+                            files: vec![StagedFile {
+                                name: format!("{event_id}.txt"),
+                                size: bytes.len() as u64,
+                                content_type: Some("text/plain".to_owned()),
+                            }],
+                        }),
+                    },
+                )
+                .await?;
+            turns.push(receipt.turn_id);
+        }
+        core.execute_next("runtime-pi", async |request| {
+            Ok(RuntimeTurnResponse {
+                output: "read it".to_owned(),
+                correlation_id: request.correlation_id,
+            })
+        })
+        .await?;
+        // Scratch the archive must not carry: interface staging still in
+        // place, an abandoned copy and a published capture never committed.
+        let store = config.value.data_dir.join("attachments");
+        fs::create_dir(store.join(".partial-0190a6e0-0000-7000-8000-00000000000a"))?;
+        let orphan = store.join("0190a6e0-0000-7000-8000-00000000000b");
+        fs::create_dir(&orphan)?;
+        fs::write(orphan.join("0"), b"never committed")?;
+        let archive = directory.path().join("backup.tar.gz");
+        backup(&config, &archive)?;
+        let names = tar::Archive::new(flate2::read::GzDecoder::new(fs::File::open(&archive)?))
+            .entries()?
+            .map(|entry| Ok(entry?.path()?.to_string_lossy().into_owned()))
+            .collect::<Result<Vec<_>>>()?;
+        assert!(
+            names.iter().all(|name| !name.contains("incoming")),
+            "{names:?}"
+        );
+        assert!(
+            names.iter().all(|name| !name.contains("0190a6e0")),
+            "{names:?}"
+        );
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.starts_with("state/attachments/") && name.ends_with("/0"))
+                .count(),
+            2
+        );
+        // Backup reconciled under exclusive ownership, like core startup.
+        assert!(!orphan.exists());
+        assert!(staging.join("queued/0").exists());
+
+        // Restore elsewhere: the queued turn runs from the restored root.
+        let relocated = directory.path().join("relocated");
+        let restored = LoadedConfig::load(&restore(&archive, &relocated)?)?;
+        let restored_core = installed_core(&restored)?;
+        restored_core
+            .execute_next("runtime-pi", async |request| {
+                assert_eq!(request.correlation_id, turns[1]);
+                let root = std::path::Path::new(&request.attachment_root);
+                assert!(root.starts_with(&relocated), "{}", root.display());
+                assert_eq!(
+                    fs::read(root.join(&request.attachments[0].path))
+                        .map_err(|error| crate::TurnFailure::Uncertain(error.into()))?,
+                    b"queued file"
+                );
+                Ok(RuntimeTurnResponse {
+                    output: "read it".to_owned(),
+                    correlation_id: request.correlation_id,
+                })
+            })
+            .await?;
+
+        // Damaged archives are refused before publication.
+        let captured = restored_core
+            .inspect_turn(&turns[0])?
+            .context("restored turn")?
+            .attachments[0]
+            .path
+            .clone();
+        for damage in ["altered", "missing", "unexpected"] {
+            let damaged = directory.path().join(format!("damaged-{damage}"));
+            fs::create_dir(&damaged)?;
+            let tree = damaged.join("installation");
+            restore(&archive, &tree)?;
+            let file = tree.join("state/attachments").join(&captured);
+            match damage {
+                "altered" => {
+                    fs::set_permissions(&file, fs::Permissions::from_mode(0o640))?;
+                    fs::write(&file, b"done fil!")?;
+                }
+                "missing" => fs::remove_file(&file)?,
+                _ => {
+                    let extra = tree.join("state/attachments/0190a6e0-0000-7000-8000-00000000000c");
+                    fs::create_dir(&extra)?;
+                    fs::write(extra.join("0"), b"unexpected")?;
+                }
+            }
+            let invalid = damaged.join("invalid.tar.gz");
+            archive_test_tree(&tree, &invalid)?;
+            let target = damaged.join("restored");
+            assert!(
+                restore(&invalid, &target).is_err(),
+                "restore accepted {damage}"
+            );
+            assert!(!target.exists(), "published {damage}");
         }
         Ok(())
     }

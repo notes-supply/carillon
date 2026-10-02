@@ -115,9 +115,50 @@ pub struct ExternalEvent {
     pub audience_id: String,
     pub delivery_target_id: String,
     pub feedback_target_id: String,
+    /// The person's text; may be empty when the event carries attachments.
     pub content: String,
     #[serde(default)]
     pub native: Value,
+    /// Files the interface staged for core to capture with this event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<StagedAttachments>,
+}
+
+/// Files an interface staged in its own staging directory of the
+/// installation. The event names a batch, never a path: core derives where
+/// the batch lives from the authenticated interface.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct StagedAttachments {
+    /// The batch directory the interface created for this event.
+    pub batch: String,
+    /// In message order; file `i` is staged as `<batch>/<i>`.
+    pub files: Vec<StagedFile>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct StagedFile {
+    /// The uploader's name for the file: display text, never a path.
+    pub name: String,
+    pub size: u64,
+    /// The media type the platform declared, unverified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+}
+
+/// A file core captured with an accepted turn.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TurnAttachment {
+    /// Where the file is, relative to the installation's current attachment
+    /// root; never an absolute path.
+    pub path: String,
+    /// The uploader's name for the file: display text, never a path.
+    pub name: String,
+    pub size: u64,
+    /// The media type the platform declared, unverified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    /// Lowercase hexadecimal SHA-256 of the captured bytes.
+    pub sha256: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -126,6 +167,19 @@ pub struct EventReceipt {
     pub turn_id: String,
     pub state: TurnState,
     pub duplicate: bool,
+}
+
+/// What core knows about an event an interface submitted.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum EventStatus {
+    /// Accepted; the receipt says which turn it became.
+    Accepted(EventReceipt),
+    /// Core is still capturing the event's attachments; the outcome will
+    /// follow.
+    Capturing,
+    /// Neither accepted nor being captured now.
+    Unknown,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -149,6 +203,13 @@ pub struct RuntimeTurnRequest {
     /// Interface-owned metadata captured with the accepted event.
     #[serde(default)]
     pub native: Value,
+    /// The directory holding every captured attachment of the installation,
+    /// resolved when the turn is claimed. Earlier turns' relative paths
+    /// resolve against it too, so it is sent with every turn.
+    pub attachment_root: String,
+    /// This turn's captured files, in message order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<TurnAttachment>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -264,6 +325,9 @@ pub struct TurnInspection {
     pub delivery_state: Option<DeliveryState>,
     pub delivery_native_ref: Option<String>,
     pub error: Option<String>,
+    /// The files captured with the turn, in message order.
+    #[serde(default)]
+    pub attachments: Vec<TurnAttachment>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

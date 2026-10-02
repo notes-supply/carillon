@@ -26,10 +26,15 @@ impl InterfaceError {
     }
 
     /// Whether the failure is worth retrying: core unreachable or failing,
-    /// rather than rejecting the request or violating its wire contract.
+    /// rather than rejecting the request, refusing it for lack of storage,
+    /// or violating its wire contract.
     #[must_use]
     pub fn is_transient(&self) -> bool {
-        self.status.is_server_error() && self.status != StatusCode::BAD_GATEWAY
+        self.status.is_server_error()
+            && !matches!(
+                self.status,
+                StatusCode::BAD_GATEWAY | StatusCode::INSUFFICIENT_STORAGE
+            )
     }
 }
 

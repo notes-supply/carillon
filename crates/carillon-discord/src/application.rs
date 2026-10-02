@@ -1,8 +1,11 @@
 //! Gateway and operator HTTP assembly. Policies live in the component modules.
-use crate::conversations::{AdmittedInteraction, InteractionSource, admit_interaction};
+use crate::conversations::{
+    AdmittedInteraction, InteractionSource, SourceAttachment, admit_interaction,
+};
 use crate::{
+    attachments::Downloads,
     error::discord_failure_is_terminal,
-    inbound::{QueuedMessage, message_worker},
+    inbound::{Ingress, QueuedMessage, lanes},
 };
 
 use crate::{
@@ -36,7 +39,7 @@ use axum::{
 };
 use carillon_discord_commands::contract::{InteractionKind, Reply};
 use carillon_installation::config::{
-    LoadedConfig, ProviderRole, RELEASE_VERSION, read_token_file, token_matches,
+    LoadedConfig, ProviderRole, RELEASE_VERSION, attachment_staging, read_token_file, token_matches,
 };
 use carillon_protocol::model::{
     Delivery, DeliveryOutcome, DeliveryReconciliation, EventReceipt, Health, ModelQuery,
@@ -167,12 +170,19 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
     // Cosmetic: records that cannot be read turn cards off, not the provider.
     let cards =
         CardRecords::open(state_directory(&config, &provider.id).join("activity-cards.json"));
+    // This instance owns the provider's state: staging left by an earlier
+    // one is abandoned and removed.
+    let downloads = Downloads::open(
+        attachment_staging(&config.value.data_dir, &provider.id),
+        state.discord.attachments,
+    )?;
     connect(
         state,
         listener,
         read_token_file(discord_token_path)?,
         reconciled,
         cards,
+        downloads,
     )
     .await
 }
@@ -186,6 +196,7 @@ async fn connect(
     discord_token: String,
     reconciled: DeliveryReconciliation,
     cards: Option<CardRecords>,
+    downloads: Downloads,
 ) -> Result<()> {
     let http = Arc::new(DiscordHttp::new(discord_token.clone()));
     let current_user = http.current_user().await?.model().await?;
@@ -210,20 +221,16 @@ async fn connect(
     for target in reconciled.feedback_target_ids {
         terminal_feedback(&http, &state.discord, &target, Feedback::Uncertain).await;
     }
-    let (messages, receiver) = mpsc::channel(64);
+    let (messages, receiver) = mpsc::channel(lanes::MAX_PENDING);
     let delivery_state = state.clone();
-    let worker_state = state.clone();
-    let worker_http = http.clone();
-    tokio::spawn(async move {
-        message_worker(
-            worker_state.core,
-            worker_state.discord,
-            worker_state.participation,
-            worker_http,
-            receiver,
-        )
-        .await;
+    let ingress = Arc::new(Ingress {
+        core: state.core.clone(),
+        config: state.discord.clone(),
+        participation: state.participation.clone(),
+        http: http.clone(),
+        downloads,
     });
+    tokio::spawn(lanes::dispatch(ingress, receiver));
     let router = discord_router(state.clone(), false);
     let (outcomes, observed) = mpsc::unbounded_channel();
     let monitor = activity_monitor(
@@ -462,6 +469,12 @@ async fn simulate(
     Json(request): Json<IncomingMessage>,
 ) -> Result<Response, InterfaceError> {
     authorize_interface(&state, &headers)?;
+    if !request.attachments.is_empty() {
+        return Err(InterfaceError {
+            status: StatusCode::BAD_REQUEST,
+            message: "deterministic mode does not download attachments".to_owned(),
+        });
+    }
     let Some(plan) = admit_message(
         &state.discord,
         &state.participation,
@@ -575,8 +588,19 @@ async fn gateway_loop(
                     channel_id: message.channel_id.to_string(),
                     parent_channel_id: None,
                     content: message.content.clone(),
+                    attachments: message
+                        .attachments
+                        .iter()
+                        .map(|attachment| SourceAttachment {
+                            id: attachment.id.to_string(),
+                            filename: attachment.filename.clone(),
+                            size: attachment.size,
+                            content_type: attachment.content_type.clone(),
+                            url: attachment.url.clone(),
+                        })
+                        .collect(),
                 };
-                let native = serde_json::to_value(&*message).unwrap_or(Value::Null);
+                let native = native_message(&message);
                 if let Err(refused) = queue_message(&messages, QueuedMessage { request, native })? {
                     warn!(
                         channel = %refused.request.channel_id,
@@ -604,6 +628,20 @@ async fn gateway_loop(
         }
     }
     bail!("Discord gateway event stream ended")
+}
+
+/// The message as Discord sent it, for the runtime's native context, without
+/// the signed addresses of its attachments: those expire, and accepted
+/// files are core's captures, not CDN links.
+fn native_message(message: &twilight_model::channel::Message) -> Value {
+    let mut native = serde_json::to_value(message).unwrap_or(Value::Null);
+    if let Some(attachments) = native.get_mut("attachments").and_then(Value::as_array_mut) {
+        for attachment in attachments.iter_mut().filter_map(Value::as_object_mut) {
+            attachment.remove("url");
+            attachment.remove("proxy_url");
+        }
+    }
+    native
 }
 
 /// Hands a message to the worker without waiting for room. The gateway must
