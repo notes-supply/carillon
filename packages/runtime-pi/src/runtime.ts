@@ -1,10 +1,15 @@
 /** A native Pi runtime with instance-owned execution and model state. */
 import { ModelRuntime, SettingsManager } from "@earendil-works/pi-coding-agent";
-import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import type {
+  AgentSession,
+  AgentSessionEvent,
+  SessionManager,
+} from "@earendil-works/pi-coding-agent";
 import {
   clampThinkingLevel,
   getSupportedThinkingLevels,
   type Api,
+  type ImageContent,
   type Model,
   type ModelThinkingLevel,
 } from "@earendil-works/pi-ai";
@@ -22,9 +27,9 @@ import {
   ATTACHMENT_NOTE,
   attachmentContext,
   DEFAULT_INLINE_IMAGES,
+  earlierNote,
   prepareAttachments,
   type InlineImagePolicy,
-  type PreparedAttachments,
 } from "./attachments.ts";
 import { ModelSelections } from "./model.ts";
 import { openConversation } from "./namespace.ts";
@@ -228,10 +233,17 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
       request.attachments ?? [],
       options.inlineImages ?? DEFAULT_INLINE_IMAGES,
     );
+    // Files of earlier unanswered turns the conversation does not hold,
+    // such as those of a command that opened it before Pi saved anything,
+    // come first; then this turn's.
+    const notes = (request.unanswered ?? [])
+      .filter((earlier) => !noted(manager, earlier.correlation_id))
+      .map((earlier) => note(earlier.correlation_id, earlierNote(earlier.attachments)));
+    if (attachments.note !== undefined) notes.push(note(request.correlation_id, attachments.note));
     const created = await createPiExecutionSession({
       resourceRoot: root,
       extensionContext: options.extensionContext?.(request),
-      attachmentContext: attachmentContext(request.attachment_root, attachments.note !== undefined),
+      attachmentContext: attachmentContext(request.attachment_root, notes.length > 0),
       workspace: workspace,
       manager,
       modelRuntime: runtime,
@@ -248,7 +260,7 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
           output += event.assistantMessageEvent.delta;
       });
       try {
-        await promptWithNote(session, request, signal, attachments);
+        await promptWithNotes(session, request.input, signal, attachments.images, notes);
         return {
           correlation_id: request.correlation_id,
           output,
@@ -261,38 +273,39 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
     }
   }
 
+  /** An attachment note of the turn that brought the files, as a native custom message. */
+  function note(turn: string, content: string) {
+    return { customType: ATTACHMENT_NOTE, content, display: false, details: { turn } };
+  }
+
   /**
-   * Prompt with the turn's images, its attachment note travelling with the
+   * Prompt with the turn's images, its attachment notes travelling with the
    * message after any compaction. A command or input an extension handles
-   * consumes the prompt without a message; the note is then kept on its own,
-   * so the files remain known to later turns.
+   * consumes the prompt without a message; the notes are then kept on their
+   * own. Pi saves them once the conversation has a message; until then, core
+   * offers the files again with later turns.
    */
-  async function promptWithNote(
+  async function promptWithNotes(
     session: AgentSession,
-    request: TurnRequest,
+    input: string,
     signal: AbortSignal,
-    attachments: PreparedAttachments,
+    images: ImageContent[],
+    notes: readonly ReturnType<typeof note>[],
   ): Promise<void> {
-    const note =
-      attachments.note === undefined
-        ? undefined
-        : {
-            customType: ATTACHMENT_NOTE,
-            content: attachments.note,
-            display: false,
-            details: { turn: request.correlation_id },
-          };
-    if (note !== undefined) await session.sendCustomMessage(note, { deliverAs: "nextTurn" });
+    for (const pending of notes)
+      await session.sendCustomMessage(pending, { deliverAs: "nextTurn" });
     try {
-      await promptSession(session, request.input, signal, attachments.images);
+      await promptSession(session, input, signal, images);
     } finally {
-      if (note !== undefined && !signal.aborted && !noted(session, request.correlation_id))
-        await session.sendCustomMessage(note);
+      if (!signal.aborted)
+        for (const pending of notes)
+          if (!noted(session.sessionManager, pending.details.turn))
+            await session.sendCustomMessage(pending);
     }
   }
 
-  function noted(session: AgentSession, turn: string): boolean {
-    return session.sessionManager
+  function noted(manager: SessionManager, turn: string): boolean {
+    return manager
       .getBranch()
       .some(
         (entry) =>

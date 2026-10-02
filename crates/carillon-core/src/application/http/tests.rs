@@ -1486,7 +1486,7 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
         "malformed",
         "mismatch",
     ] {
-        let mut request = state.core.runtime_request(&turn);
+        let mut request = state.core.runtime_request(&turn, Vec::new());
         request.input = input.to_owned();
         let outcome = call_runtime(&state.client, &runtime, "unused", request).await;
         assert!(
@@ -1495,7 +1495,7 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
         );
     }
     // An explanation is not proof that no model work ran: it is not `Retry`.
-    let mut request = state.core.runtime_request(&turn);
+    let mut request = state.core.runtime_request(&turn, Vec::new());
     request.input = "explained".to_owned();
     let outcome = call_runtime(&state.client, &runtime, "unused", request).await;
     assert!(
@@ -1506,7 +1506,7 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
         &state.client,
         &runtime,
         "unused",
-        state.core.runtime_request(&turn),
+        state.core.runtime_request(&turn, Vec::new()),
     )
     .await
     .map_err(|failure| match failure {
@@ -1531,7 +1531,7 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
             &state.client,
             &runtime,
             "unused",
-            state.core.runtime_request(&turn)
+            state.core.runtime_request(&turn, Vec::new())
         )
         .await,
         Err(TurnFailure::Retry(_))

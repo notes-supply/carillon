@@ -210,6 +210,18 @@ pub struct RuntimeTurnRequest {
     /// This turn's captured files, in message order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<TurnAttachment>,
+    /// Files of earlier turns in this conversation since its last answered
+    /// one, oldest first. Those turns may have ended before the runtime's
+    /// conversation recorded them; the runtime makes sure it knows them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unanswered: Vec<UnansweredTurn>,
+}
+
+/// An earlier turn's captured files, offered again to a later turn.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct UnansweredTurn {
+    pub correlation_id: String,
+    pub attachments: Vec<TurnAttachment>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

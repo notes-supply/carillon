@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deflateSync } from "node:zlib";
 import { afterEach, expect, it } from "vitest";
-import type { TurnAttachment } from "@carillon/protocol";
+import type { RuntimeTurnRequest, TurnAttachment } from "@carillon/protocol";
 import { createPiRuntime, type RuntimeOperations } from "@carillon/runtime-pi";
 import { conversationDirectory } from "./namespace.ts";
 import { DEFAULT_INLINE_IMAGES, prepareAttachments } from "./attachments.ts";
@@ -245,7 +245,7 @@ function system(sent: Sent): string {
     .join("\n");
 }
 
-async function execute(runtime: RuntimeOperations, request: ReturnType<typeof turn>) {
+async function execute(runtime: RuntimeOperations, request: RuntimeTurnRequest) {
   return (await runtime.executeTurn(request)).output;
 }
 
@@ -369,11 +369,8 @@ it("leaves a corrupt image to Pi's omission hint and keeps it a file", async () 
   expect(notes(sent[0]).join("\n")).toContain('name: "broken.png"');
 });
 
-it("keeps slash commands and input handlers native when files are attached", async () => {
-  const { root, resources, runtime, sent, workspace } = await setup(
-    ["text", "image"],
-    ["started", "described"],
-  );
+/** An extension recording the input and `/note` commands Pi hands it; returns what it saw. */
+async function observe(resources: string, workspace: string) {
   await mkdir(join(resources, "extensions"));
   const record = join(workspace, "observed.json");
   await writeFile(
@@ -390,21 +387,34 @@ export default function observer(pi) {
 }
 `,
   );
+  return async () =>
+    (await readFile(record, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as unknown);
+}
+
+it("keeps slash commands and input handlers native when files are attached", async () => {
+  const { root, resources, runtime, sent, workspace } = await setup(
+    ["text", "image"],
+    ["started", "described"],
+  );
+  const observed = await observe(resources, workspace);
   const store = join(root, "attachments");
   const attachments = await capture(store, [
     { name: "a.png", bytes: png(8, 8) },
     { name: "b.png", bytes: png(9, 9) },
   ]);
-  // An established conversation: Pi persists a new session from its first answer.
+  // An established conversation: Pi saves the command's note at once.
   await execute(runtime, turn(resources, store, "hello", [], "start"));
   await execute(runtime, turn(resources, store, "/note hello there", attachments, "command"));
   expect(sent).toHaveLength(1);
-  await execute(runtime, turn(resources, store, "describe", attachments, "prompt"));
-  const observed = (await readFile(record, "utf8"))
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line) as unknown);
-  expect(observed).toEqual([
+  // Core offers the unanswered command's files again; they are not noted twice.
+  await execute(runtime, {
+    ...turn(resources, store, "describe", attachments, "prompt"),
+    unanswered: [{ correlation_id: "command", attachments }],
+  });
+  expect(await observed()).toEqual([
     { input: "hello", images: 0 },
     { command: "hello there" },
     { input: "describe", images: 2 },
@@ -412,6 +422,46 @@ export default function observer(pi) {
   expect(images(prompt(sent[1])?.content)).toHaveLength(2);
   // The files sent with the command are recorded too.
   expect(notes(sent[1])).toHaveLength(2);
+});
+
+it("keeps files sent with a command that opens a conversation", async () => {
+  const { root, resources, runtime, sent, state, workspace } = await setup(
+    ["text", "image"],
+    ["described", "recalled"],
+  );
+  const observed = await observe(resources, workspace);
+  const store = join(root, "attachments");
+  const attachments = await capture(store, [
+    { name: "a.png", bytes: png(8, 8) },
+    { name: "b.png", bytes: png(9, 9) },
+  ]);
+  // The conversation's first message is a command: Pi saves nothing yet.
+  expect(
+    await execute(runtime, turn(resources, store, "/note hello there", attachments, "command")),
+  ).toBe("");
+  expect(sent).toHaveLength(0);
+  const directory = conversationDirectory(join(state, "sessions"), turn(resources, store, ""));
+  expect(await readdir(directory).catch(() => [])).toEqual([]);
+  // That turn got no answer, so core offers its files with the next one.
+  await execute(runtime, {
+    ...turn(resources, store, "describe", attachments, "prompt"),
+    unanswered: [{ correlation_id: "command", attachments }],
+  });
+  expect(await observed()).toEqual([{ command: "hello there" }, { input: "describe", images: 2 }]);
+  expect(images(prompt(sent[0])?.content)).toHaveLength(2);
+  const [earlier = "", own = ""] = notes(sent[0]);
+  expect(notes(sent[0])).toHaveLength(2);
+  expect(earlier).toContain("an earlier message that did not reach you");
+  expect(earlier).toMatch(/^1\. path: \S+; name: "a\.png"; size: \S+ bytes; file$/mu);
+  expect(earlier).not.toContain("inline");
+  expect(own).toContain("sent inline as an image");
+  // Pi saved both with the message: a later turn has them from history.
+  await execute(runtime, turn(resources, store, "What came with the command?", [], "later"));
+  expect(notes(sent[1])).toEqual(notes(sent[0]));
+  expect(system(sent[1] ?? { messages: [] })).toContain(`kept in ${store}.`);
+  const [file] = await readdir(directory);
+  const history = await readFile(join(directory, file ?? ""), "utf8");
+  expect(history).toContain('"details":{"turn":"command"}');
 });
 
 it("applies the inline policy's count and byte limits and leaves other files alone", async () => {

@@ -9,7 +9,7 @@ use std::{
 use anyhow::bail;
 
 use carillon_installation::config::AttachmentLimits;
-use carillon_protocol::model::{StagedAttachments, StagedFile, TurnAttachment};
+use carillon_protocol::model::{StagedAttachments, StagedFile, TurnAttachment, UnansweredTurn};
 
 use super::*;
 
@@ -563,6 +563,128 @@ async fn an_altered_capture_interrupts_its_turn_without_running_it() -> Result<(
         notice.content.contains("changed or removed after"),
         "{}",
         notice.content
+    );
+    Ok(())
+}
+
+/// Run the next turn, answering with `output`, and return the earlier files
+/// it was offered. An empty answer ends the turn unanswered, as a command
+/// that consumed its message does.
+async fn offered(state: &AppState, output: &str) -> Result<Vec<UnansweredTurn>> {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let record = seen.clone();
+    let output = output.to_owned();
+    run_next_turn(state, "test-runtime", async move |_, _, request| {
+        record
+            .lock()
+            .map_err(|_| TurnFailure::Uncertain(anyhow!("poisoned")))?
+            .clone_from(&request.unanswered);
+        Ok(RuntimeTurnResponse {
+            correlation_id: request.correlation_id,
+            output,
+        })
+    })
+    .await?;
+    let offered = seen.lock().map_err(|_| anyhow!("poisoned"))?.clone();
+    Ok(offered)
+}
+
+#[tokio::test]
+async fn files_of_unanswered_turns_are_offered_again_until_a_turn_is_answered() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    let staged = stage(
+        &state,
+        "command",
+        &[("a.txt", b"first"), ("b.txt", b"second")],
+    )?;
+    let command = submit(&state, event("command", "/note", staged))
+        .await
+        .map_err(|error| anyhow!(error.message))?;
+    assert!(offered(&state, "").await?.is_empty());
+    // Another conversation's unanswered files stay with it.
+    let mut elsewhere = event(
+        "elsewhere",
+        "/note",
+        stage(&state, "elsewhere", &[("c.txt", b"other")])?,
+    );
+    "other".clone_into(&mut elsewhere.audience_id);
+    submit(&state, elsewhere)
+        .await
+        .map_err(|error| anyhow!(error.message))?;
+    assert!(offered(&state, "").await?.is_empty());
+    accept(&state, "describe", "files").await?;
+    let again = offered(&state, "the files say first and second").await?;
+    let accepted = state
+        .core
+        .inspect_turn(&command.turn_id)?
+        .context("turn")?
+        .attachments;
+    assert_eq!(
+        again,
+        vec![UnansweredTurn {
+            correlation_id: command.turn_id,
+            attachments: accepted,
+        }]
+    );
+    // Once a turn of the conversation is answered, they are not offered again.
+    accept(&state, "later", "files").await?;
+    assert!(offered(&state, "another answer").await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn unanswered_files_fit_one_event_and_leave_out_altered_files() -> Result<()> {
+    let directory = tempdir()?;
+    let mut state = installation(directory.path())?;
+    with_limits(
+        &mut state,
+        AttachmentLimits {
+            max_files: 2,
+            free_space_mib: 0,
+            ..AttachmentLimits::default()
+        },
+    )?;
+    let older = stage(&state, "older", &[("1", b"1"), ("2", b"2")])?;
+    submit(&state, event("older", "", older))
+        .await
+        .map_err(|error| anyhow!(error.message))?;
+    offered(&state, "").await?;
+    let newer = stage(&state, "newer", &[("3", b"3"), ("4", b"4")])?;
+    let newer = submit(&state, event("newer", "", newer))
+        .await
+        .map_err(|error| anyhow!(error.message))?;
+    offered(&state, "").await?;
+    let accepted = state
+        .core
+        .inspect_turn(&newer.turn_id)?
+        .context("turn")?
+        .attachments;
+    let altered = state
+        .config
+        .value
+        .data_dir
+        .join("attachments")
+        .join(&accepted[1].path);
+    fs::set_permissions(&altered, fs::Permissions::from_mode(0o640))?;
+    fs::write(&altered, b"5")?;
+    let ask = accept(&state, "ask", "files").await?;
+    // Only the newest turn fits one event's two files, without its altered
+    // file; the asking turn itself still runs.
+    assert_eq!(
+        offered(&state, "an answer").await?,
+        vec![UnansweredTurn {
+            correlation_id: newer.turn_id,
+            attachments: vec![accepted[0].clone()],
+        }]
+    );
+    assert_eq!(
+        state
+            .core
+            .inspect_turn(&ask.turn_id)?
+            .context("turn")?
+            .state,
+        TurnState::Completed
     );
     Ok(())
 }

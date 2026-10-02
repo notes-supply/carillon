@@ -8,6 +8,6 @@ The shared model vocabulary owns availability, effective selections, inheritance
 
 [`fixtures/activity.json`](fixtures/activity.json) holds valid and invalid running-turn activity snapshots, which runtimes produce and interfaces render; both languages check it the same way.
 
-[`fixtures/turns.json`](fixtures/turns.json) holds core's runtime turn requests, with and without attachments. Rust round-trips the canonical requests core sends; the runtime's `RuntimeTurnRequestSchema` accepts them and refuses the invalid ones, such as attachment paths that are not a capture and ordinal.
+[`fixtures/turns.json`](fixtures/turns.json) holds core's runtime turn requests, with and without attachments, including files of earlier unanswered turns offered again. Rust round-trips the canonical requests core sends; the runtime's `RuntimeTurnRequestSchema` accepts them and refuses the invalid ones, such as attachment paths that are not a capture and ordinal.
 
 Installation configuration and durable filesystem utilities belong to `carillon-installation`, not the wire crate. A command module can depend on the wire crate without pulling host filesystem or credential discovery into Wasm.

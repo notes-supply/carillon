@@ -110,6 +110,13 @@ export const TurnAttachmentSchema = Type.Object({
 });
 export type TurnAttachment = Static<typeof TurnAttachmentSchema>;
 
+/** An earlier turn's captured files, offered again to a later turn. */
+export const UnansweredTurnSchema = Type.Object({
+  correlation_id: Type.String({ minLength: 1 }),
+  attachments: Type.Array(TurnAttachmentSchema, { minItems: 1, maxItems: 100 }),
+});
+export type UnansweredTurn = Static<typeof UnansweredTurnSchema>;
+
 /** Core's request to run one claimed turn. */
 export const RuntimeTurnRequestSchema = Type.Object({
   correlation_id: Type.String(),
@@ -125,5 +132,10 @@ export const RuntimeTurnRequestSchema = Type.Object({
   attachment_root: Type.String({ minLength: 1 }),
   /** This turn's captured files, in message order. */
   attachments: Type.Optional(Type.Array(TurnAttachmentSchema, { maxItems: 100 })),
+  /**
+   * Files of earlier turns in this conversation since its last answered one,
+   * oldest first, which the runtime's conversation may not have recorded.
+   */
+  unanswered: Type.Optional(Type.Array(UnansweredTurnSchema, { maxItems: 100 })),
 });
 export type RuntimeTurnRequest = Static<typeof RuntimeTurnRequestSchema>;

@@ -10,7 +10,7 @@ use carillon_installation::config::AttachmentLimits;
 use carillon_protocol::model::{
     ActiveTurn, Delivery, DeliveryAck, DeliveryReconciliation, EventReceipt, EventStatus,
     ExternalEvent, ModelQuery, RuntimeTurnRequest, RuntimeTurnResponse, SelectedProvider,
-    StateCounts, TurnInspection, TurnSummary,
+    StateCounts, TurnInspection, TurnSummary, UnansweredTurn,
 };
 use std::{path::PathBuf, sync::Arc};
 use tracing::warn;
@@ -291,8 +291,9 @@ impl Core {
             warn!(turn_id = %turn.turn_id, error = %message, "captured attachment is not usable; turn not run");
             return Ok(WorkerStep::Advanced);
         }
+        let unanswered = self.unanswered(&turn).await?;
         let outcome = async {
-            let request = self.runtime_request(&turn);
+            let request = self.runtime_request(&turn, unanswered);
             let correlation_id = request.correlation_id.clone();
             let response = submit(request).await?;
             validate_response(&correlation_id, &response)?;
@@ -415,7 +416,11 @@ impl Core {
         self.database.delivery_counts()
     }
 
-    pub(crate) fn runtime_request(&self, turn: &ClaimedTurn) -> RuntimeTurnRequest {
+    pub(crate) fn runtime_request(
+        &self,
+        turn: &ClaimedTurn,
+        unanswered: Vec<UnansweredTurn>,
+    ) -> RuntimeTurnRequest {
         RuntimeTurnRequest {
             correlation_id: turn.turn_id.clone(),
             interface_id: turn.interface_id.clone(),
@@ -434,7 +439,48 @@ impl Core {
                 .iter()
                 .map(attachments::CapturedFile::wire)
                 .collect(),
+            unanswered,
         }
+    }
+
+    /// Files sent earlier in the turn's conversation that its runtime may
+    /// never have recorded, because their turns got no answer: those since
+    /// the conversation's last completed turn, at most one event's worth,
+    /// and only files that are still the ones accepted.
+    async fn unanswered(&self, turn: &ClaimedTurn) -> Result<Vec<UnansweredTurn>> {
+        let limits = &self.options.attachments;
+        let earlier =
+            self.database
+                .unanswered_files(turn, limits.max_files, limits.max_event_bytes())?;
+        if earlier.is_empty() {
+            return Ok(Vec::new());
+        }
+        let data = self.options.data_directory.clone();
+        tokio::task::spawn_blocking(move || {
+            earlier
+                .into_iter()
+                .filter_map(|earlier| {
+                    let attachments = earlier
+                        .files
+                        .iter()
+                        .filter(|file| match attachments::check(&data, file) {
+                            Ok(()) => true,
+                            Err(unusable) => {
+                                warn!(turn_id = %earlier.turn_id, error = %unusable, "an earlier attachment is not offered again");
+                                false
+                            }
+                        })
+                        .map(attachments::CapturedFile::wire)
+                        .collect::<Vec<_>>();
+                    (!attachments.is_empty()).then_some(UnansweredTurn {
+                        correlation_id: earlier.turn_id,
+                        attachments,
+                    })
+                })
+                .collect()
+        })
+        .await
+        .context("check earlier attachments")
     }
 
     /// Re-read a claimed turn's captured files before any runtime sees them,

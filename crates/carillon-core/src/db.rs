@@ -70,6 +70,13 @@ pub struct ClaimedTurn {
     pub attachments: Vec<CapturedFile>,
 }
 
+/// One earlier turn's captured files.
+#[derive(Clone, Debug)]
+pub(crate) struct TurnFiles {
+    pub(crate) turn_id: String,
+    pub(crate) files: Vec<CapturedFile>,
+}
+
 /// Lifecycle states are stored by their wire names. The wire types live in
 /// the protocol crate, so they are read through this wrapper rather than a
 /// foreign `FromSql` implementation.
@@ -444,6 +451,53 @@ impl Database {
         turn.attachments = captured_files(&transaction, Some(&turn.turn_id))?;
         transaction.commit()?;
         Ok(Some(turn))
+    }
+
+    /// The captured files of `turn`'s conversation accepted after its last
+    /// completed turn and before `turn`, oldest first. Taken newest first
+    /// while together they hold at most `files` files and `bytes` bytes.
+    pub(crate) fn unanswered_files(
+        &self,
+        turn: &ClaimedTurn,
+        files: u32,
+        bytes: u64,
+    ) -> Result<Vec<TurnFiles>> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT earlier.id FROM turns current JOIN turns earlier
+               ON earlier.interface_id = current.interface_id
+              AND earlier.agent_id = current.agent_id
+              AND earlier.audience_id = current.audience_id
+              AND earlier.acceptance_sequence < current.acceptance_sequence
+             WHERE current.id = ?1
+               AND earlier.acceptance_sequence > COALESCE((
+                 SELECT MAX(answered.acceptance_sequence) FROM turns answered
+                 WHERE answered.interface_id = current.interface_id
+                   AND answered.agent_id = current.agent_id
+                   AND answered.audience_id = current.audience_id
+                   AND answered.acceptance_sequence < current.acceptance_sequence
+                   AND answered.state = 'completed'
+               ), 0)
+               AND EXISTS (SELECT 1 FROM turn_attachments WHERE turn_id = earlier.id)
+             ORDER BY earlier.acceptance_sequence DESC",
+        )?;
+        let mut rows = statement.query([&turn.turn_id])?;
+        let (mut unanswered, mut count, mut total) = (Vec::new(), 0_u64, 0_u64);
+        while let Some(row) = rows.next()? {
+            let turn_id: String = row.get(0)?;
+            let captured = captured_files(&connection, Some(&turn_id))?;
+            count += captured.len() as u64;
+            total += captured.iter().map(|file| file.size).sum::<u64>();
+            if count > u64::from(files) || total > bytes {
+                break;
+            }
+            unanswered.push(TurnFiles {
+                turn_id,
+                files: captured,
+            });
+        }
+        unanswered.reverse();
+        Ok(unanswered)
     }
 
     /// Commits a successful runtime response: completed output and the
