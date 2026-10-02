@@ -390,8 +390,9 @@ pub(crate) enum Unusable {
     Unreadable(#[from] anyhow::Error),
 }
 
-/// Check a captured file for dispatch, telling a file that is no longer the
-/// accepted one from one that could not be read.
+/// Check that a referenced file is still the regular file core captured,
+/// with the same length and digest, telling a file that is no longer the
+/// accepted one from one that could not be read. Blocking: reads it whole.
 pub(crate) fn check(data_directory: &Path, reference: &CapturedFile) -> Result<(), Unusable> {
     let path =
         file(data_directory, reference).map_err(|error| Unusable::Altered(error.to_string()))?;
@@ -435,22 +436,13 @@ fn digest(path: &Path) -> io::Result<String> {
     Ok(hex::encode(digest.finalize()))
 }
 
-/// Check that a referenced file is the regular file core captured: same
-/// length and digest. Blocking: reads the whole file.
-pub(crate) fn verify(data_directory: &Path, reference: &CapturedFile) -> Result<()> {
-    check(data_directory, reference).map_err(|unusable| match unusable {
-        Unusable::Altered(message) => anyhow::anyhow!(message),
-        Unusable::Unreadable(error) => error,
-    })
-}
-
 /// Validate a stopped installation's capture store against every committed
 /// reference before it is archived or published by restore: each referenced
 /// file present and intact, and nothing else in the store.
 pub(crate) fn validate_store(data_directory: &Path, references: &[CapturedFile]) -> Result<()> {
     let mut expected: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
     for reference in references {
-        verify(data_directory, reference)?;
+        check(data_directory, reference)?;
         expected
             .entry(&reference.capture)
             .or_default()

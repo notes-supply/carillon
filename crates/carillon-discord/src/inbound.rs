@@ -11,8 +11,8 @@ use crate::{
     client::CoreClient,
     config::DiscordConfig,
     conversations::{
-        IncomingMessage, MessagePlan, Participation, ResolvedMessage, admit_message,
-        discord_parent_channel, prepare_conversation,
+        IncomingMessage, MessagePlan, Participation, admit_message, discord_parent_channel,
+        prepare_conversation,
     },
     delivery::{
         Feedback, clear_processing_feedback, explain, processing_feedback, terminal_feedback,
@@ -163,7 +163,12 @@ pub(crate) async fn prepare(ingress: &Ingress, mut inbound: QueuedMessage) {
 async fn prepare_text(ingress: &Ingress, plan: MessagePlan) {
     let (discord, http) = (&ingress.config, &*ingress.http);
     let source = format!("{}:{}", plan.channel_id, plan.message_id);
-    let resolved = match open_conversation(ingress, &plan, None).await {
+    let opened = ingress
+        .retry(None, "prepare a Discord conversation", || {
+            prepare_conversation(&ingress.participation, &ingress.http, plan.clone())
+        })
+        .await;
+    let resolved = match opened {
         Some(Ok(resolved)) => resolved,
         Some(Err(failure)) => {
             warn!(error = %failure, "Discord conversation cannot be prepared");
@@ -255,7 +260,12 @@ async fn prepare_files(ingress: &Ingress, plan: MessagePlan) {
             return;
         }
     };
-    let mut resolved = match open_conversation(ingress, &plan, Some(deadline)).await {
+    let opened = ingress
+        .retry(Some(deadline), "prepare a Discord conversation", || {
+            prepare_conversation(&ingress.participation, &ingress.http, plan.clone())
+        })
+        .await;
+    let mut resolved = match opened {
         Some(Ok(resolved)) => resolved,
         unopened => {
             typing.abort();
@@ -281,20 +291,6 @@ async fn prepare_files(ingress: &Ingress, plan: MessagePlan) {
     if let Err(refusal) = settled {
         refuse(refusal).await;
     }
-}
-
-/// Create or adopt the message's conversation, retrying what may succeed;
-/// `None` when the provider stopped or `deadline` passed first.
-async fn open_conversation(
-    ingress: &Ingress,
-    plan: &MessagePlan,
-    deadline: Option<Instant>,
-) -> Option<Result<ResolvedMessage>> {
-    ingress
-        .retry(deadline, "prepare a Discord conversation", || {
-            prepare_conversation(&ingress.participation, &ingress.http, plan.clone())
-        })
-        .await
 }
 
 async fn keep_typing(http: Arc<DiscordHttp>, config: DiscordConfig, channel: String) {

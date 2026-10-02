@@ -9,9 +9,7 @@ use std::{
 use anyhow::{Context as _, Result};
 use carillon_protocol::model::{StagedAttachments, StagedFile};
 
-use super::{
-    Cancel, CaptureError, CapturedFile, capture, reconcile, store, validate_store, verify,
-};
+use super::{Cancel, CaptureError, CapturedFile, capture, check, reconcile, store, validate_store};
 
 fn staging(data: &Path) -> PathBuf {
     data.join("components/interface/incoming")
@@ -103,7 +101,7 @@ fn captures_are_exact_read_only_copies_independent_of_staging() -> Result<()> {
     );
     fs::write(staging(data.path()).join("batch-1/0"), b"changed later")?;
     for file in captured(&capture, &staged) {
-        verify(data.path(), &file)?;
+        check(data.path(), &file)?;
     }
     Ok(())
 }
@@ -259,13 +257,13 @@ fn verification_and_store_validation_detect_altered_missing_and_unexpected_files
     // Same length, different bytes: only the digest notices.
     fs::set_permissions(&first, fs::Permissions::from_mode(0o640))?;
     fs::write(&first, b"altered!")?;
-    assert!(verify(data.path(), &files[0]).is_err());
+    assert!(check(data.path(), &files[0]).is_err());
     assert!(validate_store(data.path(), &files).is_err());
     fs::write(&first, b"original")?;
-    verify(data.path(), &files[0])?;
+    check(data.path(), &files[0])?;
 
     fs::remove_file(&first)?;
-    assert!(verify(data.path(), &files[0]).is_err());
+    assert!(check(data.path(), &files[0]).is_err());
     fs::write(&first, b"original")?;
 
     let extra = store(data.path()).join(&capture.id).join("2");
@@ -281,6 +279,6 @@ fn verification_and_store_validation_detect_altered_missing_and_unexpected_files
     // A stored identity is a capture name, never a path.
     let mut escaping = files[0].clone();
     "../outside".clone_into(&mut escaping.capture);
-    assert!(verify(data.path(), &escaping).is_err());
+    assert!(check(data.path(), &escaping).is_err());
     Ok(())
 }
