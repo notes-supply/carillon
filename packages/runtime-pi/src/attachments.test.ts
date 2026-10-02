@@ -92,6 +92,7 @@ async function setup(
   input: ("text" | "image")[],
   replies: Reply[],
   policy = DEFAULT_INLINE_IMAGES,
+  others: { id: string; input: ("text" | "image")[] }[] = [],
 ) {
   const root = await mkdtemp(join(tmpdir(), "carillon-attachments-"));
   const state = join(root, "pi");
@@ -111,7 +112,7 @@ async function setup(
           baseUrl: fixture.endpoint,
           api: "openai-completions",
           apiKey: "test-only",
-          models: [{ id: "vision", input }],
+          models: [{ id: "vision", input }, ...others],
         },
       },
     }),
@@ -446,4 +447,34 @@ it("applies the inline policy's count and byte limits and leaves other files alo
   expect(none.note?.split("\n").filter((line) => line.endsWith("; file"))).toHaveLength(4);
   expect(none.note).toContain("not passed as an inline image: BMP images are not passed inline");
   expect(await prepareAttachments(root, [], DEFAULT_INLINE_IMAGES)).toEqual({ images: [] });
+});
+
+it("lets an extension choose the model before Pi prepares the images", async () => {
+  const { root, resources, runtime, sent } = await setup(
+    ["text", "image"],
+    ["chosen"],
+    DEFAULT_INLINE_IMAGES,
+    [{ id: "reader", input: ["text"] }],
+  );
+  await mkdir(join(resources, "extensions"));
+  await writeFile(
+    join(resources, "extensions", "router.ts"),
+    `export default function router(pi) {
+  pi.on("before_agent_start", async (_event, context) => {
+    const reader = context.modelRegistry.find("fixture", "reader");
+    if (reader !== undefined) await pi.setModel(reader);
+  });
+}
+`,
+  );
+  const store = join(root, "attachments");
+  const attachments = await capture(store, [{ name: "photo.png", bytes: png(16, 16) }]);
+  expect(await execute(runtime, turn(resources, store, "Route this.", attachments))).toBe("chosen");
+  // Carillon passed the image; the extension's text-only model received
+  // Pi's own placeholder for it.
+  const [request] = sent;
+  expect(JSON.stringify(request)).toContain('"model":"reader"');
+  const [message] = users(request ?? { messages: [] });
+  expect(images(message?.content)).toEqual([]);
+  expect(text(message?.content)).toContain("image omitted: model does not support images");
 });
