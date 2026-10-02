@@ -296,12 +296,16 @@ impl Core {
         let earlier =
             self.database
                 .unnoted_files(&turn, limits.max_files, limits.max_event_bytes())?;
+        let offered = self.offer(earlier).await?;
         // The files this turn carries to the runtime: its own and the earlier
-        // ones offered with it.
+        // turns offered with it, even when none of a turn's files was left.
         let carried = std::iter::once(turn.turn_id.clone())
-            .chain(earlier.iter().map(|earlier| earlier.turn_id.clone()))
+            .chain(offered.iter().map(|earlier| earlier.correlation_id.clone()))
             .collect::<Vec<_>>();
-        let unanswered = self.offer(earlier).await?;
+        let unanswered = offered
+            .into_iter()
+            .filter(|earlier| !earlier.attachments.is_empty())
+            .collect();
         let outcome = async {
             let request = self.runtime_request(&turn, unanswered);
             let correlation_id = request.correlation_id.clone();
@@ -461,9 +465,10 @@ impl Core {
         }
     }
 
-    /// The earlier files offered to a turn, without any that are no longer
-    /// the files accepted: those are logged and, once the turn is answered,
-    /// not offered again.
+    /// The earlier turns offered to a turn, each whole: Pi notes a turn's
+    /// files once. A file that is no longer the one accepted is left out for
+    /// good; a turn with a file that cannot be read now is not offered, and
+    /// is offered again later.
     async fn offer(&self, earlier: Vec<TurnFiles>) -> Result<Vec<UnansweredTurn>> {
         if earlier.is_empty() {
             return Ok(Vec::new());
@@ -473,19 +478,20 @@ impl Core {
             earlier
                 .into_iter()
                 .filter_map(|earlier| {
-                    let attachments = earlier
-                        .files
-                        .iter()
-                        .filter(|file| match attachments::check(&data, file) {
-                            Ok(()) => true,
-                            Err(unusable) => {
-                                warn!(turn_id = %earlier.turn_id, error = %unusable, "an earlier attachment is not offered again");
-                                false
+                    let mut attachments = Vec::with_capacity(earlier.files.len());
+                    for file in &earlier.files {
+                        match attachments::check(&data, file) {
+                            Ok(()) => attachments.push(file.wire()),
+                            Err(Unusable::Altered(message)) => {
+                                warn!(turn_id = %earlier.turn_id, error = %message, "a changed earlier attachment is not offered again");
                             }
-                        })
-                        .map(attachments::CapturedFile::wire)
-                        .collect::<Vec<_>>();
-                    (!attachments.is_empty()).then_some(UnansweredTurn {
+                            Err(Unusable::Unreadable(error)) => {
+                                warn!(turn_id = %earlier.turn_id, error = %error, "an earlier message's files are offered later: one cannot be read now");
+                                return None;
+                            }
+                        }
+                    }
+                    Some(UnansweredTurn {
                         correlation_id: earlier.turn_id,
                         attachments,
                     })

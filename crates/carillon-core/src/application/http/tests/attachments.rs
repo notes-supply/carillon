@@ -790,6 +790,54 @@ async fn every_file_of_initial_commands_is_offered_until_an_answered_turn_carrie
 }
 
 #[tokio::test]
+async fn earlier_files_that_cannot_be_read_now_are_offered_whole_once_they_can() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    // Two commands open the conversation: one with a file, one with a pair.
+    let mut commands = Vec::new();
+    for (name, files) in [
+        ("alone", vec![("a", b"a".as_slice())]),
+        ("pair", vec![("b", b"b".as_slice()), ("c", b"c".as_slice())]),
+    ] {
+        let receipt = submit(&state, event(name, "/note", stage(&state, name, &files)?))
+            .await
+            .map_err(|error| anyhow!(error.message))?;
+        offered(&state, "").await?;
+        let attachments = state
+            .core
+            .inspect_turn(&receipt.turn_id)?
+            .context("turn")?
+            .attachments;
+        commands.push(UnansweredTurn {
+            correlation_id: receipt.turn_id,
+            attachments,
+        });
+    }
+    let root = state.config.value.data_dir.join("attachments");
+    let unreadable = [
+        root.join(&commands[0].attachments[0].path),
+        root.join(&commands[1].attachments[1].path),
+    ];
+    for file in &unreadable {
+        fs::set_permissions(file, fs::Permissions::from_mode(0o000))?;
+    }
+    // A turn with a file that cannot be read now is not offered, not even
+    // its readable sibling, and an answer does not retire it.
+    accept(&state, "ask-1", "files").await?;
+    let withheld = offered(&state, "an answer").await;
+    for file in &unreadable {
+        fs::set_permissions(file, fs::Permissions::from_mode(0o440))?;
+    }
+    assert!(withheld?.is_empty());
+    // Once readable, each is offered whole, in order, and then carried.
+    accept(&state, "ask-2", "files").await?;
+    assert_eq!(offered(&state, "an answer").await?, commands);
+    accept(&state, "ask-3", "files").await?;
+    assert!(offered(&state, "an answer").await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
 #[expect(
     clippy::await_holding_lock,
     reason = "the held lock is what stalls the blocking copy"

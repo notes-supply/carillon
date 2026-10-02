@@ -469,8 +469,15 @@ it("keeps files sent with commands that open a conversation", async () => {
   expect(first).not.toContain("inline");
   expect(second).toMatch(/^1\. path: \S+a2\/0; name: "report\.txt"; size: \S+ bytes; file$/mu);
   expect(own).toContain("sent inline as an image");
-  // Pi saved them with the message: a later turn has them from history.
-  await execute(runtime, turn(resources, store, "What came with the commands?", [], "later"));
+  // Pi saved them with the message: a later turn, after reopening, has them
+  // from history, and offering them again does not repeat them.
+  await execute(runtime, {
+    ...turn(resources, store, "What came with the commands?", [], "later"),
+    unanswered: [
+      { correlation_id: "command", attachments },
+      { correlation_id: "again", attachments: report },
+    ],
+  });
   expect(notes(sent[1])).toEqual(notes(sent[0]));
   expect(system(sent[1] ?? { messages: [] })).toContain(`kept in ${store}.`);
   const [file] = await readdir(directory);
