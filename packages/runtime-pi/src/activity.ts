@@ -231,7 +231,7 @@ function operationTarget(operation: unknown): string | undefined {
 }
 
 /** The first line of the model's public text, as a short headline. */
-function commentary(text: string): string | undefined {
+export function commentary(text: string): string | undefined {
   const line = text.split(/\r\n|\r|\n/u).find((candidate) => candidate.trim().length > 0);
   return line === undefined ? undefined : displayed(line, HEADLINE_LIMIT);
 }
@@ -246,7 +246,7 @@ function toolName(name: string): string {
 }
 
 /** Redacted, on one line and bounded; undefined when nothing remains. */
-function displayed(text: string, limit = DETAIL_LIMIT): string | undefined {
+export function displayed(text: string, limit = DETAIL_LIMIT): string | undefined {
   const line = singleLine(redactCredentials(text));
   return line.length === 0 ? undefined : bounded(line, limit);
 }

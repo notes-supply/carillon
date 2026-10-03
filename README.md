@@ -37,6 +37,10 @@ that owns the behavior you want to change:
   sessions, model selection and explicit shutdown.
   [Run a native session](packages/runtime-pi/examples/session.ts) without Discord
   or Carillon HTTP: `mise run example:pi -- …` (configured credentials required).
+- **[T3 runtime](packages/runtime-t3/README.md)** — `createT3Runtime`, the same
+  runtime boundary executed on a T3 Code server: derived thread and message
+  identities, read-back instead of re-execution, native interruption and
+  activity from T3's timeline. A text-only proof of concept.
 - **[Discord interface](crates/carillon-discord/README.md)** — admission,
   conversation mapping, native delivery and command hosting.
   [Render the model picker](crates/carillon-discord/examples/model_picker.rs)

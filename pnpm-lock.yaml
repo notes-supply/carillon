@@ -176,6 +176,28 @@ importers:
         specifier: 8.21.3
         version: 8.21.3
 
+  packages/runtime-t3:
+    dependencies:
+      '@carillon/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@carillon/runtime-pi':
+        specifier: workspace:*
+        version: link:../runtime-pi
+      smol-toml:
+        specifier: 1.6.0
+        version: 1.6.0
+      typebox:
+        specifier: 1.0.65
+        version: 1.0.65
+    devDependencies:
+      '@types/ws':
+        specifier: 8.18.2
+        version: 8.18.2
+      ws:
+        specifier: 8.21.3
+        version: 8.21.3
+
 packages:
 
   '@anthropic-ai/sdk@0.124.0':
@@ -790,6 +812,9 @@ packages:
 
   '@types/retry@0.12.0':
     resolution: {integrity: sha512-wWKOClTTiizcZhXnPY4wikVAwmdYHp8q6DmC+EJUzAMsycb7HB32Kh9RN4+0gExjmPmZSAQjgURXIGATPegAvA==}
+
+  '@types/ws@8.18.2':
+    resolution: {integrity: sha512-67MQl+fpWKVTT1NYdnmo3U4sc/xPo/zQBncVnI74qmQa0z/b+1g6iYqNmGCPbxO+zz2aklb08a0oHfegiVd0/w==}
 
   '@typescript-eslint/eslint-plugin@8.68.0':
     resolution: {integrity: sha512-WASHDpCm6qO5jj9g1a+8NiW5+GCkAyLReR56/4VruYmNgfUmqpxOfZ2Yfb8xGfJPWv5Qi6LSD8sXdces3vbp/Q==}
@@ -2267,6 +2292,10 @@ snapshots:
       '@types/retry': 0.12.0
 
   '@types/retry@0.12.0': {}
+
+  '@types/ws@8.18.2':
+    dependencies:
+      '@types/node': 26.4.0
 
   '@typescript-eslint/eslint-plugin@8.68.0(@typescript-eslint/parser@8.68.0(eslint@10.9.1(jiti@2.7.0))(typescript@6.0.3))(eslint@10.9.1(jiti@2.7.0))(typescript@6.0.3)':
     dependencies:

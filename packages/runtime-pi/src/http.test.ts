@@ -39,6 +39,7 @@ async function serve() {
     token: "test-only",
     providerId: "runtime-pi",
     provider: "deterministic-local-substitute",
+    features: [],
     workspace: "/unused",
   });
   server.listen(0, "127.0.0.1");

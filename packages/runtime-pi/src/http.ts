@@ -18,7 +18,9 @@ interface RuntimeServerOptions {
   readonly runtime: RuntimeOperations;
   readonly token: string;
   readonly providerId: string;
-  readonly provider: "pi" | "deterministic-local-substitute";
+  /** The engine behind this runtime, as `/health` names it. */
+  readonly provider: string;
+  readonly features: readonly string[];
   readonly workspace: string;
 }
 
@@ -47,7 +49,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
         role: "runtime",
         version: packageInfo.version,
         status: "ready",
-        features: ["native-continuations", "native-extensions", "skills"],
+        features: options.features,
         provider: options.provider,
       });
       return;
@@ -177,7 +179,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
 
   function unixIdentity(): { readonly uid: number; readonly groups: number[] } {
     if (process.getuid === undefined || process.getgroups === undefined)
-      throw new Error("Carillon Pi runtime requires Unix process identity APIs");
+      throw new Error("Carillon runtimes require Unix process identity APIs");
     return { uid: process.getuid(), groups: process.getgroups() };
   }
 }
