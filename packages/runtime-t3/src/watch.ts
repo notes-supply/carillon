@@ -11,7 +11,13 @@
  * Nothing here talks to the network.
  */
 import type { ActivityPhase, FinishedTool, RunningTool, TurnActivity } from "@carillon/protocol";
-import { commandHeader, commentary, describe, displayed } from "@carillon/runtime/activity";
+import {
+  commandHeader,
+  commentary,
+  describe,
+  displayed,
+  toolName,
+} from "@carillon/runtime/activity";
 import { bounded } from "@carillon/runtime/failure";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { Static, TSchema } from "typebox";
@@ -357,9 +363,24 @@ export function watchTurn(
     else pendingRequests.delete(request.id);
   }
 
+  /**
+   * The background work a run's provider thread lists. T3 sends the thread
+   * record before the run that names it and lists provider threads whole in
+   * a snapshot, so a run that names a thread this fold has not been given
+   * is a broken reference: its work is unknown, never an empty roster.
+   */
   function roster(run: Run | undefined): readonly BackgroundTask[] {
     if (run?.providerThreadId == null) return [];
-    return providerThreads.get(run.providerThreadId)?.pendingBackgroundTasks ?? [];
+    return listed(providerThreads.get(run.providerThreadId), run);
+  }
+
+  function listed(thread: ProviderThread | undefined, run: Run): readonly BackgroundTask[] {
+    if (thread === undefined)
+      throw new T3Failure(
+        "malformed",
+        `T3 named provider thread ${String(run.providerThreadId)} for run ${run.id} without sending its record`,
+      );
+    return thread.pendingBackgroundTasks ?? [];
   }
 
   /**
@@ -692,7 +713,11 @@ export function watchTurn(
     stale: () =>
       predecessor === undefined
         ? undefined
-        : { run: predecessor, listed: predecessorThread?.pendingBackgroundTasks ?? [] },
+        : {
+            run: predecessor,
+            listed:
+              predecessor.providerThreadId === null ? [] : listed(predecessorThread, predecessor),
+          },
     empty: () => !hasMessages,
     quiet,
     providerSession() {
@@ -783,7 +808,7 @@ export function watchTurn(
       for (const task of tasks) {
         if (!backgroundSince.has(task.taskId)) backgroundSince.set(task.taskId, now);
         runningTools.push({
-          tool: task.kind ?? "background_task",
+          tool: toolName(task.kind ?? "background_task"),
           ...withDetail(task.description === undefined ? undefined : displayed(task.description)),
           started_at: backgroundSince.get(task.taskId) ?? now,
         });

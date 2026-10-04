@@ -294,6 +294,9 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
           }
           throw abandoned(failure);
         }
+        // A rejected or unreadable answer after the turn's work may exist on
+        // T3 ends the turn, but the native run is not shown stopped by it.
+        if (reached() && failure instanceof T3Failure) throw abandoned(failure);
         throw unavailable(failure);
       } finally {
         connection.close();

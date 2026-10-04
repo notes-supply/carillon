@@ -1,3 +1,5 @@
+import { TurnActivitySchema } from "@carillon/protocol";
+import { Check } from "typebox/value";
 import { expect, it } from "vitest";
 import { watchTurn } from "./watch.ts";
 
@@ -522,18 +524,18 @@ it("retains no provider records before the turn's run exists and only its own af
   );
   // The ordinary pre-dispatch snapshot: ownership unknown, nothing of the history kept.
   expect(watch.retained()).toMatchObject({ runs: 0, providerThreads: 0, sessions: 0 });
-  // The turn's run starts and T3 re-sends its provider thread and session with it.
+  // The turn's run starts: T3 re-sends its provider thread just before the run, then its session.
   watch.apply(
-    event(2, "run.created", {
-      ...run("running", "message-current", 500),
-      providerThreadId: "thread-9",
-    }),
-  );
-  watch.apply(
-    event(3, "provider-thread.updated", {
+    event(2, "provider-thread.updated", {
       id: "thread-9",
       providerSessionId: "session-9",
       pendingBackgroundTasks: [{ taskId: "t", kind: "command" }],
+    }),
+  );
+  watch.apply(
+    event(3, "run.created", {
+      ...run("running", "message-current", 500),
+      providerThreadId: "thread-9",
     }),
   );
   watch.apply(event(4, "provider-session.updated", { id: "session-9", status: "running" }));
@@ -823,14 +825,15 @@ it("owns its provider thread and session through the serving event order, after 
 it("treats a session record it never saw as unknown, not as detached", () => {
   const watch = watchTurn("message-1", "/workspace");
   watch.apply(snapshot({ runs: [], providerThreads: [], providerSessions: [] }));
-  watch.apply(event(2, "run.created", run("running")));
+  // T3 sends the run's provider thread record before the run that names it.
   watch.apply(
-    event(3, "provider-thread.updated", {
+    event(2, "provider-thread.updated", {
       id: "provider-thread",
       providerSessionId: "never-seen",
       pendingBackgroundTasks: [{ taskId: "t", kind: "command" }],
     }),
   );
+  watch.apply(event(3, "run.created", run("running")));
   watch.apply(event(4, "run.updated", run("completed")));
   expect(watch.outcome()).toBeUndefined();
   expect(watch.quiet()).toBe(false);
@@ -1174,4 +1177,73 @@ it("keeps the thread's latest earlier run and its listed work until the turn's o
   watch.apply(event(6, "run.created", run("running", "message-9", 4)));
   expect(watch.stale()).toBeUndefined();
   expect(watch.run()?.id).toBe("run-4");
+});
+
+it("refuses a run that names a provider thread T3 never sent, instead of assuming no background work", () => {
+  // The turn's own run, completed, with its provider thread record missing from a snapshot.
+  const current = watchTurn("message-1", "/workspace");
+  expect(() =>
+    current.apply(
+      snapshot({ runs: [run("completed")], providerThreads: [], providerSessions: [] }),
+    ),
+  ).toThrow("T3 named provider thread provider-thread for run run-1 without sending its record");
+  // A run created without its record having arrived first is the same broken reference.
+  const created = watchTurn("message-1", "/workspace");
+  created.apply(snapshot({ runs: [], providerThreads: [], providerSessions: [] }));
+  expect(() => created.apply(event(2, "run.created", run("running")))).toThrow(
+    "T3 named provider thread provider-thread for run run-1 without sending its record",
+  );
+  // A terminal predecessor whose record is missing cannot be judged safe to pass before dispatch.
+  const successor = watchTurn("message-9", "/workspace");
+  successor.apply(
+    snapshot({ runs: [run("completed", "old", 1)], providerThreads: [], providerSessions: [] }),
+  );
+  expect(() => successor.stale()).toThrow(
+    "T3 named provider thread provider-thread for run run-1 without sending its record",
+  );
+  // A run T3 has not attached to a provider thread yet has nothing listed.
+  const unattached = watchTurn("message-9", "/workspace");
+  unattached.apply(
+    snapshot({
+      runs: [{ ...run("completed", "old", 1), providerThreadId: null }],
+      providerThreads: [],
+      providerSessions: [],
+    }),
+  );
+  expect(unattached.stale()).toEqual({
+    run: { ...run("completed", "old", 1), providerThreadId: null },
+    listed: [],
+  });
+});
+
+it("serves background task kinds through the shared tool-name normalization", () => {
+  const watch = watchTurn("message-1", "/workspace");
+  watch.apply(
+    snapshot({
+      runs: [run("running")],
+      providerThreads: [
+        {
+          id: "provider-thread",
+          providerSessionId: "session",
+          pendingBackgroundTasks: [
+            { taskId: "empty", kind: "" },
+            { taskId: "control", kind: "sub\u0000agent\n\tjob" },
+            { taskId: "long", kind: "k".repeat(100) },
+            { taskId: "plain", kind: "command", description: "sleep 300" },
+            { taskId: "unknown" },
+          ],
+        },
+      ],
+    }),
+  );
+  const activity = watch.activity();
+  expect(Check(TurnActivitySchema, activity)).toBe(true);
+  expect(activity.running.map((tool) => tool.tool)).toEqual([
+    "tool",
+    "sub agent job",
+    `${"k".repeat(63)}…`,
+    "command",
+    "background_task",
+  ]);
+  expect(activity.running[3]).toMatchObject({ detail: "sleep 300" });
 });

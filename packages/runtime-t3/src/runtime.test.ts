@@ -457,14 +457,23 @@ it("describes the running turn to its own interface, bounded and redacted, from 
   expect(activity()).toBeUndefined();
 });
 
-it("fails a turn on a known timeline kind that lacks the fields it consumes", async () => {
+it("fails a turn on a known timeline kind that lacks the fields it consumes, naming the run that may still be running", async () => {
   const result = runtime.executeTurn(turn("turn-1", "work"));
   const run = await started("turn-1");
   fake.tool(threadId, run.id, { type: "user_input_request", requestId: "request-x" });
-  await expect(result).rejects.toMatchObject({
-    status: 502,
-    message: "T3 answered in a form this runtime does not understand.",
-  });
+  // The answer cannot be read, but the run T3 already started is not shown stopped by that.
+  await expect(result).rejects.toThrow(
+    new RegExp(
+      `^Lost contact with T3 while the turn ran \\(T3 sent a .* this runtime does not understand\\); native run ${run.id} may still be running\\.$`,
+      "u",
+    ),
+  );
+  await expect(result).rejects.toMatchObject({ status: 502 });
+  expect(runOf("turn-1")?.status).toBe("running");
+  // The exit left no confirmed stop: the conversation is fenced.
+  await expect((await backgroundTurn("turn-2")).result).rejects.toThrow(
+    /was not confirmed stopped/u,
+  );
 });
 
 it("fails closed on an incompatible, unreachable or refusing server, and on answers it does not understand", async () => {
