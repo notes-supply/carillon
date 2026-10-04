@@ -122,7 +122,21 @@ export function isActive(run: Run): boolean {
   return ACTIVE.has(run.status);
 }
 
-export function watchTurn(messageId: string, workspace: string): TurnWatch {
+export interface WatchOptions {
+  /**
+   * An earlier turn on this thread ended with a stop T3 did not confirm.
+   * Its process may still deliver a wake, and T3 labels every wake alike, so
+   * no follow-up of this turn can be trusted as its own: the turn ends
+   * unresolved as soon as one is adopted. The runtime owns this fact.
+   */
+  readonly uncertainPredecessor?: boolean;
+}
+
+export function watchTurn(
+  messageId: string,
+  workspace: string,
+  options: WatchOptions = {},
+): TurnWatch {
   let seen = false;
   let lastSequence: number | undefined;
   /** The turn's run as last seen: its identity, kept through snapshots and reconnections. */
@@ -162,6 +176,14 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
    */
   let wakeOwedAfter: number | undefined;
   /**
+   * Later runs first seen while this turn's run was still active. This
+   * turn's own wake can only start after its run completed with work still
+   * listed, so such a run is another process's, for good.
+   */
+  const foreign = new Set<string>();
+  /** A completed run followed by a run no fact of this turn accounts for. */
+  let stray: string | undefined;
+  /**
    * The ordinal of a turn run whose roster listed work the last time work
    * was seen. Cleared when the roster empties while that run still executes
    * (the result reached the running turn). Left set across a resumed
@@ -190,31 +212,38 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
     retrying = new Set();
     providerThreads = new Map();
     sessions = new Map();
+    stray = undefined;
     recentThreads.clear();
     recentSessions.clear();
     detachedSessions.clear();
   }
 
   /**
-   * A later run is the turn's only while the turn expects one: its process
-   * owes the report of listed work, or a resumed snapshot left that open.
-   * Otherwise a run T3 starts after the turn's is someone else's (such as a
-   * predecessor's late wake) and is neither awaited nor answered with. T3
-   * labels both kinds of wake alike (created by the agent on the same
-   * provider thread), so a predecessor's wake that arrives while this turn
-   * owes one cannot be told apart; that limit is documented.
+   * Whether a run T3 started after this turn's is this turn's. This turn's
+   * own wake can only start once its run completed with work still listed,
+   * so a later run first seen while the run is active is another process's
+   * (such as an earlier turn's late wake) and stays foreign. After that, a
+   * later run is the owed wake, or resolves a resumed snapshot's ambiguity.
+   * A later run no fact of this turn accounts for is a stray: neither
+   * answered with nor dropped, it makes the turn unresolved.
    */
-  function expectsFollowUp(): boolean {
-    return wakeOwedAfter !== undefined || backgroundSeenAt !== undefined;
+  function adopt(run: Run): boolean {
+    if (anchor === undefined || run.ordinal <= anchor.ordinal) return false;
+    if (turnRuns.has(run.id)) return true;
+    if (foreign.has(run.id)) return false;
+    if (anchor.status !== "completed") {
+      foreign.add(run.id);
+      return false;
+    }
+    if (wakeOwedAfter !== undefined && run.ordinal > wakeOwedAfter) return true;
+    if (backgroundSeenAt !== undefined) return true;
+    stray ??= run.id;
+    return false;
   }
 
   function foldRun(run: Run): void {
     if (run.userMessageId === messageId) anchor = run;
-    const owned =
-      anchor !== undefined &&
-      (run.id === anchor.id ||
-        turnRuns.has(run.id) ||
-        (run.ordinal > anchor.ordinal && expectsFollowUp()));
+    const owned = anchor !== undefined && (run.id === anchor.id || adopt(run));
     if (owned) {
       turnRuns.set(run.id, run);
       earlier.delete(run.id);
@@ -222,6 +251,13 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
     } else if (anchor !== undefined && run.ordinal > anchor.ordinal) return;
     else if (isActive(run)) earlier.set(run.id, run);
     else earlier.delete(run.id);
+  }
+
+  /** An adopted follow-up whose provenance an unconfirmed earlier stop leaves uncertain. */
+  function uncertainFollowUp(): boolean {
+    if (options.uncertainPredecessor !== true || anchor === undefined) return false;
+    for (const run of turnRuns.values()) if (run.ordinal > anchor.ordinal) return true;
+    return false;
   }
 
   /** Runs seen before the turn's own were filed as earlier; refile those from the turn onward. */
@@ -527,7 +563,10 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
               "T3 sent a thread snapshot this runtime does not understand",
             );
           reset();
-          for (const run of projection.runs) foldRun(run);
+          // Runs in ordinal order, so the turn's own is known before the
+          // runs that follow it are judged.
+          for (const run of [...projection.runs].sort((a, b) => a.ordinal - b.ordinal))
+            foldRun(run);
           refile();
           for (const thread of projection.providerThreads) foldProviderThread(thread);
           for (const session of projection.providerSessions) foldSession(session);
@@ -627,7 +666,19 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
       if (anchor === undefined || last === undefined) return undefined;
       const request = ownedPendingRequest();
       if (request !== undefined) return { kind: "blocked", asked: asked(request) };
+      if (uncertainFollowUp())
+        return {
+          kind: "unresolved",
+          explanation:
+            "An earlier turn on this conversation was not confirmed stopped, and T3 cannot show whether the run that followed this turn's background work reports this turn's work or the earlier one's",
+        };
       if (active() !== undefined) return undefined;
+      if (stray !== undefined && last.status === "completed")
+        return {
+          kind: "unresolved",
+          explanation:
+            "A run followed this turn's while Carillon was not watching, and T3's state cannot show whether it reports this turn's background work",
+        };
       switch (last.status) {
         case "completed": {
           if (roster(last).length > 0) {

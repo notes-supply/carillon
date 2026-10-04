@@ -80,6 +80,15 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
   const pending = new Set<Promise<unknown>>();
   /** Executing turns by correlation ID, from before T3 is contacted until they settle. */
   const executing = new Map<string, { readonly interfaceId: string; readonly watch: TurnWatch }>();
+  /**
+   * Threads where a turn's stop was not confirmed. Such a process may still
+   * deliver a wake that T3 cannot tell from a later turn's, and the public
+   * contract offers no stop or delivery fence to show it is gone, so the
+   * fence is never lifted by inference: later turns on the thread run, but
+   * one that comes to depend on a follow-up ends unresolved. The runtime is
+   * the only owner of this fact; a restart forgets it.
+   */
+  const uncertain = new Set<string>();
 
   async function track<T>(operation: () => Promise<T>): Promise<T> {
     shutdown.signal.throwIfAborted();
@@ -134,7 +143,11 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       );
     const binding = bindThread(request);
     const messageId = derivedId("message", request.correlation_id);
-    const watch = watchTurn(messageId, options.workspace);
+    const watch = watchTurn(
+      messageId,
+      options.workspace,
+      uncertain.has(binding.threadId) ? { uncertainPredecessor: true } : {},
+    );
     executing.set(request.correlation_id, { interfaceId: request.interface_id, watch });
     log(`turn ${request.correlation_id}: thread ${binding.threadId}, message ${messageId}`);
     try {
@@ -158,6 +171,14 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     } finally {
       executing.delete(request.correlation_id);
     }
+  }
+
+  /** Remembers that this thread's native work was left possibly running. */
+  function unconfirmed(binding: ThreadBinding): void {
+    uncertain.add(binding.threadId);
+    log(
+      `thread ${binding.threadId}: stop unconfirmed; follow-up runs on this thread are no longer trusted`,
+    );
   }
 
   function bindThread(request: TurnRequest): ThreadBinding {
@@ -440,11 +461,13 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
           `thread ${binding.threadId}: session detach not accepted (${failure.detail ?? failure.message})`,
         );
       }
+      unconfirmed(binding);
       return { quiet: false, requestOpen: watch.requestOpen() };
     }
     const quiet = await settle(watch, stream, (turn) => turn.quiet(), settleMs);
     const calls = watch.activity().tool_calls;
     const stop = { quiet, requestOpen: watch.requestOpen() };
+    if (!quiet) unconfirmed(binding);
     if (quiet)
       log(
         `run ${target.id}: T3 confirmed the stop; ${String(calls)} tool call(s) had started and are not undone${stop.requestOpen ? "; a request of the turn is still open in T3" : ""}`,
@@ -578,7 +601,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
   /** The person's view of an unresolved background report, saying only what T3 confirmed. */
   function wakeReport(stop: Stop | undefined): string {
     return stop?.quiet === true
-      ? "T3 reports its native session stopped. Send another message to continue."
+      ? "T3 confirmed that nothing of it is still running. Send another message to continue."
       : "T3 does not confirm that its native process has stopped, so a result may still arrive; the next turn interrupts any run it finds active. Send another message to continue.";
   }
 

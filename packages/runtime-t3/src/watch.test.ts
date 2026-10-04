@@ -911,3 +911,195 @@ it("leaves a pending request no item of the turn names unassigned, even while th
     asked: "T3 asked a question this runtime cannot relay yet (Scope: Which file?)",
   });
 });
+
+it("never adopts a run first seen while its own run was active, even once it owes a wake", () => {
+  // The coordinator's fault probe: the successor runs with work listed when an earlier turn's wake queues behind it.
+  const watch = watchTurn("current-message", "/workspace");
+  const current = {
+    ...run("running", "current-message", 2, "current"),
+    providerThreadId: "provider",
+  };
+  const stale = {
+    ...current,
+    id: "old-wake",
+    ordinal: 3,
+    userMessageId: "predecessor-notification",
+    status: "queued",
+  };
+  const provider = {
+    id: "provider",
+    providerSessionId: "new-session",
+    pendingBackgroundTasks: [{ taskId: "current-background", kind: "command" }],
+  };
+  watch.apply(
+    snapshot({
+      runs: [current],
+      providerThreads: [provider],
+      providerSessions: [{ id: "new-session", status: "running" }],
+    }),
+  );
+  watch.apply(event(2, "run.created", stale));
+  expect(watch.latestRun()?.id).toBe("current");
+  watch.apply(
+    event(3, "message.updated", {
+      id: "current-ack",
+      runId: "current",
+      role: "assistant",
+      text: "Current acknowledgement.",
+      createdAt: "2026-10-04T15:00:01Z",
+    }),
+  );
+  watch.apply(event(4, "run.updated", { ...current, status: "completed" }));
+  watch.apply(event(5, "run.updated", { ...stale, status: "running" }));
+  watch.apply(
+    event(6, "message.updated", {
+      id: "old-output",
+      runId: "old-wake",
+      role: "assistant",
+      text: "PREDECESSOR OUTPUT.",
+      createdAt: "2026-10-04T15:00:02Z",
+    }),
+  );
+  watch.apply(event(7, "provider-thread.updated", { ...provider, pendingBackgroundTasks: [] }));
+  watch.apply(event(8, "run.updated", { ...stale, status: "completed" }));
+  // The foreign run never satisfies the owed wake; the turn keeps waiting for its own.
+  expect(watch.outcome()).toBeUndefined();
+  expect(watch.retained().runs).toBe(1);
+  const own = {
+    ...current,
+    id: "own-wake",
+    ordinal: 4,
+    userMessageId: "own-notification",
+    status: "running",
+  };
+  watch.apply(event(9, "run.created", own));
+  watch.apply(
+    event(10, "message.updated", {
+      id: "own-output",
+      runId: "own-wake",
+      role: "assistant",
+      text: "OWN RESULT.",
+      createdAt: "2026-10-04T15:00:03Z",
+    }),
+  );
+  watch.apply(event(11, "run.updated", { ...own, status: "completed" }));
+  expect(watch.outcome()).toEqual({
+    kind: "completed",
+    output: "Current acknowledgement.\n\nOWN RESULT.",
+  });
+});
+
+it("ends unresolved on a fresh snapshot whose follow-up no fact of the turn accounts for, and completes with the follow-up when the facts are known", () => {
+  // The coordinator's snapshot probe: completed root, completed follow-up, empty roster, no background fact seen.
+  const root = {
+    ...run("completed", "current-message", 2, "current"),
+    providerThreadId: "provider",
+  };
+  const wake = { ...root, id: "owed-wake", ordinal: 3, userMessageId: "native-notification" };
+  const projection = {
+    runs: [root, wake],
+    providerThreads: [{ id: "provider", providerSessionId: "session", pendingBackgroundTasks: [] }],
+    providerSessions: [{ id: "session", status: "ready" }],
+    messages: [
+      {
+        id: "ack",
+        runId: "current",
+        role: "assistant",
+        text: "Working in background.",
+        createdAt: "2026-10-04T15:00:01Z",
+      },
+      {
+        id: "result",
+        runId: "owed-wake",
+        role: "assistant",
+        text: "OWN BACKGROUND RESULT.",
+        createdAt: "2026-10-04T15:00:02Z",
+      },
+    ],
+  };
+  const fresh = watchTurn("current-message", "/workspace");
+  fresh.apply(snapshot(projection, 42));
+  expect(fresh.outcome()).toEqual({
+    kind: "unresolved",
+    explanation:
+      "A run followed this turn's while Carillon was not watching, and T3's state cannot show whether it reports this turn's background work",
+  });
+  expect(fresh.quiet()).toBe(true);
+  // A fold that had seen the run's listed work adopts the follow-up and answers with its result.
+  const informed = watchTurn("current-message", "/workspace");
+  informed.apply(
+    snapshot({
+      runs: [{ ...root, status: "running" }],
+      providerThreads: [
+        {
+          id: "provider",
+          providerSessionId: "session",
+          pendingBackgroundTasks: [{ taskId: "t", kind: "command" }],
+        },
+      ],
+      providerSessions: [{ id: "session", status: "running" }],
+    }),
+  );
+  informed.resubscribing();
+  informed.apply(snapshot(projection, 42));
+  expect(informed.outcome()).toEqual({
+    kind: "completed",
+    output: "Working in background.\n\nOWN BACKGROUND RESULT.",
+  });
+});
+
+it("ends unresolved on a follow-up after an unconfirmed earlier stop, and completes without it", () => {
+  const owedWake = (options: { uncertainPredecessor?: boolean }) => {
+    const watch = watchTurn("current-message", "/workspace", options);
+    const root = {
+      ...run("running", "current-message", 3, "current"),
+      providerThreadId: "provider",
+    };
+    watch.apply(
+      snapshot({
+        runs: [run("interrupted", "earlier", 1, "earlier"), root],
+        providerThreads: [
+          {
+            id: "provider",
+            providerSessionId: "session",
+            pendingBackgroundTasks: [{ taskId: "t", kind: "command" }],
+          },
+        ],
+        providerSessions: [{ id: "session", status: "running" }],
+      }),
+    );
+    watch.apply(event(2, "run.updated", { ...root, status: "completed" }));
+    watch.apply(
+      event(3, "provider-thread.updated", {
+        id: "provider",
+        providerSessionId: "session",
+        pendingBackgroundTasks: [],
+      }),
+    );
+    const wake = {
+      ...root,
+      id: "wake",
+      ordinal: 4,
+      userMessageId: "notification",
+      status: "running",
+    };
+    watch.apply(event(4, "run.created", wake));
+    watch.apply(
+      event(5, "message.updated", {
+        id: "w",
+        runId: "wake",
+        role: "assistant",
+        text: "Result.",
+        createdAt: "2026-10-04T15:00:03Z",
+      }),
+    );
+    watch.apply(event(6, "run.updated", { ...wake, status: "completed" }));
+    return watch;
+  };
+  expect(owedWake({}).outcome()?.kind).toBe("completed");
+  expect(owedWake({ uncertainPredecessor: true }).outcome()).toEqual({
+    kind: "unresolved",
+    explanation:
+      "An earlier turn on this conversation was not confirmed stopped, and T3 cannot show whether the run that followed this turn's background work reports this turn's work or the earlier one's",
+  });
+});

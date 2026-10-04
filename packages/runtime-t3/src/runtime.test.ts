@@ -789,3 +789,46 @@ it("closes promptly while the first snapshot never arrives", async () => {
 });
 
 const started2 = started;
+
+it("fails closed on any follow-up after an unconfirmed stop on the conversation, while plain turns continue", async () => {
+  // Turn 1 is cancelled while waiting and T3 never confirms the stop.
+  fake.interruptBehaviour = "ignore";
+  const controller = new AbortController();
+  const first = runtime.executeTurn(turn("turn-1", "first"), controller.signal);
+  const run1 = await started("turn-1");
+  controller.abort(new Error("core disconnected"));
+  await expect(first).rejects.toThrow("core disconnected");
+  fake.interruptBehaviour = "settle";
+  fake.stop(threadId, run1.id, "interrupted");
+
+  // Turn 2 owes a wake; the follow-up cannot be told from turn 1's late wake.
+  const second = runtime.executeTurn(turn("turn-2", "second"));
+  const run2 = await started("turn-2");
+  fake.background(threadId, [{ taskId: "task-1", kind: "command" }]);
+  fake.assistant(threadId, run2.id, "Started.");
+  fake.complete(threadId, run2.id);
+  await until(() => runtime.activity("turn-2", "discord-private")?.phase === "tools");
+  fake.background(threadId, []);
+  const wake = fake.wake(threadId, "Background command completed");
+  fake.assistant(threadId, wake.id, "Whose result?");
+  await expect(second).rejects.toThrow(/was not confirmed stopped/u);
+  await expect(second).rejects.toMatchObject({ status: 502 });
+  expect(fake.interrupts).toEqual([run1.id, wake.id]);
+
+  // The fence is not lifted by inference: a plain turn still completes on its own text,
+  // a turn that depends on a follow-up still ends unresolved.
+  const third = runtime.executeTurn(turn("turn-3", "third"));
+  answer(await started("turn-3"), "Plain answer.");
+  expect((await third).output).toBe("Plain answer.");
+  const fourth = runtime.executeTurn(turn("turn-4", "fourth"));
+  const run4 = await started("turn-4");
+  fake.background(threadId, [{ taskId: "task-2", kind: "command" }]);
+  fake.assistant(threadId, run4.id, "Started again.");
+  fake.complete(threadId, run4.id);
+  await until(() => runtime.activity("turn-4", "discord-private")?.phase === "tools");
+  fake.background(threadId, []);
+  const own = fake.wake(threadId, "Background command completed");
+  fake.assistant(threadId, own.id, "My result.");
+  await expect(fourth).rejects.toThrow(/was not confirmed stopped/u);
+  expect(fake.interrupts).toEqual([run1.id, wake.id, own.id]);
+});
