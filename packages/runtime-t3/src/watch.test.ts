@@ -103,6 +103,8 @@ it("knows the turn's run by its message, keeps the answer in message order, and 
     messages: 2,
     providerThreads: 1,
     sessions: 1,
+    pendingProviderRecords: 0,
+    detachedSessions: 0,
   });
 });
 
@@ -137,6 +139,8 @@ it("retains only the turn's own work from a long history and keeps its identity 
     messages: 0,
     providerThreads: 1,
     sessions: 1,
+    pendingProviderRecords: 0,
+    detachedSessions: 0,
   });
   expect(watch.blocking().map((blocking) => blocking.id)).toEqual(["run-7"]);
   expect(watch.activity()).toEqual({ phase: "model", running: [], recent: [], tool_calls: 0 });
@@ -187,6 +191,8 @@ it("bounds finished tools to the recent window while counting every call", () =>
     messages: 0,
     providerThreads: 1,
     sessions: 1,
+    pendingProviderRecords: 0,
+    detachedSessions: 0,
   });
   const activity = watch.activity();
   expect(activity.tool_calls).toBe(41);
@@ -661,6 +667,38 @@ it("keeps only the turn's provider thread and session from a snapshot", () => {
   expect(watch.retained()).toMatchObject({ providerThreads: 1, sessions: 1 });
   watch.apply(event(2, "provider-thread.updated", { id: "other-thread", providerSessionId: null }));
   expect(watch.retained()).toMatchObject({ providerThreads: 1, sessions: 1 });
+});
+
+it("bounds unrelated provider updates and detaches while preserving its own detach", () => {
+  const watch = watchTurn("message-1", "/workspace");
+  watch.apply(snapshot({ runs: [run("running")] }));
+  let sequence = 1;
+  for (let index = 0; index < 500; index++) {
+    const id = `unrelated-${String(index)}`;
+    watch.apply(event(++sequence, "provider-thread.updated", { id, providerSessionId: id }));
+    watch.apply(event(++sequence, "provider-session.updated", { id, status: "ready" }));
+    watch.apply(event(++sequence, "provider-session.detached", { providerSessionId: id }));
+  }
+  expect(watch.retained()).toMatchObject({
+    providerThreads: 1,
+    sessions: 1,
+    pendingProviderRecords: 8,
+    detachedSessions: 0,
+  });
+  watch.apply(event(++sequence, "provider-session.detached", { providerSessionId: "session" }));
+  expect(watch.retained().detachedSessions).toBe(1);
+  expect(watch.providerSession()).toBeUndefined();
+  watch.apply(
+    event(++sequence, "provider-thread.updated", {
+      id: "provider-thread",
+      providerSessionId: "replacement",
+    }),
+  );
+  watch.apply(
+    event(sequence + 1, "provider-session.updated", { id: "replacement", status: "ready" }),
+  );
+  expect(watch.retained().detachedSessions).toBe(0);
+  expect(watch.providerSession()).toBe("replacement");
 });
 
 it("owns its provider thread and session through the serving event order, after a long pre-dispatch history", () => {

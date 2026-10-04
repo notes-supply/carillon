@@ -52,6 +52,8 @@ export interface Retained {
   readonly messages: number;
   readonly providerThreads: number;
   readonly sessions: number;
+  readonly pendingProviderRecords: number;
+  readonly detachedSessions: number;
 }
 
 export interface TurnWatch {
@@ -292,7 +294,7 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
   function foldProviderThread(thread: ProviderThread): void {
     if (turnProviderThread(thread.id)) {
       providerThreads.set(thread.id, thread);
-      adoptPending();
+      pruneProviders();
     } else remember(recentThreads, thread);
   }
 
@@ -337,6 +339,7 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
     for (const id of providerThreads.keys())
       if (!turnProviderThread(id)) providerThreads.delete(id);
     for (const id of sessions.keys()) if (!turnSession(id)) sessions.delete(id);
+    for (const id of detachedSessions) if (!turnSession(id)) detachedSessions.delete(id);
     adoptPending();
   }
 
@@ -546,7 +549,7 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
               break;
             case "provider-session.detached": {
               const id = isRecord(payload) ? payload["providerSessionId"] : undefined;
-              if (typeof id === "string") {
+              if (typeof id === "string" && turnSession(id)) {
                 sessions.delete(id);
                 recentSessions.delete(id);
                 detachedSessions.add(id);
@@ -695,6 +698,8 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
       messages: assistant.size,
       providerThreads: providerThreads.size,
       sessions: sessions.size,
+      pendingProviderRecords: recentThreads.size + recentSessions.size,
+      detachedSessions: detachedSessions.size,
     }),
     onChange(listener) {
       listeners.add(listener);
