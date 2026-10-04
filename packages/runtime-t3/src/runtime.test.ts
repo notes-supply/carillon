@@ -923,12 +923,15 @@ it("fences the conversation when a turn read back from an existing run exits wit
   await started("turn-1");
   const retry = build();
   const again = retry.executeTurn(turn("turn-1", "work"));
+  // Both turns will fail; observe each rejection as it happens.
+  const firstFails = expect(first).rejects.toThrow(/cannot be used|Lost contact/u);
+  const againFails = expect(again).rejects.toThrow(/cannot be used|Lost contact/u);
   await until(() => fake.subscriptions.length === 2);
   expect(dispatches()).toHaveLength(1);
   fake.protocolVersion = 3;
   fake.disconnectAll();
-  await expect(again).rejects.toThrow(/cannot be used|Lost contact/u);
-  await expect(first).rejects.toThrow(/cannot be used|Lost contact/u);
+  await againFails;
+  await firstFails;
   fake.protocolVersion = 2;
   await expect((await backgroundTurn("turn-2", retry)).result).rejects.toThrow(
     /was not confirmed stopped/u,
