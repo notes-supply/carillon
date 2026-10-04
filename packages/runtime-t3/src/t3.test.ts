@@ -77,3 +77,43 @@ it("delivers stream items and ends a stream on request", async () => {
   connection.close();
   await connection.closed;
 });
+
+it("ends a stalled discovery, body read or upgrade with the caller's own reason, and classifies the rest as before", async () => {
+  const connecting = async (fault: "holdDiscovery" | "holdDiscoveryBody" | "holdUpgrade") => {
+    fake[fault] = true;
+    const controller = new AbortController();
+    const pending = connectT3({ url: fake.url, token: fake.token }, { signal: controller.signal });
+    const failing = expect(pending).rejects.toThrow("core disconnected");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const started = Date.now();
+    controller.abort(new Error("core disconnected"));
+    await failing;
+    expect(Date.now() - started).toBeLessThan(500);
+    fake[fault] = false;
+    fake.disconnectAll();
+  };
+  await connecting("holdDiscovery");
+  await connecting("holdDiscoveryBody");
+  await connecting("holdUpgrade");
+  // An already aborted caller sends nothing at all.
+  const aborted = AbortSignal.abort(new Error("closed"));
+  await expect(
+    connectT3({ url: fake.url, token: fake.token }, { signal: aborted }),
+  ).rejects.toThrow("closed");
+  // Without an abort the failures keep their classification.
+  const signal = new AbortController().signal;
+  fake.protocolVersion = 1;
+  await expect(connectT3({ url: fake.url, token: fake.token }, { signal })).rejects.toMatchObject({
+    kind: "incompatible",
+  });
+  fake.protocolVersion = 2;
+  await expect(
+    connectT3({ url: "http://127.0.0.1:1", token: fake.token }, { signal }),
+  ).rejects.toMatchObject({ kind: "unreachable" });
+  await expect(connectT3({ url: fake.url, token: "other" }, { signal })).rejects.toMatchObject({
+    kind: "refused",
+  });
+  const connection = await connectT3({ url: fake.url, token: fake.token }, { signal });
+  connection.close();
+  await connection.closed;
+});

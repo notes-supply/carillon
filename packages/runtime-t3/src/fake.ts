@@ -107,6 +107,12 @@ export interface FakeT3 {
   omitRequestItems: boolean;
   /** Accepts subscriptions but never delivers their first snapshot or marker. */
   holdSnapshot: boolean;
+  /** Accepts protocol discovery requests but never answers them. */
+  holdDiscovery: boolean;
+  /** Answers protocol discovery with its headers but never sends the body. */
+  holdDiscoveryBody: boolean;
+  /** Accepts upgrade requests but never completes them. */
+  holdUpgrade: boolean;
   /** Closes every client socket, as a server restart would. */
   disconnectAll(): void;
   tool(threadId: string, runId: string, item: Partial<FakeItem> & { type: string }): FakeItem;
@@ -156,9 +162,20 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
   const requestRuns = new Map<string, string>();
   const sockets = new Set<WebSocket>();
 
+  /** Sockets of discovery and upgrade requests held open by a fault. */
+  const held = new Set<Duplex>();
   const server = createServer((request, response) => {
     if (request.url?.startsWith("/ws") === true) {
+      if (fake.holdDiscovery) {
+        held.add(request.socket);
+        return;
+      }
       response.writeHead(426, { "content-type": "application/json" });
+      if (fake.holdDiscoveryBody) {
+        held.add(request.socket);
+        response.flushHeaders();
+        return;
+      }
       response.end(
         JSON.stringify({
           code: "orchestration_protocol_incompatible",
@@ -181,6 +198,10 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
     if (request.headers.authorization !== `Bearer ${token}`) {
       socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
       socket.destroy();
+      return;
+    }
+    if (fake.holdUpgrade) {
+      held.add(socket);
       return;
     }
     wss.handleUpgrade(request, socket, head, (client) => {
@@ -222,8 +243,13 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
     retainRequests: false,
     omitRequestItems: false,
     holdSnapshot: false,
+    holdDiscovery: false,
+    holdDiscoveryBody: false,
+    holdUpgrade: false,
     disconnectAll() {
       for (const socket of sockets) socket.terminate();
+      for (const socket of held) socket.destroy();
+      held.clear();
     },
     tool(threadId, runId, item) {
       const thread = threadOf(threadId);

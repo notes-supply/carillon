@@ -955,3 +955,128 @@ it("treats a cancel with a possibly accepted dispatch and no observed run as unc
   );
   await slow.close();
 }, 10_000);
+
+it("dispatches nothing when cancelled while a stale run is being stopped", async () => {
+  const first = runtime.executeTurn(turn("turn-1", "work"));
+  answer(await started("turn-1"), "Done.");
+  expect((await first).output).toBe("Done.");
+  // Another process starts a run on the thread, and T3 keeps it running after an interrupt.
+  const stale = fake.wake(threadId, "Late background report");
+  await until(() => thread().runs.find((run) => run.id === stale.id)?.status === "running");
+  fake.interruptBehaviour = "ignore";
+
+  // Turn 2 is cancelled while waiting for that stale run to settle: it must not reach T3.
+  const controller = new AbortController();
+  const result = runtime.executeTurn(turn("turn-2", "next"), controller.signal);
+  await until(() => fake.interrupts.length === 1);
+  await pause(50);
+  const begun = Date.now();
+  controller.abort(new Error("core disconnected"));
+  await expect(result).rejects.toThrow("core disconnected");
+  expect(Date.now() - begun).toBeLessThan(400);
+  expect(dispatches()).toHaveLength(1);
+  expect(runOf("turn-2")).toBeUndefined();
+  expect(fake.interrupts).toEqual([stale.id]);
+
+  // Nothing of turn 2 was left on T3: the thread stays trusted, and the stale run is swept again.
+  fake.interruptBehaviour = "settle";
+  expect((await (await backgroundTurn("turn-3")).result).output).toBe("Started.\n\nResult.");
+  expect(fake.interrupts).toEqual([stale.id, stale.id]);
+  expect(thread().runs.find((run) => run.id === stale.id)?.status).toBe("interrupted");
+});
+
+it("cancels or closes promptly while T3's discovery or upgrade stalls before any dispatch", async () => {
+  fake.holdDiscovery = true;
+  const controller = new AbortController();
+  const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
+  await pause(100);
+  let begun = Date.now();
+  controller.abort(new Error("core disconnected"));
+  await expect(result).rejects.toThrow("core disconnected");
+  expect(Date.now() - begun).toBeLessThan(500);
+  fake.holdDiscovery = false;
+
+  fake.holdUpgrade = true;
+  const closing = runtime.executeTurn(turn("turn-2", "work"));
+  await pause(100);
+  begun = Date.now();
+  await runtime.close();
+  await expect(closing).rejects.toThrow("T3 runtime is closed");
+  expect(Date.now() - begun).toBeLessThan(500);
+  fake.holdUpgrade = false;
+  fake.disconnectAll();
+  expect(fake.threads.size).toBe(0);
+  expect(dispatches()).toHaveLength(0);
+});
+
+it("keeps reconnecting through a stalled discovery after the dispatch, and stops the run when it gets through", async () => {
+  let dropped = 0;
+  fake.dropAnswer = (command) => command.type === "message.dispatch" && dropped++ === 0;
+  const controller = new AbortController();
+  const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
+  const run = await started("turn-1");
+  // The reconnection's discovery stalls; the caller cancels meanwhile.
+  fake.holdDiscovery = true;
+  await pause(200);
+  controller.abort(new Error("core disconnected"));
+  let settled = false;
+  void result.catch(() => undefined).finally(() => (settled = true));
+  await pause(200);
+  expect(settled).toBe(false);
+  // Discovery answers again (the held request fails as on a restart): the run is found and interrupted.
+  fake.holdDiscovery = false;
+  fake.disconnectAll();
+  await expect(result).rejects.toThrow("core disconnected");
+  expect(fake.interrupts).toEqual([run.id]);
+  expect(runOf("turn-1")?.status).toBe("interrupted");
+});
+
+it("stops background work a failed run left behind before releasing the queue, and says what T3 confirmed", async () => {
+  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const run = await started("turn-1");
+  const task = fake.tool(threadId, run.id, { type: "command_execution", input: "sleep 300 &" });
+  fake.background(threadId, [{ taskId: "task-1", kind: "command", description: "sleep 300" }]);
+  await until(() => activity()?.phase === "tools");
+  fake.fail(threadId, run.id, "Provider crashed");
+  await expect(result).rejects.toMatchObject({
+    status: 502,
+    message: "Provider crashed; T3 confirmed that its background work was stopped.",
+  });
+  expect(fake.interrupts).toEqual([run.id]);
+  expect(roster()).toEqual([]);
+  expect(thread().items.find((item) => item.id === task.id)?.status).toBe("interrupted");
+  // The stop was confirmed: the conversation stays trusted.
+  expect((await (await backgroundTurn("turn-2")).result).output).toBe("Started.\n\nResult.");
+  expect(fake.interrupts).toEqual([run.id]);
+
+  // A run someone else stopped with work still listed goes the same way.
+  const stopped = runtime.executeTurn(turn("turn-3", "work"));
+  const run3 = await started("turn-3");
+  fake.background(threadId, [{ taskId: "task-3", kind: "command" }]);
+  await until(() => runtime.activity("turn-3", "discord-private")?.phase === "tools");
+  fake.stop(threadId, run3.id, "cancelled");
+  await expect(stopped).rejects.toThrow(
+    "The T3 run was cancelled before it answered; T3 confirmed that its background work was stopped.",
+  );
+  expect(fake.interrupts).toEqual([run.id, run3.id]);
+  expect(roster()).toEqual([]);
+});
+
+it("fences the conversation when the background work of a failed run is not confirmed stopped", async () => {
+  fake.interruptBehaviour = "ignore";
+  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const run = await started("turn-1");
+  fake.background(threadId, [{ taskId: "task-1", kind: "command" }]);
+  await until(() => activity()?.phase === "tools");
+  fake.fail(threadId, run.id, "Provider crashed.");
+  await expect(result).rejects.toThrow(
+    "Provider crashed; T3 has not confirmed that its background work stopped, so it may still be running; the next turn interrupts any run it finds active.",
+  );
+  expect(fake.interrupts).toEqual([run.id]);
+  expect(roster()).toHaveLength(1);
+  fake.interruptBehaviour = "settle";
+  fake.background(threadId, []);
+  await expect((await backgroundTurn("turn-2")).result).rejects.toThrow(
+    /was not confirmed stopped/u,
+  );
+});

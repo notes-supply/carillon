@@ -415,9 +415,24 @@ it("explains failures with T3's failure text and treats other stops as stopped",
     }),
   );
   expect(watch.outcome()).toEqual({ kind: "failed", explanation: "Usage limit reached" });
-  watch.apply(event(2, "run.updated", run("cancelled")));
+  expect(watch.quiet()).toBe(true);
+  // Work still listed for a failed or stopped run keeps the turn terminal but not quiet.
+  const listed = (sequence: number, tasks: readonly { taskId: string; kind: string }[]) =>
+    event(sequence, "provider-thread.updated", {
+      id: "provider-thread",
+      providerSessionId: "session",
+      pendingBackgroundTasks: tasks,
+    });
+  watch.apply(listed(2, [{ taskId: "t", kind: "command" }]));
+  expect(watch.outcome()).toEqual({ kind: "failed", explanation: "Usage limit reached" });
+  expect(watch.quiet()).toBe(false);
+  watch.apply(event(3, "run.updated", run("cancelled")));
   expect(watch.outcome()).toEqual({ kind: "stopped", status: "cancelled" });
-  watch.apply(event(3, "run.created", run("running", "other", 0, "run-9")));
+  expect(watch.quiet()).toBe(false);
+  watch.apply(listed(4, []));
+  expect(watch.outcome()).toEqual({ kind: "stopped", status: "cancelled" });
+  expect(watch.quiet()).toBe(true);
+  watch.apply(event(5, "run.created", run("running", "other", 0, "run-9")));
   expect(watch.blocking().map((blocking) => blocking.id)).toEqual(["run-9"]);
 });
 

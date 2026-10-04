@@ -173,13 +173,16 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
             throw new ExplainedFailure(502, "T3 finished the run without an answer.");
           return { correlation_id: request.correlation_id, output: outcome.output };
         case "failed":
-          throw new ExplainedFailure(502, outcome.explanation);
+          throw new ExplainedFailure(502, withStop(outcome.explanation, stop));
         case "blocked":
           throw new ExplainedFailure(502, `${outcome.asked}; ${stopReport(stop)}`);
         case "unresolved":
           throw new ExplainedFailure(502, `${outcome.explanation}; ${wakeReport(stop)}`);
         case "stopped":
-          throw new ExplainedFailure(502, `The T3 run was ${outcome.status} before it answered.`);
+          throw new ExplainedFailure(
+            502,
+            withStop(`The T3 run was ${outcome.status} before it answered.`, stop),
+          );
         default: {
           const exhaustive: never = outcome;
           throw new Error(`unknown outcome ${String(exhaustive)}`);
@@ -247,10 +250,21 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
   ): Promise<{ readonly outcome: Outcome; readonly stop?: Stop }> {
     let text: string | undefined;
     let attempt = 0;
+    /**
+     * Whether the turn's work may exist on T3: dispatched by this call, or
+     * read back from a run the thread already had for it. Until then a
+     * cancelled caller ends every wait at once with nothing to stop; after
+     * that the waits are kept, since the work must still be found and
+     * stopped.
+     */
+    const reached = () => progress.dispatched || watch.run() !== undefined;
     for (;;) {
       let connection: T3Connection;
       try {
-        connection = await connect(options.endpoint, { timeoutMs });
+        connection = await connect(options.endpoint, {
+          timeoutMs,
+          ...(reached() ? {} : { signal }),
+        });
       } catch (failure) {
         if (attempt > 0 && attempt < reconnect.attempts && failure instanceof T3Failure) {
           attempt += 1;
@@ -286,14 +300,9 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       }
     }
 
-    /**
-     * Waits before another connection. Until the turn may have reached T3,
-     * a cancelled caller ends the wait at once; after a possible dispatch
-     * the wait is kept, since the native work must still be found and
-     * stopped.
-     */
+    /** Waits before another connection; see `reached`. */
     async function pause(): Promise<void> {
-      if (progress.dispatched) {
+      if (reached()) {
         await sleep(reconnect.delayMs);
         return;
       }
@@ -307,19 +316,21 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       await ensureThread(connection, binding);
       const stream = subscribe(connection, binding.threadId, watch);
       try {
-        // Before a possible dispatch, a cancelled caller need not wait for
-        // the snapshot; afterwards the state must be read back regardless.
         await settle(
           watch,
           stream,
           (turn) => turn.synchronized(),
           timeoutMs,
           "the thread snapshot",
-          progress.dispatched ? undefined : signal,
+          reached() ? undefined : signal,
         );
         if (watch.run() === undefined && !signal.aborted) {
-          await stopBlocking(connection, binding, watch, stream);
+          await stopBlocking(connection, binding, watch, stream, signal);
           text ??= await compose(request, watch.empty());
+          // Nothing of this turn has reached T3 yet; a caller that aborted
+          // while the stale run settled or the message was composed is
+          // honoured here, so no cancelled turn executes tools.
+          signal.throwIfAborted();
           progress.dispatched = true;
           await dispatch(connection, binding, request, text);
         }
@@ -330,7 +341,11 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
             ? signal.reason
             : new Error("turn cancelled", { cause: signal.reason });
         }
-        if (outcome.kind === "blocked" || outcome.kind === "unresolved") {
+        // A turn that ends with a request open or without a provenance for
+        // its follow-up, and any terminal run whose process still has work
+        // listed, is stopped before the queue is released: the fence alone
+        // would not stop that work.
+        if (outcome.kind === "blocked" || outcome.kind === "unresolved" || !watch.quiet()) {
           progress.stop = await cancel(connection, binding, watch, stream, progress.dispatched);
           return { outcome, stop: progress.stop };
         }
@@ -369,12 +384,17 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     );
   }
 
-  /** Earlier turns' runs still occupying the thread are stale to Carillon: stop them first. */
+  /**
+   * Earlier turns' runs still occupying the thread are stale to Carillon:
+   * stop them first. Nothing of this turn is on T3 yet, so a cancelled
+   * caller ends the wait at once; the stale runs stay interrupted.
+   */
   async function stopBlocking(
     connection: T3Connection,
     binding: ThreadBinding,
     watch: TurnWatch,
     stream: T3Stream,
+    signal: AbortSignal,
   ): Promise<void> {
     const blocking = watch.blocking();
     if (blocking.length === 0) return;
@@ -382,7 +402,16 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       log(`thread ${binding.threadId}: stopping stale run ${run.id} (${run.status})`);
       await interrupt(connection, binding.threadId, run.id, "Carillon moved on to a later turn");
     }
-    if (!(await settle(watch, stream, (turn) => turn.blocking().length === 0, settleMs)))
+    const settled = await settle(
+      watch,
+      stream,
+      (turn) => turn.blocking().length === 0,
+      settleMs,
+      undefined,
+      signal,
+    );
+    signal.throwIfAborted();
+    if (!settled)
       throw new ExplainedFailure(
         503,
         "An earlier turn is still running on T3 and could not be stopped; try again shortly.",
@@ -643,6 +672,19 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     return stop?.quiet === true
       ? "T3 confirmed that nothing of it is still running. Send another message to continue."
       : "T3 does not confirm that its native process has stopped, so a result may still arrive; the next turn interrupts any run it finds active. Send another message to continue.";
+  }
+
+  /**
+   * A terminal run's explanation, followed by what T3 confirmed about the
+   * background work it left behind when there was any to stop.
+   */
+  function withStop(explanation: string, stop: Stop | undefined): string {
+    if (stop === undefined) return explanation;
+    return `${explanation.replace(/\.$/u, "")}; ${
+      stop.quiet
+        ? "T3 confirmed that its background work was stopped."
+        : "T3 has not confirmed that its background work stopped, so it may still be running; the next turn interrupts any run it finds active."
+    }`;
   }
 
   /** The person's view of a stop, saying only what T3 confirmed. */

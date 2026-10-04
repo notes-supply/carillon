@@ -53,6 +53,13 @@ export interface T3Connection {
 export interface ConnectOptions {
   /** Bounds discovery, the upgrade and every answered call. */
   readonly timeoutMs?: number;
+  /**
+   * Ends discovery or the upgrade at once with the signal's own reason. No
+   * turn work has reached T3 at that point (the upgrade has presented the
+   * credential, after the protocol check). An open connection is not
+   * affected: the caller closes it when it is done.
+   */
+  readonly signal?: AbortSignal;
 }
 
 export type Connect = (endpoint: T3Endpoint, options?: ConnectOptions) => Promise<T3Connection>;
@@ -62,41 +69,66 @@ export const DEFAULT_TIMEOUT_MS = 30_000;
 /** Opens a connection, or fails naming why the server cannot be used. */
 export const connectT3: Connect = async (endpoint, options = {}) => {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  await checkProtocol(endpoint.url, timeoutMs);
+  const { signal } = options;
+  signal?.throwIfAborted();
+  await checkProtocol(endpoint.url, timeoutMs, signal);
+  signal?.throwIfAborted();
   const url = new URL("/ws", endpoint.url);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.searchParams.set("orchestrationProtocol", String(ORCHESTRATION_PROTOCOL));
   const socket = new WebSocket(url, { headers: { authorization: `Bearer ${endpoint.token}` } });
   await new Promise<void>((resolve, reject) => {
+    const settle = (outcome: () => void) => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", aborted);
+      outcome();
+    };
+    // Closing a connecting socket raises its close event at once, so each
+    // outcome is settled before the socket is closed.
     const timer = setTimeout(() => {
+      settle(() =>
+        reject(new T3Failure("unreachable", "T3 did not accept the connection in time")),
+      );
       socket.close();
-      reject(new T3Failure("unreachable", "T3 did not accept the connection in time"));
     }, timeoutMs);
-    socket.addEventListener("open", () => {
-      clearTimeout(timer);
-      resolve();
-    });
+    const aborted = () => {
+      settle(() => reject(asError(signal?.reason)));
+      socket.close();
+    };
+    signal?.addEventListener("abort", aborted);
+    socket.addEventListener("open", () => settle(resolve));
     socket.addEventListener("close", (event) => {
-      clearTimeout(timer);
       // A refused upgrade (such as a bad credential) and a dead peer both end
       // in a close before open; the server does not say which.
-      reject(
-        new T3Failure("refused", `T3 refused the connection (close code ${String(event.code)})`),
+      settle(() =>
+        reject(
+          new T3Failure("refused", `T3 refused the connection (close code ${String(event.code)})`),
+        ),
       );
     });
   });
   return openConnection(socket, timeoutMs);
 };
 
-/** The server's protocol discovery answer must name the verified version. */
-async function checkProtocol(origin: string, timeoutMs: number): Promise<void> {
+/**
+ * The server's protocol discovery answer must name the verified version. A
+ * caller's abort ends the request with the caller's reason, not as a server
+ * failure.
+ */
+async function checkProtocol(
+  origin: string,
+  timeoutMs: number,
+  signal: AbortSignal | undefined,
+): Promise<void> {
   let response: Response;
+  const deadline = AbortSignal.timeout(timeoutMs);
   try {
     response = await fetch(new URL("/ws", origin), {
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: signal === undefined ? deadline : AbortSignal.any([signal, deadline]),
       redirect: "manual",
     });
   } catch (failure) {
+    if (signal?.aborted === true) throw asError(signal.reason);
     throw new T3Failure(
       "unreachable",
       `T3 is unreachable: ${failure instanceof Error ? failure.message : String(failure)}`,
@@ -107,6 +139,9 @@ async function checkProtocol(origin: string, timeoutMs: number): Promise<void> {
     const body: unknown = await response.json();
     version = isRecord(body) ? body["orchestrationProtocolVersion"] : undefined;
   } catch {
+    // The body read is under the same signals as the request: a caller's
+    // abort here is the caller's, not an unreadable answer.
+    if (signal?.aborted === true) throw asError(signal.reason);
     version = undefined;
   }
   if (response.status !== 426 || typeof version !== "number")
@@ -315,6 +350,11 @@ function describe(error: unknown): string | undefined {
     })
     .filter((part): part is string => part !== undefined && part.length > 0);
   return parts.length === 0 ? undefined : parts.join(": ");
+}
+
+/** The caller's own abort reason as an error, so a cancellation is reported as itself. */
+function asError(reason: unknown): Error {
+  return reason instanceof Error ? reason : new Error("connection cancelled", { cause: reason });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
