@@ -62,6 +62,16 @@ export interface T3RuntimeOptions {
 const DEFAULT_RECONNECT = { attempts: 20, delayMs: 3_000 };
 const DEFAULT_SETTLE_MS = 30_000;
 
+/**
+ * What a turn may have left on T3: whether its message may have reached T3
+ * at all, and the last stop T3 reported for it. Decides, at the turn's exit,
+ * whether the thread's later follow-ups can still be trusted.
+ */
+interface Progress {
+  dispatched: boolean;
+  stop?: Stop;
+}
+
 /** How a cancelled or blocked turn's native work ended, as T3 confirmed it. */
 interface Stop {
   /** T3 reported no active run and no background work. */
@@ -150,8 +160,11 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     );
     executing.set(request.correlation_id, { interfaceId: request.interface_id, watch });
     log(`turn ${request.correlation_id}: thread ${binding.threadId}, message ${messageId}`);
+    const progress: Progress = { dispatched: false };
+    let settled: Outcome | undefined;
     try {
-      const { outcome, stop } = await runTurn(request, binding, watch, signal);
+      const { outcome, stop } = await runTurn(request, binding, watch, signal, progress);
+      settled = outcome;
       const run = watch.run();
       log(`turn ${request.correlation_id}: run ${run?.id ?? "?"} ${outcome.kind}`);
       switch (outcome.kind) {
@@ -167,17 +180,38 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
           throw new ExplainedFailure(502, `${outcome.explanation}; ${wakeReport(stop)}`);
         case "stopped":
           throw new ExplainedFailure(502, `The T3 run was ${outcome.status} before it answered.`);
+        default: {
+          const exhaustive: never = outcome;
+          throw new Error(`unknown outcome ${String(exhaustive)}`);
+        }
       }
     } finally {
+      // The one place that decides: work that may have reached T3 (dispatched
+      // now, or read back from a run this turn already had) and left without
+      // T3 confirming it ended (a completed run, or a stop T3 reported) leaves
+      // the thread uncertain, however the turn exited.
+      const reached = progress.dispatched || watch.run() !== undefined;
+      if (reached && !ceased(settled, progress.stop, watch)) unconfirmed(binding);
       executing.delete(request.correlation_id);
     }
+  }
+
+  /**
+   * Whether T3 showed the turn's native work ended: the stop it reported, or
+   * an outcome reached with nothing active, listed or owed. An exceptional
+   * exit, a lost receipt or a native failure that does not prove a stop
+   * (such as a detached but unconfirmed session) is not cessation.
+   */
+  function ceased(outcome: Outcome | undefined, stop: Stop | undefined, watch: TurnWatch): boolean {
+    if (stop !== undefined) return stop.quiet;
+    return outcome !== undefined && watch.quiet();
   }
 
   /** Remembers that this thread's native work was left possibly running. */
   function unconfirmed(binding: ThreadBinding): void {
     uncertain.add(binding.threadId);
     log(
-      `thread ${binding.threadId}: stop unconfirmed; follow-up runs on this thread are no longer trusted`,
+      `thread ${binding.threadId}: native work left without a confirmed stop; follow-up runs on this thread are no longer trusted`,
     );
   }
 
@@ -209,9 +243,9 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     binding: ThreadBinding,
     watch: TurnWatch,
     signal: AbortSignal,
+    progress: Progress,
   ): Promise<{ readonly outcome: Outcome; readonly stop?: Stop }> {
     let text: string | undefined;
-    let dispatched = false;
     let attempt = 0;
     for (;;) {
       let connection: T3Connection;
@@ -259,7 +293,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
      * stopped.
      */
     async function pause(): Promise<void> {
-      if (dispatched) {
+      if (progress.dispatched) {
         await sleep(reconnect.delayMs);
         return;
       }
@@ -281,23 +315,25 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
           (turn) => turn.synchronized(),
           timeoutMs,
           "the thread snapshot",
-          dispatched ? undefined : signal,
+          progress.dispatched ? undefined : signal,
         );
         if (watch.run() === undefined && !signal.aborted) {
           await stopBlocking(connection, binding, watch, stream);
           text ??= await compose(request, watch.empty());
-          dispatched = true;
+          progress.dispatched = true;
           await dispatch(connection, binding, request, text);
         }
         const outcome = await observe(watch, stream, signal);
         if (outcome === undefined) {
-          await cancel(connection, binding, watch, stream, dispatched);
+          progress.stop = await cancel(connection, binding, watch, stream, progress.dispatched);
           throw signal.reason instanceof Error
             ? signal.reason
             : new Error("turn cancelled", { cause: signal.reason });
         }
-        if (outcome.kind === "blocked" || outcome.kind === "unresolved")
-          return { outcome, stop: await cancel(connection, binding, watch, stream, dispatched) };
+        if (outcome.kind === "blocked" || outcome.kind === "unresolved") {
+          progress.stop = await cancel(connection, binding, watch, stream, progress.dispatched);
+          return { outcome, stop: progress.stop };
+        }
         return { outcome };
       } finally {
         stream.end();
@@ -422,8 +458,14 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     if (watch.run() === undefined && dispatched)
       await settle(watch, stream, (turn) => turn.run() !== undefined, settleMs);
     if (watch.run() === undefined) {
-      log(`thread ${binding.threadId}: cancelled before T3 recorded a run; nothing to stop`);
-      return { quiet: true, requestOpen: false };
+      // Without a dispatch nothing reached T3. After one, a run T3 may have
+      // accepted could still appear, so the stop is not confirmed.
+      log(
+        dispatched
+          ? `thread ${binding.threadId}: cancelled with a dispatch T3 may have accepted and no run observed; stop unconfirmed`
+          : `thread ${binding.threadId}: cancelled before anything was dispatched; nothing to stop`,
+      );
+      return { quiet: !dispatched, requestOpen: false };
     }
     const target = watch.activeRun() ?? watch.latestRun();
     if (target === undefined || watch.quiet()) {
@@ -461,13 +503,11 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
           `thread ${binding.threadId}: session detach not accepted (${failure.detail ?? failure.message})`,
         );
       }
-      unconfirmed(binding);
       return { quiet: false, requestOpen: watch.requestOpen() };
     }
     const quiet = await settle(watch, stream, (turn) => turn.quiet(), settleMs);
     const calls = watch.activity().tool_calls;
     const stop = { quiet, requestOpen: watch.requestOpen() };
-    if (!quiet) unconfirmed(binding);
     if (quiet)
       log(
         `run ${target.id}: T3 confirmed the stop; ${String(calls)} tool call(s) had started and are not undone${stop.requestOpen ? "; a request of the turn is still open in T3" : ""}`,

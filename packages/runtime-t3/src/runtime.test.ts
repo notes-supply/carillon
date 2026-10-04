@@ -832,3 +832,123 @@ it("fails closed on any follow-up after an unconfirmed stop on the conversation,
   await expect(fourth).rejects.toThrow(/was not confirmed stopped/u);
   expect(fake.interrupts).toEqual([run1.id, wake.id, own.id]);
 });
+
+/**
+ * Drives a turn that owes a wake, then its wake, and hands back the still
+ * pending result: it completes, or ends unresolved when the thread is fenced.
+ */
+async function backgroundTurn(
+  correlation: string,
+  instance: RuntimeOperations = runtime,
+): Promise<{ readonly result: Promise<{ output: string }> }> {
+  const result = instance.executeTurn(turn(correlation, "work"));
+  // The assertion attaches after the fake has been driven; keep an early rejection handled meanwhile.
+  void result.catch(() => undefined);
+  const run = await started(correlation);
+  fake.background(threadId, [{ taskId: `task-${correlation}`, kind: "command" }]);
+  fake.assistant(threadId, run.id, "Started.");
+  fake.complete(threadId, run.id);
+  await until(() => instance.activity(correlation, "discord-private")?.phase === "tools");
+  fake.background(threadId, []);
+  const wake = fake.wake(threadId, "Background command completed");
+  fake.assistant(threadId, wake.id, "Result.");
+  fake.complete(threadId, wake.id);
+  return { result };
+}
+
+it("fences the conversation when the receipt of an accepted detach is lost", async () => {
+  const controller = new AbortController();
+  const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
+  const run = await started("turn-1");
+  fake.background(threadId, [{ taskId: "task-1", kind: "command" }]);
+  fake.complete(threadId, run.id);
+  await until(() => activity()?.phase === "tools");
+  fake.background(threadId, []);
+  await until(() => activity()?.phase === "model");
+  // T3 processes the detach but its answer never arrives; recovery then reads the detached session back.
+  fake.dropAnswer = (command) => command.type === "provider-session.detach";
+  controller.abort(new Error("core disconnected"));
+  await expect(result).rejects.toThrow(/was detached before it reported/u);
+  expect(fake.detached).toEqual([thread().session.id]);
+  await expect((await backgroundTurn("turn-2")).result).rejects.toThrow(
+    /was not confirmed stopped/u,
+  );
+});
+
+it("fences the conversation when reconnection is exhausted after a dispatch", async () => {
+  const result = runtime.executeTurn(turn("turn-1", "work"));
+  await started("turn-1");
+  fake.protocolVersion = 3;
+  fake.disconnectAll();
+  await expect(result).rejects.toThrow(/cannot be used|Lost contact/u);
+  fake.protocolVersion = 2;
+  await expect((await backgroundTurn("turn-2")).result).rejects.toThrow(
+    /was not confirmed stopped/u,
+  );
+});
+
+it("fences the conversation when a native failure does not prove a stop, but not after a confirmed stop or a completed turn", async () => {
+  // A detached session while work is owed: a failure, not a stop.
+  const detachedResult = runtime.executeTurn(turn("turn-1", "work"));
+  const run = await started("turn-1");
+  fake.background(threadId, [{ taskId: "task-1", kind: "command" }]);
+  fake.complete(threadId, run.id);
+  await until(() => activity()?.phase === "tools");
+  fake.background(threadId, []);
+  thread().sessionDetached = true;
+  fake.snapshotOnResume = true;
+  fake.disconnectAll();
+  await expect(detachedResult).rejects.toThrow(/was detached before it reported/u);
+  await expect((await backgroundTurn("turn-2")).result).rejects.toThrow(
+    /was not confirmed stopped/u,
+  );
+  fake.snapshotOnResume = false;
+
+  // A fresh runtime: a confirmed interrupt and a completed turn leave the thread trusted.
+  await runtime.close();
+  runtime = build();
+  const controller = new AbortController();
+  const cancelled = runtime.executeTurn(turn("turn-3", "work"), controller.signal);
+  const run3 = await started("turn-3");
+  controller.abort(new Error("core disconnected"));
+  await expect(cancelled).rejects.toThrow("core disconnected");
+  expect(runOf("turn-3")?.status).toBe("interrupted");
+  expect((await (await backgroundTurn("turn-4")).result).output).toBe("Started.\n\nResult.");
+  expect(fake.interrupts).toEqual([run3.id]);
+});
+
+it("fences the conversation when a turn read back from an existing run exits without a confirmed stop", async () => {
+  // Another runtime instance retries the same correlation while its run is active: it dispatches nothing.
+  const first = runtime.executeTurn(turn("turn-1", "work"));
+  await started("turn-1");
+  const retry = build();
+  const again = retry.executeTurn(turn("turn-1", "work"));
+  await until(() => fake.subscriptions.length === 2);
+  expect(dispatches()).toHaveLength(1);
+  fake.protocolVersion = 3;
+  fake.disconnectAll();
+  await expect(again).rejects.toThrow(/cannot be used|Lost contact/u);
+  await expect(first).rejects.toThrow(/cannot be used|Lost contact/u);
+  fake.protocolVersion = 2;
+  await expect((await backgroundTurn("turn-2", retry)).result).rejects.toThrow(
+    /was not confirmed stopped/u,
+  );
+  await retry.close();
+});
+
+it("treats a cancel with a possibly accepted dispatch and no observed run as unconfirmed", async () => {
+  const slow = build({ reconnectDelayMs: 1_000 });
+  // The dispatch never reaches T3's handler and the socket drops; the caller then cancels.
+  fake.dropRequest = (command) => command.type === "message.dispatch";
+  const controller = new AbortController();
+  const result = slow.executeTurn(turn("turn-1", "work"), controller.signal);
+  await until(() => fake.received.some((command) => command.type === "message.dispatch"));
+  await pause(100);
+  controller.abort(new Error("core disconnected"));
+  await expect(result).rejects.toThrow("core disconnected");
+  fake.dropRequest = () => false;
+  await expect((await backgroundTurn("turn-2", slow)).result).rejects.toThrow(
+    /was not confirmed stopped/u,
+  );
+  await slow.close();
+}, 10_000);
