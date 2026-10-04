@@ -78,6 +78,8 @@ export interface FakeT3 {
   readonly commands: Command[];
   /** Every interrupt accepted, by run. */
   readonly interrupts: string[];
+  /** Every provider session detached, by session. */
+  readonly detached: string[];
   /** Every thread subscription received, in order. */
   readonly subscriptions: Subscription[];
   /** What protocol discovery announces. */
@@ -98,6 +100,8 @@ export interface FakeT3 {
   snapshotOnResume: boolean;
   /** Leaves a run\'s pending requests open when it ends: a contradictory projection. */
   retainRequests: boolean;
+  /** Omits request items from snapshots, as T3\'s bounded history window may. */
+  omitRequestItems: boolean;
   /** Closes every client socket, as a server restart would. */
   disconnectAll(): void;
   tool(threadId: string, runId: string, item: Partial<FakeItem> & { type: string }): FakeItem;
@@ -139,6 +143,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
   const received: Command[] = [];
   const commands: Command[] = [];
   const interrupts: string[] = [];
+  const detached: string[] = [];
   const subscriptions: Subscription[] = [];
   const receipts = new Map<string, number>();
   const requestRuns = new Map<string, string>();
@@ -197,6 +202,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
     received,
     commands,
     interrupts,
+    detached,
     subscriptions,
     protocolVersion: ORCHESTRATION_PROTOCOL,
     dropAnswer: () => false,
@@ -207,6 +213,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
     interruptBehaviour: "settle",
     snapshotOnResume: false,
     retainRequests: false,
+    omitRequestItems: false,
     disconnectAll() {
       for (const socket of sockets) socket.terminate();
     },
@@ -413,7 +420,9 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
                     providerThreads: [thread.providerThread],
                     providerSessions: [thread.session],
                     messages: thread.messages.map((message) => ({ ...message, streaming: false })),
-                    turnItems: thread.items,
+                    turnItems: fake.omitRequestItems
+                      ? thread.items.filter((item) => !item.type.endsWith("_request"))
+                      : thread.items,
                   },
                 },
               ]
@@ -476,6 +485,19 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
           interrupts.push(runId);
           if (fake.interruptBehaviour === "settle") settleBackground(thread);
         } else throw new Error(`Run ${runId} is not interruptible.`);
+        receipts.set(command.commandId, thread.sequence);
+        return thread.sequence;
+      }
+      case "provider-session.detach": {
+        const thread = threadOf(command.threadId);
+        const sessionId = String(command["providerSessionId"]);
+        if (thread.session.id !== sessionId || thread.session.status === "stopped")
+          throw new Error(`Provider session ${sessionId} does not belong to thread ${thread.id}.`);
+        detached.push(sessionId);
+        if (fake.interruptBehaviour === "settle") {
+          thread.session = { ...thread.session, status: "stopped" };
+          emit(thread, "provider-session.detached", { providerSessionId: sessionId });
+        }
         receipts.set(command.commandId, thread.sequence);
         return thread.sequence;
       }

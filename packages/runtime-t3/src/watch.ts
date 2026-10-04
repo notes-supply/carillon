@@ -36,6 +36,8 @@ import { T3Failure } from "./t3.ts";
 export type Outcome =
   | { readonly kind: "completed"; readonly output: string }
   | { readonly kind: "failed"; readonly explanation: string }
+  /** T3's state cannot show whether the turn's background work was reported. */
+  | { readonly kind: "unresolved"; readonly explanation: string }
   /** Someone other than this runtime ended the run. */
   | { readonly kind: "stopped"; readonly status: RunStatus }
   /** T3 waits for an approval or answer this runtime cannot give; `asked` says which. */
@@ -48,6 +50,8 @@ export interface Retained {
   readonly counted: number;
   readonly requests: number;
   readonly messages: number;
+  readonly providerThreads: number;
+  readonly sessions: number;
 }
 
 export interface TurnWatch {
@@ -70,8 +74,10 @@ export interface TurnWatch {
   /** Whether the thread has any message yet. */
   empty(): boolean;
   outcome(): Outcome | undefined;
-  /** Nothing of the turn still executes: no active run and no background work. */
+  /** Nothing of the turn still executes: no active run, no background work, and no report its live process still owes. */
   quiet(): boolean;
+  /** The provider session behind the turn's latest run, while T3 lists one. */
+  providerSession(): string | undefined;
   /** Whether a request of the turn is still open. */
   requestOpen(): boolean;
   activity(): TurnActivity;
@@ -125,7 +131,7 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
   let running = new Map<string, ToolItem>();
   let recent: ToolItem[] = [];
   let counted = new Set<string>();
-  let requestItems = new Map<string, RequestItem>();
+  const requestItems = new Map<string, RequestItem>();
   let pendingRequests = new Map<string, RuntimeRequest>();
   let errors = new Map<string, string>();
   let compacting = new Set<string>();
@@ -138,10 +144,19 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
    * is not complete until a later run exists.
    */
   let wakeOwedAfter: number | undefined;
+  /**
+   * The ordinal of a turn run whose roster listed work the last time work
+   * was seen. Cleared when the roster empties while that run still executes
+   * (the result reached the running turn). Left set across a resumed
+   * subscription that missed the transition, when T3's state alone cannot
+   * say whether the result was delivered.
+   */
+  let backgroundSeenAt: number | undefined;
   const listeners = new Set<() => void>();
   /** When each background task was first seen, since T3 does not date them. */
   const backgroundSince = new Map<string, number>();
 
+  /** Forgets everything but the turn's identity, its request items and its background facts. */
   function reset(): void {
     turnRuns = new Map();
     last = undefined;
@@ -152,7 +167,6 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
     running = new Map();
     recent = [];
     counted = new Set();
-    requestItems = new Map();
     pendingRequests = new Map();
     errors = new Map();
     compacting = new Set();
@@ -241,6 +255,53 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
   function roster(run: Run | undefined): readonly BackgroundTask[] {
     if (run?.providerThreadId == null) return [];
     return providerThreads.get(run.providerThreadId)?.pendingBackgroundTasks ?? [];
+  }
+
+  /** Provider threads the turn's runs execute in; empty while none is known. */
+  function turnProviderThreads(): Set<string> {
+    const ids = new Set<string>();
+    for (const run of turnRuns.values())
+      if (run.providerThreadId !== null) ids.add(run.providerThreadId);
+    return ids;
+  }
+
+  function foldProviderThread(thread: ProviderThread): void {
+    const relevant = turnProviderThreads();
+    if (relevant.size > 0 && !relevant.has(thread.id)) return;
+    providerThreads.set(thread.id, thread);
+  }
+
+  function foldSession(session: ProviderSession): void {
+    const relevant = new Set<string>();
+    for (const thread of providerThreads.values())
+      if (thread.providerSessionId !== null) relevant.add(thread.providerSessionId);
+    if (relevant.size > 0 && !relevant.has(session.id)) return;
+    sessions.set(session.id, session);
+  }
+
+  /** The turn's live process owes a report in a run that has not appeared. */
+  function wakeOwed(): boolean {
+    return (
+      last?.status === "completed" &&
+      wakeOwedAfter !== undefined &&
+      last.ordinal <= wakeOwedAfter &&
+      !sessionEnded(last)
+    );
+  }
+
+  /**
+   * The turn's run completed, its roster is empty, and the subscription did
+   * not witness how the work it once listed ended: delivered inside the run,
+   * or still owed. T3's current state does not distinguish the two.
+   */
+  function ambiguous(): boolean {
+    return (
+      last?.status === "completed" &&
+      roster(last).length === 0 &&
+      !(wakeOwedAfter !== undefined && last.ordinal <= wakeOwedAfter) &&
+      backgroundSeenAt !== undefined &&
+      last.ordinal <= backgroundSeenAt
+    );
   }
 
   /** Whether the run's provider process is gone, so it can neither report nor wake. */
@@ -337,7 +398,12 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
   }
 
   function quiet(): boolean {
-    return active() === undefined && roster(last).length === 0;
+    return (
+      active() === undefined &&
+      roster(last).length === 0 &&
+      !wakeOwed() &&
+      !(ambiguous() && last !== undefined && !sessionEnded(last))
+    );
   }
 
   return {
@@ -356,8 +422,8 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
           reset();
           for (const run of projection.runs) foldRun(run);
           refile();
-          for (const thread of projection.providerThreads) providerThreads.set(thread.id, thread);
-          for (const session of projection.providerSessions) sessions.set(session.id, session);
+          for (const thread of projection.providerThreads) foldProviderThread(thread);
+          for (const session of projection.providerSessions) foldSession(session);
           for (const request of projection.runtimeRequests) foldRequest(request);
           for (const payload of projection.turnItems) foldItem(payload);
           for (const message of projection.messages) foldMessage(message);
@@ -386,17 +452,13 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
             case "runtime-request.updated":
               foldRequest(parsed(RuntimeRequestSchema, payload, "runtime request"));
               break;
-            case "provider-thread.updated": {
-              const thread = parsed(ProviderThreadSchema, payload, "provider thread");
-              providerThreads.set(thread.id, thread);
+            case "provider-thread.updated":
+              foldProviderThread(parsed(ProviderThreadSchema, payload, "provider thread"));
               break;
-            }
             case "provider-session.attached":
-            case "provider-session.updated": {
-              const session = parsed(ProviderSessionSchema, payload, "provider session");
-              sessions.set(session.id, session);
+            case "provider-session.updated":
+              foldSession(parsed(ProviderSessionSchema, payload, "provider session"));
               break;
-            }
             case "provider-session.detached": {
               const id = isRecord(payload) ? payload["providerSessionId"] : undefined;
               if (typeof id === "string") sessions.delete(id);
@@ -419,7 +481,12 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
         default:
           return;
       }
-      if (last?.status === "completed" && roster(last).length > 0) wakeOwedAfter = last.ordinal;
+      if (last !== undefined) {
+        const listed = roster(last).length > 0;
+        if (listed) backgroundSeenAt = last.ordinal;
+        else if (isActive(last) && backgroundSeenAt === last.ordinal) backgroundSeenAt = undefined;
+        if (listed && last.status === "completed") wakeOwedAfter = last.ordinal;
+      }
       for (const listener of listeners) listener();
     },
     resubscribing() {
@@ -433,6 +500,11 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
     blocking: () => [...earlier.values()],
     empty: () => !hasMessages,
     quiet,
+    providerSession() {
+      if (last?.providerThreadId == null) return undefined;
+      const id = providerThreads.get(last.providerThreadId)?.providerSessionId;
+      return id === null || id === undefined || !sessions.has(id) ? undefined : id;
+    },
     requestOpen: () => ownedPendingRequest() !== undefined,
     outcome() {
       if (anchor === undefined || last === undefined) return undefined;
@@ -457,6 +529,12 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
                     "T3's native session ended before it reported the result of its finished background work.",
                 }
               : undefined;
+          if (ambiguous())
+            return {
+              kind: "unresolved",
+              explanation:
+                "Carillon lost its connection to T3 while this turn ran background work, and T3's state does not show whether the result was delivered",
+            };
           return { kind: "completed", output: answer() };
         }
         case "failed":
@@ -512,6 +590,8 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
       counted: counted.size,
       requests: requestItems.size + pendingRequests.size,
       messages: assistant.size,
+      providerThreads: providerThreads.size,
+      sessions: sessions.size,
     }),
     onChange(listener) {
       listeners.add(listener);

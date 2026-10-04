@@ -547,3 +547,120 @@ it("stops the native run when the runtime closes mid-turn", async () => {
   expect(fake.interrupts).toEqual([run.id]);
   expect(runOf("turn-1")?.status).toBe("interrupted");
 });
+
+it("ends an owed report through the provider session when cancelled after the roster cleared, before the wake", async () => {
+  const controller = new AbortController();
+  const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
+  const run = await started("turn-1");
+  fake.background(threadId, [{ taskId: "task-1", kind: "command", description: "sleep 25" }]);
+  fake.assistant(threadId, run.id, "Started it in the background.");
+  fake.complete(threadId, run.id);
+  await until(() => activity()?.phase === "tools");
+  fake.background(threadId, []);
+  await until(() => activity()?.phase === "model");
+  controller.abort(new Error("core disconnected"));
+  await expect(result).rejects.toThrow("core disconnected");
+  // The completed run cannot be interrupted; the owed wake is ended through its session.
+  expect(fake.interrupts).toEqual([]);
+  expect(fake.detached).toEqual([thread().session.id]);
+  expect(thread().session.status).toBe("stopped");
+  const logged = vi.mocked(console.log).mock.calls.map((call) => String(call[0]));
+  expect(logged.some((line) => line.includes("T3 confirmed the stop"))).toBe(true);
+  expect(logged.some((line) => line.includes("had already ended"))).toBe(false);
+
+  const next = runtime.executeTurn(turn("turn-2", "again"));
+  answer(await started("turn-2"), "ok");
+  expect((await next).output).toBe("ok");
+});
+
+it("does not report an owed wake as stopped when T3 does not confirm the session detach", async () => {
+  fake.interruptBehaviour = "ignore";
+  const controller = new AbortController();
+  const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
+  const run = await started("turn-1");
+  fake.background(threadId, [{ taskId: "task-1", kind: "command" }]);
+  fake.complete(threadId, run.id);
+  await until(() => activity()?.phase === "tools");
+  fake.background(threadId, []);
+  await until(() => activity()?.phase === "model");
+  controller.abort(new Error("cancelled"));
+  await expect(result).rejects.toThrow("cancelled");
+  expect(fake.detached).toEqual([thread().session.id]);
+  const logged = vi.mocked(console.log).mock.calls.map((call) => String(call[0]));
+  expect(logged.some((line) => line.includes("did not confirm the stop"))).toBe(true);
+  expect(logged.some((line) => line.includes("T3 confirmed the stop"))).toBe(false);
+});
+
+it("fails closed when a snapshot resume cannot show whether background work was reported, and ends the session", async () => {
+  fake.snapshotOnResume = true;
+  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const run = await started("turn-1");
+  fake.background(threadId, [{ taskId: "task-1", kind: "command", description: "sleep 25" }]);
+  await until(() => activity()?.phase === "tools");
+  fake.disconnectAll();
+  // Missed while disconnected: the run completes with the roster listed, then the roster empties.
+  fake.assistant(threadId, run.id, "Started it in the background.");
+  fake.complete(threadId, run.id);
+  fake.background(threadId, []);
+  await expect(result).rejects.toMatchObject({
+    status: 502,
+    message:
+      "Carillon lost its connection to T3 while this turn ran background work, and T3's state does not show whether the result was delivered; its native session was ended, so nothing more will arrive. Send another message to continue.",
+  });
+  expect(fake.interrupts).toEqual([]);
+  expect(fake.detached).toEqual([thread().session.id]);
+  expect(fake.subscriptions.at(-1)?.afterSequence).toBeDefined();
+});
+
+it("resumes by replay through the roster transitions and still waits for the wake", async () => {
+  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const run = await started("turn-1");
+  fake.background(threadId, [{ taskId: "task-1", kind: "command" }]);
+  await until(() => activity()?.phase === "tools");
+  fake.disconnectAll();
+  fake.assistant(threadId, run.id, "Started it.");
+  fake.complete(threadId, run.id);
+  fake.background(threadId, []);
+  await resubscribed();
+  await pause(300);
+  expect(activity()).toMatchObject({ phase: "model", running: [] });
+  const wake = fake.wake(threadId, "Background command completed");
+  fake.assistant(threadId, wake.id, "It printed done.");
+  fake.complete(threadId, wake.id);
+  expect((await result).output).toBe("Started it.\n\nIt printed done.");
+  expect(fake.detached).toEqual([]);
+});
+
+it("completes normally when background work finished inside the running turn", async () => {
+  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const run = await started("turn-1");
+  fake.background(threadId, [{ taskId: "task-1", kind: "command" }]);
+  await until(() => activity()?.phase === "tools");
+  fake.background(threadId, []);
+  await until(() => activity()?.phase === "model");
+  answer(run, "Done within the turn.");
+  expect((await result).output).toBe("Done within the turn.");
+  expect(fake.detached).toEqual([]);
+});
+
+it("keeps a request's ownership and wording through a bounded snapshot that omits its item", async () => {
+  fake.interruptBehaviour = "ignore";
+  fake.omitRequestItems = true;
+  fake.snapshotOnResume = true;
+  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const run = await started("turn-1");
+  fake.request(threadId, run.id, "user_input", {
+    type: "user_input_request",
+    questions: [{ header: "Scope", question: "Which file?" }],
+  });
+  await until(() => fake.interrupts.length === 1);
+  // While the ignored interrupt is awaited, the connection drops and resumes
+  // through a snapshot whose history window lacks the request item.
+  fake.disconnectAll();
+  await resubscribed();
+  await expect(result).rejects.toMatchObject({
+    status: 502,
+    message:
+      "T3 asked a question this runtime cannot relay yet (Scope: Which file?); T3 has not confirmed that the run stopped, so it may still be waiting. Send the answer in a new message.",
+  });
+});

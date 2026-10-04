@@ -101,6 +101,8 @@ it("knows the turn's run by its message, keeps the answer in message order, and 
     counted: 0,
     requests: 0,
     messages: 2,
+    providerThreads: 1,
+    sessions: 1,
   });
 });
 
@@ -133,6 +135,8 @@ it("retains only the turn's own work from a long history and keeps its identity 
     counted: 0,
     requests: 0,
     messages: 0,
+    providerThreads: 1,
+    sessions: 1,
   });
   expect(watch.blocking().map((blocking) => blocking.id)).toEqual(["run-7"]);
   expect(watch.activity()).toEqual({ phase: "model", running: [], recent: [], tool_calls: 0 });
@@ -181,6 +185,8 @@ it("bounds finished tools to the recent window while counting every call", () =>
     counted: 41,
     requests: 0,
     messages: 0,
+    providerThreads: 1,
+    sessions: 1,
   });
   const activity = watch.activity();
   expect(activity.tool_calls).toBe(41);
@@ -230,7 +236,8 @@ it("is not finished while background work, an owed wake or a pending request rem
     }),
   );
   expect(watch.outcome()).toBeUndefined();
-  expect(watch.quiet()).toBe(true);
+  // The owed report keeps the turn non-quiet until the wake arrives.
+  expect(watch.quiet()).toBe(false);
   // The wake arrives and completes.
   watch.apply(event(3, "run.created", run("running", "wake", 2)));
   expect(watch.activeRun()?.id).toBe("run-2");
@@ -394,4 +401,186 @@ it("refuses known kinds it cannot read, ignores unknown kinds and malformed stre
   expect(() => watch.apply({ kind: "future" })).not.toThrow();
   expect(() => watch.apply(event(7, "future.event", { anything: true }))).not.toThrow();
   expect(watch.retained().counted).toBe(0);
+});
+
+it("still owes the wake after the roster clears, so a cancel in that gap is not quiet", () => {
+  const watch = watchTurn("message-1", "/workspace");
+  watch.apply(
+    snapshot({
+      runs: [run("completed")],
+      providerThreads: [
+        {
+          id: "provider-thread",
+          providerSessionId: "session",
+          pendingBackgroundTasks: [{ taskId: "t", kind: "command" }],
+        },
+      ],
+    }),
+  );
+  watch.apply(
+    event(2, "provider-thread.updated", {
+      id: "provider-thread",
+      providerSessionId: "session",
+      pendingBackgroundTasks: [],
+    }),
+  );
+  expect(watch.outcome()).toBeUndefined();
+  expect(watch.quiet()).toBe(false);
+  expect(watch.providerSession()).toBe("session");
+  // Ending the session is the confirmation that nothing more can come.
+  watch.apply(event(3, "provider-session.detached", { providerSessionId: "session" }));
+  expect(watch.quiet()).toBe(true);
+  expect(watch.providerSession()).toBeUndefined();
+});
+
+it("marks a resumed snapshot that hides how listed work ended as unresolved, not completed", () => {
+  const watch = watchTurn("message-1", "/workspace");
+  watch.apply(
+    snapshot({
+      runs: [run("running")],
+      providerThreads: [
+        {
+          id: "provider-thread",
+          providerSessionId: "session",
+          pendingBackgroundTasks: [{ taskId: "t", kind: "command" }],
+        },
+      ],
+    }),
+  );
+  watch.resubscribing();
+  watch.apply(
+    snapshot(
+      {
+        runs: [run("completed")],
+        messages: [
+          {
+            id: "a",
+            runId: "run-1",
+            role: "assistant",
+            text: "Started it.",
+            createdAt: "2026-10-04T08:00:01Z",
+          },
+        ],
+      },
+      50,
+    ),
+  );
+  expect(watch.outcome()).toEqual({
+    kind: "unresolved",
+    explanation:
+      "Carillon lost its connection to T3 while this turn ran background work, and T3's state does not show whether the result was delivered",
+  });
+  expect(watch.quiet()).toBe(false);
+  // A later run resolves it: the result was delivered.
+  watch.apply(event(51, "run.created", run("completed", "wake", 2)));
+  watch.apply(
+    event(52, "message.updated", {
+      id: "w",
+      runId: "run-2",
+      role: "assistant",
+      text: "Done.",
+      createdAt: "2026-10-04T08:00:05Z",
+    }),
+  );
+  expect(watch.outcome()).toEqual({ kind: "completed", output: "Started it.\n\nDone." });
+
+  // Work that visibly ended inside the running turn owes nothing.
+  const inTurn = watchTurn("message-1", "/workspace");
+  inTurn.apply(
+    snapshot({
+      runs: [run("running")],
+      providerThreads: [
+        {
+          id: "provider-thread",
+          providerSessionId: "session",
+          pendingBackgroundTasks: [{ taskId: "t", kind: "command" }],
+        },
+      ],
+    }),
+  );
+  inTurn.apply(
+    event(2, "provider-thread.updated", {
+      id: "provider-thread",
+      providerSessionId: "session",
+      pendingBackgroundTasks: [],
+    }),
+  );
+  inTurn.apply(
+    event(3, "message.updated", {
+      id: "a",
+      runId: "run-1",
+      role: "assistant",
+      text: "Done.",
+      createdAt: "2026-10-04T08:00:01Z",
+    }),
+  );
+  inTurn.apply(event(4, "run.updated", run("completed")));
+  expect(inTurn.outcome()).toEqual({ kind: "completed", output: "Done." });
+});
+
+it("keeps a known request's ownership through a bounded snapshot that omits its item", () => {
+  const watch = watchTurn("message-1", "/workspace");
+  watch.apply(
+    snapshot({
+      runs: [run("waiting")],
+      runtimeRequests: [{ id: "request-1", kind: "tool_approval", status: "pending" }],
+      turnItems: [
+        item(
+          "approval_request",
+          "run-1",
+          { requestId: "request-1", requestKind: "command" },
+          "waiting",
+        ),
+      ],
+    }),
+  );
+  expect(watch.outcome()).toEqual({
+    kind: "blocked",
+    asked: "T3 needs an approval (command) this runtime cannot give yet",
+  });
+  watch.resubscribing();
+  watch.apply(
+    snapshot(
+      {
+        runs: [run("completed")],
+        runtimeRequests: [{ id: "request-1", kind: "tool_approval", status: "pending" }],
+        messages: [
+          {
+            id: "a",
+            runId: "run-1",
+            role: "assistant",
+            text: "done",
+            createdAt: "2026-10-04T08:00:01Z",
+          },
+        ],
+      },
+      40,
+    ),
+  );
+  expect(watch.outcome()).toEqual({
+    kind: "blocked",
+    asked: "T3 needs an approval (command) this runtime cannot give yet",
+  });
+  expect(watch.requestOpen()).toBe(true);
+  expect(watch.retained().requests).toBe(2);
+});
+
+it("keeps only the turn's provider thread and session from a snapshot", () => {
+  const watch = watchTurn("message-1", "/workspace");
+  watch.apply(
+    snapshot({
+      runs: [run("running")],
+      providerThreads: [
+        { id: "provider-thread", providerSessionId: "session" },
+        { id: "other-thread", providerSessionId: "other-session" },
+      ],
+      providerSessions: [
+        { id: "session", status: "running" },
+        { id: "other-session", status: "stopped" },
+      ],
+    }),
+  );
+  expect(watch.retained()).toMatchObject({ providerThreads: 1, sessions: 1 });
+  watch.apply(event(2, "provider-thread.updated", { id: "other-thread", providerSessionId: null }));
+  expect(watch.retained()).toMatchObject({ providerThreads: 1, sessions: 1 });
 });

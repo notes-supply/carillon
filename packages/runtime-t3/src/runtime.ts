@@ -24,6 +24,7 @@ import {
   messageDispatch,
   RPC,
   runInterrupt,
+  sessionDetach,
   subscribeThread,
   threadCreate,
   type NativeSelection,
@@ -149,6 +150,8 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
           throw new ExplainedFailure(502, outcome.explanation);
         case "blocked":
           throw new ExplainedFailure(502, `${outcome.asked}; ${stopReport(stop)}`);
+        case "unresolved":
+          throw new ExplainedFailure(502, `${outcome.explanation}; ${wakeReport(stop)}`);
         case "stopped":
           throw new ExplainedFailure(502, `The T3 run was ${outcome.status} before it answered.`);
       }
@@ -254,7 +257,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
             ? signal.reason
             : new Error("turn cancelled", { cause: signal.reason });
         }
-        if (outcome.kind === "blocked")
+        if (outcome.kind === "blocked" || outcome.kind === "unresolved")
           return { outcome, stop: await cancel(connection, binding, watch, stream, dispatched) };
         return { outcome };
       } finally {
@@ -402,7 +405,33 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       );
       return { quiet: true, requestOpen };
     }
-    await interrupt(connection, binding.threadId, target.id, "Carillon cancelled the turn");
+    const accepted = await interrupt(
+      connection,
+      binding.threadId,
+      target.id,
+      "Carillon cancelled the turn",
+    );
+    // With nothing running, T3 refuses the interrupt, yet the process may
+    // still owe a report (or T3 cannot show whether it does). Its only
+    // public stop then is to end the provider session; the detached session
+    // is the confirmation that nothing more will come.
+    const session = watch.providerSession();
+    if (!accepted && watch.activeRun() === undefined && session !== undefined) {
+      try {
+        await connection.call(
+          RPC.dispatchCommand,
+          sessionDetach(binding.threadId, session, "Carillon cancelled the turn"),
+        );
+        log(
+          `thread ${binding.threadId}: detaching provider session ${session} to end an owed report`,
+        );
+      } catch (failure) {
+        if (!(failure instanceof T3Failure) || failure.kind !== "rejected") throw failure;
+        log(
+          `thread ${binding.threadId}: session detach not accepted (${failure.detail ?? failure.message})`,
+        );
+      }
+    }
     const quiet = await settle(watch, stream, (turn) => turn.quiet(), settleMs);
     const calls = watch.activity().tool_calls;
     const stop = { quiet, requestOpen: watch.requestOpen() };
@@ -417,19 +446,20 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     return stop;
   }
 
+  /** Whether T3 accepted the interrupt; it refuses one for a run with nothing to stop. */
   async function interrupt(
     connection: T3Connection,
     threadId: string,
     runId: string,
     reason: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
       await connection.call(RPC.dispatchCommand, runInterrupt(threadId, runId, reason));
+      return true;
     } catch (failure) {
-      // T3 refuses to interrupt a run that is no longer interruptible, which
-      // is the state we want; anything else ends the attempt.
       if (!(failure instanceof T3Failure) || failure.kind !== "rejected") throw failure;
       log(`run ${runId}: interrupt not accepted (${failure.detail ?? failure.message})`);
+      return false;
     }
   }
 
@@ -486,6 +516,13 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
 
   function log(message: string): void {
     console.log(`runtime-t3: ${message}`);
+  }
+
+  /** The person's view of an unresolved background report, saying only what T3 confirmed. */
+  function wakeReport(stop: Stop | undefined): string {
+    return stop?.quiet === true
+      ? "its native session was ended, so nothing more will arrive. Send another message to continue."
+      : "T3 did not confirm a stop, so a result may still arrive and will be stopped before the next turn. Send another message to continue.";
   }
 
   /** The person's view of a stop, saying only what T3 confirmed. */

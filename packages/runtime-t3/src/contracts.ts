@@ -273,6 +273,21 @@ export function runInterrupt(threadId: string, runId: string, reason: string) {
 }
 
 /**
+ * Ends the provider process behind a thread's native conversation. T3 has no
+ * narrower public stop for a process that owes a wake with nothing running;
+ * the detached session is the confirmation that nothing more can come.
+ */
+export function sessionDetach(threadId: string, providerSessionId: string, reason: string) {
+  return {
+    type: "provider-session.detach",
+    commandId: crypto.randomUUID(),
+    threadId,
+    providerSessionId,
+    reason,
+  } as const;
+}
+
+/**
  * The thread subscription: a bounded snapshot (T3 windows messages and
  * items to recent turns; runs, requests, provider threads and sessions stay
  * whole), or a replay of the events after a sequence this runtime already
