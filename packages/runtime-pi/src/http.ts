@@ -12,7 +12,6 @@ import {
 } from "@carillon/protocol";
 import { diagnostic, displayableExplanation, ExplainedFailure } from "./failure.ts";
 import type { RuntimeOperations, TurnRequest } from "./operations.ts";
-import packageInfo from "../package.json" with { type: "json" };
 
 interface RuntimeServerOptions {
   readonly runtime: RuntimeOperations;
@@ -20,6 +19,8 @@ interface RuntimeServerOptions {
   readonly providerId: string;
   /** The engine behind this runtime, as `/health` names it. */
   readonly provider: string;
+  /** The runtime's own build version, which core compares with the registry's expectation. */
+  readonly version: string;
   readonly features: readonly string[];
   readonly workspace: string;
 }
@@ -47,7 +48,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
       writeJson(response, 200, {
         id: options.providerId,
         role: "runtime",
-        version: packageInfo.version,
+        version: options.version,
         status: "ready",
         features: options.features,
         provider: options.provider,

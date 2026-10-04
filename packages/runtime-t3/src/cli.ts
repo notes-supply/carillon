@@ -9,6 +9,7 @@ import {
   requiredArgument,
 } from "@carillon/runtime-pi/installation";
 import { createT3Runtime } from "./runtime.ts";
+import packageInfo from "../package.json" with { type: "json" };
 import { loadSettings } from "./settings.ts";
 import { connectT3 } from "./t3.ts";
 
@@ -44,6 +45,7 @@ async function main(values: readonly string[]): Promise<void> {
     token,
     providerId: installation.runtime.id,
     provider: "t3",
+    version: packageInfo.version,
     features: ["native-continuations"],
     workspace: installation.workspace,
   });

@@ -199,7 +199,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       } catch (failure) {
         if (attempt > 0 && attempt < reconnect.attempts && failure instanceof T3Failure) {
           attempt += 1;
-          await sleep(reconnect.delayMs);
+          await pause();
           continue;
         }
         throw unavailable(failure);
@@ -216,7 +216,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
             log(
               `turn ${request.correlation_id}: ${failure.message}; reconnecting (${String(attempt)}/${String(reconnect.attempts)})`,
             );
-            await sleep(reconnect.delayMs);
+            await pause();
             continue;
           }
           const run = watch.run();
@@ -231,18 +231,36 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       }
     }
 
+    /**
+     * Waits before another connection. Until the turn may have reached T3,
+     * a cancelled caller ends the wait at once; after a possible dispatch
+     * the wait is kept, since the native work must still be found and
+     * stopped.
+     */
+    async function pause(): Promise<void> {
+      if (dispatched) {
+        await sleep(reconnect.delayMs);
+        return;
+      }
+      await sleep(reconnect.delayMs, undefined, { signal }).catch(() => undefined);
+      signal.throwIfAborted();
+    }
+
     async function drive(
       connection: T3Connection,
     ): Promise<{ readonly outcome: Outcome; readonly stop?: Stop }> {
       await ensureThread(connection, binding);
       const stream = subscribe(connection, binding.threadId, watch);
       try {
+        // Before a possible dispatch, a cancelled caller need not wait for
+        // the snapshot; afterwards the state must be read back regardless.
         await settle(
           watch,
           stream,
           (turn) => turn.synchronized(),
           timeoutMs,
           "the thread snapshot",
+          dispatched ? undefined : signal,
         );
         if (watch.run() === undefined && !signal.aborted) {
           await stopBlocking(connection, binding, watch, stream);
@@ -457,7 +475,8 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
 
   /**
    * Resolves true when the condition holds and false at the deadline, or
-   * rejects at the deadline naming what was awaited; rejects when the stream fails.
+   * rejects at the deadline naming what was awaited; resolves false as soon
+   * as the given signal aborts; rejects when the stream fails.
    */
   function settle(
     watch: TurnWatch,
@@ -465,17 +484,24 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     condition: (watch: TurnWatch) => boolean,
     deadlineMs: number,
     awaited?: string,
+    signal?: AbortSignal,
   ): Promise<boolean> {
-    return awaitWatch(watch, stream, (turn) => (condition(turn) ? true : undefined), {
-      deadline: {
-        ms: deadlineMs,
-        expired: () => {
-          if (awaited !== undefined)
-            throw new T3Failure("timeout", `T3 did not send ${awaited} in time`);
-          return false;
+    return awaitWatch(
+      watch,
+      stream,
+      (turn) => (condition(turn) ? true : signal?.aborted === true ? false : undefined),
+      {
+        ...(signal === undefined ? {} : { signal }),
+        deadline: {
+          ms: deadlineMs,
+          expired: () => {
+            if (awaited !== undefined)
+              throw new T3Failure("timeout", `T3 did not send ${awaited} in time`);
+            return false;
+          },
         },
       },
-    });
+    );
   }
 
   /**

@@ -39,6 +39,7 @@ async function serve() {
     token: "test-only",
     providerId: "runtime-pi",
     provider: "deterministic-local-substitute",
+    version: "9.9.9-test",
     features: [],
     workspace: "/unused",
   });
@@ -129,6 +130,18 @@ it("sends callers only the displayable part of explanations and logs redacted di
   );
   expect(logged[6]).toMatch(/^GET \/v1\/model failed: Error: model catalogue file is corrupt\n/u);
   for (const secret of [key, "short-secret"]) expect(logged.join("\n")).not.toContain(secret);
+});
+
+it("reports the build version its runtime was given, not a shared package's", async () => {
+  const { call, close } = await serve();
+  try {
+    expect(await call("GET", "/health")).toMatchObject({
+      status: 200,
+      body: { id: "runtime-pi", role: "runtime", version: "9.9.9-test", status: "ready" },
+    });
+  } finally {
+    await close();
+  }
 });
 
 it("describes an executing turn only to its own interface, after authentication", async () => {

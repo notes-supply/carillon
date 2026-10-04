@@ -195,13 +195,32 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
     detachedSessions.clear();
   }
 
+  /**
+   * A later run is the turn's only while the turn expects one: its process
+   * owes the report of listed work, or a resumed snapshot left that open.
+   * Otherwise a run T3 starts after the turn's is someone else's (such as a
+   * predecessor's late wake) and is neither awaited nor answered with. T3
+   * labels both kinds of wake alike (created by the agent on the same
+   * provider thread), so a predecessor's wake that arrives while this turn
+   * owes one cannot be told apart; that limit is documented.
+   */
+  function expectsFollowUp(): boolean {
+    return wakeOwedAfter !== undefined || backgroundSeenAt !== undefined;
+  }
+
   function foldRun(run: Run): void {
     if (run.userMessageId === messageId) anchor = run;
-    if (anchor !== undefined && run.ordinal >= anchor.ordinal) {
+    const owned =
+      anchor !== undefined &&
+      (run.id === anchor.id ||
+        turnRuns.has(run.id) ||
+        (run.ordinal > anchor.ordinal && expectsFollowUp()));
+    if (owned) {
       turnRuns.set(run.id, run);
       earlier.delete(run.id);
       if (last === undefined || run.ordinal >= last.ordinal) last = run;
-    } else if (isActive(run)) earlier.set(run.id, run);
+    } else if (anchor !== undefined && run.ordinal > anchor.ordinal) return;
+    else if (isActive(run)) earlier.set(run.id, run);
     else earlier.delete(run.id);
   }
 
@@ -406,14 +425,15 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
     return undefined;
   }
 
-  /** A pending request of this turn: one its items name, or any while the turn's run waits. */
+  /**
+   * A pending request of this turn: one a retained request item of the turn
+   * names. A pending request no item of the turn names stays unassigned,
+   * however the turn's run waits: it may be another run's leftover.
+   */
   function ownedPendingRequest(): RuntimeRequest | undefined {
-    let fallback: RuntimeRequest | undefined;
-    for (const request of pendingRequests.values()) {
+    for (const request of pendingRequests.values())
       if (requestItems.has(request.id)) return request;
-      fallback ??= request;
-    }
-    return active()?.status === "waiting" ? fallback : undefined;
+    return undefined;
   }
 
   /** What T3 is waiting for, in the person's terms, from the request's item. */

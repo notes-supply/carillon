@@ -105,6 +105,8 @@ export interface FakeT3 {
   retainRequests: boolean;
   /** Omits request items from snapshots, as T3\'s bounded history window may. */
   omitRequestItems: boolean;
+  /** Accepts subscriptions but never delivers their first snapshot or marker. */
+  holdSnapshot: boolean;
   /** Closes every client socket, as a server restart would. */
   disconnectAll(): void;
   tool(threadId: string, runId: string, item: Partial<FakeItem> & { type: string }): FakeItem;
@@ -219,6 +221,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
     snapshotOnResume: false,
     retainRequests: false,
     omitRequestItems: false,
+    holdSnapshot: false,
     disconnectAll() {
       for (const socket of sockets) socket.terminate();
     },
@@ -411,6 +414,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
         };
         subscriptions.push(subscription);
         thread.subscribers.add({ socket, requestId: id });
+        if (fake.holdSnapshot) return;
         const replay =
           afterSequence !== undefined && !fake.snapshotOnResume && afterSequence <= thread.sequence
             ? thread.events.filter((event) => event.sequence > afterSequence)

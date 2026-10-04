@@ -13,6 +13,7 @@ import {
 } from "./attachments.ts";
 import { createDeterministicRuntime } from "./testing.ts";
 import { createRuntimeServer } from "./http.ts";
+import packageInfo from "../package.json" with { type: "json" };
 import { runtimeListenAddress } from "./endpoint.ts";
 import {
   loadInstallation,
@@ -77,6 +78,7 @@ async function main(values: readonly string[]): Promise<void> {
     token,
     providerId: config.runtime.id,
     provider: deterministic ? "deterministic-local-substitute" : "pi",
+    version: packageInfo.version,
     features: ["native-continuations", "native-extensions", "skills"],
     workspace: config.workspace,
   });

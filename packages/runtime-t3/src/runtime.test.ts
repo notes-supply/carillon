@@ -39,13 +39,13 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-function build(overrides: { url?: string; token?: string } = {}) {
+function build(overrides: { url?: string; token?: string; reconnectDelayMs?: number } = {}) {
   return createT3Runtime({
     endpoint: { url: overrides.url ?? fake.url, token: overrides.token ?? fake.token },
     projectId: PROJECT,
     selection,
     workspace: resources,
-    reconnect: { attempts: 5, delayMs: 50 },
+    reconnect: { attempts: 5, delayMs: overrides.reconnectDelayMs ?? 50 },
     settleMs: 500,
     timeoutMs: 2_000,
   });
@@ -676,3 +676,116 @@ it("keeps a request's ownership and wording through a bounded snapshot that omit
       "T3 asked a question this runtime cannot relay yet (Scope: Which file?); T3 has not confirmed that the run stopped, so it may still be waiting. Send the answer in a new message.",
   });
 });
+
+it("does not adopt a later run the turn does not owe, and the next turn sweeps it", async () => {
+  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const run = await started("turn-1");
+  // A predecessor's late wake lands on the thread while this turn runs: it queues behind it.
+  const stale = fake.wake(threadId, 'Background command "old sleep" completed (exit code 0)');
+  expect(stale.status).toBe("queued");
+  answer(run, "Only mine.");
+  expect((await result).output).toBe("Only mine.");
+  // The stale run now runs; it is not this turn's and is not awaited.
+  expect(runOf("turn-1")?.status).toBe("completed");
+  expect(thread().runs.find((candidate) => candidate.id === stale.id)?.status).toBe("running");
+  fake.assistant(threadId, stale.id, "Old result.");
+  expect((await result).output).toBe("Only mine.");
+
+  const next = runtime.executeTurn(turn("turn-2", "again"));
+  answer(await started("turn-2"), "ok");
+  expect((await next).output).toBe("ok");
+  expect(fake.interrupts).toEqual([stale.id]);
+});
+
+it("ignores a stale pending request until the new run's own item names its request", async () => {
+  fake.retainRequests = true;
+  const first = runtime.executeTurn(turn("turn-1", "first"));
+  const run = await started("turn-1");
+  answer(run, "done");
+  expect((await first).output).toBe("done");
+  // An earlier run's request is left pending with no item of the new turn naming it.
+  fake.request(threadId, run.id, "tool_approval");
+  fake.retainRequests = false;
+
+  const second = runtime.executeTurn(turn("turn-2", "second"));
+  const next = await started("turn-2");
+  // The new run waits on its own request before its item has arrived: unknown, not blocked.
+  const own = fake.request(threadId, next.id, "user_input");
+  await until(() => runOf("turn-2")?.status === "waiting");
+  await pause(300);
+  expect(fake.interrupts).toEqual([]);
+  expect(runtime.activity("turn-2", "discord-private")?.phase).toBe("model");
+  // Its item arrives and names the request: blocked with the new turn's wording.
+  fake.tool(threadId, next.id, {
+    type: "user_input_request",
+    requestId: own.id,
+    questions: [{ header: "Scope", question: "Which file?" }],
+  });
+  await expect(second).rejects.toMatchObject({
+    status: 502,
+    message:
+      "T3 asked a question this runtime cannot relay yet (Scope: Which file?); the run was stopped. Send the answer in a new message.",
+  });
+  expect(fake.interrupts).toEqual([next.id]);
+});
+
+it("cancels promptly while the first snapshot never arrives, dispatching nothing", async () => {
+  fake.holdSnapshot = true;
+  const controller = new AbortController();
+  const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
+  await until(() => fake.subscriptions.length === 1);
+  const started = Date.now();
+  controller.abort(new Error("core disconnected"));
+  await expect(result).rejects.toThrow("core disconnected");
+  expect(Date.now() - started).toBeLessThan(1_000);
+  expect(dispatches()).toHaveLength(0);
+  fake.holdSnapshot = false;
+  const next = runtime.executeTurn(turn("turn-2", "again"));
+  answer(await started2("turn-2"), "ok");
+  expect((await next).output).toBe("ok");
+});
+
+it("cancels promptly during a reconnect delay before anything was dispatched", async () => {
+  const slow = build({ reconnectDelayMs: 5_000 });
+  let dropped = 0;
+  fake.dropAnswer = (command) => command.type === "thread.create" && dropped++ === 0;
+  const controller = new AbortController();
+  const result = slow.executeTurn(turn("turn-1", "work"), controller.signal);
+  await until(() => dropped === 1);
+  await pause(100);
+  const started = Date.now();
+  controller.abort(new Error("core disconnected"));
+  await expect(result).rejects.toThrow("core disconnected");
+  expect(Date.now() - started).toBeLessThan(1_000);
+  expect(dispatches()).toHaveLength(0);
+  await slow.close();
+});
+
+it("keeps recovering a possibly dispatched turn when cancelled during a reconnect delay", async () => {
+  const slow = build({ reconnectDelayMs: 1_000 });
+  let dropped = 0;
+  fake.dropAnswer = (command) => command.type === "message.dispatch" && dropped++ === 0;
+  const controller = new AbortController();
+  const result = slow.executeTurn(turn("turn-1", "work"), controller.signal);
+  const run = await started2("turn-1");
+  await pause(100);
+  controller.abort(new Error("core disconnected"));
+  await expect(result).rejects.toThrow("core disconnected");
+  // The abort did not abandon the native run: the reconnection found and interrupted it.
+  expect(fake.interrupts).toEqual([run.id]);
+  expect(runOf("turn-1")?.status).toBe("interrupted");
+  await slow.close();
+}, 10_000);
+
+it("closes promptly while the first snapshot never arrives", async () => {
+  fake.holdSnapshot = true;
+  const result = runtime.executeTurn(turn("turn-1", "work"));
+  await until(() => fake.subscriptions.length === 1);
+  const started = Date.now();
+  await runtime.close();
+  await expect(result).rejects.toThrow("T3 runtime is closed");
+  expect(Date.now() - started).toBeLessThan(1_000);
+  expect(dispatches()).toHaveLength(0);
+});
+
+const started2 = started;

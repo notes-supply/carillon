@@ -267,6 +267,20 @@ it("is not finished while background work, an owed wake or a pending request rem
       status: "pending",
     }),
   );
+  // Pending alone is unknown; the wake run's own item names the request.
+  expect(watch.outcome()).toBeUndefined();
+  watch.apply(
+    event(
+      8,
+      "turn-item.updated",
+      item(
+        "approval_request",
+        "run-2",
+        { requestId: "request-1", requestKind: "tool_approval" },
+        "waiting",
+      ),
+    ),
+  );
   expect(watch.outcome()).toEqual({
     kind: "blocked",
     asked: "T3 needs an approval (tool_approval) this runtime cannot give yet",
@@ -830,4 +844,70 @@ it("treats a session record it never saw as unknown, not as detached", () => {
       "T3's native session was detached while it still listed background work; T3 does not confirm whether that work still reports back.",
   });
   expect(watch.providerSession()).toBeUndefined();
+});
+
+it("adopts a later run only while the turn expects a follow-up", () => {
+  const watch = watchTurn("message-1", "/workspace");
+  watch.apply(snapshot({ runs: [run("running")] }));
+  // A predecessor's late wake queues behind the turn's run: not this turn's.
+  watch.apply(event(2, "run.created", run("queued", "stale-wake", 2)));
+  watch.apply(
+    event(3, "message.updated", {
+      id: "a",
+      runId: "run-1",
+      role: "assistant",
+      text: "Mine.",
+      createdAt: "2026-10-04T12:00:01Z",
+    }),
+  );
+  watch.apply(event(4, "run.updated", run("completed")));
+  expect(watch.outcome()).toEqual({ kind: "completed", output: "Mine." });
+  expect(watch.retained().runs).toBe(1);
+  // The same later run is the turn's when the turn owes a report.
+  const owing = watchTurn("message-1", "/workspace");
+  owing.apply(
+    snapshot({
+      runs: [run("completed")],
+      providerThreads: [
+        {
+          id: "provider-thread",
+          providerSessionId: "session",
+          pendingBackgroundTasks: [{ taskId: "t", kind: "command" }],
+        },
+      ],
+    }),
+  );
+  owing.apply(event(2, "run.created", run("running", "wake", 2)));
+  expect(owing.activeRun()?.id).toBe("run-2");
+});
+
+it("leaves a pending request no item of the turn names unassigned, even while the run waits", () => {
+  const watch = watchTurn("message-1", "/workspace");
+  watch.apply(
+    snapshot({
+      runs: [run("completed", "older", 0, "run-0"), run("waiting")],
+      runtimeRequests: [
+        { id: "stale", kind: "tool_approval", status: "pending" },
+        { id: "mine", kind: "user_input", status: "pending" },
+      ],
+    }),
+  );
+  expect(watch.outcome()).toBeUndefined();
+  expect(watch.requestOpen()).toBe(false);
+  watch.apply(
+    event(
+      2,
+      "turn-item.updated",
+      item(
+        "user_input_request",
+        "run-1",
+        { requestId: "mine", questions: [{ header: "Scope", question: "Which file?" }] },
+        "waiting",
+      ),
+    ),
+  );
+  expect(watch.outcome()).toEqual({
+    kind: "blocked",
+    asked: "T3 asked a question this runtime cannot relay yet (Scope: Which file?)",
+  });
 });
