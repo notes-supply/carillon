@@ -1118,3 +1118,60 @@ it("ends unresolved on a follow-up after an unconfirmed earlier stop, and comple
       "An earlier turn on this conversation was not confirmed stopped, and T3 cannot show whether the run that followed this turn's background work reports this turn's work or the earlier one's",
   });
 });
+
+it("refuses a provider-session detach without a session identity instead of dropping it", () => {
+  const watch = watchTurn("message-1", "/workspace");
+  watch.apply(snapshot({ runs: [run("completed")] }));
+  let sequence = 1;
+  for (const payload of [{}, { providerSessionId: 7 }, { providerSessionId: "" }, null, "session"])
+    expect(() => watch.apply(event(++sequence, "provider-session.detached", payload))).toThrow(
+      "T3 sent a provider session detach this runtime does not understand",
+    );
+  // A well-formed detach of the turn's session is still applied.
+  watch.apply(event(++sequence, "provider-session.detached", { providerSessionId: "session" }));
+  expect(watch.providerSession()).toBeUndefined();
+  expect(watch.retained().detachedSessions).toBe(1);
+});
+
+it("keeps the thread's latest earlier run and its listed work until the turn's own run exists", () => {
+  const watch = watchTurn("message-9", "/workspace");
+  const tasks = [{ taskId: "old", kind: "command" }];
+  // A terminal earlier run whose provider thread still lists work: nothing is active, but the work is.
+  watch.apply(
+    snapshot({
+      runs: [run("completed", "old-1", 1), run("completed", "old-2", 2)],
+      providerThreads: [
+        { id: "provider-thread", providerSessionId: "session", pendingBackgroundTasks: tasks },
+      ],
+    }),
+  );
+  expect(watch.blocking()).toEqual([]);
+  expect(watch.stale()).toEqual({ run: run("completed", "old-2", 2), listed: tasks });
+  // The roster follows the provider thread's later records.
+  watch.apply(
+    event(2, "provider-thread.updated", {
+      id: "provider-thread",
+      providerSessionId: "session",
+      pendingBackgroundTasks: [],
+    }),
+  );
+  expect(watch.stale()).toEqual({ run: run("completed", "old-2", 2), listed: [] });
+  // An active later run becomes the stale run, and stays it once interrupted.
+  watch.apply(event(3, "run.created", run("running", "old-3", 3)));
+  watch.apply(
+    event(4, "provider-thread.updated", {
+      id: "provider-thread",
+      providerSessionId: "session",
+      pendingBackgroundTasks: tasks,
+    }),
+  );
+  expect(watch.blocking().map((blocking) => blocking.id)).toEqual(["run-3"]);
+  expect(watch.stale()).toEqual({ run: run("running", "old-3", 3), listed: tasks });
+  watch.apply(event(5, "run.updated", run("interrupted", "old-3", 3)));
+  expect(watch.blocking()).toEqual([]);
+  expect(watch.stale()).toEqual({ run: run("interrupted", "old-3", 3), listed: tasks });
+  // The turn's own run releases the stale evidence.
+  watch.apply(event(6, "run.created", run("running", "message-9", 4)));
+  expect(watch.stale()).toBeUndefined();
+  expect(watch.run()?.id).toBe("run-4");
+});

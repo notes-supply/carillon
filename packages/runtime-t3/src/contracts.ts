@@ -83,6 +83,9 @@ export const ProviderSessionSchema = Type.Object({
 });
 export type ProviderSession = Static<typeof ProviderSessionSchema>;
 
+/** The `provider-session.detached` event: the only field this runtime reads is the session it names. */
+export const ProviderSessionDetachedSchema = Type.Object({ providerSessionId: Id });
+
 export const MessageSchema = Type.Object({
   id: Id,
   runId: Nullable(Id),
@@ -211,9 +214,10 @@ export interface NativeSelection {
  * read back or replayed without a second execution.
  */
 export function derivedId(...facts: readonly string[]): string {
-  const hash = createHash("sha256");
-  for (const fact of facts) hash.update(fact).update("\0");
-  const hex = hash.digest("hex");
+  // The facts are encoded as a JSON array, so no fact can run into the
+  // next: ("a", "b\0c") and ("a\0b", "c") hash differently, as do an
+  // empty fact and an absent one.
+  const hex = createHash("sha256").update(JSON.stringify(facts)).digest("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 

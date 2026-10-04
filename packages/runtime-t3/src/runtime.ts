@@ -272,6 +272,9 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
           await pause();
           continue;
         }
+        // Once the turn's work may exist on T3, a server that cannot be
+        // reached again is reported with the run that may still be running.
+        if (reached() && failure instanceof T3Failure) throw abandoned(failure);
         throw unavailable(failure);
       }
       try {
@@ -289,16 +292,22 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
             await pause();
             continue;
           }
-          const run = watch.run();
-          throw new ExplainedFailure(
-            502,
-            `Lost contact with T3 while the turn ran; native run ${run?.id ?? "(not recorded)"} may still be running.`,
-          );
+          throw abandoned(failure);
         }
         throw unavailable(failure);
       } finally {
         connection.close();
       }
+    }
+
+    /** The turn's work was reached but T3 can no longer be followed: the native run may still be running. */
+    function abandoned(failure: T3Failure): ExplainedFailure {
+      console.error(`runtime-t3: ${diagnostic(failure)}`);
+      const run = watch.run();
+      return new ExplainedFailure(
+        502,
+        `Lost contact with T3 while the turn ran (${failure.message}); native run ${run?.id ?? "(not recorded)"} may still be running.`,
+      );
     }
 
     /** Waits before another connection; see `reached`. */
@@ -398,15 +407,46 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     signal: AbortSignal,
   ): Promise<void> {
     const blocking = watch.blocking();
-    if (blocking.length === 0) return;
     for (const run of blocking) {
       log(`thread ${binding.threadId}: stopping stale run ${run.id} (${run.status})`);
       await interrupt(connection, binding.threadId, run.id, "Carillon moved on to a later turn");
     }
+    if (blocking.length > 0) {
+      const stopped = await settle(
+        watch,
+        stream,
+        (turn) => turn.blocking().length === 0,
+        settleMs,
+        undefined,
+        signal,
+      );
+      signal.throwIfAborted();
+      if (!stopped)
+        throw new ExplainedFailure(
+          503,
+          "An earlier turn is still running on T3 and could not be stopped; try again shortly.",
+        );
+    }
+    // Background work an earlier run left listed outlives that run, whether
+    // it was terminal already or was stopped just now: T3 settles it through
+    // the thread's latest run, and a successor is dispatched only once T3
+    // lists none of it. A roster that does not clear is reported, not assumed
+    // gone.
+    const stale = watch.stale();
+    if (stale === undefined || stale.listed.length === 0) return;
+    log(
+      `thread ${binding.threadId}: stopping ${String(stale.listed.length)} background task(s) left by earlier run ${stale.run.id} (${stale.run.status})`,
+    );
+    await interrupt(
+      connection,
+      binding.threadId,
+      stale.run.id,
+      "Carillon moved on to a later turn",
+    );
     const settled = await settle(
       watch,
       stream,
-      (turn) => turn.blocking().length === 0,
+      (turn) => (turn.stale()?.listed.length ?? 0) === 0,
       settleMs,
       undefined,
       signal,
@@ -415,7 +455,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     if (!settled)
       throw new ExplainedFailure(
         503,
-        "An earlier turn is still running on T3 and could not be stopped; try again shortly.",
+        "An earlier turn's background work is still listed on T3 and could not be stopped; try again shortly.",
       );
   }
 

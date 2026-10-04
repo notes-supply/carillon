@@ -19,6 +19,7 @@ import { Check } from "typebox/value";
 import {
   MessageSchema,
   ProjectionSchema,
+  ProviderSessionDetachedSchema,
   ProviderSessionSchema,
   ProviderThreadSchema,
   RunSchema,
@@ -76,6 +77,12 @@ export interface TurnWatch {
   latestRun(): Run | undefined;
   /** Earlier turns' runs that still occupy the thread. */
   blocking(): readonly Run[];
+  /**
+   * While the turn has no run: the thread's latest earlier run and the
+   * background work its provider thread still lists, which T3 settles
+   * through that run. Undefined once the turn's run exists.
+   */
+  stale(): { readonly run: Run; readonly listed: readonly BackgroundTask[] } | undefined;
   /** Whether the thread has any message yet. */
   empty(): boolean;
   outcome(): Outcome | undefined;
@@ -146,6 +153,14 @@ export function watchTurn(
   let last: Run | undefined;
   /** Earlier runs still active, which block a new dispatch. */
   let earlier = new Map<string, Run>();
+  /**
+   * While the turn has no run: the thread's latest earlier run and its
+   * provider thread, whose listed background work outlives the run and
+   * must be settled before a successor is dispatched. Released once the
+   * turn's own run exists.
+   */
+  let predecessor: Run | undefined;
+  let predecessorThread: ProviderThread | undefined;
   let hasMessages = false;
   let assistant = new Map<string, Message>();
   let latestAssistant: Message | undefined;
@@ -200,6 +215,8 @@ export function watchTurn(
     turnRuns = new Map();
     last = undefined;
     earlier = new Map();
+    predecessor = undefined;
+    predecessorThread = undefined;
     hasMessages = false;
     assistant = new Map();
     latestAssistant = undefined;
@@ -242,15 +259,28 @@ export function watchTurn(
   }
 
   function foldRun(run: Run): void {
-    if (run.userMessageId === messageId) anchor = run;
+    if (run.userMessageId === messageId) {
+      anchor = run;
+      predecessor = undefined;
+      predecessorThread = undefined;
+    }
     const owned = anchor !== undefined && (run.id === anchor.id || adopt(run));
     if (owned) {
       turnRuns.set(run.id, run);
       earlier.delete(run.id);
       if (last === undefined || run.ordinal >= last.ordinal) last = run;
-    } else if (anchor !== undefined && run.ordinal > anchor.ordinal) return;
-    else if (isActive(run)) earlier.set(run.id, run);
+      return;
+    }
+    if (anchor !== undefined && run.ordinal > anchor.ordinal) return;
+    if (isActive(run)) earlier.set(run.id, run);
     else earlier.delete(run.id);
+    if (anchor === undefined && (predecessor === undefined || run.ordinal >= predecessor.ordinal)) {
+      predecessor = run;
+      predecessorThread =
+        run.providerThreadId === null
+          ? undefined
+          : (recentThreads.get(run.providerThreadId) ?? providerThreads.get(run.providerThreadId));
+    }
   }
 
   /** An adopted follow-up whose provenance an unconfirmed earlier stop leaves uncertain. */
@@ -352,6 +382,7 @@ export function watchTurn(
   }
 
   function foldProviderThread(thread: ProviderThread): void {
+    if (predecessor?.providerThreadId === thread.id) predecessorThread = thread;
     if (turnProviderThread(thread.id)) {
       providerThreads.set(thread.id, thread);
       pruneProviders();
@@ -612,8 +643,12 @@ export function watchTurn(
               foldSession(parsed(ProviderSessionSchema, payload, "provider session"));
               break;
             case "provider-session.detached": {
-              const id = isRecord(payload) ? payload["providerSessionId"] : undefined;
-              if (typeof id === "string" && turnSession(id)) {
+              const { providerSessionId: id } = parsed(
+                ProviderSessionDetachedSchema,
+                payload,
+                "provider session detach",
+              );
+              if (turnSession(id)) {
                 sessions.delete(id);
                 recentSessions.delete(id);
                 detachedSessions.add(id);
@@ -654,6 +689,10 @@ export function watchTurn(
     activeRun: active,
     latestRun: () => last,
     blocking: () => [...earlier.values()],
+    stale: () =>
+      predecessor === undefined
+        ? undefined
+        : { run: predecessor, listed: predecessorThread?.pendingBackgroundTasks ?? [] },
     empty: () => !hasMessages,
     quiet,
     providerSession() {

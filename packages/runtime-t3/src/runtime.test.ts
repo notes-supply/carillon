@@ -880,7 +880,9 @@ it("fences the conversation when reconnection is exhausted after a dispatch", as
   await started("turn-1");
   fake.protocolVersion = 3;
   fake.disconnectAll();
-  await expect(result).rejects.toThrow(/cannot be used|Lost contact/u);
+  await expect(result).rejects.toThrow(
+    /^Lost contact with T3 while the turn ran .*may still be running\.$/u,
+  );
   fake.protocolVersion = 2;
   await expect((await backgroundTurn("turn-2")).result).rejects.toThrow(
     /was not confirmed stopped/u,
@@ -924,8 +926,12 @@ it("fences the conversation when a turn read back from an existing run exits wit
   const retry = build();
   const again = retry.executeTurn(turn("turn-1", "work"));
   // Both turns will fail; observe each rejection as it happens.
-  const firstFails = expect(first).rejects.toThrow(/cannot be used|Lost contact/u);
-  const againFails = expect(again).rejects.toThrow(/cannot be used|Lost contact/u);
+  const firstFails = expect(first).rejects.toThrow(
+    /^Lost contact with T3 while the turn ran .*may still be running\.$/u,
+  );
+  const againFails = expect(again).rejects.toThrow(
+    /^Lost contact with T3 while the turn ran .*may still be running\.$/u,
+  );
   await until(() => fake.subscriptions.length === 2);
   expect(dispatches()).toHaveLength(1);
   fake.protocolVersion = 3;
@@ -1079,4 +1085,94 @@ it("fences the conversation when the background work of a failed run is not conf
   await expect((await backgroundTurn("turn-2")).result).rejects.toThrow(
     /was not confirmed stopped/u,
   );
+});
+
+it("keeps the possibly-running warning when T3 cannot be reached again after the dispatch", async () => {
+  // Discovery changes protocol after the run started: every reconnection is refused.
+  const incompatible = runtime.executeTurn(turn("turn-1", "work"));
+  const run = await started("turn-1");
+  fake.protocolVersion = 3;
+  fake.disconnectAll();
+  await expect(incompatible).rejects.toThrow(
+    `Lost contact with T3 while the turn ran (T3 speaks orchestration protocol 3; this runtime supports 2); native run ${run.id} may still be running.`,
+  );
+  await expect(incompatible).rejects.toMatchObject({ status: 502 });
+  fake.protocolVersion = 2;
+  // A fresh turn that never reached T3 still reports plain unavailability.
+  fake.protocolVersion = 3;
+  await expect(runtime.executeTurn(turn("turn-2", "work"))).rejects.toThrow(
+    /^The T3 server cannot be used: T3 speaks orchestration protocol 3/u,
+  );
+  fake.protocolVersion = 2;
+
+  // The server goes away entirely after a run was accepted.
+  const unreachable = runtime.executeTurn(turn("turn-3", "work"));
+  const run3 = await started("turn-3");
+  await fake.close();
+  await expect(unreachable).rejects.toThrow(
+    new RegExp(
+      `^Lost contact with T3 while the turn ran \\(T3 is unreachable: .*\\); native run ${run3.id} may still be running\\.$`,
+      "u",
+    ),
+  );
+});
+
+it("settles background work a terminal earlier run left listed before dispatching the next turn", async () => {
+  const first = runtime.executeTurn(turn("turn-1", "work"));
+  answer(await started("turn-1"), "Done.");
+  expect((await first).output).toBe("Done.");
+  // Another process ran on the thread and completed with work still listed.
+  const old = fake.wake(threadId, "Old turn");
+  await until(() => thread().runs.find((run) => run.id === old.id)?.status === "running");
+  const task = fake.tool(threadId, old.id, { type: "command_execution", input: "sleep 300 &" });
+  fake.background(threadId, [{ taskId: "old-task", kind: "command", description: "sleep 300" }]);
+  fake.assistant(threadId, old.id, "Old result, still working.");
+  fake.complete(threadId, old.id);
+
+  const next = runtime.executeTurn(turn("turn-2", "again"));
+  const run2 = await started("turn-2");
+  // The successor was dispatched only after T3 settled the earlier work through its latest run.
+  expect(fake.interrupts).toEqual([old.id]);
+  expect(roster()).toEqual([]);
+  expect(thread().items.find((item) => item.id === task.id)?.status).toBe("interrupted");
+  answer(run2, "Mine.");
+  expect((await next).output).toBe("Mine.");
+  expect(runtime.activity("turn-2", "discord-private")).toBeUndefined();
+});
+
+it("settles the roster an interrupted earlier run keeps, and refuses to dispatch while T3 still lists it", async () => {
+  const first = runtime.executeTurn(turn("turn-1", "work"));
+  answer(await started("turn-1"), "Done.");
+  await first;
+  // An earlier run is still active with work listed; its interrupt alone leaves the roster.
+  const old = fake.wake(threadId, "Old turn");
+  await until(() => thread().runs.find((run) => run.id === old.id)?.status === "running");
+  fake.background(threadId, [{ taskId: "old-task", kind: "command" }]);
+
+  const next = runtime.executeTurn(turn("turn-2", "again"));
+  const run2 = await started("turn-2");
+  expect(fake.interrupts).toEqual([old.id, old.id]);
+  expect(thread().runs.find((run) => run.id === old.id)?.status).toBe("interrupted");
+  expect(roster()).toEqual([]);
+  answer(run2, "Mine.");
+  expect((await next).output).toBe("Mine.");
+
+  // T3 accepts the interrupts but the work stays listed: no successor is dispatched.
+  const again = fake.wake(threadId, "Another old turn");
+  await until(() => thread().runs.find((run) => run.id === again.id)?.status === "running");
+  fake.background(threadId, [{ taskId: "old-task-2", kind: "command" }]);
+  fake.interruptBehaviour = "ignore";
+  await expect(runtime.executeTurn(turn("turn-3", "third"))).rejects.toMatchObject({
+    status: 503,
+    message: "An earlier turn is still running on T3 and could not be stopped; try again shortly.",
+  });
+  fake.stop(threadId, again.id, "interrupted");
+  await expect(runtime.executeTurn(turn("turn-3", "third"))).rejects.toMatchObject({
+    status: 503,
+    message:
+      "An earlier turn's background work is still listed on T3 and could not be stopped; try again shortly.",
+  });
+  expect(runOf("turn-3")).toBeUndefined();
+  expect(dispatches()).toHaveLength(2);
+  expect(roster()).toHaveLength(1);
 });
