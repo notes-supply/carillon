@@ -555,11 +555,15 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
     };
     thread.messages.push(user);
     thread.runs.push(run);
+    // The serving order: the dispatch sends the provider thread before the
+    // run, and the turn start sends the session, then the thread, then the run.
     emit(thread, "message.updated", { ...user, streaming: false });
-    emit(thread, "run.created", run);
-    // A run's start re-sends its provider thread and session records, as T3 does.
     emit(thread, "provider-thread.updated", thread.providerThread);
-    if (!thread.sessionDetached) emit(thread, "provider-session.updated", thread.session);
+    emit(thread, "run.created", run);
+    if (!thread.sessionDetached)
+      emit(thread, "provider-session.updated", { ...thread.session, status: "running" });
+    emit(thread, "provider-thread.updated", thread.providerThread);
+    emit(thread, "run.updated", run);
     return run;
   }
 

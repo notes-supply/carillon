@@ -662,3 +662,134 @@ it("keeps only the turn's provider thread and session from a snapshot", () => {
   watch.apply(event(2, "provider-thread.updated", { id: "other-thread", providerSessionId: null }));
   expect(watch.retained()).toMatchObject({ providerThreads: 1, sessions: 1 });
 });
+
+it("owns its provider thread and session through the serving event order, after a long pre-dispatch history", () => {
+  const watch = watchTurn("message-current", "/workspace");
+  const history = Array.from({ length: 500 }, (_, index) => index);
+  watch.apply(
+    snapshot({
+      runs: history.map((index) => ({
+        ...run("completed", `message-${String(index)}`, index),
+        providerThreadId: `thread-${String(index)}`,
+      })),
+      providerThreads: history.map((index) => ({
+        id: `thread-${String(index)}`,
+        providerSessionId: `session-${String(index)}`,
+      })),
+      providerSessions: history.map((index) => ({
+        id: `session-${String(index)}`,
+        status: "stopped",
+      })),
+    }),
+  );
+  expect(watch.retained()).toMatchObject({ runs: 0, providerThreads: 0, sessions: 0 });
+  // Dispatch: the provider thread record arrives before the run that refers to it.
+  watch.apply(
+    event(2, "provider-thread.updated", { id: "thread-9", providerSessionId: "session-9" }),
+  );
+  watch.apply(
+    event(3, "run.created", {
+      ...run("starting", "message-current", 500),
+      providerThreadId: "thread-9",
+    }),
+  );
+  // Turn start: the session record arrives before the thread record that names it, then the run.
+  watch.apply(event(4, "provider-session.updated", { id: "session-9", status: "running" }));
+  watch.apply(
+    event(5, "provider-thread.updated", {
+      id: "thread-9",
+      providerSessionId: "session-9",
+      pendingBackgroundTasks: [{ taskId: "t", kind: "command" }],
+    }),
+  );
+  watch.apply(
+    event(6, "run.updated", {
+      ...run("running", "message-current", 500),
+      providerThreadId: "thread-9",
+    }),
+  );
+  expect(watch.retained()).toMatchObject({ runs: 1, providerThreads: 1, sessions: 1 });
+  expect(watch.providerSession()).toBe("session-9");
+  // The root completes with the roster still listed: the live session owes the report; nothing is detached.
+  watch.apply(
+    event(7, "run.updated", {
+      ...run("completed", "message-current", 500),
+      providerThreadId: "thread-9",
+    }),
+  );
+  expect(watch.outcome()).toBeUndefined();
+  expect(watch.quiet()).toBe(false);
+  // Its wake completes the turn.
+  watch.apply(
+    event(8, "provider-thread.updated", {
+      id: "thread-9",
+      providerSessionId: "session-9",
+      pendingBackgroundTasks: [],
+    }),
+  );
+  watch.apply(
+    event(9, "provider-thread.updated", {
+      id: "thread-9",
+      providerSessionId: "session-9",
+      pendingBackgroundTasks: [],
+    }),
+  );
+  watch.apply(
+    event(10, "run.created", { ...run("running", "wake", 501), providerThreadId: "thread-9" }),
+  );
+  watch.apply(
+    event(11, "message.updated", {
+      id: "w",
+      runId: "run-501",
+      role: "assistant",
+      text: "Done.",
+      createdAt: "2026-10-04T10:00:00Z",
+    }),
+  );
+  watch.apply(
+    event(12, "run.updated", { ...run("completed", "wake", 501), providerThreadId: "thread-9" }),
+  );
+  expect(watch.outcome()).toEqual({ kind: "completed", output: "Done." });
+  expect(watch.retained()).toMatchObject({ providerThreads: 1, sessions: 1 });
+});
+
+it("treats a session record it never saw as unknown, not as detached", () => {
+  const watch = watchTurn("message-1", "/workspace");
+  watch.apply(snapshot({ runs: [], providerThreads: [], providerSessions: [] }));
+  watch.apply(event(2, "run.created", run("running")));
+  watch.apply(
+    event(3, "provider-thread.updated", {
+      id: "provider-thread",
+      providerSessionId: "never-seen",
+      pendingBackgroundTasks: [{ taskId: "t", kind: "command" }],
+    }),
+  );
+  watch.apply(event(4, "run.updated", run("completed")));
+  expect(watch.outcome()).toBeUndefined();
+  expect(watch.quiet()).toBe(false);
+  expect(watch.providerSession()).toBe("never-seen");
+  // A snapshot that lists the thread's session but omits that one is a detachment.
+  watch.resubscribing();
+  watch.apply(
+    snapshot(
+      {
+        runs: [run("completed")],
+        providerThreads: [
+          {
+            id: "provider-thread",
+            providerSessionId: "never-seen",
+            pendingBackgroundTasks: [{ taskId: "t", kind: "command" }],
+          },
+        ],
+        providerSessions: [],
+      },
+      9,
+    ),
+  );
+  expect(watch.outcome()).toEqual({
+    kind: "failed",
+    explanation:
+      "T3's native session was detached while it still listed background work; T3 does not confirm whether that work still reports back.",
+  });
+  expect(watch.providerSession()).toBeUndefined();
+});

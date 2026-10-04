@@ -104,6 +104,8 @@ const FINISHED_ITEM: ReadonlySet<string> = new Set([
 const ENDED_SESSION: ReadonlySet<ProviderSession["status"]> = new Set(["stopped", "error"]);
 const RECENT_CALLS = 5;
 const RUNNING_CALLS = 8;
+/** Provider records kept while the fold cannot yet tell whether the turn owns them. */
+const RECENT_RECORDS = 4;
 const KNOWN_ITEMS: ReadonlySet<string> = new Set(Object.keys(TurnItemSchemas));
 
 type ToolItem = TurnItemOf<
@@ -139,6 +141,16 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
   let providerThreads = new Map<string, ProviderThread>();
   let sessions = new Map<string, ProviderSession>();
   /**
+   * The few most recent provider records not (yet) owned by a turn run. T3
+   * sends a run's provider thread just before `run.created`, and its session
+   * just before the thread record it names when the turn starts, so each is
+   * seen before the fold can tell it belongs to the turn.
+   */
+  const recentThreads = new Map<string, ProviderThread>();
+  const recentSessions = new Map<string, ProviderSession>();
+  /** Sessions T3 detached, or omitted from a snapshot while a turn thread still names them. */
+  const detachedSessions = new Set<string>();
+  /**
    * The ordinal of a turn run seen completed while its roster still listed
    * work. Its process delivers the result in a run of its own, so the turn
    * is not complete until a later run exists.
@@ -173,6 +185,9 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
     retrying = new Set();
     providerThreads = new Map();
     sessions = new Map();
+    recentThreads.clear();
+    recentSessions.clear();
+    detachedSessions.clear();
   }
 
   function foldRun(run: Run): void {
@@ -275,18 +290,54 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
   }
 
   function foldProviderThread(thread: ProviderThread): void {
-    if (turnProviderThread(thread.id)) providerThreads.set(thread.id, thread);
+    if (turnProviderThread(thread.id)) {
+      providerThreads.set(thread.id, thread);
+      adoptPending();
+    } else remember(recentThreads, thread);
   }
 
   function foldSession(session: ProviderSession): void {
-    if (turnSession(session.id)) sessions.set(session.id, session);
+    if (turnSession(session.id)) {
+      sessions.set(session.id, session);
+      detachedSessions.delete(session.id);
+    } else remember(recentSessions, session);
   }
 
-  /** Drops provider records no retained run refers to any more. */
+  function remember<T extends { readonly id: string }>(recent: Map<string, T>, record: T): void {
+    recent.delete(record.id);
+    recent.set(record.id, record);
+    for (const id of recent.keys()) {
+      if (recent.size <= RECENT_RECORDS) break;
+      recent.delete(id);
+    }
+  }
+
+  /** Adopts recently seen records the turn's runs and threads turn out to refer to. */
+  function adoptPending(): void {
+    for (const run of turnRuns.values()) {
+      const id = run.providerThreadId;
+      if (id === null || providerThreads.has(id)) continue;
+      const thread = recentThreads.get(id);
+      if (thread === undefined) continue;
+      recentThreads.delete(id);
+      providerThreads.set(id, thread);
+    }
+    for (const thread of providerThreads.values()) {
+      const id = thread.providerSessionId;
+      if (id === null || sessions.has(id)) continue;
+      const session = recentSessions.get(id);
+      if (session === undefined) continue;
+      recentSessions.delete(id);
+      sessions.set(id, session);
+    }
+  }
+
+  /** Drops provider records no retained run refers to any more, then adopts pending ones. */
   function pruneProviders(): void {
     for (const id of providerThreads.keys())
       if (!turnProviderThread(id)) providerThreads.delete(id);
     for (const id of sessions.keys()) if (!turnSession(id)) sessions.delete(id);
+    adoptPending();
   }
 
   /** The turn's process owes a report in a run that has not appeared, and T3 has not shown it stopped. */
@@ -331,13 +382,15 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
   }
 
   /**
-   * The run's provider session is detached from the thread or no longer
-   * listed. T3 removes the record before the process closes and does not
-   * fence what that process may still deliver, so this is not a stop.
+   * T3 detached the run's provider session (its thread names none, T3 sent
+   * the detach, or a snapshot omitted the session the thread names). T3
+   * removes the record before the process closes and does not fence what
+   * that process may still deliver, so this is not a stop. A session record
+   * merely not seen yet is neither detached nor stopped.
    */
   function sessionDetached(run: Run): boolean {
     const session = sessionOf(run);
-    return session !== undefined && (session.id === null || session.record === undefined);
+    return session !== undefined && (session.id === null || detachedSessions.has(session.id));
   }
 
   function active(): Run | undefined {
@@ -450,6 +503,11 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
           refile();
           for (const thread of projection.providerThreads) foldProviderThread(thread);
           for (const session of projection.providerSessions) foldSession(session);
+          // A snapshot lists every session the thread still has: one a turn
+          // thread names but the snapshot omits was detached.
+          for (const thread of providerThreads.values())
+            if (thread.providerSessionId !== null && !sessions.has(thread.providerSessionId))
+              detachedSessions.add(thread.providerSessionId);
           for (const request of projection.runtimeRequests) foldRequest(request);
           for (const payload of projection.turnItems) foldItem(payload);
           for (const message of projection.messages) foldMessage(message);
@@ -488,7 +546,11 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
               break;
             case "provider-session.detached": {
               const id = isRecord(payload) ? payload["providerSessionId"] : undefined;
-              if (typeof id === "string") sessions.delete(id);
+              if (typeof id === "string") {
+                sessions.delete(id);
+                recentSessions.delete(id);
+                detachedSessions.add(id);
+              }
               break;
             }
             case "message.updated":
@@ -530,7 +592,7 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
     providerSession() {
       if (last?.providerThreadId == null) return undefined;
       const id = providerThreads.get(last.providerThreadId)?.providerSessionId;
-      return id === null || id === undefined || !sessions.has(id) ? undefined : id;
+      return id === null || id === undefined || detachedSessions.has(id) ? undefined : id;
     },
     requestOpen: () => ownedPendingRequest() !== undefined,
     outcome() {
