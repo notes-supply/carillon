@@ -47,7 +47,6 @@ function build(overrides: { url?: string; token?: string } = {}) {
     workspace: resources,
     reconnect: { attempts: 5, delayMs: 50 },
     settleMs: 500,
-    wakeGraceMs: 300,
     timeoutMs: 2_000,
   });
 }
@@ -103,6 +102,10 @@ function userTexts(): string[] {
 }
 
 const dispatches = () => fake.commands.filter((command) => command.type === "message.dispatch");
+const activity = () => runtime.activity("turn-1", "discord-private");
+const until = (condition: () => boolean) => fake.waitFor(condition);
+const roster = () => thread().providerThread.pendingBackgroundTasks ?? [];
+const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 it("keeps a conversation's turns in one T3 thread and sends the agent's instructions once", async () => {
   const first = runtime.executeTurn(turn("turn-1", "Remember carillon."));
@@ -121,7 +124,11 @@ it("keeps a conversation's turns in one T3 thread and sends the agent's instruct
   ]);
   // The thread is opened by the same command each turn, replayed under its receipt.
   expect(fake.commands.filter((command) => command.type === "thread.create")).toHaveLength(2);
-  expect(thread().messages.filter((message) => message.role === "user")).toHaveLength(2);
+  // Each turn asks T3 for a bounded snapshot and a completion marker.
+  expect(fake.subscriptions).toEqual([
+    { afterSequence: undefined, bounded: true, marker: true },
+    { afterSequence: undefined, bounded: true, marker: true },
+  ]);
 });
 
 it("recovers a dispatch whose answer was lost by reading the run back, without dispatching again", async () => {
@@ -134,6 +141,11 @@ it("recovers a dispatch whose answer was lost by reading the run back, without d
   expect((await result).output).toBe("hi");
   expect(dispatches()).toHaveLength(1);
   expect(thread().runs).toHaveLength(1);
+  // The reconnection resumed from the folded sequence instead of reloading the thread.
+  expect(fake.subscriptions.map((subscription) => typeof subscription.afterSequence)).toEqual([
+    "undefined",
+    "number",
+  ]);
 });
 
 it("replays a dispatch T3 never received under the same command, so one run results", async () => {
@@ -150,15 +162,29 @@ it("replays a dispatch T3 never received under the same command, so one run resu
   expect(thread().runs).toHaveLength(1);
 });
 
-it("resumes observing a running turn after the connection drops", async () => {
+it("resumes observing a running turn after the connection drops, keeping completion and identity", async () => {
   const result = runtime.executeTurn(turn("turn-1", "hello"));
   const run = await started("turn-1");
+  const tool = fake.tool(threadId, run.id, { type: "command_execution", input: "cargo build" });
+  await until(() => activity()?.tool_calls === 1);
   fake.disconnectAll();
   await resubscribed();
+  fake.finishTool(threadId, tool);
   answer(run, "still here");
   expect((await result).output).toBe("still here");
   expect(thread().runs).toHaveLength(1);
   expect(dispatches()).toHaveLength(1);
+
+  // The same holds when T3 answers the resume with a snapshot instead of a replay.
+  fake.snapshotOnResume = true;
+  const next = runtime.executeTurn(turn("turn-2", "again"));
+  const second = await started("turn-2");
+  fake.disconnectAll();
+  await resubscribed();
+  answer(second, "snapshot resume");
+  expect((await next).output).toBe("snapshot resume");
+  expect(typeof fake.subscriptions.at(-1)?.afterSequence).toBe("number");
+  expect(dispatches()).toHaveLength(2);
 });
 
 it("interrupts the native run when Carillon cancels, waits for T3 to stop it, then serves the next turn", async () => {
@@ -221,7 +247,7 @@ it("reports a run someone else stopped, and the conversation continues", async (
   expect((await next).output).toBe("ok");
 });
 
-it("stops a run that waits for an answer or approval this runtime cannot give, and says what was asked", async () => {
+it("stops a run that waits for an answer or approval this runtime cannot give, saying what was asked and what T3 confirmed", async () => {
   const asked = runtime.executeTurn(turn("turn-1", "work"));
   const run = await started("turn-1");
   fake.request(threadId, run.id, "user_input", {
@@ -238,12 +264,52 @@ it("stops a run that waits for an answer or approval this runtime cannot give, a
 
   const approval = runtime.executeTurn(turn("turn-2", "more"));
   const second = await started("turn-2");
-  fake.request(threadId, second.id, "tool_approval");
+  fake.request(threadId, second.id, "tool_approval", {
+    type: "approval_request",
+    requestKind: "tool_approval",
+  });
   await expect(approval).rejects.toMatchObject({
     status: 502,
     message:
-      "T3 needs an approval (tool_approval) this runtime cannot give yet; the run was stopped.",
+      "T3 needs an approval (tool_approval) this runtime cannot give yet; the run was stopped. Send the answer in a new message.",
   });
+});
+
+it("does not claim a stop T3 did not confirm", async () => {
+  fake.interruptBehaviour = "ignore";
+  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const run = await started("turn-1");
+  fake.request(threadId, run.id, "tool_approval", {
+    type: "approval_request",
+    requestKind: "tool_approval",
+  });
+  await expect(result).rejects.toMatchObject({
+    status: 502,
+    message:
+      "T3 needs an approval (tool_approval) this runtime cannot give yet; T3 has not confirmed that the run stopped, so it may still be waiting. Send the answer in a new message.",
+  });
+  expect(fake.interrupts).toEqual([run.id]);
+  expect(runOf("turn-1")?.status).toBe("waiting");
+});
+
+it("treats a request still open after the run ended as blocking, not as success", async () => {
+  fake.retainRequests = true;
+  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const run = await started("turn-1");
+  fake.assistant(threadId, run.id, "Approve this?");
+  fake.request(threadId, run.id, "tool_approval", {
+    type: "approval_request",
+    requestKind: "tool_approval",
+  });
+  await until(() => runOf("turn-1")?.status === "waiting");
+  // T3 contradicts itself: the run ends yet its own approval stays pending.
+  fake.stop(threadId, run.id, "completed");
+  await expect(result).rejects.toMatchObject({
+    status: 502,
+    message:
+      "T3 needs an approval (tool_approval) this runtime cannot give yet; the run has ended but T3 still lists the request as open. Send the answer in a new message.",
+  });
+  expect(fake.interrupts).toEqual([]);
 });
 
 it("explains a failed run with T3's failure text and refuses an empty answer", async () => {
@@ -261,36 +327,25 @@ it("explains a failed run with T3's failure text and refuses an empty answer", a
   });
 });
 
-it("is not done while T3 still lists background work for the run", async () => {
-  const result = runtime.executeTurn(turn("turn-1", "work"));
-  const run = await started("turn-1");
-  fake.background(threadId, [{ taskId: "task-1", kind: "command", description: "cargo build" }]);
-  fake.assistant(threadId, run.id, "Building in the background.");
-  fake.complete(threadId, run.id);
-  await until(() => runtime.activity("turn-1", "discord-private")?.phase === "tools");
-  expect(runtime.activity("turn-1", "discord-private")).toMatchObject({
-    phase: "tools",
-    headline: "Building in the background.",
-    running: [{ tool: "command", detail: "cargo build" }],
-  });
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  expect(runtime.activity("turn-1", "discord-private")).toBeDefined();
-  fake.background(threadId, []);
-  expect((await result).output).toBe("Building in the background.");
-  expect(runtime.activity("turn-1", "discord-private")).toBeUndefined();
-});
-
-it("waits for the wake T3 sends after background work and answers with the follow-up run's text", async () => {
+it("waits for the run T3 starts after background work however late it comes, and answers with its text", async () => {
   const result = runtime.executeTurn(turn("turn-1", "work"));
   const run = await started("turn-1");
   fake.background(threadId, [{ taskId: "task-1", kind: "command", description: "sleep 25" }]);
   fake.assistant(threadId, run.id, "Started it in the background.");
   fake.complete(threadId, run.id);
-  await until(() => runtime.activity("turn-1", "discord-private")?.phase === "tools");
+  await until(() => activity()?.phase === "tools");
+  expect(activity()).toMatchObject({
+    phase: "tools",
+    headline: "Started it in the background.",
+    running: [{ tool: "command", detail: "sleep 25" }],
+  });
   fake.background(threadId, []);
+  // Well past the former three-second grace: the turn still waits for the result.
+  await pause(3_500);
+  expect(activity()).toMatchObject({ phase: "model", running: [] });
   const wake = fake.wake(threadId, 'Background command "sleep 25" completed (exit code 0)');
   const bash = fake.tool(threadId, wake.id, { type: "command_execution", input: "cat out.txt" });
-  await until(() => runtime.activity("turn-1", "discord-private")?.running[0]?.tool === "bash");
+  await until(() => activity()?.running[0]?.tool === "bash");
   fake.finishTool(threadId, bash);
   fake.assistant(threadId, wake.id, "It finished: tool-finished.");
   fake.complete(threadId, wake.id);
@@ -299,6 +354,43 @@ it("waits for the wake T3 sends after background work and answers with the follo
   );
   expect(thread().runs.map((candidate) => candidate.status)).toEqual(["completed", "completed"]);
   expect(dispatches()).toHaveLength(1);
+}, 10_000);
+
+it("fails closed when the native session ends before it reports finished background work", async () => {
+  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const run = await started("turn-1");
+  fake.background(threadId, [{ taskId: "task-1", kind: "monitor" }]);
+  fake.assistant(threadId, run.id, "Watching.");
+  fake.complete(threadId, run.id);
+  await until(() => activity()?.phase === "tools");
+  fake.background(threadId, []);
+  fake.session(threadId, "stopped");
+  await expect(result).rejects.toMatchObject({
+    status: 502,
+    message:
+      "T3's native session ended before it reported the result of its finished background work.",
+  });
+});
+
+it("stops background work left by a completed run when Carillon cancels, through T3's latest run", async () => {
+  const controller = new AbortController();
+  const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
+  const run = await started("turn-1");
+  const task = fake.tool(threadId, run.id, { type: "command_execution", input: "sleep 300 &" });
+  fake.background(threadId, [{ taskId: "task-1", kind: "command", description: "sleep 300" }]);
+  fake.assistant(threadId, run.id, "Running it in the background.");
+  fake.complete(threadId, run.id);
+  await until(() => activity()?.phase === "tools" && runOf("turn-1")?.status === "completed");
+  controller.abort(new Error("core disconnected"));
+  await expect(result).rejects.toThrow("core disconnected");
+  expect(fake.interrupts).toEqual([run.id]);
+  expect(roster()).toEqual([]);
+  expect(thread().items.find((item) => item.id === task.id)?.status).toBe("interrupted");
+
+  const next = runtime.executeTurn(turn("turn-2", "again"));
+  answer(await started("turn-2"), "ok");
+  expect((await next).output).toBe("ok");
+  expect(fake.interrupts).toEqual([run.id]);
 });
 
 it("interrupts the follow-up run when cancelled during T3's wake", async () => {
@@ -310,7 +402,7 @@ it("interrupts the follow-up run when cancelled during T3's wake", async () => {
   fake.background(threadId, []);
   const wake = fake.wake(threadId, "Background command completed");
   fake.tool(threadId, wake.id, { type: "command_execution", input: "cat out.txt" });
-  await until(() => runtime.activity("turn-1", "discord-private")?.running[0]?.tool === "bash");
+  await until(() => activity()?.running[0]?.tool === "bash");
   controller.abort(new Error("cancelled"));
   await expect(result).rejects.toThrow("cancelled");
   expect(fake.interrupts).toEqual([wake.id]);
@@ -320,20 +412,15 @@ it("interrupts the follow-up run when cancelled during T3's wake", async () => {
 it("describes the running turn to its own interface, bounded and redacted, from T3's timeline", async () => {
   fake.delayAnswer = (command) => (command.type === "message.dispatch" ? 200 : 0);
   const result = runtime.executeTurn(turn("turn-1", "work"));
-  await until(() => runtime.activity("turn-1", "discord-private") !== undefined);
-  expect(runtime.activity("turn-1", "discord-private")).toEqual({
-    phase: "starting",
-    running: [],
-    recent: [],
-    tool_calls: 0,
-  });
+  await until(() => activity() !== undefined);
+  expect(activity()).toEqual({ phase: "starting", running: [], recent: [], tool_calls: 0 });
   const run = await started("turn-1");
   const command = fake.tool(threadId, run.id, {
     type: "command_execution",
     input: "cargo test -p carillon-core\nexport API_KEY=hunter2",
   });
-  await until(() => runtime.activity("turn-1", "discord-private")?.phase === "tools");
-  const running = runtime.activity("turn-1", "discord-private");
+  await until(() => activity()?.phase === "tools");
+  const running = activity();
   expect(running).toMatchObject({
     phase: "tools",
     running: [{ tool: "bash", detail: "cargo test -p carillon-core …" }],
@@ -348,9 +435,11 @@ it("describes the running turn to its own interface, bounded and redacted, from 
     input: { file_path: join(resources, "SYSTEM.md") },
   });
   fake.finishTool(threadId, read, "failed");
+  // Kinds this runtime does not consume are ignored, not retained.
+  fake.tool(threadId, run.id, { type: "reasoning", text: "private thoughts", status: "completed" });
   fake.assistant(threadId, run.id, "Looking at the file.\nThen more.");
-  await until(() => runtime.activity("turn-1", "discord-private")?.tool_calls === 2);
-  expect(runtime.activity("turn-1", "discord-private")).toEqual({
+  await until(() => activity()?.tool_calls === 2 && activity()?.headline !== undefined);
+  expect(activity()).toEqual({
     phase: "model",
     headline: "Looking at the file.",
     running: [],
@@ -361,10 +450,21 @@ it("describes the running turn to its own interface, bounded and redacted, from 
     tool_calls: 2,
   });
   expect(runtime.activity("turn-1", "other-interface")).toBeUndefined();
-  expect(JSON.stringify(runtime.activity("turn-1", "discord-private"))).not.toContain("hunter2");
+  expect(JSON.stringify(activity())).not.toContain("hunter2");
+  expect(JSON.stringify(activity())).not.toContain("private thoughts");
   answer(run, "Done.");
   await result;
-  expect(runtime.activity("turn-1", "discord-private")).toBeUndefined();
+  expect(activity()).toBeUndefined();
+});
+
+it("fails a turn on a known timeline kind that lacks the fields it consumes", async () => {
+  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const run = await started("turn-1");
+  fake.tool(threadId, run.id, { type: "user_input_request", requestId: "request-x" });
+  await expect(result).rejects.toMatchObject({
+    status: 502,
+    message: "T3 answered in a form this runtime does not understand.",
+  });
 });
 
 it("fails closed on an incompatible, unreachable or refusing server, and on answers it does not understand", async () => {
@@ -447,7 +547,3 @@ it("stops the native run when the runtime closes mid-turn", async () => {
   expect(fake.interrupts).toEqual([run.id]);
   expect(runOf("turn-1")?.status).toBe("interrupted");
 });
-
-async function until(condition: () => boolean): Promise<void> {
-  await fake.waitFor(condition);
-}

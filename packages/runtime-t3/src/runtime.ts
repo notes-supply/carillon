@@ -7,7 +7,8 @@
  * are named by identifiers derived from Carillon's own, so a lost answer is
  * read back from T3, or the same command replayed under its receipt, rather
  * than executed again. A cancelled turn interrupts its native run and waits
- * for T3 to confirm the stop before the next turn may start.
+ * for T3 to confirm the stop before the next turn may start; what T3 did
+ * not confirm is reported as unconfirmed, never as stopped.
  */
 import type { ModelQuery, ModelState } from "@carillon/protocol";
 import { diagnostic, ExplainedFailure } from "@carillon/runtime-pi/failure";
@@ -23,6 +24,7 @@ import {
   messageDispatch,
   RPC,
   runInterrupt,
+  subscribeThread,
   threadCreate,
   type NativeSelection,
   type ThreadBinding,
@@ -52,21 +54,25 @@ export interface T3RuntimeOptions {
   readonly reconnect?: { readonly attempts: number; readonly delayMs: number };
   /** How long a stopped or stale run may take to settle. */
   readonly settleMs?: number;
-  /** How long after background work ends T3 may still wake the agent with its result. */
-  readonly wakeGraceMs?: number;
   /** Bounds discovery, the upgrade, each answered call and the first snapshot. */
   readonly timeoutMs?: number;
 }
 
 const DEFAULT_RECONNECT = { attempts: 20, delayMs: 3_000 };
 const DEFAULT_SETTLE_MS = 30_000;
-const DEFAULT_WAKE_GRACE_MS = 3_000;
+
+/** How a cancelled or blocked turn's native work ended, as T3 confirmed it. */
+interface Stop {
+  /** T3 reported no active run and no background work. */
+  readonly quiet: boolean;
+  /** A request of the turn is still open in T3. */
+  readonly requestOpen: boolean;
+}
 
 export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
   const connect = options.connect ?? connectT3;
   const reconnect = options.reconnect ?? DEFAULT_RECONNECT;
   const settleMs = options.settleMs ?? DEFAULT_SETTLE_MS;
-  const wakeGraceMs = options.wakeGraceMs ?? DEFAULT_WAKE_GRACE_MS;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const turns = new Serial();
   const shutdown = new AbortController();
@@ -131,7 +137,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     executing.set(request.correlation_id, { interfaceId: request.interface_id, watch });
     log(`turn ${request.correlation_id}: thread ${binding.threadId}, message ${messageId}`);
     try {
-      const outcome = await runTurn(request, binding, watch, signal);
+      const { outcome, stop } = await runTurn(request, binding, watch, signal);
       const run = watch.run();
       log(`turn ${request.correlation_id}: run ${run?.id ?? "?"} ${outcome.kind}`);
       switch (outcome.kind) {
@@ -142,7 +148,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
         case "failed":
           throw new ExplainedFailure(502, outcome.explanation);
         case "blocked":
-          throw new ExplainedFailure(502, outcome.explanation);
+          throw new ExplainedFailure(502, `${outcome.asked}; ${stopReport(stop)}`);
         case "stopped":
           throw new ExplainedFailure(502, `The T3 run was ${outcome.status} before it answered.`);
       }
@@ -179,7 +185,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     binding: ThreadBinding,
     watch: TurnWatch,
     signal: AbortSignal,
-  ): Promise<Outcome> {
+  ): Promise<{ readonly outcome: Outcome; readonly stop?: Stop }> {
     let text: string | undefined;
     let dispatched = false;
     let attempt = 0;
@@ -222,7 +228,9 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       }
     }
 
-    async function drive(connection: T3Connection): Promise<Outcome> {
+    async function drive(
+      connection: T3Connection,
+    ): Promise<{ readonly outcome: Outcome; readonly stop?: Stop }> {
       await ensureThread(connection, binding);
       const stream = subscribe(connection, binding.threadId, watch);
       try {
@@ -247,8 +255,8 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
             : new Error("turn cancelled", { cause: signal.reason });
         }
         if (outcome.kind === "blocked")
-          await cancel(connection, binding, watch, stream, dispatched);
-        return outcome;
+          return { outcome, stop: await cancel(connection, binding, watch, stream, dispatched) };
+        return { outcome };
       } finally {
         stream.end();
       }
@@ -268,8 +276,19 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     }
   }
 
+  /**
+   * Subscribes to the thread from where the watch left off: a resumed
+   * subscription replays only the events after the last folded sequence, so
+   * neither history nor the turn's identity is reloaded; a first or too-old
+   * one gets T3's bounded snapshot.
+   */
   function subscribe(connection: T3Connection, threadId: string, watch: TurnWatch): T3Stream {
-    return connection.subscribe(RPC.subscribeThread, { threadId }, (item) => watch.apply(item));
+    watch.resubscribing();
+    return connection.subscribe(
+      RPC.subscribeThread,
+      subscribeThread(threadId, watch.sequence()),
+      (item) => watch.apply(item),
+    );
   }
 
   /** Earlier turns' runs still occupying the thread are stale to Carillon: stop them first. */
@@ -324,9 +343,9 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
 
   /**
    * Resolves with the turn's outcome, or undefined once the signal aborts;
-   * rejects when the stream fails. A completion after background work waits
-   * a moment, since T3 wakes the agent with that work's result in a run of
-   * its own; a run that appears meanwhile keeps the turn going.
+   * rejects when the stream fails. The outcome is T3's state alone: a run
+   * that completed while its process still owed background work waits for
+   * the run that delivers it, however long that takes.
    */
   function observe(
     watch: TurnWatch,
@@ -334,31 +353,13 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     signal: AbortSignal,
   ): Promise<Outcome | undefined> {
     return new Promise((resolve, reject) => {
-      let grace: NodeJS.Timeout | undefined;
-      let graceElapsed = false;
       const check = () => {
         const outcome = watch.outcome();
-        if (outcome === undefined) {
-          clearTimeout(grace);
-          grace = undefined;
-          graceElapsed = false;
-          if (signal.aborted) finish(() => resolve(undefined));
-          return;
-        }
-        // The grace is waited out even after an abort, so a wake that starts
-        // meanwhile is seen and stopped rather than left running.
-        if (outcome.kind === "completed" && watch.sawBackgroundWork() && !graceElapsed) {
-          grace ??= setTimeout(() => {
-            graceElapsed = true;
-            check();
-          }, wakeGraceMs);
-          return;
-        }
-        finish(() => resolve(outcome));
+        if (outcome !== undefined) finish(() => resolve(outcome));
+        else if (signal.aborted) finish(() => resolve(undefined));
       };
       const unsubscribe = watch.onChange(check);
       const finish = (settle: () => void) => {
-        clearTimeout(grace);
         unsubscribe();
         signal.removeEventListener("abort", check);
         settle();
@@ -373,10 +374,12 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
   }
 
   /**
-   * Stops the turn's run. A dispatch whose answer never came may still have
-   * created a run: that run is given a moment to appear in the subscription
-   * before deciding there is nothing to stop. Tools T3 already ran are
-   * reported, not undone.
+   * Stops the turn's native work and reports what T3 confirmed. The
+   * interrupt targets the active run, or the thread's latest run when only
+   * background work remains: T3 settles that work through its latest run.
+   * A dispatch whose answer never came may still have created a run, which
+   * is given a moment to appear first. Tools T3 already ran are reported,
+   * not undone.
    */
   async function cancel(
     connection: T3Connection,
@@ -384,34 +387,34 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     watch: TurnWatch,
     stream: T3Stream,
     dispatched: boolean,
-  ): Promise<void> {
+  ): Promise<Stop> {
     if (watch.run() === undefined && dispatched)
       await settle(watch, stream, (turn) => turn.run() !== undefined, settleMs);
     if (watch.run() === undefined) {
       log(`thread ${binding.threadId}: cancelled before T3 recorded a run; nothing to stop`);
-      return;
+      return { quiet: true, requestOpen: false };
     }
-    const run = watch.activeRun();
-    if (run === undefined) {
-      log(`thread ${binding.threadId}: the turn's run had already ended when cancelled`);
-      return;
-    }
-    await interrupt(connection, binding.threadId, run.id, "Carillon cancelled the turn");
-    const stopped = await settle(
-      watch,
-      stream,
-      (turn) => turn.activeRun() === undefined && turn.outcome() !== undefined,
-      settleMs,
-    );
-    const calls = watch.activity().tool_calls;
-    if (stopped)
+    const target = watch.activeRun() ?? watch.latestRun();
+    if (target === undefined || watch.quiet()) {
+      const requestOpen = watch.requestOpen();
       log(
-        `run ${run.id}: stopped after cancellation; ${String(calls)} tool call(s) had started and are not undone`,
+        `thread ${binding.threadId}: the turn's work had already ended when cancelled${requestOpen ? "; a request of it is still open in T3" : ""}`,
+      );
+      return { quiet: true, requestOpen };
+    }
+    await interrupt(connection, binding.threadId, target.id, "Carillon cancelled the turn");
+    const quiet = await settle(watch, stream, (turn) => turn.quiet(), settleMs);
+    const calls = watch.activity().tool_calls;
+    const stop = { quiet, requestOpen: watch.requestOpen() };
+    if (quiet)
+      log(
+        `run ${target.id}: T3 confirmed the stop; ${String(calls)} tool call(s) had started and are not undone${stop.requestOpen ? "; a request of the turn is still open in T3" : ""}`,
       );
     else
       log(
-        `run ${run.id}: did not settle within ${String(settleMs)} ms of the interrupt; it may still be running on T3 and will be stopped before the next turn`,
+        `run ${target.id}: T3 did not confirm the stop within ${String(settleMs)} ms (active run: ${watch.activeRun()?.status ?? "none"}); it may still be running and will be stopped before the next turn`,
       );
+    return stop;
   }
 
   async function interrupt(
@@ -483,6 +486,15 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
 
   function log(message: string): void {
     console.log(`runtime-t3: ${message}`);
+  }
+
+  /** The person's view of a stop, saying only what T3 confirmed. */
+  function stopReport(stop: Stop | undefined): string {
+    if (stop?.quiet !== true)
+      return "T3 has not confirmed that the run stopped, so it may still be waiting. Send the answer in a new message.";
+    if (stop.requestOpen)
+      return "the run has ended but T3 still lists the request as open. Send the answer in a new message.";
+    return "the run was stopped. Send the answer in a new message.";
   }
 
   function unavailable(failure: unknown): unknown {

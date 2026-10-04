@@ -1,9 +1,11 @@
 /**
  * A test double of T3's orchestration server: the protocol discovery, the
  * authenticated upgrade, Effect RPC framing, command receipts, thread
- * creation, message dispatch, run interruption and thread subscriptions,
- * with faults a test can inject. It executes nothing; tests script what a
- * run does. Not used by the runtime itself.
+ * creation, message dispatch, run interruption with T3's settlement of
+ * background work, provider sessions, and thread subscriptions with bounded
+ * snapshots, sequence-based replay and completion markers, with faults a
+ * test can inject. It executes nothing; tests script what a run does. It is
+ * a test fixture, not used by the runtime itself.
  */
 import { once } from "node:events";
 import { createServer, type IncomingMessage } from "node:http";
@@ -12,21 +14,44 @@ import { WebSocketServer, type RawData, type WebSocket } from "ws";
 import {
   ORCHESTRATION_PROTOCOL,
   type Message,
+  type ProviderSession,
   type ProviderThread,
   type Run,
   type RuntimeRequest,
   type TurnItem,
 } from "./contracts.ts";
 
+/** A timeline item as the fake stores it: any kind, with whatever fields a test gives. */
+export interface FakeItem {
+  readonly id: string;
+  readonly runId: string | null;
+  readonly type: string;
+  readonly status: TurnItem["status"];
+  readonly ordinal: number;
+  readonly title: string | null;
+  readonly startedAt: string | null;
+  readonly completedAt: string | null;
+  readonly updatedAt: string;
+  readonly [field: string]: unknown;
+}
+
+interface StoredEvent {
+  readonly sequence: number;
+  readonly type: string;
+  readonly payload: unknown;
+}
+
 interface FakeThread {
   readonly id: string;
   readonly projectId: string;
   readonly runs: Run[];
   readonly messages: Message[];
-  readonly items: TurnItem[];
+  readonly items: FakeItem[];
   readonly requests: RuntimeRequest[];
   providerThread: ProviderThread;
+  session: ProviderSession;
   sequence: number;
+  readonly events: StoredEvent[];
   readonly subscribers: Set<{ readonly socket: WebSocket; readonly requestId: unknown }>;
 }
 
@@ -35,6 +60,12 @@ export interface Command {
   readonly commandId: string;
   readonly threadId: string;
   readonly [key: string]: unknown;
+}
+
+export interface Subscription {
+  readonly afterSequence: number | undefined;
+  readonly bounded: boolean;
+  readonly marker: boolean;
 }
 
 export interface FakeT3 {
@@ -47,6 +78,8 @@ export interface FakeT3 {
   readonly commands: Command[];
   /** Every interrupt accepted, by run. */
   readonly interrupts: string[];
+  /** Every thread subscription received, in order. */
+  readonly subscriptions: Subscription[];
   /** What protocol discovery announces. */
   protocolVersion: number;
   /** Processes the command, then drops the socket before answering. */
@@ -59,12 +92,16 @@ export interface FakeT3 {
   reject: (command: Command) => string | undefined;
   /** Answers the next request with a frame that is not JSON. */
   malformed: boolean;
-  /** Whether an interrupt stops the run or is quietly ignored. */
+  /** Whether an interrupt stops the run (and settles background work) or is accepted and ignored. */
   interruptBehaviour: "settle" | "ignore";
+  /** Answers a resume with a snapshot instead of a replay, as T3 does when the replay is too long. */
+  snapshotOnResume: boolean;
+  /** Leaves a run\'s pending requests open when it ends: a contradictory projection. */
+  retainRequests: boolean;
   /** Closes every client socket, as a server restart would. */
   disconnectAll(): void;
-  tool(threadId: string, runId: string, item: Partial<TurnItem> & { type: string }): TurnItem;
-  finishTool(threadId: string, item: TurnItem, status?: TurnItem["status"]): void;
+  tool(threadId: string, runId: string, item: Partial<FakeItem> & { type: string }): FakeItem;
+  finishTool(threadId: string, item: FakeItem, status?: TurnItem["status"]): void;
   assistant(threadId: string, runId: string, text: string, streaming?: boolean): void;
   complete(threadId: string, runId: string): void;
   fail(threadId: string, runId: string, message: string): void;
@@ -73,11 +110,12 @@ export interface FakeT3 {
     threadId: string,
     runId: string,
     kind: string,
-    item?: Partial<TurnItem> & { type: string },
+    item?: Partial<FakeItem> & { type: string },
   ): RuntimeRequest;
   background(threadId: string, tasks: ProviderThread["pendingBackgroundTasks"]): void;
   /** A run T3 starts itself, as when finished background work wakes the agent. */
   wake(threadId: string, text: string): Run;
+  session(threadId: string, status: ProviderSession["status"]): void;
   waitFor(condition: () => boolean, timeoutMs?: number): Promise<void>;
   close(): Promise<void>;
 }
@@ -89,12 +127,19 @@ const ACTIVE: ReadonlySet<Run["status"]> = new Set([
   "running",
   "waiting",
 ]);
+const BACKGROUND_ITEMS: ReadonlySet<string> = new Set([
+  "command_execution",
+  "dynamic_tool",
+  "subagent",
+]);
+const RUNNING_ITEMS: ReadonlySet<string> = new Set(["pending", "running", "waiting"]);
 
 export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
   const threads = new Map<string, FakeThread>();
   const received: Command[] = [];
   const commands: Command[] = [];
   const interrupts: string[] = [];
+  const subscriptions: Subscription[] = [];
   const receipts = new Map<string, number>();
   const requestRuns = new Map<string, string>();
   const sockets = new Set<WebSocket>();
@@ -152,6 +197,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
     received,
     commands,
     interrupts,
+    subscriptions,
     protocolVersion: ORCHESTRATION_PROTOCOL,
     dropAnswer: () => false,
     dropRequest: () => false,
@@ -159,13 +205,15 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
     reject: () => undefined,
     malformed: false,
     interruptBehaviour: "settle",
+    snapshotOnResume: false,
+    retainRequests: false,
     disconnectAll() {
       for (const socket of sockets) socket.terminate();
     },
     tool(threadId, runId, item) {
       const thread = threadOf(threadId);
       const now = new Date().toISOString();
-      const full: TurnItem = {
+      const full: FakeItem = {
         id: `item-${String(thread.items.length + 1)}`,
         runId,
         status: "running",
@@ -227,21 +275,29 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
       thread.requests.push(request);
       requestRuns.set(request.id, runId);
       if (item !== undefined) fake.tool(threadId, runId, { ...item, requestId: request.id });
-      updateRun(threadId, runId, "waiting");
+      const run = thread.runs.find((candidate) => candidate.id === runId);
+      if (run !== undefined && ACTIVE.has(run.status)) updateRun(threadId, runId, "waiting");
       emit(thread, "runtime-request.updated", request);
       return request;
     },
     background(threadId, tasks) {
       const thread = threadOf(threadId);
+      const rest = {
+        id: thread.providerThread.id,
+        providerSessionId: thread.providerThread.providerSessionId,
+      };
       thread.providerThread =
-        tasks === undefined
-          ? { id: thread.providerThread.id }
-          : { ...thread.providerThread, pendingBackgroundTasks: tasks };
+        tasks === undefined ? rest : { ...rest, pendingBackgroundTasks: tasks };
       emit(thread, "provider-thread.updated", thread.providerThread);
     },
     wake(threadId, text) {
       const thread = threadOf(threadId);
       return startRun(thread, `message:${thread.id}:wake:${String(thread.runs.length + 1)}`, text);
+    },
+    session(threadId, status) {
+      const thread = threadOf(threadId);
+      thread.session = { ...thread.session, status };
+      emit(thread, "provider-session.updated", thread.session);
     },
     async waitFor(condition, timeoutMs = 5_000) {
       const deadline = Date.now() + timeoutMs;
@@ -316,7 +372,8 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
         return;
       }
       case "orchestration.subscribeThread": {
-        const threadId = isRecord(payload) ? payload["threadId"] : undefined;
+        const input = isRecord(payload) ? payload : {};
+        const threadId = input["threadId"];
         const thread = typeof threadId === "string" ? threads.get(threadId) : undefined;
         if (thread === undefined) {
           rejectRequest(
@@ -327,25 +384,42 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
           );
           return;
         }
+        const afterSequence =
+          typeof input["afterSequence"] === "number" ? input["afterSequence"] : undefined;
+        const subscription: Subscription = {
+          afterSequence,
+          bounded: input["acceptBoundedSnapshot"] === true,
+          marker: input["requestCompletionMarker"] === true,
+        };
+        subscriptions.push(subscription);
         thread.subscribers.add({ socket, requestId: id });
-        send(socket, {
-          _tag: "Chunk",
-          requestId: id,
-          values: [
-            {
-              kind: "snapshot",
-              snapshotSequence: thread.sequence,
-              projection: {
-                thread: { id: thread.id, projectId: thread.projectId },
-                runs: thread.runs,
-                runtimeRequests: thread.requests,
-                providerThreads: [thread.providerThread],
-                messages: thread.messages.map((message) => ({ ...message, streaming: false })),
-                turnItems: thread.items,
-              },
-            },
-          ],
-        });
+        const replay =
+          afterSequence !== undefined && !fake.snapshotOnResume && afterSequence <= thread.sequence
+            ? thread.events.filter((event) => event.sequence > afterSequence)
+            : undefined;
+        const values: unknown[] =
+          replay === undefined
+            ? [
+                {
+                  kind: "snapshot",
+                  snapshotSequence: thread.sequence,
+                  ...(subscription.bounded
+                    ? { historyCursor: null, hasMoreHistory: false, payloadBudgetExceeded: false }
+                    : {}),
+                  projection: {
+                    thread: { id: thread.id, projectId: thread.projectId },
+                    runs: thread.runs,
+                    runtimeRequests: thread.requests,
+                    providerThreads: [thread.providerThread],
+                    providerSessions: [thread.session],
+                    messages: thread.messages.map((message) => ({ ...message, streaming: false })),
+                    turnItems: thread.items,
+                  },
+                },
+              ]
+            : replay.map((event) => streamEvent(thread, event));
+        if (subscription.marker) values.push({ kind: "synchronized" });
+        send(socket, { _tag: "Chunk", requestId: id, values });
         return;
       }
       default:
@@ -360,6 +434,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
     switch (command.type) {
       case "thread.create": {
         if (threads.has(command.threadId)) throw new Error(`thread ${command.threadId} exists`);
+        const sessionId = `provider-session-${command.threadId}`;
         const thread: FakeThread = {
           id: command.threadId,
           projectId: String(command["projectId"]),
@@ -367,8 +442,13 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
           messages: [],
           items: [],
           requests: [],
-          providerThread: { id: `provider-thread-${command.threadId}` },
+          providerThread: {
+            id: `provider-thread-${command.threadId}`,
+            providerSessionId: sessionId,
+          },
+          session: { id: sessionId, status: "ready" },
           sequence: 1,
+          events: [],
           subscribers: new Set(),
         };
         threads.set(thread.id, thread);
@@ -385,16 +465,39 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
         const thread = threadOf(command.threadId);
         const runId = String(command["runId"]);
         const run = thread.runs.find((candidate) => candidate.id === runId);
-        if (run === undefined || !ACTIVE.has(run.status))
-          throw new Error(`Run ${runId} is not interruptible.`);
-        interrupts.push(runId);
-        if (fake.interruptBehaviour === "settle") updateRun(thread.id, runId, "interrupted");
+        const latest = thread.runs.at(-1);
+        const roster = thread.providerThread.pendingBackgroundTasks ?? [];
+        if (run === undefined) throw new Error(`Run ${runId} is not interruptible.`);
+        if (ACTIVE.has(run.status)) {
+          interrupts.push(runId);
+          if (fake.interruptBehaviour === "settle") updateRun(thread.id, runId, "interrupted");
+        } else if (run.id === latest?.id && roster.length > 0) {
+          // T3 settles a stopped thread's remaining background work through its latest run.
+          interrupts.push(runId);
+          if (fake.interruptBehaviour === "settle") settleBackground(thread);
+        } else throw new Error(`Run ${runId} is not interruptible.`);
         receipts.set(command.commandId, thread.sequence);
         return thread.sequence;
       }
       default:
         throw new Error(`unsupported command ${command.type}`);
     }
+  }
+
+  function settleBackground(thread: FakeThread): void {
+    const now = new Date().toISOString();
+    thread.items.forEach((item, index) => {
+      if (!BACKGROUND_ITEMS.has(item.type) || !RUNNING_ITEMS.has(item.status)) return;
+      const interrupted = {
+        ...item,
+        status: "interrupted" as const,
+        completedAt: now,
+        updatedAt: now,
+      };
+      thread.items[index] = interrupted;
+      emit(thread, "turn-item.updated", interrupted);
+    });
+    fake.background(thread.id, []);
   }
 
   function startRun(thread: FakeThread, messageId: string, text: string): Run {
@@ -429,7 +532,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
     const updated = { ...run, status };
     thread.runs[index] = updated;
     emit(thread, "run.updated", updated);
-    if (ACTIVE.has(status)) return;
+    if (ACTIVE.has(status) || fake.retainRequests) return;
     // A run that ends takes its open requests with it, as T3 does.
     thread.requests.forEach((request, position) => {
       if (request.status !== "pending" || requestRuns.get(request.id) !== runId) return;
@@ -443,24 +546,28 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
 
   function emit(thread: FakeThread, type: string, payload: unknown): void {
     thread.sequence += 1;
+    const event: StoredEvent = { sequence: thread.sequence, type, payload };
+    thread.events.push(event);
     for (const subscriber of thread.subscribers)
       send(subscriber.socket, {
         _tag: "Chunk",
         requestId: subscriber.requestId,
-        values: [
-          {
-            kind: "event",
-            sequence: thread.sequence,
-            event: {
-              id: `event-${String(thread.sequence)}`,
-              threadId: thread.id,
-              type,
-              payload,
-              occurredAt: new Date().toISOString(),
-            },
-          },
-        ],
+        values: [streamEvent(thread, event)],
       });
+  }
+
+  function streamEvent(thread: FakeThread, event: StoredEvent): unknown {
+    return {
+      kind: "event",
+      sequence: event.sequence,
+      event: {
+        id: `event-${String(event.sequence)}`,
+        threadId: thread.id,
+        type: event.type,
+        payload: event.payload,
+        occurredAt: new Date().toISOString(),
+      },
+    };
   }
 
   function threadOf(threadId: string): FakeThread {

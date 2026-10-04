@@ -61,11 +61,27 @@ export const BackgroundTaskSchema = Type.Object({
 });
 export type BackgroundTask = Static<typeof BackgroundTaskSchema>;
 
+/** The native conversation a run executes in, with the work its process still owes. */
 export const ProviderThreadSchema = Type.Object({
   id: Id,
+  providerSessionId: Nullable(Id),
   pendingBackgroundTasks: Type.Optional(Type.Array(BackgroundTaskSchema)),
 });
 export type ProviderThread = Static<typeof ProviderThreadSchema>;
+
+/** The provider process behind a provider thread; only a live one can report or wake. */
+export const ProviderSessionSchema = Type.Object({
+  id: Id,
+  status: Type.Union([
+    Type.Literal("starting"),
+    Type.Literal("ready"),
+    Type.Literal("running"),
+    Type.Literal("waiting"),
+    Type.Literal("stopped"),
+    Type.Literal("error"),
+  ]),
+});
+export type ProviderSession = Static<typeof ProviderSessionSchema>;
 
 export const MessageSchema = Type.Object({
   id: Id,
@@ -86,59 +102,99 @@ export const ItemStatusSchema = Type.Union([
   Type.Literal("cancelled"),
   Type.Literal("interrupted"),
 ]);
+export type ItemStatus = Static<typeof ItemStatusSchema>;
 
-/** A timeline item with the fields any of its kinds may carry. */
-export const TurnItemSchema = Type.Object({
+const itemBase = {
   id: Id,
   runId: Nullable(Id),
-  type: Type.String(),
   status: ItemStatusSchema,
   ordinal: Type.Integer(),
   title: Nullable(Type.String()),
   startedAt: Nullable(Type.String()),
   completedAt: Nullable(Type.String()),
   updatedAt: Type.String(),
-  text: Type.Optional(Type.String()),
-  input: Type.Optional(Type.Unknown()),
-  toolName: Type.Optional(Nullable(Type.String())),
-  fileName: Type.Optional(Type.String()),
-  pattern: Type.Optional(Type.String()),
-  patterns: Type.Optional(Type.Array(Type.String())),
-  requestId: Type.Optional(Type.String()),
-  requestKind: Type.Optional(Type.String()),
-  questions: Type.Optional(
-    Type.Array(Type.Object({ header: Type.String(), question: Type.String() })),
-  ),
-  failure: Type.Optional(Type.Object({ class: Type.String(), message: Type.String() })),
-  retry: Type.Optional(Type.Unknown()),
-});
-export type TurnItem = Static<typeof TurnItemSchema>;
+};
 
+/**
+ * The timeline kinds this runtime reads, each with the fields it consumes
+ * required. A known kind missing them is malformed; kinds not listed here
+ * are ignored, not retained.
+ */
+export const TurnItemSchemas = {
+  command_execution: Type.Object({
+    ...itemBase,
+    type: Type.Literal("command_execution"),
+    input: Type.String(),
+  }),
+  file_change: Type.Object({
+    ...itemBase,
+    type: Type.Literal("file_change"),
+    fileName: Type.String(),
+  }),
+  file_search: Type.Object({
+    ...itemBase,
+    type: Type.Literal("file_search"),
+    pattern: Type.Optional(Type.String()),
+  }),
+  web_search: Type.Object({
+    ...itemBase,
+    type: Type.Literal("web_search"),
+    patterns: Type.Optional(Type.Array(Type.String())),
+  }),
+  dynamic_tool: Type.Object({
+    ...itemBase,
+    type: Type.Literal("dynamic_tool"),
+    toolName: Nullable(Type.String()),
+    input: Type.Unknown(),
+  }),
+  subagent: Type.Object({ ...itemBase, type: Type.Literal("subagent") }),
+  user_input_request: Type.Object({
+    ...itemBase,
+    type: Type.Literal("user_input_request"),
+    requestId: Id,
+    questions: Type.Array(Type.Object({ header: Type.String(), question: Type.String() })),
+  }),
+  approval_request: Type.Object({
+    ...itemBase,
+    type: Type.Literal("approval_request"),
+    requestId: Id,
+    requestKind: Type.String(),
+  }),
+  error: Type.Object({
+    ...itemBase,
+    type: Type.Literal("error"),
+    failure: Type.Object({ class: Type.String(), message: Type.String() }),
+    retry: Type.Optional(Type.Unknown()),
+  }),
+  compaction: Type.Object({ ...itemBase, type: Type.Literal("compaction") }),
+} as const;
+
+export const TurnItemSchema = Type.Union([
+  TurnItemSchemas.command_execution,
+  TurnItemSchemas.file_change,
+  TurnItemSchemas.file_search,
+  TurnItemSchemas.web_search,
+  TurnItemSchemas.dynamic_tool,
+  TurnItemSchemas.subagent,
+  TurnItemSchemas.user_input_request,
+  TurnItemSchemas.approval_request,
+  TurnItemSchemas.error,
+  TurnItemSchemas.compaction,
+]);
+export type TurnItem = Static<typeof TurnItemSchema>;
+export type TurnItemOf<K extends TurnItem["type"]> = Extract<TurnItem, { type: K }>;
+
+/** A thread snapshot. Timeline items are checked one by one as they are folded. */
 export const ProjectionSchema = Type.Object({
-  thread: Type.Object({ id: Id, projectId: Id }),
+  thread: Type.Object({ id: Id }),
   runs: Type.Array(RunSchema),
   runtimeRequests: Type.Array(RuntimeRequestSchema),
   providerThreads: Type.Array(ProviderThreadSchema),
+  providerSessions: Type.Array(ProviderSessionSchema),
   messages: Type.Array(MessageSchema),
-  turnItems: Type.Array(TurnItemSchema),
+  turnItems: Type.Array(Type.Unknown()),
 });
 export type Projection = Static<typeof ProjectionSchema>;
-
-/** One item of `orchestration.subscribeThread`; kinds this build does not know are ignored. */
-export const ThreadStreamItemSchema = Type.Union([
-  Type.Object({
-    kind: Type.Literal("snapshot"),
-    snapshotSequence: Type.Integer(),
-    projection: ProjectionSchema,
-  }),
-  Type.Object({
-    kind: Type.Literal("event"),
-    sequence: Type.Integer(),
-    event: Type.Object({ type: Type.String(), payload: Type.Unknown() }),
-  }),
-  Type.Object({ kind: Type.String() }),
-]);
-export type ThreadStreamItem = Static<typeof ThreadStreamItemSchema>;
 
 export const DispatchResultSchema = Type.Object({ sequence: Type.Integer() });
 
@@ -213,6 +269,21 @@ export function runInterrupt(threadId: string, runId: string, reason: string) {
     threadId,
     runId,
     reason,
+  } as const;
+}
+
+/**
+ * The thread subscription: a bounded snapshot (T3 windows messages and
+ * items to recent turns; runs, requests, provider threads and sessions stay
+ * whole), or a replay of the events after a sequence this runtime already
+ * folded, each ended by a completion marker.
+ */
+export function subscribeThread(threadId: string, afterSequence: number | undefined) {
+  return {
+    threadId,
+    acceptBoundedSnapshot: true,
+    requestCompletionMarker: true,
+    ...(afterSequence === undefined ? {} : { afterSequence }),
   } as const;
 }
 

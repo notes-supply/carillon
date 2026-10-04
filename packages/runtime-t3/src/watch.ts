@@ -1,11 +1,13 @@
 /**
  * What one Carillon turn looks like in its T3 thread, folded from the thread
- * subscription: the run the turn's message started, whether that run still
- * needs anything, the answer it produced, and a bounded activity snapshot.
- * Nothing here talks to the network; a snapshot replaces everything seen
- * before, so a resumed subscription starts clean.
+ * subscription. The fold keeps only what the turn needs: its run and the
+ * runs T3 started after it, earlier runs that still occupy the thread, the
+ * tools running now and the last few finished, open requests, the turn's
+ * assistant messages, the provider thread's roster and session. History
+ * outside the turn is dropped as it arrives; a snapshot replaces everything
+ * except the turn's identity. Nothing here talks to the network.
  */
-import type { FinishedTool, RunningTool, TurnActivity, ActivityPhase } from "@carillon/protocol";
+import type { ActivityPhase, FinishedTool, RunningTool, TurnActivity } from "@carillon/protocol";
 import { commandHeader, commentary, describe, displayed } from "@carillon/runtime-pi/activity";
 import { bounded } from "@carillon/runtime-pi/failure";
 import { isAbsolute, relative, resolve } from "node:path";
@@ -14,16 +16,20 @@ import { Check } from "typebox/value";
 import {
   MessageSchema,
   ProjectionSchema,
+  ProviderSessionSchema,
   ProviderThreadSchema,
   RunSchema,
   RuntimeRequestSchema,
   TurnItemSchema,
+  TurnItemSchemas,
+  type BackgroundTask,
   type Message,
+  type ProviderSession,
   type ProviderThread,
   type Run,
   type RunStatus,
   type RuntimeRequest,
-  type TurnItem,
+  type TurnItemOf,
 } from "./contracts.ts";
 import { T3Failure } from "./t3.ts";
 
@@ -32,26 +38,44 @@ export type Outcome =
   | { readonly kind: "failed"; readonly explanation: string }
   /** Someone other than this runtime ended the run. */
   | { readonly kind: "stopped"; readonly status: RunStatus }
-  /** T3 waits for an approval or answer this runtime cannot give. */
-  | { readonly kind: "blocked"; readonly explanation: string };
+  /** T3 waits for an approval or answer this runtime cannot give; `asked` says which. */
+  | { readonly kind: "blocked"; readonly asked: string };
+
+export interface Retained {
+  readonly runs: number;
+  readonly running: number;
+  readonly recent: number;
+  readonly counted: number;
+  readonly requests: number;
+  readonly messages: number;
+}
 
 export interface TurnWatch {
-  /** Folds one `subscribeThread` item in. */
+  /** Folds one `subscribeThread` item in; kinds this build does not know are ignored. */
   apply(item: unknown): void;
-  /** Whether a snapshot has been seen since the last (re)subscription. */
+  /** Forgets that the subscription caught up; the next snapshot or marker says so again. */
+  resubscribing(): void;
+  /** Whether the current subscription has delivered its snapshot or replay. */
   synchronized(): boolean;
-  /** The run this turn's message started, once T3 recorded it. */
+  /** The last event sequence folded: the native anchor a resumed subscription continues from. */
+  sequence(): number | undefined;
+  /** The run this turn's message started, as last seen. */
   run(): Run | undefined;
-  /** The turn's run that is still active, or the follow-up T3 started after it. */
+  /** The turn's run or a follow-up T3 started after it, while one is active. */
   activeRun(): Run | undefined;
+  /** The thread's latest run, the one T3 settles background work through. */
+  latestRun(): Run | undefined;
   /** Earlier turns' runs that still occupy the thread. */
   blocking(): readonly Run[];
-  /** Whether T3 listed background work for this turn at any point; it may wake the agent when that work ends. */
-  sawBackgroundWork(): boolean;
   /** Whether the thread has any message yet. */
   empty(): boolean;
   outcome(): Outcome | undefined;
+  /** Nothing of the turn still executes: no active run and no background work. */
+  quiet(): boolean;
+  /** Whether a request of the turn is still open. */
+  requestOpen(): boolean;
   activity(): TurnActivity;
+  retained(): Retained;
   /** Called after every applied item, until the returned function is called. */
   onChange(listener: () => void): () => void;
 }
@@ -64,14 +88,6 @@ const ACTIVE: ReadonlySet<RunStatus> = new Set([
   "waiting",
 ]);
 const BEFORE_PROVIDER: ReadonlySet<RunStatus> = new Set(["preparing", "queued", "starting"]);
-const TOOL_ITEMS: ReadonlySet<string> = new Set([
-  "command_execution",
-  "file_change",
-  "file_search",
-  "web_search",
-  "dynamic_tool",
-  "subagent",
-]);
 const RUNNING_ITEM: ReadonlySet<string> = new Set(["pending", "running", "waiting"]);
 const FINISHED_ITEM: ReadonlySet<string> = new Set([
   "completed",
@@ -79,8 +95,15 @@ const FINISHED_ITEM: ReadonlySet<string> = new Set([
   "cancelled",
   "interrupted",
 ]);
+const ENDED_SESSION: ReadonlySet<ProviderSession["status"]> = new Set(["stopped", "error"]);
 const RECENT_CALLS = 5;
 const RUNNING_CALLS = 8;
+const KNOWN_ITEMS: ReadonlySet<string> = new Set(Object.keys(TurnItemSchemas));
+
+type ToolItem = TurnItemOf<
+  "command_execution" | "file_change" | "file_search" | "web_search" | "dynamic_tool" | "subagent"
+>;
+type RequestItem = TurnItemOf<"user_input_request" | "approval_request">;
 
 export function isActive(run: Run): boolean {
   return ACTIVE.has(run.status);
@@ -88,100 +111,187 @@ export function isActive(run: Run): boolean {
 
 export function watchTurn(messageId: string, workspace: string): TurnWatch {
   let seen = false;
-  let sawBackground = false;
-  let runs = new Map<string, Run>();
-  let requests = new Map<string, RuntimeRequest>();
+  let lastSequence: number | undefined;
+  /** The turn's run as last seen: its identity, kept through snapshots and reconnections. */
+  let anchor: Run | undefined;
+  /** Runs from the turn's onward, by ID, with the greatest ordinal tracked. */
+  let turnRuns = new Map<string, Run>();
+  let last: Run | undefined;
+  /** Earlier runs still active, which block a new dispatch. */
+  let earlier = new Map<string, Run>();
+  let hasMessages = false;
+  let assistant = new Map<string, Message>();
+  let latestAssistant: Message | undefined;
+  let running = new Map<string, ToolItem>();
+  let recent: ToolItem[] = [];
+  let counted = new Set<string>();
+  let requestItems = new Map<string, RequestItem>();
+  let pendingRequests = new Map<string, RuntimeRequest>();
+  let errors = new Map<string, string>();
+  let compacting = new Set<string>();
+  let retrying = new Set<string>();
   let providerThreads = new Map<string, ProviderThread>();
-  let messages = new Map<string, Message>();
-  let items = new Map<string, TurnItem>();
+  let sessions = new Map<string, ProviderSession>();
+  /**
+   * The ordinal of a turn run seen completed while its roster still listed
+   * work. Its process delivers the result in a run of its own, so the turn
+   * is not complete until a later run exists.
+   */
+  let wakeOwedAfter: number | undefined;
   const listeners = new Set<() => void>();
   /** When each background task was first seen, since T3 does not date them. */
   const backgroundSince = new Map<string, number>();
 
-  function own(): Run | undefined {
-    for (const run of runs.values()) if (run.userMessageId === messageId) return run;
-    return undefined;
+  function reset(): void {
+    turnRuns = new Map();
+    last = undefined;
+    earlier = new Map();
+    hasMessages = false;
+    assistant = new Map();
+    latestAssistant = undefined;
+    running = new Map();
+    recent = [];
+    counted = new Set();
+    requestItems = new Map();
+    pendingRequests = new Map();
+    errors = new Map();
+    compacting = new Set();
+    retrying = new Set();
+    providerThreads = new Map();
+    sessions = new Map();
   }
 
-  /**
-   * The turn's run and every run T3 started after it, such as the wake that
-   * delivers finished background work: Carillon dispatches nothing to the
-   * thread until the turn settles, so later runs are part of it.
-   */
-  function turnRuns(): Run[] {
-    const mine = own();
-    if (mine === undefined) return [];
-    return [...runs.values()]
-      .filter((run) => run.ordinal >= mine.ordinal)
-      .sort((left, right) => left.ordinal - right.ordinal);
+  function foldRun(run: Run): void {
+    if (run.userMessageId === messageId) anchor = run;
+    if (anchor !== undefined && run.ordinal >= anchor.ordinal) {
+      turnRuns.set(run.id, run);
+      earlier.delete(run.id);
+      if (last === undefined || run.ordinal >= last.ordinal) last = run;
+    } else if (isActive(run)) earlier.set(run.id, run);
+    else earlier.delete(run.id);
   }
 
-  function turnRunIds(): Set<string> {
-    return new Set(turnRuns().map((run) => run.id));
+  /** Runs seen before the turn's own were filed as earlier; refile those from the turn onward. */
+  function refile(): void {
+    if (anchor === undefined) return;
+    for (const run of [...earlier.values()]) if (run.ordinal >= anchor.ordinal) foldRun(run);
   }
 
-  function ownItems(): TurnItem[] {
-    const ids = turnRunIds();
-    return [...items.values()]
-      .filter((item) => item.runId !== null && ids.has(item.runId))
-      .sort((left, right) => left.ordinal - right.ordinal);
+  function foldMessage(message: Message): void {
+    hasMessages = true;
+    if (message.role !== "assistant" || message.runId === null || !turnRuns.has(message.runId))
+      return;
+    assistant.set(message.id, message);
+    if (
+      latestAssistant === undefined ||
+      latestAssistant.id === message.id ||
+      message.createdAt >= latestAssistant.createdAt
+    )
+      latestAssistant = message;
+  }
+
+  function foldItem(payload: unknown): void {
+    if (!isRecord(payload)) return;
+    const type = payload["type"];
+    const runId = payload["runId"];
+    // Only the turn's own items of the kinds this runtime reads are checked and kept.
+    if (typeof type !== "string" || !KNOWN_ITEMS.has(type)) return;
+    if (typeof runId !== "string" || !turnRuns.has(runId)) return;
+    const item = parsed(TurnItemSchema, payload, `${type} item`);
+    if (item.runId === null) return;
+    switch (item.type) {
+      case "command_execution":
+      case "file_change":
+      case "file_search":
+      case "web_search":
+      case "dynamic_tool":
+      case "subagent":
+        counted.add(item.id);
+        if (RUNNING_ITEM.has(item.status)) running.set(item.id, item);
+        else {
+          running.delete(item.id);
+          if (FINISHED_ITEM.has(item.status)) {
+            recent = recent.filter((finished) => finished.id !== item.id);
+            recent.push(item);
+            if (recent.length > RECENT_CALLS) recent.shift();
+          }
+        }
+        return;
+      case "user_input_request":
+      case "approval_request":
+        requestItems.set(item.requestId, item);
+        return;
+      case "error":
+        errors.set(item.runId, item.failure.message);
+        if (item.retry !== undefined && RUNNING_ITEM.has(item.status)) retrying.add(item.id);
+        else retrying.delete(item.id);
+        return;
+      case "compaction":
+        if (RUNNING_ITEM.has(item.status)) compacting.add(item.id);
+        else compacting.delete(item.id);
+        return;
+    }
+  }
+
+  function foldRequest(request: RuntimeRequest): void {
+    if (request.status === "pending") pendingRequests.set(request.id, request);
+    else pendingRequests.delete(request.id);
+  }
+
+  function roster(run: Run | undefined): readonly BackgroundTask[] {
+    if (run?.providerThreadId == null) return [];
+    return providerThreads.get(run.providerThreadId)?.pendingBackgroundTasks ?? [];
+  }
+
+  /** Whether the run's provider process is gone, so it can neither report nor wake. */
+  function sessionEnded(run: Run): boolean {
+    if (run.providerThreadId === null) return false;
+    const thread = providerThreads.get(run.providerThreadId);
+    if (thread === undefined) return false;
+    if (thread.providerSessionId === null) return true;
+    const session = sessions.get(thread.providerSessionId);
+    return session === undefined || ENDED_SESSION.has(session.status);
   }
 
   function active(): Run | undefined {
-    return turnRuns().find(isActive);
+    for (const run of turnRuns.values()) if (isActive(run)) return run;
+    return undefined;
   }
 
-  function backgroundTasks(run: Run) {
-    return (
-      (run.providerThreadId === null
-        ? undefined
-        : providerThreads.get(run.providerThreadId)?.pendingBackgroundTasks) ?? []
-    );
+  /** A pending request of this turn: one its items name, or any while the turn's run waits. */
+  function ownedPendingRequest(): RuntimeRequest | undefined {
+    let fallback: RuntimeRequest | undefined;
+    for (const request of pendingRequests.values()) {
+      if (requestItems.has(request.id)) return request;
+      fallback ??= request;
+    }
+    return active()?.status === "waiting" ? fallback : undefined;
+  }
+
+  /** What T3 is waiting for, in the person's terms, from the request's item. */
+  function asked(request: RuntimeRequest): string {
+    const item = requestItems.get(request.id);
+    const question = item?.type === "user_input_request" ? item.questions[0] : undefined;
+    if (question !== undefined)
+      return `T3 asked a question this runtime cannot relay yet (${question.header}: ${question.question})`;
+    const kind = item?.type === "approval_request" ? item.requestKind : request.kind;
+    return `T3 needs an approval (${kind}) this runtime cannot give yet`;
   }
 
   function answer(): string {
-    const ids = turnRunIds();
-    return [...messages.values()]
-      .filter(
-        (message) =>
-          message.role === "assistant" && message.runId !== null && ids.has(message.runId),
-      )
+    return [...assistant.values()]
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
       .map((message) => message.text.trim())
       .filter((text) => text.length > 0)
       .join("\n\n");
   }
 
-  /** A pending request of this turn: one its items name, or any while the run waits. */
-  function pendingRequest(run: Run): RuntimeRequest | undefined {
-    const pending = [...requests.values()].filter((request) => request.status === "pending");
-    const named = ownItems().flatMap((item) =>
-      pending.filter((request) => request.id === item.requestId),
-    );
-    return named[0] ?? (run.status === "waiting" ? pending[0] : undefined);
-  }
-
-  /** What T3 is waiting for, in the person's terms, from the request's item. */
-  function blockedBy(request: RuntimeRequest): string {
-    const item = ownItems().find((candidate) => candidate.requestId === request.id);
-    const question = item?.questions?.[0];
-    if (item?.type === "user_input_request" && question !== undefined)
-      return `T3 asked a question this runtime cannot relay yet (${question.header}: ${question.question}); the run was stopped. Send the answer in a new message.`;
-    const kind = item?.requestKind ?? request.kind;
-    return `T3 needs an approval (${kind}) this runtime cannot give yet; the run was stopped.`;
-  }
-
-  function tool(item: TurnItem): { tool: string; detail?: string } | undefined {
+  function tool(item: ToolItem): { tool: string; detail?: string } {
     switch (item.type) {
       case "command_execution":
         return { tool: "bash", ...withDetail(commandHeader(item.input)) };
       case "file_change":
-        return {
-          tool: "edit",
-          ...withDetail(
-            item.fileName === undefined ? undefined : displayed(workspacePath(item.fileName)),
-          ),
-        };
+        return { tool: "edit", ...withDetail(displayed(workspacePath(item.fileName))) };
       case "file_search":
         return {
           tool: "grep",
@@ -207,8 +317,6 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
           tool: "subagent",
           ...withDetail(item.title === null ? undefined : displayed(item.title)),
         };
-      default:
-        return undefined;
     }
   }
 
@@ -222,105 +330,137 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
     return Number.isNaN(parsed) ? Math.floor(Date.now() / 1000) : Math.floor(parsed / 1000);
   }
 
-  function replace<T extends { id: string }>(values: readonly T[]): Map<string, T> {
-    return new Map(values.map((value) => [value.id, value]));
-  }
-
   function parsed<S extends TSchema>(schema: S, payload: unknown, what: string): Static<S> {
     if (!Check(schema, payload))
       throw new T3Failure("malformed", `T3 sent a ${what} this runtime does not understand`);
     return payload;
   }
 
+  function quiet(): boolean {
+    return active() === undefined && roster(last).length === 0;
+  }
+
   return {
     apply(item) {
       if (!isRecord(item) || typeof item["kind"] !== "string")
         throw new T3Failure("malformed", "T3 sent a thread stream item without a kind");
-      if (item["kind"] === "snapshot") {
-        const projection = item["projection"];
-        if (!Check(ProjectionSchema, projection))
-          throw new T3Failure(
-            "malformed",
-            "T3 sent a thread snapshot this runtime does not understand",
-          );
-        runs = replace(projection.runs);
-        requests = replace(projection.runtimeRequests);
-        providerThreads = replace(projection.providerThreads);
-        messages = replace(projection.messages);
-        items = replace(projection.turnItems);
-        seen = true;
-      } else if (item["kind"] === "event") {
-        const event = item["event"];
-        if (!isRecord(event) || typeof event["type"] !== "string")
-          throw new T3Failure("malformed", "T3 sent a thread event without a type");
-        const payload = event["payload"];
-        switch (event["type"]) {
-          case "run.created":
-          case "run.updated": {
-            const run = parsed(RunSchema, payload, "run");
-            runs.set(run.id, run);
-            break;
-          }
-          case "runtime-request.updated": {
-            const request = parsed(RuntimeRequestSchema, payload, "runtime request");
-            requests.set(request.id, request);
-            break;
-          }
-          case "provider-thread.updated": {
-            const thread = parsed(ProviderThreadSchema, payload, "provider thread");
-            providerThreads.set(thread.id, thread);
-            break;
-          }
-          case "message.updated": {
-            const message = parsed(MessageSchema, payload, "message");
-            messages.set(message.id, message);
-            break;
-          }
-          case "turn-item.updated": {
-            const item = parsed(TurnItemSchema, payload, "turn item");
-            items.set(item.id, item);
-            break;
-          }
-          default:
-            return;
+      switch (item["kind"]) {
+        case "snapshot": {
+          const projection = item["projection"];
+          const sequence = item["snapshotSequence"];
+          if (!Check(ProjectionSchema, projection) || typeof sequence !== "number")
+            throw new T3Failure(
+              "malformed",
+              "T3 sent a thread snapshot this runtime does not understand",
+            );
+          reset();
+          for (const run of projection.runs) foldRun(run);
+          refile();
+          for (const thread of projection.providerThreads) providerThreads.set(thread.id, thread);
+          for (const session of projection.providerSessions) sessions.set(session.id, session);
+          for (const request of projection.runtimeRequests) foldRequest(request);
+          for (const payload of projection.turnItems) foldItem(payload);
+          for (const message of projection.messages) foldMessage(message);
+          lastSequence = sequence;
+          seen = true;
+          break;
         }
-      } else return;
-      const mine = own();
-      if (mine !== undefined && backgroundTasks(mine).length > 0) sawBackground = true;
+        case "event": {
+          const event = item["event"];
+          const sequence = item["sequence"];
+          if (!isRecord(event) || typeof event["type"] !== "string" || typeof sequence !== "number")
+            throw new T3Failure(
+              "malformed",
+              "T3 sent a thread event this runtime does not understand",
+            );
+          // A resumed subscription may replay events already folded.
+          if (lastSequence !== undefined && sequence <= lastSequence) return;
+          lastSequence = sequence;
+          const payload = event["payload"];
+          switch (event["type"]) {
+            case "run.created":
+            case "run.updated":
+              foldRun(parsed(RunSchema, payload, "run"));
+              refile();
+              break;
+            case "runtime-request.updated":
+              foldRequest(parsed(RuntimeRequestSchema, payload, "runtime request"));
+              break;
+            case "provider-thread.updated": {
+              const thread = parsed(ProviderThreadSchema, payload, "provider thread");
+              providerThreads.set(thread.id, thread);
+              break;
+            }
+            case "provider-session.attached":
+            case "provider-session.updated": {
+              const session = parsed(ProviderSessionSchema, payload, "provider session");
+              sessions.set(session.id, session);
+              break;
+            }
+            case "provider-session.detached": {
+              const id = isRecord(payload) ? payload["providerSessionId"] : undefined;
+              if (typeof id === "string") sessions.delete(id);
+              break;
+            }
+            case "message.updated":
+              foldMessage(parsed(MessageSchema, payload, "message"));
+              break;
+            case "turn-item.updated":
+              foldItem(payload);
+              break;
+            default:
+              return;
+          }
+          break;
+        }
+        case "synchronized":
+          seen = true;
+          break;
+        default:
+          return;
+      }
+      if (last?.status === "completed" && roster(last).length > 0) wakeOwedAfter = last.ordinal;
       for (const listener of listeners) listener();
     },
-    synchronized: () => seen,
-    run: own,
-    activeRun: active,
-    blocking() {
-      const mine = own();
-      return [...runs.values()].filter(
-        (run) => isActive(run) && (mine === undefined || run.ordinal < mine.ordinal),
-      );
+    resubscribing() {
+      seen = false;
     },
-    sawBackgroundWork: () => sawBackground,
-    empty: () => messages.size === 0,
+    synchronized: () => seen,
+    sequence: () => lastSequence,
+    run: () => anchor,
+    activeRun: active,
+    latestRun: () => last,
+    blocking: () => [...earlier.values()],
+    empty: () => !hasMessages,
+    quiet,
+    requestOpen: () => ownedPendingRequest() !== undefined,
     outcome() {
-      const current = active();
-      if (current !== undefined) {
-        const request = pendingRequest(current);
-        return request === undefined
-          ? undefined
-          : { kind: "blocked", explanation: blockedBy(request) };
-      }
-      const last = turnRuns().at(-1);
-      if (last === undefined) return undefined;
+      if (anchor === undefined || last === undefined) return undefined;
+      const request = ownedPendingRequest();
+      if (request !== undefined) return { kind: "blocked", asked: asked(request) };
+      if (active() !== undefined) return undefined;
       switch (last.status) {
         case "completed": {
-          if (backgroundTasks(last).length > 0) return undefined;
+          if (roster(last).length > 0)
+            return sessionEnded(last)
+              ? {
+                  kind: "failed",
+                  explanation:
+                    "T3's native session ended while it still listed background work, which can no longer report back.",
+                }
+              : undefined;
+          if (wakeOwedAfter !== undefined && last.ordinal <= wakeOwedAfter)
+            return sessionEnded(last)
+              ? {
+                  kind: "failed",
+                  explanation:
+                    "T3's native session ended before it reported the result of its finished background work.",
+                }
+              : undefined;
           return { kind: "completed", output: answer() };
         }
-        case "failed": {
-          const error = ownItems().findLast(
-            (item) => item.type === "error" && item.runId === last.id,
-          );
-          return { kind: "failed", explanation: error?.failure?.message ?? "The T3 run failed" };
-        }
+        case "failed":
+          return { kind: "failed", explanation: errors.get(last.id) ?? "The T3 run failed" };
         case "interrupted":
         case "cancelled":
         case "rolled_back":
@@ -334,56 +474,45 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
       }
     },
     activity() {
-      const run = active() ?? turnRuns().at(-1);
-      const owned = ownItems();
-      const toolItems = owned.filter((item) => TOOL_ITEMS.has(item.type));
-      const running: RunningTool[] = toolItems
-        .filter((item) => RUNNING_ITEM.has(item.status))
-        .flatMap((item) => {
-          const described = tool(item);
-          return described === undefined
-            ? []
-            : [{ ...described, started_at: seconds(item.startedAt ?? item.updatedAt) }];
+      const run = active() ?? last;
+      const runningTools: RunningTool[] = [...running.values()].map((item) => ({
+        ...tool(item),
+        started_at: seconds(item.startedAt ?? item.updatedAt),
+      }));
+      const now = Math.floor(Date.now() / 1000);
+      const tasks = roster(run);
+      for (const task of tasks) {
+        if (!backgroundSince.has(task.taskId)) backgroundSince.set(task.taskId, now);
+        runningTools.push({
+          tool: task.kind ?? "background_task",
+          ...withDetail(task.description === undefined ? undefined : displayed(task.description)),
+          started_at: backgroundSince.get(task.taskId) ?? now,
         });
-      if (run !== undefined) {
-        const now = Math.floor(Date.now() / 1000);
-        const current = backgroundTasks(run);
-        for (const task of current) {
-          if (!backgroundSince.has(task.taskId)) backgroundSince.set(task.taskId, now);
-          running.push({
-            tool: task.kind ?? "background_task",
-            ...withDetail(task.description === undefined ? undefined : displayed(task.description)),
-            started_at: backgroundSince.get(task.taskId) ?? now,
-          });
-        }
-        for (const id of backgroundSince.keys())
-          if (!current.some((task) => task.taskId === id)) backgroundSince.delete(id);
       }
-      const recent: FinishedTool[] = toolItems
-        .filter((item) => FINISHED_ITEM.has(item.status))
-        .sort((left, right) => (left.completedAt ?? "").localeCompare(right.completedAt ?? ""))
-        .slice(-RECENT_CALLS)
-        .flatMap((item) => {
-          const described = tool(item);
-          return described === undefined ? [] : [{ ...described, ok: item.status === "completed" }];
-        });
-      const ids = turnRunIds();
-      const latest = [...messages.values()]
-        .filter(
-          (message) =>
-            message.role === "assistant" && message.runId !== null && ids.has(message.runId),
-        )
-        .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
-        .at(-1);
-      const headline = latest === undefined ? undefined : commentary(latest.text);
+      for (const id of backgroundSince.keys())
+        if (!tasks.some((task) => task.taskId === id)) backgroundSince.delete(id);
+      const headline = latestAssistant === undefined ? undefined : commentary(latestAssistant.text);
       return {
-        phase: phase(run, owned, running.length),
+        phase: phase(run, compacting.size > 0, retrying.size > 0, runningTools.length),
         ...(headline === undefined ? {} : { headline }),
-        running: running.slice(0, RUNNING_CALLS),
-        recent,
-        tool_calls: toolItems.length,
+        running: runningTools.slice(0, RUNNING_CALLS),
+        recent: recent.map(
+          (item): FinishedTool => ({
+            ...tool(item),
+            ok: item.status === "completed",
+          }),
+        ),
+        tool_calls: counted.size,
       };
     },
+    retained: () => ({
+      runs: turnRuns.size + earlier.size,
+      running: running.size,
+      recent: recent.length,
+      counted: counted.size,
+      requests: requestItems.size + pendingRequests.size,
+      messages: assistant.size,
+    }),
     onChange(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -393,18 +522,13 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
 
 function phase(
   run: Run | undefined,
-  items: readonly TurnItem[],
+  compacting: boolean,
+  retrying: boolean,
   runningTools: number,
 ): ActivityPhase {
   if (run === undefined || BEFORE_PROVIDER.has(run.status)) return "starting";
-  if (items.some((item) => item.type === "compaction" && RUNNING_ITEM.has(item.status)))
-    return "compacting";
-  if (
-    items.some(
-      (item) => item.type === "error" && item.retry !== undefined && RUNNING_ITEM.has(item.status),
-    )
-  )
-    return "retrying";
+  if (compacting) return "compacting";
+  if (retrying) return "retrying";
   return runningTools > 0 ? "tools" : "model";
 }
 
