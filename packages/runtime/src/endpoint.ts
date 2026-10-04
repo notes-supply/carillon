@@ -1,6 +1,6 @@
 import { isIP } from "node:net";
 
-// Pi starts independently of core, so validate its bind endpoint here too.
+// A runtime starts independently of core, so it validates its own bind endpoint too.
 export function runtimeListenAddress(value: string) {
   const url = new URL(value);
   const host = url.hostname.replace(/^\[|\]$/gu, "");

@@ -1,13 +1,8 @@
 import { once } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { ExplainedFailure } from "./failure.ts";
 import { createRuntimeServer } from "./http.ts";
-import { ModelSelections } from "./model.ts";
 import type { RuntimeOperations } from "./operations.ts";
-import { DETERMINISTIC_DEFAULT, DETERMINISTIC_MODELS } from "./testing.ts";
 
 const key = `sk-proj-${"Ab1".repeat(20)}`;
 
@@ -15,10 +10,8 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-/** A runtime whose turns fail with the input as the provider's explanation, and whose model changes use real selection rules. */
+/** A runtime whose turns fail with the input as the provider's explanation, and whose model changes are refused quoting the requested option. */
 async function serve() {
-  const state = await mkdtemp(join(tmpdir(), "carillon-http-"));
-  const selections = await ModelSelections.open(join(state, "model-selection.json"));
   const runtime: RuntimeOperations = {
     executeTurn: (request) =>
       Promise.reject(
@@ -31,7 +24,13 @@ async function serve() {
         ? { phase: "tools", running: [], recent: [{ tool: "read", ok: true }], tool_calls: 1 }
         : undefined,
     modelState: () => Promise.reject(new Error("model catalogue file is corrupt")),
-    setModel: (update) => selections.update(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, update),
+    setModel: (update) =>
+      Promise.reject(
+        new ExplainedFailure(
+          422,
+          `Local reasoner has no ${Object.keys(update.selection?.options ?? {}).join(", ")} setting.`,
+        ),
+      ),
     close: () => Promise.resolve(),
   };
   const server = createRuntimeServer({
@@ -58,7 +57,6 @@ async function serve() {
   };
   const close = async () => {
     await new Promise((done) => server.close(done));
-    await rm(state, { recursive: true, force: true });
   };
   return { call, close };
 }

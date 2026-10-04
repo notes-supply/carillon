@@ -33,9 +33,9 @@ import {
 } from "./attachments.ts";
 import { ModelSelections } from "./model.ts";
 import { openConversation } from "./namespace.ts";
-import { Serial } from "./serial.ts";
+import { Serial } from "@carillon/runtime/serial";
 import { createPiExecutionSession, promptSession } from "./session.ts";
-import type { RuntimeOperations, TurnRequest, TurnResponse } from "./operations.ts";
+import type { RuntimeOperations, TurnRequest, TurnResponse } from "@carillon/runtime/operations";
 
 export interface PiRuntimeOptions {
   readonly workspace: string;

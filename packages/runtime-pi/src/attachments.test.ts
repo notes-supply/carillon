@@ -14,7 +14,8 @@ import { join } from "node:path";
 import { deflateSync } from "node:zlib";
 import { afterEach, expect, it } from "vitest";
 import type { RuntimeTurnRequest, TurnAttachment } from "@carillon/protocol";
-import { createPiRuntime, type RuntimeOperations } from "@carillon/runtime-pi";
+import type { RuntimeOperations } from "@carillon/runtime/operations";
+import { createPiRuntime } from "@carillon/runtime-pi";
 import { conversationDirectory } from "./namespace.ts";
 import { DEFAULT_INLINE_IMAGES, prepareAttachments } from "./attachments.ts";
 

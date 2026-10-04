@@ -3,13 +3,11 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "exports": {
-    ".": "./src/index.ts",
-    "./*": "./src/*.ts"
-  },
+  "exports": "./src/index.ts",
   "bin": "./src/cli.ts",
   "dependencies": {
     "@carillon/protocol": "workspace:*",
+    "@carillon/runtime": "workspace:*",
     "@earendil-works/pi-ai": "1.0.0",
     "@earendil-works/pi-coding-agent": "1.0.0",
     "image-size": "2.0.4",

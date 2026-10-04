@@ -11,8 +11,8 @@
  * Nothing here talks to the network.
  */
 import type { ActivityPhase, FinishedTool, RunningTool, TurnActivity } from "@carillon/protocol";
-import { commandHeader, commentary, describe, displayed } from "@carillon/runtime-pi/activity";
-import { bounded } from "@carillon/runtime-pi/failure";
+import { commandHeader, commentary, describe, displayed } from "@carillon/runtime/activity";
+import { bounded } from "@carillon/runtime/failure";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { Static, TSchema } from "typebox";
 import { Check } from "typebox/value";

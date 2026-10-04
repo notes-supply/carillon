@@ -11,9 +11,9 @@
  * not confirm is reported as unconfirmed, never as stopped.
  */
 import type { ModelQuery, ModelState } from "@carillon/protocol";
-import { diagnostic, ExplainedFailure } from "@carillon/runtime-pi/failure";
-import type { RuntimeOperations, TurnRequest, TurnResponse } from "@carillon/runtime-pi/operations";
-import { Serial } from "@carillon/runtime-pi/serial";
+import { diagnostic, ExplainedFailure } from "@carillon/runtime/failure";
+import type { RuntimeOperations, TurnRequest, TurnResponse } from "@carillon/runtime/operations";
+import { Serial } from "@carillon/runtime/serial";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";

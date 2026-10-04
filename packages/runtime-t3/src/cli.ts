@@ -1,13 +1,13 @@
 import { once } from "node:events";
 import { readFile, stat } from "node:fs/promises";
-import { runtimeListenAddress } from "@carillon/runtime-pi/endpoint";
-import { createRuntimeServer } from "@carillon/runtime-pi/http";
+import { runtimeListenAddress } from "@carillon/runtime/endpoint";
+import { createRuntimeServer } from "@carillon/runtime/http";
 import {
   loadInstallation,
   loadRuntimeCredential,
   parseArguments,
   requiredArgument,
-} from "@carillon/runtime-pi/installation";
+} from "@carillon/runtime/installation";
 import { createT3Runtime } from "./runtime.ts";
 import packageInfo from "../package.json" with { type: "json" };
 import { loadSettings } from "./settings.ts";

@@ -41,6 +41,9 @@ that owns the behavior you want to change:
   runtime boundary executed on a T3 Code server: derived thread and message
   identities, read-back instead of re-execution, native interruption and
   activity from T3's timeline. A text-only proof of concept.
+- **[Shared runtime boundary](packages/runtime/README.md)** — the authenticated
+  HTTP adapter, failure display rules, tool descriptions and registry loading
+  every runtime provider serves, with no engine dependency.
 - **[Discord interface](crates/carillon-discord/README.md)** — admission,
   conversation mapping, native delivery and command hosting.
   [Render the model picker](crates/carillon-discord/examples/model_picker.rs)

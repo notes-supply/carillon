@@ -15,7 +15,7 @@ import {
 import type { Api, ImageContent, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { ExplainedFailure } from "./failure.ts";
+import { ExplainedFailure } from "@carillon/runtime/failure";
 
 interface PiExecutionSessionOptions {
   readonly resourceRoot: string;

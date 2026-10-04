@@ -12,15 +12,15 @@ import {
   type InlineImagePolicy,
 } from "./attachments.ts";
 import { createDeterministicRuntime } from "./testing.ts";
-import { createRuntimeServer } from "./http.ts";
+import { createRuntimeServer } from "@carillon/runtime/http";
 import packageInfo from "../package.json" with { type: "json" };
-import { runtimeListenAddress } from "./endpoint.ts";
+import { runtimeListenAddress } from "@carillon/runtime/endpoint";
 import {
   loadInstallation,
   loadRuntimeCredential,
   parseArguments,
   requiredArgument,
-} from "./installation.ts";
+} from "@carillon/runtime/installation";
 
 /** The runtime's own settings, `providers/<id>.toml`; every setting is optional. */
 const ProviderFileSchema = Type.Object(

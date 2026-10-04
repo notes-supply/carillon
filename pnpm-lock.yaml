@@ -149,11 +149,26 @@ importers:
         specifier: 1.0.65
         version: 1.0.65
 
+  packages/runtime:
+    dependencies:
+      '@carillon/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      smol-toml:
+        specifier: 1.6.0
+        version: 1.6.0
+      typebox:
+        specifier: 1.0.65
+        version: 1.0.65
+
   packages/runtime-pi:
     dependencies:
       '@carillon/protocol':
         specifier: workspace:*
         version: link:../protocol
+      '@carillon/runtime':
+        specifier: workspace:*
+        version: link:../runtime
       '@earendil-works/pi-ai':
         specifier: 1.0.0
         version: 1.0.0(@aws-sdk/credential-provider-node@3.972.83)(@smithy/signature-v4@5.7.3)(undici@8.10.2)(ws@8.21.3)
@@ -181,9 +196,9 @@ importers:
       '@carillon/protocol':
         specifier: workspace:*
         version: link:../protocol
-      '@carillon/runtime-pi':
+      '@carillon/runtime':
         specifier: workspace:*
-        version: link:../runtime-pi
+        version: link:../runtime
       smol-toml:
         specifier: 1.6.0
         version: 1.6.0

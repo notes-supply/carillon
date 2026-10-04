@@ -18,8 +18,8 @@ import {
   type ScopeState,
 } from "@carillon/protocol";
 import { Parse } from "typebox/value";
-import { ExplainedFailure } from "./failure.ts";
-import { Serial } from "./serial.ts";
+import { ExplainedFailure } from "@carillon/runtime/failure";
+import { Serial } from "@carillon/runtime/serial";
 
 const LedgerSchema = Type.Object({
   agents: Type.Array(Type.Object({ agent_id: Type.String(), selection: SelectionSchema })),

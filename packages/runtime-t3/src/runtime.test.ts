@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { RuntimeOperations } from "@carillon/runtime-pi/operations";
+import type { RuntimeOperations } from "@carillon/runtime/operations";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { derivedId, type Run } from "./contracts.ts";
 import { startFakeT3, type FakeT3 } from "./fake.ts";

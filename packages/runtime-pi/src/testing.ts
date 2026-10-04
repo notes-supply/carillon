@@ -7,9 +7,9 @@ import { Type } from "typebox";
 import { Parse } from "typebox/value";
 import { capturedPath } from "./attachments.ts";
 import { ModelSelections } from "./model.ts";
-import { Serial } from "./serial.ts";
+import { Serial } from "@carillon/runtime/serial";
 import { conversationDirectory } from "./namespace.ts";
-import type { RuntimeOperations, TurnRequest, TurnResponse } from "./operations.ts";
+import type { RuntimeOperations, TurnRequest, TurnResponse } from "@carillon/runtime/operations";
 interface DeterministicSession {
   readonly turns: readonly {
     readonly correlation_id: string;

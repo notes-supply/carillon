@@ -58,8 +58,7 @@ mise run example:pi -- --state-dir /path/to/pi-state --workspace /path/to/worksp
 - [`runtime.ts`](src/runtime.ts): instance construction, model operations, execution queue and shutdown.
 - [`session.ts`](src/session.ts), [`namespace.ts`](src/namespace.ts): native Pi sessions/resources/cancellation and conversation identity.
 - [`model.ts`](src/model.ts): persisted selection policy; shared wire shapes come from [`@carillon/protocol`](../protocol/README.md).
-- [`activity.ts`](src/activity.ts): a running turn's snapshot and the deny-by-default description of tool inputs, including the Bash command-header policy.
-- [`failure.ts`](src/failure.ts): `ExplainedFailure` and the conservative, best-effort rules for what of an explanation may be displayed and how diagnostics are redacted.
-- [`http.ts`](src/http.ts): authenticated transport over runtime operations. It sends callers only the displayable part of `ExplainedFailure` messages, and logs other failures and runtime-side explanations by method and path.
+- [`activity.ts`](src/activity.ts): a running turn's snapshot from Pi's native session events; the deny-by-default description of tool inputs, including the Bash command-header policy, is the shared runtime package's.
 - [`cli.ts`](src/cli.ts): installation arguments, credentials, OAuth registration, listener and signal lifecycle.
+- The authenticated HTTP adapter, `ExplainedFailure` and the display and redaction rules, registry loading and the runtime operations interface live in [`@carillon/runtime`](../runtime/README.md), shared with every runtime provider.
 - [`testing.ts`](src/testing.ts): explicit deterministic **service-test substitute**, not Pi execution. Production code does not branch through it during a turn.
