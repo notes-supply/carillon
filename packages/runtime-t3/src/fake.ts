@@ -50,6 +50,9 @@ interface FakeThread {
   readonly requests: RuntimeRequest[];
   providerThread: ProviderThread;
   session: ProviderSession;
+  /** T3 removed the session's record; the process closes later and may still deliver until it does. */
+  sessionDetached: boolean;
+  sessionClosed: boolean;
   sequence: number;
   readonly events: StoredEvent[];
   readonly subscribers: Set<{ readonly socket: WebSocket; readonly requestId: unknown }>;
@@ -120,6 +123,8 @@ export interface FakeT3 {
   /** A run T3 starts itself, as when finished background work wakes the agent. */
   wake(threadId: string, text: string): Run;
   session(threadId: string, status: ProviderSession["status"]): void;
+  /** The detached process finally closes: nothing further can be delivered. */
+  closeSession(threadId: string): void;
   waitFor(condition: () => boolean, timeoutMs?: number): Promise<void>;
   close(): Promise<void>;
 }
@@ -299,12 +304,18 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
     },
     wake(threadId, text) {
       const thread = threadOf(threadId);
+      if (thread.sessionClosed)
+        throw new Error("the provider process has closed; no wake can come");
       return startRun(thread, `message:${thread.id}:wake:${String(thread.runs.length + 1)}`, text);
     },
     session(threadId, status) {
       const thread = threadOf(threadId);
       thread.session = { ...thread.session, status };
-      emit(thread, "provider-session.updated", thread.session);
+      if (!thread.sessionDetached) emit(thread, "provider-session.updated", thread.session);
+    },
+    closeSession(threadId) {
+      const thread = threadOf(threadId);
+      thread.sessionClosed = true;
     },
     async waitFor(condition, timeoutMs = 5_000) {
       const deadline = Date.now() + timeoutMs;
@@ -418,7 +429,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
                     runs: thread.runs,
                     runtimeRequests: thread.requests,
                     providerThreads: [thread.providerThread],
-                    providerSessions: [thread.session],
+                    providerSessions: thread.sessionDetached ? [] : [thread.session],
                     messages: thread.messages.map((message) => ({ ...message, streaming: false })),
                     turnItems: fake.omitRequestItems
                       ? thread.items.filter((item) => !item.type.endsWith("_request"))
@@ -456,6 +467,8 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
             providerSessionId: sessionId,
           },
           session: { id: sessionId, status: "ready" },
+          sessionDetached: false,
+          sessionClosed: false,
           sequence: 1,
           events: [],
           subscribers: new Set(),
@@ -491,11 +504,12 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
       case "provider-session.detach": {
         const thread = threadOf(command.threadId);
         const sessionId = String(command["providerSessionId"]);
-        if (thread.session.id !== sessionId || thread.session.status === "stopped")
+        if (thread.session.id !== sessionId || thread.sessionDetached)
           throw new Error(`Provider session ${sessionId} does not belong to thread ${thread.id}.`);
         detached.push(sessionId);
+        // As T3 does: the record goes now; the process closes later, if at all.
         if (fake.interruptBehaviour === "settle") {
-          thread.session = { ...thread.session, status: "stopped" };
+          thread.sessionDetached = true;
           emit(thread, "provider-session.detached", { providerSessionId: sessionId });
         }
         receipts.set(command.commandId, thread.sequence);
@@ -543,6 +557,9 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
     thread.runs.push(run);
     emit(thread, "message.updated", { ...user, streaming: false });
     emit(thread, "run.created", run);
+    // A run's start re-sends its provider thread and session records, as T3 does.
+    emit(thread, "provider-thread.updated", thread.providerThread);
+    if (!thread.sessionDetached) emit(thread, "provider-session.updated", thread.session);
     return run;
   }
 

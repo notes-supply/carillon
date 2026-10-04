@@ -412,9 +412,11 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       "Carillon cancelled the turn",
     );
     // With nothing running, T3 refuses the interrupt, yet the process may
-    // still owe a report (or T3 cannot show whether it does). Its only
-    // public stop then is to end the provider session; the detached session
-    // is the confirmation that nothing more will come.
+    // still owe a report (or T3 cannot show whether it does). The only public
+    // stop left is a provider-session detach. T3 accepts it, removes the
+    // session's record and closes the process afterwards, without fencing
+    // what that process may still deliver, so the acceptance is a request
+    // receipt, never a confirmed stop.
     const session = watch.providerSession();
     if (!accepted && watch.activeRun() === undefined && session !== undefined) {
       try {
@@ -423,7 +425,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
           sessionDetach(binding.threadId, session, "Carillon cancelled the turn"),
         );
         log(
-          `thread ${binding.threadId}: detaching provider session ${session} to end an owed report`,
+          `thread ${binding.threadId}: T3 accepted a detach of provider session ${session}; its public contract does not confirm that the process has closed, so the stop is unconfirmed and the next turn interrupts any run it finds active`,
         );
       } catch (failure) {
         if (!(failure instanceof T3Failure) || failure.kind !== "rejected") throw failure;
@@ -431,6 +433,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
           `thread ${binding.threadId}: session detach not accepted (${failure.detail ?? failure.message})`,
         );
       }
+      return { quiet: false, requestOpen: watch.requestOpen() };
     }
     const quiet = await settle(watch, stream, (turn) => turn.quiet(), settleMs);
     const calls = watch.activity().tool_calls;
@@ -441,7 +444,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       );
     else
       log(
-        `run ${target.id}: T3 did not confirm the stop within ${String(settleMs)} ms (active run: ${watch.activeRun()?.status ?? "none"}); it may still be running and will be stopped before the next turn`,
+        `run ${target.id}: T3 did not confirm the stop within ${String(settleMs)} ms (active run: ${watch.activeRun()?.status ?? "none"}); it may still be running, and the next turn interrupts any run it finds active`,
       );
     return stop;
   }
@@ -521,8 +524,8 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
   /** The person's view of an unresolved background report, saying only what T3 confirmed. */
   function wakeReport(stop: Stop | undefined): string {
     return stop?.quiet === true
-      ? "its native session was ended, so nothing more will arrive. Send another message to continue."
-      : "T3 did not confirm a stop, so a result may still arrive and will be stopped before the next turn. Send another message to continue.";
+      ? "T3 reports its native session stopped. Send another message to continue."
+      : "T3 does not confirm that its native process has stopped, so a result may still arrive; the next turn interrupts any run it finds active. Send another message to continue.";
   }
 
   /** The person's view of a stop, saying only what T3 confirmed. */

@@ -268,7 +268,7 @@ it("is not finished while background work, an owed wake or a pending request rem
   expect(watch.requestOpen()).toBe(true);
 });
 
-it("fails closed when the provider session that owes a wake is gone", () => {
+it("fails closed when the provider session that owes a wake stops or is detached, saying which", () => {
   const watch = watchTurn("message-1", "/workspace");
   watch.apply(
     snapshot({
@@ -290,12 +290,42 @@ it("fails closed when the provider session that owes a wake is gone", () => {
     }),
   );
   expect(watch.outcome()).toBeUndefined();
-  watch.apply(event(3, "provider-session.detached", { providerSessionId: "session" }));
+  watch.apply(event(3, "provider-session.updated", { id: "session", status: "stopped" }));
   expect(watch.outcome()).toEqual({
     kind: "failed",
     explanation:
-      "T3's native session ended before it reported the result of its finished background work.",
+      "T3's native session stopped before it reported the result of its finished background work.",
   });
+  expect(watch.quiet()).toBe(true);
+
+  const detached = watchTurn("message-1", "/workspace");
+  detached.apply(
+    snapshot({
+      runs: [run("completed")],
+      providerThreads: [
+        {
+          id: "provider-thread",
+          providerSessionId: "session",
+          pendingBackgroundTasks: [{ taskId: "t", kind: "command" }],
+        },
+      ],
+    }),
+  );
+  detached.apply(
+    event(2, "provider-thread.updated", {
+      id: "provider-thread",
+      providerSessionId: "session",
+      pendingBackgroundTasks: [],
+    }),
+  );
+  detached.apply(event(3, "provider-session.detached", { providerSessionId: "session" }));
+  expect(detached.outcome()).toEqual({
+    kind: "failed",
+    explanation:
+      "T3's native session was detached before it reported the result of its finished background work; T3 does not confirm whether that result will still arrive.",
+  });
+  // Detachment removes the record before the process closes: not a confirmed stop.
+  expect(detached.quiet()).toBe(false);
 });
 
 it("gates completion on the turn's own open request even when its run is terminal", () => {
@@ -427,10 +457,58 @@ it("still owes the wake after the roster clears, so a cancel in that gap is not 
   expect(watch.outcome()).toBeUndefined();
   expect(watch.quiet()).toBe(false);
   expect(watch.providerSession()).toBe("session");
-  // Ending the session is the confirmation that nothing more can come.
+  // A detach removes the record; the process may still deliver, so the gap stays non-quiet.
   watch.apply(event(3, "provider-session.detached", { providerSessionId: "session" }));
-  expect(watch.quiet()).toBe(true);
+  expect(watch.quiet()).toBe(false);
   expect(watch.providerSession()).toBeUndefined();
+  // Only a session T3 reports stopped confirms that nothing more can come.
+  watch.apply(event(4, "provider-session.attached", { id: "session", status: "stopped" }));
+  expect(watch.quiet()).toBe(true);
+});
+
+it("retains no provider records before the turn's run exists and only its own afterwards", () => {
+  const watch = watchTurn("message-current", "/workspace");
+  const history = Array.from({ length: 500 }, (_, index) => index);
+  watch.apply(
+    snapshot({
+      runs: history.map((index) => ({
+        ...run("completed", `message-${String(index)}`, index),
+        providerThreadId: `thread-${String(index)}`,
+      })),
+      providerThreads: history.map((index) => ({
+        id: `thread-${String(index)}`,
+        providerSessionId: `session-${String(index)}`,
+      })),
+      providerSessions: history.map((index) => ({
+        id: `session-${String(index)}`,
+        status: "stopped",
+      })),
+    }),
+  );
+  // The ordinary pre-dispatch snapshot: ownership unknown, nothing of the history kept.
+  expect(watch.retained()).toMatchObject({ runs: 0, providerThreads: 0, sessions: 0 });
+  // The turn's run starts and T3 re-sends its provider thread and session with it.
+  watch.apply(
+    event(2, "run.created", {
+      ...run("running", "message-current", 500),
+      providerThreadId: "thread-9",
+    }),
+  );
+  watch.apply(
+    event(3, "provider-thread.updated", {
+      id: "thread-9",
+      providerSessionId: "session-9",
+      pendingBackgroundTasks: [{ taskId: "t", kind: "command" }],
+    }),
+  );
+  watch.apply(event(4, "provider-session.updated", { id: "session-9", status: "running" }));
+  watch.apply(
+    event(5, "provider-thread.updated", { id: "thread-77", providerSessionId: "session-77" }),
+  );
+  watch.apply(event(6, "provider-session.updated", { id: "session-77", status: "running" }));
+  expect(watch.retained()).toMatchObject({ runs: 1, providerThreads: 1, sessions: 1 });
+  expect(watch.activity()).toMatchObject({ phase: "tools", running: [{ tool: "command" }] });
+  expect(watch.providerSession()).toBe("session-9");
 });
 
 it("marks a resumed snapshot that hides how listed work ended as unresolved, not completed", () => {

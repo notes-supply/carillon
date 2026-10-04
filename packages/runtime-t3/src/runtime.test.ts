@@ -368,7 +368,7 @@ it("fails closed when the native session ends before it reports finished backgro
   await expect(result).rejects.toMatchObject({
     status: 502,
     message:
-      "T3's native session ended before it reported the result of its finished background work.",
+      "T3's native session stopped before it reported the result of its finished background work.",
   });
 });
 
@@ -548,7 +548,7 @@ it("stops the native run when the runtime closes mid-turn", async () => {
   expect(runOf("turn-1")?.status).toBe("interrupted");
 });
 
-it("ends an owed report through the provider session when cancelled after the roster cleared, before the wake", async () => {
+it("requests a session detach when cancelled after the roster cleared, before the wake, and reports the stop as unconfirmed", async () => {
   const controller = new AbortController();
   const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
   const run = await started("turn-1");
@@ -560,17 +560,29 @@ it("ends an owed report through the provider session when cancelled after the ro
   await until(() => activity()?.phase === "model");
   controller.abort(new Error("core disconnected"));
   await expect(result).rejects.toThrow("core disconnected");
-  // The completed run cannot be interrupted; the owed wake is ended through its session.
+  // The completed run cannot be interrupted; the only public stop left is a
+  // session detach, whose acceptance is a receipt, not a confirmed stop.
   expect(fake.interrupts).toEqual([]);
   expect(fake.detached).toEqual([thread().session.id]);
-  expect(thread().session.status).toBe("stopped");
+  expect(thread().sessionDetached).toBe(true);
   const logged = vi.mocked(console.log).mock.calls.map((call) => String(call[0]));
-  expect(logged.some((line) => line.includes("T3 confirmed the stop"))).toBe(true);
+  expect(logged.some((line) => line.includes("does not confirm that the process has closed"))).toBe(
+    true,
+  );
+  expect(logged.some((line) => line.includes("T3 confirmed the stop"))).toBe(false);
   expect(logged.some((line) => line.includes("had already ended"))).toBe(false);
 
+  // The detached process delivers its wake anyway; the next turn finds and interrupts it.
+  const wake = fake.wake(threadId, "Background command completed");
   const next = runtime.executeTurn(turn("turn-2", "again"));
   answer(await started("turn-2"), "ok");
   expect((await next).output).toBe("ok");
+  expect(fake.interrupts).toEqual([wake.id]);
+  expect(thread().runs.map((candidate) => candidate.status)).toEqual([
+    "completed",
+    "interrupted",
+    "completed",
+  ]);
 });
 
 it("does not report an owed wake as stopped when T3 does not confirm the session detach", async () => {
@@ -587,11 +599,11 @@ it("does not report an owed wake as stopped when T3 does not confirm the session
   await expect(result).rejects.toThrow("cancelled");
   expect(fake.detached).toEqual([thread().session.id]);
   const logged = vi.mocked(console.log).mock.calls.map((call) => String(call[0]));
-  expect(logged.some((line) => line.includes("did not confirm the stop"))).toBe(true);
+  expect(logged.some((line) => /does not confirm|did not confirm/u.test(line))).toBe(true);
   expect(logged.some((line) => line.includes("T3 confirmed the stop"))).toBe(false);
 });
 
-it("fails closed when a snapshot resume cannot show whether background work was reported, and ends the session", async () => {
+it("fails closed when a snapshot resume cannot show whether background work was reported, without claiming a stop", async () => {
   fake.snapshotOnResume = true;
   const result = runtime.executeTurn(turn("turn-1", "work"));
   const run = await started("turn-1");
@@ -605,7 +617,7 @@ it("fails closed when a snapshot resume cannot show whether background work was 
   await expect(result).rejects.toMatchObject({
     status: 502,
     message:
-      "Carillon lost its connection to T3 while this turn ran background work, and T3's state does not show whether the result was delivered; its native session was ended, so nothing more will arrive. Send another message to continue.",
+      "Carillon lost its connection to T3 while this turn ran background work, and T3's state does not show whether the result was delivered; T3 does not confirm that its native process has stopped, so a result may still arrive; the next turn interrupts any run it finds active. Send another message to continue.",
   });
   expect(fake.interrupts).toEqual([]);
   expect(fake.detached).toEqual([thread().session.id]);

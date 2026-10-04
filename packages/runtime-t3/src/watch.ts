@@ -257,35 +257,45 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
     return providerThreads.get(run.providerThreadId)?.pendingBackgroundTasks ?? [];
   }
 
-  /** Provider threads the turn's runs execute in; empty while none is known. */
-  function turnProviderThreads(): Set<string> {
-    const ids = new Set<string>();
-    for (const run of turnRuns.values())
-      if (run.providerThreadId !== null) ids.add(run.providerThreadId);
-    return ids;
+  /**
+   * Provider records matter only for the turn's runs: before the turn's run
+   * exists none is kept, and the thread's history of provider threads and
+   * sessions is dropped as it arrives. T3 re-sends a provider thread's record
+   * when a run starts on it (its last run ordinal changes), so the turn's
+   * thread and session arrive with the run.
+   */
+  function turnProviderThread(id: string): boolean {
+    for (const run of turnRuns.values()) if (run.providerThreadId === id) return true;
+    return false;
+  }
+
+  function turnSession(id: string): boolean {
+    for (const thread of providerThreads.values()) if (thread.providerSessionId === id) return true;
+    return false;
   }
 
   function foldProviderThread(thread: ProviderThread): void {
-    const relevant = turnProviderThreads();
-    if (relevant.size > 0 && !relevant.has(thread.id)) return;
-    providerThreads.set(thread.id, thread);
+    if (turnProviderThread(thread.id)) providerThreads.set(thread.id, thread);
   }
 
   function foldSession(session: ProviderSession): void {
-    const relevant = new Set<string>();
-    for (const thread of providerThreads.values())
-      if (thread.providerSessionId !== null) relevant.add(thread.providerSessionId);
-    if (relevant.size > 0 && !relevant.has(session.id)) return;
-    sessions.set(session.id, session);
+    if (turnSession(session.id)) sessions.set(session.id, session);
   }
 
-  /** The turn's live process owes a report in a run that has not appeared. */
+  /** Drops provider records no retained run refers to any more. */
+  function pruneProviders(): void {
+    for (const id of providerThreads.keys())
+      if (!turnProviderThread(id)) providerThreads.delete(id);
+    for (const id of sessions.keys()) if (!turnSession(id)) sessions.delete(id);
+  }
+
+  /** The turn's process owes a report in a run that has not appeared, and T3 has not shown it stopped. */
   function wakeOwed(): boolean {
     return (
       last?.status === "completed" &&
       wakeOwedAfter !== undefined &&
       last.ordinal <= wakeOwedAfter &&
-      !sessionEnded(last)
+      !sessionStopped(last)
     );
   }
 
@@ -304,14 +314,30 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
     );
   }
 
-  /** Whether the run's provider process is gone, so it can neither report nor wake. */
-  function sessionEnded(run: Run): boolean {
-    if (run.providerThreadId === null) return false;
+  function sessionOf(
+    run: Run,
+  ): { readonly id: string | null; readonly record: ProviderSession | undefined } | undefined {
+    if (run.providerThreadId === null) return undefined;
     const thread = providerThreads.get(run.providerThreadId);
-    if (thread === undefined) return false;
-    if (thread.providerSessionId === null) return true;
-    const session = sessions.get(thread.providerSessionId);
-    return session === undefined || ENDED_SESSION.has(session.status);
+    if (thread === undefined) return undefined;
+    const id = thread.providerSessionId;
+    return { id, record: id === null ? undefined : sessions.get(id) };
+  }
+
+  /** T3 reports the run's provider process stopped or failed: it can neither report nor wake. */
+  function sessionStopped(run: Run): boolean {
+    const record = sessionOf(run)?.record;
+    return record !== undefined && ENDED_SESSION.has(record.status);
+  }
+
+  /**
+   * The run's provider session is detached from the thread or no longer
+   * listed. T3 removes the record before the process closes and does not
+   * fence what that process may still deliver, so this is not a stop.
+   */
+  function sessionDetached(run: Run): boolean {
+    const session = sessionOf(run);
+    return session !== undefined && (session.id === null || session.record === undefined);
   }
 
   function active(): Run | undefined {
@@ -402,7 +428,7 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
       active() === undefined &&
       roster(last).length === 0 &&
       !wakeOwed() &&
-      !(ambiguous() && last !== undefined && !sessionEnded(last))
+      !(ambiguous() && last !== undefined && !sessionStopped(last))
     );
   }
 
@@ -448,6 +474,7 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
             case "run.updated":
               foldRun(parsed(RunSchema, payload, "run"));
               refile();
+              pruneProviders();
               break;
             case "runtime-request.updated":
               foldRequest(parsed(RuntimeRequestSchema, payload, "runtime request"));
@@ -513,22 +540,36 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
       if (active() !== undefined) return undefined;
       switch (last.status) {
         case "completed": {
-          if (roster(last).length > 0)
-            return sessionEnded(last)
-              ? {
-                  kind: "failed",
-                  explanation:
-                    "T3's native session ended while it still listed background work, which can no longer report back.",
-                }
-              : undefined;
-          if (wakeOwedAfter !== undefined && last.ordinal <= wakeOwedAfter)
-            return sessionEnded(last)
-              ? {
-                  kind: "failed",
-                  explanation:
-                    "T3's native session ended before it reported the result of its finished background work.",
-                }
-              : undefined;
+          if (roster(last).length > 0) {
+            if (sessionStopped(last))
+              return {
+                kind: "failed",
+                explanation:
+                  "T3's native session stopped while it still listed background work, which can no longer report back.",
+              };
+            if (sessionDetached(last))
+              return {
+                kind: "failed",
+                explanation:
+                  "T3's native session was detached while it still listed background work; T3 does not confirm whether that work still reports back.",
+              };
+            return undefined;
+          }
+          if (wakeOwedAfter !== undefined && last.ordinal <= wakeOwedAfter) {
+            if (sessionStopped(last))
+              return {
+                kind: "failed",
+                explanation:
+                  "T3's native session stopped before it reported the result of its finished background work.",
+              };
+            if (sessionDetached(last))
+              return {
+                kind: "failed",
+                explanation:
+                  "T3's native session was detached before it reported the result of its finished background work; T3 does not confirm whether that result will still arrive.",
+              };
+            return undefined;
+          }
           if (ambiguous())
             return {
               kind: "unresolved",
