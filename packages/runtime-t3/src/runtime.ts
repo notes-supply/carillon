@@ -253,9 +253,10 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     /**
      * Whether the turn's work may exist on T3: dispatched by this call, or
      * read back from a run the thread already had for it. Until then a
-     * cancelled caller ends every wait at once with nothing to stop; after
-     * that the waits are kept, since the work must still be found and
-     * stopped.
+     * cancelled caller can end connection, snapshot, retry and stale-run
+     * settlement waits with no turn to stop. RPCs already awaiting a
+     * receipt remain timeout-bounded. After that point, recovery waits are
+     * kept since the work must still be found and stopped.
      */
     const reached = () => progress.dispatched || watch.run() !== undefined;
     for (;;) {
@@ -386,8 +387,8 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
 
   /**
    * Earlier turns' runs still occupying the thread are stale to Carillon:
-   * stop them first. Nothing of this turn is on T3 yet, so a cancelled
-   * caller ends the wait at once; the stale runs stay interrupted.
+   * stop them first. Nothing of this turn is on T3 yet, so cancellation
+   * ends the settlement wait; interrupt requests already sent are not undone.
    */
   async function stopBlocking(
     connection: T3Connection,
