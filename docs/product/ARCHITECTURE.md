@@ -168,7 +168,7 @@ Each outcome is recorded once. If storage cannot record it, the turn remains run
 
 Provider instances are declared in `carillon.toml` with stable IDs and one of two roles: interface or runtime. An agent names its runtime provider. Provider state paths are namespaced by provider identity.
 
-The included release supervises core, Discord, and Pi as separate user services running three separate programs: `carillon core`, `carillon discord serve` (the `carillon-discord` executable, with the release's command module under `app/lib`), and `carillon-runtime-pi`.
+The included release supervises core, Discord, and Pi as separate user services running three separate programs: `carillon core`, `carillon discord serve` (the `carillon-discord` executable, with the release's command module under `app/lib`), and `carillon-runtime-pi`. The optional T3 runtime ships as a fourth program, `carillon-runtime-t3`, with a unit the target does not want until the operator enables it.
 
 The services share the installing Unix identity. Registry and provider configuration are loaded at process start; changes are applied by restarting the affected service. The Discord command module is the exception: it is installed or reset in the running provider by `carillon discord commands`, without reconnecting the gateway.
 

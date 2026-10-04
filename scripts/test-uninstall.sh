@@ -20,6 +20,8 @@ install_release() {
 }
 install_release "$DECOY"
 printf '%s\n' unrelated-owner-data >"$OWNER_HOME/unrelated"
+# An unrelated user unit shares the directory and must survive every uninstall.
+printf '[Unit]\nDescription=unrelated\n' >"$UNIT_DIR/unrelated.service"
 cp -a "$DECOY" "$TEST_ROOT/decoy-before"
 REAL_FIND=$(command -v find)
 REAL_RM=$(command -v rm)
@@ -105,6 +107,10 @@ done
 ln -s "$ROOT/app/bin/carillon-uninstall" "$OWNER_HOME/remove-carillon"
 for failure in unset stale partial-term partial-kill sync-cleanup marker-kill rmdir-kill; do
   install_release "$ROOT"
+  # The operator explicitly enabled the optional T3 unit: its link lives in the
+  # target's wants directory, which disabling the target does not touch.
+  mkdir -p "$UNIT_DIR/carillon.target.wants"
+  ln -s ../carillon-runtime-t3.service "$UNIT_DIR/carillon.target.wants/carillon-runtime-t3.service"
   # The manager retains its loaded definition until a successful reload, even
   # when interrupted filesystem cleanup has already removed every unit file.
   touch "$ROOT/manager-loaded"
@@ -165,6 +171,8 @@ for failure in unset stale partial-term partial-kill sync-cleanup marker-kill rm
   esac
   [ ! -e "$ROOT/app" ]
   [ -z "$(find "$UNIT_DIR" -maxdepth 1 -name 'carillon*')" ]
+  [ ! -e "$UNIT_DIR/carillon.target.wants/carillon-runtime-t3.service" ]
+  [ -f "$UNIT_DIR/unrelated.service" ]
   cmp "$TEST_ROOT/config-before" "$ROOT/carillon.toml"
   diff -r "$TEST_ROOT/credentials-before" "$ROOT/credentials"
   rm -rf "$TEST_ROOT/credentials-before"

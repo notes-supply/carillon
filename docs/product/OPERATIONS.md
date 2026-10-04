@@ -2,12 +2,14 @@
 
 ## Installation model
 
-The release installs four user units:
+The release installs four default user units:
 
 - `carillon.target`
 - `carillon-core.service`
 - `carillon-discord.service`
 - `carillon-runtime-pi.service`
+
+It also registers one optional unit, `carillon-runtime-t3.service`, for the T3 runtime executable `app/bin/carillon-runtime-t3`. The target does not want it and setup does not enable it: it serves `--provider runtime-t3` with `credentials/runtime-t3.token` and logs to `logs/runtime-t3.log`, and runs only after the operator has added that provider to the registry with its settings file and credential and enabled the unit (`systemctl --user enable --now carillon-runtime-t3.service`). It is part of `carillon.target`, so `stop` and `restart` apply to it once enabled, and uninstall removes it with the other units.
 
 Run `install.sh` as the non-root Unix user that should own Carillon. The installer rejects root, creates no users or groups, changes no sudo policy, and does not enable lingering. It enables but does not start `carillon.target`.
 

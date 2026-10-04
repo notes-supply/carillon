@@ -5,6 +5,7 @@ ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 VERSION=$(cd "$ROOT" && bun -e 'import manifest from "./Cargo.toml"; console.log(manifest.workspace.package.version)')
 RELEASE=${1:-"$ROOT/target/package/carillon-$VERSION"}
 BASE_PORT=${CARILLON_TEST_BASE_PORT:-44800}
+TEST_ROOT_T3_OUT=$(mktemp)
 
 # This tests the bundled Discord/Pi release, not a limit on provider extensibility.
 # Reinstallation below replaces binaries with the same schema; it is not a
@@ -16,6 +17,7 @@ for artifact in \
   lib/carillon_discord_commands.wasm \
   lib/carillon-discord-pi.js \
   bin/carillon-runtime-pi \
+  bin/carillon-runtime-t3 \
   bin/pi \
   bin/photon_rs_bg.wasm \
   bin/carillon-pi \
@@ -26,14 +28,28 @@ for artifact in \
   systemd/carillon.target \
   systemd/carillon-core.service \
   systemd/carillon-discord.service \
-  systemd/carillon-runtime-pi.service
+  systemd/carillon-runtime-pi.service \
+  systemd/carillon-runtime-t3.service
 do
   [ -e "$RELEASE/$artifact" ] || { printf 'release artifact missing: %s\n' "$artifact" >&2; exit 1; }
 done
-[ "$(find "$RELEASE/systemd" -maxdepth 1 -type f | wc -l)" -eq 4 ] || {
-  printf '%s\n' "release must contain exactly the target and three default service units" >&2
+[ "$(find "$RELEASE/systemd" -maxdepth 1 -type f | wc -l)" -eq 5 ] || {
+  printf '%s\n' "release must contain exactly the target, three default service units and the optional T3 unit" >&2
   exit 1
 }
+# The optional T3 unit is shipped but not wanted by the default target.
+grep -F carillon-runtime-t3 "$RELEASE/systemd/carillon.target" >/dev/null && {
+  printf '%s\n' "the default target must not want the optional T3 unit" >&2
+  exit 1
+}
+# The T3 executable is standalone: it starts without a source checkout and
+# fails closed on its arguments before touching anything.
+if "$RELEASE/bin/carillon-runtime-t3" >"$TEST_ROOT_T3_OUT" 2>&1; then
+  printf '%s\n' "carillon-runtime-t3 must refuse to start without --config" >&2
+  exit 1
+fi
+grep -F -- '--config is required' "$TEST_ROOT_T3_OUT" >/dev/null
+rm -f "$TEST_ROOT_T3_OUT"
 
 node "$ROOT/scripts/test-codemode.mjs" "$RELEASE"
 node "$ROOT/scripts/test-images.mjs" "$RELEASE"
@@ -106,11 +122,13 @@ install_release() {
 
 verify_units() {
   verify_dir=$1
-  [ "$(find "$verify_dir" -maxdepth 1 -type f -name 'carillon*' | wc -l)" -eq 4 ] || {
-    printf '%s\n' "installation must contain exactly the target and three default service units" >&2
+  [ "$(find "$verify_dir" -maxdepth 1 -type f -name 'carillon*' | wc -l)" -eq 5 ] || {
+    printf '%s\n' "installation must contain exactly the target, three default service units and the optional T3 unit" >&2
     exit 1
   }
   systemd-analyze verify "$verify_dir"/carillon.target "$verify_dir"/carillon-*.service
+  # The optional T3 unit is registered but never wanted or enabled by default.
+  [ ! -e "$verify_dir/carillon.target.wants/carillon-runtime-t3.service" ]
 }
 
 assert_service_identity() {
@@ -330,6 +348,10 @@ for offset in 0 1 2; do
 done
 
 grep -F -- '--provider runtime-pi' "$XDG_CONFIG_HOME/systemd/user/carillon-runtime-pi.service" >/dev/null
+# The optional T3 unit is registered with the others but neither wanted by the
+# target nor enabled, so a default Pi installation never activates it.
+grep -F -- '--provider runtime-t3' "$XDG_CONFIG_HOME/systemd/user/carillon-runtime-t3.service" >/dev/null
+[ ! -e "$XDG_CONFIG_HOME/systemd/user/carillon.target.wants/carillon-runtime-t3.service" ]
 grep -F -- "--commands \"$CARILLON_HOME/app/lib/carillon_discord_commands.wasm\"" \
   "$XDG_CONFIG_HOME/systemd/user/carillon-discord.service" >/dev/null
 RUNTIME_TOKEN=$(cat "$CARILLON_HOME/credentials/runtime-pi.token")

@@ -62,6 +62,8 @@ The model selection is fixed by this file: `GET /v1/model` offers it as the only
 bun packages/runtime-t3/src/cli.ts --config "$CARILLON_HOME/carillon.toml" --provider runtime-t3 --token-file "$CARILLON_HOME/credentials/runtime-t3.token"
 ```
 
+The release ships the same program as the standalone executable `app/bin/carillon-runtime-t3` and registers the optional user unit `carillon-runtime-t3.service`, which runs that command with the installation's registry and `credentials/runtime-t3.token`. The default target does not want the unit: add the `runtime-t3` provider to `carillon.toml`, write `providers/runtime-t3.toml` and the two credentials (the installation token and the T3 token file), then `systemctl --user enable --now carillon-runtime-t3.service`. Uninstall removes the unit with the others.
+
 Startup fails closed: the registry entry must exist and be enabled, the installation credential must match, the settings file must be valid, and T3 must answer discovery with protocol 2 and accept the token.
 
 ## Resource snapshot

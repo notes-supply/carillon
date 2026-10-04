@@ -137,6 +137,11 @@ Extract it and run `install.sh` as the Unix user that should own the agent. The 
 - `carillon-runtime-pi.service`
 - `carillon.target`
 
+The release also ships the optional `carillon-runtime-t3.service` and its
+`bin/carillon-runtime-t3` executable; the target does not want it, so it runs
+only once the operator has registered the `runtime-t3` provider and enables the
+unit (see the [T3 runtime](packages/runtime-t3/README.md)).
+
 After setup, operate the installation with `carillon status`, `start`, `stop`, `restart`, `logs` and `discord commands`. Update the software from a later archive with `carillon update carillon-VERSION-linux-ARCH.tar.gz`; this keeps configuration, credentials and state, and returns the services to their previous running or stopped state.
 
 See [`docs/product/OPERATIONS.md`](docs/product/OPERATIONS.md) for configuration, service operation, backup, and restore details.
