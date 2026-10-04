@@ -273,9 +273,12 @@ export function runInterrupt(threadId: string, runId: string, reason: string) {
 }
 
 /**
- * Ends the provider process behind a thread's native conversation. T3 has no
- * narrower public stop for a process that owes a wake with nothing running;
- * the detached session is the confirmation that nothing more can come.
+ * Asks T3 to detach the provider session behind a thread's native
+ * conversation: the only public stop for a process that owes a wake with
+ * nothing running. T3 accepts the request and removes the session's record
+ * before the process closes, without confirming the closure or fencing a
+ * wake the process may still deliver, so acceptance is a receipt, not a
+ * confirmed stop; the runtime reports such a stop as unconfirmed.
  */
 export function sessionDetach(threadId: string, providerSessionId: string, reason: string) {
   return {

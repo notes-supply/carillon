@@ -348,32 +348,21 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
    * Resolves with the turn's outcome, or undefined once the signal aborts;
    * rejects when the stream fails. The outcome is T3's state alone: a run
    * that completed while its process still owed background work waits for
-   * the run that delivers it, however long that takes.
+   * the run that delivers it, however long that takes. The outcome is read
+   * before the abort, so a turn T3 already settled is never cancelled.
    */
-  function observe(
+  async function observe(
     watch: TurnWatch,
     stream: T3Stream,
     signal: AbortSignal,
   ): Promise<Outcome | undefined> {
-    return new Promise((resolve, reject) => {
-      const check = () => {
-        const outcome = watch.outcome();
-        if (outcome !== undefined) finish(() => resolve(outcome));
-        else if (signal.aborted) finish(() => resolve(undefined));
-      };
-      const unsubscribe = watch.onChange(check);
-      const finish = (settle: () => void) => {
-        unsubscribe();
-        signal.removeEventListener("abort", check);
-        settle();
-      };
-      signal.addEventListener("abort", check);
-      stream.done.then(
-        () => finish(() => reject(new T3Failure("disconnected", "the thread subscription ended"))),
-        (failure: unknown) => finish(() => reject(asError(failure))),
-      );
-      check();
-    });
+    const outcome = await awaitWatch<Outcome | null>(
+      watch,
+      stream,
+      (turn) => turn.outcome() ?? (signal.aborted ? null : undefined),
+      { signal },
+    );
+    return outcome ?? undefined;
   }
 
   /**
@@ -466,7 +455,10 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     }
   }
 
-  /** Resolves true when the condition holds, false at the deadline; rejects when the stream fails. */
+  /**
+   * Resolves true when the condition holds and false at the deadline, or
+   * rejects at the deadline naming what was awaited; rejects when the stream fails.
+   */
   function settle(
     watch: TurnWatch,
     stream: T3Stream,
@@ -474,23 +466,59 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     deadlineMs: number,
     awaited?: string,
   ): Promise<boolean> {
+    return awaitWatch(watch, stream, (turn) => (condition(turn) ? true : undefined), {
+      deadline: {
+        ms: deadlineMs,
+        expired: () => {
+          if (awaited !== undefined)
+            throw new T3Failure("timeout", `T3 did not send ${awaited} in time`);
+          return false;
+        },
+      },
+    });
+  }
+
+  /**
+   * Waits on the fold: `ready` is evaluated now, after every applied item
+   * and when the signal aborts, and its first defined value resolves. A
+   * stream that ends or fails rejects; a deadline resolves or throws through
+   * `expired`. Every listener is removed however the wait ends.
+   */
+  function awaitWatch<T>(
+    watch: TurnWatch,
+    stream: T3Stream,
+    ready: (watch: TurnWatch) => T | undefined,
+    options: {
+      readonly signal?: AbortSignal;
+      readonly deadline?: { readonly ms: number; readonly expired: () => T };
+    },
+  ): Promise<T> {
     return new Promise((resolve, reject) => {
-      const check = () => {
-        if (condition(watch)) finish(() => resolve(true));
-      };
-      const unsubscribe = watch.onChange(check);
-      const timer = setTimeout(() => {
-        finish(() =>
-          awaited === undefined
-            ? resolve(false)
-            : reject(new T3Failure("timeout", `T3 did not send ${awaited} in time`)),
-        );
-      }, deadlineMs);
+      let timer: NodeJS.Timeout | undefined;
       const finish = (settled: () => void) => {
         clearTimeout(timer);
         unsubscribe();
+        options.signal?.removeEventListener("abort", check);
         settled();
       };
+      const check = () => {
+        const value = ready(watch);
+        if (value !== undefined) finish(() => resolve(value));
+      };
+      const unsubscribe = watch.onChange(check);
+      options.signal?.addEventListener("abort", check);
+      if (options.deadline !== undefined) {
+        const { expired } = options.deadline;
+        timer = setTimeout(() => {
+          finish(() => {
+            try {
+              resolve(expired());
+            } catch (failure) {
+              reject(asError(failure));
+            }
+          });
+        }, options.deadline.ms);
+      }
       stream.done.then(
         () => finish(() => reject(new T3Failure("disconnected", "the thread subscription ended"))),
         (failure: unknown) => finish(() => reject(asError(failure))),

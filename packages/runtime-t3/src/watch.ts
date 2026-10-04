@@ -3,9 +3,12 @@
  * subscription. The fold keeps only what the turn needs: its run and the
  * runs T3 started after it, earlier runs that still occupy the thread, the
  * tools running now and the last few finished, open requests, the turn's
- * assistant messages, the provider thread's roster and session. History
- * outside the turn is dropped as it arrives; a snapshot replaces everything
- * except the turn's identity. Nothing here talks to the network.
+ * assistant messages, the provider thread's roster and session, plus a few
+ * recent provider records awaiting attribution. History outside the turn is
+ * dropped as it arrives. A snapshot replaces the fold's view of the thread
+ * but keeps the turn's identity, its request items and its background facts
+ * (work listed, report owed), which a bounded snapshot cannot restate.
+ * Nothing here talks to the network.
  */
 import type { ActivityPhase, FinishedTool, RunningTool, TurnActivity } from "@carillon/protocol";
 import { commandHeader, commentary, describe, displayed } from "@carillon/runtime-pi/activity";
@@ -275,11 +278,13 @@ export function watchTurn(messageId: string, workspace: string): TurnWatch {
   }
 
   /**
-   * Provider records matter only for the turn's runs: before the turn's run
-   * exists none is kept, and the thread's history of provider threads and
-   * sessions is dropped as it arrives. T3 re-sends a provider thread's record
-   * when a run starts on it (its last run ordinal changes), so the turn's
-   * thread and session arrive with the run.
+   * Provider records matter only for the turn's runs: the thread's history of
+   * provider threads and sessions is dropped as it arrives, and before the
+   * turn's run exists only the few most recent records wait in the
+   * attribution window below. T3 sends a run's provider thread record just
+   * before `run.created`, and its session record just before the thread
+   * record that names it when the turn starts, so the turn's records arrive
+   * with the run.
    */
   function turnProviderThread(id: string): boolean {
     for (const run of turnRuns.values()) if (run.providerThreadId === id) return true;
