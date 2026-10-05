@@ -114,6 +114,7 @@ it("knows the turn's run by its message, keeps the answer in message order, and 
     detachedSessions: 0,
     delegations: 0,
     transfers: 0,
+    links: 0,
   });
 });
 
@@ -152,6 +153,7 @@ it("retains only the turn's own work from a long history and keeps its identity 
     detachedSessions: 0,
     delegations: 0,
     transfers: 0,
+    links: 0,
   });
   expect(watch.busy()).toBe(true);
   expect(watch.activity()).toEqual({ phase: "model", running: [], recent: [], tool_calls: 0 });
@@ -219,6 +221,7 @@ it("bounds finished tools to the recent window while counting every call", () =>
     detachedSessions: 0,
     delegations: 0,
     transfers: 0,
+    links: 0,
   });
   const activity = watch.activity();
   expect(activity.tool_calls).toBe(41);
@@ -524,24 +527,30 @@ it("explains failures with T3's failure text and treats other stops as stopped",
   );
   expect(watch.outcome()).toEqual({ kind: "failed", explanation: "Usage limit reached" });
   expect(watch.quiet()).toBe(true);
-  // Work still listed for a failed or stopped run keeps the turn terminal but not quiet.
+  // Work the run started and still lists keeps the turn terminal but not quiet.
   const listed = (sequence: number, tasks: readonly { taskId: string; kind: string }[]) =>
     event(sequence, "provider-thread.updated", {
       id: "provider-thread",
       providerSessionId: "session",
       pendingBackgroundTasks: tasks,
     });
-  watch.apply(listed(2, [{ taskId: "t", kind: "command" }]));
-  expect(watch.outcome()).toEqual({ kind: "failed", explanation: "Usage limit reached" });
-  expect(watch.quiet()).toBe(false);
-  watch.apply(event(3, "run.updated", run("cancelled")));
-  expect(watch.outcome()).toEqual({ kind: "stopped", status: "cancelled" });
-  expect(watch.quiet()).toBe(false);
-  watch.apply(listed(4, []));
-  expect(watch.outcome()).toEqual({ kind: "stopped", status: "cancelled" });
-  expect(watch.quiet()).toBe(true);
-  watch.apply(event(5, "run.created", run("running", "other", 0, "run-9")));
-  expect(watch.busy()).toBe(true);
+  const stopped = watchTurn("message-1", "/workspace");
+  stopped.apply(snapshot({ runs: [run("running")] }));
+  stopped.apply(listed(2, [{ taskId: "t", kind: "command" }]));
+  stopped.apply(event(3, "run.updated", run("failed")));
+  expect(stopped.outcome()).toMatchObject({ kind: "failed" });
+  expect(stopped.quiet()).toBe(false);
+  stopped.apply(event(4, "run.updated", run("cancelled")));
+  expect(stopped.outcome()).toEqual({ kind: "stopped", status: "cancelled" });
+  expect(stopped.quiet()).toBe(false);
+  stopped.apply(listed(5, []));
+  expect(stopped.outcome()).toEqual({ kind: "stopped", status: "cancelled" });
+  expect(stopped.quiet()).toBe(true);
+  // Work first listed after the run stopped is another run's, and does not hold it.
+  stopped.apply(listed(6, [{ taskId: "late", kind: "command" }]));
+  expect(stopped.quiet()).toBe(true);
+  stopped.apply(event(7, "run.created", run("running", "other", 0, "run-9")));
+  expect(stopped.busy()).toBe(true);
 });
 
 it("refuses known kinds it cannot read, ignores unknown kinds and malformed stream items it does not need", () => {
@@ -823,6 +832,7 @@ it("bounds unrelated provider updates and detaches while preserving its own deta
     detachedSessions: 0,
     delegations: 0,
     transfers: 0,
+    links: 0,
   });
   watch.apply(event(++sequence, "provider-session.detached", { providerSessionId: "session" }));
   expect(watch.retained().detachedSessions).toBe(1);
@@ -873,11 +883,7 @@ it("owns its provider thread and session through the serving event order, after 
   // Turn start: the session record arrives before the thread record that names it, then the run.
   watch.apply(event(4, "provider-session.updated", { id: "session-9", status: "running" }));
   watch.apply(
-    event(5, "provider-thread.updated", {
-      id: "thread-9",
-      providerSessionId: "session-9",
-      pendingBackgroundTasks: [{ taskId: "t", kind: "command" }],
-    }),
+    event(5, "provider-thread.updated", { id: "thread-9", providerSessionId: "session-9" }),
   );
   watch.apply(
     event(6, "run.updated", {
@@ -885,11 +891,19 @@ it("owns its provider thread and session through the serving event order, after 
       providerThreadId: "thread-9",
     }),
   );
+  // The run starts background work.
+  watch.apply(
+    event(7, "provider-thread.updated", {
+      id: "thread-9",
+      providerSessionId: "session-9",
+      pendingBackgroundTasks: [{ taskId: "t", kind: "command" }],
+    }),
+  );
   expect(watch.retained()).toMatchObject({ runs: 1, providerThreads: 1, sessions: 1 });
   expect(watch.providerSession()).toBe("session-9");
   // The root completes with the roster still listed: the live session owes the report; nothing is detached.
   watch.apply(
-    event(7, "run.updated", {
+    event(8, "run.updated", {
       ...run("completed", "message-current", 500),
       providerThreadId: "thread-9",
     }),
@@ -898,13 +912,6 @@ it("owns its provider thread and session through the serving event order, after 
   expect(watch.quiet()).toBe(false);
   // Its wake completes the turn.
   watch.apply(
-    event(8, "provider-thread.updated", {
-      id: "thread-9",
-      providerSessionId: "session-9",
-      pendingBackgroundTasks: [],
-    }),
-  );
-  watch.apply(
     event(9, "provider-thread.updated", {
       id: "thread-9",
       providerSessionId: "session-9",
@@ -912,10 +919,17 @@ it("owns its provider thread and session through the serving event order, after 
     }),
   );
   watch.apply(
-    event(10, "run.created", { ...run("running", "wake", 501), providerThreadId: "thread-9" }),
+    event(10, "provider-thread.updated", {
+      id: "thread-9",
+      providerSessionId: "session-9",
+      pendingBackgroundTasks: [],
+    }),
   );
   watch.apply(
-    event(11, "message.updated", {
+    event(11, "run.created", { ...run("running", "wake", 501), providerThreadId: "thread-9" }),
+  );
+  watch.apply(
+    event(12, "message.updated", {
       id: "w",
       runId: "run-501",
       role: "assistant",
@@ -924,7 +938,7 @@ it("owns its provider thread and session through the serving event order, after 
     }),
   );
   watch.apply(
-    event(12, "run.updated", { ...run("completed", "wake", 501), providerThreadId: "thread-9" }),
+    event(13, "run.updated", { ...run("completed", "wake", 501), providerThreadId: "thread-9" }),
   );
   expect(watch.outcome()).toEqual({ kind: "completed", output: "Done." });
   expect(watch.retained()).toMatchObject({ providerThreads: 1, sessions: 1 });
@@ -1692,4 +1706,173 @@ it("marks delegations a resumed snapshot no longer lists unknown, and shows nest
   expect(resumed?.items.find((work) => work.id === "native-2")?.state).toBe("unknown");
   expect(resumed?.partial).toBe(true);
   expect(watch.retained()).toMatchObject({ delegations: 2, transfers: 1 });
+});
+
+it("keeps confirmed outcomes when a resumed snapshot omits finished children, and only live ones become unknown", () => {
+  const watch = watchTurn("message-1", "/workspace");
+  const delivered = { completionDelivery: { state: "delivered" } };
+  watch.apply(
+    snapshot({
+      runs: [run("running")],
+      subagents: [
+        task("done", "completed", "run-1", delivered),
+        task("broke", "failed", "run-1", delivered),
+        task("stopped", "cancelled", "run-1", delivered),
+        task("live", "running"),
+      ],
+    }),
+  );
+  expect(watch.activity().work?.partial).toBe(false);
+  watch.resubscribing();
+  watch.apply(snapshot({ runs: [run("running")], subagents: [] }, 5));
+  const states = Object.fromEntries(
+    (watch.activity().work?.items ?? [])
+      .filter((work) => work.kind === "delegation")
+      .map((work) => [work.id, work.state]),
+  );
+  // What T3 confirmed stands; the missing present-day coverage is reported as partial.
+  expect(states).toEqual({
+    done: "succeeded",
+    broke: "failed",
+    stopped: "cancelled",
+    live: "unknown",
+  });
+  expect(watch.activity().work?.partial).toBe(true);
+  // The live child's report is still owed: its omission proves nothing.
+  watch.apply(event(6, "run.updated", run("completed")));
+  watch.apply(reply6());
+  expect(watch.outcome()).toMatchObject({ kind: "completed", followUp: { after: 1 } });
+
+  function reply6() {
+    return event(7, "message.updated", {
+      id: "a",
+      runId: "run-1",
+      role: "assistant",
+      text: "started",
+      createdAt: "2026-10-05T12:00:00Z",
+    });
+  }
+});
+
+it("bounds the work it keeps when every child is live, reporting partial coverage and an owed report", () => {
+  const watch = watchTurn("message-1", "/workspace");
+  watch.apply(snapshot({ runs: [run("running")] }));
+  for (let index = 0; index < 1000; index += 1)
+    watch.apply(event(index + 2, "subagent.updated", task(`child-${String(index)}`, "running")));
+  expect(watch.retained().delegations).toBe(32);
+  const summary = watch.activity().work;
+  expect(summary?.items).toHaveLength(16);
+  expect(summary?.partial).toBe(true);
+  // Children the bound dropped may still owe a report: the answer carries a cursor.
+  watch.apply(event(2000, "run.updated", run("completed")));
+  expect(watch.outcome()).toMatchObject({ kind: "completed", followUp: { after: 1 } });
+  // Settled children make room for later ones; overflow alone never proves delivery.
+  const settled = { completionDelivery: { state: "delivered" } };
+  for (let index = 0; index < 32; index += 1)
+    watch.apply(
+      event(
+        2001 + index,
+        "subagent.updated",
+        task(`child-${String(index)}`, "completed", "run-1", settled),
+      ),
+    );
+  watch.apply(event(3000, "subagent.updated", task("late", "running")));
+  expect(watch.retained().delegations).toBe(32);
+  expect(watch.activity().work?.items.some((work) => work.id === "late")).toBe(true);
+  expect(watch.outcome()).toMatchObject({ followUp: { after: 1 } });
+
+  // A snapshot lists children whole, so coverage and the owed report are decided afresh.
+  watch.resubscribing();
+  watch.apply(
+    snapshot(
+      {
+        runs: [run("completed")],
+        subagents: [
+          ...Array.from({ length: 1000 }, (_, index) =>
+            task(`child-${String(index)}`, "completed", "run-1", settled),
+          ),
+          task("late", "completed", "run-1", settled),
+        ],
+      },
+      4000,
+    ),
+  );
+  expect(watch.retained().delegations).toBeLessThanOrEqual(32);
+  expect(watch.activity().work?.partial).toBe(true);
+  expect(watch.outcome()).toEqual({ kind: "completed", output: "" });
+});
+
+it("keeps only the turn's continuation links and a bounded window of others, across a large foreign history", () => {
+  const watch = watchTurn("message-current", "/workspace");
+  const history = Array.from({ length: 500 }, (_, index) => index);
+  watch.apply(
+    snapshot({
+      runs: history.map((index) => ({
+        ...run("completed", `message-${String(index)}`, index),
+        delegatedCompletion: {
+          disposition: "open",
+          delivery: { messageId: `continuation-${String(index)}` },
+        },
+      })),
+      messages: history.map((index) => ({
+        id: `continuation-${String(index)}`,
+        runId: null,
+        role: "user",
+        text: "",
+        createdAt: "2026-10-05T10:00:00Z",
+        delegatedCompletion: { parentRunId: `run-${String(index)}` },
+      })),
+    }),
+  );
+  expect(watch.retained().links).toBeLessThanOrEqual(16);
+  // The turn runs and starts background work, so it owes a wake.
+  const thread = (taskIds: string[]) => ({
+    id: "provider-thread",
+    providerSessionId: "session",
+    pendingBackgroundTasks: taskIds.map((taskId) => ({ taskId, kind: "command" })),
+  });
+  watch.apply(event(2, "run.created", run("starting", "message-current", 500)));
+  watch.apply(event(3, "run.updated", run("running", "message-current", 500)));
+  watch.apply(event(4, "provider-thread.updated", thread(["own"])));
+  watch.apply(event(5, "run.updated", run("completed", "message-current", 500)));
+  watch.apply(event(6, "provider-thread.updated", thread([])));
+  // Another turn's work is reported next: T3 announces its continuation before its run.
+  watch.apply(
+    event(7, "run.updated", {
+      ...run("completed", "message-499", 499),
+      delegatedCompletion: { disposition: "open", delivery: { messageId: "late-report" } },
+    }),
+  );
+  watch.apply(event(8, "run.created", run("running", "late-report", 501)));
+  // That continuation is not this turn's wake, nor a stray.
+  expect(watch.outcome()).toBeUndefined();
+  expect(watch.activeRun()).toBeUndefined();
+  expect(watch.retained().links).toBeLessThanOrEqual(16);
+
+  // A link may name its parent before the fold knows the parent is the turn's.
+  watch.apply(
+    event(9, "message.updated", {
+      id: "own-report",
+      runId: null,
+      role: "user",
+      text: "",
+      createdAt: "2026-10-05T12:00:00Z",
+      delegatedCompletion: { parentRunId: "run-502" },
+    }),
+  );
+  watch.apply(event(10, "run.updated", run("completed", "late-report", 501)));
+  // The turn's own wake, which delegated in turn.
+  watch.apply(event(11, "run.created", run("running", "wake", 502)));
+  watch.apply(
+    event(12, "message.updated", {
+      id: "w",
+      runId: "run-502",
+      role: "assistant",
+      text: "Result.",
+      createdAt: "2026-10-05T12:00:01Z",
+    }),
+  );
+  watch.apply(event(13, "run.updated", run("completed", "wake", 502)));
+  // Its continuation, announced before its parent was known, is linked to the turn.
+  expect(watch.outcome()).toMatchObject({ kind: "completed", output: "Result.", followUp: {} });
 });

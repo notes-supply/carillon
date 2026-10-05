@@ -1484,7 +1484,8 @@ it("answers when the parent run completes and delivers the delegated report in a
   const followUp = runtime.executeTurn(
     turn("turn-1-report", "", { native: { follow_up: reply.follow_up } }),
   );
-  await until(() => runtime.activity("turn-1-report", "discord-private")?.phase === "waiting");
+  await until(() => runtime.activity("turn-1-report", "discord-private")?.work?.items.length === 1);
+  expect(runtime.activity("turn-1-report", "discord-private")?.phase).toBe("waiting");
   expect(runtime.activity("turn-1-report", "discord-private")?.work?.items).toEqual([
     expect.objectContaining({ id: child.id, kind: "delegation", state: "running" }),
   ]);
@@ -1516,6 +1517,93 @@ it("stops nothing when a follow-up turn is cancelled: the continuation is T3's",
   // Nor does it fence the conversation: a later turn's own follow-up is still trusted.
   fake.complete(threadId, continuation.id);
   expect((await (await backgroundTurn("turn-2")).result).output).toBe("Started.\n\nResult.");
+});
+
+it("runs the conversation's next message while a follow-up turn still observes delegated work", async () => {
+  const first = runtime.executeTurn(turn("turn-1", "delegate it"));
+  const parent = await started("turn-1");
+  const child = fake.delegate(threadId, parent.id, { title: "slow child" });
+  answer(parent, "DELEGATED");
+  const reply = await first;
+  const followUp = runtime.executeTurn(
+    turn("turn-1-report", "", { native: { follow_up: reply.follow_up } }),
+  );
+  await until(() => runtime.activity("turn-1-report", "discord-private")?.work?.items.length === 1);
+  // The next message reaches T3 and is answered while the child still works.
+  const next = runtime.executeTurn(turn("turn-2", "anything else?"));
+  answer(await started("turn-2"), "Yes.");
+  expect((await next).output).toBe("Yes.");
+  expect(thread().subagents.find((task) => task.id === child.id)?.status).toBe("running");
+  // The child finishes: only the follow-up reports it, once.
+  const continuation = fake.finishDelegation(threadId, child.id);
+  fake.assistant(threadId, continuation.id, "Child done.");
+  fake.complete(threadId, continuation.id);
+  expect(await followUp).toEqual({ correlation_id: "turn-1-report", output: "Child done." });
+  expect(dispatches()).toHaveLength(2);
+  expect(fake.interrupts).toEqual([]);
+});
+
+it("resumes a follow-up after its observation was lost, reporting what T3 delivered meanwhile once", async () => {
+  const first = runtime.executeTurn(turn("turn-1", "delegate twice"));
+  const parent = await started("turn-1");
+  const quick = fake.delegate(threadId, parent.id, { title: "quick child" });
+  const slow = fake.delegate(threadId, parent.id, { title: "slow child" });
+  answer(parent, "DELEGATED");
+  const reply = await first;
+  const cursor = { native: { follow_up: reply.follow_up } };
+  // Core loses the observation (a restart); nothing observes while T3 works.
+  const controller = new AbortController();
+  const lost = runtime.executeTurn(turn("turn-1-report", "", cursor), controller.signal);
+  await until(() => runtime.activity("turn-1-report", "discord-private")?.work !== undefined);
+  controller.abort(new Error("core restarted"));
+  await expect(lost).rejects.toThrow("core restarted");
+  // Meanwhile one child reports, and the other's result waits to be delivered
+  // behind the conversation's next message.
+  const reported = fake.finishDelegation(threadId, quick.id);
+  fake.assistant(threadId, reported.id, "Quick result.");
+  fake.complete(threadId, reported.id);
+  const next = runtime.executeTurn(turn("turn-2", "more"));
+  const own = await started("turn-2");
+  const pending = fake.finishDelegation(threadId, slow.id);
+  expect(pending.status).toBe("queued");
+  // Core asks again: the observation is rebuilt from T3's records alone.
+  const resumed = runtime.executeTurn(turn("turn-1-report", "", cursor));
+  answer(own, "More.");
+  await next;
+  fake.assistant(threadId, pending.id, "Slow result.");
+  fake.complete(threadId, pending.id);
+  expect(await resumed).toEqual({
+    correlation_id: "turn-1-report",
+    output: "Quick result.\n\nSlow result.",
+  });
+  // No dispatch, interrupt or detach on T3's work: two messages, both the person's.
+  expect(dispatches()).toHaveLength(2);
+  expect(fake.interrupts).toEqual([]);
+  expect(fake.detached).toEqual([]);
+});
+
+it("says so when a resumed follow-up's report is older than the window it reads", async () => {
+  const first = runtime.executeTurn(turn("turn-1", "delegate it"));
+  const parent = await started("turn-1");
+  const child = fake.delegate(threadId, parent.id, { title: "child" });
+  answer(parent, "DELEGATED");
+  const reply = await first;
+  const continuation = fake.finishDelegation(threadId, child.id);
+  fake.assistant(threadId, continuation.id, "Old report.");
+  fake.complete(threadId, continuation.id);
+  for (const correlation of ["turn-2", "turn-3"]) {
+    const later = runtime.executeTurn(turn(correlation, "later"));
+    answer(await started(correlation), "ok");
+    await later;
+  }
+  fake.messageWindow = 2;
+  await expect(
+    runtime.executeTurn(turn("turn-1-report", "", { native: { follow_up: reply.follow_up } })),
+  ).rejects.toMatchObject({
+    status: 502,
+    message:
+      "T3 finished the report of the delegated work, but it is older than the part of the thread this runtime reads; read it in T3",
+  });
 });
 
 it("sends a command invocation verbatim, without notes about earlier files", async () => {

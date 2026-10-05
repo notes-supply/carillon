@@ -90,6 +90,8 @@ export interface Retained {
   readonly detachedSessions: number;
   readonly delegations: number;
   readonly transfers: number;
+  /** Continuation links: the turn's, and the few most recent of other runs. */
+  readonly links: number;
 }
 
 export interface TurnWatch {
@@ -144,6 +146,10 @@ const ENDED_SESSION: ReadonlySet<ProviderSession["status"]> = new Set(["stopped"
 const ACTIVE_TASK: ReadonlySet<Subagent["status"]> = new Set(["pending", "running", "waiting"]);
 /** A published result T3 has yet to deliver to the parent in a continuation. */
 const OWED_DELIVERY: ReadonlySet<string> = new Set(["pending", "claimed"]);
+/** A result T3 delivered to the parent in a continuation. */
+const DELIVERED: ReadonlySet<string> = new Set(["delivered", "acknowledged"]);
+const OLDER_REPORT =
+  "T3 finished the report of the delegated work, but it is older than the part of the thread this runtime reads; read it in T3";
 /** Transfers shown as work of their own; spawn and result transfers belong to their delegation. */
 const TRANSFER_WORK: ReadonlyMap<string, { kind: WorkItem["kind"]; label: string }> = new Map([
   ["provider_handoff", { kind: "handoff", label: "context handoff" }],
@@ -151,6 +157,23 @@ const TRANSFER_WORK: ReadonlyMap<string, { kind: WorkItem["kind"]; label: string
   ["merge_back", { kind: "fork", label: "merge back from another thread" }],
 ]);
 const RECENT_CALLS = 5;
+/**
+ * Child agents (and, separately, transfers) a turn keeps records of. Beyond
+ * it, settled records make room; when all are live, coverage is partial and
+ * the report is owed until a snapshot shows otherwise.
+ */
+const WORK_RETAINED = 32;
+/** Continuation links of runs not (yet) the turn's, kept for reference-before-owner order. */
+const PENDING_LINKS = 16;
+/** Run statuses during which a run may start tools, and so background work. */
+const EXECUTING: ReadonlySet<RunStatus> = new Set(["running", "waiting"]);
+const SETTLED_TASK: ReadonlySet<Subagent["status"]> = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+  "interrupted",
+]);
+const SETTLED_TRANSFER: ReadonlySet<string> = new Set(["consumed", "failed", "superseded"]);
 const RUNNING_CALLS = 8;
 /** Provider records kept while the fold cannot yet tell whether the turn owns them. */
 const RECENT_RECORDS = 4;
@@ -163,6 +186,15 @@ type RequestItem = TurnItemOf<"user_input_request" | "approval_request">;
 
 export function isActive(run: Run): boolean {
   return ACTIVE.has(run.status);
+}
+
+function executing(run: Run): boolean {
+  return EXECUTING.has(run.status);
+}
+
+/** A run known to have ended; an unknown run is not. */
+function settledRun(status: RunStatus | undefined): boolean {
+  return status !== undefined && !ACTIVE.has(status);
 }
 
 /**
@@ -218,18 +250,37 @@ export function watchTurn(
    * them; a follow-up turn of the same conversation does (see `followUp`).
    */
   let continuationRuns = new Map<string, Run>();
-  /** Continuation messages T3 announced or sent, by message, with the run whose work they report. */
-  const continuations = new Map<string, string>();
+  /** Continuation messages of the turn's runs, by message, with the run whose work they report. */
+  const ownLinks = new Map<string, string>();
+  /**
+   * The few most recent continuation links of other runs: a continuation of
+   * another turn's work is neither this turn's wake nor a stray, and a link
+   * may name its parent before the fold knows the parent is the turn's.
+   */
+  const pendingLinks = new Map<string, string>();
+  /** A snapshot's links while it is folded; never kept beyond it. */
+  let snapshotLinks: ReadonlyMap<string, string> | undefined;
   /** Later runs not (yet) known to be the turn's, kept briefly in case a continuation link arrives after them. */
   const unclaimed = new Map<string, Run>();
   /** Runs adopted because the turn's process owed a background report (wakes), not by a native link. */
   const wakeRuns = new Set<string>();
-  /** Child agents started by the turn's runs or their continuations, kept across snapshots. */
+  /** Child agents started by the turn's runs or their continuations, kept across snapshots, up to the bound. */
   const delegations = new Map<string, Subagent>();
-  /** Delegations a resumed snapshot no longer listed: their state is not confirmed. */
+  /**
+   * Delegations a resumed snapshot no longer listed: their current state is
+   * not confirmed. A settled one keeps the outcome T3 confirmed.
+   */
   const unconfirmed = new Set<string>();
-  /** Handoffs, forks and merges of the turn's runs. */
+  /** Handoffs, forks and merges of the turn's runs, up to the bound. */
   const transfers = new Map<string, ContextTransfer>();
+  /** Work the bound left out: the summary is partial. */
+  let workOmitted = false;
+  /** Live or owed child agents the bound left out: the report counts as owed until a snapshot settles it. */
+  let owedUnknown = false;
+  /** Runs first seen in a bounded snapshot that may have left their messages outside its window. */
+  const windowed = new Set<string>();
+  /** The latest snapshot left older history outside its window. */
+  let historyOmitted = false;
   /**
    * The few most recent transfers that name no run the turn holds yet: T3
    * records a provider handoff before it creates the run it hands over to.
@@ -282,17 +333,15 @@ export function watchTurn(
    */
   let backgroundSeenAt: number | undefined;
   /**
-   * Background work the provider thread already listed when the turn's run
-   * took it over: another run's, such as one started in T3's own UI, whose
-   * report is not this turn's to wait for or answer with. Known only when
-   * the fold saw the run before it started; otherwise every listed task
-   * counts as the turn's.
+   * Background work first listed while none of the turn's runs could have
+   * been executing: another run's, such as one started in T3's own UI or an
+   * earlier turn's, whose report is not this turn's to wait for or answer
+   * with. Work first listed while one of them could have run, or across a
+   * gap the fold did not see, is the turn's. Both sets keep only what the
+   * turn's provider threads still list.
    */
-  const inherited = new Set<string>();
-  /** The fold saw the turn's run before it started. */
-  let sawStart = false;
-  /** The work listed when the run took over its provider thread was recorded. */
-  let takenOver = false;
+  const ownTasks = new Set<string>();
+  const otherTasks = new Set<string>();
   const listeners = new Set<() => void>();
   /** When each background task was first seen, since T3 does not date them. */
   const backgroundSince = new Map<string, number>();
@@ -348,13 +397,12 @@ export function watchTurn(
       return followUp !== undefined && run.ordinal > followUp.after;
     }
     remember(unclaimed, run.userMessageId, run);
+    // Another run's continuation is never this turn's wake or a stray.
+    if (linkParent(run.userMessageId) !== undefined) return false;
     if (foreign.has(run.id)) return false;
-    if (followUp !== undefined) {
-      // A follow-up turn owns only its continuations and the wakes they owe;
-      // anything else on the thread is someone else's and is left alone.
-      if (wakeOwedAfter !== undefined && run.ordinal > wakeOwedAfter) return wake(run);
-      return false;
-    }
+    // A follow-up turn owns only its continuations: with the conversation's
+    // later messages running beside it, no other run can be attributed to it.
+    if (followUp !== undefined) return false;
     if (anchor.status !== "completed") {
       foreign.add(run.id);
       return false;
@@ -372,8 +420,27 @@ export function watchTurn(
 
   /** Whether T3 linked this run's message to work of a run the turn holds. */
   function continuationOf(run: Run): boolean {
-    const parent = continuations.get(run.userMessageId);
+    const parent = linkParent(run.userMessageId);
     return parent !== undefined && linkedRun(parent);
+  }
+
+  /** The run whose delegated work a continuation message reports, if T3 has said. */
+  function linkParent(message: string): string | undefined {
+    return ownLinks.get(message) ?? snapshotLinks?.get(message) ?? pendingLinks.get(message);
+  }
+
+  /** Keeps a continuation link: the turn's for good (up to the bound), another run's briefly. */
+  function keepLink(message: string, parentRun: string): void {
+    if (!linkedRun(parentRun)) {
+      remember(pendingLinks, message, parentRun, PENDING_LINKS);
+      return;
+    }
+    pendingLinks.delete(message);
+    if (ownLinks.has(message) || ownLinks.size < WORK_RETAINED) ownLinks.set(message, parentRun);
+    else {
+      workOmitted = true;
+      owedUnknown = true;
+    }
   }
 
   /** A run whose delegated work and continuations belong to this turn's report. */
@@ -383,26 +450,31 @@ export function watchTurn(
 
   /** Records a continuation link, and folds again a run it arrived after. */
   function link(message: string, parentRun: string): void {
-    if (continuations.get(message) === parentRun) return;
-    continuations.set(message, parentRun);
+    if (linkParent(message) === parentRun && (ownLinks.has(message) || !linkedRun(parentRun)))
+      return;
+    keepLink(message, parentRun);
     const run = unclaimed.get(message);
     if (run !== undefined) foldRun(run);
   }
 
   function foldRun(run: Run): void {
     if (run.userMessageId === messageId) anchor = run;
-    const delivery = run.delegatedCompletion?.delivery;
-    if (delivery != null) continuations.set(delivery.messageId, run.id);
     const owned =
       anchor !== undefined && ((run.id === anchor.id && followUp === undefined) || adopt(run));
+    // The run names the continuation that will report its delegated work.
+    const delivery = run.delegatedCompletion?.delivery;
     if (owned) {
       turnRuns.set(run.id, run);
       earlier.delete(run.id);
       if (last === undefined || run.ordinal >= last.ordinal) last = run;
+      for (const [message, parent] of [...pendingLinks])
+        if (parent === run.id) keepLink(message, parent);
+      if (delivery != null) keepLink(delivery.messageId, run.id);
       for (const transfer of [...recentTransfers.values()])
         if (namesLinkedRun(transfer)) foldTransfer(transfer);
       return;
     }
+    if (delivery != null) keepLink(delivery.messageId, run.id);
     if (anchor !== undefined && run.ordinal >= anchor.ordinal) return;
     if (isActive(run)) earlier.set(run.id, run);
     else earlier.delete(run.id);
@@ -423,6 +495,7 @@ export function watchTurn(
    * continuation not started yet, or a continuation no turn answered with.
    */
   function reportOwed(): boolean {
+    if (owedUnknown) return true;
     for (const task of delegations.values())
       if (
         task.origin === "app_owned" &&
@@ -430,7 +503,7 @@ export function watchTurn(
       )
         return true;
     const started = new Set([...continuationRuns.values()].map((run) => run.userMessageId));
-    for (const [message, parent] of continuations)
+    for (const [message, parent] of ownLinks)
       if (linkedRun(parent) && !started.has(message)) return true;
     for (const run of continuationRuns.values())
       if (followUp === undefined ? true : run.ordinal > followUp.after && !turnRuns.has(run.id))
@@ -505,15 +578,47 @@ export function watchTurn(
   /** A child agent of a run the turn holds; others are another conversation's business. */
   function foldSubagent(task: Subagent): void {
     if (task.runId === null || !linkedRun(task.runId)) return;
-    delegations.set(task.id, task);
-    unconfirmed.delete(task.id);
+    if (retain(delegations, task.id, task, settledTask)) unconfirmed.delete(task.id);
+    else {
+      workOmitted = true;
+      if (!settledTask(task)) owedUnknown = true;
+    }
+  }
+
+  /** Settled: finished, with nothing left for T3 to deliver. */
+  function settledTask(task: Subagent): boolean {
+    return (
+      SETTLED_TASK.has(task.status) && !OWED_DELIVERY.has(task.completionDelivery?.state ?? "")
+    );
+  }
+
+  /**
+   * Keeps a record within the bound, making room by dropping the oldest
+   * settled record; false when every kept record is still live.
+   */
+  function retain<T>(
+    records: Map<string, T>,
+    id: string,
+    record: T,
+    settled: (record: T) => boolean,
+  ): boolean {
+    if (!records.has(id) && records.size >= WORK_RETAINED) {
+      const room = [...records].find(([, kept]) => settled(kept));
+      if (room === undefined) return false;
+      records.delete(room[0]);
+      unconfirmed.delete(room[0]);
+      workOmitted = true;
+    }
+    records.set(id, record);
+    return true;
   }
 
   function foldTransfer(transfer: ContextTransfer): void {
     if (!TRANSFER_WORK.has(transfer.type)) return;
     if (namesLinkedRun(transfer)) {
-      transfers.set(transfer.id, transfer);
       recentTransfers.delete(transfer.id);
+      if (!retain(transfers, transfer.id, transfer, (kept) => SETTLED_TRANSFER.has(kept.status)))
+        workOmitted = true;
     } else remember(recentTransfers, transfer.id, transfer);
   }
 
@@ -530,13 +635,13 @@ export function watchTurn(
 
   /**
    * The turn's background work on a run's provider thread: what it lists,
-   * less work inherited from before the turn's run. T3 sends the thread
+   * less work another run started (see `otherTasks`). T3 sends the thread
    * record before the run that names it and lists provider threads whole in
    * a snapshot, so a run that names a thread this fold has not been given
    * is a broken reference: its work is unknown, never an empty roster.
    */
   function roster(run: Run | undefined): readonly BackgroundTask[] {
-    return listedWork(run).filter((task) => !inherited.has(task.taskId));
+    return listedWork(run).filter((task) => !otherTasks.has(task.taskId));
   }
 
   /** Everything the run's provider thread lists, the turn's or not. */
@@ -588,11 +693,16 @@ export function watchTurn(
   }
 
   /** Keeps `record` among the few most recent of `recent`. */
-  function remember<T>(recent: Map<string, T>, key: string, record: T): void {
+  function remember<T>(
+    recent: Map<string, T>,
+    key: string,
+    record: T,
+    limit = RECENT_RECORDS,
+  ): void {
     recent.delete(key);
     recent.set(key, record);
     for (const oldest of recent.keys()) {
-      if (recent.size <= RECENT_RECORDS) break;
+      if (recent.size <= limit) break;
       recent.delete(oldest);
     }
   }
@@ -777,7 +887,12 @@ export function watchTurn(
         id: task.id,
         kind: "delegation",
         label: (task.title === null ? undefined : displayed(task.title, 100)) ?? "subagent",
-        state: unconfirmed.has(task.id) ? "unknown" : TASK_STATE[task.status],
+        // A settled outcome T3 confirmed stands when a later snapshot omits
+        // the task; only live state becomes unknown. The summary is partial.
+        state:
+          unconfirmed.has(task.id) && !SETTLED_TASK.has(task.status)
+            ? "unknown"
+            : TASK_STATE[task.status],
         ...(delegations.has(task.parentNodeId) ? { parent: task.parentNodeId } : {}),
         ...(actor.length === 0 ? {} : { actor: toolName(actor) }),
         ...(task.startedAt === null ? {} : { started_at: seconds(task.startedAt) }),
@@ -806,6 +921,61 @@ export function watchTurn(
       });
     }
     return items;
+  }
+
+  /**
+   * A follow-up turn's outcome once its latest continuation completed: the
+   * continuations' text, carrying another cursor while delegated work still
+   * owes a report. Text a resumed bounded snapshot may have left outside its
+   * window is reported missing, never passed off as the whole report.
+   */
+  function reported(latest: Run): Outcome {
+    const output = answer();
+    const missing = [...turnRuns.keys()].some(
+      (id) => windowed.has(id) && ![...assistant.values()].some((message) => message.runId === id),
+    );
+    if (output.length === 0 && missing) return { kind: "failed", explanation: OLDER_REPORT };
+    const notes = [
+      ...(missing
+        ? [
+            "[Part of this report is older than the part of the thread Carillon reads; T3 shows all of it.]",
+          ]
+        : []),
+      ...(roster(latest).length > 0 ||
+      (wakeOwedAfter !== undefined && latest.ordinal <= wakeOwedAfter)
+        ? ["[The report started background work in T3; its result will show in T3, not here.]"]
+        : []),
+    ];
+    const text = [output, ...notes].filter((part) => part.length > 0).join("\n\n");
+    return reportOwed()
+      ? {
+          kind: "completed",
+          output: text,
+          followUp: { message: messageId, after: latest.ordinal },
+        }
+      : { kind: "completed", output: text };
+  }
+
+  /** One of the turn's runs is executing now. */
+  function ownRunExecuting(): boolean {
+    for (const run of turnRuns.values()) if (executing(run)) return true;
+    return false;
+  }
+
+  /**
+   * Files background work the turn's provider threads list but the fold has
+   * not classified yet, and forgets what they no longer list.
+   */
+  function classifyWork(ownCouldHaveRun: boolean): void {
+    const listedNow = new Set<string>();
+    for (const thread of providerThreads.values())
+      for (const task of thread.pendingBackgroundTasks ?? []) {
+        listedNow.add(task.taskId);
+        if (ownTasks.has(task.taskId) || otherTasks.has(task.taskId)) continue;
+        (ownCouldHaveRun ? ownTasks : otherTasks).add(task.taskId);
+      }
+    for (const id of ownTasks) if (!listedNow.has(id)) ownTasks.delete(id);
+    for (const id of otherTasks) if (!listedNow.has(id)) otherTasks.delete(id);
   }
 
   function quiet(): boolean {
@@ -839,22 +1009,48 @@ export function watchTurn(
                 "malformed",
                 `T3 sent a thread snapshot that omits run ${id} this turn observed`,
               );
+          const before = new Map([...turnRuns].map(([id, run]) => [id, run.status]));
           reset();
           // Continuation links first, from messages and the runs that announce
           // them, so no continuation is ever judged a stray; then runs in
           // ordinal order, so the turn's own is known before the runs that
-          // follow it are judged.
+          // follow it are judged. Only the turn's links, and the few most
+          // recent others, outlive the snapshot.
+          const links = new Map<string, string>();
           for (const message of projection.messages)
             if (message.delegatedCompletion !== undefined)
-              continuations.set(message.id, message.delegatedCompletion.parentRunId);
-          for (const run of [...projection.runs].sort((a, b) => a.ordinal - b.ordinal))
-            foldRun(run);
-          refile();
-          // Delegations and transfers arrive whole; one the turn knew that
-          // this snapshot omits is no longer confirmed, never assumed done.
-          const listedTasks = new Set(projection.subagents.map((task) => task.id));
-          for (const id of delegations.keys()) if (!listedTasks.has(id)) unconfirmed.add(id);
-          for (const task of projection.subagents) foldSubagent(task);
+              links.set(message.id, message.delegatedCompletion.parentRunId);
+          for (const run of projection.runs)
+            if (run.delegatedCompletion?.delivery != null)
+              links.set(run.delegatedCompletion.delivery.messageId, run.id);
+          snapshotLinks = links;
+          try {
+            for (const run of [...projection.runs].sort((a, b) => a.ordinal - b.ordinal))
+              foldRun(run);
+            refile();
+          } finally {
+            snapshotLinks = undefined;
+          }
+          for (const [message, parent] of links) keepLink(message, parent);
+          const windowedSnapshot = item["hasMoreHistory"] === true;
+          historyOmitted = windowedSnapshot;
+          for (const run of turnRuns.values())
+            if (windowedSnapshot && !before.has(run.id)) windowed.add(run.id);
+          // Delegations and transfers arrive whole: the turn's coverage is
+          // decided afresh. One the turn knew that this snapshot omits keeps
+          // what T3 last confirmed, its current state unconfirmed; live and
+          // owed work is kept before settled work.
+          const listed = projection.subagents.filter(
+            (task) => task.runId !== null && linkedRun(task.runId),
+          );
+          const listedIds = new Set(listed.map((task) => task.id));
+          for (const id of delegations.keys()) if (!listedIds.has(id)) unconfirmed.add(id);
+          workOmitted = false;
+          owedUnknown = false;
+          for (const task of [...listed].sort(
+            (left, right) => Number(settledTask(left)) - Number(settledTask(right)),
+          ))
+            foldSubagent(task);
           for (const transfer of projection.contextTransfers) foldTransfer(transfer);
           for (const thread of projection.providerThreads) foldProviderThread(thread);
           for (const session of projection.providerSessions) foldSession(session);
@@ -866,11 +1062,22 @@ export function watchTurn(
           for (const request of projection.runtimeRequests) foldRequest(request);
           for (const payload of projection.turnItems) foldItem(payload);
           for (const message of projection.messages) foldMessage(message);
+          // Background work listed now that the fold has not classified was
+          // started across the gap: the turn's if one of its runs could have
+          // executed in it.
+          classifyWork(
+            [...turnRuns.values()].some(
+              (run) =>
+                executing(run) ||
+                (!BEFORE_PROVIDER.has(run.status) && !settledRun(before.get(run.id))),
+            ),
+          );
           lastSequence = sequence;
           seen = true;
           break;
         }
         case "event": {
+          const executingBefore = ownRunExecuting();
           const event = item["event"];
           const sequence = item["sequence"];
           if (!isRecord(event) || typeof event["type"] !== "string" || typeof sequence !== "number")
@@ -928,6 +1135,7 @@ export function watchTurn(
             default:
               return;
           }
+          classifyWork(executingBefore || ownRunExecuting());
           break;
         }
         case "synchronized":
@@ -935,14 +1143,6 @@ export function watchTurn(
           break;
         default:
           return;
-      }
-      if (anchor !== undefined && followUp === undefined) {
-        if (BEFORE_PROVIDER.has(anchor.status)) sawStart = true;
-        const thread = anchor.providerThreadId;
-        if (sawStart && !takenOver && thread !== null && providerThreads.has(thread)) {
-          for (const task of listedWork(anchor)) inherited.add(task.taskId);
-          takenOver = true;
-        }
       }
       if (last !== undefined) {
         const listed = roster(last).length > 0;
@@ -983,9 +1183,17 @@ export function watchTurn(
         // Only a follow-up turn holds no run of its own: it waits for a
         // continuation as long as the delegated work still owes one.
         if (followUp === undefined || reportOwed()) return undefined;
+        // T3 says it delivered a result, but the continuation that carries it
+        // is not in the window this runtime reads.
+        const delivered = [...delegations.values()].some((task) =>
+          DELIVERED.has(task.completionDelivery?.state ?? ""),
+        );
         return {
           kind: "failed",
-          explanation: "T3's delegated work ended without reporting back to this conversation",
+          explanation:
+            delivered && historyOmitted
+              ? OLDER_REPORT
+              : "T3's delegated work ended without reporting back to this conversation",
         };
       }
       const request = ownedPendingRequest();
@@ -1005,6 +1213,10 @@ export function watchTurn(
         };
       switch (last.status) {
         case "completed": {
+          // A follow-up turn reports its continuations and never waits for a
+          // wake: beside the conversation's later messages, no run but a
+          // continuation can be attributed to it.
+          if (followUp !== undefined) return reported(last);
           if (roster(last).length > 0) {
             if (sessionStopped(last))
               return {
@@ -1047,10 +1259,7 @@ export function watchTurn(
             ? {
                 kind: "completed",
                 output: answer(),
-                followUp: {
-                  message: messageId,
-                  after: followUp === undefined ? anchor.ordinal : last.ordinal,
-                },
+                followUp: { message: messageId, after: anchor.ordinal },
               }
             : { kind: "completed", output: answer() };
         }
@@ -1070,6 +1279,7 @@ export function watchTurn(
     },
     activity() {
       const run = active() ?? last;
+      const partial = unconfirmed.size > 0 || workOmitted || owedUnknown;
       // A child agent shows once, as its delegation, not also as a tool or a
       // background task of its parent.
       const shownAsWork = (item: ToolItem) =>
@@ -1119,9 +1329,7 @@ export function watchTurn(
             }),
           ),
         tool_calls: counted.size,
-        ...(work.length === 0 && unconfirmed.size === 0
-          ? {}
-          : { work: summarizeWork(work, unconfirmed.size > 0) }),
+        ...(work.length === 0 && !partial ? {} : { work: summarizeWork(work, partial) }),
       };
     },
     retained: () => ({
@@ -1137,6 +1345,7 @@ export function watchTurn(
       detachedSessions: detachedSessions.size,
       delegations: delegations.size,
       transfers: transfers.size,
+      links: ownLinks.size + pendingLinks.size,
     }),
     onChange(listener) {
       listeners.add(listener);

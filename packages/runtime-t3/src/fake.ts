@@ -691,7 +691,16 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
                   kind: "snapshot",
                   snapshotSequence: thread.sequence,
                   ...(subscription.bounded
-                    ? { historyCursor: null, hasMoreHistory: false, payloadBudgetExceeded: false }
+                    ? (() => {
+                        const more =
+                          fake.messageWindow !== undefined &&
+                          thread.messages.length > fake.messageWindow;
+                        return {
+                          historyCursor: more ? "older" : null,
+                          hasMoreHistory: more,
+                          payloadBudgetExceeded: false,
+                        };
+                      })()
                     : {}),
                   projection: {
                     thread: {

@@ -273,13 +273,18 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
 
   return {
     executeTurn(request, signal) {
+      const run = () => {
+        const combined =
+          signal === undefined ? shutdown.signal : AbortSignal.any([signal, shutdown.signal]);
+        combined.throwIfAborted();
+        return executeT3(request, combined);
+      };
+      // A follow-up turn only reads T3's records, so it runs beside the
+      // conversation's turns rather than ahead of or behind them.
       return track(() =>
-        inThread(bindThread(request).threadId, () => {
-          const combined =
-            signal === undefined ? shutdown.signal : AbortSignal.any([signal, shutdown.signal]);
-          combined.throwIfAborted();
-          return executeT3(request, combined);
-        }),
+        followUpCursor(request.native) === undefined
+          ? inThread(bindThread(request).threadId, run)
+          : run(),
       );
     },
     activity(correlationId, interfaceId) {
@@ -348,7 +353,8 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       ...(uncertain.has(binding.threadId) ? { uncertainPredecessor: true } : {}),
       ...(follow === undefined ? {} : { followUp: { after: follow.after } }),
     });
-    executing.set(request.correlation_id, { interfaceId: request.interface_id, watch });
+    const entry = { interfaceId: request.interface_id, watch };
+    executing.set(request.correlation_id, entry);
     log(
       `turn ${request.correlation_id}: thread ${binding.threadId}, message ${messageId}${follow === undefined ? "" : `, follow-up after run ${String(follow.after)}`}`,
     );
@@ -404,7 +410,9 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       // started nothing and stops nothing: it only reads T3's records.
       const reached = follow === undefined && (progress.dispatched || watch.run() !== undefined);
       if (reached && !ceased(settled, progress.stop, watch)) unconfirmed(binding);
-      executing.delete(request.correlation_id);
+      // Core may ask again for a follow-up turn while an abandoned attempt
+      // is still unwinding; only the attempt's own entry is removed.
+      if (executing.get(request.correlation_id) === entry) executing.delete(request.correlation_id);
     }
   }
 
