@@ -631,7 +631,7 @@ async function testRuntimeCommands() {
     [],
     [{ name: "invocation", type: 3, value: "compact" }],
   );
-  assert.match(refused.content, /^`\/compact` was not sent: .*Discord connection/u);
+  assert.match(refused.content, /^`\/compact`: .*Discord connection/u);
   assert.equal(
     run("--home", installation, "recent", "--limit", "100"),
     before,

@@ -98,6 +98,8 @@ fn invocation(options: &Value) -> Option<String> {
     })
 }
 
+/// Sends the text and says what happened. A failure's reason is the
+/// provider's, which says whether the text was not sent or may have been.
 fn submit(host: &mut impl HostCalls, text: &str) -> Outcome {
     let shown = shorten(text, 200).replace('`', "ˋ");
     match host.submit_command(text.to_owned()) {
@@ -105,10 +107,7 @@ fn submit(host: &mut impl HostCalls, text: &str) -> Outcome {
             format!("Sent `{shown}` to the agent; its answer follows in this conversation."),
             Vec::new(),
         ),
-        Err(reason) => reply(
-            format!("`{shown}` was not sent: {}", shorten(&reason, 400)),
-            Vec::new(),
-        ),
+        Err(reason) => reply(format!("`{shown}`: {}", shorten(&reason, 400)), Vec::new()),
     }
 }
 
@@ -350,8 +349,14 @@ mod tests {
         let reply = expect_reply(interact(&mut host, &command(Some("status"), true)))?;
         assert_eq!(
             reply.content,
-            "`/status` was not sent: Carillon could not accept the command right now."
+            "`/status`: Carillon could not accept the command right now."
         );
+        // An unconfirmed submission may still run: the reply says so, and
+        // never that it was not sent.
+        let uncertain = "Carillon did not confirm that it accepted it; if it did, the answer follows in this conversation.";
+        host.refusal = Some(uncertain.to_owned());
+        let reply = expect_reply(interact(&mut host, &command(Some("status"), true)))?;
+        assert_eq!(reply.content, format!("`/status`: {uncertain}"));
         assert_eq!(host.submitted.len(), 2);
 
         let reply = expect_reply(interact(&mut host, &command(Some("status"), false)))?;
