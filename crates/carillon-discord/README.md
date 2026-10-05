@@ -27,11 +27,11 @@ retain the actual Wasm path rather than substituting this direct native call.
   concrete core and Discord clients. It does not own a second delivery queue.
   Delivered content is sent as given, split at Discord's length limit, with mentions
   disabled. Its `Reactions` keep each message's reactions in order: the processing
-  reaction is a request they own until Discord answers it, shared by a duplicate of the
-  message, and the delivered, failed or uncertain reaction waits for that request before
-  replacing it. Reactions beside the work are their tasks, with at most 64 outcomes under
-  way (one beyond them is not shown, and that is logged), until the connection stops:
-  they then get two seconds to end, and the rest are cancelled.
+  reaction is a request they own until Discord answers it, and the delivered, failed or
+  uncertain reaction waits for that request before replacing it. Reactions beside the
+  work are their tasks, with at most 64 outcomes under way (one beyond them is not
+  shown, and that is logged), until the connection stops: they then get two seconds to
+  end, and the rest are cancelled.
 - [`activity`](src/activity.rs) shows temporary activity cards and typing while turns
   run. It reads core's activity list, receives each turn's outcome from the delivery
   loop, and records only the channel and message of cards it created, so a restart
@@ -55,7 +55,8 @@ retain the actual Wasm path rather than substituting this direct native call.
   processing reaction and typing before admission, and core's attempts in the rest; core's
   silence is reported as a possible acceptance, and a refusal's reaction is shown without
   the answer waiting for it.
-- [`inbound`](src/inbound.rs) settles one admitted message: it prepares the native
+- [`inbound`](src/inbound.rs) settles one admitted message: it asks core whether it
+  already holds the message, such as a replayed one, and if not prepares the native
   conversation, emits feedback (admission waits at most two seconds for it) and retries
   only ambiguous transport submission with the same event identity. Its [`lanes`](src/inbound/lanes.rs) run messages one at a
   time per conversation, in arrival order, with bounded queues; a message with files

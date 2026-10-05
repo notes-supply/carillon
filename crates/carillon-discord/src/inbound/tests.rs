@@ -7,11 +7,12 @@ use crate::{
 use anyhow::{Context as _, anyhow};
 use axum::{
     Json, Router,
+    extract::Path,
     http::{Method, StatusCode, Uri},
     response::IntoResponse as _,
-    routing::post,
+    routing::{any, get, post},
 };
-use carillon_protocol::model::{EventReceipt, ExternalEvent, TurnState};
+use carillon_protocol::model::{EventReceipt, EventStatus, ExternalEvent, TurnState};
 use serde_json::Value;
 use std::{
     sync::{
@@ -20,6 +21,7 @@ use std::{
     },
     time::Duration,
 };
+use tokio::sync::Notify;
 
 /// Message preparation with staging under `directory`.
 pub(crate) fn ingress(
@@ -41,6 +43,56 @@ pub(crate) fn ingress(
         http,
         stopping: tokio_util::sync::CancellationToken::new(),
     }))
+}
+
+/// Core's answer to whether it holds an event: accepted once `accepted`
+/// counts a submission, otherwise unknown.
+fn event_status(accepted: Arc<AtomicUsize>) -> Router {
+    Router::new().route(
+        "/v1/events/{event_id}",
+        get(move |Path(event_id): Path<String>| {
+            let held = accepted.load(Ordering::SeqCst) > 0;
+            async move {
+                Json(if held {
+                    EventStatus::Accepted(EventReceipt {
+                        event_id,
+                        turn_id: "accepted".to_owned(),
+                        duplicate: false,
+                        state: TurnState::Queued,
+                    })
+                } else {
+                    EventStatus::Unknown
+                })
+            }
+        }),
+    )
+}
+
+/// Discord's client, sending every request to the fake at `address`.
+fn discord_client(address: std::net::SocketAddr) -> Arc<twilight_http::Client> {
+    Arc::new(
+        twilight_http::Client::builder()
+            .token("test-only".to_owned())
+            .proxy(address.to_string(), true)
+            .ratelimiter(None)
+            .build(),
+    )
+}
+
+/// Message 400 in channel 300, from the allowlisted person.
+fn hello() -> super::QueuedMessage {
+    super::QueuedMessage {
+        request: IncomingMessage {
+            event_id: "400".to_owned(),
+            guild_id: Some("100".to_owned()),
+            user_id: "200".to_owned(),
+            channel_id: "300".to_owned(),
+            parent_channel_id: None,
+            content: "hello".to_owned(),
+            attachments: Vec::new(),
+        },
+        native: Value::Null,
+    }
 }
 
 #[tokio::test]
@@ -179,12 +231,7 @@ async fn interrupted_success_receipt_recovers_the_committed_turn() -> anyhow::Re
     Ok(())
 }
 
-// Keep the rejection, feedback and next admission trace together.
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one observable rejection/feedback/admission trace"
-)]
 async fn configuration_rejection_does_not_block_the_next_message_in_its_conversation()
 -> anyhow::Result<()> {
     let (trace, mut observed) = tokio::sync::mpsc::unbounded_channel();
@@ -214,6 +261,7 @@ async fn configuration_rejection_does_not_block_the_next_message_in_its_conversa
                 }
             }),
         )
+        .merge(event_status(Arc::default()))
         .fallback(move |method: Method, uri: Uri| {
             let trace = trace.clone();
             async move {
@@ -223,13 +271,7 @@ async fn configuration_rejection_does_not_block_the_next_message_in_its_conversa
         });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
-    let http = Arc::new(
-        twilight_http::Client::builder()
-            .token("test-only".to_owned())
-            .proxy(address.to_string(), true)
-            .ratelimiter(None)
-            .build(),
-    );
+    let http = discord_client(address);
     let directory = tempfile::tempdir()?;
     let core = core_client(format!("http://{address}"));
     let participation = Arc::new(Participation::load(
@@ -351,6 +393,7 @@ async fn slow_feedback_never_delays_a_messages_admission() -> anyhow::Result<()>
                 }
             }),
         )
+        .merge(event_status(Arc::default()))
         // Reactions and typing take Discord far longer than admission.
         .fallback(move |method: Method, uri: Uri| {
             let trace = trace.clone();
@@ -362,13 +405,7 @@ async fn slow_feedback_never_delays_a_messages_admission() -> anyhow::Result<()>
         });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
-    let http = Arc::new(
-        twilight_http::Client::builder()
-            .token("test-only".to_owned())
-            .proxy(address.to_string(), true)
-            .ratelimiter(None)
-            .build(),
-    );
+    let http = discord_client(address);
     let directory = tempfile::tempdir()?;
     let participation = Arc::new(Participation::load(
         directory.path().join("participation.json"),
@@ -426,98 +463,167 @@ async fn slow_feedback_never_delays_a_messages_admission() -> anyhow::Result<()>
 #[tokio::test]
 async fn a_duplicate_never_lets_the_processing_reaction_land_after_the_outcome()
 -> anyhow::Result<()> {
-    // Discord applies the first processing reaction four seconds after
-    // receiving it, after admission stopped waiting, and any later one at
-    // once; core reports the message's second arrival as a duplicate.
+    // The gateway replays a message core accepted while its outcome is
+    // removing the processing reaction. Discord holds that removal until a
+    // second processing reaction arrives or the test lets it go, and
+    // applies a second processing reaction only four seconds late.
     let applied = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-    let submissions = Arc::new(AtomicUsize::new(0));
-    let submitted = submissions.clone();
-    let app = Router::new()
-        .route(
-            "/v1/events",
-            post(move |Json(event): Json<ExternalEvent>| {
-                let duplicate = submitted.fetch_add(1, Ordering::SeqCst) > 0;
-                async move {
-                    Json(EventReceipt {
-                        event_id: event.event_id,
-                        turn_id: "accepted".to_owned(),
-                        duplicate,
-                        state: TurnState::Queued,
-                    })
-                }
-            }),
-        )
-        .merge(crate::delivery::tests::late_processing(
-            Duration::from_secs(4),
-            applied.clone(),
-        ));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let address = listener.local_addr()?;
-    let server = tokio::spawn(async move { axum::serve(listener, app).await });
-    let http = Arc::new(
-        twilight_http::Client::builder()
-            .token("test-only".to_owned())
-            .proxy(address.to_string(), true)
-            .ratelimiter(None)
-            .build(),
-    );
-    let directory = tempfile::tempdir()?;
-    let participation = Arc::new(Participation::load(
-        directory.path().join("participation.json"),
-    )?);
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let (removing, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
     let mut config = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
     config.typing = false;
     let (processing, delivered) = (
         config.processing_emoji.clone(),
         config.delivered_emoji.clone(),
     );
-    // The same message arrives twice, as a replayed gateway event does.
-    let (send, receive) = tokio::sync::mpsc::channel(2);
-    for _ in 0..2 {
-        send.send(super::QueuedMessage {
-            request: IncomingMessage {
-                event_id: "400".to_owned(),
-                guild_id: Some("100".to_owned()),
-                user_id: "200".to_owned(),
-                channel_id: "300".to_owned(),
-                parent_channel_id: None,
-                content: "hello".to_owned(),
-                attachments: Vec::new(),
-            },
-            native: Value::Null,
-        })
-        .await?;
-    }
-    drop(send);
+    let submitted = accepted.clone();
+    let app = {
+        let (applied, removing, release) = (applied.clone(), removing.clone(), release.clone());
+        let (puts, deletes) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let processing = processing.clone();
+        Router::new()
+            .route(
+                "/v1/events",
+                post(move |Json(event): Json<ExternalEvent>| {
+                    let duplicate = submitted.fetch_add(1, Ordering::SeqCst) > 0;
+                    async move {
+                        Json(EventReceipt {
+                            event_id: event.event_id,
+                            turn_id: "accepted".to_owned(),
+                            duplicate,
+                            state: TurnState::Queued,
+                        })
+                    }
+                }),
+            )
+            .merge(event_status(accepted.clone()))
+            .route(
+                "/api/v10/channels/{channel}/messages/{message}/reactions/{emoji}/@me",
+                any(
+                    move |method: Method, Path((_, _, emoji)): Path<(String, String, String)>| {
+                        let effect = format!("{method} {emoji}");
+                        let again = method == Method::PUT
+                            && emoji == processing
+                            && puts.fetch_add(1, Ordering::SeqCst) > 0;
+                        let first_removal =
+                            method == Method::DELETE && deletes.fetch_add(1, Ordering::SeqCst) == 0;
+                        let (applied, removing, release) =
+                            (applied.clone(), removing.clone(), release.clone());
+                        async move {
+                            if first_removal {
+                                removing.notify_one();
+                                release.notified().await;
+                            }
+                            if again {
+                                release.notify_one();
+                            }
+                            let applying = tokio::spawn(async move {
+                                if again {
+                                    tokio::time::sleep(Duration::from_secs(4)).await;
+                                }
+                                applied.lock().await.push(effect);
+                            });
+                            let _ = applying.await;
+                            StatusCode::NO_CONTENT
+                        }
+                    },
+                ),
+            )
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let directory = tempfile::tempdir()?;
+    let participation = Arc::new(Participation::load(
+        directory.path().join("participation.json"),
+    )?);
     let ingress = ingress(
         core_client(format!("http://{address}")),
         config,
         participation,
-        http,
+        discord_client(address),
         directory.path(),
     )?;
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        super::lanes::dispatch(ingress.clone(), receive),
-    )
-    .await?;
+    super::prepare(&ingress, hello()).await;
     // The answer is delivered and its outcome shown, as the delivery loop does.
     ingress
         .reactions
         .show_outcome("300:400".to_owned(), crate::delivery::Feedback::Delivered);
+    tokio::time::timeout(Duration::from_secs(2), removing.notified())
+        .await
+        .context("the outcome did not remove the processing reaction")?;
+    // The replay is prepared like any message while that removal is under way.
+    tokio::time::timeout(Duration::from_secs(10), super::prepare(&ingress, hello())).await?;
+    release.notify_one();
     assert_eq!(ingress.reactions.stop(Duration::from_secs(10)).await, 0);
     server.abort();
-    assert_eq!(submissions.load(Ordering::SeqCst), 2);
-    // One processing reaction, removed by the duplicate and again by the
-    // outcome, before the delivered one.
+    // Core already held the replay, so it was neither shown nor submitted.
     assert_eq!(
         *applied.lock().await,
         [
             format!("PUT {processing}"),
             format!("DELETE {processing}"),
-            format!("DELETE {processing}"),
             format!("PUT {delivered}"),
         ]
     );
+    assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_message_stopped_before_core_says_whether_it_holds_it_gets_no_feedback()
+-> anyhow::Result<()> {
+    // Core is slow to say whether it holds the message, and the provider
+    // stops meanwhile.
+    let (trace, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    let asked = Arc::new(Notify::new());
+    let app = {
+        let (status_trace, asked) = (trace.clone(), asked.clone());
+        Router::new()
+            .route(
+                "/v1/events/{event_id}",
+                get(move |uri: Uri| async move {
+                    let _ = status_trace.send(format!("GET {uri}"));
+                    asked.notify_one();
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    Json(EventStatus::Unknown)
+                }),
+            )
+            .fallback(move |method: Method, uri: Uri| {
+                let trace = trace.clone();
+                async move {
+                    let _ = trace.send(format!("{method} {uri}"));
+                    StatusCode::NO_CONTENT
+                }
+            })
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let directory = tempfile::tempdir()?;
+    let participation = Arc::new(Participation::load(
+        directory.path().join("participation.json"),
+    )?);
+    let ingress = ingress(
+        core_client(format!("http://{address}")),
+        discord_config(DiscordActivation::Always, DiscordConversation::Channel),
+        participation,
+        discord_client(address),
+        directory.path(),
+    )?;
+    let preparing = tokio::spawn({
+        let ingress = ingress.clone();
+        async move { super::prepare(&ingress, hello()).await }
+    });
+    tokio::time::timeout(Duration::from_secs(2), asked.notified()).await?;
+    ingress.stopping.cancel();
+    tokio::time::timeout(Duration::from_secs(1), preparing)
+        .await
+        .context("preparation waited out core after the stop")??;
+    assert_eq!(ingress.reactions.stop(Duration::from_secs(1)).await, 0);
+    server.abort();
+    // Neither feedback nor a submission: the message was never admitted.
+    let requests = std::iter::from_fn(|| observed.try_recv().ok()).collect::<Vec<_>>();
+    assert_eq!(requests, ["GET /v1/events/400"]);
     Ok(())
 }

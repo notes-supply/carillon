@@ -57,7 +57,7 @@ pub(crate) enum Feedback {
 ///
 /// A processing reaction is a request these reactions own until Discord
 /// answers it or [`FEEDBACK_LIMIT`] passes, and a message admitted again
-/// meanwhile, such as a duplicate, shares it. Admission waits for it at most
+/// meanwhile shares it. Admission waits for it at most
 /// [`PROMPT_FEEDBACK`], and stopping that wait cancels only the wait: a
 /// request Discord already received may still be applied, so the request
 /// goes on. The message's outcome reaction waits for it to end before
@@ -123,9 +123,9 @@ impl Reactions {
             return None;
         }
         let (sent, ended) = match lock(&self.0.unanswered).entry(target.to_owned()) {
-            // A message admitted again, such as a duplicate, shares the
-            // request under way: a second one could be applied after an
-            // outcome that waited only for the first.
+            // A message admitted again shares the request under way: a
+            // second one could be applied after an outcome that waited only
+            // for the first.
             Entry::Occupied(under_way) => return Some(under_way.get().clone()),
             Entry::Vacant(vacant) => {
                 let (sent, ended) = watch::channel(());
@@ -170,7 +170,11 @@ impl Reactions {
         if !config.reactions {
             return;
         }
-        self.clear(target).await;
+        self.after_processing(target).await;
+        if let Err(failure) = delete_feedback_reaction(http, target, &config.processing_emoji).await
+        {
+            warn!(error = %failure, "Discord processing reaction removal failed");
+        }
         let emoji = match feedback {
             Feedback::Delivered => &config.delivered_emoji,
             Feedback::Failed => &config.failed_emoji,
@@ -194,20 +198,6 @@ impl Reactions {
             this.outcome(&target, feedback).await;
             drop(slot);
         });
-    }
-
-    /// Removes the processing reaction of a message that gets no outcome of
-    /// its own, such as a duplicate, once its request has ended.
-    pub(crate) async fn clear(&self, target: &str) {
-        let Owned { http, config, .. } = &*self.0;
-        if !config.reactions {
-            return;
-        }
-        self.after_processing(target).await;
-        if let Err(failure) = delete_feedback_reaction(http, target, &config.processing_emoji).await
-        {
-            warn!(error = %failure, "Discord processing reaction removal failed");
-        }
     }
 
     /// Ends the reaction tasks under way when the provider stops: they get

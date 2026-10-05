@@ -24,6 +24,21 @@ use std::{
     time::Duration,
 };
 
+/// Message `message` in channel 300, as admission hands it to core.
+fn event(message: &str) -> ExternalEvent {
+    ExternalEvent {
+        event_id: message.to_owned(),
+        agent_id: "default".to_owned(),
+        user_id: "200".to_owned(),
+        audience_id: "discord-100-300".to_owned(),
+        delivery_target_id: "300".to_owned(),
+        feedback_target_id: format!("300:{message}"),
+        content: "hello".to_owned(),
+        native: serde_json::Value::Null,
+        attachments: None,
+    }
+}
+
 /// Discord's client, sending every request to the fake at `address`.
 fn discord_client(address: std::net::SocketAddr) -> Arc<twilight_http::Client> {
     Arc::new(
@@ -461,6 +476,39 @@ pub(crate) fn late_processing(
             },
         ),
     )
+}
+
+#[tokio::test]
+async fn a_message_admitted_again_shares_its_processing_request() -> anyhow::Result<()> {
+    // Discord applies the processing reaction four seconds late, and the
+    // message is admitted again meanwhile.
+    let applied = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let app = late_processing(Duration::from_secs(4), applied.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let mut config = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
+    config.typing = false;
+    let (processing, delivered) = (
+        config.processing_emoji.clone(),
+        config.delivered_emoji.clone(),
+    );
+    let reactions = Reactions::new(discord_client(address), config);
+    reactions.admission(&event("400")).await;
+    reactions.admission(&event("400")).await;
+    reactions.show_outcome("300:400".to_owned(), Feedback::Delivered);
+    assert_eq!(reactions.stop(Duration::from_secs(10)).await, 0);
+    server.abort();
+    // One processing reaction, which the outcome waited for.
+    assert_eq!(
+        *applied.lock().await,
+        [
+            format!("PUT {processing}"),
+            format!("DELETE {processing}"),
+            format!("PUT {delivered}"),
+        ]
+    );
+    Ok(())
 }
 
 #[tokio::test]

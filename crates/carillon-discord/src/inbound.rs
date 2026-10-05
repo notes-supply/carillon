@@ -162,6 +162,15 @@ pub(crate) async fn prepare(ingress: &Ingress, mut inbound: QueuedMessage) {
 async fn prepare_text(ingress: &Ingress, plan: MessagePlan) {
     let reactions = &ingress.reactions;
     let source = format!("{}:{}", plan.channel_id, plan.message_id);
+    // A message core already holds, such as one the gateway replayed, is
+    // not admitted again: its feedback belongs to its first admission.
+    match ingress
+        .until(None, known_receipt(&ingress.core, &plan.message_id))
+        .await
+    {
+        Some(None) => {}
+        Some(Some(_)) | None => return,
+    }
     let opened = ingress
         .retry(None, "prepare a Discord conversation", || {
             prepare_conversation(&ingress.participation, &ingress.http, plan.clone())
@@ -188,17 +197,13 @@ async fn prepare_text(ingress: &Ingress, plan: MessagePlan) {
     else {
         return;
     };
-    match receipt {
-        Ok(receipt) if receipt.duplicate => {
-            reactions.clear(&resolved.event.feedback_target_id).await;
-        }
-        Ok(_) => {}
-        Err(failure) => {
-            warn!(error = %failure.message, "Discord event submission failed");
-            reactions
-                .outcome(&resolved.event.feedback_target_id, Feedback::Failed)
-                .await;
-        }
+    // Accepted, even as a duplicate of its own earlier attempt, the message
+    // gets its outcome from delivery.
+    if let Err(failure) = receipt {
+        warn!(error = %failure.message, "Discord event submission failed");
+        reactions
+            .outcome(&resolved.event.feedback_target_id, Feedback::Failed)
+            .await;
     }
 }
 
