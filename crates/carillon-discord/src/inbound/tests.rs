@@ -35,6 +35,7 @@ pub(crate) fn ingress(
             config.attachments,
         )?),
         core,
+        reactions: crate::delivery::Reactions::new(http.clone(), config.clone()),
         config,
         participation,
         http,

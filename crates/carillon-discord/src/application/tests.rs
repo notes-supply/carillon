@@ -74,6 +74,7 @@ async fn discord_state(core: CoreClient, directory: &Path) -> anyhow::Result<Dis
         participation: Arc::new(Participation::load(directory.join("participation.json"))?),
         commands: stub_commands(directory, &replying("stub reply", &[])).await?,
         app: None,
+        reactions: None,
         operator_token_hash: hash_token("operator"),
     })
 }

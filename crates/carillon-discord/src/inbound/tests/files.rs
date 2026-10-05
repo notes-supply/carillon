@@ -284,6 +284,7 @@ fn ingress(
             world.staging.with_file_name("participation.json"),
         )?),
         http: world.http.clone(),
+        reactions: crate::delivery::Reactions::new(world.http.clone(), config.clone()),
         config,
         stopping: tokio_util::sync::CancellationToken::new(),
     }))
@@ -791,6 +792,7 @@ async fn overload_replies_only_to_messages_admission_would_activate() -> Result<
             world.staging.with_file_name("participation.json"),
         )?),
         http: world.http.clone(),
+        reactions: crate::delivery::Reactions::new(world.http.clone(), config.clone()),
         config,
         stopping: tokio_util::sync::CancellationToken::new(),
     });

@@ -14,10 +14,7 @@ use crate::{
         IncomingMessage, MessagePlan, Participation, admit_message, discord_parent_channel,
         prepare_conversation,
     },
-    delivery::{
-        Feedback, admission_feedback, clear_processing_feedback, explain, terminal_feedback,
-        trigger_typing,
-    },
+    delivery::{Feedback, Reactions, explain, trigger_typing},
     error::discord_failure_is_terminal,
 };
 use anyhow::{Result, anyhow};
@@ -61,6 +58,8 @@ pub(crate) struct Ingress {
     pub(crate) config: DiscordConfig,
     pub(crate) participation: Arc<Participation>,
     pub(crate) http: Arc<DiscordHttp>,
+    /// The reactions that show each message's progress, in order.
+    pub(crate) reactions: Reactions,
     pub(crate) downloads: Arc<Downloads>,
     /// Cancelled when the provider stops: work not yet handed to core ends,
     /// and a submission core may have received is settled first.
@@ -139,7 +138,7 @@ pub(crate) async fn prepare(ingress: &Ingress, mut inbound: QueuedMessage) {
         Some(Ok(parent)) => parent,
         Some(Err(failure)) => {
             let source = format!("{channel}:{}", inbound.request.event_id);
-            terminal_feedback(http, discord, &source, Feedback::Failed).await;
+            ingress.reactions.outcome(&source, Feedback::Failed).await;
             warn!(error = %failure, "Discord message route is unavailable");
             return;
         }
@@ -161,7 +160,7 @@ pub(crate) async fn prepare(ingress: &Ingress, mut inbound: QueuedMessage) {
 }
 
 async fn prepare_text(ingress: &Ingress, plan: MessagePlan) {
-    let (discord, http) = (&ingress.config, &*ingress.http);
+    let reactions = &ingress.reactions;
     let source = format!("{}:{}", plan.channel_id, plan.message_id);
     let opened = ingress
         .retry(None, "prepare a Discord conversation", || {
@@ -172,12 +171,12 @@ async fn prepare_text(ingress: &Ingress, plan: MessagePlan) {
         Some(Ok(resolved)) => resolved,
         Some(Err(failure)) => {
             warn!(error = %failure, "Discord conversation cannot be prepared");
-            terminal_feedback(http, discord, &source, Feedback::Failed).await;
+            reactions.outcome(&source, Feedback::Failed).await;
             return;
         }
         None => return,
     };
-    admission_feedback(http, discord, &resolved.event).await;
+    reactions.admission(&resolved.event).await;
     // Accepting text is a single step in core; a submission cut short by
     // the provider stopping either happened or did not.
     let Some(receipt) = ingress
@@ -191,18 +190,14 @@ async fn prepare_text(ingress: &Ingress, plan: MessagePlan) {
     };
     match receipt {
         Ok(receipt) if receipt.duplicate => {
-            clear_processing_feedback(http, discord, &resolved.event.feedback_target_id).await;
+            reactions.clear(&resolved.event.feedback_target_id).await;
         }
         Ok(_) => {}
         Err(failure) => {
             warn!(error = %failure.message, "Discord event submission failed");
-            terminal_feedback(
-                http,
-                discord,
-                &resolved.event.feedback_target_id,
-                Feedback::Failed,
-            )
-            .await;
+            reactions
+                .outcome(&resolved.event.feedback_target_id, Feedback::Failed)
+                .await;
         }
     }
 }
@@ -211,11 +206,11 @@ async fn prepare_text(ingress: &Ingress, plan: MessagePlan) {
 /// sender sees typing; the processing reaction appears once they are handed
 /// to core. Everything before submission ends by the preparation deadline.
 async fn prepare_files(ingress: &Ingress, plan: MessagePlan) {
-    let (discord, http) = (&ingress.config, &*ingress.http);
+    let (reactions, http) = (&ingress.reactions, &*ingress.http);
     let source = format!("{}:{}", plan.channel_id, plan.message_id);
     let refuse = async |refusal: Refusal| {
         explain(http, &source, &refusal.0).await;
-        terminal_feedback(http, discord, &source, Feedback::Failed).await;
+        reactions.outcome(&source, Feedback::Failed).await;
     };
     if let Err(refusal) = ingress.downloads.admit(&plan.attachments) {
         refuse(refusal).await;
@@ -272,7 +267,7 @@ async fn prepare_files(ingress: &Ingress, plan: MessagePlan) {
             drop(staged);
             if let Some(Err(failure)) = unopened {
                 warn!(error = %failure, "Discord conversation cannot be prepared");
-                terminal_feedback(http, discord, &source, Feedback::Failed).await;
+                reactions.outcome(&source, Feedback::Failed).await;
             } else {
                 refuse(ingress.unfinished()).await;
             }
@@ -280,9 +275,9 @@ async fn prepare_files(ingress: &Ingress, plan: MessagePlan) {
         }
     };
     resolved.event.attachments = Some(staged.manifest.clone());
-    // As for text, the processing reaction precedes submission, so the
+    // As for text, the processing reaction precedes submission, and the
     // delivered or failed reaction that follows always replaces it.
-    admission_feedback(http, discord, &resolved.event).await;
+    reactions.admission(&resolved.event).await;
     let settled = submit_files(ingress, &resolved.event, deadline).await;
     typing.abort();
     // Core holds its own copy once it answers; the staged files go.

@@ -21,7 +21,7 @@ use crate::{
         IncomingMessage, Participation, admit_identity, admit_message,
         prepare_deterministic_conversation,
     },
-    delivery::{Feedback, delivery_loop, terminal_feedback},
+    delivery::{Feedback, Reactions, delivery_loop},
 };
 #[cfg(test)]
 use crate::{
@@ -91,6 +91,8 @@ struct DiscordState {
     commands: Arc<Commands>,
     /// Absent in deterministic mode, where no Discord application exists.
     app: Option<Arc<DiscordApp>>,
+    /// The reactions shown on messages, with the Discord application.
+    reactions: Option<Reactions>,
     /// The provider's attachment downloads and staging, in either mode.
     downloads: Arc<Downloads>,
     operator_token_hash: String,
@@ -167,6 +169,7 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
         participation,
         commands,
         app: None,
+        reactions: None,
         downloads,
         operator_token_hash: config.value.core.operator_token_hash.clone(),
     };
@@ -221,8 +224,10 @@ async fn connect(
     });
     state.commands.reconcile(&app).await?;
     state.app = Some(app);
+    let reactions = Reactions::new(http.clone(), state.discord.clone());
+    state.reactions = Some(reactions.clone());
     for target in reconciled.feedback_target_ids {
-        terminal_feedback(&http, &state.discord, &target, Feedback::Uncertain).await;
+        reactions.outcome(&target, Feedback::Uncertain).await;
     }
     let (messages, receiver) = mpsc::channel(lanes::MAX_PENDING);
     let delivery_state = state.clone();
@@ -232,6 +237,7 @@ async fn connect(
         config: state.discord.clone(),
         participation: state.participation.clone(),
         http: http.clone(),
+        reactions: reactions.clone(),
         downloads: state.downloads.clone(),
         stopping: stopping.clone(),
     });
@@ -251,7 +257,7 @@ async fn connect(
         result = gateway_loop(state, discord_token, messages) => {
             result.context("Discord gateway stopped")
         },
-        result = delivery_loop(delivery_state.core, delivery_state.discord, http, outcomes) => {
+        result = delivery_loop(delivery_state.core, reactions, http, outcomes) => {
             result.context("Discord delivery worker stopped")
         },
         () = monitor => Err(anyhow::anyhow!("Discord activity monitor stopped")),
@@ -664,15 +670,14 @@ async fn gateway_loop(
                         message = %refused.request.event_id,
                         "Discord message refused: the message queue is full"
                     );
-                    if let Some(app) = state.app.clone() {
-                        let discord = state.discord.clone();
-                        tokio::spawn(async move {
-                            let source = format!(
+                    if let Some(reactions) = &state.reactions {
+                        reactions.show_outcome(
+                            format!(
                                 "{}:{}",
                                 refused.request.channel_id, refused.request.event_id
-                            );
-                            terminal_feedback(&app.http, &discord, &source, Feedback::Failed).await;
-                        });
+                            ),
+                            Feedback::Failed,
+                        );
                     }
                 }
             }
@@ -793,10 +798,10 @@ async fn run_interaction(state: &DiscordState, admitted: AdmittedInteraction) ->
         },
     );
     // Without a Discord connection there is nowhere to anchor a submission.
-    if let Some(app) = &state.app {
+    if let (Some(app), Some(reactions)) = (&state.app, &state.reactions) {
         calls = calls.with_submissions(Submissions {
             http: Arc::clone(&app.http),
-            config: state.discord.clone(),
+            reactions: reactions.clone(),
             origin: admitted.origin,
         });
     }

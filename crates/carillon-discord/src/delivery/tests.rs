@@ -1,4 +1,4 @@
-use super::{delivery_loop, discord_chunks, send_discord_message};
+use super::{Reactions, delivery_loop, discord_chunks, send_discord_message};
 use crate::{
     client::test_client as core_client,
     config::{DiscordActivation, DiscordConversation},
@@ -107,7 +107,7 @@ async fn ambiguous_claim_failures_reconcile_before_polling_again() -> anyhow::Re
     let (outcomes, _) = tokio::sync::mpsc::unbounded_channel();
     let outcome = tokio::time::timeout(
         Duration::from_secs(5),
-        delivery_loop(core, config, http, outcomes),
+        delivery_loop(core, Reactions::new(http.clone(), config), http, outcomes),
     )
     .await;
     server.abort();
@@ -301,7 +301,10 @@ async fn deliveries_reach_discord_verbatim_without_notifying_anyone() -> anyhow:
         Duration::from_secs(5),
         delivery_loop(
             core_client(format!("http://{address}")),
-            discord_config(DiscordActivation::Always, DiscordConversation::Channel),
+            Reactions::new(
+                http.clone(),
+                discord_config(DiscordActivation::Always, DiscordConversation::Channel),
+            ),
             http,
             outcomes,
         ),
@@ -384,7 +387,10 @@ async fn a_slow_reaction_never_holds_up_the_next_delivery() -> anyhow::Result<()
         Duration::from_secs(5),
         delivery_loop(
             core_client(format!("http://{address}")),
-            discord_config(DiscordActivation::Always, DiscordConversation::Channel),
+            Reactions::new(
+                http.clone(),
+                discord_config(DiscordActivation::Always, DiscordConversation::Channel),
+            ),
             http,
             outcomes,
         ),

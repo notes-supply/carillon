@@ -45,9 +45,8 @@ use twilight_model::{
 
 use crate::{
     client::CoreClient,
-    config::DiscordConfig,
     conversations::{InteractionOrigin, submitted_event},
-    delivery::{Feedback, admission_feedback, promptly, terminal_feedback},
+    delivery::{Feedback, Reactions},
 };
 
 /// The whole invocation, including every native call it makes.
@@ -76,10 +75,10 @@ pub struct InteractionCalls {
 }
 
 /// What submitting needs: the conversation's channel to anchor the text in,
-/// and Discord to post that anchor and its feedback.
+/// Discord to post that anchor, and the reactions that show its progress.
 pub struct Submissions {
     pub http: Arc<DiscordHttp>,
-    pub config: DiscordConfig,
+    pub reactions: Reactions,
     pub origin: InteractionOrigin,
 }
 
@@ -179,8 +178,8 @@ impl InteractionCalls {
     }
 }
 
-/// How much of the module's deadline a submission may take, leaving the
-/// module time to answer with its outcome.
+/// How much of the module's ten-second deadline a submission may take,
+/// leaving the module time to answer with its outcome.
 const SUBMIT_LIMIT: Duration = Duration::from_secs(7);
 /// How long posting the marker may take inside the submission's limit.
 const MARKER_LIMIT: Duration = Duration::from_secs(4);
@@ -192,10 +191,15 @@ const SUBMIT_ATTEMPTS: u32 = 3;
 /// event's identity and feedback target; core then accepts the event like
 /// any message, and the answer is delivered to the conversation.
 ///
-/// Everything happens within [`SUBMIT_LIMIT`], so the module can still say
-/// what happened: feedback is bounded and never delays admission, and an
-/// attempt core has not answered in time may have been accepted, which the
-/// answer says; the marker's ID makes a repeated submission the same event.
+/// The submission returns within [`SUBMIT_LIMIT`], so the module can still
+/// say what happened. Within it, posting the marker takes at most
+/// [`MARKER_LIMIT`], and admission waits at most
+/// [`PROMPT_FEEDBACK`](crate::delivery::PROMPT_FEEDBACK) for the
+/// processing reaction and typing; core's attempts take the rest. An attempt
+/// core has not answered in time may have been accepted, which the answer
+/// says, and the marker's ID makes a repeated submission the same event. A
+/// refused or unconfirmed submission's reaction is then shown without the
+/// answer waiting for it.
 async fn submit(
     core: &CoreClient,
     submissions: &Submissions,
@@ -206,7 +210,7 @@ async fn submit(
 ) -> Result<(), String> {
     let Submissions {
         http,
-        config,
+        reactions,
         origin,
     } = submissions;
     let channel: Id<ChannelMarker> = origin
@@ -242,7 +246,7 @@ async fn submit(
         text,
         intent,
     );
-    admission_feedback(http, config, &event).await;
+    reactions.admission(&event).await;
     let retry = Duration::from_millis(500);
     let mut attempt = 1;
     let (feedback, refusal) = loop {
@@ -266,11 +270,7 @@ async fn submit(
         attempt += 1;
         tokio::time::sleep(retry).await;
     };
-    promptly(
-        terminal_feedback(http, config, &event.feedback_target_id, feedback),
-        "command feedback",
-    )
-    .await;
+    reactions.show_outcome(event.feedback_target_id, feedback);
     Err(refusal.to_owned())
 }
 
@@ -1750,16 +1750,17 @@ pub(crate) mod tests {
             crate::config::DiscordConversation::Thread,
         );
         config.typing = false;
+        let http = Arc::new(
+            twilight_http::Client::builder()
+                .token("test-only".to_owned())
+                .proxy(address.to_string(), true)
+                .ratelimiter(None)
+                .build(),
+        );
         let calls =
             super::InteractionCalls::new(core, query).with_submissions(super::Submissions {
-                http: Arc::new(
-                    twilight_http::Client::builder()
-                        .token("test-only".to_owned())
-                        .proxy(address.to_string(), true)
-                        .ratelimiter(None)
-                        .build(),
-                ),
-                config,
+                reactions: crate::delivery::Reactions::new(http.clone(), config),
+                http,
                 origin: crate::conversations::InteractionOrigin {
                     guild_id: "100".to_owned(),
                     user_id: "200".to_owned(),
@@ -1817,12 +1818,14 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// Calls that submit through `server`, as the person in channel `400`.
+    /// Calls that submit through `server`, as the person in channel `400`,
+    /// with the reactions they show.
     async fn submitting(
         router: Router,
         configure: impl FnOnce(&mut crate::config::DiscordConfig),
     ) -> anyhow::Result<(
         super::InteractionCalls,
+        crate::delivery::Reactions,
         tokio::task::JoinHandle<std::io::Result<()>>,
     )> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -1833,6 +1836,14 @@ pub(crate) mod tests {
             crate::config::DiscordConversation::Thread,
         );
         configure(&mut config);
+        let http = Arc::new(
+            twilight_http::Client::builder()
+                .token("test-only".to_owned())
+                .proxy(address.to_string(), true)
+                .ratelimiter(None)
+                .build(),
+        );
+        let reactions = crate::delivery::Reactions::new(http.clone(), config);
         let calls = super::InteractionCalls::new(
             crate::client::test_client(format!("http://{address}")),
             carillon_protocol::model::ModelQuery {
@@ -1841,14 +1852,8 @@ pub(crate) mod tests {
             },
         )
         .with_submissions(super::Submissions {
-            http: Arc::new(
-                twilight_http::Client::builder()
-                    .token("test-only".to_owned())
-                    .proxy(address.to_string(), true)
-                    .ratelimiter(None)
-                    .build(),
-            ),
-            config,
+            http,
+            reactions: reactions.clone(),
             origin: crate::conversations::InteractionOrigin {
                 guild_id: "100".to_owned(),
                 user_id: "200".to_owned(),
@@ -1856,7 +1861,7 @@ pub(crate) mod tests {
                 route_channel_id: "300".to_owned(),
             },
         });
-        Ok((calls, server))
+        Ok((calls, reactions, server))
     }
 
     fn submit_request() -> anyhow::Result<Vec<u8>> {
@@ -1883,7 +1888,7 @@ pub(crate) mod tests {
             submitted.clone(),
             (Duration::ZERO, Duration::from_secs(30)),
         );
-        let (calls, server) = submitting(router, |config| config.typing = true).await?;
+        let (calls, _reactions, server) = submitting(router, |config| config.typing = true).await?;
         let started = std::time::Instant::now();
         let reply = calls.answer(&submit_request()?).await;
         let elapsed = started.elapsed();
@@ -1921,11 +1926,10 @@ pub(crate) mod tests {
             Arc::new(tokio::sync::Mutex::new(Vec::new())),
             (Duration::from_secs(30), Duration::ZERO),
         );
-        let (calls, server) = submitting(router, |config| config.typing = false).await?;
+        let (calls, reactions, server) = submitting(router, |config| config.typing = false).await?;
         let started = std::time::Instant::now();
         let reply = calls.answer(&submit_request()?).await;
         let elapsed = started.elapsed();
-        server.abort();
         // Core may have accepted it: the answer says so, in time to be shown.
         assert_eq!(
             reply,
@@ -1935,6 +1939,9 @@ pub(crate) mod tests {
             )
         );
         assert!(elapsed < super::DEADLINE, "answered after {elapsed:?}");
+        // The uncertain reaction is shown beside the answer, not before it.
+        reactions.settled().await;
+        server.abort();
         let trace = trace.lock().await;
         assert_eq!(
             trace
@@ -1948,6 +1955,110 @@ pub(crate) mod tests {
             trace.last().is_some_and(
                 |request| request.starts_with("PUT ") && request.contains("/reactions/")
             )
+        );
+        Ok(())
+    }
+
+    /// Discord receives the processing reaction at once but applies it only
+    /// after `delay`, in work of its own that goes on whatever its client
+    /// does, as an accepted request can; everything else applies at once.
+    /// `applied` records the order in which reactions take effect.
+    fn applying_server(delay: Duration, applied: Arc<tokio::sync::Mutex<Vec<String>>>) -> Router {
+        use axum::{
+            Json,
+            extract::Path,
+            http::Method,
+            routing::{any, post},
+        };
+        use carillon_protocol::model::{EventReceipt, ExternalEvent, TurnState};
+        let processing = crate::conversations::tests::discord_config(
+            crate::config::DiscordActivation::Always,
+            crate::config::DiscordConversation::Thread,
+        )
+        .processing_emoji;
+        Router::new()
+            .route(
+                "/v1/events",
+                post(|Json(event): Json<ExternalEvent>| async move {
+                    Json(EventReceipt {
+                        event_id: event.event_id,
+                        turn_id: "turn".to_owned(),
+                        duplicate: false,
+                        state: TurnState::Queued,
+                    })
+                }),
+            )
+            .route(
+                "/api/v10/channels/{channel}/messages",
+                post(|Json(body): Json<Value>| async move {
+                    Json(json!({
+                        "id": "901",
+                        "channel_id": "400",
+                        "author": {"id": "201", "username": "carillon", "discriminator": "0"},
+                        "content": body["content"],
+                        "attachments": [],
+                        "embeds": [],
+                        "mention_everyone": false,
+                        "mention_roles": [],
+                        "mentions": [],
+                        "pinned": false,
+                        "timestamp": "2026-10-05T00:00:00.000000+00:00",
+                        "tts": false,
+                        "type": 0,
+                    }))
+                }),
+            )
+            .route(
+                "/api/v10/channels/{channel}/messages/{message}/reactions/{emoji}/@me",
+                any(
+                    move |method: Method, Path((_, _, emoji)): Path<(String, String, String)>| {
+                        let (applied, processing) = (applied.clone(), processing.clone());
+                        async move {
+                            let effect = format!("{method} {emoji}");
+                            let pending = method == Method::PUT && emoji == processing;
+                            let applying = tokio::spawn(async move {
+                                if pending {
+                                    tokio::time::sleep(delay).await;
+                                }
+                                applied.lock().await.push(effect);
+                            });
+                            let _ = applying.await;
+                            StatusCode::NO_CONTENT
+                        }
+                    },
+                ),
+            )
+            .fallback(|| async { StatusCode::NO_CONTENT })
+    }
+
+    #[tokio::test]
+    async fn a_late_processing_reaction_never_lands_after_the_outcome() -> anyhow::Result<()> {
+        use carillon_discord_commands::contract::HostReply;
+        // The coordinator's fault: Discord applies the processing reaction
+        // four seconds after receiving it, after admission stopped waiting.
+        let applied = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let router = applying_server(Duration::from_secs(4), applied.clone());
+        let (calls, reactions, server) = submitting(router, |config| config.typing = true).await?;
+        let started = std::time::Instant::now();
+        assert_eq!(calls.answer(&submit_request()?).await, HostReply::Submitted);
+        // Admission did not wait for Discord to apply it.
+        assert!(started.elapsed() < crate::delivery::PROMPT_FEEDBACK + Duration::from_secs(1));
+        // The answer is delivered at once and its outcome shown, as the
+        // delivery loop does.
+        reactions.show_outcome("400:901".to_owned(), super::Feedback::Delivered);
+        reactions.settled().await;
+        server.abort();
+        let config = crate::conversations::tests::discord_config(
+            crate::config::DiscordActivation::Always,
+            crate::config::DiscordConversation::Thread,
+        );
+        assert_eq!(
+            *applied.lock().await,
+            [
+                format!("PUT {}", config.processing_emoji),
+                format!("DELETE {}", config.processing_emoji),
+                format!("PUT {}", config.delivered_emoji),
+            ]
         );
         Ok(())
     }

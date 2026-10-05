@@ -30,7 +30,7 @@ use super::{Ingress, QueuedMessage, prepare};
 use crate::{
     config::{DiscordConfig, DiscordConversation},
     conversations::{IncomingMessage, admit_message},
-    delivery::{Feedback, explain, terminal_feedback},
+    delivery::{Feedback, explain},
 };
 
 /// Messages waiting or in preparation, across every lane.
@@ -172,7 +172,7 @@ pub(crate) fn refuse_overloaded(
             "Carillon is too busy to take this message right now; please send it again shortly.",
         )
         .await;
-        terminal_feedback(&ingress.http, &ingress.config, &source, Feedback::Failed).await;
+        ingress.reactions.outcome(&source, Feedback::Failed).await;
         drop(permit);
     });
 }
