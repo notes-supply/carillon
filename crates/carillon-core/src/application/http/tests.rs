@@ -42,6 +42,7 @@ fn installation(root: &Path) -> Result<AppState> {
             url: format!("http://127.0.0.1:{}", index + 2),
             token_hash: hash_token("test-only"),
             enabled: true,
+            parallel_turns: None,
         })
     })
     .collect::<Result<Vec<_>>>()?;
@@ -170,6 +171,21 @@ fn configuration_rejects_malformed_provider_endpoints_before_startup() -> Result
             LoadedConfig::load(&path)?;
         }
         state.config.value.providers[index].url = original;
+    }
+    // Concurrent conversations are a bounded runtime setting.
+    for index in 0..state.config.value.providers.len() {
+        let runtime = state.config.value.providers[index].role == ProviderRole::Runtime;
+        for (parallel, valid) in [(0, false), (1, runtime), (16, runtime), (17, false)] {
+            state.config.value.providers[index].parallel_turns = Some(parallel);
+            fs::write(&path, toml::to_string(&state.config.value)?)?;
+            assert_eq!(
+                LoadedConfig::load(&path).is_ok(),
+                valid,
+                "parallel_turns {parallel} on {:?}",
+                state.config.value.providers[index].role
+            );
+        }
+        state.config.value.providers[index].parallel_turns = None;
     }
     state.config.value.core.listen.set_port(0);
     fs::write(&path, toml::to_string(&state.config.value)?)?;
@@ -838,6 +854,55 @@ async fn follow_up_turns_carry_only_the_runtime_cursor_and_cannot_be_forged() ->
         refused.err().map(|error| error.status),
         Some(StatusCode::BAD_REQUEST)
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_workers_progress_other_conversations_and_keep_each_in_order() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    let first = accept(&state, "a1", "conversation-a").await?;
+    let second = accept(&state, "a2", "conversation-a").await?;
+    let other = accept(&state, "b1", "conversation-b").await?;
+    // One worker holds conversation A's first turn running.
+    let (release, held) = tokio::sync::oneshot::channel::<()>();
+    let (started, running) = tokio::sync::oneshot::channel::<String>();
+    let worker = configured(&state);
+    let long = tokio::spawn(async move {
+        super::run_next_turn(&worker, "test-runtime", async move |_, _, request| {
+            let _ = started.send(request.correlation_id.clone());
+            let _ = held.await;
+            Ok(completed(request))
+        })
+        .await
+    });
+    assert_eq!(running.await?, first.turn_id);
+    // Another worker meanwhile runs the other conversation's turn, never A's next one.
+    let mut ran = Vec::new();
+    let step = run_next_turn(&state, "test-runtime", async |_, _, request| {
+        ran.push(request.correlation_id.clone());
+        Ok(completed(request))
+    })
+    .await?;
+    assert_eq!(step, WorkerStep::Advanced);
+    assert_eq!(ran, std::slice::from_ref(&other.turn_id));
+    assert_eq!(
+        run_next_turn(&state, "test-runtime", async |_, _, _| {
+            Err(TurnFailure::Uncertain(anyhow!(
+                "A's next turn ran beside its first"
+            )))
+        })
+        .await?,
+        WorkerStep::Idle
+    );
+    let _ = release.send(());
+    assert_eq!(long.await??, WorkerStep::Advanced);
+    run_next_turn(&state, "test-runtime", async |_, _, request| {
+        ran.push(request.correlation_id.clone());
+        Ok(completed(request))
+    })
+    .await?;
+    assert_eq!(ran, [other.turn_id, second.turn_id]);
     Ok(())
 }
 

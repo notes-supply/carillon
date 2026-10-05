@@ -24,6 +24,8 @@ The Rust core (`carillon-core`, the `carillon` executable) owns:
 
 SQLite is the only writer-owned durable store for this lifecycle. Network and model work never run inside its transactions.
 
+Core runs one worker per enabled runtime, or the runtime entry's `parallel_turns` workers for a runtime that executes conversations concurrently. Each worker claims, in one transaction, the oldest queued turn of a conversation with no earlier queued or running turn, so workers never share a conversation and every conversation keeps its order.
+
 The durable core is platform-neutral. `Core` exposes admission, pinned runtime lookup, one-step execution and delivery operations over one private SQLite authority. Its constructor receives agent/resources/runtime facts; it does not know installation credentials, parse HTTP, or choose Discord/Pi. The application modules resolve installation defaults, authenticate ingress, assemble workers and translate HTTP into these same operations. See [the core component guide](../../crates/carillon-core/README.md) and its executable temporary-SQLite example.
 
 ## Providers are separate programs

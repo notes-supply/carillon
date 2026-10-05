@@ -171,6 +171,7 @@ fn default_providers(
             url: format!("http://127.0.0.1:{}", checked_port(base_port, 1)?),
             token_hash: hash_token(discord_token),
             enabled: true,
+            parallel_turns: None,
         },
         Provider {
             id: "runtime-pi".to_owned(),
@@ -179,6 +180,7 @@ fn default_providers(
             url: format!("http://127.0.0.1:{}", checked_port(base_port, 2)?),
             token_hash: hash_token(runtime_token),
             enabled: true,
+            parallel_turns: None,
         },
     ])
 }

@@ -90,7 +90,11 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
   const reconnect = options.reconnect ?? DEFAULT_RECONNECT;
   const settleMs = options.settleMs ?? DEFAULT_SETTLE_MS;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const turns = new Serial();
+  /**
+   * One queue per conversation thread, kept while it has turns: turns of one
+   * conversation run in order, turns of different conversations at once.
+   */
+  const threads = new Map<string, { readonly serial: Serial; turns: number }>();
   const shutdown = new AbortController();
   const pending = new Set<Promise<unknown>>();
   /** Executing turns by correlation ID, from before T3 is contacted until they settle. */
@@ -118,14 +122,23 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
 
   return {
     executeTurn(request, signal) {
-      return track(() =>
-        turns.run(() => {
-          const combined =
-            signal === undefined ? shutdown.signal : AbortSignal.any([signal, shutdown.signal]);
-          combined.throwIfAborted();
-          return executeT3(request, combined);
-        }),
-      );
+      return track(async () => {
+        const threadId = bindThread(request).threadId;
+        const queue = threads.get(threadId) ?? { serial: new Serial(), turns: 0 };
+        threads.set(threadId, queue);
+        queue.turns += 1;
+        try {
+          return await queue.serial.run(() => {
+            const combined =
+              signal === undefined ? shutdown.signal : AbortSignal.any([signal, shutdown.signal]);
+            combined.throwIfAborted();
+            return executeT3(request, combined);
+          });
+        } finally {
+          queue.turns -= 1;
+          if (queue.turns === 0) threads.delete(threadId);
+        }
+      });
     },
     activity(correlationId, interfaceId) {
       const turn = executing.get(correlationId);

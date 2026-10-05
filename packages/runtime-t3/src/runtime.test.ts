@@ -1288,3 +1288,49 @@ it("sends a command invocation verbatim, without notes about earlier files", asy
     "hello\n\n[Carillon: 1 file(s) attached to earlier messages are not available to this runtime: a.png]",
   ]);
 });
+
+it("runs different conversations at once and each conversation's turns in order", async () => {
+  const other = { audience_id: "conversation-2" };
+  const otherThread = derivedId("thread", PROJECT, "discord-private", "default", "conversation-2");
+  const otherRun = (correlation: string) =>
+    fake.threads
+      .get(otherThread)
+      ?.runs.find((run) => run.userMessageId === derivedId("message", correlation));
+  const first = runtime.executeTurn(turn("turn-1", "long work"));
+  const long = await started("turn-1");
+  // The same conversation's next turn waits for the first, in Carillon's order.
+  const second = runtime.executeTurn(turn("turn-2", "next"));
+  // Another conversation proceeds meanwhile.
+  const unrelated = runtime.executeTurn(turn("turn-3", "elsewhere", other));
+  await fake.waitFor(() => otherRun("turn-3") !== undefined);
+  const elsewhere = otherRun("turn-3");
+  if (elsewhere === undefined) throw new Error("other conversation did not start");
+  fake.assistant(otherThread, elsewhere.id, "Done elsewhere.");
+  fake.complete(otherThread, elsewhere.id);
+  expect((await unrelated).output).toBe("Done elsewhere.");
+  expect(runOf("turn-2")).toBeUndefined();
+  expect(runOf("turn-1")?.status).toBe("running");
+  answer(long, "Long done.");
+  expect((await first).output).toBe("Long done.");
+  answer(await started("turn-2"), "Next done.");
+  expect((await second).output).toBe("Next done.");
+  expect(fake.interrupts).toEqual([]);
+});
+
+it("cancels one conversation's turn without touching another's", async () => {
+  const otherThread = derivedId("thread", PROJECT, "discord-private", "default", "conversation-2");
+  const controller = new AbortController();
+  const cancelled = runtime.executeTurn(turn("turn-1", "stop me"), controller.signal);
+  const mine = await started("turn-1");
+  const kept = runtime.executeTurn(turn("turn-2", "keep me", { audience_id: "conversation-2" }));
+  await fake.waitFor(() => (fake.threads.get(otherThread)?.runs.length ?? 0) === 1);
+  controller.abort(new Error("core disconnected"));
+  await expect(cancelled).rejects.toThrow("core disconnected");
+  const other = fake.threads.get(otherThread)?.runs[0];
+  if (other === undefined) throw new Error("other conversation did not start");
+  expect(fake.interrupts).toEqual([mine.id]);
+  expect(other.status).toBe("running");
+  fake.assistant(otherThread, other.id, "Still here.");
+  fake.complete(otherThread, other.id);
+  expect((await kept).output).toBe("Still here.");
+});

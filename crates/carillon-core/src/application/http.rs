@@ -153,6 +153,10 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
         core,
         client: Client::new(),
     };
+    // A runtime configured for concurrent conversations gets that many
+    // workers. Each claim is one transaction that skips conversations with an
+    // earlier queued or running turn, so workers never share a conversation
+    // and each conversation keeps its order.
     let mut workers = tokio::task::JoinSet::new();
     for runtime in config
         .value
@@ -160,9 +164,11 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
         .iter()
         .filter(|provider| provider.role == ProviderRole::Runtime && provider.enabled)
     {
-        let runtime_id = runtime.id.clone();
-        let worker = state.clone();
-        workers.spawn(async move { runtime_worker(worker, runtime_id).await });
+        for _ in 0..runtime.parallel_turns() {
+            let runtime_id = runtime.id.clone();
+            let worker = state.clone();
+            workers.spawn(async move { runtime_worker(worker, runtime_id).await });
+        }
     }
 
     let router = Router::new()
@@ -339,8 +345,9 @@ const ACTIVITY_TIMEOUT: Duration = Duration::from_secs(2);
 /// runtime's latest snapshot when the runtime supplies one. The durable
 /// states come from storage; `activity: null` never means the turn ended.
 /// Runtimes are asked at once, so the list takes one snapshot timeout at
-/// most however many runtimes cannot answer. Each runtime runs at most one
-/// turn at a time, so there is one request per configured runtime at most.
+/// most however many runtimes cannot answer. A runtime runs at most its
+/// configured number of conversations at once, so the requests are bounded
+/// by the configured workers.
 async fn active_turns(
     State(state): State<AppState>,
     headers: HeaderMap,
