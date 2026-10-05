@@ -32,7 +32,7 @@ use tokio::net::TcpListener;
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    Core, CoreError, CoreOptions, RuntimeClient, RuntimeProvider, TurnFailure, WorkerStep,
+    Core, CoreError, CoreOptions, Lane, RuntimeClient, RuntimeProvider, TurnFailure, WorkerStep,
 };
 
 #[derive(Clone)]
@@ -154,9 +154,11 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
         client: Client::new(),
     };
     // A runtime configured for concurrent conversations gets that many
-    // workers. Each claim is one transaction that skips conversations with an
-    // earlier executable turn queued or running, so workers never share a
-    // conversation and each conversation keeps its order.
+    // message workers. Each claim is one transaction that skips
+    // conversations with an earlier message queued or running, so workers
+    // never share a conversation and each conversation keeps its order.
+    // Observations wait on native work that may take hours; a fixed few run
+    // per runtime beside its messages, never in their place.
     let mut workers = tokio::task::JoinSet::new();
     for runtime in config
         .value
@@ -164,17 +166,13 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
         .iter()
         .filter(|provider| provider.role == ProviderRole::Runtime && provider.enabled)
     {
-        for _ in 0..runtime.parallel_turns() {
+        let lanes = (0..runtime.parallel_turns())
+            .map(|_| Lane::Messages)
+            .chain((0..OBSERVATION_WORKERS).map(|_| Lane::Observations));
+        for lane in lanes {
             let runtime_id = runtime.id.clone();
             let worker = state.clone();
-            workers.spawn(async move { runtime_worker(worker, runtime_id).await });
-        }
-        // Observations wait on native work that may take hours; a fixed few
-        // run per runtime beside its executable turns, never in their place.
-        for _ in 0..OBSERVATION_WORKERS {
-            let runtime_id = runtime.id.clone();
-            let worker = state.clone();
-            workers.spawn(async move { observation_worker(worker, runtime_id).await });
+            workers.spawn(async move { runtime_worker(worker, runtime_id, lane).await });
         }
     }
 
@@ -439,79 +437,52 @@ async fn runtime_activity(
     })
 }
 
-async fn runtime_worker(state: AppState, runtime_id: String) {
+/// How many observations of one runtime core follows at once. More wait in
+/// the queue; messages are unaffected.
+const OBSERVATION_WORKERS: u32 = 4;
+
+/// Runs a runtime's turns of one lane until shutdown. An idle worker waits
+/// for core to signal new work instead of polling.
+async fn runtime_worker(state: AppState, runtime_id: String, lane: Lane) {
+    // A runtime that gave an observation no answer is asked again after a
+    // pause, not in a tight loop.
+    let backoff = match lane {
+        Lane::Messages => Duration::from_secs(1),
+        Lane::Observations => Duration::from_secs(5),
+    };
+    let mut work = state.core.work(lane);
     loop {
-        let delay = match run_next_turn(&state, &runtime_id, async |runtime, token, request| {
-            call_runtime(&state.client, runtime, token, request).await
-        })
+        work.mark_unchanged();
+        match run_next(
+            &state,
+            &runtime_id,
+            lane,
+            async |runtime, token, request| {
+                call_runtime(&state.client, runtime, token, request).await
+            },
+        )
         .await
         {
-            Ok(WorkerStep::Advanced) => continue,
-            Ok(WorkerStep::Idle) => Duration::from_millis(100),
-            Ok(WorkerStep::Backoff) => Duration::from_secs(1),
-            Err(failure) => {
-                warn!(runtime_id, error = %failure, "runtime worker failed");
-                Duration::from_secs(1)
+            Ok(WorkerStep::Advanced) => {}
+            Ok(WorkerStep::Idle) => {
+                // The sender lives as long as `state`, which this task holds.
+                let _ = work.changed().await;
             }
-        };
-        tokio::time::sleep(delay).await;
+            Ok(WorkerStep::Backoff) => tokio::time::sleep(backoff).await,
+            Err(failure) => {
+                warn!(runtime_id, ?lane, error = %failure, "runtime worker failed");
+                tokio::time::sleep(backoff).await;
+            }
+        }
     }
-}
-
-/// How many observations of one runtime core follows at once. More wait in
-/// the queue; executable turns are unaffected.
-const OBSERVATION_WORKERS: usize = 4;
-
-async fn observation_worker(state: AppState, runtime_id: String) {
-    loop {
-        let delay =
-            match run_next_observation(&state, &runtime_id, async |runtime, token, request| {
-                call_runtime(&state.client, runtime, token, request).await
-            })
-            .await
-            {
-                Ok(WorkerStep::Advanced) => continue,
-                Ok(WorkerStep::Idle) => Duration::from_millis(500),
-                // An observation asked again waits a little, so a runtime that is
-                // down is not asked in a tight loop.
-                Ok(WorkerStep::Backoff) => Duration::from_secs(5),
-                Err(failure) => {
-                    warn!(runtime_id, error = %failure, "observation worker failed");
-                    Duration::from_secs(5)
-                }
-            };
-        tokio::time::sleep(delay).await;
-    }
-}
-
-/// One observation step; see [`run_next_turn`].
-async fn run_next_observation(
-    state: &AppState,
-    runtime_id: &str,
-    submit: impl AsyncFnOnce(
-        &Provider,
-        &str,
-        RuntimeTurnRequest,
-    ) -> Result<RuntimeTurnResponse, TurnFailure>,
-) -> Result<WorkerStep> {
-    let runtime = state.config.provider(runtime_id, ProviderRole::Runtime)?;
-    if !runtime.enabled {
-        return Ok(WorkerStep::Backoff);
-    }
-    let token = runtime_token(&state.config, runtime)?;
-    state
-        .core
-        .observe_next(runtime_id, async |request| {
-            submit(runtime, &token, request).await
-        })
-        .await
 }
 
 /// One worker iteration without idle or availability waits. Only the runtime
 /// call is substitutable; claims and outcome writes use the real database.
-async fn run_next_turn(
+async fn run_next(
     state: &AppState,
     runtime_id: &str,
+    lane: Lane,
     submit: impl AsyncFnOnce(
         &Provider,
         &str,
@@ -525,7 +496,7 @@ async fn run_next_turn(
     let token = runtime_token(&state.config, runtime)?;
     state
         .core
-        .execute_next(runtime_id, async |request| {
+        .run_next(runtime_id, lane, async |request| {
             submit(runtime, &token, request).await
         })
         .await

@@ -1481,9 +1481,7 @@ it("answers when the parent run completes and delivers the delegated report in a
   });
 
   // Core queues the follow-up turn with the cursor; it dispatches nothing and waits.
-  const followUp = runtime.executeTurn(
-    turn("turn-1-report", "", { native: { follow_up: reply.follow_up } }),
-  );
+  const followUp = runtime.executeTurn(turn("turn-1-report", "", { follow_up: reply.follow_up }));
   await until(() => runtime.activity("turn-1-report", "discord-private")?.work?.items.length === 1);
   expect(runtime.activity("turn-1-report", "discord-private")?.phase).toBe("waiting");
   expect(runtime.activity("turn-1-report", "discord-private")?.work?.items).toEqual([
@@ -1505,7 +1503,7 @@ it("stops nothing when a follow-up turn is cancelled: the continuation is T3's",
   const reply = await first;
   const controller = new AbortController();
   const followUp = runtime.executeTurn(
-    turn("turn-1-report", "", { native: { follow_up: reply.follow_up } }),
+    turn("turn-1-report", "", { follow_up: reply.follow_up }),
     controller.signal,
   );
   const continuation = fake.finishDelegation(threadId, child.id);
@@ -1525,9 +1523,7 @@ it("runs the conversation's next message while a follow-up turn still observes d
   const child = fake.delegate(threadId, parent.id, { title: "slow child" });
   answer(parent, "DELEGATED");
   const reply = await first;
-  const followUp = runtime.executeTurn(
-    turn("turn-1-report", "", { native: { follow_up: reply.follow_up } }),
-  );
+  const followUp = runtime.executeTurn(turn("turn-1-report", "", { follow_up: reply.follow_up }));
   await until(() => runtime.activity("turn-1-report", "discord-private")?.work?.items.length === 1);
   // The next message reaches T3 and is answered while the child still works.
   const next = runtime.executeTurn(turn("turn-2", "anything else?"));
@@ -1549,9 +1545,7 @@ it("says where a child's result went when T3 delivers it into the next message's
   const child = fake.delegate(threadId, parent.id, { title: "child" });
   answer(parent, "DELEGATED");
   const reply = await first;
-  const followUp = runtime.executeTurn(
-    turn("turn-1-report", "", { native: { follow_up: reply.follow_up } }),
-  );
+  const followUp = runtime.executeTurn(turn("turn-1-report", "", { follow_up: reply.follow_up }));
   await until(() => runtime.activity("turn-1-report", "discord-private")?.work?.items.length === 1);
   const next = runtime.executeTurn(turn("turn-2", "anything else?"));
   const own = await started("turn-2");
@@ -1573,7 +1567,7 @@ it("resumes a follow-up after its observation was lost, reporting what T3 delive
   const slow = fake.delegate(threadId, parent.id, { title: "slow child" });
   answer(parent, "DELEGATED");
   const reply = await first;
-  const cursor = { native: { follow_up: reply.follow_up } };
+  const cursor = { follow_up: reply.follow_up };
   // Core loses the observation (a restart); nothing observes while T3 works.
   const controller = new AbortController();
   const lost = runtime.executeTurn(turn("turn-1-report", "", cursor), controller.signal);
@@ -1619,7 +1613,7 @@ it("says so when a resumed follow-up's report is older than the window it reads"
   }
   fake.messageWindow = 2;
   await expect(
-    runtime.executeTurn(turn("turn-1-report", "", { native: { follow_up: reply.follow_up } })),
+    runtime.executeTurn(turn("turn-1-report", "", { follow_up: reply.follow_up })),
   ).rejects.toMatchObject({
     status: 502,
     message:

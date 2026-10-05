@@ -9,5 +9,5 @@ mod resources;
 mod runtime_client;
 
 pub use attachments::Reconciled;
-pub use engine::{Core, CoreError, CoreOptions, RuntimeProvider, TurnFailure, WorkerStep};
+pub use engine::{Core, CoreError, CoreOptions, Lane, RuntimeProvider, TurnFailure, WorkerStep};
 pub use runtime_client::RuntimeClient;

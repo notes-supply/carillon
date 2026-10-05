@@ -15,7 +15,7 @@ export interface TurnResponse {
   /**
    * Native work linked to this turn will continue the conversation after
    * this answer: core queues a follow-up turn for the same conversation
-   * whose request carries this runtime-owned cursor as `native.follow_up`.
+   * (an observation) whose request carries this runtime-owned cursor as `follow_up`.
    */
   readonly follow_up?: unknown;
 }

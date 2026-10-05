@@ -14,8 +14,10 @@
 //!
 //! - One accepted event is one turn row, keyed by (interface, event); the row
 //!   carries what the event said and what happened to it.
-//! - Turns in one conversation (interface, agent, audience) run in acceptance
-//!   order. Only queued or running predecessors block later messages.
+//! - Messages in one conversation (interface, agent, audience) run in
+//!   acceptance order. Only queued or running predecessors block later
+//!   messages. An observation (a turn whose `follow_up_json` holds a
+//!   runtime's cursor) neither waits for messages nor holds them back.
 //!   Session continuity belongs to the runtime.
 //! - A delivery row exists exactly when its turn left `running`; completion
 //!   output and the delivery intent commit in one
@@ -43,17 +45,13 @@ use serde_json::Value;
 
 use carillon_protocol::model::{
     ActiveTurn, Delivery, DeliveryOutcome, DeliveryState, EventReceipt, ExternalEvent,
-    NATIVE_FOLLOW_UP, RuntimeTurnResponse, StateCounts, TurnInspection, TurnState, TurnSummary,
+    RuntimeTurnResponse, StateCounts, TurnInspection, TurnState, TurnSummary,
 };
 
-use crate::attachments::{Capture, CapturedFile};
-
-/// SQL condition, over a `turns` row, for an observation: a turn core queued
-/// itself to carry a runtime's follow-up cursor (`native.follow_up`, which
-/// no interface may set).
-const OBSERVATION: &str = "json_type(native_json, '$.follow_up') IS NOT NULL";
-const OBSERVATION_T: &str = "json_type(t.native_json, '$.follow_up') IS NOT NULL";
-const OBSERVATION_EARLIER: &str = "json_type(earlier.native_json, '$.follow_up') IS NOT NULL";
+use crate::{
+    attachments::{Capture, CapturedFile},
+    engine::Lane,
+};
 
 #[derive(Clone)]
 pub struct Database {
@@ -74,6 +72,8 @@ pub struct ClaimedTurn {
     pub input: String,
     pub resource_snapshot_id: String,
     pub native: Value,
+    /// The runtime's cursor, on an observation; `None` on a message.
+    pub follow_up: Option<Value>,
     pub attachments: Vec<CapturedFile>,
 }
 
@@ -256,6 +256,7 @@ impl Database {
                 feedback_target_id TEXT NOT NULL,
                 input TEXT NOT NULL,
                 native_json TEXT NOT NULL,
+                follow_up_json TEXT,
                 runtime_id TEXT NOT NULL,
                 provider_snapshot_json TEXT NOT NULL,
                 resource_snapshot_id TEXT NOT NULL,
@@ -268,6 +269,14 @@ impl Database {
             );
             CREATE INDEX IF NOT EXISTS turns_conversation
                 ON turns(interface_id, agent_id, audience_id, acceptance_sequence);
+            CREATE INDEX IF NOT EXISTS turns_queued
+                ON turns(runtime_id, acceptance_sequence) WHERE state = 'queued';
+            CREATE INDEX IF NOT EXISTS turns_conversation_unfinished
+                ON turns(interface_id, agent_id, audience_id, acceptance_sequence)
+                WHERE state IN ('queued', 'running');
+            CREATE INDEX IF NOT EXISTS turns_interface_unfinished
+                ON turns(interface_id, acceptance_sequence)
+                WHERE state IN ('queued', 'running');
             CREATE TABLE IF NOT EXISTS deliveries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 turn_id TEXT NOT NULL UNIQUE,
@@ -281,6 +290,8 @@ impl Database {
                 updated_at INTEGER NOT NULL,
                 FOREIGN KEY(turn_id) REFERENCES turns(id)
             );
+            CREATE INDEX IF NOT EXISTS deliveries_open
+                ON deliveries(interface_id, id) WHERE state IN ('pending', 'delivering');
             CREATE TABLE IF NOT EXISTS turn_attachments (
                 turn_id TEXT NOT NULL REFERENCES turns(id),
                 ordinal INTEGER NOT NULL,
@@ -407,53 +418,40 @@ impl Database {
         })
     }
 
-    /// Claims the oldest eligible queued turn for a runtime and marks it
-    /// running. A turn is eligible only when its conversation has no earlier
-    /// queued or running turn, which serializes each conversation FIFO.
-    /// Interrupted turns are terminal and never hold later messages.
-    /// Claims the oldest executable turn of a conversation with no earlier
-    /// executable turn queued or running. Observations neither wait for
-    /// executable turns nor hold them back (see [`Database::claim_observation`]).
-    pub fn claim_turn(&self, runtime_id: &str) -> Result<Option<ClaimedTurn>> {
-        self.claim(
-            &format!(
-                "SELECT id, interface_id, agent_id, audience_id, runtime_id,
-                    target_id, feedback_target_id, input, resource_snapshot_id, native_json
-             FROM turns t
-             WHERE runtime_id = ?1 AND state = 'queued' AND NOT {OBSERVATION_T}
-               AND NOT EXISTS (
-                 SELECT 1 FROM turns earlier
-                 WHERE earlier.interface_id = t.interface_id
-                   AND earlier.agent_id = t.agent_id
-                   AND earlier.audience_id = t.audience_id
-                   AND earlier.state IN ('queued', 'running')
-                   AND earlier.acceptance_sequence < t.acceptance_sequence
-                   AND NOT {OBSERVATION_EARLIER}
-               )
-             ORDER BY acceptance_sequence LIMIT 1"
-            ),
-            runtime_id,
-        )
-    }
-
-    /// Claims the oldest queued observation: a turn core queued to carry the
-    /// report of work an earlier turn left running. It only reads native
-    /// records, so it runs beside the conversation's executable turns, in a
-    /// lane of its own.
-    pub fn claim_observation(&self, runtime_id: &str) -> Result<Option<ClaimedTurn>> {
-        self.claim(
-            &format!(
-                "SELECT id, interface_id, agent_id, audience_id, runtime_id,
-                    target_id, feedback_target_id, input, resource_snapshot_id, native_json
-             FROM turns t
-             WHERE runtime_id = ?1 AND state = 'queued' AND {OBSERVATION_T}
-             ORDER BY acceptance_sequence LIMIT 1"
-            ),
-            runtime_id,
-        )
-    }
-
-    fn claim(&self, query: &str, runtime_id: &str) -> Result<Option<ClaimedTurn>> {
+    /// Claims a runtime's oldest claimable turn of a lane and marks it
+    /// running.
+    ///
+    /// A message is claimable only when its conversation has no earlier
+    /// message queued or running, which serializes each conversation FIFO.
+    /// Interrupted turns are terminal and never hold later messages. An
+    /// observation only reads native records, so it neither waits for
+    /// messages nor holds them back.
+    pub fn claim(&self, runtime_id: &str, lane: Lane) -> Result<Option<ClaimedTurn>> {
+        let query = match lane {
+            Lane::Messages => {
+                "SELECT id, interface_id, agent_id, audience_id, runtime_id, target_id,
+                    feedback_target_id, input, resource_snapshot_id, native_json, follow_up_json
+                 FROM turns t
+                 WHERE runtime_id = ?1 AND state = 'queued' AND follow_up_json IS NULL
+                   AND NOT EXISTS (
+                     SELECT 1 FROM turns earlier
+                     WHERE earlier.interface_id = t.interface_id
+                       AND earlier.agent_id = t.agent_id
+                       AND earlier.audience_id = t.audience_id
+                       AND earlier.state IN ('queued', 'running')
+                       AND earlier.acceptance_sequence < t.acceptance_sequence
+                       AND earlier.follow_up_json IS NULL
+                   )
+                 ORDER BY acceptance_sequence LIMIT 1"
+            }
+            Lane::Observations => {
+                "SELECT id, interface_id, agent_id, audience_id, runtime_id, target_id,
+                    feedback_target_id, input, resource_snapshot_id, native_json, follow_up_json
+                 FROM turns
+                 WHERE runtime_id = ?1 AND state = 'queued' AND follow_up_json IS NOT NULL
+                 ORDER BY acceptance_sequence LIMIT 1"
+            }
+        };
         let mut connection = self.connect()?;
         let transaction = write_transaction(&mut connection)?;
         let turn = transaction
@@ -469,6 +467,7 @@ impl Database {
                     input: row.get(7)?,
                     resource_snapshot_id: row.get(8)?,
                     native: json_column(row, 9)?,
+                    follow_up: optional_json_column(row, 10)?,
                     attachments: Vec::new(),
                 })
             })
@@ -549,8 +548,8 @@ impl Database {
     /// delivery intent, atomically. A response with a follow-up cursor also
     /// queues, in the same transaction, the observation that will carry the
     /// report of the work this turn left running: same conversation, target
-    /// and runtime, with the cursor as its only `native` fact. It does not
-    /// hold back the conversation's later messages.
+    /// and runtime, carrying the cursor and nothing an interface sent. It
+    /// does not hold back the conversation's later messages.
     pub fn complete_turn(&self, turn: &ClaimedTurn, response: &RuntimeTurnResponse) -> Result<()> {
         let mut connection = self.connect()?;
         let transaction = write_transaction(&mut connection)?;
@@ -567,16 +566,17 @@ impl Database {
         if let Some(cursor) = &response.follow_up {
             transaction.execute(
                 "INSERT INTO turns(id, interface_id, event_id, agent_id, audience_id, user_id,
-                     target_id, feedback_target_id, input, native_json, runtime_id,
-                     provider_snapshot_json, resource_snapshot_id, state, accepted_at)
+                     target_id, feedback_target_id, input, native_json, follow_up_json,
+                     runtime_id, provider_snapshot_json, resource_snapshot_id, state,
+                     accepted_at)
                  SELECT ?2, interface_id, 'follow-up:' || id, agent_id, audience_id, user_id,
-                     target_id, feedback_target_id, '', ?3, runtime_id,
+                     target_id, feedback_target_id, '', '{}', ?3, runtime_id,
                      provider_snapshot_json, resource_snapshot_id, 'queued', ?4
                  FROM turns WHERE id = ?1",
                 params![
                     turn.turn_id,
                     uuid::Uuid::now_v7().to_string(),
-                    serde_json::to_string(&serde_json::json!({ NATIVE_FOLLOW_UP: cursor }))?,
+                    serde_json::to_string(cursor)?,
                     now,
                 ],
             )?;
@@ -629,37 +629,34 @@ impl Database {
         Ok(())
     }
 
-    /// Marks every executable turn still recorded as running as interrupted,
-    /// and returns running observations to the queue. Run at startup: an
-    /// executable turn that was running when core stopped may or may not have
-    /// executed, and Carillon does not infer that repeating it is safe; an
-    /// observation only reads native records, so it is asked again and
-    /// delivers its report once, when it completes.
+    /// Marks every message still recorded as running as interrupted, and
+    /// returns running observations to the queue. Run at startup: a message
+    /// that was running when core stopped may or may not have executed, and
+    /// Carillon does not infer that repeating it is safe; an observation
+    /// only reads native records, so it is asked again and delivers its
+    /// report once, when it completes.
     pub fn recover_running_turns(&self) -> Result<usize> {
         let mut connection = self.connect()?;
         let transaction = write_transaction(&mut connection)?;
         let now = timestamp()?;
         transaction.execute(
-            &format!(
-                "INSERT INTO deliveries(turn_id, interface_id, target_id, feedback_target_id,
-                     content, state, updated_at)
-                 SELECT id, interface_id, target_id, feedback_target_id, ?1, 'pending', ?2
-                 FROM turns t WHERE state = 'running' AND NOT {OBSERVATION_T}"
-            ),
+            "INSERT INTO deliveries(turn_id, interface_id, target_id, feedback_target_id,
+                 content, state, updated_at)
+             SELECT id, interface_id, target_id, feedback_target_id, ?1, 'pending', ?2
+             FROM turns WHERE state = 'running' AND follow_up_json IS NULL",
             params![
                 "Carillon restarted during that turn. It was not run again. Send another message to continue in this conversation.",
                 now,
             ],
         )?;
         let recovered = transaction.execute(
-            &format!(
-                "UPDATE turns SET state = 'interrupted', error = ?1, finished_at = ?2
-                 WHERE state = 'running' AND NOT {OBSERVATION}"
-            ),
+            "UPDATE turns SET state = 'interrupted', error = ?1, finished_at = ?2
+             WHERE state = 'running' AND follow_up_json IS NULL",
             params!["core restarted while the runtime was executing", now],
         )?;
         transaction.execute(
-            &format!("UPDATE turns SET state = 'queued' WHERE state = 'running' AND {OBSERVATION}"),
+            "UPDATE turns SET state = 'queued'
+             WHERE state = 'running' AND follow_up_json IS NOT NULL",
             [],
         )?;
         transaction.commit()?;
@@ -704,8 +701,8 @@ impl Database {
                 "SELECT id, turn_id, target_id, feedback_target_id, content,
                         (SELECT state FROM turns WHERE turns.id = deliveries.turn_id)
                  FROM deliveries
-                 WHERE interface_id = ?1
-                   AND (state = 'pending' OR (state = 'delivering' AND claim_owner = ?2))
+                 WHERE interface_id = ?1 AND state IN ('pending', 'delivering')
+                   AND (state = 'pending' OR claim_owner = ?2)
                  ORDER BY CASE state WHEN 'delivering' THEN 0 ELSE 1 END, id LIMIT 1",
                 params![interface_id, owner],
                 |row| {
@@ -953,8 +950,20 @@ fn enqueue_delivery(
 }
 
 fn json_column<T: DeserializeOwned>(row: &Row<'_>, index: usize) -> rusqlite::Result<T> {
-    let text: String = row.get(index)?;
-    serde_json::from_str(&text).map_err(|error| {
+    parse_json(index, &row.get::<_, String>(index)?)
+}
+
+fn optional_json_column<T: DeserializeOwned>(
+    row: &Row<'_>,
+    index: usize,
+) -> rusqlite::Result<Option<T>> {
+    row.get::<_, Option<String>>(index)?
+        .map(|text| parse_json(index, &text))
+        .transpose()
+}
+
+fn parse_json<T: DeserializeOwned>(index: usize, text: &str) -> rusqlite::Result<T> {
+    serde_json::from_str(text).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(index, Type::Text, Box::new(error))
     })
 }
@@ -1036,7 +1045,7 @@ mod tests {
         Ok(directory)
     }
 
-    use super::Database;
+    use super::{Database, Lane};
     use carillon_protocol::model::{
         DeliveryOutcome, DeliveryState, EventReceipt, ExternalEvent, RuntimeTurnResponse, TurnState,
     };
@@ -1072,7 +1081,9 @@ mod tests {
         let database = Database::create(&directory.path().join("state.sqlite3"))?;
         accept(&database, "one", "conversation")?;
         let next = accept(&database, "two", "conversation")?;
-        let turn = database.claim_turn("runtime")?.context("missing turn")?;
+        let turn = database
+            .claim("runtime", Lane::Messages)?
+            .context("missing turn")?;
         database.interrupt_turn(&turn, "runtime disconnected", None)?;
         let claim = database
             .claim_delivery("discord", "live")?
@@ -1080,12 +1091,12 @@ mod tests {
         assert_eq!(claim.turn_state, TurnState::Interrupted);
         assert_eq!(
             database
-                .claim_turn("runtime")?
+                .claim("runtime", Lane::Messages)?
                 .context("next message blocked")?
                 .turn_id,
             next.turn_id
         );
-        assert!(database.claim_turn("runtime")?.is_none());
+        assert!(database.claim("runtime", Lane::Messages)?.is_none());
         assert!(database.acknowledge_delivery(
             "discord",
             claim.id,
@@ -1206,7 +1217,7 @@ mod tests {
         assert_eq!(first.state, TurnState::Queued);
 
         let turn = database
-            .claim_turn("runtime")?
+            .claim("runtime", Lane::Messages)?
             .context("turn was not queued")?;
         database.complete_turn(
             &turn,
@@ -1232,12 +1243,13 @@ mod tests {
         let database = Database::create(&directory.path().join("state.sqlite3"))?;
         let (first, cursor) = delegated(&database)?;
         // The report is an observation: executable claims never take it.
-        assert!(database.claim_turn("runtime")?.is_none());
+        assert!(database.claim("runtime", Lane::Messages)?.is_none());
         let report = database
-            .claim_observation("runtime")?
+            .claim("runtime", Lane::Observations)?
             .context("observation missing")?;
         assert_eq!(report.input, "");
-        assert_eq!(report.native, json!({ "follow_up": cursor }));
+        assert_eq!(report.follow_up, Some(cursor));
+        assert_eq!(report.native, json!({}));
         assert_eq!(
             (
                 report.audience_id.as_str(),
@@ -1261,12 +1273,12 @@ mod tests {
         accept(&database, "two", "conversation")?;
         accept(&database, "three", "conversation")?;
         let second = database
-            .claim_turn("runtime")?
+            .claim("runtime", Lane::Messages)?
             .context("second turn missing")?;
-        assert!(database.claim_turn("runtime")?.is_none());
+        assert!(database.claim("runtime", Lane::Messages)?.is_none());
         complete(&database, &second, "second reply")?;
-        assert!(database.claim_turn("runtime")?.is_some());
-        assert!(database.claim_observation("runtime")?.is_none());
+        assert!(database.claim("runtime", Lane::Messages)?.is_some());
+        assert!(database.claim("runtime", Lane::Observations)?.is_none());
         Ok(())
     }
 
@@ -1276,17 +1288,17 @@ mod tests {
         let database = Database::create(&directory.path().join("state.sqlite3"))?;
         delegated(&database)?;
         let report = database
-            .claim_observation("runtime")?
+            .claim("runtime", Lane::Observations)?
             .context("observation missing")?;
         accept(&database, "two", "conversation")?;
         database
-            .claim_turn("runtime")?
+            .claim("runtime", Lane::Messages)?
             .context("second turn missing")?;
         // A restart returns the running observation to its queue; the
         // executable turn that was running is interrupted, as ever.
         assert_eq!(database.recover_running_turns()?, 1);
         let resumed = database
-            .claim_observation("runtime")?
+            .claim("runtime", Lane::Observations)?
             .context("observation not resumed")?;
         assert_eq!(resumed.turn_id, report.turn_id);
         complete(&database, &resumed, "the report")?;
@@ -1316,7 +1328,7 @@ mod tests {
                 .iter()
                 .any(|content| content.starts_with("Carillon restarted"))
         );
-        assert!(database.claim_observation("runtime")?.is_none());
+        assert!(database.claim("runtime", Lane::Observations)?.is_none());
         Ok(())
     }
 
@@ -1324,7 +1336,7 @@ mod tests {
     fn delegated(database: &Database) -> Result<(super::ClaimedTurn, serde_json::Value)> {
         accept(database, "one", "conversation")?;
         let first = database
-            .claim_turn("runtime")?
+            .claim("runtime", Lane::Messages)?
             .context("first turn missing")?;
         let cursor = json!({"message": "native-message", "after": 1});
         database.complete_turn(
@@ -1366,7 +1378,7 @@ mod tests {
         let database = Database::create(&directory.path().join("state.sqlite3"))?;
         accept(&database, "one", "conversation")?;
         let first = database
-            .claim_turn("runtime")?
+            .claim("runtime", Lane::Messages)?
             .context("first turn missing")?;
         database.complete_turn(
             &first,
@@ -1378,7 +1390,7 @@ mod tests {
         )?;
         accept(&database, "two", "conversation")?;
         let second = database
-            .claim_turn("runtime")?
+            .claim("runtime", Lane::Messages)?
             .context("second turn missing")?;
         // Delivery insertion follows the turn update. Fail at that last write,
         // using real SQLite transaction semantics.
@@ -1446,11 +1458,15 @@ mod tests {
             let recent = database.recent_turns(None, 10)?;
             assert_eq!(recent[0].event_id, "two");
             assert_eq!(recent[1].event_id, "one");
-            let first = database.claim_turn("runtime")?.context("first missing")?;
+            let first = database
+                .claim("runtime", Lane::Messages)?
+                .context("first missing")?;
             assert_eq!(first.turn_id, "z-first");
-            assert!(database.claim_turn("runtime")?.is_none());
+            assert!(database.claim("runtime", Lane::Messages)?.is_none());
             database.interrupt_turn(&first, "interrupted", None)?;
-            let second = database.claim_turn("runtime")?.context("second missing")?;
+            let second = database
+                .claim("runtime", Lane::Messages)?
+                .context("second missing")?;
             assert_eq!(second.turn_id, "a-second");
         }
         Ok(())
@@ -1461,14 +1477,19 @@ mod tests {
         let directory = tempdir()?;
         let database = Database::create(&directory.path().join("state.sqlite3"))?;
         accept(&database, "one", "conversation")?;
-        database.claim_turn("runtime")?.context("missing turn")?;
+        database
+            .claim("runtime", Lane::Messages)?
+            .context("missing turn")?;
         assert_eq!(database.recover_running_turns()?, 1);
         assert_eq!(database.recover_running_turns()?, 0);
-        assert!(database.claim_turn("runtime")?.is_none());
+        assert!(database.claim("runtime", Lane::Messages)?.is_none());
         assert_eq!(database.turn_counts()?.interrupted, 1);
         let next = accept(&database, "two", "conversation")?;
         assert_eq!(
-            database.claim_turn("runtime")?.context("blocked")?.turn_id,
+            database
+                .claim("runtime", Lane::Messages)?
+                .context("blocked")?
+                .turn_id,
             next.turn_id
         );
         Ok(())
@@ -1483,7 +1504,7 @@ mod tests {
 
         for output in ["first reply", "second reply"] {
             let turn = database
-                .claim_turn("runtime")?
+                .claim("runtime", Lane::Messages)?
                 .context("turn was not queued")?;
             database.complete_turn(
                 &turn,
@@ -1546,7 +1567,7 @@ mod tests {
 
         accept(&database, "uncertain", "one")?;
         let uncertain = database
-            .claim_turn("runtime")?
+            .claim("runtime", Lane::Messages)?
             .context("uncertain turn was not queued")?;
         database.interrupt_turn(&uncertain, "ambiguous", None)?;
         assert!(
@@ -1558,7 +1579,7 @@ mod tests {
 
         accept(&database, "requeued", "two")?;
         let requeued = database
-            .claim_turn("runtime")?
+            .claim("runtime", Lane::Messages)?
             .context("requeued turn was not queued")?;
         database.requeue_turn(&requeued)?;
         assert!(database.requeue_turn(&requeued).is_err());
@@ -1569,7 +1590,7 @@ mod tests {
         );
 
         let requeued = database
-            .claim_turn("runtime")?
+            .claim("runtime", Lane::Messages)?
             .context("requeued turn could not be claimed again")?;
         let response = RuntimeTurnResponse {
             correlation_id: requeued.turn_id.clone(),

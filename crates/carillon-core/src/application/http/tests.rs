@@ -95,7 +95,19 @@ async fn run_next_turn(
         RuntimeTurnRequest,
     ) -> Result<RuntimeTurnResponse, TurnFailure>,
 ) -> Result<WorkerStep> {
-    super::run_next_turn(&configured(state), runtime_id, submit).await
+    super::run_next(&configured(state), runtime_id, Lane::Messages, submit).await
+}
+
+async fn run_next_observation(
+    state: &AppState,
+    runtime_id: &str,
+    submit: impl AsyncFnOnce(
+        &Provider,
+        &str,
+        RuntimeTurnRequest,
+    ) -> Result<RuntimeTurnResponse, TurnFailure>,
+) -> Result<WorkerStep> {
+    super::run_next(&configured(state), runtime_id, Lane::Observations, submit).await
 }
 
 async fn accept(state: &AppState, id: &str, audience: &str) -> Result<EventReceipt> {
@@ -567,7 +579,7 @@ async fn occupied_listener_leaves_accepted_and_running_work_untouched() -> Resul
     state
         .core
         .database
-        .claim_turn("test-runtime")?
+        .claim("test-runtime", Lane::Messages)?
         .context("missing running turn")?;
     let queued = accept(&state, "queued", "other").await?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -851,7 +863,7 @@ async fn follow_up_turns_carry_only_the_runtime_cursor_beside_later_messages() -
     // conversation runs meanwhile, while its executable lane ignores it.
     let later = accept(&state, "two", "conversation").await?;
     run_next_turn(&state, "test-runtime", async move |_, _, request| {
-        assert!(request.native.get("follow_up").is_none());
+        assert!(request.follow_up.is_none());
         Ok(completed(request))
     })
     .await?;
@@ -891,7 +903,8 @@ async fn follow_up_turns_carry_only_the_runtime_cursor_beside_later_messages() -
     assert_ne!(request.correlation_id, first.turn_id);
     assert_eq!(request.input, "");
     assert_eq!(request.audience_id, "conversation");
-    assert_eq!(request.native, serde_json::json!({ "follow_up": cursor }));
+    assert_eq!(request.follow_up, Some(cursor));
+    assert_eq!(request.native, serde_json::json!({}));
     assert!(request.attachments.is_empty() && request.unanswered.is_empty());
     let mut contents = Vec::new();
     while let Some(delivery) = state
@@ -958,7 +971,8 @@ async fn an_interface_cannot_pose_as_cores_follow_up() -> Result<()> {
         http::header::AUTHORIZATION,
         format!("Bearer {}", state.config.credential("test-interface")?).parse()?,
     );
-    let refused = accept_event(
+    let native = serde_json::json!({ "follow_up": {"message": "x", "after": 0} });
+    let _receipt = accept_event(
         State(configured(&state)),
         headers,
         Json(ExternalEvent {
@@ -969,15 +983,69 @@ async fn an_interface_cannot_pose_as_cores_follow_up() -> Result<()> {
             delivery_target_id: "test-destination".to_owned(),
             feedback_target_id: "test-feedback".to_owned(),
             content: "hello".to_owned(),
-            native: serde_json::json!({ "follow_up": {"message": "x", "after": 0} }),
+            native: native.clone(),
             attachments: None,
         }),
     )
-    .await;
+    .await
+    .map_err(|error| anyhow!(error.message))?;
+    // Native data is the interface's own: the event is a message like any
+    // other, never an observation, and carries no cursor.
     assert_eq!(
-        refused.err().map(|error| error.status),
-        Some(StatusCode::BAD_REQUEST)
+        run_next_observation(&state, "test-runtime", async |_, _, _| {
+            Err(TurnFailure::Uncertain(anyhow!("ran as an observation")))
+        })
+        .await?,
+        WorkerStep::Idle
     );
+    run_next_turn(&state, "test-runtime", async move |_, _, request| {
+        assert_eq!(
+            (request.native.clone(), request.follow_up.clone()),
+            (native, None)
+        );
+        Ok(completed(request))
+    })
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn workers_hear_of_claimable_turns_in_their_own_lane() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    let mut messages = state.core.work(Lane::Messages);
+    let mut observations = state.core.work(Lane::Observations);
+    let mut changed = || {
+        let seen = (messages.has_changed().ok(), observations.has_changed().ok());
+        messages.mark_unchanged();
+        observations.mark_unchanged();
+        seen
+    };
+    accept(&state, "one", "conversation").await?;
+    assert_eq!(changed(), (Some(true), Some(false)));
+    // A turn the runtime never received waits for its own worker's backoff;
+    // waking the others would ask a down runtime in a tight loop.
+    run_next_turn(&state, "test-runtime", async |_, _, _| {
+        Err(TurnFailure::Retry(anyhow!("connection refused")))
+    })
+    .await?;
+    assert_eq!(changed(), (Some(false), Some(false)));
+    // A finished message frees its conversation's next one, and its cursor
+    // queues an observation.
+    run_next_turn(&state, "test-runtime", async |_, _, request| {
+        Ok(RuntimeTurnResponse {
+            follow_up: Some(serde_json::json!({"message": "m", "after": 1})),
+            ..completed(request)
+        })
+    })
+    .await?;
+    assert_eq!(changed(), (Some(true), Some(true)));
+    // An observation holds back no message.
+    run_next_observation(&state, "test-runtime", async |_, _, request| {
+        Ok(completed(request))
+    })
+    .await?;
+    assert_eq!(changed(), (Some(false), Some(false)));
     Ok(())
 }
 
@@ -993,11 +1061,16 @@ async fn concurrent_workers_progress_other_conversations_and_keep_each_in_order(
     let (started, running) = tokio::sync::oneshot::channel::<String>();
     let worker = configured(&state);
     let long = tokio::spawn(async move {
-        super::run_next_turn(&worker, "test-runtime", async move |_, _, request| {
-            let _ = started.send(request.correlation_id.clone());
-            let _ = held.await;
-            Ok(completed(request))
-        })
+        super::run_next(
+            &worker,
+            "test-runtime",
+            Lane::Messages,
+            async move |_, _, request| {
+                let _ = started.send(request.correlation_id.clone());
+                let _ = held.await;
+                Ok(completed(request))
+            },
+        )
         .await
     });
     assert_eq!(running.await?, first.turn_id);
@@ -1228,7 +1301,7 @@ async fn startup_drains_queued_nondefault_runtime_without_replaying_running_work
     state
         .core
         .database
-        .claim_turn("test-runtime")?
+        .claim("test-runtime", Lane::Messages)?
         .context("missing claim")?;
     let blocked = accept(&state, "successor", "blocked").await?;
     let queued = accept(&state, "queued", "old-conversation").await?;
@@ -1723,7 +1796,7 @@ async fn a_closing_runtime_gives_no_answer_rather_than_a_failure() -> Result<()>
     let turn = state
         .core
         .database
-        .claim_turn("test-runtime")?
+        .claim("test-runtime", Lane::Messages)?
         .context("turn missing")?;
     let mut runtime = state
         .config
@@ -1755,7 +1828,7 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
     let turn = state
         .core
         .database
-        .claim_turn("test-runtime")?
+        .claim("test-runtime", Lane::Messages)?
         .context("missing claim")?;
     let mut runtime = state
         .config

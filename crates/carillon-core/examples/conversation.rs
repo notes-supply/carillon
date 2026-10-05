@@ -1,6 +1,6 @@
 //! A complete durable conversation with no HTTP, Discord or model account.
 use anyhow::{Context as _, Result, ensure};
-use carillon_core::{Core, CoreOptions, RuntimeProvider, WorkerStep};
+use carillon_core::{Core, CoreOptions, Lane, RuntimeProvider, WorkerStep};
 use carillon_installation::config::AttachmentLimits;
 use carillon_protocol::model::{
     DeliveryAck, DeliveryOutcome, ExternalEvent, RuntimeTurnResponse, SelectedProvider, TurnState,
@@ -62,7 +62,7 @@ async fn conversation() -> Result<()> {
     );
     std::fs::write(resources.join("SYSTEM.md"), "Changed after acceptance")?;
     let step = core
-        .execute_next("echo", async |request| {
+        .run_next("echo", Lane::Messages, async |request| {
             // Opaque interface data is captured on acceptance, not supplied by a duplicate.
             assert_eq!(request.native, event.native);
             // This deterministic test runtime is deliberately not Pi. The snapshot is real.

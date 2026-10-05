@@ -71,16 +71,12 @@ export type CommandCatalog = Static<typeof CommandCatalogSchema>;
 
 /**
  * A turn's `native` metadata belongs to the interface that submitted it,
- * apart from two neutral keys: `intent: "command"`, set by an interface
+ * apart from one neutral key: `intent: "command"`, set by an interface
  * whose person invoked one of the runtime's own commands rather than
- * writing a message, and `follow_up`, set only by core on a turn it queued
- * itself to carry a runtime's follow-up cursor (see `RuntimeTurnResponse`).
+ * writing a message.
  */
 export function turnIntent(native: unknown): "command" | undefined {
   return isRecord(native) && native["intent"] === "command" ? "command" : undefined;
-}
-export function followUpCursor(native: unknown): unknown {
-  return isRecord(native) ? native["follow_up"] : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -227,5 +223,10 @@ export const RuntimeTurnRequestSchema = Type.Object({
    * carried yet, oldest first, which the runtime's conversation may not hold.
    */
   unanswered: Type.Optional(Type.Array(UnansweredTurnSchema, { maxItems: 100 })),
+  /**
+   * Present on an observation: a turn core queued itself to carry the report
+   * of native work an earlier turn started, with that turn's runtime cursor.
+   */
+  follow_up: Type.Optional(Type.Unknown()),
 });
 export type RuntimeTurnRequest = Static<typeof RuntimeTurnRequestSchema>;

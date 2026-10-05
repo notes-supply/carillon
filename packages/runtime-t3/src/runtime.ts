@@ -11,7 +11,6 @@
  * not confirm is reported as unconfirmed, never as stopped.
  */
 import {
-  followUpCursor,
   turnIntent,
   type CommandCatalog,
   type ModelQuery,
@@ -282,9 +281,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       // A follow-up turn only reads T3's records, so it runs beside the
       // conversation's turns rather than ahead of or behind them.
       return track(() =>
-        followUpCursor(request.native) === undefined
-          ? inThread(bindThread(request).threadId, run)
-          : run(),
+        request.follow_up === undefined ? inThread(bindThread(request).threadId, run) : run(),
       );
     },
     activity(correlationId, interfaceId) {
@@ -429,7 +426,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
 
   /** The follow-up cursor core carries back, checked: anything else is not a follow-up. */
   function followUpOf(request: TurnRequest): FollowUp | undefined {
-    const cursor = followUpCursor(request.native);
+    const cursor = request.follow_up;
     if (cursor === undefined) return undefined;
     if (!Check(FollowUpSchema, cursor))
       throw new ExplainedFailure(

@@ -215,6 +215,11 @@ pub struct RuntimeTurnRequest {
     /// recorded them, so the runtime makes sure it knows them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unanswered: Vec<UnansweredTurn>,
+    /// Present on an observation: a turn core queued itself to carry the
+    /// report of native work an earlier turn started, with the cursor that
+    /// turn's runtime answered with. An observation dispatches nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_up: Option<Value>,
 }
 
 /// An earlier turn's captured files, offered again to a later turn.
@@ -229,8 +234,8 @@ pub struct RuntimeTurnResponse {
     pub correlation_id: String,
     pub output: String,
     /// Native work linked to this turn will continue the conversation after
-    /// this answer. Core queues a follow-up turn for the same conversation
-    /// whose request carries this runtime-owned cursor in `native.follow_up`.
+    /// this answer. Core queues an observation for the same conversation
+    /// whose request carries this runtime-owned cursor as `follow_up`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follow_up: Option<Value>,
 }
@@ -240,9 +245,6 @@ pub struct RuntimeTurnResponse {
 pub const NATIVE_INTENT: &str = "intent";
 /// The value of [`NATIVE_INTENT`] for a command invocation.
 pub const INTENT_COMMAND: &str = "command";
-/// The neutral key of a turn's `native` metadata that only core sets, on a
-/// turn it queued itself, to carry a runtime's follow-up cursor.
-pub const NATIVE_FOLLOW_UP: &str = "follow_up";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Delivery {

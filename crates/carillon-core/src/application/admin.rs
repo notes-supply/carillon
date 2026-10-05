@@ -546,6 +546,7 @@ mod tests {
     use carillon_installation::config::{Config, LoadedConfig, ProviderRole, RELEASE_VERSION};
 
     use super::{backup, initialize, restore, set_provider};
+    use crate::Lane;
 
     fn initialize_test_installation(
         root: &Path,
@@ -1050,7 +1051,7 @@ mod tests {
                     None,
                 )?;
                 let expected_state = if uncertain {
-                    assert!(db.claim_turn("runtime-pi")?.is_some());
+                    assert!(db.claim("runtime-pi", Lane::Messages)?.is_some());
                     assert_eq!(db.recover_running_turns()?, 1);
                     TurnState::Interrupted
                 } else {
@@ -1195,7 +1196,7 @@ mod tests {
                 .await?;
             turns.push(receipt.turn_id);
         }
-        core.execute_next("runtime-pi", async |request| {
+        core.run_next("runtime-pi", Lane::Messages, async |request| {
             Ok(RuntimeTurnResponse {
                 output: "read it".to_owned(),
                 follow_up: None,
@@ -1240,7 +1241,7 @@ mod tests {
         let restored = LoadedConfig::load(&restore(&archive, &relocated)?)?;
         let restored_core = installed_core(&restored)?;
         restored_core
-            .execute_next("runtime-pi", async |request| {
+            .run_next("runtime-pi", Lane::Messages, async |request| {
                 assert_eq!(request.correlation_id, turns[1]);
                 let root = std::path::Path::new(&request.attachment_root);
                 assert!(root.starts_with(&relocated), "{}", root.display());

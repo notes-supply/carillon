@@ -336,7 +336,7 @@ There is no automatic rollback, migration step or download service. The state ch
 - It covers the registry, the core database's integrity and exact schema, the Discord settings, and an installed command module.
 - It does not cover Pi's state (sessions, authentication, model selections), other provider-native state, credentials, or whether the services will start and stay healthy.
 
-Releases with attachment support record attached files in the core database (`turn_attachments`). Their update check refuses a database written by an earlier release, before any service stops ("database schema is not the current Carillon format"); moving such an installation forward is an explicit cutover, taken from a verified backup, not something `update` performs.
+Releases with attachment support record attached files in the core database (`turn_attachments`), and releases with delegated-work reports record each observation's cursor in a column of its own, with indexes for claiming unfinished turns. Their update check refuses a database written by an earlier release, before any service stops ("database schema is not the current Carillon format"); moving such an installation forward is an explicit cutover, taken from a verified backup, not something `update` performs.
 
 `carillon update` with an older release runs the same checks, so it refuses a core schema that release does not know. Passing them does not make a downgrade safe for the unchecked state. There is no supported downgrade; restore a backup made before the update instead.
 
