@@ -8,7 +8,7 @@ import { createT3Runtime } from "@carillon/runtime-t3";
 const runtime = createT3Runtime({
   endpoint: { url: "http://127.0.0.1:3773", token },
   projectId: "…",
-  selection: { instanceId: "claudeAgent", model: "claude-fable-5-1", options: [{ id: "effort", value: "high" }] },
+  selection: { instanceId: "claudeAgent", model: "claude-fable-5-1", options: [{ id: "effort", value: "high" }] }, // the agent default
   workspace: "/path/to/workspace",
 });
 const answer = await runtime.executeTurn({ correlation_id: "turn-1", interface_id: "discord", agent_id: "default", audience_id: "conversation-1", input: "Hello", resource_root: "…", attachment_root: "…" });
@@ -55,10 +55,10 @@ instance_id = "claudeAgent"
 model = "claude-fable-5-1"
 
 [model.options]
-effort = "high"
+effort = "high"                         # a select's choice ID, or true/false for a boolean
 ```
 
-The model selection is fixed by this file: `GET /v1/model` offers it as the only choice and `PUT /v1/model` is refused with an explanation. Run it from the repository with:
+`[model]` is the agent default: the selection a conversation's thread is opened with, as T3 names it. Run it from the repository with:
 
 ```sh
 bun packages/runtime-t3/src/cli.ts --config "$CARILLON_HOME/carillon.toml" --provider runtime-t3 --token-file "$CARILLON_HOME/credentials/runtime-t3.token"
@@ -67,6 +67,12 @@ bun packages/runtime-t3/src/cli.ts --config "$CARILLON_HOME/carillon.toml" --pro
 The release ships the same program as the standalone executable `app/bin/carillon-runtime-t3` and registers the optional user unit `carillon-runtime-t3.service`, which runs that command with the installation's registry and `credentials/runtime-t3.token`. The default target does not want the unit: add the `runtime-t3` provider to `carillon.toml`, write `providers/runtime-t3.toml` and the two credentials (the installation token and the T3 token file), then enable the unit without starting it on its own (`systemctl --user enable carillon-runtime-t3.service`) and start or restart Carillon through its target (`carillon restart`, or `carillon start` when it is stopped), so the service runs under `carillon.target` like the others and Carillon's update and stop know it is running. Uninstall removes the unit with the others.
 
 Startup fails closed: the registry entry must exist and be enabled, the installation credential must match, the settings file must be valid, and T3 must answer discovery with protocol 2 and accept the token.
+
+## Models
+
+The conversation's model is its thread's own selection, as T3 holds it: every message runs with it, and it changes when the person changes it here or in T3's own UI, the last change winning. Nothing is stored on the Carillon side ([`models.ts`](src/models.ts)). `GET /v1/model` reads T3's catalogue from `server.getConfig` (the models of provider instances T3 reports enabled, installed and usable, with their select and boolean settings; a boolean is offered as `on`/`off`) and, in a conversation, the thread's selection from its snapshot. A conversation whose thread does not exist yet shows the agent default, which it will start with; reading creates nothing. The agent default is `[model]` above and is marked read-only, so `/model` shows it without controls; changing it means editing this file and restarting.
+
+`PUT /v1/model` for a conversation sets the thread's selection with `thread.model-selection.set` (opening the thread first if needed), then reads it back. T3 accepts any model name and setting value, so the change is checked against the catalogue first. It waits in the conversation's queue, so a turn that arrives meanwhile runs with it, and it is refused while a turn of the conversation is queued or running or while T3 still works or owes results on the thread: T3 may restart or replace the provider session to apply a change, which would end that work. `expected` is compared with the thread's selection just before the change; T3 has no compare-and-set, so a change made in T3's own UI in between is overwritten. T3 decides whether a change it accepts needs a new session or a handoff to another provider, and its refusal is reported as given. Returning the conversation to the agent default sets `[model]` on the thread.
 
 ## Resource snapshot
 

@@ -347,6 +347,18 @@ fn render(state: &ModelState, scope: Scope, view: &View) -> Reply {
     let components = if state.available.is_empty() {
         content.push_str("No models are available from the runtime.");
         Vec::new()
+    } else if effective(state, scope).is_some_and(|scope| scope.read_only) {
+        let _ = write!(
+            content,
+            "The {} selection is set by the runtime and cannot be changed here.",
+            scope_name(scope)
+        );
+        let buttons = scope_buttons(state, scope);
+        if buttons.is_empty() {
+            Vec::new()
+        } else {
+            vec![json!({ "type": 1, "components": buttons })]
+        }
     } else {
         let providers: Vec<&str> = state
             .available
@@ -401,7 +413,9 @@ fn summary(state: &ModelState) -> String {
         content,
         "Agent default: {} ({})",
         describe(state, state.agent.selection.as_ref()),
-        if state.agent.overridden {
+        if state.agent.read_only {
+            "set by the runtime"
+        } else if state.agent.overridden {
             "set for this agent"
         } else {
             "runtime default"
@@ -507,20 +521,7 @@ fn actions(state: &ModelState, scope: Scope, provider: &str, page: usize, pages:
     let name = scope_name(scope);
     let current = effective(state, scope);
     let provider_key = fingerprint(&[provider]);
-    let mut buttons = Vec::new();
-    if state.conversation.is_some() {
-        for (target, label) in [
-            (Scope::Conversation, "This conversation"),
-            (Scope::Agent, "Agent default"),
-        ] {
-            buttons.push(button(
-                &format!("model:scope:{}", scope_name(target)),
-                label,
-                if target == scope { PRIMARY } else { SECONDARY },
-                false,
-            ));
-        }
-    }
+    let mut buttons = scope_buttons(state, scope);
     if pages > 1 {
         buttons.push(button(
             &format!(
@@ -548,6 +549,28 @@ fn actions(state: &ModelState, scope: Scope, provider: &str, page: usize, pages:
         !current.is_some_and(|scope| scope.overridden),
     ));
     json!({ "type": 1, "components": buttons })
+}
+
+/// Buttons switching between the conversation and agent scopes, when the
+/// panel was opened in a conversation.
+fn scope_buttons(state: &ModelState, scope: Scope) -> Vec<Value> {
+    if state.conversation.is_none() {
+        return Vec::new();
+    }
+    [
+        (Scope::Conversation, "This conversation"),
+        (Scope::Agent, "Agent default"),
+    ]
+    .into_iter()
+    .map(|(target, label)| {
+        button(
+            &format!("model:scope:{}", scope_name(target)),
+            label,
+            if target == scope { PRIMARY } else { SECONDARY },
+            false,
+        )
+    })
+    .collect()
 }
 
 /// Rare provider overflow uses navigation choices in the same menu, leaving
@@ -950,6 +973,38 @@ mod tests {
         host.failure = Some(long);
         let reply = expect_reply(interact(&mut host, &command(true)))?;
         assert!(reply.content.starts_with("Model settings are unavailable:"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_read_only_scope_shows_its_selection_without_controls() -> Result<(), String> {
+        let mut host = runtime(true);
+        host.state.agent.read_only = true;
+        let reply = expect_reply(interact(&mut host, &command(true)))?;
+        assert!(reply.content.contains("Agent default: sonnet name"));
+        assert!(reply.content.contains("(set by the runtime)"));
+        assert!(custom_ids(&reply).contains(&"model:model:conversation".to_owned()));
+
+        let reply = expect_reply(interact(&mut host, &component("model:scope:agent", &[])))?;
+        assert!(
+            reply
+                .content
+                .ends_with("The agent selection is set by the runtime and cannot be changed here.")
+        );
+        assert_eq!(
+            custom_ids(&reply),
+            ["model:scope:conversation", "model:scope:agent"]
+        );
+
+        let mut host = runtime(false);
+        host.state.agent.read_only = true;
+        let reply = expect_reply(interact(&mut host, &command(false)))?;
+        assert!(reply.components.is_empty());
+        assert!(
+            host.requests
+                .iter()
+                .all(|request| matches!(request, HostRequest::ModelState))
+        );
         Ok(())
     }
 

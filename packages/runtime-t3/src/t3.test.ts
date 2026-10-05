@@ -38,13 +38,14 @@ it("classifies rejections, unknown methods and a closed socket", async () => {
   await expect(stream.done).rejects.toMatchObject({
     kind: "rejected",
     detail:
-      "OrchestrationV2GetThreadProjectionError from the fake T3: Failed to load orchestration V2 thread none",
+      "OrchestrationV2GetThreadProjectionError from the fake T3: Failed to load orchestration V2 thread none: No orchestration projection exists for thread none.",
   });
   const pending = connection.call("orchestration.dispatchCommand", {
     type: "thread.create",
     commandId: "c",
     threadId: "t",
     projectId: "p",
+    modelSelection: { instanceId: "claudeAgent", model: "claude-sonnet-5" },
   });
   fake.delayAnswer = () => 10_000;
   fake.disconnectAll();
@@ -62,6 +63,7 @@ it("delivers stream items and ends a stream on request", async () => {
     commandId: "create",
     threadId: "thread",
     projectId: "project",
+    modelSelection: { instanceId: "claudeAgent", model: "claude-sonnet-5" },
   });
   const items: unknown[] = [];
   const stream = connection.subscribe(

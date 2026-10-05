@@ -153,6 +153,10 @@ The runtime owns model availability, engine settings, and selections. It answers
 
 Core relays these calls from an interface provider to the runtime that owns the conversation, adding the interface identity that names the conversation; status and body pass through unchanged. Only transport failures are described by core. Discord presents the state through `/model` and asks for changes; it keeps no settings ledger of its own.
 
+A scope the runtime does not change through this API is marked `read_only`; Discord shows its selection without controls.
+
+T3's runtime keeps no selections: a conversation's model is its T3 thread's own selection, which T3's own UI may change too, and its agent default is the runtime's settings, marked read-only. A conversation change is checked against T3's catalogue, refused while the conversation or its thread is busy, and compared with `expected` just before it is written; T3 has no compare-and-set, so the last writer wins.
+
 Pi keeps Carillon's selections in `pi/model-selection.json` beside its private state. Updates flush the replacement file, rename it, and sync its directory before confirming success. The runtime default is Pi's own setting. A turn resolves its selection when it starts: conversation override, else agent default, else runtime default. Queued work therefore picks up a change; running work keeps what it started with.
 
 ## Operation lifecycle

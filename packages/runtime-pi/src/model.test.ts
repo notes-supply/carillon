@@ -8,7 +8,8 @@ import { Check } from "typebox/value";
 import { DETERMINISTIC_DEFAULT, DETERMINISTIC_MODELS, describeSelection } from "./testing.ts";
 import { ModelStateSchema } from "@carillon/protocol";
 import { ExplainedFailure } from "@carillon/runtime/failure";
-import { ModelSelections, resolved } from "./model.ts";
+import { resolved } from "@carillon/runtime/models";
+import { ModelSelections } from "./model.ts";
 import { type AvailableModel } from "@carillon/protocol";
 
 const conversation = {

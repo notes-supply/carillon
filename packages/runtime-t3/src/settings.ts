@@ -16,12 +16,18 @@ const SettingsSchema = Type.Object(
     project_id: Type.String({ minLength: 1 }),
     /** Prefix of the T3 thread titles this runtime opens. */
     title: Type.Optional(Type.String({ minLength: 1, maxLength: 60 })),
-    /** The native selection every turn runs with, as T3 names it. */
+    /** The native selection a new conversation thread starts with, as T3 names it. */
     model: Type.Object(
       {
         instance_id: Type.String({ minLength: 1 }),
         model: Type.String({ minLength: 1 }),
-        options: Type.Optional(Type.Record(Type.String({ minLength: 1 }), Type.String())),
+        /** Option values by ID: a select choice's ID, or a boolean. */
+        options: Type.Optional(
+          Type.Record(
+            Type.String({ minLength: 1 }),
+            Type.Union([Type.String({ minLength: 1 }), Type.Boolean()]),
+          ),
+        ),
       },
       { additionalProperties: false },
     ),

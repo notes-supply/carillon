@@ -10,8 +10,15 @@
  * for T3 to confirm the stop before the next turn may start; what T3 did
  * not confirm is reported as unconfirmed, never as stopped.
  */
-import { followUpCursor, turnIntent, type ModelQuery, type ModelState } from "@carillon/protocol";
+import {
+  followUpCursor,
+  turnIntent,
+  type ModelQuery,
+  type ModelState,
+  type ModelUpdate,
+} from "@carillon/protocol";
 import { diagnostic, ExplainedFailure } from "@carillon/runtime/failure";
+import { validated } from "@carillon/runtime/models";
 import type { RuntimeOperations, TurnRequest, TurnResponse } from "@carillon/runtime/operations";
 import { Serial } from "@carillon/runtime/serial";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -21,14 +28,18 @@ import {
   derivedId,
   DispatchResultSchema,
   messageDispatch,
+  modelSelectionSet,
   RPC,
   runInterrupt,
   sessionDetach,
   subscribeThread,
   threadCreate,
+  ThreadSnapshotSchema,
   type NativeSelection,
+  type Projection,
   type ThreadBinding,
 } from "./contracts.ts";
+import { catalog, modelState, sameSelection, toNative } from "./models.ts";
 import {
   connectT3,
   DEFAULT_TIMEOUT_MS,
@@ -38,7 +49,7 @@ import {
   type T3Endpoint,
   type T3Stream,
 } from "./t3.ts";
-import { watchTurn, type FollowUp, type Outcome, type TurnWatch } from "./watch.ts";
+import { threadWorking, watchTurn, type FollowUp, type Outcome, type TurnWatch } from "./watch.ts";
 
 /** The follow-up cursor this runtime hands core with an answer, and reads back on the follow-up turn. */
 const FollowUpSchema = Type.Object({
@@ -50,6 +61,7 @@ export interface T3RuntimeOptions {
   readonly endpoint: T3Endpoint;
   /** The T3 project whose workspace root is the agent's workspace. */
   readonly projectId: string;
+  /** The selection a new conversation thread starts with: the agent default. */
   readonly selection: NativeSelection;
   readonly workspace: string;
   /** Prefix of the thread titles this runtime opens. */
@@ -120,42 +132,172 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     }
   }
 
+  /** Runs `work` in the thread's queue, after the thread's earlier turns and changes. */
+  async function inThread<T>(threadId: string, work: () => Promise<T>): Promise<T> {
+    const queue = threads.get(threadId) ?? { serial: new Serial(), turns: 0 };
+    threads.set(threadId, queue);
+    queue.turns += 1;
+    try {
+      return await queue.serial.run(work);
+    } finally {
+      queue.turns -= 1;
+      if (queue.turns === 0) threads.delete(threadId);
+    }
+  }
+
+  /** One short exchange with T3 on its own connection; T3's failures are explained. */
+  async function connected<T>(work: (connection: T3Connection) => Promise<T>): Promise<T> {
+    let connection: T3Connection | undefined;
+    try {
+      connection = await connect(options.endpoint, { timeoutMs, signal: shutdown.signal });
+      return await work(connection);
+    } catch (failure) {
+      throw unavailable(failure);
+    } finally {
+      connection?.close();
+    }
+  }
+
+  /**
+   * Changes the conversation thread's model. The change waits in the
+   * thread's queue, so a turn that arrives meanwhile runs with it; it is
+   * refused while the conversation has turns or T3 still works or owes
+   * results on the thread, since T3 may restart or replace the provider
+   * session to apply it. `expected` is compared with the thread's selection
+   * just before the change: T3 itself offers no compare-and-set, so a change
+   * made in T3's own UI in between is overwritten, the last change winning.
+   */
+  async function setModel(update: ModelUpdate): Promise<ModelState> {
+    if (update.scope === "agent")
+      throw new ExplainedFailure(
+        422,
+        "The agent default is the model in the T3 runtime's settings; change it there.",
+      );
+    const audience = update.audience_id;
+    if (audience === undefined)
+      throw new ExplainedFailure(400, "There is no conversation here to set a model for.");
+    const binding = bindThread({ ...update, audience_id: audience });
+    if (threads.has(binding.threadId)) throw busy();
+    return inThread(binding.threadId, () =>
+      connected(async (connection) => {
+        const offered = catalog(await connection.call(RPC.getConfig, {}));
+        const target =
+          update.selection === null
+            ? options.selection
+            : toNative(offered, validated(offered.available, update.selection));
+        await ensureThread(connection, binding);
+        const before = await readThread(connection, binding.threadId);
+        if (before === undefined)
+          throw new T3Failure("malformed", "T3 did not list the conversation's thread it opened");
+        if (threadWorking(before)) throw busy();
+        const current = modelState(offered, options.selection, {
+          thread: before.thread.modelSelection,
+        });
+        if (
+          update.expected !== undefined &&
+          current.conversation?.selection != null &&
+          !sameSelection(current.conversation.selection, {
+            ...update.expected,
+            options: update.expected.options ?? {},
+          })
+        )
+          throw new ExplainedFailure(409, "The model settings changed.");
+        try {
+          await connection.call(RPC.dispatchCommand, modelSelectionSet(binding.threadId, target));
+        } catch (failure) {
+          if (!(failure instanceof T3Failure) || failure.kind !== "rejected") throw failure;
+          throw new ExplainedFailure(
+            422,
+            `T3 refused the model change: ${failure.detail ?? failure.message}`,
+          );
+        }
+        log(`thread ${binding.threadId}: model set to ${target.instanceId}/${target.model}`);
+        const after = await readThread(connection, binding.threadId);
+        return modelState(offered, options.selection, { thread: after?.thread.modelSelection });
+      }),
+    );
+  }
+
+  function busy(): ExplainedFailure {
+    return new ExplainedFailure(
+      409,
+      "This conversation is still working; change the model once it has finished.",
+    );
+  }
+
+  /**
+   * The thread's current record, read from the first item of a fresh
+   * subscription; undefined when T3 has no such thread.
+   */
+  function readThread(connection: T3Connection, threadId: string): Promise<Projection | undefined> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        stream.end();
+        reject(new T3Failure("timeout", "T3 did not send the thread snapshot in time"));
+      }, timeoutMs);
+      const stream = connection.subscribe(
+        RPC.subscribeThread,
+        subscribeThread(threadId, undefined),
+        (item) => {
+          clearTimeout(timer);
+          stream.end();
+          if (Check(ThreadSnapshotSchema, item)) resolve(item.projection);
+          else
+            reject(
+              new T3Failure(
+                "malformed",
+                "T3 sent a thread snapshot this runtime does not understand",
+              ),
+            );
+        },
+      );
+      stream.done.then(
+        () => {
+          clearTimeout(timer);
+          reject(new T3Failure("disconnected", "the thread subscription ended"));
+        },
+        (failure: unknown) => {
+          clearTimeout(timer);
+          if (missingThread(failure)) resolve(undefined);
+          else reject(asError(failure));
+        },
+      );
+    });
+  }
+
   return {
     executeTurn(request, signal) {
-      return track(async () => {
-        const threadId = bindThread(request).threadId;
-        const queue = threads.get(threadId) ?? { serial: new Serial(), turns: 0 };
-        threads.set(threadId, queue);
-        queue.turns += 1;
-        try {
-          return await queue.serial.run(() => {
-            const combined =
-              signal === undefined ? shutdown.signal : AbortSignal.any([signal, shutdown.signal]);
-            combined.throwIfAborted();
-            return executeT3(request, combined);
-          });
-        } finally {
-          queue.turns -= 1;
-          if (queue.turns === 0) threads.delete(threadId);
-        }
-      });
+      return track(() =>
+        inThread(bindThread(request).threadId, () => {
+          const combined =
+            signal === undefined ? shutdown.signal : AbortSignal.any([signal, shutdown.signal]);
+          combined.throwIfAborted();
+          return executeT3(request, combined);
+        }),
+      );
     },
     activity(correlationId, interfaceId) {
       const turn = executing.get(correlationId);
       return turn?.interfaceId === interfaceId ? turn.watch.activity() : undefined;
     },
     modelState(query: ModelQuery): Promise<ModelState> {
-      shutdown.signal.throwIfAborted();
-      return Promise.resolve(fixedModelState(options.selection, query));
-    },
-    setModel(): Promise<ModelState> {
-      shutdown.signal.throwIfAborted();
-      return Promise.reject(
-        new ExplainedFailure(
-          422,
-          "The T3 runtime runs the model named in its settings; change the provider file and restart to select another.",
-        ),
+      return track(() =>
+        connected(async (connection) => {
+          const offered = catalog(await connection.call(RPC.getConfig, {}));
+          const audience = query.audience_id;
+          if (audience === undefined) return modelState(offered, options.selection, undefined);
+          const thread = await readThread(
+            connection,
+            bindThread({ ...query, audience_id: audience }).threadId,
+          );
+          return modelState(offered, options.selection, {
+            thread: thread?.thread.modelSelection,
+          });
+        }),
       );
+    },
+    setModel(update: ModelUpdate): Promise<ModelState> {
+      return track(() => setModel(update));
     },
     async close() {
       shutdown.abort(new Error("T3 runtime is closed"));
@@ -268,7 +410,9 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     );
   }
 
-  function bindThread(request: TurnRequest): ThreadBinding {
+  function bindThread(
+    request: Pick<TurnRequest, "interface_id" | "agent_id" | "audience_id">,
+  ): ThreadBinding {
     return {
       threadId: derivedId(
         "thread",
@@ -782,7 +926,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       case "rejected":
         return new ExplainedFailure(
           502,
-          `T3 rejected the turn: ${failure.detail ?? failure.message}`,
+          `T3 rejected the request: ${failure.detail ?? failure.message}`,
         );
       case "malformed":
         return new ExplainedFailure(502, "T3 answered in a form this runtime does not understand.");
@@ -797,29 +941,12 @@ function asError(failure: unknown): Error {
   return failure instanceof Error ? failure : new Error(String(failure));
 }
 
-/** The configured selection is the only one offered, at every scope. */
-function fixedModelState(selection: NativeSelection, query: ModelQuery): ModelState {
-  const chosen = {
-    provider: selection.instanceId,
-    model: selection.model,
-    options: Object.fromEntries(selection.options.map(({ id, value }) => [id, value])),
-  };
-  const scope = { selection: chosen, overridden: false };
-  return {
-    available: [
-      {
-        provider: selection.instanceId,
-        model: selection.model,
-        name: selection.model,
-        options: selection.options.map(({ id, value }) => ({
-          id,
-          name: id,
-          choices: [value],
-          default: value,
-        })),
-      },
-    ],
-    agent: scope,
-    ...(query.audience_id === undefined ? {} : { conversation: scope }),
-  };
+/** T3's answer to a subscription for a thread it has no record of. */
+function missingThread(failure: unknown): boolean {
+  return (
+    failure instanceof T3Failure &&
+    failure.kind === "rejected" &&
+    failure.tag === "OrchestrationV2GetThreadProjectionError" &&
+    (failure.detail ?? "").includes("No orchestration projection exists")
+  );
 }

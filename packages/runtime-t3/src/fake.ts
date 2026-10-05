@@ -10,11 +10,14 @@
 import { once } from "node:events";
 import { createServer, type IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
+import { Check } from "typebox/value";
 import { WebSocketServer, type RawData, type WebSocket } from "ws";
 import {
+  NativeSelectionSchema,
   ORCHESTRATION_PROTOCOL,
   type ContextTransfer,
   type Message,
+  type NativeSelection,
   type ProviderSession,
   type ProviderThread,
   type Run,
@@ -46,6 +49,7 @@ interface StoredEvent {
 interface FakeThread {
   readonly id: string;
   readonly projectId: string;
+  modelSelection: NativeSelection;
   readonly runs: Run[];
   readonly messages: Message[];
   readonly items: FakeItem[];
@@ -91,6 +95,8 @@ export interface FakeT3 {
   readonly subscriptions: Subscription[];
   /** What protocol discovery announces. */
   protocolVersion: number;
+  /** The provider instances `server.getConfig` lists, as T3 describes them. */
+  providers: unknown[];
   /** Processes the command, then drops the socket before answering. */
   dropAnswer: (command: Command) => boolean;
   /** Drops the socket before processing the command. */
@@ -197,6 +203,47 @@ const BACKGROUND_ITEMS: ReadonlySet<string> = new Set([
 ]);
 const RUNNING_ITEMS: ReadonlySet<string> = new Set(["pending", "running", "waiting"]);
 
+/** A catalogue shaped like the serving build's: one usable instance and one disabled. */
+export const FAKE_PROVIDERS: readonly unknown[] = [
+  {
+    instanceId: "claudeAgent",
+    driver: "claudeAgent",
+    enabled: true,
+    installed: true,
+    status: "ready",
+    models: [
+      {
+        slug: "claude-sonnet-5",
+        name: "Claude Sonnet 5",
+        isCustom: false,
+        capabilities: {
+          optionDescriptors: [
+            {
+              id: "effort",
+              label: "Effort",
+              type: "select",
+              options: [
+                { id: "low", label: "Low" },
+                { id: "high", label: "High", isDefault: true },
+              ],
+            },
+            { id: "fastMode", label: "Fast Mode", type: "boolean" },
+          ],
+        },
+      },
+      { slug: "claude-haiku-4-5", name: "Claude Haiku 4.5", isCustom: false, capabilities: null },
+    ],
+  },
+  {
+    instanceId: "cursor",
+    driver: "cursor",
+    enabled: false,
+    installed: false,
+    status: "disabled",
+    models: [{ slug: "auto", name: "Auto", isCustom: false, capabilities: null }],
+  },
+];
+
 export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
   const threads = new Map<string, FakeThread>();
   const received: Command[] = [];
@@ -280,6 +327,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
     detached,
     subscriptions,
     protocolVersion: ORCHESTRATION_PROTOCOL,
+    providers: [...FAKE_PROVIDERS],
     dropAnswer: () => false,
     dropRequest: () => false,
     delayAnswer: () => 0,
@@ -583,7 +631,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
             socket,
             id,
             "OrchestrationV2GetThreadProjectionError",
-            `Failed to load orchestration V2 thread ${String(threadId)}`,
+            `Failed to load orchestration V2 thread ${String(threadId)}: No orchestration projection exists for thread ${String(threadId)}.`,
           );
           return;
         }
@@ -611,7 +659,11 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
                     ? { historyCursor: null, hasMoreHistory: false, payloadBudgetExceeded: false }
                     : {}),
                   projection: {
-                    thread: { id: thread.id, projectId: thread.projectId },
+                    thread: {
+                      id: thread.id,
+                      projectId: thread.projectId,
+                      modelSelection: thread.modelSelection,
+                    },
                     runs: thread.runs.filter((run) => !fake.omitRun(run)),
                     subagents: thread.subagents.filter((task) => !fake.omitSubagent(task)),
                     contextTransfers: thread.transfers,
@@ -632,6 +684,9 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
         send(socket, { _tag: "Chunk", requestId: id, values });
         return;
       }
+      case "server.getConfig":
+        exit(socket, id, { _tag: "Success", value: { providers: fake.providers } });
+        return;
       default:
         rejectRequest(socket, id, "RpcNotFound", String(frame["tag"]));
     }
@@ -648,6 +703,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
         const thread: FakeThread = {
           id: command.threadId,
           projectId: String(command["projectId"]),
+          modelSelection: selectionOf(command),
           runs: [],
           messages: [],
           items: [],
@@ -672,6 +728,16 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
       case "message.dispatch": {
         const thread = threadOf(command.threadId);
         startRun(thread, String(command["messageId"]), String(command["text"]));
+        receipts.set(command.commandId, thread.sequence);
+        return thread.sequence;
+      }
+      case "thread.model-selection.set": {
+        const thread = threadOf(command.threadId);
+        thread.modelSelection = selectionOf(command);
+        emit(thread, "thread.model-selection-updated", {
+          id: thread.id,
+          modelSelection: thread.modelSelection,
+        });
         receipts.set(command.commandId, thread.sequence);
         return thread.sequence;
       }
@@ -841,6 +907,13 @@ function text(data: RawData): string {
   if (Array.isArray(data)) return Buffer.concat(data).toString("utf8");
   if (data instanceof ArrayBuffer) return Buffer.from(data).toString("utf8");
   return data.toString("utf8");
+}
+
+/** The command's model selection, refused as T3's validator would when malformed. */
+function selectionOf(command: Command): NativeSelection {
+  const selection = command["modelSelection"];
+  if (!Check(NativeSelectionSchema, selection)) throw new Error("invalid model selection");
+  return selection;
 }
 
 function isCommand(value: unknown): value is Command {

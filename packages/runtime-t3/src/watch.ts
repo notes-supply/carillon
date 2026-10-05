@@ -44,6 +44,7 @@ import {
   type BackgroundTask,
   type ContextTransfer,
   type Message,
+  type Projection,
   type ProviderSession,
   type ProviderThread,
   type Run,
@@ -161,6 +162,22 @@ type RequestItem = TurnItemOf<"user_input_request" | "approval_request">;
 
 export function isActive(run: Run): boolean {
   return ACTIVE.has(run.status);
+}
+
+/**
+ * Whether anything on the thread still runs or is owed, whoever started it:
+ * an active run, background work a provider thread lists, or a child agent
+ * still working or with a result T3 has yet to deliver.
+ */
+export function threadWorking(projection: Projection): boolean {
+  return (
+    projection.runs.some(isActive) ||
+    projection.providerThreads.some((thread) => (thread.pendingBackgroundTasks ?? []).length > 0) ||
+    projection.subagents.some(
+      (task) =>
+        ACTIVE_TASK.has(task.status) || OWED_DELIVERY.has(task.completionDelivery?.state ?? ""),
+    )
+  );
 }
 
 export interface WatchOptions {

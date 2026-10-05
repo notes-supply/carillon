@@ -41,7 +41,10 @@ function snapshot(overrides: Record<string, unknown>, sequence = 1) {
     kind: "snapshot",
     snapshotSequence: sequence,
     projection: {
-      thread: { id: "thread" },
+      thread: {
+        id: "thread",
+        modelSelection: { instanceId: "claudeAgent", model: "claude-sonnet-5" },
+      },
       runs: [],
       runtimeRequests: [],
       providerThreads: [{ id: "provider-thread", providerSessionId: "session" }],

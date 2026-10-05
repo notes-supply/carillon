@@ -252,8 +252,21 @@ export type TurnItem = Static<typeof TurnItemSchema>;
 export type TurnItemOf<K extends TurnItem["type"]> = Extract<TurnItem, { type: K }>;
 
 /** A thread snapshot. Timeline items are checked one by one as they are folded. */
+/** A native model selection: a provider instance's model, with option values by ID. */
+export const NativeSelectionSchema = Type.Object({
+  instanceId: Id,
+  model: Id,
+  options: Type.Optional(
+    Type.Array(
+      Type.Object({ id: Id, value: Type.Union([Type.String({ minLength: 1 }), Type.Boolean()]) }),
+    ),
+  ),
+});
+export type NativeSelection = Static<typeof NativeSelectionSchema>;
+
 export const ProjectionSchema = Type.Object({
-  thread: Type.Object({ id: Id }),
+  /** The thread's own record; its selection is what every run of the thread uses. */
+  thread: Type.Object({ id: Id, modelSelection: NativeSelectionSchema }),
   runs: Type.Array(RunSchema),
   runtimeRequests: Type.Array(RuntimeRequestSchema),
   providerThreads: Type.Array(ProviderThreadSchema),
@@ -265,14 +278,63 @@ export const ProjectionSchema = Type.Object({
 });
 export type Projection = Static<typeof ProjectionSchema>;
 
+/** The first item of a fresh thread subscription. */
+export const ThreadSnapshotSchema = Type.Object({
+  kind: Type.Literal("snapshot"),
+  snapshotSequence: Type.Integer(),
+  projection: ProjectionSchema,
+});
+
 export const DispatchResultSchema = Type.Object({ sequence: Type.Integer() });
 
-/** A native model selection as T3 names it, preserved from configuration. */
-export interface NativeSelection {
-  readonly instanceId: string;
-  readonly model: string;
-  readonly options: readonly { readonly id: string; readonly value: string }[];
-}
+/**
+ * A setting a model offers, as T3 describes it: a select among choices, or a
+ * boolean. Other kinds are not offered through Carillon.
+ */
+export const OptionDescriptorSchema = Type.Union([
+  Type.Object({
+    id: Id,
+    label: Type.String({ minLength: 1 }),
+    type: Type.Literal("select"),
+    options: Type.Array(Type.Object({ id: Id, isDefault: Type.Optional(Type.Boolean()) })),
+    currentValue: Type.Optional(Id),
+  }),
+  Type.Object({
+    id: Id,
+    label: Type.String({ minLength: 1 }),
+    type: Type.Literal("boolean"),
+    currentValue: Type.Optional(Type.Boolean()),
+  }),
+]);
+export type OptionDescriptor = Static<typeof OptionDescriptorSchema>;
+
+/**
+ * One provider instance in T3's server configuration. T3 grows its list
+ * forward-compatibly, so an entry outside this shape is skipped, as T3's own
+ * clients do.
+ */
+export const ProviderSchema = Type.Object({
+  instanceId: Id,
+  enabled: Type.Boolean(),
+  installed: Type.Boolean(),
+  status: Type.String(),
+  availability: Type.Optional(Type.String()),
+  models: Type.Array(
+    Type.Object({
+      slug: Id,
+      name: Type.String({ minLength: 1 }),
+      capabilities: Type.Optional(
+        Type.Union([
+          Type.Object({ optionDescriptors: Type.Optional(Type.Array(Type.Unknown())) }),
+          Type.Null(),
+        ]),
+      ),
+    }),
+  ),
+});
+export type Provider = Static<typeof ProviderSchema>;
+
+export const ServerConfigSchema = Type.Object({ providers: Type.Array(Type.Unknown()) });
 
 /**
  * A stable identifier for one Carillon fact. The same facts always name the
@@ -408,6 +470,6 @@ function nativeSelection(selection: NativeSelection) {
   return {
     instanceId: selection.instanceId,
     model: selection.model,
-    options: selection.options.map(({ id, value }) => ({ id, value })),
+    options: (selection.options ?? []).map(({ id, value }) => ({ id, value })),
   };
 }
