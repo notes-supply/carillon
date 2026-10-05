@@ -43,7 +43,7 @@ use serde_json::Value;
 
 use carillon_protocol::model::{
     ActiveTurn, Delivery, DeliveryOutcome, DeliveryState, EventReceipt, ExternalEvent,
-    RuntimeTurnResponse, StateCounts, TurnInspection, TurnState, TurnSummary,
+    NATIVE_FOLLOW_UP, RuntimeTurnResponse, StateCounts, TurnInspection, TurnState, TurnSummary,
 };
 
 use crate::attachments::{Capture, CapturedFile};
@@ -513,7 +513,11 @@ impl Database {
     }
 
     /// Commits a successful runtime response: completed output and the
-    /// delivery intent, atomically.
+    /// delivery intent, atomically. A response with a follow-up cursor also
+    /// queues, in the same transaction, the follow-up turn that will carry
+    /// the report of the work this turn left running: same conversation,
+    /// target and runtime, after every message already accepted there, with
+    /// the cursor as its only `native` fact.
     pub fn complete_turn(&self, turn: &ClaimedTurn, response: &RuntimeTurnResponse) -> Result<()> {
         let mut connection = self.connect()?;
         let transaction = write_transaction(&mut connection)?;
@@ -527,6 +531,23 @@ impl Database {
             bail!("turn {} was not running", turn.turn_id);
         }
         enqueue_delivery(&transaction, turn, &response.output, now)?;
+        if let Some(cursor) = &response.follow_up {
+            transaction.execute(
+                "INSERT INTO turns(id, interface_id, event_id, agent_id, audience_id, user_id,
+                     target_id, feedback_target_id, input, native_json, runtime_id,
+                     provider_snapshot_json, resource_snapshot_id, state, accepted_at)
+                 SELECT ?2, interface_id, 'follow-up:' || id, agent_id, audience_id, user_id,
+                     target_id, feedback_target_id, '', ?3, runtime_id,
+                     provider_snapshot_json, resource_snapshot_id, 'queued', ?4
+                 FROM turns WHERE id = ?1",
+                params![
+                    turn.turn_id,
+                    uuid::Uuid::now_v7().to_string(),
+                    serde_json::to_string(&serde_json::json!({ NATIVE_FOLLOW_UP: cursor }))?,
+                    now,
+                ],
+            )?;
+        }
         transaction.commit()?;
         Ok(())
     }
@@ -1147,6 +1168,7 @@ mod tests {
             &RuntimeTurnResponse {
                 correlation_id: turn.turn_id.clone(),
                 output: "reply".to_owned(),
+                follow_up: None,
             },
         )?;
         assert_eq!(
@@ -1155,6 +1177,74 @@ mod tests {
                 .context("delivery missing")?
                 .content,
             "reply"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn follow_up_cursor_queues_one_report_turn_behind_accepted_messages() -> Result<()> {
+        let directory = tempdir()?;
+        let database = Database::create(&directory.path().join("state.sqlite3"))?;
+        accept(&database, "one", "conversation")?;
+        let first = database
+            .claim_turn("runtime")?
+            .context("first turn missing")?;
+        // A message the person sent while the first turn ran.
+        accept(&database, "two", "conversation")?;
+        let cursor = json!({"message": "native-message", "after": 1});
+        database.complete_turn(
+            &first,
+            &RuntimeTurnResponse {
+                correlation_id: first.turn_id.clone(),
+                output: "delegated".to_owned(),
+                follow_up: Some(cursor.clone()),
+            },
+        )?;
+        // The answer is delivered at once; the report waits its turn, after
+        // the message accepted before it, in the same conversation.
+        assert_eq!(
+            database
+                .claim_delivery("discord", "instance")?
+                .context("delivery missing")?
+                .content,
+            "delegated"
+        );
+        let second = database
+            .claim_turn("runtime")?
+            .context("second turn missing")?;
+        assert_eq!(second.input, "hello");
+        assert!(database.claim_turn("runtime")?.is_none());
+        database.complete_turn(
+            &second,
+            &RuntimeTurnResponse {
+                correlation_id: second.turn_id.clone(),
+                output: "second reply".to_owned(),
+                follow_up: None,
+            },
+        )?;
+        let report = database
+            .claim_turn("runtime")?
+            .context("follow-up turn missing")?;
+        assert_eq!(report.input, "");
+        assert_eq!(report.native, json!({ "follow_up": cursor }));
+        assert_eq!(
+            (
+                report.audience_id.as_str(),
+                report.target_id.as_str(),
+                report.feedback_target_id.as_str()
+            ),
+            (
+                first.audience_id.as_str(),
+                first.target_id.as_str(),
+                first.feedback_target_id.as_str()
+            )
+        );
+        assert_eq!(
+            database
+                .event_receipt("discord", &format!("follow-up:{}", first.turn_id))?
+                .context("follow-up receipt missing")?
+                .turn_id,
+            report.turn_id
         );
         Ok(())
     }
@@ -1172,6 +1262,7 @@ mod tests {
             &RuntimeTurnResponse {
                 correlation_id: first.turn_id.clone(),
                 output: "first reply".to_owned(),
+                follow_up: None,
             },
         )?;
         accept(&database, "two", "conversation")?;
@@ -1187,6 +1278,7 @@ mod tests {
         let response = RuntimeTurnResponse {
             correlation_id: second.turn_id.clone(),
             output: "second reply".to_owned(),
+            follow_up: None,
         };
         let failure = database
             .complete_turn(&second, &response)
@@ -1287,6 +1379,7 @@ mod tests {
                 &RuntimeTurnResponse {
                     correlation_id: turn.turn_id.clone(),
                     output: output.to_owned(),
+                    follow_up: None,
                 },
             )?;
         }
@@ -1370,6 +1463,7 @@ mod tests {
         let response = RuntimeTurnResponse {
             correlation_id: requeued.turn_id.clone(),
             output: "done".to_owned(),
+            follow_up: None,
         };
         database.complete_turn(&requeued, &response)?;
         assert!(database.complete_turn(&requeued, &response).is_err());

@@ -10,13 +10,12 @@
  * for T3 to confirm the stop before the next turn may start; what T3 did
  * not confirm is reported as unconfirmed, never as stopped.
  */
-import type { ModelQuery, ModelState } from "@carillon/protocol";
+import { followUpCursor, turnIntent, type ModelQuery, type ModelState } from "@carillon/protocol";
 import { diagnostic, ExplainedFailure } from "@carillon/runtime/failure";
 import type { RuntimeOperations, TurnRequest, TurnResponse } from "@carillon/runtime/operations";
 import { Serial } from "@carillon/runtime/serial";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { Type } from "typebox";
 import { Check } from "typebox/value";
 import {
   derivedId,
@@ -39,7 +38,13 @@ import {
   type T3Endpoint,
   type T3Stream,
 } from "./t3.ts";
-import { watchTurn, type Outcome, type TurnWatch } from "./watch.ts";
+import { watchTurn, type FollowUp, type Outcome, type TurnWatch } from "./watch.ts";
+
+/** The follow-up cursor this runtime hands core with an answer, and reads back on the follow-up turn. */
+const FollowUpSchema = Type.Object({
+  message: Type.String({ minLength: 1 }),
+  after: Type.Integer({ minimum: 0 }),
+});
 
 export interface T3RuntimeOptions {
   readonly endpoint: T3Endpoint;
@@ -152,30 +157,49 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
         "This runtime cannot accept attached files yet; please send text only.",
       );
     const binding = bindThread(request);
-    const messageId = derivedId("message", request.correlation_id);
-    const watch = watchTurn(
-      messageId,
-      options.workspace,
-      uncertain.has(binding.threadId) ? { uncertainPredecessor: true } : {},
-    );
+    // A follow-up turn core queued to carry the report of work an earlier
+    // turn delegated: it reads T3's continuations of that turn's message and
+    // dispatches nothing.
+    const follow = followUpOf(request);
+    const messageId = follow?.message ?? derivedId("message", request.correlation_id);
+    const watch = watchTurn(messageId, options.workspace, {
+      ...(uncertain.has(binding.threadId) ? { uncertainPredecessor: true } : {}),
+      ...(follow === undefined ? {} : { followUp: { after: follow.after } }),
+    });
     executing.set(request.correlation_id, { interfaceId: request.interface_id, watch });
-    log(`turn ${request.correlation_id}: thread ${binding.threadId}, message ${messageId}`);
+    log(
+      `turn ${request.correlation_id}: thread ${binding.threadId}, message ${messageId}${follow === undefined ? "" : `, follow-up after run ${String(follow.after)}`}`,
+    );
     const progress: Progress = { dispatched: false };
     let settled: Outcome | undefined;
     try {
-      const { outcome, stop } = await runTurn(request, binding, watch, signal, progress);
+      const { outcome, stop } = await runTurn(request, binding, watch, signal, progress, follow);
       settled = outcome;
       const run = watch.run();
       log(`turn ${request.correlation_id}: run ${run?.id ?? "?"} ${outcome.kind}`);
       switch (outcome.kind) {
-        case "completed":
-          if (outcome.output.trim().length === 0)
+        case "completed": {
+          const output =
+            outcome.output.trim().length === 0 && outcome.followUp !== undefined
+              ? "The work this message started is still running; its report follows."
+              : outcome.output;
+          if (output.trim().length === 0)
             throw new ExplainedFailure(502, "T3 finished the run without an answer.");
-          return { correlation_id: request.correlation_id, output: outcome.output };
+          return {
+            correlation_id: request.correlation_id,
+            output,
+            ...(outcome.followUp === undefined ? {} : { follow_up: outcome.followUp }),
+          };
+        }
         case "failed":
           throw new ExplainedFailure(502, withStop(outcome.explanation, stop));
         case "blocked":
-          throw new ExplainedFailure(502, `${outcome.asked}; ${stopReport(stop)}`);
+          throw new ExplainedFailure(
+            502,
+            follow === undefined
+              ? `${outcome.asked}; ${stopReport(stop)}`
+              : `${outcome.asked}; the delegated work's report waits for it in T3.`,
+          );
         case "unresolved":
           throw new ExplainedFailure(502, `${outcome.explanation}; ${wakeReport(stop)}`);
         case "stopped":
@@ -192,11 +216,24 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       // The one place that decides: work that may have reached T3 (dispatched
       // now, or read back from a run this turn already had) and left without
       // T3 confirming it ended (a completed run, or a stop T3 reported) leaves
-      // the thread uncertain, however the turn exited.
-      const reached = progress.dispatched || watch.run() !== undefined;
+      // the thread uncertain, however the turn exited. A follow-up turn
+      // started nothing and stops nothing: it only reads T3's records.
+      const reached = follow === undefined && (progress.dispatched || watch.run() !== undefined);
       if (reached && !ceased(settled, progress.stop, watch)) unconfirmed(binding);
       executing.delete(request.correlation_id);
     }
+  }
+
+  /** The follow-up cursor core carries back, checked: anything else is not a follow-up. */
+  function followUpOf(request: TurnRequest): FollowUp | undefined {
+    const cursor = followUpCursor(request.native);
+    if (cursor === undefined) return undefined;
+    if (!Check(FollowUpSchema, cursor))
+      throw new ExplainedFailure(
+        502,
+        "Carillon asked to follow up on work this runtime cannot identify.",
+      );
+    return cursor;
   }
 
   /**
@@ -247,6 +284,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     watch: TurnWatch,
     signal: AbortSignal,
     progress: Progress,
+    follow: FollowUp | undefined,
   ): Promise<{ readonly outcome: Outcome; readonly stop?: Stop }> {
     let text: string | undefined;
     let attempt = 0;
@@ -258,7 +296,8 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
      * receipt remain timeout-bounded. After that point, recovery waits are
      * kept since the work must still be found and stopped.
      */
-    const reached = () => progress.dispatched || watch.run() !== undefined;
+    const reached = () =>
+      follow === undefined && (progress.dispatched || watch.run() !== undefined);
     for (;;) {
       let connection: T3Connection;
       try {
@@ -326,7 +365,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     async function drive(
       connection: T3Connection,
     ): Promise<{ readonly outcome: Outcome; readonly stop?: Stop }> {
-      await ensureThread(connection, binding);
+      if (follow === undefined) await ensureThread(connection, binding);
       const stream = subscribe(connection, binding.threadId, watch);
       try {
         await settle(
@@ -337,20 +376,26 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
           "the thread snapshot",
           reached() ? undefined : signal,
         );
-        if (watch.run() === undefined && !signal.aborted) {
-          text ??= await compose(request, watch.empty());
-          // Stale work is settled against the fold as it is now, after the
-          // resource files were read, and the dispatch follows with no
-          // further wait: a run that starts on the thread meanwhile is seen
-          // here, not after the dispatch. Nothing of this turn has reached
-          // T3 yet, so a caller that aborted during either is honoured
-          // before anything is sent.
-          await stopBlocking(connection, binding, watch, stream, signal);
+        if (follow === undefined && watch.run() === undefined && !signal.aborted) {
+          text ??= compose(request);
+          // Nothing of this turn has reached T3 yet, so a caller that
+          // aborted meanwhile is honoured before anything is sent. Work
+          // already running on the thread, whoever started it, is never
+          // interrupted: the message waits behind it in T3's own queue.
           signal.throwIfAborted();
           progress.dispatched = true;
-          await dispatch(connection, binding, request, text, progress);
+          await dispatch(connection, binding, request, text, watch.busy(), progress);
         }
         const outcome = await observe(watch, stream, signal);
+        // A follow-up turn reports what T3 does with work it started itself
+        // and never stops it: the continuation is T3's, not Carillon's.
+        if (follow !== undefined) {
+          if (outcome === undefined)
+            throw signal.reason instanceof Error
+              ? signal.reason
+              : new Error("turn cancelled", { cause: signal.reason });
+          return { outcome };
+        }
         if (outcome === undefined) {
           progress.stop = await cancel(connection, binding, watch, stream, progress.dispatched);
           throw signal.reason instanceof Error
@@ -400,107 +445,17 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     );
   }
 
-  /**
-   * Earlier turns' runs still occupying the thread are stale to Carillon:
-   * stop them first. Nothing of this turn is on T3 yet, so cancellation
-   * ends the settlement wait; interrupt requests already sent are not undone.
-   */
-  async function stopBlocking(
-    connection: T3Connection,
-    binding: ThreadBinding,
-    watch: TurnWatch,
-    stream: T3Stream,
-    signal: AbortSignal,
-  ): Promise<void> {
-    // The fold as it is now decides, after each pass: a run that started
-    // while the first pass waited is settled by a second, and only work
-    // still present after that is refused, not raced.
-    for (let pass = 0; ; pass += 1) {
-      const stale = watch.stale();
-      if (watch.blocking().length === 0 && (stale === undefined || stale.listed.length === 0))
-        return;
-      if (pass === 2)
-        throw new ExplainedFailure(
-          503,
-          "An earlier turn keeps starting work on T3 while this turn is prepared; try again shortly.",
-        );
-      await settleStale(connection, binding, watch, stream, signal);
-    }
-  }
-
-  async function settleStale(
-    connection: T3Connection,
-    binding: ThreadBinding,
-    watch: TurnWatch,
-    stream: T3Stream,
-    signal: AbortSignal,
-  ): Promise<void> {
-    const blocking = watch.blocking();
-    for (const run of blocking) {
-      log(`thread ${binding.threadId}: stopping stale run ${run.id} (${run.status})`);
-      await interrupt(connection, binding.threadId, run.id, "Carillon moved on to a later turn");
-    }
-    if (blocking.length > 0) {
-      const stopped = await settle(
-        watch,
-        stream,
-        (turn) => turn.blocking().length === 0,
-        settleMs,
-        undefined,
-        signal,
-      );
-      signal.throwIfAborted();
-      if (!stopped)
-        throw new ExplainedFailure(
-          503,
-          "An earlier turn is still running on T3 and could not be stopped; try again shortly.",
-        );
-    }
-    // Background work an earlier run left listed outlives that run, whether
-    // it was terminal already or was stopped just now: T3 settles it through
-    // the thread's latest run, and a successor is dispatched only once T3
-    // lists none of it. A roster that does not clear is reported, not assumed
-    // gone.
-    const stale = watch.stale();
-    if (stale === undefined || stale.listed.length === 0) return;
-    log(
-      `thread ${binding.threadId}: stopping ${String(stale.listed.length)} background task(s) left by earlier run ${stale.run.id} (${stale.run.status})`,
-    );
-    await interrupt(
-      connection,
-      binding.threadId,
-      stale.run.id,
-      "Carillon moved on to a later turn",
-    );
-    const settled = await settle(
-      watch,
-      stream,
-      (turn) => (turn.stale()?.listed.length ?? 0) === 0,
-      settleMs,
-      undefined,
-      signal,
-    );
-    signal.throwIfAborted();
-    if (!settled)
-      throw new ExplainedFailure(
-        503,
-        "An earlier turn's background work is still listed on T3 and could not be stopped; try again shortly.",
-      );
-  }
-
   async function dispatch(
     connection: T3Connection,
     binding: ThreadBinding,
     request: TurnRequest,
     text: string,
+    queued: boolean,
     progress: Progress,
   ): Promise<void> {
-    const command = messageDispatch(
-      binding.threadId,
-      request.correlation_id,
-      text,
-      options.selection,
-    );
+    const command = messageDispatch(binding.threadId, request.correlation_id, text, [], queued);
+    if (queued)
+      log(`turn ${request.correlation_id}: the thread is busy; the message waits in T3's queue`);
     let result: unknown;
     try {
       result = await connection.call(RPC.dispatchCommand, command);
@@ -756,22 +711,18 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     });
   }
 
-  /** The person's text, with the agent's instructions before the thread's first message. */
-  async function compose(request: TurnRequest, firstMessage: boolean): Promise<string> {
-    const parts: string[] = [];
-    if (firstMessage) {
-      const instructions = await agentInstructions(request.resource_root);
-      if (instructions !== undefined) parts.push(instructions);
-    }
-    parts.push(request.input);
+  /**
+   * The person's text. A command invocation is sent verbatim, so T3 runs it
+   * as its own; prose names earlier files this runtime cannot provide. The
+   * agent's instructions are the T3 project's own configuration.
+   */
+  function compose(request: TurnRequest): string {
+    if (turnIntent(request.native) === "command") return request.input;
     const earlier = (request.unanswered ?? []).flatMap((turn) =>
       turn.attachments.map((attachment) => attachment.name),
     );
-    if (earlier.length > 0)
-      parts.push(
-        `[Carillon: ${String(earlier.length)} file(s) attached to earlier messages are not available to this runtime: ${earlier.join(", ")}]`,
-      );
-    return parts.join("\n\n");
+    if (earlier.length === 0) return request.input;
+    return `${request.input}\n\n[Carillon: ${String(earlier.length)} file(s) attached to earlier messages are not available to this runtime: ${earlier.join(", ")}]`;
   }
 
   function log(message: string): void {
@@ -831,29 +782,6 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
 
 function asError(failure: unknown): Error {
   return failure instanceof Error ? failure : new Error(String(failure));
-}
-
-/**
- * The agent's instructions from the resource snapshot, for the first message
- * of a thread. T3 has no system-prompt facility for a thread, so they travel
- * as a delimited preamble; the snapshot's extensions and skills are Pi's and
- * are not loaded here.
- */
-async function agentInstructions(resourceRoot: string): Promise<string | undefined> {
-  const files = await Promise.all(
-    ["SYSTEM.md", "AGENTS.md"].map((name) =>
-      readFile(join(resourceRoot, name), "utf8").then(
-        (text) => text.trim(),
-        (failure: unknown) => {
-          if (failure instanceof Error && "code" in failure && failure.code === "ENOENT") return "";
-          throw failure;
-        },
-      ),
-    ),
-  );
-  const present = files.filter((text) => text.length > 0);
-  if (present.length === 0) return undefined;
-  return `[Agent instructions from Carillon]\n${present.join("\n\n")}\n[End of agent instructions]`;
 }
 
 /** The configured selection is the only one offered, at every scope. */

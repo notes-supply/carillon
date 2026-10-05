@@ -44,6 +44,9 @@ pub struct ScopeState {
     #[serde(deserialize_with = "required_nullable")]
     pub selection: Option<Selection>,
     pub overridden: bool,
+    /// The runtime does not change this scope through the model API.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

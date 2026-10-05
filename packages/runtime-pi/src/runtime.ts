@@ -249,6 +249,9 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
       modelRuntime: runtime,
       model,
       ...(isThinkingLevel(model, thinking) ? { thinkingLevel: thinking } : {}),
+      onWork: (fact) => {
+        activity.report(fact);
+      },
     });
     const { session, extensionsResult } = created;
     try {

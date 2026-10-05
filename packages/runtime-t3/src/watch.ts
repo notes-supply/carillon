@@ -10,12 +10,19 @@
  * (work listed, report owed), which a bounded snapshot cannot restate.
  * Nothing here talks to the network.
  */
-import type { ActivityPhase, FinishedTool, RunningTool, TurnActivity } from "@carillon/protocol";
+import type {
+  ActivityPhase,
+  FinishedTool,
+  RunningTool,
+  TurnActivity,
+  WorkItem,
+} from "@carillon/protocol";
 import {
   commandHeader,
   commentary,
   describe,
   displayed,
+  summarizeWork,
   toolName,
 } from "@carillon/runtime/activity";
 import { bounded } from "@carillon/runtime/failure";
@@ -23,6 +30,7 @@ import { isAbsolute, relative, resolve } from "node:path";
 import type { Static, TSchema } from "typebox";
 import { Check } from "typebox/value";
 import {
+  ContextTransferSchema,
   MessageSchema,
   ProjectionSchema,
   ProviderSessionDetachedSchema,
@@ -30,21 +38,35 @@ import {
   ProviderThreadSchema,
   RunSchema,
   RuntimeRequestSchema,
+  SubagentSchema,
   TurnItemSchema,
   TurnItemSchemas,
   type BackgroundTask,
+  type ContextTransfer,
   type Message,
   type ProviderSession,
   type ProviderThread,
   type Run,
   type RunStatus,
   type RuntimeRequest,
+  type Subagent,
   type TurnItemOf,
 } from "./contracts.ts";
 import { T3Failure } from "./t3.ts";
 
+/**
+ * Where a turn's report of delegated work continues: the message the
+ * conversation's turn began with, and the last run whose text was answered.
+ * The runtime hands it to core as the follow-up turn's cursor.
+ */
+export interface FollowUp {
+  readonly message: string;
+  readonly after: number;
+}
+
 export type Outcome =
-  | { readonly kind: "completed"; readonly output: string }
+  /** `followUp`: work this answer started still owes the conversation a report. */
+  | { readonly kind: "completed"; readonly output: string; readonly followUp?: FollowUp }
   | { readonly kind: "failed"; readonly explanation: string }
   /** T3's state cannot show whether the turn's background work was reported. */
   | { readonly kind: "unresolved"; readonly explanation: string }
@@ -64,6 +86,8 @@ export interface Retained {
   readonly sessions: number;
   readonly pendingProviderRecords: number;
   readonly detachedSessions: number;
+  readonly delegations: number;
+  readonly transfers: number;
 }
 
 export interface TurnWatch {
@@ -81,14 +105,8 @@ export interface TurnWatch {
   activeRun(): Run | undefined;
   /** The thread's latest run, the one T3 settles background work through. */
   latestRun(): Run | undefined;
-  /** Earlier turns' runs that still occupy the thread. */
-  blocking(): readonly Run[];
-  /**
-   * While the turn has no run: the thread's latest earlier run and the
-   * background work its provider thread still lists, which T3 settles
-   * through that run. Undefined once the turn's run exists.
-   */
-  stale(): { readonly run: Run; readonly listed: readonly BackgroundTask[] } | undefined;
+  /** Whether runs this turn did not start still occupy the thread, so a new message waits behind them. */
+  busy(): boolean;
   /** Whether the thread has any message yet. */
   empty(): boolean;
   outcome(): Outcome | undefined;
@@ -120,6 +138,16 @@ const FINISHED_ITEM: ReadonlySet<string> = new Set([
   "interrupted",
 ]);
 const ENDED_SESSION: ReadonlySet<ProviderSession["status"]> = new Set(["stopped", "error"]);
+/** T3's own test for a child still working (`isOrchestrationV2WorkActive`). */
+const ACTIVE_TASK: ReadonlySet<Subagent["status"]> = new Set(["pending", "running", "waiting"]);
+/** A published result T3 has yet to deliver to the parent in a continuation. */
+const OWED_DELIVERY: ReadonlySet<string> = new Set(["pending", "claimed"]);
+/** Transfers shown as work of their own; spawn and result transfers belong to their delegation. */
+const TRANSFER_WORK: ReadonlyMap<string, { kind: WorkItem["kind"]; label: string }> = new Map([
+  ["provider_handoff", { kind: "handoff", label: "context handoff" }],
+  ["fork", { kind: "fork", label: "fork to another thread" }],
+  ["merge_back", { kind: "fork", label: "merge back from another thread" }],
+]);
 const RECENT_CALLS = 5;
 const RUNNING_CALLS = 8;
 /** Provider records kept while the fold cannot yet tell whether the turn owns them. */
@@ -143,6 +171,12 @@ export interface WatchOptions {
    * unresolved as soon as one is adopted. The runtime owns this fact.
    */
   readonly uncertainPredecessor?: boolean;
+  /**
+   * This turn reports delegated work of an earlier turn that began with
+   * `messageId`: it owns no run of its own, only the continuations T3
+   * starts for that work after run ordinal `after`.
+   */
+  readonly followUp?: { readonly after: number };
 }
 
 export function watchTurn(
@@ -157,16 +191,27 @@ export function watchTurn(
   /** Runs from the turn's onward, by ID, with the greatest ordinal tracked. */
   let turnRuns = new Map<string, Run>();
   let last: Run | undefined;
-  /** Earlier runs still active, which block a new dispatch. */
+  /** Earlier runs still active: a new message waits behind them in T3's queue. */
   let earlier = new Map<string, Run>();
+  const followUp = options.followUp;
   /**
-   * While the turn has no run: the thread's latest earlier run and its
-   * provider thread, whose listed background work outlives the run and
-   * must be settled before a successor is dispatched. Released once the
-   * turn's own run exists.
+   * Continuations T3 started to report work the turn's runs delegated,
+   * positively linked through T3's own records. A turn never answers with
+   * them; a follow-up turn of the same conversation does (see `followUp`).
    */
-  let predecessor: Run | undefined;
-  let predecessorThread: ProviderThread | undefined;
+  let continuationRuns = new Map<string, Run>();
+  /** Continuation messages T3 announced or sent, by message, with the run whose work they report. */
+  const continuations = new Map<string, string>();
+  /** Later runs not (yet) known to be the turn's, kept briefly in case a continuation link arrives after them. */
+  const unclaimed = new Map<string, Run>();
+  /** Runs adopted because the turn's process owed a background report (wakes), not by a native link. */
+  const wakeRuns = new Set<string>();
+  /** Child agents started by the turn's runs or their continuations, kept across snapshots. */
+  const delegations = new Map<string, Subagent>();
+  /** Delegations a resumed snapshot no longer listed: their state is not confirmed. */
+  const unconfirmed = new Set<string>();
+  /** Handoffs, forks and merges of the turn's runs. */
+  const transfers = new Map<string, ContextTransfer>();
   let hasMessages = false;
   /** The turn's assistant messages by ID, kept across snapshots. */
   const assistant = new Map<string, Message>();
@@ -227,8 +272,8 @@ export function watchTurn(
     turnRuns = new Map();
     last = undefined;
     earlier = new Map();
-    predecessor = undefined;
-    predecessorThread = undefined;
+    continuationRuns = new Map();
+    unclaimed.clear();
     hasMessages = false;
     running = new Map();
     recent = [];
@@ -257,46 +302,101 @@ export function watchTurn(
   function adopt(run: Run): boolean {
     if (anchor === undefined || run.ordinal <= anchor.ordinal) return false;
     if (turnRuns.has(run.id)) return true;
+    // A continuation is identified by T3's own record, whenever it is seen:
+    // it is neither another process's wake nor a stray, and only a
+    // follow-up turn answers with it.
+    if (continuationOf(run)) {
+      continuationRuns.set(run.id, run);
+      unclaimed.delete(run.userMessageId);
+      if (stray === run.id) stray = undefined;
+      return followUp !== undefined && run.ordinal > followUp.after;
+    }
+    remember(unclaimed, run.userMessageId, run);
     if (foreign.has(run.id)) return false;
+    if (followUp !== undefined) {
+      // A follow-up turn owns only its continuations and the wakes they owe;
+      // anything else on the thread is someone else's and is left alone.
+      if (wakeOwedAfter !== undefined && run.ordinal > wakeOwedAfter) return wake(run);
+      return false;
+    }
     if (anchor.status !== "completed") {
       foreign.add(run.id);
       return false;
     }
-    if (wakeOwedAfter !== undefined && run.ordinal > wakeOwedAfter) return true;
-    if (backgroundSeenAt !== undefined) return true;
+    if (wakeOwedAfter !== undefined && run.ordinal > wakeOwedAfter) return wake(run);
+    if (backgroundSeenAt !== undefined) return wake(run);
     stray ??= run.id;
     return false;
   }
 
+  function wake(run: Run): true {
+    wakeRuns.add(run.id);
+    return true;
+  }
+
+  /** Whether T3 linked this run's message to work of a run the turn holds. */
+  function continuationOf(run: Run): boolean {
+    const parent = continuations.get(run.userMessageId);
+    return parent !== undefined && linkedRun(parent);
+  }
+
+  /** A run whose delegated work and continuations belong to this turn's report. */
+  function linkedRun(id: string): boolean {
+    return anchor?.id === id || turnRuns.has(id) || continuationRuns.has(id);
+  }
+
+  /** Records a continuation link, and folds again a run it arrived after. */
+  function link(message: string, parentRun: string): void {
+    if (continuations.get(message) === parentRun) return;
+    continuations.set(message, parentRun);
+    const run = unclaimed.get(message);
+    if (run !== undefined) foldRun(run);
+  }
+
   function foldRun(run: Run): void {
-    if (run.userMessageId === messageId) {
-      anchor = run;
-      predecessor = undefined;
-      predecessorThread = undefined;
-    }
-    const owned = anchor !== undefined && (run.id === anchor.id || adopt(run));
+    if (run.userMessageId === messageId) anchor = run;
+    const delivery = run.delegatedCompletion?.delivery;
+    if (delivery != null) continuations.set(delivery.messageId, run.id);
+    const owned =
+      anchor !== undefined && ((run.id === anchor.id && followUp === undefined) || adopt(run));
     if (owned) {
       turnRuns.set(run.id, run);
       earlier.delete(run.id);
       if (last === undefined || run.ordinal >= last.ordinal) last = run;
       return;
     }
-    if (anchor !== undefined && run.ordinal > anchor.ordinal) return;
+    if (anchor !== undefined && run.ordinal >= anchor.ordinal) return;
     if (isActive(run)) earlier.set(run.id, run);
     else earlier.delete(run.id);
-    if (anchor === undefined && (predecessor === undefined || run.ordinal >= predecessor.ordinal)) {
-      predecessor = run;
-      predecessorThread =
-        run.providerThreadId === null
-          ? undefined
-          : (recentThreads.get(run.providerThreadId) ?? providerThreads.get(run.providerThreadId));
-    }
   }
 
-  /** An adopted follow-up whose provenance an unconfirmed earlier stop leaves uncertain. */
+  /** An adopted wake whose provenance an unconfirmed earlier stop leaves uncertain. */
   function uncertainFollowUp(): boolean {
     if (options.uncertainPredecessor !== true || anchor === undefined) return false;
-    for (const run of turnRuns.values()) if (run.ordinal > anchor.ordinal) return true;
+    for (const run of turnRuns.values()) if (wakeRuns.has(run.id)) return true;
+    return false;
+  }
+
+  /**
+   * Whether work the turn delegated still owes this conversation a report:
+   * a T3-owned task still working, or with a result T3 has yet to deliver
+   * in a continuation (T3 publishes the result before it schedules the
+   * continuation, so this covers the gap between them), an announced
+   * continuation not started yet, or a continuation no turn answered with.
+   */
+  function reportOwed(): boolean {
+    for (const task of delegations.values())
+      if (
+        task.origin === "app_owned" &&
+        (ACTIVE_TASK.has(task.status) || OWED_DELIVERY.has(task.completionDelivery?.state ?? ""))
+      )
+        return true;
+    const started = new Set([...continuationRuns.values()].map((run) => run.userMessageId));
+    for (const [message, parent] of continuations)
+      if (linkedRun(parent) && !started.has(message)) return true;
+    for (const run of continuationRuns.values())
+      if (followUp === undefined ? true : run.ordinal > followUp.after && !turnRuns.has(run.id))
+        return true;
     return false;
   }
 
@@ -308,6 +408,8 @@ export function watchTurn(
 
   function foldMessage(message: Message): void {
     hasMessages = true;
+    if (message.delegatedCompletion !== undefined)
+      link(message.id, message.delegatedCompletion.parentRunId);
     if (message.role !== "assistant" || message.runId === null || !turnRuns.has(message.runId))
       return;
     assistant.set(message.id, message);
@@ -362,6 +464,20 @@ export function watchTurn(
     }
   }
 
+  /** A child agent of a run the turn holds; others are another conversation's business. */
+  function foldSubagent(task: Subagent): void {
+    if (task.runId === null || !linkedRun(task.runId)) return;
+    delegations.set(task.id, task);
+    unconfirmed.delete(task.id);
+  }
+
+  function foldTransfer(transfer: ContextTransfer): void {
+    if (!TRANSFER_WORK.has(transfer.type)) return;
+    const runs = [transfer.sourcePoint.runId, transfer.targetRunId];
+    if (!runs.some((run) => run != null && linkedRun(run))) return;
+    transfers.set(transfer.id, transfer);
+  }
+
   function foldRequest(request: RuntimeRequest): void {
     if (request.status === "pending") pendingRequests.set(request.id, request);
     else pendingRequests.delete(request.id);
@@ -407,26 +523,26 @@ export function watchTurn(
   }
 
   function foldProviderThread(thread: ProviderThread): void {
-    if (predecessor?.providerThreadId === thread.id) predecessorThread = thread;
     if (turnProviderThread(thread.id)) {
       providerThreads.set(thread.id, thread);
       pruneProviders();
-    } else remember(recentThreads, thread);
+    } else remember(recentThreads, thread.id, thread);
   }
 
   function foldSession(session: ProviderSession): void {
     if (turnSession(session.id)) {
       sessions.set(session.id, session);
       detachedSessions.delete(session.id);
-    } else remember(recentSessions, session);
+    } else remember(recentSessions, session.id, session);
   }
 
-  function remember<T extends { readonly id: string }>(recent: Map<string, T>, record: T): void {
-    recent.delete(record.id);
-    recent.set(record.id, record);
-    for (const id of recent.keys()) {
+  /** Keeps `record` among the few most recent of `recent`. */
+  function remember<T>(recent: Map<string, T>, key: string, record: T): void {
+    recent.delete(key);
+    recent.set(key, record);
+    for (const oldest of recent.keys()) {
       if (recent.size <= RECENT_RECORDS) break;
-      recent.delete(id);
+      recent.delete(oldest);
     }
   }
 
@@ -596,6 +712,51 @@ export function watchTurn(
     return payload;
   }
 
+  /**
+   * The turn's delegated and transferred work, from T3's own records: each
+   * child agent with the state T3 last confirmed (unknown once a snapshot
+   * stopped listing it), the report T3 still owes this conversation, and
+   * the handoffs, forks and merges of the turn's runs.
+   */
+  function workItems(): WorkItem[] {
+    const items: WorkItem[] = [];
+    for (const task of delegations.values()) {
+      const actor = task.model ?? task.driver;
+      items.push({
+        id: task.id,
+        kind: "delegation",
+        label: (task.title === null ? undefined : displayed(task.title, 100)) ?? "subagent",
+        state: unconfirmed.has(task.id) ? "unknown" : TASK_STATE[task.status],
+        ...(delegations.has(task.parentNodeId) ? { parent: task.parentNodeId } : {}),
+        ...(actor.length === 0 ? {} : { actor: toolName(actor) }),
+        ...(task.startedAt === null ? {} : { started_at: seconds(task.startedAt) }),
+      });
+    }
+    const reporting = [...continuationRuns.values()].some(
+      (run) => isActive(run) && !turnRuns.has(run.id),
+    );
+    if (reporting || (followUp === undefined && reportOwed()))
+      items.push({
+        id: `report:${messageId}`,
+        kind: "task",
+        label: "report back to this conversation",
+        state: reporting ? "running" : "queued",
+      });
+    for (const transfer of transfers.values()) {
+      const work = TRANSFER_WORK.get(transfer.type);
+      if (work === undefined) continue;
+      const target =
+        transfer.type === "provider_handoff" ? transfer.targetProviderInstanceId : null;
+      items.push({
+        id: transfer.id,
+        kind: work.kind,
+        label: target === null ? work.label : `${work.label} to ${toolName(target)}`,
+        state: transferState(transfer.status),
+      });
+    }
+    return items;
+  }
+
   function quiet(): boolean {
     return (
       active() === undefined &&
@@ -628,11 +789,22 @@ export function watchTurn(
                 `T3 sent a thread snapshot that omits run ${id} this turn observed`,
               );
           reset();
-          // Runs in ordinal order, so the turn's own is known before the
-          // runs that follow it are judged.
+          // Continuation links first, from messages and the runs that announce
+          // them, so no continuation is ever judged a stray; then runs in
+          // ordinal order, so the turn's own is known before the runs that
+          // follow it are judged.
+          for (const message of projection.messages)
+            if (message.delegatedCompletion !== undefined)
+              continuations.set(message.id, message.delegatedCompletion.parentRunId);
           for (const run of [...projection.runs].sort((a, b) => a.ordinal - b.ordinal))
             foldRun(run);
           refile();
+          // Delegations and transfers arrive whole; one the turn knew that
+          // this snapshot omits is no longer confirmed, never assumed done.
+          const listedTasks = new Set(projection.subagents.map((task) => task.id));
+          for (const id of delegations.keys()) if (!listedTasks.has(id)) unconfirmed.add(id);
+          for (const task of projection.subagents) foldSubagent(task);
+          for (const transfer of projection.contextTransfers) foldTransfer(transfer);
           for (const thread of projection.providerThreads) foldProviderThread(thread);
           for (const session of projection.providerSessions) foldSession(session);
           // A snapshot lists every session the thread still has: one a turn
@@ -692,6 +864,13 @@ export function watchTurn(
             case "message.updated":
               foldMessage(parsed(MessageSchema, payload, "message"));
               break;
+            case "subagent.updated":
+              foldSubagent(parsed(SubagentSchema, payload, "subagent"));
+              break;
+            case "context-transfer.created":
+            case "context-transfer.updated":
+              foldTransfer(parsed(ContextTransferSchema, payload, "context transfer"));
+              break;
             case "turn-item.updated":
               foldItem(payload);
               break;
@@ -722,15 +901,7 @@ export function watchTurn(
     run: () => anchor,
     activeRun: active,
     latestRun: () => last,
-    blocking: () => [...earlier.values()],
-    stale: () =>
-      predecessor === undefined
-        ? undefined
-        : {
-            run: predecessor,
-            listed:
-              predecessor.providerThreadId === null ? [] : listed(predecessorThread, predecessor),
-          },
+    busy: () => earlier.size > 0,
     empty: () => !hasMessages,
     quiet,
     providerSession() {
@@ -740,7 +911,24 @@ export function watchTurn(
     },
     requestOpen: () => ownedPendingRequest() !== undefined,
     outcome() {
-      if (anchor === undefined || last === undefined) return undefined;
+      if (anchor === undefined) {
+        if (followUp !== undefined && seen)
+          return {
+            kind: "failed",
+            explanation:
+              "T3 no longer lists the message whose delegated work this turn reports, so its report cannot be followed",
+          };
+        return undefined;
+      }
+      if (last === undefined) {
+        // Only a follow-up turn holds no run of its own: it waits for a
+        // continuation as long as the delegated work still owes one.
+        if (followUp === undefined || reportOwed()) return undefined;
+        return {
+          kind: "failed",
+          explanation: "T3's delegated work ended without reporting back to this conversation",
+        };
+      }
       const request = ownedPendingRequest();
       if (request !== undefined) return { kind: "blocked", asked: asked(request) };
       if (uncertainFollowUp())
@@ -794,7 +982,18 @@ export function watchTurn(
               explanation:
                 "Carillon lost its connection to T3 while this turn ran background work, and T3's state does not show whether the result was delivered",
             };
-          return { kind: "completed", output: answer() };
+          // The answer is complete; delegated work it started may still owe
+          // the conversation a report, which a follow-up turn delivers.
+          return reportOwed()
+            ? {
+                kind: "completed",
+                output: answer(),
+                followUp: {
+                  message: messageId,
+                  after: followUp === undefined ? anchor.ordinal : last.ordinal,
+                },
+              }
+            : { kind: "completed", output: answer() };
         }
         case "failed":
           return { kind: "failed", explanation: errors.get(last.id) ?? "The T3 run failed" };
@@ -812,12 +1011,27 @@ export function watchTurn(
     },
     activity() {
       const run = active() ?? last;
-      const runningTools: RunningTool[] = [...running.values()].map((item) => ({
-        ...tool(item),
-        started_at: seconds(item.startedAt ?? item.updatedAt),
-      }));
+      // A child agent shows once, as its delegation, not also as a tool or a
+      // background task of its parent.
+      const shownAsWork = (item: ToolItem) =>
+        item.type === "subagent" &&
+        item.subagentId !== undefined &&
+        delegations.has(item.subagentId);
+      const childThreads = new Set(
+        [...delegations.values()].flatMap((task) =>
+          task.childThreadId === null ? [] : [task.childThreadId],
+        ),
+      );
+      const runningTools: RunningTool[] = [...running.values()]
+        .filter((item) => !shownAsWork(item))
+        .map((item) => ({
+          ...tool(item),
+          started_at: seconds(item.startedAt ?? item.updatedAt),
+        }));
       const now = Math.floor(Date.now() / 1000);
-      const tasks = roster(run);
+      const tasks = roster(run).filter(
+        (task) => task.childThreadId === undefined || !childThreads.has(task.childThreadId),
+      );
       for (const task of tasks) {
         if (!backgroundSince.has(task.taskId)) backgroundSince.set(task.taskId, now);
         runningTools.push({
@@ -829,17 +1043,26 @@ export function watchTurn(
       for (const id of backgroundSince.keys())
         if (!tasks.some((task) => task.taskId === id)) backgroundSince.delete(id);
       const headline = latestAssistant === undefined ? undefined : commentary(latestAssistant.text);
+      const work = workItems();
       return {
-        phase: phase(run, compacting.size > 0, retrying.size > 0, runningTools.length),
+        phase:
+          run === undefined && followUp !== undefined
+            ? "waiting"
+            : phase(run, compacting.size > 0, retrying.size > 0, runningTools.length),
         ...(headline === undefined ? {} : { headline }),
         running: runningTools.slice(0, RUNNING_CALLS),
-        recent: recent.map(
-          (item): FinishedTool => ({
-            ...tool(item),
-            ok: item.status === "completed",
-          }),
-        ),
+        recent: recent
+          .filter((item) => !shownAsWork(item))
+          .map(
+            (item): FinishedTool => ({
+              ...tool(item),
+              ok: item.status === "completed",
+            }),
+          ),
         tool_calls: counted.size,
+        ...(work.length === 0 && unconfirmed.size === 0
+          ? {}
+          : { work: summarizeWork(work, unconfirmed.size > 0) }),
       };
     },
     retained: () => ({
@@ -853,6 +1076,8 @@ export function watchTurn(
       sessions: sessions.size,
       pendingProviderRecords: recentThreads.size + recentSessions.size,
       detachedSessions: detachedSessions.size,
+      delegations: delegations.size,
+      transfers: transfers.size,
     }),
     onChange(listener) {
       listeners.add(listener);
@@ -867,10 +1092,42 @@ function phase(
   retrying: boolean,
   runningTools: number,
 ): ActivityPhase {
+  if (run?.status === "queued") return "queued";
   if (run === undefined || BEFORE_PROVIDER.has(run.status)) return "starting";
   if (compacting) return "compacting";
   if (retrying) return "retrying";
-  return runningTools > 0 ? "tools" : "model";
+  if (runningTools > 0) return "tools";
+  return run.status === "waiting" ? "waiting" : "model";
+}
+
+const TASK_STATE: Readonly<Record<Subagent["status"], WorkItem["state"]>> = {
+  idle: "queued",
+  pending: "queued",
+  running: "running",
+  waiting: "waiting",
+  completed: "succeeded",
+  failed: "failed",
+  cancelled: "cancelled",
+  interrupted: "cancelled",
+};
+
+/** What a transfer's native status confirms: prepared is not consumed. */
+function transferState(status: string): WorkItem["state"] {
+  switch (status) {
+    case "pending":
+      return "running";
+    case "resolved_native":
+    case "resolved_portable":
+      return "waiting";
+    case "consumed":
+      return "succeeded";
+    case "failed":
+      return "failed";
+    case "superseded":
+      return "cancelled";
+    default:
+      return "unknown";
+  }
 }
 
 /** Claude's tool names and argument names in the vocabulary the shared description knows. */

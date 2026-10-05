@@ -128,6 +128,7 @@ fn completed(request: RuntimeTurnRequest) -> RuntimeTurnResponse {
     RuntimeTurnResponse {
         correlation_id: request.correlation_id,
         output: format!("reply to {}", request.input),
+        follow_up: None,
     }
 }
 
@@ -753,6 +754,94 @@ async fn duplicate_events_share_one_accepted_turn_without_reexecution() -> Resul
 }
 
 #[tokio::test]
+async fn follow_up_turns_carry_only_the_runtime_cursor_and_cannot_be_forged() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    let first = accept(&state, "one", "conversation").await?;
+    let cursor = serde_json::json!({"message": "native-message", "after": 1});
+    let answered = cursor.clone();
+    run_next_turn(&state, "test-runtime", async move |_, _, request| {
+        Ok(RuntimeTurnResponse {
+            follow_up: Some(answered),
+            ..completed(request)
+        })
+    })
+    .await?;
+    let delivery = state
+        .core
+        .database
+        .claim_delivery("test-interface", "instance")?
+        .context("missing reply")?;
+    assert_eq!(delivery.turn_id, first.turn_id);
+    state.core.database.acknowledge_delivery(
+        "test-interface",
+        delivery.id,
+        "instance",
+        DeliveryOutcome::Delivered,
+        None,
+    )?;
+    // The follow-up turn runs next with the cursor, no input and no files of its own.
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    let record = seen.clone();
+    run_next_turn(&state, "test-runtime", async move |_, _, request| {
+        *record
+            .lock()
+            .map_err(|_| TurnFailure::Uncertain(anyhow!("poisoned")))? = Some(request.clone());
+        Ok(RuntimeTurnResponse {
+            correlation_id: request.correlation_id,
+            output: "the report".to_owned(),
+            follow_up: None,
+        })
+    })
+    .await?;
+    let request = seen
+        .lock()
+        .map_err(|_| anyhow!("poisoned"))?
+        .clone()
+        .context("follow-up turn did not run")?;
+    assert_ne!(request.correlation_id, first.turn_id);
+    assert_eq!(request.input, "");
+    assert_eq!(request.audience_id, "conversation");
+    assert_eq!(request.native, serde_json::json!({ "follow_up": cursor }));
+    assert!(request.attachments.is_empty() && request.unanswered.is_empty());
+    let report = state
+        .core
+        .database
+        .claim_delivery("test-interface", "instance")?
+        .context("missing report")?;
+    assert_eq!(report.content, "the report");
+
+    // An interface cannot pose as core's follow-up.
+    let mut headers = HeaderMap::new();
+    headers.insert(PROVIDER_HEADER, "test-interface".parse()?);
+    headers.insert(
+        http::header::AUTHORIZATION,
+        format!("Bearer {}", state.config.credential("test-interface")?).parse()?,
+    );
+    let refused = accept_event(
+        State(configured(&state)),
+        headers,
+        Json(ExternalEvent {
+            event_id: "forged".to_owned(),
+            agent_id: state.config.value.agent.id.clone(),
+            user_id: "test-user".to_owned(),
+            audience_id: "conversation".to_owned(),
+            delivery_target_id: "test-destination".to_owned(),
+            feedback_target_id: "test-feedback".to_owned(),
+            content: "hello".to_owned(),
+            native: serde_json::json!({ "follow_up": {"message": "x", "after": 0} }),
+            attachments: None,
+        }),
+    )
+    .await;
+    assert_eq!(
+        refused.err().map(|error| error.status),
+        Some(StatusCode::BAD_REQUEST)
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn missing_resource_root_refuses_new_acceptance_without_losing_receipts() -> Result<()> {
     let directory = tempdir()?;
     let state = installation(directory.path())?;
@@ -1372,6 +1461,7 @@ async fn empty_runtime_output_interrupts_without_empty_delivery_or_replay() -> R
                         " \t\n"
                     }
                     .to_owned(),
+                    follow_up: None,
                 })
             }
         }),

@@ -2,10 +2,52 @@
  * What an executing turn is doing, derived from native Pi session events and
  * bounded for display. Tool inputs are described by the shared runtime
  * package's deny-by-default descriptions, beside Pi's tool semantics here.
+ *
+ * Pi has no session event for child agents: a tool that runs other tools
+ * (nested calls carry `parentToolCallId`) is still one tool call, not a
+ * delegation. A participating extension that runs child agents reports
+ * their lifecycle explicitly as `carillon:work` facts on the session's event
+ * bus (see {@link WORK_CHANNEL}); unsupported extensions keep the ordinary
+ * tool view.
  */
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
-import type { ActivityPhase, FinishedTool, RunningTool, TurnActivity } from "@carillon/protocol";
-import { commentary, describe, toolName } from "@carillon/runtime/activity";
+import {
+  WORK_ITEM_LIMIT,
+  WorkItemSchema,
+  type ActivityPhase,
+  type FinishedTool,
+  type RunningTool,
+  type TurnActivity,
+  type WorkItem,
+} from "@carillon/protocol";
+import {
+  commentary,
+  describe,
+  displayed,
+  summarizeWork,
+  toolName,
+} from "@carillon/runtime/activity";
+import { Type } from "typebox";
+import { Check } from "typebox/value";
+
+/**
+ * The event-bus channel on which a participating Pi extension reports the
+ * work it runs for the current turn: `{ id, kind, label, state, parent?,
+ * actor? }` with the shared work vocabulary, one fact per change, the same
+ * `id` for the same work. Each session (and so each turn) has its own bus.
+ */
+export const WORK_CHANNEL = "carillon:work";
+
+const WorkReportSchema = Type.Object({
+  id: WorkItemSchema.properties.id,
+  kind: WorkItemSchema.properties.kind,
+  label: Type.String({ minLength: 1, maxLength: 1000 }),
+  state: WorkItemSchema.properties.state,
+  parent: Type.Optional(WorkItemSchema.properties.id),
+  actor: Type.Optional(Type.String({ minLength: 1, maxLength: 1000 })),
+});
+const FINISHED_WORK: ReadonlySet<WorkItem["state"]> = new Set(["succeeded", "failed", "cancelled"]);
+const WORK_LABEL_LIMIT = 100;
 
 /** The most finished calls a snapshot lists; older calls are only counted. */
 const RECENT_CALLS = 5;
@@ -14,6 +56,11 @@ const RUNNING_CALLS = 8;
 
 export interface ActivityTracker {
   observe(event: AgentSessionEvent): void;
+  /**
+   * One fact a participating extension reported on {@link WORK_CHANNEL}.
+   * A fact outside the shared vocabulary is ignored, never guessed at.
+   */
+  report(fact: unknown): void;
   snapshot(): TurnActivity;
 }
 
@@ -25,6 +72,10 @@ export function trackActivity(workspace: string): ActivityTracker {
   const running = new Map<string, RunningTool>();
   const recent: FinishedTool[] = [];
   const idle = (): ActivityPhase => (running.size > 0 ? "tools" : "model");
+  /** Reported work by ID, at most the snapshot limit; never more, even when all of it is live. */
+  const work = new Map<string, WorkItem>();
+  /** Some reported work could not be retained. */
+  let partialWork = false;
 
   return {
     observe(event) {
@@ -88,6 +139,31 @@ export function trackActivity(workspace: string): ActivityTracker {
           break;
       }
     },
+    report(fact) {
+      if (!Check(WorkReportSchema, fact)) return;
+      const known = work.get(fact.id);
+      if (known === undefined && work.size >= WORK_ITEM_LIMIT) {
+        // Make room only by forgetting finished work, oldest first.
+        const finished = [...work.values()].find((item) => FINISHED_WORK.has(item.state));
+        if (finished === undefined) {
+          partialWork = true;
+          return;
+        }
+        work.delete(finished.id);
+      }
+      const actor = fact.actor === undefined ? undefined : toolName(fact.actor);
+      const startedAt =
+        known?.started_at ?? (fact.state === "running" ? Math.floor(Date.now() / 1000) : undefined);
+      work.set(fact.id, {
+        id: fact.id,
+        kind: fact.kind,
+        label: displayed(fact.label, WORK_LABEL_LIMIT) ?? fact.kind,
+        state: fact.state,
+        ...(fact.parent === undefined ? {} : { parent: fact.parent }),
+        ...(actor === undefined ? {} : { actor }),
+        ...(startedAt === undefined ? {} : { started_at: startedAt }),
+      });
+    },
     snapshot() {
       return {
         phase,
@@ -95,6 +171,9 @@ export function trackActivity(workspace: string): ActivityTracker {
         running: [...running.values()].slice(0, RUNNING_CALLS),
         recent: [...recent],
         tool_calls: toolCalls,
+        ...(work.size === 0 && !partialWork
+          ? {}
+          : { work: summarizeWork([...work.values()], partialWork) }),
       };
     },
   };

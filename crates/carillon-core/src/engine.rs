@@ -9,8 +9,8 @@ use anyhow::{Context as _, Result, anyhow};
 use carillon_installation::config::AttachmentLimits;
 use carillon_protocol::model::{
     ActiveTurn, Delivery, DeliveryAck, DeliveryReconciliation, EventReceipt, EventStatus,
-    ExternalEvent, ModelQuery, RuntimeTurnRequest, RuntimeTurnResponse, SelectedProvider,
-    StateCounts, TurnInspection, TurnSummary, UnansweredTurn,
+    ExternalEvent, ModelQuery, NATIVE_FOLLOW_UP, RuntimeTurnRequest, RuntimeTurnResponse,
+    SelectedProvider, StateCounts, TurnInspection, TurnSummary, UnansweredTurn,
 };
 use std::{path::PathBuf, sync::Arc};
 use tracing::warn;
@@ -293,9 +293,14 @@ impl Core {
             return Ok(WorkerStep::Advanced);
         }
         let limits = &self.options.attachments;
-        let earlier =
+        // A follow-up turn only reports work an earlier turn started; it
+        // carries no files to the runtime's conversation.
+        let earlier = if turn.native.get(NATIVE_FOLLOW_UP).is_some() {
+            Vec::new()
+        } else {
             self.database
-                .unnoted_files(&turn, limits.max_files, limits.max_event_bytes())?;
+                .unnoted_files(&turn, limits.max_files, limits.max_event_bytes())?
+        };
         let offered = self.offer(earlier).await?;
         // The files this turn carries to the runtime: its own and the earlier
         // turns offered with it, even when none of a turn's files was left.
@@ -537,6 +542,12 @@ impl Core {
         }
         if event.agent_id != self.options.agent_id {
             return Err(CoreError::InvalidInput("unknown agent".to_owned()));
+        }
+        // Only core queues follow-up turns; an interface cannot pose as one.
+        if event.native.get(NATIVE_FOLLOW_UP).is_some() {
+            return Err(CoreError::InvalidInput(format!(
+                "native.{NATIVE_FOLLOW_UP} is reserved for turns core queues itself"
+            )));
         }
         if let Some(staged) = &event.attachments {
             crate::intake::admit(&self.options.attachments, staged)?;

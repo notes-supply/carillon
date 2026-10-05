@@ -16,6 +16,7 @@ import type { Api, ImageContent, Model, ModelThinkingLevel } from "@earendil-wor
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ExplainedFailure } from "@carillon/runtime/failure";
+import { WORK_CHANNEL } from "./activity.ts";
 
 interface PiExecutionSessionOptions {
   readonly resourceRoot: string;
@@ -30,6 +31,8 @@ interface PiExecutionSessionOptions {
   readonly extensionContext?: unknown;
   /** Host context for this turn's attachments, as a native extension. */
   readonly attachmentContext?: ExtensionFactory;
+  /** Receives each fact participating extensions report on the session's `carillon:work` channel. */
+  readonly onWork?: (fact: unknown) => void;
 }
 
 export async function createPiExecutionSession(options: PiExecutionSessionOptions) {
@@ -42,6 +45,7 @@ export async function createPiExecutionSession(options: PiExecutionSessionOption
   );
   const settingsManager = SettingsManager.create(options.workspace, options.resourceRoot);
   const eventBus = createEventBus();
+  if (options.onWork !== undefined) eventBus.on(WORK_CHANNEL, options.onWork);
   const loader = new DefaultResourceLoader({
     eventBus,
     cwd: options.workspace,

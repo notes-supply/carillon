@@ -807,6 +807,7 @@ mod tests {
                     *conversation = ScopeState {
                         selection: Some(selection),
                         overridden: true,
+                        read_only: false,
                     };
                 }
                 self.failure = self.then_fail.take();
@@ -855,10 +856,12 @@ mod tests {
                     Some(selection) => ScopeState {
                         selection: Some(selection),
                         overridden: true,
+                        read_only: false,
                     },
                     None => ScopeState {
                         selection: agent_default,
                         overridden: false,
+                        read_only: false,
                     },
                 };
             }
@@ -899,6 +902,7 @@ mod tests {
         let agent = ScopeState {
             selection: Some(selection("anthropic", "sonnet", Some("medium"))),
             overridden: false,
+            read_only: false,
         };
         FakeRuntime {
             state: ModelState {
@@ -926,6 +930,7 @@ mod tests {
         let scope = ScopeState {
             selection: Some(selection(&long, &long, Some(&long))),
             overridden: true,
+            read_only: false,
         };
         host.state.agent = scope.clone();
         host.state.conversation = Some(scope);
@@ -1462,6 +1467,7 @@ mod tests {
         host.state.conversation = Some(ScopeState {
             selection: Some(last.clone()),
             overridden: true,
+            read_only: false,
         });
         let reply = expect_reply(interact(&mut host, &command(true)))?;
         let model = component_by_id(&reply, "model:model:conversation");
@@ -1650,6 +1656,7 @@ mod tests {
         host.state.conversation = Some(ScopeState {
             selection: Some(selection("removed", "gone", Some("high"))),
             overridden: true,
+            read_only: false,
         });
         let reply = expect_reply(interact(&mut host, &command(true)))?;
         assert!(
@@ -1699,6 +1706,7 @@ mod tests {
                 ..selection("anthropic", "sonnet", None)
             }),
             overridden: false,
+            read_only: false,
         });
         let reply = expect_reply(interact(&mut host, &command(true)))?;
         assert_eq!(

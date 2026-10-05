@@ -6,6 +6,7 @@
  * passes the same best-effort credential redaction as diagnostics before it
  * is cut to length, so no caller ever receives raw tool arguments.
  */
+import { WORK_ITEM_LIMIT, type WorkItem, type WorkSummary } from "@carillon/protocol";
 import { isAbsolute, relative, resolve } from "node:path";
 import { bounded, redactCredentials } from "./failure.ts";
 
@@ -164,4 +165,25 @@ function singleLine(text: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const LIVE_WORK: ReadonlySet<WorkItem["state"]> = new Set(["running", "waiting", "queued"]);
+
+/**
+ * A turn's work as one bounded summary: live work first, then work whose
+ * state is no longer known, then finished work, each in the runtime's order.
+ * Items beyond the snapshot's limit are counted exactly in `omitted`, since
+ * the runtime holds them; `partial` passes on what the runtime could not
+ * observe at all.
+ */
+export function summarizeWork(items: readonly WorkItem[], partial: boolean): WorkSummary {
+  const rank = (item: WorkItem) =>
+    LIVE_WORK.has(item.state) ? 0 : item.state === "unknown" ? 1 : 2;
+  const ordered = [...items].sort((left, right) => rank(left) - rank(right));
+  const omitted = Math.max(0, ordered.length - WORK_ITEM_LIMIT);
+  return {
+    items: ordered.slice(0, WORK_ITEM_LIMIT),
+    partial,
+    ...(omitted > 0 ? { omitted } : {}),
+  };
 }

@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -86,6 +85,14 @@ async function started(correlation: string): Promise<Run> {
   return run;
 }
 
+/** The turn's run once it has the status. */
+async function waitForStatus(correlation: string, status: Run["status"]): Promise<Run> {
+  await fake.waitFor(() => runOf(correlation)?.status === status);
+  const run = runOf(correlation);
+  if (run === undefined) throw new Error("run not started");
+  return run;
+}
+
 /** The runtime's thread subscription after a reconnection. */
 async function resubscribed(): Promise<void> {
   await fake.waitFor(() => thread().subscribers.size === 1);
@@ -108,7 +115,7 @@ const until = (condition: () => boolean) => fake.waitFor(condition);
 const roster = () => thread().providerThread.pendingBackgroundTasks ?? [];
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-it("keeps a conversation's turns in one T3 thread and sends the agent's instructions once", async () => {
+it("keeps a conversation's turns in one T3 thread and sends the person's text as written", async () => {
   const first = runtime.executeTurn(turn("turn-1", "Remember carillon."));
   answer(await started("turn-1"), "Noted.");
   expect(await first).toEqual({ correlation_id: "turn-1", output: "Noted." });
@@ -119,10 +126,14 @@ it("keeps a conversation's turns in one T3 thread and sends the agent's instruct
 
   expect(fake.threads.size).toBe(1);
   expect(thread().runs.map((run) => run.ordinal)).toEqual([1, 2]);
-  expect(userTexts()).toEqual([
-    "[Agent instructions from Carillon]\nYou are the Carillon agent.\n[End of agent instructions]\n\nRemember carillon.",
-    "Which word?",
-  ]);
+  // The agent's instructions are the T3 project's own configuration, not a preamble.
+  expect(userTexts()).toEqual(["Remember carillon.", "Which word?"]);
+  // The thread was opened with the configured selection; messages carry none, so the
+  // thread's own selection (which the native UI may change) runs them.
+  expect(fake.commands.find((command) => command.type === "thread.create")).toMatchObject({
+    modelSelection: { instanceId: "claudeAgent", model: "claude-fable-5-1" },
+  });
+  for (const dispatch of dispatches()) expect(dispatch).not.toHaveProperty("modelSelection");
   // The thread is opened by the same command each turn, replayed under its receipt.
   expect(fake.commands.filter((command) => command.type === "thread.create")).toHaveLength(2);
   // Each turn asks T3 for a bounded snapshot and a completion marker.
@@ -218,7 +229,7 @@ it("resolves a cancellation that arrives while the dispatch is still in flight",
   expect(dispatches()).toHaveLength(1);
 });
 
-it("stops a stale run an ignored interrupt left behind before the next turn starts", async () => {
+it("waits behind a run its ignored interrupt left running, without interrupting it again", async () => {
   fake.interruptBehaviour = "ignore";
   const controller = new AbortController();
   const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
@@ -229,10 +240,15 @@ it("stops a stale run an ignored interrupt left behind before the next turn star
 
   fake.interruptBehaviour = "settle";
   const next = runtime.executeTurn(turn("turn-2", "again"));
-  answer(await started("turn-2"), "ok");
+  const queued = await started("turn-2");
+  expect(queued.status).toBe("queued");
+  expect(dispatches().at(-1)).toMatchObject({ dispatchMode: { type: "queue_after_active" } });
+  await until(() => runtime.activity("turn-2", "discord-private")?.phase === "queued");
+  // The earlier run finishes on its own; only then does the new message run.
+  fake.complete(threadId, run.id);
+  answer(await waitForStatus("turn-2", "running"), "ok");
   expect((await next).output).toBe("ok");
-  expect(fake.interrupts).toEqual([run.id, run.id]);
-  expect(runOf("turn-1")?.status).toBe("interrupted");
+  expect(fake.interrupts).toEqual([run.id]);
 });
 
 it("reports a run someone else stopped, and the conversation continues", async () => {
@@ -582,15 +598,17 @@ it("requests a session detach when cancelled after the roster cleared, before th
   expect(logged.some((line) => line.includes("T3 confirmed the stop"))).toBe(false);
   expect(logged.some((line) => line.includes("had already ended"))).toBe(false);
 
-  // The detached process delivers its wake anyway; the next turn finds and interrupts it.
+  // The detached process delivers its wake anyway; the next turn waits behind it in T3's queue.
   const wake = fake.wake(threadId, "Background command completed");
   const next = runtime.executeTurn(turn("turn-2", "again"));
-  answer(await started("turn-2"), "ok");
+  expect((await started("turn-2")).status).toBe("queued");
+  fake.complete(threadId, wake.id);
+  answer(await waitForStatus("turn-2", "running"), "ok");
   expect((await next).output).toBe("ok");
-  expect(fake.interrupts).toEqual([wake.id]);
+  expect(fake.interrupts).toEqual([]);
   expect(thread().runs.map((candidate) => candidate.status)).toEqual([
     "completed",
-    "interrupted",
+    "completed",
     "completed",
   ]);
 });
@@ -687,7 +705,7 @@ it("keeps a request's ownership and wording through a bounded snapshot that omit
   });
 });
 
-it("does not adopt a later run the turn does not owe, and the next turn sweeps it", async () => {
+it("does not adopt a later run the turn does not owe, and the next turn waits behind it", async () => {
   const result = runtime.executeTurn(turn("turn-1", "work"));
   const run = await started("turn-1");
   // A predecessor's late wake lands on the thread while this turn runs: it queues behind it.
@@ -702,9 +720,11 @@ it("does not adopt a later run the turn does not owe, and the next turn sweeps i
   expect((await result).output).toBe("Only mine.");
 
   const next = runtime.executeTurn(turn("turn-2", "again"));
-  answer(await started("turn-2"), "ok");
+  expect((await started("turn-2")).status).toBe("queued");
+  fake.complete(threadId, stale.id);
+  answer(await waitForStatus("turn-2", "running"), "ok");
   expect((await next).output).toBe("ok");
-  expect(fake.interrupts).toEqual([stale.id]);
+  expect(fake.interrupts).toEqual([]);
 });
 
 it("ignores a stale pending request until the new run's own item names its request", async () => {
@@ -724,7 +744,7 @@ it("ignores a stale pending request until the new run's own item names its reque
   await until(() => runOf("turn-2")?.status === "waiting");
   await pause(300);
   expect(fake.interrupts).toEqual([]);
-  expect(runtime.activity("turn-2", "discord-private")?.phase).toBe("model");
+  expect(runtime.activity("turn-2", "discord-private")?.phase).toBe("waiting");
   // Its item arrives and names the request: blocked with the new turn's wording.
   fake.tool(threadId, next.id, {
     type: "user_input_request",
@@ -972,35 +992,6 @@ it("treats a cancel with a possibly accepted dispatch and no observed run as unc
   await slow.close();
 }, 10_000);
 
-it("dispatches nothing when cancelled while a stale run is being stopped", async () => {
-  const first = runtime.executeTurn(turn("turn-1", "work"));
-  answer(await started("turn-1"), "Done.");
-  expect((await first).output).toBe("Done.");
-  // Another process starts a run on the thread, and T3 keeps it running after an interrupt.
-  const stale = fake.wake(threadId, "Late background report");
-  await until(() => thread().runs.find((run) => run.id === stale.id)?.status === "running");
-  fake.interruptBehaviour = "ignore";
-
-  // Turn 2 is cancelled while waiting for that stale run to settle: it must not reach T3.
-  const controller = new AbortController();
-  const result = runtime.executeTurn(turn("turn-2", "next"), controller.signal);
-  await until(() => fake.interrupts.length === 1);
-  await pause(50);
-  const begun = Date.now();
-  controller.abort(new Error("core disconnected"));
-  await expect(result).rejects.toThrow("core disconnected");
-  expect(Date.now() - begun).toBeLessThan(400);
-  expect(dispatches()).toHaveLength(1);
-  expect(runOf("turn-2")).toBeUndefined();
-  expect(fake.interrupts).toEqual([stale.id]);
-
-  // Nothing of turn 2 was left on T3: the thread stays trusted, and the stale run is swept again.
-  fake.interruptBehaviour = "settle";
-  expect((await (await backgroundTurn("turn-3")).result).output).toBe("Started.\n\nResult.");
-  expect(fake.interrupts).toEqual([stale.id, stale.id]);
-  expect(thread().runs.find((run) => run.id === stale.id)?.status).toBe("interrupted");
-});
-
 it("cancels or closes promptly while T3's discovery or upgrade stalls before any dispatch", async () => {
   fake.holdDiscovery = true;
   const controller = new AbortController();
@@ -1127,107 +1118,6 @@ it("keeps the possibly-running warning when T3 cannot be reached again after the
   );
 });
 
-it("settles background work a terminal earlier run left listed before dispatching the next turn", async () => {
-  const first = runtime.executeTurn(turn("turn-1", "work"));
-  answer(await started("turn-1"), "Done.");
-  expect((await first).output).toBe("Done.");
-  // Another process ran on the thread and completed with work still listed.
-  const old = fake.wake(threadId, "Old turn");
-  await until(() => thread().runs.find((run) => run.id === old.id)?.status === "running");
-  const task = fake.tool(threadId, old.id, { type: "command_execution", input: "sleep 300 &" });
-  fake.background(threadId, [{ taskId: "old-task", kind: "command", description: "sleep 300" }]);
-  fake.assistant(threadId, old.id, "Old result, still working.");
-  fake.complete(threadId, old.id);
-
-  const next = runtime.executeTurn(turn("turn-2", "again"));
-  const run2 = await started("turn-2");
-  // The successor was dispatched only after T3 settled the earlier work through its latest run.
-  expect(fake.interrupts).toEqual([old.id]);
-  expect(roster()).toEqual([]);
-  expect(thread().items.find((item) => item.id === task.id)?.status).toBe("interrupted");
-  answer(run2, "Mine.");
-  expect((await next).output).toBe("Mine.");
-  expect(runtime.activity("turn-2", "discord-private")).toBeUndefined();
-});
-
-it("settles the roster an interrupted earlier run keeps, and refuses to dispatch while T3 still lists it", async () => {
-  const first = runtime.executeTurn(turn("turn-1", "work"));
-  answer(await started("turn-1"), "Done.");
-  await first;
-  // An earlier run is still active with work listed; its interrupt alone leaves the roster.
-  const old = fake.wake(threadId, "Old turn");
-  await until(() => thread().runs.find((run) => run.id === old.id)?.status === "running");
-  fake.background(threadId, [{ taskId: "old-task", kind: "command" }]);
-
-  const next = runtime.executeTurn(turn("turn-2", "again"));
-  const run2 = await started("turn-2");
-  expect(fake.interrupts).toEqual([old.id, old.id]);
-  expect(thread().runs.find((run) => run.id === old.id)?.status).toBe("interrupted");
-  expect(roster()).toEqual([]);
-  answer(run2, "Mine.");
-  expect((await next).output).toBe("Mine.");
-
-  // T3 accepts the interrupts but the work stays listed: no successor is dispatched.
-  const again = fake.wake(threadId, "Another old turn");
-  await until(() => thread().runs.find((run) => run.id === again.id)?.status === "running");
-  fake.background(threadId, [{ taskId: "old-task-2", kind: "command" }]);
-  fake.interruptBehaviour = "ignore";
-  await expect(runtime.executeTurn(turn("turn-3", "third"))).rejects.toMatchObject({
-    status: 503,
-    message: "An earlier turn is still running on T3 and could not be stopped; try again shortly.",
-  });
-  fake.stop(threadId, again.id, "interrupted");
-  await expect(runtime.executeTurn(turn("turn-3", "third"))).rejects.toMatchObject({
-    status: 503,
-    message:
-      "An earlier turn's background work is still listed on T3 and could not be stopped; try again shortly.",
-  });
-  expect(runOf("turn-3")).toBeUndefined();
-  expect(dispatches()).toHaveLength(2);
-  expect(roster()).toHaveLength(1);
-});
-
-it("settles a predecessor that starts while the message is being composed, before dispatching", async () => {
-  // The first message reads the resource files; a FIFO holds that read open.
-  const fifo = join(resources, "SYSTEM.md");
-  await rm(fifo);
-  execFileSync("mkfifo", [fifo]);
-  const result = runtime.executeTurn(turn("turn-1", "work"));
-  await until(() => fake.threads.has(threadId) && fake.subscriptions.length === 1);
-  await pause(100);
-  // Another process starts a run on the thread while compose waits on the file.
-  const late = fake.wake(threadId, "Late predecessor");
-  await until(() => thread().runs.find((run) => run.id === late.id)?.status === "running");
-  await writeFile(fifo, "You are the Carillon agent.\n");
-  const run = await started("turn-1");
-  // The late run was stopped before this turn's message reached T3.
-  expect(fake.interrupts).toEqual([late.id]);
-  expect(thread().runs.find((candidate) => candidate.id === late.id)?.status).toBe("interrupted");
-  expect(thread().runs.map((candidate) => candidate.id)).toEqual([late.id, run.id]);
-  answer(run, "Mine.");
-  expect((await result).output).toBe("Mine.");
-
-  // When the late run cannot be stopped, nothing is dispatched.
-  execFileSync("mkfifo", [`${fifo}.second`]);
-  await rm(fifo);
-  execFileSync("mkfifo", [fifo]);
-  fake.interruptBehaviour = "ignore";
-  const refused = runtime.executeTurn(
-    turn("turn-2", "again", { resource_root: resources, input: "again" }),
-  );
-  // Not the thread's first message: compose reads nothing, so the late run starts first.
-  const again = fake.wake(threadId, "Another late predecessor");
-  await until(
-    () => thread().runs.find((candidate) => candidate.id === again.id)?.status === "running",
-  );
-  await expect(refused).rejects.toMatchObject({
-    status: 503,
-    message: "An earlier turn is still running on T3 and could not be stopped; try again shortly.",
-  });
-  expect(runOf("turn-2")).toBeUndefined();
-  expect(dispatches()).toHaveLength(1);
-});
-
 it("clears the doubt on a refusal T3 holds a rejected receipt for, and keeps it on a defect", async () => {
   fake.reject = (command) =>
     command.type === "message.dispatch" ? "Thread is archived." : undefined;
@@ -1252,59 +1142,6 @@ it("clears the doubt on a refusal T3 holds a rejected receipt for, and keeps it 
   await expect((await backgroundTurn("turn-4")).result).rejects.toThrow(
     /was not confirmed stopped/u,
   );
-});
-
-it("allows a second stale settlement pass and refuses only work still present after it", async () => {
-  const first = runtime.executeTurn(turn("turn-1", "work"));
-  answer(await started("turn-1"), "Done.");
-  await first;
-  // An earlier run is active with work listed. A late run starts just as T3
-  // settles that work: the first pass ends, the second pass stops the late run.
-  const old = fake.wake(threadId, "Old turn");
-  await until(() => thread().runs.find((run) => run.id === old.id)?.status === "running");
-  fake.background(threadId, [{ taskId: "old-task", kind: "command" }]);
-  let later: Run | undefined;
-  fake.dropAnswer = (command) => {
-    if (command.type === "run.interrupt" && fake.interrupts.length === 2 && later === undefined)
-      later = fake.wake(threadId, "Later turn");
-    return false;
-  };
-  const next = runtime.executeTurn(turn("turn-2", "again"));
-  const run2 = await started("turn-2");
-  expect(fake.interrupts).toEqual([old.id, old.id, later?.id]);
-  expect(thread().runs.map((run) => run.status)).toEqual([
-    "completed",
-    "interrupted",
-    "interrupted",
-    "running",
-  ]);
-  expect(roster()).toEqual([]);
-  answer(run2, "Mine.");
-  expect((await next).output).toBe("Mine.");
-
-  // A thread that keeps starting work while this turn is prepared is refused
-  // while that work is unsettled, whichever settlement step finds it: no
-  // successor run, no dispatch, and an explanation naming the earlier work.
-  fake.dropAnswer = (command) => {
-    if (command.type === "run.interrupt") {
-      fake.wake(threadId, "Yet another turn");
-      fake.background(threadId, [
-        { taskId: `task-${String(fake.interrupts.length)}`, kind: "command" },
-      ]);
-    }
-    return false;
-  };
-  const oldAgain = fake.wake(threadId, "Old again");
-  await until(() => thread().runs.find((run) => run.id === oldAgain.id)?.status === "running");
-  fake.background(threadId, [{ taskId: "old-again", kind: "command" }]);
-  await expect(runtime.executeTurn(turn("turn-3", "third"))).rejects.toMatchObject({ status: 503 });
-  await expect(runtime.executeTurn(turn("turn-3", "third"))).rejects.toThrow(
-    /^An earlier turn(?:'s background work)? .*; try again shortly\.$/u,
-  );
-  expect(runOf("turn-3")).toBeUndefined();
-  expect(dispatches()).toHaveLength(2);
-  expect(thread().runs.some((run) => run.status === "running")).toBe(true);
-  fake.dropAnswer = () => false;
 });
 
 it("reads the run back when T3 fails a dispatch it had already committed", async () => {
@@ -1332,11 +1169,12 @@ it("refuses a resumed snapshot that omits the run it observed, keeping the run p
   expect(runOf("turn-1")?.status).toBe("running");
   fake.omitRun = () => false;
   fake.snapshotOnResume = false;
-  // The exit left no confirmed stop: the conversation is fenced and the next turn sweeps the run.
+  // The run finishes on its own. The exit left no confirmed stop, so the conversation is fenced.
+  fake.complete(threadId, run.id);
   await expect((await backgroundTurn("turn-2")).result).rejects.toThrow(
     /was not confirmed stopped/u,
   );
-  expect(fake.interrupts).toEqual([run.id]);
+  expect(fake.interrupts).toEqual([]);
 });
 
 it("keeps the answer text it observed when a bounded snapshot resumes without it", async () => {
@@ -1351,4 +1189,102 @@ it("keeps the answer text it observed when a bounded snapshot resumes without it
   fake.complete(threadId, run.id);
   expect((await result).output).toBe("Part one.\n\nPart two.");
   expect(fake.subscriptions).toHaveLength(2);
+});
+
+it("queues behind a person's run in the native UI and cancels only its own queued run", async () => {
+  const first = runtime.executeTurn(turn("turn-1", "hello"));
+  answer(await started("turn-1"), "hi");
+  await first;
+  // The person starts a run in T3's own UI; it waits on their approval.
+  const person = fake.wake(threadId, "a message typed in the T3 UI");
+  fake.request(threadId, person.id, "tool_approval");
+  expect(thread().runs.find((run) => run.id === person.id)?.status).toBe("waiting");
+
+  const controller = new AbortController();
+  const queued = runtime.executeTurn(turn("turn-2", "from Discord"), controller.signal);
+  const own = await started("turn-2");
+  expect(own.status).toBe("queued");
+  expect(dispatches().at(-1)).toMatchObject({ dispatchMode: { type: "queue_after_active" } });
+  await until(() => runtime.activity("turn-2", "discord-private")?.phase === "queued");
+  controller.abort(new Error("core disconnected"));
+  await expect(queued).rejects.toThrow("core disconnected");
+  // Only the turn's own queued run was interrupted; the person's run still waits on them.
+  expect(fake.interrupts).toEqual([own.id]);
+  expect(runOf("turn-2")?.status).toBe("interrupted");
+  expect(thread().runs.find((run) => run.id === person.id)?.status).toBe("waiting");
+});
+
+it("answers when the parent run completes and delivers the delegated report in a follow-up turn", async () => {
+  const first = runtime.executeTurn(turn("turn-1", "delegate it"));
+  const parent = await started("turn-1");
+  const child = fake.delegate(threadId, parent.id, {
+    title: "pong child",
+    model: "claude-sonnet-5",
+  });
+  await until(
+    () => runtime.activity("turn-1", "discord-private")?.work?.items[0]?.state === "running",
+  );
+  answer(parent, "DELEGATED");
+  const reply = await first;
+  expect(reply).toEqual({
+    correlation_id: "turn-1",
+    output: "DELEGATED",
+    follow_up: { message: derivedId("message", "turn-1"), after: 1 },
+  });
+
+  // Core queues the follow-up turn with the cursor; it dispatches nothing and waits.
+  const followUp = runtime.executeTurn(
+    turn("turn-1-report", "", { native: { follow_up: reply.follow_up } }),
+  );
+  await until(() => runtime.activity("turn-1-report", "discord-private")?.phase === "waiting");
+  expect(runtime.activity("turn-1-report", "discord-private")?.work?.items).toEqual([
+    expect.objectContaining({ id: child.id, kind: "delegation", state: "running" }),
+  ]);
+  const continuation = fake.finishDelegation(threadId, child.id);
+  fake.assistant(threadId, continuation.id, "PONG reported.");
+  fake.complete(threadId, continuation.id);
+  expect(await followUp).toEqual({ correlation_id: "turn-1-report", output: "PONG reported." });
+  expect(dispatches()).toHaveLength(1);
+  expect(fake.interrupts).toEqual([]);
+});
+
+it("stops nothing when a follow-up turn is cancelled: the continuation is T3's", async () => {
+  const first = runtime.executeTurn(turn("turn-1", "delegate it"));
+  const parent = await started("turn-1");
+  const child = fake.delegate(threadId, parent.id, { title: "slow child" });
+  answer(parent, "Working on it.");
+  const reply = await first;
+  const controller = new AbortController();
+  const followUp = runtime.executeTurn(
+    turn("turn-1-report", "", { native: { follow_up: reply.follow_up } }),
+    controller.signal,
+  );
+  const continuation = fake.finishDelegation(threadId, child.id);
+  await until(() => runtime.activity("turn-1-report", "discord-private")?.phase === "model");
+  controller.abort(new Error("core disconnected"));
+  await expect(followUp).rejects.toThrow("core disconnected");
+  expect(fake.interrupts).toEqual([]);
+  expect(thread().runs.find((run) => run.id === continuation.id)?.status).toBe("running");
+  // Nor does it fence the conversation: a later turn's own follow-up is still trusted.
+  fake.complete(threadId, continuation.id);
+  expect((await (await backgroundTurn("turn-2")).result).output).toBe("Started.\n\nResult.");
+});
+
+it("sends a command invocation verbatim, without notes about earlier files", async () => {
+  const earlier = [{ correlation_id: "turn-0", attachments: [attachment] }];
+  const command = runtime.executeTurn(
+    turn("turn-1", "/compact keep the decisions", {
+      native: { intent: "command" },
+      unanswered: earlier,
+    }),
+  );
+  answer(await started("turn-1"), "Compacted.");
+  await command;
+  const prose = runtime.executeTurn(turn("turn-2", "hello", { unanswered: earlier }));
+  answer(await started("turn-2"), "hi");
+  await prose;
+  expect(userTexts()).toEqual([
+    "/compact keep the decisions",
+    "hello\n\n[Carillon: 1 file(s) attached to earlier messages are not available to this runtime: a.png]",
+  ]);
 });

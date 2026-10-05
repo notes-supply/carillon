@@ -1,5 +1,6 @@
+import type { WorkItem } from "@carillon/protocol";
 import { expect, it } from "vitest";
-import { commandHeader, describe } from "./activity.ts";
+import { commandHeader, describe, summarizeWork } from "./activity.ts";
 
 it.each([
   ["cargo test -p carillon-discord --all-targets", "cargo test -p carillon-discord --all-targets"],
@@ -131,4 +132,36 @@ it("describes tool targets without exposing contents or arbitrary arguments", ()
   ])
     expect(describe("web_search", args, workspace)).toBeUndefined();
   expect(describe("read", { path: 7 }, workspace)).toBeUndefined();
+});
+
+it("orders work live first and counts what the snapshot leaves out exactly", () => {
+  const item = (id: string, state: WorkItem["state"]): WorkItem => ({
+    id,
+    kind: "delegation",
+    label: id,
+    state,
+  });
+  expect(
+    summarizeWork(
+      [
+        item("done", "succeeded"),
+        item("lost", "unknown"),
+        item("live", "running"),
+        item("next", "queued"),
+      ],
+      false,
+    ),
+  ).toEqual({
+    items: [
+      item("live", "running"),
+      item("next", "queued"),
+      item("lost", "unknown"),
+      item("done", "succeeded"),
+    ],
+    partial: false,
+  });
+  const many = Array.from({ length: 20 }, (_, index) => item(`w${String(index)}`, "running"));
+  const summary = summarizeWork(many, true);
+  expect(summary.items).toHaveLength(16);
+  expect(summary).toMatchObject({ partial: true, omitted: 4 });
 });

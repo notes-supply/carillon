@@ -668,6 +668,7 @@ async fn offered(state: &AppState, output: &str) -> Result<Vec<UnansweredTurn>> 
         Ok(RuntimeTurnResponse {
             correlation_id: request.correlation_id,
             output,
+            follow_up: None,
         })
     })
     .await?;

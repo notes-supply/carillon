@@ -73,6 +73,7 @@ async fn conversation() -> Result<()> {
             Ok(RuntimeTurnResponse {
                 correlation_id: request.correlation_id,
                 output: format!("{} — {captured}", request.input),
+                follow_up: None,
             })
         })
         .await?;

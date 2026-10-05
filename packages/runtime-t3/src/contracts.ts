@@ -12,6 +12,9 @@ export const ORCHESTRATION_PROTOCOL = 2;
 export const RPC = {
   dispatchCommand: "orchestration.dispatchCommand",
   subscribeThread: "orchestration.subscribeThread",
+  getConfig: "server.getConfig",
+  refreshProviders: "server.refreshProviders",
+  createUploadUrl: "attachments.createUploadUrl",
 } as const;
 
 const Id = Type.String({ minLength: 1 });
@@ -39,6 +42,16 @@ export const RunSchema = Type.Object({
   userMessageId: Id,
   providerThreadId: Nullable(Id),
   status: RunStatusSchema,
+  /**
+   * The results of tasks this run delegated: T3 names the message of the
+   * continuation it offers next (`delivery`), before it starts that run.
+   */
+  delegatedCompletion: Type.Optional(
+    Type.Object({
+      disposition: Type.String(),
+      delivery: Type.Union([Type.Object({ messageId: Id }), Type.Null()]),
+    }),
+  ),
 });
 export type Run = Static<typeof RunSchema>;
 
@@ -58,6 +71,8 @@ export const BackgroundTaskSchema = Type.Object({
   taskId: Id,
   kind: Type.Optional(Type.String()),
   description: Type.Optional(Type.String()),
+  /** A background subagent's own thread, when it has one. */
+  childThreadId: Type.Optional(Id),
 });
 export type BackgroundTask = Static<typeof BackgroundTaskSchema>;
 
@@ -92,8 +107,52 @@ export const MessageSchema = Type.Object({
   role: Type.Union([Type.Literal("user"), Type.Literal("assistant"), Type.Literal("system")]),
   text: Type.String(),
   createdAt: Type.String(),
+  /** A continuation T3 dispatched to report delegated results of `parentRunId`. */
+  delegatedCompletion: Type.Optional(Type.Object({ parentRunId: Id })),
 });
 export type Message = Static<typeof MessageSchema>;
+
+/** A child agent: T3's own delegated task (`app_owned`) or the provider's (`provider_native`). */
+export const SubagentSchema = Type.Object({
+  id: Id,
+  /** The run that started it. */
+  runId: Nullable(Id),
+  parentNodeId: Id,
+  origin: Type.String(),
+  driver: Type.String(),
+  status: Type.Union([
+    Type.Literal("idle"),
+    Type.Literal("pending"),
+    Type.Literal("running"),
+    Type.Literal("waiting"),
+    Type.Literal("completed"),
+    Type.Literal("failed"),
+    Type.Literal("cancelled"),
+    Type.Literal("interrupted"),
+  ]),
+  title: Nullable(Type.String()),
+  model: Nullable(Type.String()),
+  childThreadId: Nullable(Id),
+  startedAt: Nullable(Type.String()),
+  /** Whether T3 offers the parent a continuation with the result. */
+  completionWake: Type.Optional(Type.String()),
+  /** Where the result's delivery to the parent stands; `pending` and `claimed` still owe a continuation. */
+  completionDelivery: Type.Optional(Type.Object({ state: Type.String() })),
+});
+export type Subagent = Static<typeof SubagentSchema>;
+
+/** A transfer of conversation context between threads or providers. */
+export const ContextTransferSchema = Type.Object({
+  id: Id,
+  type: Type.String(),
+  status: Type.String(),
+  sourceThreadId: Id,
+  targetThreadId: Id,
+  sourcePoint: Type.Object({ threadId: Id, runId: Type.Optional(Id) }),
+  targetRunId: Nullable(Id),
+  targetProviderInstanceId: Nullable(Id),
+});
+export type ContextTransfer = Static<typeof ContextTransferSchema>;
 
 export const ItemStatusSchema = Type.Union([
   Type.Literal("idle"),
@@ -150,7 +209,12 @@ export const TurnItemSchemas = {
     toolName: Nullable(Type.String()),
     input: Type.Unknown(),
   }),
-  subagent: Type.Object({ ...itemBase, type: Type.Literal("subagent") }),
+  subagent: Type.Object({
+    ...itemBase,
+    type: Type.Literal("subagent"),
+    /** The child agent record this item shows, when T3 tracks one. */
+    subagentId: Type.Optional(Id),
+  }),
   user_input_request: Type.Object({
     ...itemBase,
     type: Type.Literal("user_input_request"),
@@ -196,6 +260,8 @@ export const ProjectionSchema = Type.Object({
   providerSessions: Type.Array(ProviderSessionSchema),
   messages: Type.Array(MessageSchema),
   turnItems: Type.Array(Type.Unknown()),
+  subagents: Type.Array(SubagentSchema),
+  contextTransfers: Type.Array(ContextTransferSchema),
 });
 export type Projection = Static<typeof ProjectionSchema>;
 
@@ -245,12 +311,26 @@ export function threadCreate(binding: ThreadBinding, selection: NativeSelection)
   } as const;
 }
 
-/** One Carillon turn as one T3 message: the same turn always sends the same command. */
+/** An image T3 holds for a message, uploaded before the dispatch that references it. */
+export interface NativeImage {
+  readonly type: "image";
+  readonly id: string;
+  readonly name: string;
+  readonly mimeType: string;
+  readonly sizeBytes: number;
+}
+
+/**
+ * One Carillon turn as one T3 message: the same turn always sends the same
+ * command. The message carries no model selection, so it runs with the
+ * thread's own, as T3 decides; behind active work it waits in T3's queue.
+ */
 export function messageDispatch(
   threadId: string,
   correlationId: string,
   text: string,
-  selection: NativeSelection,
+  images: readonly NativeImage[],
+  queued: boolean,
 ) {
   return {
     type: "message.dispatch",
@@ -260,9 +340,24 @@ export function messageDispatch(
     threadId,
     messageId: derivedId("message", correlationId),
     text,
-    attachments: [],
+    attachments: images.map(({ type, id, name, mimeType, sizeBytes }) => ({
+      type,
+      id,
+      name,
+      mimeType,
+      sizeBytes,
+    })),
+    dispatchMode: { type: queued ? "queue_after_active" : "start_immediately" },
+  } as const;
+}
+
+/** Sets the thread's model selection, which every later run of the thread uses. */
+export function modelSelectionSet(threadId: string, selection: NativeSelection) {
+  return {
+    type: "thread.model-selection.set",
+    commandId: crypto.randomUUID(),
+    threadId,
     modelSelection: nativeSelection(selection),
-    dispatchMode: { type: "start_immediately" },
   } as const;
 }
 

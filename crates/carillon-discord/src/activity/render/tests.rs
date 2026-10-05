@@ -2,7 +2,9 @@ use super::{active_text, final_text, finishing_text};
 use crate::config::ActivityMarkers;
 use carillon_protocol::model::{
     ActiveTurn, ActivityPhase, DeliveryOutcome, FinishedTool, RunningTool, TurnActivity, TurnState,
+    WorkItem, WorkKind, WorkState, WorkSummary,
 };
+use std::num::NonZeroU32;
 
 fn turn(activity: Option<TurnActivity>) -> ActiveTurn {
     ActiveTurn {
@@ -36,6 +38,7 @@ fn tools() -> TurnActivity {
             },
         ],
         tool_calls: 3,
+        work: None,
     }
 }
 
@@ -278,4 +281,101 @@ fn empty_markers_leave_no_separator_or_space() {
     many.running = many.running.into_iter().cycle().take(4).collect();
     many.tool_calls = 6;
     assert!(active_text(&turn(Some(many)), None, &markers).ends_with("\n… and 1 more running"));
+}
+
+fn work(id: &str, kind: WorkKind, label: &str, state: WorkState) -> WorkItem {
+    WorkItem {
+        id: id.to_owned(),
+        kind,
+        label: label.to_owned(),
+        state,
+        parent: None,
+        actor: None,
+        started_at: None,
+    }
+}
+
+#[test]
+fn work_items_render_generic_bounded_rows_without_provider_knowledge() {
+    let markers = ActivityMarkers::default();
+    let mut activity = tools();
+    activity.running.clear();
+    activity.recent.clear();
+    activity.tool_calls = 0;
+    activity.phase = ActivityPhase::Waiting;
+    let mut child = work(
+        "a",
+        WorkKind::Delegation,
+        "research `x`",
+        WorkState::Running,
+    );
+    child.actor = Some("claude-sonnet-5 <@1>".to_owned());
+    child.started_at = Some(1_790_000_100);
+    let mut grandchild = work("b", WorkKind::Delegation, "grandchild", WorkState::Waiting);
+    grandchild.parent = Some("a".to_owned());
+    // A parent that is not listed does not indent.
+    let mut orphan = work(
+        "c",
+        WorkKind::Handoff,
+        "context handoff to codex",
+        WorkState::Unknown,
+    );
+    orphan.parent = Some("gone".to_owned());
+    activity.work = Some(WorkSummary {
+        items: vec![
+            child,
+            grandchild,
+            orphan,
+            work(
+                "d",
+                WorkKind::Fork,
+                "fork to another thread",
+                WorkState::Succeeded,
+            ),
+            work(
+                "e",
+                WorkKind::Task,
+                "report to this conversation",
+                WorkState::Queued,
+            ),
+        ],
+        partial: false,
+        omitted: NonZeroU32::new(2),
+    });
+    let text = active_text(&turn(Some(activity.clone())), None, &markers);
+    let lines = text.lines().collect::<Vec<_>>();
+    assert_eq!(lines[0], "⏳ Working · Waiting · started <t:1790000000:R>");
+    assert_eq!(
+        lines[2],
+        "↳ delegation `research ˋxˋ` · running · claude-sonnet-5???1? · <t:1790000100:R>"
+    );
+    assert_eq!(lines[3], "\u{2003}⏳ delegation `grandchild` · waiting");
+    assert_eq!(
+        lines[4],
+        "⚠️ handoff `context handoff to codex` · state unknown"
+    );
+    assert_eq!(lines[5], "✓ fork `fork to another thread` · done");
+    // One hidden retained item and the exact further count.
+    assert_eq!(lines[6], "⏳ … and 3 more");
+    assert_eq!(lines.len(), 7);
+
+    // Incomplete observation without a count is said, not counted.
+    activity.work = Some(WorkSummary {
+        items: vec![work("a", WorkKind::Delegation, "child", WorkState::Failed)],
+        partial: true,
+        omitted: None,
+    });
+    let text = active_text(&turn(Some(activity.clone())), None, &markers);
+    assert!(
+        text.ends_with("✗ delegation `child` · failed\n⚠️ … additional work not fully observed")
+    );
+
+    // Work belongs to the live card: finishing and final cards keep only history.
+    assert!(!finishing_text(Some(&activity), &markers).contains("delegation"));
+    activity.phase = ActivityPhase::Queued;
+    activity.work = None;
+    assert_eq!(
+        active_text(&turn(Some(activity)), None, &markers),
+        "⏳ Working · Queued behind other work in this conversation · started <t:1790000000:R>\n> Checking tests"
+    );
 }

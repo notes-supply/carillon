@@ -26,6 +26,8 @@ export type AvailableModel = Static<typeof AvailableModelSchema>;
 export const ScopeStateSchema = Type.Object({
   selection: Type.Union([SelectionSchema, Type.Null()]),
   overridden: Type.Boolean(),
+  /** The runtime does not change this scope through the model API. */
+  read_only: Type.Optional(Type.Boolean()),
 });
 export type ScopeState = Static<typeof ScopeStateSchema>;
 export const ModelStateSchema = Type.Object({
@@ -51,14 +53,53 @@ export const ModelUpdateSchema = Type.Object({
 export type ModelUpdate = Static<typeof ModelUpdateSchema>;
 
 /**
+ * One of the runtime's own commands (or user-invocable skills), as its
+ * engine names and describes it. `hint` describes the arguments the engine
+ * expects, when it says.
+ */
+export const RuntimeCommandSchema = Type.Object({
+  name: Type.String({ minLength: 1, maxLength: 100 }),
+  description: Type.Optional(Type.String({ minLength: 1 })),
+  hint: Type.Optional(Type.String({ minLength: 1 })),
+});
+export type RuntimeCommand = Static<typeof RuntimeCommandSchema>;
+/** The commands a person may run in a conversation, in the runtime's order. */
+export const CommandCatalogSchema = Type.Object({
+  commands: Type.Array(RuntimeCommandSchema),
+});
+export type CommandCatalog = Static<typeof CommandCatalogSchema>;
+
+/**
+ * A turn's `native` metadata belongs to the interface that submitted it,
+ * apart from two neutral keys: `intent: "command"`, set by an interface
+ * whose person invoked one of the runtime's own commands rather than
+ * writing a message, and `follow_up`, set only by core on a turn it queued
+ * itself to carry a runtime's follow-up cursor (see `RuntimeTurnResponse`).
+ */
+export function turnIntent(native: unknown): "command" | undefined {
+  return isRecord(native) && native["intent"] === "command" ? "command" : undefined;
+}
+export function followUpCursor(native: unknown): unknown {
+  return isRecord(native) ? native["follow_up"] : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
  * What a runtime is doing in one executing turn, for display while it runs.
  * The runtime formats each `detail` from its own tool semantics; consumers
  * show it as given and never receive raw tool arguments.
  */
 export const ActivityPhaseSchema = Type.Union([
   Type.Literal("starting"),
+  /** The runtime accepted the turn, which waits behind other work on its native conversation. */
+  Type.Literal("queued"),
   Type.Literal("model"),
   Type.Literal("tools"),
+  /** The turn's native work waits on something outside the model, such as a native request. */
+  Type.Literal("waiting"),
   Type.Literal("retrying"),
   Type.Literal("compacting"),
 ]);
@@ -76,6 +117,53 @@ export const FinishedToolSchema = Type.Object({
   ok: Type.Boolean(),
 });
 export type FinishedTool = Static<typeof FinishedToolSchema>;
+/** The most work items one snapshot lists. */
+export const WORK_ITEM_LIMIT = 16;
+/**
+ * One unit of native work related to a turn that is not a tool call: a
+ * child agent the turn delegated to (`delegation`), a transfer of the
+ * conversation's context to another model or provider (`handoff`), a branch
+ * into another conversation (`fork`), or other tracked work (`task`). The
+ * runtime keeps `id` stable while it observes the work and states only what
+ * the native engine last confirmed; `unknown` when it can no longer confirm.
+ * `label` and `actor` are bounded display text, never prompts, results or
+ * arguments; `parent` names another listed item the work was observed under.
+ */
+export const WorkItemSchema = Type.Object({
+  id: Type.String({ minLength: 1, maxLength: 256 }),
+  kind: Type.Union([
+    Type.Literal("task"),
+    Type.Literal("delegation"),
+    Type.Literal("handoff"),
+    Type.Literal("fork"),
+  ]),
+  label: Type.String({ minLength: 1, maxLength: 200 }),
+  state: Type.Union([
+    Type.Literal("queued"),
+    Type.Literal("running"),
+    Type.Literal("waiting"),
+    Type.Literal("succeeded"),
+    Type.Literal("failed"),
+    Type.Literal("cancelled"),
+    Type.Literal("unknown"),
+  ]),
+  parent: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+  actor: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
+  /** Unix seconds. */
+  started_at: Type.Optional(Type.Integer()),
+});
+export type WorkItem = Static<typeof WorkItemSchema>;
+/**
+ * The turn's related work, bounded. `partial` says the runtime could not
+ * observe all of it (more than it retains, or coverage it cannot confirm);
+ * `omitted` is an exact count of further current items when it knows one.
+ */
+export const WorkSummarySchema = Type.Object({
+  items: Type.Array(WorkItemSchema, { maxItems: WORK_ITEM_LIMIT }),
+  partial: Type.Boolean(),
+  omitted: Type.Optional(Type.Integer({ minimum: 1 })),
+});
+export type WorkSummary = Static<typeof WorkSummarySchema>;
 export const TurnActivitySchema = Type.Object({
   phase: ActivityPhaseSchema,
   /** The model's own latest public commentary, when it wrote any. */
@@ -85,6 +173,8 @@ export const TurnActivitySchema = Type.Object({
   recent: Type.Array(FinishedToolSchema),
   /** Every call started in the turn, including those no longer listed. */
   tool_calls: Type.Integer({ minimum: 0 }),
+  /** Delegated and transferred work, when the runtime observes any. */
+  work: Type.Optional(WorkSummarySchema),
 });
 export type TurnActivity = Static<typeof TurnActivitySchema>;
 

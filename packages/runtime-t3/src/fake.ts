@@ -13,11 +13,13 @@ import type { Duplex } from "node:stream";
 import { WebSocketServer, type RawData, type WebSocket } from "ws";
 import {
   ORCHESTRATION_PROTOCOL,
+  type ContextTransfer,
   type Message,
   type ProviderSession,
   type ProviderThread,
   type Run,
   type RuntimeRequest,
+  type Subagent,
   type TurnItem,
 } from "./contracts.ts";
 
@@ -48,6 +50,8 @@ interface FakeThread {
   readonly messages: Message[];
   readonly items: FakeItem[];
   readonly requests: RuntimeRequest[];
+  readonly subagents: Subagent[];
+  readonly transfers: ContextTransfer[];
   providerThread: ProviderThread;
   session: ProviderSession;
   /** T3 removed the session's record; the process closes later and may still deliver until it does. */
@@ -115,6 +119,8 @@ export interface FakeT3 {
   omitRequestItems: boolean;
   /** Accepts subscriptions but never delivers their first snapshot or marker. */
   holdSnapshot: boolean;
+  /** Omits matching child agents from snapshots, as a broken or skewed snapshot might. */
+  omitSubagent: (task: Subagent) => boolean;
   /** Accepts protocol discovery requests but never answers them. */
   holdDiscovery: boolean;
   /** Answers protocol discovery with its headers but never sends the body. */
@@ -145,6 +151,31 @@ export interface FakeT3 {
   background(threadId: string, tasks: ProviderThread["pendingBackgroundTasks"]): void;
   /** A run T3 starts itself, as when finished background work wakes the agent. */
   wake(threadId: string, text: string): Run;
+  /**
+   * The run delegates a task to a T3-owned child agent, as `delegate_task`
+   * does: the task record names the run that started it.
+   */
+  delegate(
+    threadId: string,
+    runId: string,
+    task: {
+      readonly title?: string;
+      readonly model?: string;
+      readonly wake?: "always" | "settled_only";
+    },
+  ): Subagent;
+  /** A child agent's own update, such as a provider-native subagent or a nested one. */
+  subagent(threadId: string, task: Subagent): void;
+  /**
+   * The child finishes and T3 reports it to its parent as the serving build
+   * does: the task's result is published with its delivery claimed, the
+   * parent run announces the continuation message, then T3 starts the
+   * continuation run (queued behind active work) and marks the delivery
+   * delivered. Returns the continuation run.
+   */
+  finishDelegation(threadId: string, taskId: string, status?: Subagent["status"]): Run;
+  /** A context transfer T3 records for the thread, such as a provider handoff. */
+  transfer(threadId: string, transfer: ContextTransfer): void;
   session(threadId: string, status: ProviderSession["status"]): void;
   /** The detached process finally closes: nothing further can be delivered. */
   closeSession(threadId: string): void;
@@ -263,6 +294,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
     retainRequests: false,
     omitRequestItems: false,
     holdSnapshot: false,
+    omitSubagent: () => false,
     holdDiscovery: false,
     holdDiscoveryBody: false,
     holdUpgrade: false,
@@ -356,6 +388,88 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
       if (thread.sessionClosed)
         throw new Error("the provider process has closed; no wake can come");
       return startRun(thread, `message:${thread.id}:wake:${String(thread.runs.length + 1)}`, text);
+    },
+    delegate(threadId, runId, task) {
+      const thread = threadOf(threadId);
+      const id = `node:delegated-task:${String(thread.subagents.length + 1)}:${thread.id}`;
+      const record: Subagent = {
+        id,
+        runId,
+        parentNodeId: `node:run:${runId}:root`,
+        origin: "app_owned",
+        driver: "claudeAgent",
+        status: "running",
+        title: task.title ?? null,
+        model: task.model ?? null,
+        childThreadId: `thread:delegated-task:${id}`,
+        startedAt: new Date().toISOString(),
+        completionWake: task.wake ?? "always",
+      };
+      fake.subagent(threadId, record);
+      fake.tool(threadId, runId, { type: "subagent", status: "running", subagentId: id });
+      return record;
+    },
+    subagent(threadId, task) {
+      const thread = threadOf(threadId);
+      const index = thread.subagents.findIndex((candidate) => candidate.id === task.id);
+      if (index === -1) thread.subagents.push(task);
+      else thread.subagents[index] = task;
+      emit(thread, "subagent.updated", task);
+    },
+    finishDelegation(threadId, taskId, status = "completed") {
+      const thread = threadOf(threadId);
+      const task = thread.subagents.find((candidate) => candidate.id === taskId);
+      if (task?.runId == null) throw new Error(`unknown delegated task ${taskId}`);
+      const parentIndex = thread.runs.findIndex((run) => run.id === task.runId);
+      const parent = thread.runs[parentIndex];
+      if (parent === undefined) throw new Error(`unknown parent run ${task.runId}`);
+      const messageId = `message:${thread.id}:continuation:${String(thread.runs.length + 1)}`;
+      fake.subagent(threadId, { ...task, status, completionDelivery: { state: "claimed" } });
+      const announcing = {
+        ...parent,
+        delegatedCompletion: { disposition: "open", delivery: { messageId } },
+      };
+      thread.runs[parentIndex] = announcing;
+      emit(thread, "run.updated", announcing);
+      fake.transfer(threadId, {
+        id: `context-transfer:subagent_result:${taskId}`,
+        type: "subagent_result",
+        status: "consumed",
+        sourceThreadId: task.childThreadId ?? taskId,
+        targetThreadId: thread.id,
+        sourcePoint: { threadId: task.childThreadId ?? taskId },
+        targetRunId: null,
+        targetProviderInstanceId: null,
+      });
+      const run = startRun(
+        thread,
+        messageId,
+        `Delegated task ${taskId} reached a terminal state.`,
+        { parentRunId: parent.id },
+      );
+      fake.subagent(threadId, {
+        ...task,
+        status,
+        completionDelivery: { state: "delivered" },
+      });
+      const settledParent = {
+        ...announcing,
+        delegatedCompletion: { disposition: "open", delivery: null },
+      };
+      thread.runs[parentIndex] = settledParent;
+      emit(thread, "run.updated", settledParent);
+      return run;
+    },
+    transfer(threadId, transfer) {
+      const thread = threadOf(threadId);
+      const index = thread.transfers.findIndex((candidate) => candidate.id === transfer.id);
+      if (index === -1) thread.transfers.push(transfer);
+      else thread.transfers[index] = transfer;
+      emit(
+        thread,
+        index === -1 ? "context-transfer.created" : "context-transfer.updated",
+        transfer,
+      );
     },
     session(threadId, status) {
       const thread = threadOf(threadId);
@@ -499,6 +613,8 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
                   projection: {
                     thread: { id: thread.id, projectId: thread.projectId },
                     runs: thread.runs.filter((run) => !fake.omitRun(run)),
+                    subagents: thread.subagents.filter((task) => !fake.omitSubagent(task)),
+                    contextTransfers: thread.transfers,
                     runtimeRequests: thread.requests,
                     providerThreads: [thread.providerThread],
                     providerSessions: thread.sessionDetached ? [] : [thread.session],
@@ -536,6 +652,8 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
           messages: [],
           items: [],
           requests: [],
+          subagents: [],
+          transfers: [],
           providerThread: {
             id: `provider-thread-${command.threadId}`,
             providerSessionId: sessionId,
@@ -610,7 +728,12 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
     fake.background(thread.id, []);
   }
 
-  function startRun(thread: FakeThread, messageId: string, text: string): Run {
+  function startRun(
+    thread: FakeThread,
+    messageId: string,
+    text: string,
+    delegatedCompletion?: { readonly parentRunId: string },
+  ): Run {
     const active = thread.runs.some((run) => ACTIVE.has(run.status));
     const run: Run = {
       id: `run-${thread.id.slice(0, 8)}-${String(thread.runs.length + 1)}`,
@@ -626,14 +749,19 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
       role: "user",
       text,
       createdAt: new Date().toISOString(),
+      ...(delegatedCompletion === undefined ? {} : { delegatedCompletion }),
     };
     thread.messages.push(user);
     thread.runs.push(run);
     // The serving order: the dispatch sends the provider thread before the
-    // run, and the turn start sends the session, then the thread, then the run.
-    emit(thread, "message.updated", { ...user, streaming: false });
+    // run, and the turn start sends the session, then the thread, then the
+    // run. A continuation's message, with its link, follows its run.
+    if (delegatedCompletion === undefined)
+      emit(thread, "message.updated", { ...user, streaming: false });
     emit(thread, "provider-thread.updated", thread.providerThread);
     emit(thread, "run.created", run);
+    if (delegatedCompletion !== undefined)
+      emit(thread, "message.updated", { ...user, streaming: false });
     if (!thread.sessionDetached)
       emit(thread, "provider-session.updated", { ...thread.session, status: "running" });
     emit(thread, "provider-thread.updated", thread.providerThread);

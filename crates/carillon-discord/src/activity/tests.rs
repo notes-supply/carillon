@@ -319,6 +319,7 @@ fn tools(
             })
             .collect(),
         tool_calls: u32::try_from(running.len() + recent.len()).unwrap_or_default(),
+        work: None,
     }
 }
 

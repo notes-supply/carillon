@@ -13,6 +13,7 @@ import { TurnActivitySchema } from "@carillon/protocol";
 import { Check } from "typebox/value";
 import { afterEach, expect, it, vi } from "vitest";
 import { createPiRuntime } from "@carillon/runtime-pi";
+import { trackActivity } from "./activity.ts";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -242,4 +243,149 @@ it("removes a turn's activity when preparation fails before its session exists",
     await runtime.close();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+it("shows child agents only from a participating extension's explicit lifecycle reports", async () => {
+  const root = await mkdtemp(join(tmpdir(), "carillon-activity-"));
+  await mkdir(join(root, "resources", "extensions"), { recursive: true });
+  // A participating extension: real child processes, each reported from queued to its exit.
+  // `solo` runs a child process too but reports nothing, so it stays an ordinary tool.
+  await writeFile(
+    join(root, "resources", "extensions", "team.ts"),
+    `
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+const waitFor = (file) => \`const fs=require("fs");const t=setInterval(()=>{if(fs.existsSync(\${JSON.stringify(file)})){clearInterval(t);process.exit(fs.readFileSync(\${JSON.stringify(file)},"utf8")==="fail"?3:0)}},20)\`;
+function child(file) {
+  return new Promise((resolve) => {
+    const process_ = spawn(process.execPath, ["-e", waitFor(file)], { stdio: "ignore" });
+    process_.on("exit", (code) => resolve(code));
+  });
+}
+export default function (pi) {
+  const report = (fact) => pi.events.emit("carillon:work", fact);
+  pi.registerTool({
+    name: "team", label: "Team", description: "Runs two child agents",
+    parameters: { type: "object", properties: {} },
+    async execute() {
+      report({ id: "lead", kind: "delegation", label: "lead child\\nsecond line", state: "queued", actor: "pi child" });
+      report({ id: "helper", kind: "delegation", label: "helper child", state: "queued", parent: "lead" });
+      report({ kind: "delegation", label: "no identity", state: "running" });
+      report({ id: "bad", kind: "agent", label: "unknown kind", state: "running" });
+      report({ id: "lead", kind: "delegation", label: "lead child", state: "running", actor: "pi child" });
+      report({ id: "helper", kind: "delegation", label: "helper child", state: "running", parent: "lead" });
+      await Promise.all([
+        child(${JSON.stringify(join(root, "lead"))}).then((code) =>
+          report({ id: "lead", kind: "delegation", label: "lead child", state: code === 0 ? "succeeded" : "failed", actor: "pi child" })),
+        child(${JSON.stringify(join(root, "helper"))}).then((code) =>
+          report({ id: "helper", kind: "delegation", label: "helper child", state: code === 0 ? "succeeded" : "failed", parent: "lead" })),
+      ]);
+      return { content: [{ type: "text", text: "team finished" }], details: {} };
+    },
+  });
+  pi.registerTool({
+    name: "solo", label: "Solo", description: "Runs one unreported child",
+    parameters: { type: "object", properties: {} },
+    async execute() {
+      await child(${JSON.stringify(join(root, "solo"))});
+      return { content: [{ type: "text", text: "solo finished" }], details: {} };
+    },
+  });
+}
+`,
+  );
+  const { models, runtime } = await piRuntime(root);
+  const finalResponse = Promise.withResolvers<undefined>();
+  let calls = 0;
+  vi.spyOn(models, "streamSimple").mockImplementation(() => {
+    calls += 1;
+    return calls === 1
+      ? scripted(Promise.resolve(), "Starting the team.", [
+          { type: "toolCall", id: "team-1", name: "team", arguments: {} },
+          { type: "toolCall", id: "solo-1", name: "solo", arguments: {} },
+        ])
+      : scripted(finalResponse.promise, "Team reported.", []);
+  });
+  const activity = () => runtime.activity("turn-1", "discord-private");
+  try {
+    const turn = runtime.executeTurn(request(root, "turn-1"));
+    // Observed below once the children are released; kept handled meanwhile.
+    void turn.catch(() => undefined);
+    await expect
+      .poll(() => activity()?.work?.items.map((item) => item.state))
+      .toEqual(["running", "running"]);
+    const running = activity();
+    expect(Check(TurnActivitySchema, running)).toBe(true);
+    // Start times are the runtime's own clock; everything else is as reported.
+    expect(
+      running?.work?.items.map((item) => ({ ...item, started_at: typeof item.started_at })),
+    ).toEqual([
+      {
+        id: "lead",
+        kind: "delegation",
+        label: "lead child",
+        state: "running",
+        actor: "pi child",
+        started_at: "number",
+      },
+      {
+        id: "helper",
+        kind: "delegation",
+        label: "helper child",
+        state: "running",
+        parent: "lead",
+        started_at: "number",
+      },
+    ]);
+    expect(running?.work?.partial).toBe(false);
+    // The unreported child stays an ordinary running tool.
+    expect(running?.running.map((tool) => tool.tool).sort()).toEqual(["solo", "team"]);
+
+    await writeFile(join(root, "helper"), "fail");
+    await expect
+      .poll(() => activity()?.work?.items.map((item) => item.state))
+      .toEqual(["running", "failed"]);
+    // Finishing the parent tool alone proves nothing about a child: it is the report that does.
+    await writeFile(join(root, "lead"), "ok");
+    await writeFile(join(root, "solo"), "ok");
+    // Finished work keeps the order it was reported in.
+    await expect
+      .poll(() => activity()?.work?.items.map((item) => item.state))
+      .toEqual(["succeeded", "failed"]);
+    finalResponse.resolve(undefined);
+    expect((await turn).output).toContain("Team reported.");
+    expect(activity()).toBeUndefined();
+  } finally {
+    finalResponse.resolve(undefined);
+    for (const file of ["lead", "helper", "solo"]) await writeFile(join(root, file), "ok");
+    await runtime.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("keeps at most the snapshot limit of reported work, never dropping live work for more", () => {
+  const tracker = trackActivity("/workspace");
+  const report = (id: string, state: string) =>
+    tracker.report({ id, kind: "delegation", label: `child ${id}`, state });
+  for (let index = 0; index < 16; index += 1) report(`c${String(index)}`, "running");
+  report("extra", "running");
+  expect(tracker.snapshot().work).toMatchObject({ partial: true });
+  expect(tracker.snapshot().work?.items).toHaveLength(16);
+  expect(tracker.snapshot().work?.items.some((item) => item.id === "extra")).toBe(false);
+  // Finished work makes room, oldest first; live work stays.
+  report("c0", "succeeded");
+  report("late", "running");
+  const ids = tracker.snapshot().work?.items.map((item) => item.id) ?? [];
+  expect(ids).toContain("late");
+  expect(ids).not.toContain("c0");
+  // Reports outside the vocabulary or bounds are ignored, never guessed.
+  for (const invalid of [
+    null,
+    "running",
+    { id: "", kind: "delegation", label: "x", state: "running" },
+    { id: "y", kind: "delegation", label: "x", state: "done" },
+    { id: "z".repeat(300), kind: "delegation", label: "x", state: "running" },
+  ])
+    tracker.report(invalid);
+  expect(tracker.snapshot().work?.items).toHaveLength(16);
 });

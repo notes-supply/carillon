@@ -1196,6 +1196,7 @@ mod tests {
         core.execute_next("runtime-pi", async |request| {
             Ok(RuntimeTurnResponse {
                 output: "read it".to_owned(),
+                follow_up: None,
                 correlation_id: request.correlation_id,
             })
         })
@@ -1248,6 +1249,7 @@ mod tests {
                 );
                 Ok(RuntimeTurnResponse {
                     output: "read it".to_owned(),
+                    follow_up: None,
                     correlation_id: request.correlation_id,
                 })
             })

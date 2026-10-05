@@ -228,7 +228,21 @@ pub struct UnansweredTurn {
 pub struct RuntimeTurnResponse {
     pub correlation_id: String,
     pub output: String,
+    /// Native work linked to this turn will continue the conversation after
+    /// this answer. Core queues a follow-up turn for the same conversation
+    /// whose request carries this runtime-owned cursor in `native.follow_up`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_up: Option<Value>,
 }
+
+/// The neutral key of a turn's `native` metadata through which an
+/// interface says the input invokes one of the runtime's own commands.
+pub const NATIVE_INTENT: &str = "intent";
+/// The value of [`NATIVE_INTENT`] for a command invocation.
+pub const INTENT_COMMAND: &str = "command";
+/// The neutral key of a turn's `native` metadata that only core sets, on a
+/// turn it queued itself, to carry a runtime's follow-up cursor.
+pub const NATIVE_FOLLOW_UP: &str = "follow_up";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Delivery {
@@ -284,16 +298,120 @@ pub struct TurnActivity {
     pub recent: Vec<FinishedTool>,
     /// Every call started in the turn, including those no longer listed.
     pub tool_calls: u32,
+    /// Delegated and transferred work, when the runtime observes any.
+    #[serde(
+        default,
+        deserialize_with = "crate::models::optional_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub work: Option<WorkSummary>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ActivityPhase {
     Starting,
+    /// The runtime accepted the turn, which waits behind other work on its
+    /// native conversation.
+    Queued,
     Model,
     Tools,
+    /// The turn's native work waits on something outside the model.
+    Waiting,
     Retrying,
     Compacting,
+}
+
+/// The most work items one snapshot lists.
+pub const WORK_ITEM_LIMIT: usize = 16;
+
+/// A turn's related work, bounded. `partial` says the runtime could not
+/// observe all of it; `omitted` is an exact count of further current items
+/// when the runtime knows one.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct WorkSummary {
+    #[serde(deserialize_with = "bounded_items")]
+    pub items: Vec<WorkItem>,
+    pub partial: bool,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::optional_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub omitted: Option<std::num::NonZeroU32>,
+}
+
+/// One unit of native work related to a turn that is not a tool call. The
+/// runtime keeps `id` stable while it observes the work and states only what
+/// the native engine last confirmed. `label` and `actor` are bounded display
+/// text, never prompts, results or arguments.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct WorkItem {
+    #[serde(deserialize_with = "crate::models::nonempty_string")]
+    pub id: String,
+    pub kind: WorkKind,
+    #[serde(deserialize_with = "crate::models::nonempty_string")]
+    pub label: String,
+    pub state: WorkState,
+    /// Another listed item this work was observed under.
+    #[serde(
+        default,
+        deserialize_with = "crate::models::optional_nonempty_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub parent: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::optional_nonempty_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub actor: Option<String>,
+    /// Unix seconds.
+    #[serde(
+        default,
+        deserialize_with = "crate::models::optional_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub started_at: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkKind {
+    /// Other tracked work.
+    Task,
+    /// A child agent the turn delegated to.
+    Delegation,
+    /// The conversation's context transferred to another model or provider.
+    Handoff,
+    /// A branch of the conversation into another one.
+    Fork,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkState {
+    Queued,
+    Running,
+    Waiting,
+    Succeeded,
+    Failed,
+    Cancelled,
+    /// The runtime can no longer confirm this work's state.
+    Unknown,
+}
+
+fn bounded_items<'de, D>(deserializer: D) -> Result<Vec<WorkItem>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let items = Vec::<WorkItem>::deserialize(deserializer)?;
+    if items.len() > WORK_ITEM_LIMIT {
+        return Err(serde::de::Error::custom(format!(
+            "at most {WORK_ITEM_LIMIT} work items are allowed"
+        )));
+    }
+    Ok(items)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -425,6 +543,33 @@ pub struct RuntimeModelQuery {
     pub interface_id: String,
     #[serde(flatten)]
     pub query: ModelQuery,
+}
+
+/// One of the runtime's own commands (or user-invocable skills), as its
+/// engine names and describes it.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RuntimeCommand {
+    #[serde(deserialize_with = "crate::models::nonempty_string")]
+    pub name: String,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::optional_nonempty_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub description: Option<String>,
+    /// The arguments the engine expects, when it says.
+    #[serde(
+        default,
+        deserialize_with = "crate::models::optional_nonempty_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub hint: Option<String>,
+}
+
+/// The commands a person may run in a conversation, in the runtime's order.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CommandCatalog {
+    pub commands: Vec<RuntimeCommand>,
 }
 
 /// Core-to-runtime form of [`ModelUpdate`].
