@@ -335,11 +335,17 @@ export const ProjectionSchema = Type.Object({
 });
 export type Projection = Static<typeof ProjectionSchema>;
 
-/** The first item of a fresh thread subscription. */
+/**
+ * The first item of a fresh thread subscription. `hasMoreHistory` says a
+ * bounded snapshot left older history out. T3 may also set
+ * `payloadBudgetExceeded`, when the complete turns it keeps exceed its byte
+ * budget; it leaves nothing out for that, so it is not read.
+ */
 export const ThreadSnapshotSchema = Type.Object({
   kind: Type.Literal("snapshot"),
   snapshotSequence: Type.Integer(),
   projection: ProjectionSchema,
+  hasMoreHistory: Type.Optional(Type.Boolean()),
 });
 
 export const DispatchResultSchema = Type.Object({ sequence: Type.Integer() });

@@ -33,13 +33,13 @@ import {
   ContextTransferSchema,
   DelegatedNotificationSchema,
   MessageSchema,
-  ProjectionSchema,
   ProviderSessionDetachedSchema,
   ProviderSessionSchema,
   ProviderThreadSchema,
   RunSchema,
   RuntimeRequestSchema,
   SubagentSchema,
+  ThreadSnapshotSchema,
   TurnItemSchema,
   TurnItemSchemas,
   UserMessageOpeningSchema,
@@ -1172,13 +1172,12 @@ export function watchTurn(
         throw new T3Failure("malformed", "T3 sent a thread stream item without a kind");
       switch (item["kind"]) {
         case "snapshot": {
-          const projection = item["projection"];
-          const sequence = item["snapshotSequence"];
-          if (!Check(ProjectionSchema, projection) || !isSequence(sequence))
+          if (!Check(ThreadSnapshotSchema, item))
             throw new T3Failure(
               "malformed",
               "T3 sent a thread snapshot this runtime does not understand",
             );
+          const { projection, snapshotSequence: sequence, hasMoreHistory } = item;
           // A snapshot lists the thread's runs whole: one that omits a run
           // this turn already observed is broken, and is refused before it
           // replaces anything the fold knows.
@@ -1236,7 +1235,8 @@ export function watchTurn(
           }
           for (const [message, parent] of links) keepLink(message, parent);
           for (const report of reports) notified(report, true);
-          const windowedSnapshot = item["hasMoreHistory"] === true;
+          // Only `hasMoreHistory` says T3 left history out of the snapshot.
+          const windowedSnapshot = hasMoreHistory === true;
           historyOmitted = windowedSnapshot;
           for (const run of turnRuns.values())
             if (windowedSnapshot && !before.has(run.id)) windowed.add(run.id);

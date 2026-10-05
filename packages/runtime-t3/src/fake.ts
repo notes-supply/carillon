@@ -124,6 +124,8 @@ export interface FakeT3 {
   defect: (command: Command) => boolean;
   /** Lists only the last so many messages in a snapshot, as T3's bounded window may. */
   messageWindow: number | undefined;
+  /** Marks bounded snapshots over T3's byte budget, as T3 does when the complete turns it keeps exceed it. */
+  payloadBudgetExceeded: boolean;
   /** Omits matching runs from snapshots: a broken snapshot. */
   omitRun: (run: Run) => boolean;
   /** The thread a snapshot names: the one subscribed to, unless a fault names another. */
@@ -383,6 +385,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
     failAfterDispatch: () => undefined,
     defect: () => false,
     messageWindow: undefined,
+    payloadBudgetExceeded: false,
     omitRun: () => false,
     snapshotThread: (threadId) => threadId,
     malformed: false,
@@ -747,7 +750,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
                         return {
                           historyCursor: more ? "older" : null,
                           hasMoreHistory: more,
-                          payloadBudgetExceeded: false,
+                          payloadBudgetExceeded: fake.payloadBudgetExceeded,
                         };
                       })()
                     : {}),

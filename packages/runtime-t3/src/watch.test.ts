@@ -579,6 +579,17 @@ it("refuses stream sequences that are not integers before they move the replay c
   expect(watch.outcome()?.kind).toBe("completed");
 });
 
+it("refuses a snapshot whose history flag is not a boolean before folding any of it", () => {
+  const watch = watchTurn("message-1", "/workspace");
+  watch.apply(snapshot({ runs: [run("running")] }, 4));
+  expect(() =>
+    watch.apply({ ...snapshot({ runs: [run("completed")] }, 6), hasMoreHistory: "yes" }),
+  ).toThrow("T3 sent a thread snapshot this runtime does not understand");
+  // The cursor and the run are the earlier snapshot's.
+  expect(watch.sequence()).toBe(4);
+  expect(watch.outcome()).toBeUndefined();
+});
+
 it("refuses known kinds it cannot read, ignores unknown kinds and malformed stream items it does not need", () => {
   const watch = watchTurn("message-1", "/workspace");
   expect(() =>

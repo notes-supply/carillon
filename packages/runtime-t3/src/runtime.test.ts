@@ -1714,6 +1714,37 @@ it("says so when a resumed follow-up's report is older than the window it reads"
   });
 });
 
+it("reads a snapshot over T3's byte budget as whole, so a report there is neither older nor partial", async () => {
+  const first = runtime.executeTurn(turn("turn-1", "delegate it"));
+  const parent = await started("turn-1");
+  const child = fake.delegate(threadId, parent.id, { title: "child" });
+  answer(parent, "DELEGATED");
+  const reply = await first;
+  const continuation = fake.finishDelegation(threadId, child.id);
+  fake.assistant(threadId, continuation.id, "Whole report.");
+  fake.complete(threadId, continuation.id);
+  // T3 keeps complete turns over its byte budget and says so; it omits nothing.
+  fake.payloadBudgetExceeded = true;
+  expect(
+    (await runtime.executeTurn(turn("turn-1-report", "", { follow_up: reply.follow_up }))).output,
+  ).toBe("Whole report.");
+});
+
+it("does not call a missing report older than the window when only T3's byte budget was exceeded", async () => {
+  const first = runtime.executeTurn(turn("turn-1", "delegate it"));
+  const parent = await started("turn-1");
+  const child = fake.delegate(threadId, parent.id, { title: "child" });
+  answer(parent, "DELEGATED");
+  const reply = await first;
+  // T3 delivers the result to a continuation that ends without a report:
+  // the snapshot holds all of it, so the report is missing, not older.
+  fake.complete(threadId, fake.finishDelegation(threadId, child.id).id);
+  fake.payloadBudgetExceeded = true;
+  await expect(
+    runtime.executeTurn(turn("turn-1-report", "", { follow_up: reply.follow_up })),
+  ).rejects.toMatchObject({ status: 502, message: "T3 finished the run without an answer." });
+});
+
 it("sends a command invocation verbatim, without notes about earlier files", async () => {
   const earlier = [{ correlation_id: "turn-0", attachments: [attachment] }];
   const command = runtime.executeTurn(
