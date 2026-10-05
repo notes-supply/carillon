@@ -37,7 +37,12 @@ import { openConversation } from "./namespace.ts";
 import { RuntimeClosed } from "@carillon/runtime/failure";
 import { Serial } from "@carillon/runtime/serial";
 import { createPiExecutionSession, promptSession } from "./session.ts";
-import type { RuntimeOperations, TurnRequest, TurnResponse } from "@carillon/runtime/operations";
+import {
+  commandFinished,
+  type RuntimeOperations,
+  type TurnRequest,
+  type TurnResponse,
+} from "@carillon/runtime/operations";
 
 export interface PiRuntimeOptions {
   readonly workspace: string;
@@ -264,18 +269,31 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
     try {
       assertExtensionsLoaded(extensionsResult.errors);
       let output = "";
+      // What the prompt brought: an assistant message, or a failure an
+      // extension reported while it ran, such as a command's.
+      const seen = { answer: false, failure: false };
       const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
         activity.observe(event);
+        if (event.type === "message_start" && event.message.role === "assistant")
+          seen.answer = true;
         if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta")
           output += event.assistantMessageEvent.delta;
       });
+      const unwatch = session.extensionRunner.onError(() => {
+        seen.failure = true;
+      });
       try {
         await promptWithNotes(session, request.input, signal, attachments.images, notes);
+        // A command Pi ran to completion without a message, such as an
+        // extension's, is acknowledged; a failed one, and any message the
+        // model answered with nothing, still has no answer.
+        const silent = !seen.answer && !seen.failure;
         return {
           correlation_id: request.correlation_id,
-          output,
+          output: silent ? (commandFinished(request) ?? output) : output,
         };
       } finally {
+        unwatch();
         unsubscribe();
       }
     } finally {

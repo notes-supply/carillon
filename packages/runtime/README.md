@@ -4,7 +4,7 @@
 
 Modules are imported by path (`@carillon/runtime/<module>`); there is no aggregate entry point.
 
-- [`operations.ts`](src/operations.ts): `RuntimeOperations`, the interface a runtime implements: execute a turn, describe its activity, read and change the model selection, close.
+- [`operations.ts`](src/operations.ts): `RuntimeOperations`, the interface a runtime implements: execute a turn, describe its activity, read and change the model selection, list its commands, close. `commandFinished` is the answer to a command invocation the engine completed without a reply of its own.
 - [`http.ts`](src/http.ts): the authenticated HTTP adapter over those operations (`/health`, `POST /v1/turns`, `GET /v1/turns/{id}/activity`, `GET`/`PUT /v1/model`, `GET /v1/commands`). Creating a server binds no listener. The provider passes its own identity, engine name, build version and features. Callers receive only the displayable part of an `ExplainedFailure`; a request a closing runtime abandons (`RuntimeClosed`) is answered 503 without an explanation, which core reads as no answer; every other failure is logged, redacted, by method and path.
 - [`failure.ts`](src/failure.ts): `ExplainedFailure` and `RuntimeClosed`, the classes the adapter recognises by `instanceof`, and the conservative, best-effort rules for what of an explanation may be shown and how diagnostics are redacted.
 - [`activity.ts`](src/activity.ts): deny-by-default descriptions of what a tool acts on (the Bash command-header policy, workspace-relative paths, operation targets), the headline of a model's public text, and bounded single-line display. Native event tracking stays with each provider.

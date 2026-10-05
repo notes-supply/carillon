@@ -574,3 +574,35 @@ it("lets an extension choose the model before Pi prepares the images", async () 
   expect(images(message?.content)).toEqual([]);
   expect(text(message?.content)).toContain("image omitted: model does not support images");
 });
+
+it("acknowledges a command Pi ran without an answer, but not a failed one or an empty answer", async () => {
+  const { root, resources, runtime, sent } = await setup(["text"], [""]);
+  await mkdir(join(resources, "extensions"));
+  await writeFile(
+    join(resources, "extensions", "commands.ts"),
+    `export default function commands(pi) {
+  pi.registerCommand("quiet", { description: "Answer nothing", handler: async () => {} });
+  pi.registerCommand("broken", {
+    description: "Fail",
+    handler: async () => {
+      throw new Error("broken on purpose");
+    },
+  });
+}
+`,
+  );
+  const store = join(root, "attachments");
+  const command = (input: string, correlation: string) => ({
+    ...turn(resources, store, input, [], correlation),
+    native: { intent: "command" },
+  });
+  // The extension's command ran to completion and answered nothing.
+  expect(await execute(runtime, command("/quiet now", "quiet"))).toBe("`/quiet` finished.");
+  // As a person's ordinary message, nothing answered is still no answer.
+  expect(await execute(runtime, turn(resources, store, "/quiet", [], "plain"))).toBe("");
+  // A command that failed is not acknowledged.
+  expect(await execute(runtime, command("/broken", "broken"))).toBe("");
+  // Nor is one the model answered with nothing.
+  expect(await execute(runtime, command("/unknown", "empty"))).toBe("");
+  expect(sent).toHaveLength(1);
+});

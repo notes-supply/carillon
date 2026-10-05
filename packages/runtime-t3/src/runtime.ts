@@ -19,7 +19,12 @@ import {
 } from "@carillon/protocol";
 import { diagnostic, ExplainedFailure, RuntimeClosed } from "@carillon/runtime/failure";
 import { validated } from "@carillon/runtime/models";
-import type { RuntimeOperations, TurnRequest, TurnResponse } from "@carillon/runtime/operations";
+import {
+  commandFinished,
+  type RuntimeOperations,
+  type TurnRequest,
+  type TurnResponse,
+} from "@carillon/runtime/operations";
 import { Serial } from "@carillon/runtime/serial";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Type } from "typebox";
@@ -369,7 +374,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
               ? outcome.output
               : outcome.followUp !== undefined
                 ? "The work this message started is still running; its report follows."
-                : acknowledged(request);
+                : (commandFinished(request) ?? "");
           if (output.trim().length === 0)
             throw new ExplainedFailure(502, "T3 finished the run without an answer.");
           return {
@@ -411,17 +416,6 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       // is still unwinding; only the attempt's own entry is removed.
       if (executing.get(request.correlation_id) === entry) executing.delete(request.correlation_id);
     }
-  }
-
-  /**
-   * The answer to a command invocation T3 ran to completion without a reply
-   * of its own, such as a compaction; any other run without an answer has
-   * failed to answer.
-   */
-  function acknowledged(request: TurnRequest): string {
-    if (turnIntent(request.native) !== "command") return "";
-    const [name = ""] = request.input.trim().split(/\s+/u);
-    return `\`${name.replaceAll("`", "")}\` finished.`;
   }
 
   /** The follow-up cursor core carries back, checked: anything else is not a follow-up. */

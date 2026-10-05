@@ -1,13 +1,25 @@
-import type {
-  CommandCatalog,
-  ModelQuery,
-  ModelUpdate,
-  ModelState,
-  RuntimeTurnRequest,
-  TurnActivity,
+import {
+  turnIntent,
+  type CommandCatalog,
+  type ModelQuery,
+  type ModelUpdate,
+  type ModelState,
+  type RuntimeTurnRequest,
+  type TurnActivity,
 } from "@carillon/protocol";
 
 export type TurnRequest = RuntimeTurnRequest;
+
+/**
+ * The answer to a command invocation the engine ran to completion without
+ * a reply of its own, such as a compaction: a short note naming it.
+ * Undefined for any other turn, which has failed to answer.
+ */
+export function commandFinished(request: TurnRequest): string | undefined {
+  if (turnIntent(request.native) !== "command") return undefined;
+  const [name = ""] = request.input.trim().split(/\s+/u);
+  return `\`${name.replaceAll("`", "")}\` finished.`;
+}
 
 export interface TurnResponse {
   readonly correlation_id: string;
