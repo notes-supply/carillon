@@ -9,6 +9,7 @@ import {
   clampThinkingLevel,
   getSupportedThinkingLevels,
   type Api,
+  type AssistantMessage,
   type ImageContent,
   type Model,
   type ModelThinkingLevel,
@@ -269,13 +270,11 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
     try {
       assertExtensionsLoaded(extensionsResult.errors);
       let output = "";
-      // What the prompt brought: an assistant message, or a failure an
-      // extension reported while it ran, such as a command's.
-      const seen = { answer: false, failure: false };
+      // Whether an extension reported a failure while the prompt ran, such
+      // as a command's.
+      const seen = { failure: false };
       const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
         activity.observe(event);
-        if (event.type === "message_start" && event.message.role === "assistant")
-          seen.answer = true;
         if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta")
           output += event.assistantMessageEvent.delta;
       });
@@ -283,11 +282,17 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
         seen.failure = true;
       });
       try {
-        await promptWithNotes(session, request.input, signal, attachments.images, notes);
+        const answer = await promptWithNotes(
+          session,
+          request.input,
+          signal,
+          attachments.images,
+          notes,
+        );
         // A command Pi ran to completion without a message, such as an
         // extension's, is acknowledged; a failed one, and any message the
         // model answered with nothing, still has no answer.
-        const silent = !seen.answer && !seen.failure;
+        const silent = answer === undefined && !seen.failure;
         return {
           correlation_id: request.correlation_id,
           output: silent ? (commandFinished(request) ?? output) : output,
@@ -311,7 +316,8 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
    * message after any compaction. A command or input an extension handles
    * consumes the prompt without a message; the notes are then kept on their
    * own. Pi saves them once the conversation has a message; until then, core
-   * offers the files again with later turns.
+   * offers the files again with later turns. Returns the prompt's own
+   * answer, as `promptSession` does.
    */
   async function promptWithNotes(
     session: AgentSession,
@@ -319,11 +325,11 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
     signal: AbortSignal,
     images: ImageContent[],
     notes: readonly ReturnType<typeof note>[],
-  ): Promise<void> {
+  ): Promise<AssistantMessage | undefined> {
     for (const pending of notes)
       await session.sendCustomMessage(pending, { deliverAs: "nextTurn" });
     try {
-      await promptSession(session, input, signal, images);
+      return await promptSession(session, input, signal, images);
     } finally {
       if (!signal.aborted)
         for (const pending of notes)

@@ -36,14 +36,20 @@ const SentSchema = Type.Object({
 type Sent = Static<typeof SentSchema>;
 type Content = Sent["messages"][number]["content"] | undefined;
 
-type Reply = string | ((sent: Sent) => { tool: string; arguments: unknown } | string);
+type Reply =
+  | string
+  | { readonly refuse: number }
+  | ((sent: Sent) => { tool: string; arguments: unknown } | string);
 
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const step of cleanup.splice(0).reverse()) await step();
 });
 
-/** A local OpenAI-compatible endpoint answering with `replies` in order. */
+/**
+ * A local OpenAI-compatible endpoint answering with `replies` in order; a
+ * `refuse` reply answers with that HTTP status instead.
+ */
 async function inference(replies: Reply[]) {
   const sent: Sent[] = [];
   const server: Server = createServer((request, response) => {
@@ -55,6 +61,11 @@ async function inference(replies: Reply[]) {
       const body = Parse(SentSchema, JSON.parse(raw));
       sent.push(body);
       const reply = replies.shift() ?? "done";
+      if (typeof reply === "object") {
+        response.writeHead(reply.refuse, { "content-type": "application/json" });
+        response.end(JSON.stringify({ error: { message: "The fixture refused this request." } }));
+        return;
+      }
       const answer = typeof reply === "string" ? reply : reply(body);
       const delta =
         typeof answer === "string"
@@ -575,8 +586,8 @@ it("lets an extension choose the model before Pi prepares the images", async () 
   expect(text(message?.content)).toContain("image omitted: model does not support images");
 });
 
-it("acknowledges a command Pi ran without an answer, but not a failed one or an empty answer", async () => {
-  const { root, resources, runtime, sent } = await setup(["text"], [""]);
+/** An extension with a command that answers nothing and one that fails. */
+async function commands(resources: string) {
   await mkdir(join(resources, "extensions"));
   await writeFile(
     join(resources, "extensions", "commands.ts"),
@@ -591,11 +602,19 @@ it("acknowledges a command Pi ran without an answer, but not a failed one or an 
 }
 `,
   );
+}
+
+/** A `/command` invocation of `input`, with the command intent. */
+function commandTurn(resources: string, store: string, input: string, correlation: string) {
+  return { ...turn(resources, store, input, [], correlation), native: { intent: "command" } };
+}
+
+it("acknowledges a command Pi ran without an answer, but not a failed one or an empty answer", async () => {
+  const { root, resources, runtime, sent } = await setup(["text"], [""]);
+  await commands(resources);
   const store = join(root, "attachments");
-  const command = (input: string, correlation: string) => ({
-    ...turn(resources, store, input, [], correlation),
-    native: { intent: "command" },
-  });
+  const command = (input: string, correlation: string) =>
+    commandTurn(resources, store, input, correlation);
   // The extension's command ran to completion and answered nothing.
   expect(await execute(runtime, command("/quiet now", "quiet"))).toBe("`/quiet` finished.");
   // As a person's ordinary message, nothing answered is still no answer.
@@ -605,4 +624,22 @@ it("acknowledges a command Pi ran without an answer, but not a failed one or an 
   // Nor is one the model answered with nothing.
   expect(await execute(runtime, command("/unknown", "empty"))).toBe("");
   expect(sent).toHaveLength(1);
+});
+
+it("acknowledges a silent command after a failed turn without repeating that failure", async () => {
+  const { root, resources, runtime } = await setup(["text"], [{ refuse: 400 }, { refuse: 400 }]);
+  await commands(resources);
+  const store = join(root, "attachments");
+  // The conversation's last answer is Pi's record of a failure.
+  await expect(
+    execute(runtime, turn(resources, store, "hello", [], "failed")),
+  ).rejects.toMatchObject({ status: 502 });
+  // A command that then runs without an answer of its own is acknowledged.
+  expect(await execute(runtime, commandTurn(resources, store, "/quiet", "quiet"))).toBe(
+    "`/quiet` finished.",
+  );
+  // A prompt that fails now still fails.
+  await expect(
+    execute(runtime, commandTurn(resources, store, "/unknown", "refused")),
+  ).rejects.toMatchObject({ status: 502 });
 });
