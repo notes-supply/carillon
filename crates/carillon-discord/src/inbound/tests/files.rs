@@ -301,7 +301,7 @@ async fn run_for(
     let ingress = ingress(world, config, cdn)?;
     let (send, receive) = mpsc::channel(lanes::MAX_PENDING);
     for message in messages {
-        send.send(message).await?;
+        send.send(message.into()).await?;
     }
     drop(send);
     tokio::time::timeout(limit, lanes::dispatch(ingress, receive)).await?;
@@ -1062,7 +1062,7 @@ async fn stopping_settles_what_core_may_hold_and_drops_the_rest() -> Result<()> 
             vec![attachment(cdn, "602", "stalled", 100)],
         ),
     ] {
-        send.send(queued).await?;
+        send.send(queued.into()).await?;
     }
     let dispatcher = tokio::spawn(lanes::dispatch(ingress, receive));
     // Stop once the first message is with core and the other is downloading.
@@ -1130,13 +1130,16 @@ async fn a_conversation_attempt_stalled_in_discords_answer_is_bounded() -> Resul
             .build(),
     );
     let (send, receive) = mpsc::channel(1);
-    send.send(message(
-        "86",
-        "300",
-        "200",
-        "",
-        vec![attachment(port, "601", "a.bin", 8)],
-    ))
+    send.send(
+        message(
+            "86",
+            "300",
+            "200",
+            "",
+            vec![attachment(port, "601", "a.bin", 8)],
+        )
+        .into(),
+    )
     .await?;
     drop(send);
     let started = Instant::now();

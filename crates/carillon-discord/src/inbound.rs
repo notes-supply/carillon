@@ -398,4 +398,4 @@ pub(crate) async fn submit_event_with_retry(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

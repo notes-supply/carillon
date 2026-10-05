@@ -80,7 +80,7 @@ fn discord_client(address: std::net::SocketAddr) -> Arc<twilight_http::Client> {
 }
 
 /// Message 400 in channel 300, from the allowlisted person.
-fn hello() -> super::QueuedMessage {
+pub(crate) fn hello() -> super::QueuedMessage {
     super::QueuedMessage {
         request: IncomingMessage {
             event_id: "400".to_owned(),
@@ -285,18 +285,21 @@ async fn configuration_rejection_does_not_block_the_next_message_in_its_conversa
     let (send, receive) = tokio::sync::mpsc::channel(2);
     // One conversation: the second message waits for the first to settle.
     for (event, channel) in [("400", "300"), ("401", "300")] {
-        send.send(super::QueuedMessage {
-            request: IncomingMessage {
-                event_id: event.to_owned(),
-                guild_id: Some("100".to_owned()),
-                user_id: "200".to_owned(),
-                channel_id: channel.to_owned(),
-                parent_channel_id: None,
-                content: "hello".to_owned(),
-                attachments: Vec::new(),
-            },
-            native: Value::Null,
-        })
+        send.send(
+            super::QueuedMessage {
+                request: IncomingMessage {
+                    event_id: event.to_owned(),
+                    guild_id: Some("100".to_owned()),
+                    user_id: "200".to_owned(),
+                    channel_id: channel.to_owned(),
+                    parent_channel_id: None,
+                    content: "hello".to_owned(),
+                    attachments: Vec::new(),
+                },
+                native: Value::Null,
+            }
+            .into(),
+        )
         .await?;
     }
     drop(send);
@@ -415,19 +418,7 @@ async fn slow_feedback_never_delays_a_messages_admission() -> anyhow::Result<()>
     let mut services = tokio::task::JoinSet::new();
     services.spawn(async move { axum::serve(listener, app).await });
     let (send, receive) = tokio::sync::mpsc::channel(2);
-    send.send(super::QueuedMessage {
-        request: IncomingMessage {
-            event_id: "400".to_owned(),
-            guild_id: Some("100".to_owned()),
-            user_id: "200".to_owned(),
-            channel_id: "300".to_owned(),
-            parent_channel_id: None,
-            content: "hello".to_owned(),
-            attachments: Vec::new(),
-        },
-        native: Value::Null,
-    })
-    .await?;
+    send.send(hello().into()).await?;
     drop(send);
     let ingress = ingress(
         core_client(format!("http://{address}")),

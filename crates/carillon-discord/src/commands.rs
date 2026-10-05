@@ -47,6 +47,7 @@ use crate::{
     client::{CoreClient, RUNTIME_LATE},
     conversations::{InteractionOrigin, submitted_event},
     delivery::{Feedback, Reactions},
+    inbound::lanes::Lanes,
 };
 
 /// The whole invocation, including every native call it makes.
@@ -75,10 +76,12 @@ pub struct InteractionCalls {
 }
 
 /// What submitting needs: the conversation's channel to anchor the text in,
-/// Discord to post that anchor, and the reactions that show its progress.
+/// Discord to post that anchor, the reactions that show its progress, and
+/// the lanes in which it takes its place among the conversation's messages.
 pub struct Submissions {
     pub http: Arc<DiscordHttp>,
     pub reactions: Reactions,
+    pub lanes: Lanes,
     pub origin: InteractionOrigin,
 }
 
@@ -210,9 +213,11 @@ const SUBMIT_ATTEMPTS: u32 = 3;
 /// event's identity and feedback target; core then accepts the event like
 /// any message, and the answer is delivered to the conversation.
 ///
-/// The submission returns by `deadline`, the end of its interaction's
-/// calls, so the module can still say what happened. Before it, posting the
-/// marker takes at most [`MARKER_LIMIT`], and core's attempts take the rest,
+/// The submission first waits for its turn in the conversation's lane, after
+/// the messages before it. It returns by `deadline`, the end of its
+/// interaction's calls, so the module can still say what happened. Before
+/// it, posting the marker takes at most [`MARKER_LIMIT`], and core's attempts
+/// take the rest,
 /// beside the wait of at most
 /// [`PROMPT_FEEDBACK`](crate::delivery::PROMPT_FEEDBACK) for the
 /// processing reaction and typing, which never holds them back. An attempt
@@ -232,12 +237,28 @@ async fn submit(
     let Submissions {
         http,
         reactions,
+        lanes,
         origin,
     } = submissions;
     let channel: Id<ChannelMarker> = origin
         .channel_id
         .parse()
         .map_err(|_| "The conversation's channel is not valid.".to_owned())?;
+    // The command takes its place among the conversation's messages, so
+    // core accepts it after the messages before it and before those after.
+    // The lane waits for it while it holds the turn, to the end of this call.
+    let _turn = match timeout_at(deadline, lanes.turn(&origin.channel_id)).await {
+        Ok(Some(turn)) => turn,
+        Ok(None) => {
+            return Err(
+                "Carillon is too busy or restarting, so it was not sent; please run it again shortly."
+                    .to_owned(),
+            );
+        }
+        Err(_) => {
+            return Err("Earlier messages in this conversation are still being prepared, so it was not sent; please run it again once they are answered.".to_owned());
+        }
+    };
     let shown = text.replace('`', "ˋ");
     let shown: String = shown.chars().take(1900).collect();
     let silent = AllowedMentions::default();
@@ -1791,9 +1812,10 @@ pub(crate) mod tests {
                 .ratelimiter(None)
                 .build(),
         );
-        let calls =
-            super::InteractionCalls::new(core, query).with_submissions(super::Submissions {
+        let calls = super::InteractionCalls::new(core.clone(), query).with_submissions(
+            super::Submissions {
                 reactions: crate::delivery::Reactions::new(http.clone(), config),
+                lanes: serving_lanes(core, http.clone())?,
                 http,
                 origin: crate::conversations::InteractionOrigin {
                     guild_id: "100".to_owned(),
@@ -1801,7 +1823,8 @@ pub(crate) mod tests {
                     channel_id: "400".to_owned(),
                     route_channel_id: "300".to_owned(),
                 },
-            });
+            },
+        );
         assert_eq!(
             calls.answer(&submit, calls_until()).await,
             HostReply::Submitted
@@ -1884,14 +1907,16 @@ pub(crate) mod tests {
                 .build(),
         );
         let reactions = crate::delivery::Reactions::new(http.clone(), config);
+        let core = crate::client::test_client(format!("http://{address}"));
         let calls = super::InteractionCalls::new(
-            crate::client::test_client(format!("http://{address}")),
+            core.clone(),
             carillon_protocol::model::ModelQuery {
                 agent_id: "default".to_owned(),
                 audience_id: Some("discord-100-400".to_owned()),
             },
         )
         .with_submissions(super::Submissions {
+            lanes: serving_lanes(core, http.clone())?,
             http,
             reactions: reactions.clone(),
             origin: crate::conversations::InteractionOrigin {
@@ -1902,6 +1927,34 @@ pub(crate) mod tests {
             },
         });
         Ok((calls, reactions, server))
+    }
+
+    /// Lanes served by the provider's own dispatcher, in which no message of
+    /// the conversation is waiting.
+    fn serving_lanes(
+        core: crate::client::CoreClient,
+        http: Arc<twilight_http::Client>,
+    ) -> anyhow::Result<crate::inbound::lanes::Lanes> {
+        let directory = tempfile::tempdir()?;
+        let participation = Arc::new(crate::conversations::Participation::load(
+            directory.path().join("participation.json"),
+        )?);
+        let ingress = crate::inbound::tests::ingress(
+            core,
+            crate::conversations::tests::discord_config(
+                crate::config::DiscordActivation::Always,
+                crate::config::DiscordConversation::Thread,
+            ),
+            participation,
+            http,
+            directory.path(),
+        )?;
+        let (sender, receiver) = tokio::sync::mpsc::channel(crate::inbound::lanes::MAX_PENDING);
+        tokio::spawn(async move {
+            let _directory = directory;
+            crate::inbound::lanes::dispatch(ingress, receiver).await;
+        });
+        Ok(crate::inbound::lanes::Lanes::new(sender))
     }
 
     /// The end of an interaction's native calls, were it starting now.
@@ -2145,6 +2198,242 @@ pub(crate) mod tests {
             trace.iter().any(|request| request.contains("/reactions/")),
             "{trace:?}"
         );
+        Ok(())
+    }
+
+    /// A conversation in channel 300 whose message 400 is still being
+    /// prepared, core taking `status` to say whether it holds it. Beside it
+    /// [`preparing`] returns calls of a person in that conversation, which
+    /// take their place in the same lanes. `accepted` records the events
+    /// core accepts, `markers` the marker messages posted.
+    struct Preparing {
+        ingress: Arc<crate::inbound::Ingress>,
+        send: tokio::sync::mpsc::Sender<crate::inbound::lanes::Queued>,
+        dispatcher: tokio::task::JoinHandle<()>,
+        accepted: Arc<tokio::sync::Mutex<Vec<String>>>,
+        markers: Arc<AtomicUsize>,
+        server: tokio::task::JoinHandle<std::io::Result<()>>,
+        _directory: tempfile::TempDir,
+    }
+
+    impl Preparing {
+        /// Closes the lanes and waits, at most ten seconds, for the
+        /// dispatcher to settle what it holds; the calls must be gone, as
+        /// they hold the lanes too. Returns the events core accepted.
+        async fn settled(self) -> anyhow::Result<Vec<String>> {
+            drop(self.send);
+            tokio::time::timeout(Duration::from_secs(10), self.dispatcher)
+                .await
+                .map_err(|_| anyhow::anyhow!("the lanes did not settle"))??;
+            self.server.abort();
+            Ok(self.accepted.lock().await.clone())
+        }
+    }
+
+    /// Core and Discord for [`preparing`]: core is slow by `status` to say
+    /// whether it holds message 400, and records what it accepts and the
+    /// marker messages posted.
+    fn preparing_server(
+        status: Duration,
+        accepted: Arc<tokio::sync::Mutex<Vec<String>>>,
+        markers: Arc<AtomicUsize>,
+    ) -> Router {
+        use axum::{
+            Json,
+            extract::Path as Segment,
+            routing::{get, post},
+        };
+        use carillon_protocol::model::{EventReceipt, EventStatus, ExternalEvent, TurnState};
+        Router::new()
+            .route(
+                "/v1/events/{event_id}",
+                get(move |Segment(event_id): Segment<String>| async move {
+                    if event_id == "400" {
+                        tokio::time::sleep(status).await;
+                    }
+                    Json(EventStatus::Unknown)
+                }),
+            )
+            .route(
+                "/v1/events",
+                post(move |Json(event): Json<ExternalEvent>| {
+                    let accepted = accepted.clone();
+                    async move {
+                        accepted.lock().await.push(event.event_id.clone());
+                        Json(EventReceipt {
+                            event_id: event.event_id,
+                            turn_id: "turn".to_owned(),
+                            duplicate: false,
+                            state: TurnState::Queued,
+                        })
+                    }
+                }),
+            )
+            .route(
+                "/v1/commands",
+                get(|| async { Json(json!({"commands": [{"name": "compact"}]})) }),
+            )
+            .route(
+                "/api/v10/channels/{channel}/messages",
+                post(move || {
+                    markers.fetch_add(1, Ordering::SeqCst);
+                    async {
+                        Json(json!({
+                            "id": "901",
+                            "channel_id": "300",
+                            "author": {"id": "201", "username": "carillon", "discriminator": "0"},
+                            "content": "marker",
+                            "attachments": [],
+                            "embeds": [],
+                            "mention_everyone": false,
+                            "mention_roles": [],
+                            "mentions": [],
+                            "pinned": false,
+                            "timestamp": "2026-10-05T00:00:00.000000+00:00",
+                            "tts": false,
+                            "type": 0,
+                        }))
+                    }
+                }),
+            )
+            .fallback(|| async { StatusCode::NO_CONTENT })
+    }
+
+    async fn preparing(status: Duration) -> anyhow::Result<(super::InteractionCalls, Preparing)> {
+        let (accepted, markers) = (
+            Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        let router = preparing_server(status, accepted.clone(), markers.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+        let mut config = crate::conversations::tests::discord_config(
+            crate::config::DiscordActivation::Always,
+            crate::config::DiscordConversation::Channel,
+        );
+        config.typing = false;
+        let http = Arc::new(
+            twilight_http::Client::builder()
+                .token("test-only".to_owned())
+                .proxy(address.to_string(), true)
+                .ratelimiter(None)
+                .build(),
+        );
+        let core = crate::client::test_client(format!("http://{address}"));
+        let directory = tempfile::tempdir()?;
+        let participation = Arc::new(crate::conversations::Participation::load(
+            directory.path().join("participation.json"),
+        )?);
+        let ingress = crate::inbound::tests::ingress(
+            core.clone(),
+            config,
+            participation,
+            http.clone(),
+            directory.path(),
+        )?;
+        // Message 400 arrives first, through the gateway's lanes.
+        let (send, receive) = tokio::sync::mpsc::channel(4);
+        send.send(crate::inbound::tests::hello().into()).await?;
+        let dispatcher = tokio::spawn(crate::inbound::lanes::dispatch(ingress.clone(), receive));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let calls = super::InteractionCalls::new(
+            core,
+            carillon_protocol::model::ModelQuery {
+                agent_id: "default".to_owned(),
+                audience_id: Some("discord-100-300".to_owned()),
+            },
+        )
+        .with_submissions(super::Submissions {
+            http,
+            reactions: ingress.reactions.clone(),
+            lanes: crate::inbound::lanes::Lanes::new(send.clone()),
+            origin: crate::conversations::InteractionOrigin {
+                guild_id: "100".to_owned(),
+                user_id: "200".to_owned(),
+                channel_id: "300".to_owned(),
+                route_channel_id: "300".to_owned(),
+            },
+        });
+        let preparing = Preparing {
+            ingress,
+            send,
+            dispatcher,
+            accepted,
+            markers,
+            server,
+            _directory: directory,
+        };
+        Ok((calls, preparing))
+    }
+
+    #[tokio::test]
+    async fn a_command_is_accepted_after_the_messages_before_it_in_its_conversation()
+    -> anyhow::Result<()> {
+        // Core takes two seconds to say whether it holds message 400 when a
+        // Run click comes in the same conversation.
+        let (calls, preparing) = preparing(Duration::from_secs(2)).await?;
+        let directory = tempfile::tempdir()?;
+        std::fs::write(directory.path().join("release.wasm"), running_module()?)?;
+        let commands = Commands::load(files(directory.path())).await?;
+        assert_eq!(commands.invoke(calls, interaction()).await?.content, "ran");
+        // Core accepted the message before the command that followed it.
+        assert_eq!(preparing.settled().await?, ["400", "901"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_command_still_waiting_at_its_deadline_is_not_sent_and_its_conversation_goes_on()
+    -> anyhow::Result<()> {
+        use carillon_discord_commands::contract::HostReply;
+        let (calls, preparing) = preparing(Duration::from_secs(3)).await?;
+        let started = std::time::Instant::now();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let reply = calls.answer(&submit_request()?, deadline).await;
+        drop(calls);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(
+            reply,
+            HostReply::Error("Earlier messages in this conversation are still being prepared, so it was not sent; please run it again once they are answered.".to_owned())
+        );
+        let markers = preparing.markers.clone();
+        // The message was accepted; nothing of the command was posted or sent.
+        assert_eq!(preparing.settled().await?, ["400"]);
+        assert_eq!(markers.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_command_waiting_when_the_provider_stops_is_not_sent() -> anyhow::Result<()> {
+        use carillon_discord_commands::contract::HostReply;
+        let (calls, preparing) = preparing(Duration::from_secs(30)).await?;
+        let submit = submit_request()?;
+        let waiting = tokio::spawn(async move { calls.answer(&submit, calls_until()).await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        preparing.ingress.stopping.cancel();
+        let reply = tokio::time::timeout(Duration::from_secs(2), waiting).await??;
+        assert_eq!(
+            reply,
+            HostReply::Error("Carillon is too busy or restarting, so it was not sent; please run it again shortly.".to_owned())
+        );
+        let markers = preparing.markers.clone();
+        assert!(preparing.settled().await?.is_empty());
+        assert_eq!(markers.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn listing_commands_never_waits_for_the_conversation() -> anyhow::Result<()> {
+        use carillon_discord_commands::contract::{HostReply, HostRequest};
+        // The conversation's message is being prepared for half a minute.
+        let (calls, preparing) = preparing(Duration::from_secs(30)).await?;
+        let started = std::time::Instant::now();
+        let reply = calls
+            .answer(&serde_json::to_vec(&HostRequest::Commands)?, calls_until())
+            .await;
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(matches!(reply, HostReply::Commands(catalog) if catalog.commands.len() == 1));
+        preparing.server.abort();
         Ok(())
     }
 

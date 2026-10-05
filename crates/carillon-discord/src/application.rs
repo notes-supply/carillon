@@ -5,7 +5,10 @@ use crate::conversations::{
 use crate::{
     attachments::Downloads,
     error::discord_failure_is_terminal,
-    inbound::{Ingress, PREPARATION_DEADLINE, QueuedMessage, known_receipt, lanes},
+    inbound::{
+        Ingress, PREPARATION_DEADLINE, QueuedMessage, known_receipt,
+        lanes::{self, Lanes, Queued},
+    },
 };
 
 use crate::{
@@ -93,6 +96,9 @@ struct DiscordState {
     app: Option<Arc<DiscordApp>>,
     /// The reactions shown on messages, with the Discord application.
     reactions: Option<Reactions>,
+    /// The conversation lanes `/command` submissions take their place in,
+    /// with the Discord application.
+    lanes: Option<Lanes>,
     /// The provider's attachment downloads and staging, in either mode.
     downloads: Arc<Downloads>,
     operator_token_hash: String,
@@ -170,6 +176,7 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
         commands,
         app: None,
         reactions: None,
+        lanes: None,
         downloads,
         operator_token_hash: config.value.core.operator_token_hash.clone(),
     };
@@ -230,6 +237,7 @@ async fn connect(
         reactions.outcome(&target, Feedback::Uncertain).await;
     }
     let (messages, receiver) = mpsc::channel(lanes::MAX_PENDING);
+    state.lanes = Some(Lanes::new(messages.clone()));
     let delivery_state = state.clone();
     let stopping = CancellationToken::new();
     let ingress = Arc::new(Ingress {
@@ -624,7 +632,7 @@ async fn simulate_interaction(
 async fn gateway_loop(
     state: DiscordState,
     token: String,
-    messages: mpsc::Sender<QueuedMessage>,
+    messages: mpsc::Sender<Queued>,
 ) -> Result<()> {
     let intents = Intents::GUILDS | Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT;
     let mut shard = Shard::new(ShardId::ONE, token, intents);
@@ -743,13 +751,16 @@ fn strip_attachment_addresses(value: &mut Value) {
 /// retrying; a message that finds the queue full is returned refused, and
 /// the person who sent it is told it failed rather than left waiting.
 fn queue_message(
-    messages: &mpsc::Sender<QueuedMessage>,
+    messages: &mpsc::Sender<Queued>,
     inbound: QueuedMessage,
 ) -> Result<Result<(), QueuedMessage>> {
-    match messages.try_send(inbound) {
-        Ok(()) => Ok(Ok(())),
-        Err(mpsc::error::TrySendError::Full(inbound)) => Ok(Err(inbound)),
-        Err(mpsc::error::TrySendError::Closed(_)) => bail!("Discord message worker stopped"),
+    match messages.try_reserve() {
+        Ok(room) => {
+            room.send(inbound.into());
+            Ok(Ok(()))
+        }
+        Err(mpsc::error::TrySendError::Full(())) => Ok(Err(inbound)),
+        Err(mpsc::error::TrySendError::Closed(())) => bail!("Discord message worker stopped"),
     }
 }
 
@@ -799,10 +810,12 @@ async fn run_interaction(state: &DiscordState, admitted: AdmittedInteraction) ->
         },
     );
     // Without a Discord connection there is nowhere to anchor a submission.
-    if let (Some(app), Some(reactions)) = (&state.app, &state.reactions) {
+    if let (Some(app), Some(reactions), Some(lanes)) = (&state.app, &state.reactions, &state.lanes)
+    {
         calls = calls.with_submissions(Submissions {
             http: Arc::clone(&app.http),
             reactions: reactions.clone(),
+            lanes: lanes.clone(),
             origin: admitted.origin,
         });
     }

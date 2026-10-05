@@ -4,6 +4,11 @@
 //! belong to, known on arrival: a message that will start a thread is its
 //! own new thread's lane, so later messages in that thread wait for it.
 //!
+//! A `/command` submission takes its place in its conversation's lane like
+//! a message, so core accepts it after the messages before it and before
+//! those after. When the lane reaches it, the submission is given the
+//! lane's [`Turn`], and the lane waits until that is dropped.
+//!
 //! Lanes live in memory, bounded overall and per lane; a message beyond the
 //! bounds is refused at once rather than queued without limit. Only a
 //! lane's first message runs, so a slow transfer holds back its own
@@ -21,9 +26,10 @@ use std::{
 
 use serde_json::Value;
 use tokio::{
-    sync::{Semaphore, mpsc},
+    sync::{Semaphore, mpsc, oneshot},
     task::JoinSet,
 };
+use tokio_util::sync::{CancellationToken, DropGuard};
 use tracing::warn;
 
 use super::{Ingress, QueuedMessage, prepare};
@@ -39,6 +45,59 @@ pub(crate) const MAX_PENDING: usize = 64;
 pub(crate) const MAX_PER_LANE: usize = 16;
 /// Overload replies being sent at once; beyond them refusals are only logged.
 const REFUSALS: usize = 4;
+
+/// What a conversation's lane holds, in arrival order.
+pub(crate) enum Queued {
+    Message(QueuedMessage),
+    /// A `/command` submission, waiting for its conversation's turn.
+    Submission(Submission),
+}
+
+impl From<QueuedMessage> for Queued {
+    fn from(message: QueuedMessage) -> Self {
+        Self::Message(message)
+    }
+}
+
+/// A `/command` submission's place in the lane of the conversation in
+/// `channel`: a command never starts a thread, so its conversation's lane
+/// is its channel. The lane sends it the [`Turn`] when it reaches it.
+pub(crate) struct Submission {
+    channel: String,
+    /// Taken when the lane reaches the submission.
+    turn: Option<oneshot::Sender<Turn>>,
+}
+
+/// The lane's turn, held by a submission while it runs; the lane goes on
+/// once it is dropped.
+pub(crate) struct Turn {
+    _ending: DropGuard,
+}
+
+/// Where `/command` submissions take their place among the messages of
+/// their conversations.
+#[derive(Clone)]
+pub(crate) struct Lanes(mpsc::Sender<Queued>);
+
+impl Lanes {
+    pub(crate) const fn new(sender: mpsc::Sender<Queued>) -> Self {
+        Self(sender)
+    }
+
+    /// The turn of the conversation in `channel`, once the messages before
+    /// it have been accepted or refused. `None` when the lanes are full or
+    /// stopping and the submission was not queued, or was dropped unrun.
+    pub(crate) async fn turn(&self, channel: &str) -> Option<Turn> {
+        let (turn, given) = oneshot::channel();
+        let submission = Submission {
+            channel: channel.to_owned(),
+            turn: Some(turn),
+        };
+        // Like a gateway message, a submission never waits for room.
+        self.0.try_send(Queued::Submission(submission)).ok()?;
+        given.await.ok()
+    }
+}
 
 /// The conversation a message will belong to, before any Discord lookup:
 /// its own thread when it starts one, otherwise its channel or thread.
@@ -56,8 +115,8 @@ pub(crate) fn lane(config: &DiscordConfig, message: &IncomingMessage) -> String 
 /// Prepare messages as they arrive until the gateway stops sending them and
 /// every lane has drained, or until the provider stops and running
 /// preparations have settled.
-pub(crate) async fn dispatch(ingress: Arc<Ingress>, mut messages: mpsc::Receiver<QueuedMessage>) {
-    let mut lanes: HashMap<String, VecDeque<QueuedMessage>> = HashMap::new();
+pub(crate) async fn dispatch(ingress: Arc<Ingress>, mut messages: mpsc::Receiver<Queued>) {
+    let mut lanes: HashMap<String, VecDeque<Queued>> = HashMap::new();
     let mut pending = 0_usize;
     let mut running = JoinSet::new();
     let refusals = Arc::new(Semaphore::new(REFUSALS));
@@ -65,21 +124,27 @@ pub(crate) async fn dispatch(ingress: Arc<Ingress>, mut messages: mpsc::Receiver
     loop {
         tokio::select! {
             received = messages.recv(), if open => {
-                let Some(message) = received else {
+                let Some(queued) = received else {
                     open = false;
                     continue;
                 };
-                let key = lane(&ingress.config, &message.request);
+                let key = match &queued {
+                    Queued::Message(message) => lane(&ingress.config, &message.request),
+                    Queued::Submission(submission) => submission.channel.clone(),
+                };
                 let queue = lanes.entry(key.clone()).or_default();
                 if pending >= MAX_PENDING || queue.len() >= MAX_PER_LANE {
                     if queue.is_empty() {
                         lanes.remove(&key);
                     }
-                    refuse_overloaded(&ingress, &refusals, message.request);
+                    // A refused submission is dropped: its command is not sent.
+                    if let Queued::Message(message) = queued {
+                        refuse_overloaded(&ingress, &refusals, message.request);
+                    }
                     continue;
                 }
                 pending += 1;
-                queue.push_back(message);
+                queue.push_back(queued);
                 if queue.len() == 1 {
                     start(&mut running, &ingress, key, queue);
                 }
@@ -121,14 +186,33 @@ fn start(
     running: &mut JoinSet<String>,
     ingress: &Arc<Ingress>,
     key: String,
-    queue: &VecDeque<QueuedMessage>,
+    queue: &mut VecDeque<Queued>,
 ) {
-    if let Some(head) = queue.front().cloned() {
-        let ingress = ingress.clone();
-        running.spawn(async move {
-            prepare(&ingress, head).await;
-            key
-        });
+    match queue.front_mut() {
+        Some(Queued::Message(head)) => {
+            let (ingress, head) = (ingress.clone(), head.clone());
+            running.spawn(async move {
+                prepare(&ingress, head).await;
+                key
+            });
+        }
+        Some(Queued::Submission(head)) => {
+            // The submission runs while it holds the turn. A turn nobody
+            // takes, as for a submission that stopped waiting, is dropped
+            // here, and the lane goes on at once.
+            let ended = CancellationToken::new();
+            let turn = Turn {
+                _ending: ended.clone().drop_guard(),
+            };
+            if let Some(waiting) = head.turn.take() {
+                let _ = waiting.send(turn);
+            }
+            running.spawn(async move {
+                ended.cancelled().await;
+                key
+            });
+        }
+        None => {}
     }
 }
 

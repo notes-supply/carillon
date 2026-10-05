@@ -75,6 +75,7 @@ async fn discord_state(core: CoreClient, directory: &Path) -> anyhow::Result<Dis
         commands: stub_commands(directory, &replying("stub reply", &[])).await?,
         app: None,
         reactions: None,
+        lanes: None,
         operator_token_hash: hash_token("operator"),
     })
 }
