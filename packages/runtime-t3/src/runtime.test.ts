@@ -779,6 +779,25 @@ it("changes the thread's own selection, which later messages inherit, and reads 
   ).rejects.toMatchObject({ status: 409, message: "The model settings changed." });
   expect(thread().modelSelection.model).toBe("claude-haiku-4-5");
 
+  // A model T3's catalogue no longer lists is still the thread's selection,
+  // so a view from before T3 switched to it is stale too.
+  const shownHaiku = (await runtime.modelState(conversation)).conversation?.selection;
+  thread().modelSelection = { instanceId: "claudeAgent", model: "claude-retired", options: [] };
+  expect((await runtime.modelState(conversation)).conversation?.selection).toEqual({
+    provider: "claudeAgent",
+    model: "claude-retired",
+    options: {},
+  });
+  await expect(
+    runtime.setModel({
+      ...conversation,
+      scope: "conversation",
+      selection: { ...agentDefault, options: { effort: "low" } },
+      ...(shownHaiku == null ? {} : { expected: shownHaiku }),
+    }),
+  ).rejects.toMatchObject({ status: 409, message: "The model settings changed." });
+  expect(thread().modelSelection.model).toBe("claude-retired");
+
   // Returning to the agent default sets the settings' selection on the thread.
   const reset = await runtime.setModel({ ...conversation, scope: "conversation", selection: null });
   expect(reset.conversation).toEqual({ selection: agentDefault, overridden: false });
