@@ -2190,3 +2190,148 @@ async fn activity_answers_promptly_when_several_runtimes_cannot_describe_their_t
     Ok(())
 }
 mod attachments;
+
+/// A runtime endpoint written at the socket level: while `cut` is set it sends
+/// a successful answer's headers and only the start of its body, then closes;
+/// otherwise it answers the request whole, with `output`.
+async fn cut_off_runtime(
+    cut: Arc<std::sync::atomic::AtomicBool>,
+    output: &'static str,
+) -> Result<(String, tokio::task::JoinHandle<()>)> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let server = tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 8192];
+            // Read the headers, then as much body as they announce.
+            let body = loop {
+                let Ok(read) = socket.read(&mut buffer).await else {
+                    break None;
+                };
+                if read == 0 {
+                    break None;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                let length = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if request.len() >= end + 4 + length {
+                    break Some(request[end + 4..end + 4 + length].to_vec());
+                }
+            };
+            let Some(body) = body else { continue };
+            let correlation = serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|request| request["correlation_id"].as_str().map(str::to_owned))
+                .unwrap_or_default();
+            let answer =
+                serde_json::to_string(&json!({"correlation_id": correlation, "output": output}))
+                    .unwrap_or_default();
+            let response = if cut.load(std::sync::atomic::Ordering::SeqCst) {
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    answer.len() + 100,
+                    &answer[..answer.len() / 2]
+                )
+            } else {
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{answer}",
+                    answer.len()
+                )
+            };
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.shutdown().await;
+        }
+    });
+    Ok((url, server))
+}
+
+#[tokio::test]
+async fn a_cut_off_answer_asks_an_observation_again_but_never_replays_an_executable_turn()
+-> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    let first = accept(&state, "one", "conversation").await?;
+    let cursor = serde_json::json!({"message": "native-message", "after": 1});
+    run_next_turn(&state, "test-runtime", async move |_, _, request| {
+        Ok(RuntimeTurnResponse {
+            follow_up: Some(cursor),
+            ..completed(request)
+        })
+    })
+    .await?;
+    let answer = state
+        .core
+        .database
+        .claim_delivery("test-interface", "instance")?
+        .context("missing reply")?;
+    state.core.database.acknowledge_delivery(
+        "test-interface",
+        answer.id,
+        "instance",
+        DeliveryOutcome::Delivered,
+        None,
+    )?;
+    let cut = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let (url, server) = cut_off_runtime(cut.clone(), "the report").await?;
+    let mut runtime = state
+        .config
+        .provider("test-runtime", ProviderRole::Runtime)?
+        .clone();
+    runtime.url = url;
+    let observation = format!("follow-up:{}", first.turn_id);
+    let state_of = |event: &str| -> Result<Option<TurnState>> {
+        Ok(state
+            .core
+            .recent_turns(Some(event), 1)?
+            .first()
+            .map(|turn| turn.state))
+    };
+
+    // The answer's body is cut off: the observation goes back to its queue,
+    // with nothing delivered.
+    run_next_observation(&state, "test-runtime", async |_, _, request| {
+        call_runtime(&state.client, &runtime, "unused", request).await
+    })
+    .await?;
+    assert_eq!(state_of(&observation)?, Some(TurnState::Queued));
+    assert!(
+        state
+            .core
+            .database
+            .claim_delivery("test-interface", "instance")?
+            .is_none()
+    );
+    // Asked again, it completes and its report is delivered once.
+    cut.store(false, std::sync::atomic::Ordering::SeqCst);
+    run_next_observation(&state, "test-runtime", async |_, _, request| {
+        call_runtime(&state.client, &runtime, "unused", request).await
+    })
+    .await?;
+    assert_eq!(state_of(&observation)?, Some(TurnState::Completed));
+    let report = state
+        .core
+        .database
+        .claim_delivery("test-interface", "instance")?
+        .context("missing report")?;
+    assert_eq!(report.content, "the report");
+
+    // An executable turn whose answer is cut off is interrupted, never replayed.
+    cut.store(true, std::sync::atomic::Ordering::SeqCst);
+    accept(&state, "two", "elsewhere").await?;
+    run_next_turn(&state, "test-runtime", async |_, _, request| {
+        call_runtime(&state.client, &runtime, "unused", request).await
+    })
+    .await?;
+    assert_eq!(state_of("two")?, Some(TurnState::Interrupted));
+    server.abort();
+    Ok(())
+}

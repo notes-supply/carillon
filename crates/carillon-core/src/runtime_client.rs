@@ -75,12 +75,14 @@ impl RuntimeClient {
                 )),
             });
         }
-        let response = response
-            .json::<RuntimeTurnResponse>()
-            .await
-            .map_err(|error| {
-                TurnFailure::Uncertain(anyhow!(error).context("decode runtime response"))
-            })?;
+        // A body cut off or timed out is no answer; a body received whole
+        // that is not a valid response is a failed turn.
+        let body = response.bytes().await.map_err(|error| {
+            TurnFailure::Unanswered(anyhow!(error).context("read runtime response"))
+        })?;
+        let response = serde_json::from_slice::<RuntimeTurnResponse>(&body).map_err(|error| {
+            TurnFailure::Uncertain(anyhow!(error).context("decode runtime response"))
+        })?;
         crate::engine::validate_response(&request.correlation_id, &response)?;
         Ok(response)
     }
