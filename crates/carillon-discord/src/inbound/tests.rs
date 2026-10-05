@@ -571,6 +571,88 @@ async fn a_duplicate_never_lets_the_processing_reaction_land_after_the_outcome()
 }
 
 #[tokio::test]
+async fn an_accepted_message_whose_answer_was_lost_keeps_its_processing_reaction()
+-> anyhow::Result<()> {
+    // Core accepts the message, but its answer to the first attempt is
+    // lost; the retry, with the same event, is that accepted attempt's
+    // duplicate. The message still waits for its own answer.
+    let (trace, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let (core_trace, submitted) = (trace.clone(), accepted.clone());
+    let app = Router::new()
+        .route(
+            "/v1/events",
+            post(move |Json(event): Json<ExternalEvent>| {
+                let attempt = submitted.fetch_add(1, Ordering::SeqCst);
+                let _ = core_trace.send(format!("submit {attempt}"));
+                async move {
+                    if attempt == 0 {
+                        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                    } else {
+                        Json(EventReceipt {
+                            event_id: event.event_id,
+                            turn_id: "accepted".to_owned(),
+                            duplicate: true,
+                            state: TurnState::Queued,
+                        })
+                        .into_response()
+                    }
+                }
+            }),
+        )
+        .merge(event_status(accepted))
+        .fallback(move |method: Method, uri: Uri| {
+            let trace = trace.clone();
+            async move {
+                let _ = trace.send(format!("{method} {}", uri.path()));
+                StatusCode::NO_CONTENT
+            }
+        });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let directory = tempfile::tempdir()?;
+    let participation = Arc::new(Participation::load(
+        directory.path().join("participation.json"),
+    )?);
+    let mut config = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
+    config.typing = false;
+    let ingress = ingress(
+        core_client(format!("http://{address}")),
+        config,
+        participation,
+        discord_client(address),
+        directory.path(),
+    )?;
+    let reaction =
+        |emoji: &str| format!("/api/v10/channels/300/messages/400/reactions/{emoji}/@me");
+    let (processing, delivered) = (reaction("%F0%9F%91%80"), reaction("%E2%9C%85"));
+    super::prepare(&ingress, hello()).await;
+    // Accepted, the message keeps its processing reaction until its answer.
+    let admitted = std::iter::from_fn(|| observed.try_recv().ok()).collect::<Vec<_>>();
+    assert_eq!(
+        admitted,
+        [
+            format!("PUT {processing}"),
+            "submit 0".to_owned(),
+            "submit 1".to_owned(),
+        ]
+    );
+    // Its answer is delivered and its outcome shown, as the delivery loop does.
+    ingress
+        .reactions
+        .show_outcome("300:400".to_owned(), crate::delivery::Feedback::Delivered);
+    assert_eq!(ingress.reactions.stop(Duration::from_secs(10)).await, 0);
+    server.abort();
+    let shown = std::iter::from_fn(|| observed.try_recv().ok()).collect::<Vec<_>>();
+    assert_eq!(
+        shown,
+        [format!("DELETE {processing}"), format!("PUT {delivered}")]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_message_stopped_before_core_says_whether_it_holds_it_gets_no_feedback()
 -> anyhow::Result<()> {
     // Core is slow to say whether it holds the message, and the provider
