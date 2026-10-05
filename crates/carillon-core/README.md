@@ -29,7 +29,7 @@ The example creates temporary storage, accepts and deduplicates a message, invok
 - [`resources.rs`](src/resources.rs): accepted resource snapshots.
 - [`attachments.rs`](src/attachments.rs): the capture store: confined streaming copies, publication, verification and reconciliation.
 - [`intake.rs`](src/intake.rs): accepting events with attachments: bounded, coalesced captures with storage reservations.
-- [`runtime_client.rs`](src/runtime_client.rs): concrete HTTP execution transport.
+- [`runtime_client.rs`](src/runtime_client.rs): concrete HTTP execution transport. A turn's request has no total deadline: it takes as long as the runtime's work, and a caller that stops waiting ends it, which the runtime takes as cancellation.
 - [`application/http.rs`](src/application/http.rs): authentication, request/response formatting, runtime workers and service assembly.
 - [`application/admin.rs`](src/application/admin.rs), [`application/cli.rs`](src/application/cli.rs): bundled installation defaults, operator commands and startup.
 - [`application/operations.rs`](src/application/operations.rs), [`application/update.rs`](src/application/update.rs): the installed release's user services, logs, health and archive updates. The maintenance lock they take is `carillon_installation::maintenance`, shared with the Discord provider's command module changes.

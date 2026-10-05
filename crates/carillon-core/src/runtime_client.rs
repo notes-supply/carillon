@@ -4,7 +4,6 @@ use anyhow::anyhow;
 use carillon_protocol::model::{RuntimeTurnRequest, RuntimeTurnResponse};
 use reqwest::Client;
 use serde::Deserialize;
-use std::time::Duration;
 
 /// A runtime's failure response. Its `error` is phrased for the person using
 /// the interface and safe to display; a runtime omits it when it has nothing
@@ -27,6 +26,11 @@ impl RuntimeClient {
         Self { client, url, token }
     }
     /// Submit one request, distinguishing provably unreceived work from ambiguous execution.
+    ///
+    /// The request has no total deadline: a turn takes as long as its
+    /// runtime's work, which may wait on native work for hours. A caller
+    /// that stops waiting, such as a worker stopped with the service, ends the
+    /// request, and the runtime takes the closed connection as cancellation.
     /// # Errors
     /// Returns transport, runtime or invalid response failures. Only `Retry` permits automatic
     /// replay of executable work; `Unanswered` also permits asking again for an observation.
@@ -38,13 +42,12 @@ impl RuntimeClient {
             .client
             .post(format!("{}/v1/turns", self.url))
             .bearer_auth(&self.token)
-            .timeout(Duration::from_mins(30))
             .json(&request)
             .send()
             .await
             .map_err(|error| {
                 // A connect failure means the request never reached the runtime.
-                // Any later failure — timeout, broken transfer — may have left
+                // Any later failure, such as a broken transfer, may have left
                 // model work running, so the outcome is ambiguous.
                 let retry = error.is_connect();
                 let failure = anyhow!(error).context("contact runtime provider");
@@ -75,7 +78,7 @@ impl RuntimeClient {
                 )),
             });
         }
-        // A body cut off or timed out is no answer; a body received whole
+        // A body cut off is no answer; a body received whole
         // that is not a valid response is a failed turn.
         let body = response.bytes().await.map_err(|error| {
             TurnFailure::Unanswered(anyhow!(error).context("read runtime response"))

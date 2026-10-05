@@ -2500,3 +2500,74 @@ async fn shutdown_waits_for_storage_work_a_stopped_caller_started() -> Result<()
     assert_eq!(turn.state, TurnState::Running);
     Ok(())
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_turn_takes_as_long_as_its_runtime_and_ends_when_its_caller_stops() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    accept(&state, "one", "conversation").await?;
+    let turn = state
+        .core
+        .database
+        .claim("test-runtime", Lane::Messages)?
+        .context("missing claim")?;
+    let mut runtime = state
+        .config
+        .provider("test-runtime", ProviderRole::Runtime)?
+        .clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    runtime.url = format!("http://{}", listener.local_addr()?);
+    // The runtime's native work runs past half an hour, in the paused
+    // clock's virtual time; it reports when its request is dropped.
+    let (ended, mut endings) = tokio::sync::mpsc::unbounded_channel();
+    let app = Router::new().route(
+        "/v1/turns",
+        post(move |Json(request): Json<RuntimeTurnRequest>| {
+            let ended = ended.clone();
+            async move {
+                struct Ending(tokio::sync::mpsc::UnboundedSender<()>);
+                impl Drop for Ending {
+                    fn drop(&mut self) {
+                        let _ = self.0.send(());
+                    }
+                }
+                let _ending = Ending(ended);
+                tokio::time::sleep(Duration::from_mins(31)).await;
+                Json(completed(request))
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let started = tokio::time::Instant::now();
+    let response = call_runtime(
+        &state.client,
+        &runtime,
+        "unused",
+        state.core.runtime_request(&turn, Vec::new()),
+    )
+    .await;
+    // No transport deadline cuts the work short.
+    assert!(
+        matches!(&response, Ok(answer) if answer.correlation_id == turn.turn_id),
+        "{response:?}"
+    );
+    assert!(started.elapsed() >= Duration::from_mins(31));
+    endings
+        .recv()
+        .await
+        .context("the answered request did not end")?;
+    // A caller that stops, as a stopping worker does, ends the request at
+    // the runtime, which takes it as cancellation.
+    let request = state.core.runtime_request(&turn, Vec::new());
+    let (client, cancelled) = (state.client.clone(), runtime.clone());
+    let call =
+        tokio::spawn(async move { call_runtime(&client, &cancelled, "unused", request).await });
+    tokio::time::sleep(Duration::from_mins(1)).await;
+    call.abort();
+    tokio::time::timeout(Duration::from_secs(5), endings.recv())
+        .await
+        .context("the runtime kept working after its caller stopped")?
+        .context("the runtime's request did not end")?;
+    server.abort();
+    Ok(())
+}
