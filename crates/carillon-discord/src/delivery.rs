@@ -210,10 +210,11 @@ impl Reactions {
         }
     }
 
-    /// Ends the reactions under way when the provider stops: they get
-    /// `grace` to end, then the rest are cancelled and no reaction starts
-    /// again. Returns how many were cancelled. A cancelled request Discord
-    /// already received may still be applied; its effect is unknown.
+    /// Ends the reaction tasks under way when the provider stops: they get
+    /// `grace` to end, then the rest are cancelled, as is any asked for
+    /// later. Returns how many were cancelled. A cancelled request Discord
+    /// already received may still be applied; its effect is unknown. An
+    /// [`outcome`](Self::outcome) another task awaits is that task's own.
     pub(crate) async fn stop(&self, grace: Duration) -> usize {
         let Owned { tasks, stopped, .. } = &*self.0;
         tasks.close();
