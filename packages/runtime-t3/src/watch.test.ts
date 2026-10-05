@@ -1876,3 +1876,61 @@ it("keeps only the turn's continuation links and a bounded window of others, acr
   // Its continuation, announced before its parent was known, is linked to the turn.
   expect(watch.outcome()).toMatchObject({ kind: "completed", output: "Result.", followUp: {} });
 });
+
+it("resumes a follow-up on a fresh snapshot while T3 still owes the delivery, and links the continuation by its notification", () => {
+  const follow = watchTurn("message-1", "/workspace", { followUp: { after: 1 } });
+  // After a restart: the parent completed, its child finished, and T3 has
+  // claimed the result but not yet started the continuation.
+  follow.apply(
+    snapshot({
+      runs: [run("completed")],
+      subagents: [
+        task("child", "completed", "run-1", { completionDelivery: { state: "claimed" } }),
+      ],
+    }),
+  );
+  expect(follow.outcome()).toBeUndefined();
+  expect(follow.activity()).toMatchObject({
+    phase: "waiting",
+    work: {
+      items: [{ id: "child", state: "succeeded" }],
+    },
+  });
+  // The continuation starts: its message is not projected and the parent's
+  // announcement was cleared; its first item names the task.
+  follow.apply(event(2, "run.created", run("running", "message:continuation", 2)));
+  follow.apply(
+    event(3, "turn-item.updated", {
+      id: "notification-2",
+      runId: "run-2",
+      type: "notification",
+      status: "completed",
+      ordinal: 1,
+      title: null,
+      startedAt: null,
+      completedAt: null,
+      updatedAt: "2026-10-05T12:00:00Z",
+      source: { kind: "delegated_task", taskIds: ["child"] },
+      outcome: "completed",
+      summary: "Delegated task finished",
+    }),
+  );
+  follow.apply(
+    event(
+      4,
+      "subagent.updated",
+      task("child", "completed", "run-1", { completionDelivery: { state: "delivered" } }),
+    ),
+  );
+  follow.apply(
+    event(5, "message.updated", {
+      id: "r",
+      runId: "run-2",
+      role: "assistant",
+      text: "The child said PONG.",
+      createdAt: "2026-10-05T12:00:01Z",
+    }),
+  );
+  follow.apply(event(6, "run.updated", run("completed", "message:continuation", 2)));
+  expect(follow.outcome()).toEqual({ kind: "completed", output: "The child said PONG." });
+});

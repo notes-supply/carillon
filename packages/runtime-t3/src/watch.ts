@@ -459,7 +459,7 @@ export function watchTurn(
     }
     ownRunLinks.set(run, parentRun);
     const seenFirst = [...unclaimed.values()].find((candidate) => candidate.id === run);
-    if (seenFirst !== undefined) foldRun(seenFirst);
+    if (seenFirst !== undefined) refold(seenFirst);
   }
 
   /** The run whose delegated task a notification reports, with the turn's tasks it names. */
@@ -522,7 +522,13 @@ export function watchTurn(
       return;
     keepLink(message, parentRun);
     const run = unclaimed.get(message);
-    if (run !== undefined) foldRun(run);
+    if (run !== undefined) refold(run);
+  }
+
+  /** Folds again a run a link arrived after, adopting the provider records it names. */
+  function refold(run: Run): void {
+    foldRun(run);
+    pruneProviders();
   }
 
   function foldRun(run: Run): void {
