@@ -15,7 +15,7 @@ use tokio::{
     sync::{Semaphore, mpsc, watch},
     time::{sleep, timeout},
 };
-use tokio_util::task::TaskTracker;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::warn;
 use twilight_http::{Client as DiscordHttp, request::channel::reaction::RequestReactionType};
 use twilight_model::{
@@ -27,12 +27,14 @@ use twilight_model::{
 };
 /// How long one feedback request may take, rate-limit waits included.
 const FEEDBACK_LIMIT: Duration = Duration::from_secs(30);
-/// How long a message's admission waits for its feedback, its processing
-/// reaction and typing indicator, before core receives it anyway.
+/// How long work waits for feedback it does not depend on before going on
+/// without it: a message's admission, for its processing reaction and
+/// typing indicator, and the provider's stop, for reactions under way.
 pub(crate) const PROMPT_FEEDBACK: Duration = Duration::from_secs(2);
-/// Outcome reactions sent at once; more wait their turn, while the work
-/// that asked for them goes on.
-const OUTCOMES_IN_FLIGHT: usize = 8;
+/// Outcome reactions shown beside work that are owned at once, from when
+/// they are asked for until they end. Beyond them an outcome reaction is
+/// not shown, and that is logged: the work never waits for its feedback.
+const OUTCOMES: usize = 64;
 
 /// A feedback request, bounded as a whole.
 async fn bounded<T>(
@@ -61,6 +63,10 @@ pub(crate) enum Feedback {
 /// removing it, so a processing reaction Discord answered cannot be added
 /// after the outcome. One Discord never answers leaves its effect unknown:
 /// it may still be applied later, and that is logged, not assumed away.
+///
+/// Reactions that run beside work are tasks these reactions own until
+/// [`Reactions::stop`]: processing requests, one per admission, and
+/// at most [`OUTCOMES`] outcome reactions.
 #[derive(Clone)]
 pub(crate) struct Reactions(Arc<Owned>);
 
@@ -70,8 +76,10 @@ struct Owned {
     /// Processing requests not yet ended, by feedback target. A receiver
     /// closes when its request ends.
     unanswered: Mutex<HashMap<String, watch::Receiver<()>>>,
+    /// Slots for the outcome reactions shown beside work.
     outcomes: Arc<Semaphore>,
     tasks: TaskTracker,
+    stopped: CancellationToken,
 }
 
 impl Reactions {
@@ -80,8 +88,9 @@ impl Reactions {
             http,
             config,
             unanswered: Mutex::new(HashMap::new()),
-            outcomes: Arc::new(Semaphore::new(OUTCOMES_IN_FLIGHT)),
+            outcomes: Arc::new(Semaphore::new(OUTCOMES)),
             tasks: TaskTracker::new(),
+            stopped: CancellationToken::new(),
         }))
     }
 
@@ -114,7 +123,7 @@ impl Reactions {
         let (sent, ended) = watch::channel(());
         lock(&self.0.unanswered).insert(target.to_owned(), ended.clone());
         let (this, target, mine) = (self.clone(), target.to_owned(), ended.clone());
-        self.0.tasks.spawn(async move {
+        self.spawn(async move {
             let owned = &this.0;
             if let Err(failure) =
                 create_feedback_reaction(&owned.http, &target, &owned.config.processing_emoji).await
@@ -132,6 +141,13 @@ impl Reactions {
             drop(sent);
         });
         Some(ended)
+    }
+
+    /// Runs `reaction` as a task these reactions own, until it ends or they
+    /// stop.
+    fn spawn(&self, reaction: impl Future<Output = ()> + Send + 'static) {
+        let Owned { tasks, stopped, .. } = &*self.0;
+        tasks.spawn(stopped.clone().run_until_cancelled_owned(reaction));
     }
 
     /// Waits until the message's processing request, if one is under way,
@@ -165,15 +181,18 @@ impl Reactions {
         }
     }
 
-    /// Shows the message's outcome without the caller waiting for it: a
-    /// task these reactions own, at most [`OUTCOMES_IN_FLIGHT`] at once.
+    /// Shows the message's outcome as a task these reactions own, so the
+    /// work that asked for it goes on. Beyond [`OUTCOMES`] under way, it is
+    /// not shown, and that is logged.
     pub(crate) fn show_outcome(&self, target: String, feedback: Feedback) {
+        let Ok(slot) = self.0.outcomes.clone().try_acquire_owned() else {
+            warn!(%target, "Discord outcome reaction not shown: too many are under way");
+            return;
+        };
         let this = self.clone();
-        self.0.tasks.spawn(async move {
-            let Ok(_turn) = this.0.outcomes.clone().acquire_owned().await else {
-                return;
-            };
+        self.spawn(async move {
             this.outcome(&target, feedback).await;
+            drop(slot);
         });
     }
 
@@ -191,11 +210,26 @@ impl Reactions {
         }
     }
 
-    /// Waits for every reaction request these reactions sent to end.
-    #[cfg(test)]
-    pub(crate) async fn settled(&self) {
-        self.0.tasks.close();
-        self.0.tasks.wait().await;
+    /// Ends the reactions under way when the provider stops: they get
+    /// `grace` to end, then the rest are cancelled and no reaction starts
+    /// again. Returns how many were cancelled. A cancelled request Discord
+    /// already received may still be applied; its effect is unknown.
+    pub(crate) async fn stop(&self, grace: Duration) -> usize {
+        let Owned { tasks, stopped, .. } = &*self.0;
+        tasks.close();
+        let unfinished = match timeout(grace, tasks.wait()).await {
+            Ok(()) => 0,
+            Err(_) => tasks.len(),
+        };
+        stopped.cancel();
+        if unfinished > 0 {
+            warn!(
+                unfinished,
+                "Discord reactions still under way at stop were cancelled; Discord may still apply those it received"
+            );
+            tasks.wait().await;
+        }
+        unfinished
     }
 }
 
@@ -445,4 +479,4 @@ pub(crate) fn discord_chunks(content: &str) -> Vec<String> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

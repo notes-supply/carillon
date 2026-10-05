@@ -21,7 +21,7 @@ use crate::{
         IncomingMessage, Participation, admit_identity, admit_message,
         prepare_deterministic_conversation,
     },
-    delivery::{Feedback, Reactions, delivery_loop},
+    delivery::{Feedback, PROMPT_FEEDBACK, Reactions, delivery_loop},
 };
 #[cfg(test)]
 use crate::{
@@ -257,7 +257,7 @@ async fn connect(
         result = gateway_loop(state, discord_token, messages) => {
             result.context("Discord gateway stopped")
         },
-        result = delivery_loop(delivery_state.core, reactions, http, outcomes) => {
+        result = delivery_loop(delivery_state.core, reactions.clone(), http, outcomes) => {
             result.context("Discord delivery worker stopped")
         },
         () = monitor => Err(anyhow::anyhow!("Discord activity monitor stopped")),
@@ -266,11 +266,12 @@ async fn connect(
     };
     // No new message is taken. Preparation not yet handed to core ends; a
     // submission core may have received is settled, so its staged files
-    // stay until core no longer needs them.
+    // stay until core no longer needs them. Reactions still under way then
+    // get a moment to end before the rest are cancelled.
     stopping.cancel();
-    dispatcher
-        .await
-        .context("Discord message preparation failed")?;
+    let prepared = dispatcher.await;
+    reactions.stop(PROMPT_FEEDBACK).await;
+    prepared.context("Discord message preparation failed")?;
     outcome
 }
 

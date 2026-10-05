@@ -1940,7 +1940,7 @@ pub(crate) mod tests {
         );
         assert!(elapsed < super::DEADLINE, "answered after {elapsed:?}");
         // The uncertain reaction is shown beside the answer, not before it.
-        reactions.settled().await;
+        assert_eq!(reactions.stop(Duration::from_secs(10)).await, 0);
         server.abort();
         let trace = trace.lock().await;
         assert_eq!(
@@ -2046,7 +2046,7 @@ pub(crate) mod tests {
         // The answer is delivered at once and its outcome shown, as the
         // delivery loop does.
         reactions.show_outcome("400:901".to_owned(), super::Feedback::Delivered);
-        reactions.settled().await;
+        assert_eq!(reactions.stop(Duration::from_secs(10)).await, 0);
         server.abort();
         let config = crate::conversations::tests::discord_config(
             crate::config::DiscordActivation::Always,

@@ -1,4 +1,4 @@
-use super::{Reactions, delivery_loop, discord_chunks, send_discord_message};
+use super::{Feedback, OUTCOMES, Reactions, delivery_loop, discord_chunks, send_discord_message};
 use crate::{
     client::test_client as core_client,
     config::{DiscordActivation, DiscordConversation},
@@ -7,11 +7,14 @@ use crate::{
 use anyhow::Context as _;
 use axum::{
     Json, Router,
+    extract::Path,
     http::{Method, StatusCode, Uri},
     response::IntoResponse as _,
-    routing::{get, post},
+    routing::{any, get, post},
 };
-use carillon_protocol::model::{Delivery, DeliveryOutcome, DeliveryReconciliation, TurnState};
+use carillon_protocol::model::{
+    Delivery, DeliveryOutcome, DeliveryReconciliation, ExternalEvent, TurnState,
+};
 use serde_json::json;
 use std::{
     sync::{
@@ -20,6 +23,16 @@ use std::{
     },
     time::Duration,
 };
+
+/// Discord's client, sending every request to the fake at `address`.
+fn discord_client(address: std::net::SocketAddr) -> Arc<twilight_http::Client> {
+    Arc::new(
+        twilight_http::Client::builder()
+            .proxy(address.to_string(), true)
+            .ratelimiter(None)
+            .build(),
+    )
+}
 
 fn reconciling_core(trace: Arc<tokio::sync::Mutex<Vec<String>>>) -> Router {
     let polls = Arc::new(AtomicUsize::new(0));
@@ -98,12 +111,7 @@ async fn ambiguous_claim_failures_reconcile_before_polling_again() -> anyhow::Re
     let core = core_client(format!("http://{address}"));
     let config = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
     let expected_uncertain = config.uncertain_emoji.clone();
-    let http = Arc::new(
-        twilight_http::Client::builder()
-            .proxy(address.to_string(), true)
-            .ratelimiter(None)
-            .build(),
-    );
+    let http = discord_client(address);
     let (outcomes, _) = tokio::sync::mpsc::unbounded_channel();
     let outcome = tokio::time::timeout(
         Duration::from_secs(5),
@@ -207,12 +215,14 @@ fn a_long_answer_is_split_in_one_pass() {
 
 /// Core serving the given deliveries in order, then rejecting further claims
 /// to end the delivery loop, beside a Discord API that records created
-/// messages and takes `feedback` to answer anything else, such as reactions.
+/// messages and takes `feedback` to answer anything else, such as reactions,
+/// counting those in `received` as they arrive.
 fn delivering_core(
     deliveries: Vec<Delivery>,
     messages: Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>,
     acks: Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>,
     feedback: Duration,
+    received: Arc<AtomicUsize>,
 ) -> Router {
     let pending = Arc::new(std::sync::Mutex::new(deliveries.into_iter()));
     Router::new()
@@ -258,6 +268,7 @@ fn delivering_core(
             }),
         )
         .fallback(move || async move {
+            received.fetch_add(1, Ordering::SeqCst);
             tokio::time::sleep(feedback).await;
             StatusCode::NO_CONTENT
         })
@@ -286,16 +297,12 @@ async fn deliveries_reach_discord_verbatim_without_notifying_anyone() -> anyhow:
         messages.clone(),
         acks.clone(),
         Duration::ZERO,
+        Arc::default(),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
-    let http = Arc::new(
-        twilight_http::Client::builder()
-            .proxy(address.to_string(), true)
-            .ratelimiter(None)
-            .build(),
-    );
+    let http = discord_client(address);
     let (outcomes, mut observed) = tokio::sync::mpsc::unbounded_channel();
     let outcome = tokio::time::timeout(
         Duration::from_secs(5),
@@ -355,55 +362,145 @@ async fn deliveries_reach_discord_verbatim_without_notifying_anyone() -> anyhow:
 }
 
 #[tokio::test]
-async fn a_slow_reaction_never_holds_up_the_next_delivery() -> anyhow::Result<()> {
+async fn slow_reactions_never_hold_up_deliveries_and_stay_bounded() -> anyhow::Result<()> {
     let delivery = |id: i64| Delivery {
         turn_state: TurnState::Completed,
         id,
         turn_id: format!("turn-{id}"),
         target_id: "300".to_owned(),
-        feedback_target_id: format!("300:40{id}"),
+        feedback_target_id: format!("300:{}", 1_000 + id),
         content: format!("answer {id}"),
     };
+    let burst = OUTCOMES + 2;
     let messages = Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let acks = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let received = Arc::new(AtomicUsize::new(0));
     // Each reaction takes Discord far longer than delivering an answer.
     let app = delivering_core(
-        vec![delivery(1), delivery(2), delivery(3)],
+        (1..).take(burst).map(delivery).collect(),
         messages.clone(),
         acks.clone(),
         Duration::from_secs(20),
+        received.clone(),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
-    let http = Arc::new(
-        twilight_http::Client::builder()
-            .proxy(address.to_string(), true)
-            .ratelimiter(None)
-            .build(),
+    let http = discord_client(address);
+    let reactions = Reactions::new(
+        http.clone(),
+        discord_config(DiscordActivation::Always, DiscordConversation::Channel),
     );
     let (outcomes, _observed) = tokio::sync::mpsc::unbounded_channel();
     let outcome = tokio::time::timeout(
         Duration::from_secs(5),
         delivery_loop(
             core_client(format!("http://{address}")),
-            Reactions::new(
-                http.clone(),
-                discord_config(DiscordActivation::Always, DiscordConversation::Channel),
-            ),
+            reactions.clone(),
             http,
             outcomes,
         ),
     )
     .await;
-    server.abort();
     // Every answer was delivered and acknowledged while the reactions waited.
     assert!(
         outcome
             .context("deliveries waited for reactions")?
             .is_err_and(|failure| failure.to_string().contains("delivery claim rejected"))
     );
-    assert_eq!(messages.lock().await.len(), 3);
-    assert_eq!(acks.lock().await.len(), 3);
+    assert_eq!(messages.lock().await.len(), burst);
+    assert_eq!(acks.lock().await.len(), burst);
+    // Only the first OUTCOMES outcomes are under way; the rest were not
+    // shown rather than queued.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while received.load(Ordering::SeqCst) < OUTCOMES {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("outcome reactions were not sent")?;
+    let started = std::time::Instant::now();
+    assert_eq!(reactions.stop(Duration::from_millis(200)).await, OUTCOMES);
+    assert!(started.elapsed() < Duration::from_secs(2));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    server.abort();
+    assert_eq!(received.load(Ordering::SeqCst), OUTCOMES);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stopping_provider_ends_its_reactions_within_the_grace() -> anyhow::Result<()> {
+    // Discord answers message 401's reactions only after 30 seconds and
+    // message 402's after a moment.
+    let received = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let trace = received.clone();
+    let app = Router::new().route(
+        "/api/v10/channels/{channel}/messages/{message}/reactions/{emoji}/@me",
+        any(
+            move |method: Method, Path((_, message, emoji)): Path<(String, String, String)>| {
+                let trace = trace.clone();
+                async move {
+                    trace
+                        .lock()
+                        .await
+                        .push(format!("{method} {message} {emoji}"));
+                    let answer = if message == "401" { 30_000 } else { 100 };
+                    tokio::time::sleep(Duration::from_millis(answer)).await;
+                    StatusCode::NO_CONTENT
+                }
+            },
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let mut config = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
+    config.typing = false;
+    let (processing, delivered) = (
+        config.processing_emoji.clone(),
+        config.delivered_emoji.clone(),
+    );
+    let reactions = Reactions::new(discord_client(address), config);
+    reactions.show_outcome("300:401".to_owned(), Feedback::Delivered);
+    reactions.show_outcome("300:402".to_owned(), Feedback::Delivered);
+    let started = std::time::Instant::now();
+    // The provider stops: what ends within the grace ends, the rest is
+    // cancelled rather than awaited for thirty seconds.
+    assert_eq!(reactions.stop(Duration::from_secs(1)).await, 1);
+    let stopping = started.elapsed();
+    assert!(
+        stopping >= Duration::from_secs(1) && stopping < Duration::from_secs(2),
+        "stopping took {stopping:?}"
+    );
+    // Nothing starts after the stop, whether an outcome or an admission.
+    reactions.show_outcome("300:403".to_owned(), Feedback::Delivered);
+    let event = ExternalEvent {
+        event_id: "404".to_owned(),
+        agent_id: "default".to_owned(),
+        user_id: "200".to_owned(),
+        audience_id: "discord-100-300".to_owned(),
+        delivery_target_id: "300".to_owned(),
+        feedback_target_id: "300:404".to_owned(),
+        content: "hello".to_owned(),
+        native: serde_json::Value::Null,
+        attachments: None,
+    };
+    let admitting = std::time::Instant::now();
+    reactions.admission(&event).await;
+    assert!(admitting.elapsed() < Duration::from_millis(500));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    server.abort();
+    // 402's outcome was shown; 401's was cut while removing the processing
+    // reaction, so its outcome reaction never followed.
+    let mut received = received.lock().await.clone();
+    received.sort();
+    assert_eq!(
+        received,
+        [
+            format!("DELETE 401 {processing}"),
+            format!("DELETE 402 {processing}"),
+            format!("PUT 402 {delivered}"),
+        ]
+    );
     Ok(())
 }
