@@ -57,6 +57,8 @@ interface FakeThread {
   readonly subagents: Subagent[];
   readonly transfers: ContextTransfer[];
   providerThread: ProviderThread;
+  /** Provider threads of other providers on the thread, such as an earlier run's. */
+  readonly otherProviderThreads: ProviderThread[];
   session: ProviderSession;
   /** T3 removed the session's record; the process closes later and may still deliver until it does. */
   sessionDetached: boolean;
@@ -166,8 +168,13 @@ export interface FakeT3 {
     item?: Partial<FakeItem> & { type: string },
   ): RuntimeRequest;
   background(threadId: string, tasks: ProviderThread["pendingBackgroundTasks"]): void;
-  /** A run T3 starts itself, as when finished background work wakes the agent. */
-  wake(threadId: string, text: string): Run;
+  /**
+   * A run T3 starts itself, as when finished background work wakes the
+   * agent; on `providerThreadId` when another provider's process woke.
+   */
+  wake(threadId: string, text: string, providerThreadId?: string): Run;
+  /** Another provider's thread on the thread, such as an earlier run's, with its roster. */
+  otherProvider(threadId: string, record: ProviderThread): void;
   /** A message a person sends in T3's own UI: a run it opens, queued behind any active run. */
   message(threadId: string, text: string): Run;
   /**
@@ -470,13 +477,21 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
         tasks === undefined ? rest : { ...rest, pendingBackgroundTasks: tasks };
       emit(thread, "provider-thread.updated", thread.providerThread);
     },
-    wake(threadId, text) {
+    wake(threadId, text, providerThreadId) {
       const thread = threadOf(threadId);
-      if (thread.sessionClosed)
+      if (thread.sessionClosed && providerThreadId === undefined)
         throw new Error("the provider process has closed; no wake can come");
       return startRun(thread, `message:${thread.id}:wake:${String(thread.runs.length + 1)}`, text, {
         wake: true,
+        ...(providerThreadId === undefined ? {} : { providerThreadId }),
       });
+    },
+    otherProvider(threadId, record) {
+      const thread = threadOf(threadId);
+      const index = thread.otherProviderThreads.findIndex((other) => other.id === record.id);
+      if (index === -1) thread.otherProviderThreads.push(record);
+      else thread.otherProviderThreads[index] = record;
+      emit(thread, "provider-thread.updated", record);
     },
     message(threadId, text) {
       const thread = threadOf(threadId);
@@ -743,7 +758,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
                     subagents: thread.subagents.filter((task) => !fake.omitSubagent(task)),
                     contextTransfers: thread.transfers,
                     runtimeRequests: thread.requests,
-                    providerThreads: [thread.providerThread],
+                    providerThreads: [thread.providerThread, ...thread.otherProviderThreads],
                     providerSessions: thread.sessionDetached ? [] : [thread.session],
                     // As T3: a continuation's own message is sent live but not
                     // projected; its run's notification item names its tasks.
@@ -821,6 +836,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
             id: `provider-thread-${command.threadId}`,
             providerSessionId: sessionId,
           },
+          otherProviderThreads: [],
           session: { id: sessionId, status: "ready" },
           sessionDetached: false,
           sessionClosed: false,
@@ -922,6 +938,8 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
     text: string,
     origin: {
       readonly wake?: true;
+      /** Another provider's thread the run executes on. */
+      readonly providerThreadId?: string;
       readonly delegatedCompletion?: { readonly parentRunId: string };
     } = {},
   ): Run {
@@ -933,7 +951,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
       ordinal: thread.runs.length + 1,
       userMessageId: messageId,
       // As T3: a queued run takes a provider thread only when it starts.
-      providerThreadId: active ? null : thread.providerThread.id,
+      providerThreadId: origin.providerThreadId ?? (active ? null : thread.providerThread.id),
       status: active ? "queued" : "running",
     };
     const user: Message = {

@@ -987,6 +987,57 @@ it("neither interrupts nor detaches the session of a person's run when cancelled
   expect(thread().runs.find((candidate) => candidate.id === person.id)?.status).toBe("running");
 });
 
+/**
+ * The turn's run leaves its own work listed while an older provider's
+ * process, on its own provider thread, finishes a task and wakes.
+ */
+async function olderProviderWake(signal?: AbortSignal) {
+  const result = runtime.executeTurn(turn("turn-1", "work"), signal);
+  void result.catch(() => undefined);
+  const run = await started("turn-1");
+  const older = (tasks: { taskId: string; kind: string }[]) => ({
+    id: "old-provider",
+    providerSessionId: "old-session",
+    pendingBackgroundTasks: tasks,
+  });
+  fake.otherProvider(threadId, older([{ taskId: "old-task", kind: "command" }]));
+  fake.background(threadId, [{ taskId: "own-task", kind: "command" }]);
+  fake.assistant(threadId, run.id, "Started own work.");
+  fake.complete(threadId, run.id);
+  await until(() => activity()?.phase === "tools");
+  fake.otherProvider(threadId, older([]));
+  const foreign = fake.wake(threadId, "Old command completed", "old-provider");
+  fake.assistant(threadId, foreign.id, "FOREIGN OLDER RESULT");
+  return { result, foreign };
+}
+
+it("never answers with or settles on another provider's wake while its own work is listed", async () => {
+  const { result, foreign } = await olderProviderWake();
+  fake.complete(threadId, foreign.id);
+  const settled = await Promise.race([result.then(() => true), sleep(200).then(() => false)]);
+  expect(settled).toBe(false);
+  expect(activity()?.phase).toBe("tools");
+  // Its own work finishes and its own process wakes.
+  fake.background(threadId, []);
+  const own = fake.wake(threadId, "Own command completed");
+  fake.assistant(threadId, own.id, "OWN RESULT.");
+  fake.complete(threadId, own.id);
+  expect((await result).output).toBe("Started own work.\n\nOWN RESULT.");
+  expect(fake.interrupts).toEqual([]);
+});
+
+it("neither interrupts another provider's wake nor detaches a session under it when cancelled", async () => {
+  const controller = new AbortController();
+  const { result, foreign } = await olderProviderWake(controller.signal);
+  // The fold hears of the wake before Carillon cancels.
+  await sleep(200);
+  controller.abort();
+  await expect(result).rejects.toThrow();
+  expect(fake.interrupts).toEqual([]);
+  expect(fake.detached).toEqual([]);
+  expect(thread().runs.find((candidate) => candidate.id === foreign.id)?.status).toBe("running");
+});
+
 it("does not adopt a later run the turn does not owe, and the next turn waits behind it", async () => {
   const result = runtime.executeTurn(turn("turn-1", "work"));
   const run = await started("turn-1");

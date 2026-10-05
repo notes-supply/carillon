@@ -1176,7 +1176,7 @@ it("ends unresolved on a fresh snapshot whose follow-up no fact of the turn acco
   expect(fresh.outcome()).toEqual({
     kind: "unresolved",
     explanation:
-      "A run followed this turn's while Carillon was not watching, and T3's state cannot show whether it reports this turn's background work",
+      "A run T3's records cannot attribute followed this turn's, and T3's state cannot show whether it reports this turn's background work",
   });
   expect(fresh.quiet()).toBe(true);
   // A fold that had seen the run's listed work adopts the follow-up and answers with its result.
@@ -2333,4 +2333,155 @@ it("says only that a result was acknowledged when T3 names no run it was read in
     }),
   );
   expect(named.outcome()).toEqual({ kind: "completed", output: READ_ELSEWHERE });
+});
+
+// Another provider's process on the thread: its wake names no work, and runs
+// on its own provider thread, not the one holding this turn's work.
+const ownRoot = {
+  ...run("completed", "own-message", 2, "own-run"),
+  providerThreadId: "own-provider",
+};
+const olderRun = {
+  ...run("completed", "old-message", 1, "old-run"),
+  providerThreadId: "old-provider",
+};
+const ownProvider = (tasks: string[]) => ({
+  id: "own-provider",
+  providerSessionId: "own-session",
+  pendingBackgroundTasks: tasks.map((taskId) => ({ taskId, kind: "command" })),
+});
+const olderProvider = (tasks: string[]) => ({
+  id: "old-provider",
+  providerSessionId: "old-session",
+  pendingBackgroundTasks: tasks.map((taskId) => ({ taskId, kind: "command" })),
+});
+const twoProviders = {
+  runs: [olderRun, ownRoot],
+  providerThreads: [ownProvider(["own-task"]), olderProvider(["old-task"])],
+  providerSessions: [
+    { id: "own-session", status: "ready" },
+    { id: "old-session", status: "ready" },
+  ],
+  messages: [answerOf("own-answer", "own-run", "Started own work.")],
+};
+const olderWake = (status: string, ordinal = 3) => ({
+  ...run(status, "older-task-notification", ordinal, "older-task-wake"),
+  providerThreadId: "old-provider",
+});
+const ownWake = (status: string, ordinal = 4) => ({
+  ...run(status, "own-task-notification", ordinal, "own-task-wake"),
+  providerThreadId: "own-provider",
+});
+
+it("never adopts another provider's wake while its own work is listed (coordinator reproduction)", () => {
+  const watch = watchTurn("own-message", "/workspace");
+  watch.apply(snapshot(twoProviders));
+  watch.apply(event(2, "provider-thread.updated", olderProvider([])));
+  watch.apply(event(3, "run.created", olderWake("running")));
+  watch.apply(event(4, "turn-item.updated", wakeOpening("older-task-wake")));
+  // Neither its active run nor its latest: cancellation targets only its own run.
+  expect(watch.activeRun()).toBeUndefined();
+  expect(watch.latestRun()?.id).toBe("own-run");
+  expect(watch.busy()).toBe(true);
+  watch.apply(
+    event(5, "message.updated", answerOf("old-result", "older-task-wake", "FOREIGN OLDER RESULT")),
+  );
+  watch.apply(event(6, "run.updated", olderWake("completed")));
+  // Its own task is still listed: not answered, not quiet.
+  expect(watch.outcome()).toBeUndefined();
+  expect(watch.quiet()).toBe(false);
+  expect(watch.retained().runs).toBe(1);
+  // Its own work finishes and its own provider's process wakes.
+  watch.apply(event(7, "provider-thread.updated", ownProvider([])));
+  watch.apply(event(8, "run.created", ownWake("running")));
+  watch.apply(event(9, "turn-item.updated", wakeOpening("own-task-wake")));
+  expect(watch.activeRun()?.id).toBe("own-task-wake");
+  watch.apply(event(10, "message.updated", answerOf("own-result", "own-task-wake", "OWN RESULT.")));
+  watch.apply(event(11, "run.updated", ownWake("completed")));
+  expect(watch.outcome()).toEqual({
+    kind: "completed",
+    output: "Started own work.\n\nOWN RESULT.",
+  });
+  expect(watch.quiet()).toBe(true);
+});
+
+it("never adopts another provider's wake from a resumed snapshot", () => {
+  const resumed = (projection: Record<string, unknown>) => {
+    const watch = watchTurn("own-message", "/workspace");
+    watch.apply(snapshot(twoProviders));
+    watch.resubscribing();
+    watch.apply(snapshot({ ...twoProviders, ...projection }, 30));
+    return watch;
+  };
+  const foreignAnswer = answerOf("old-result", "older-task-wake", "FOREIGN OLDER RESULT");
+  const waiting = resumed({
+    runs: [olderRun, ownRoot, olderWake("completed")],
+    providerThreads: [ownProvider(["own-task"]), olderProvider([])],
+    messages: [...twoProviders.messages, foreignAnswer],
+    turnItems: [wakeOpening("older-task-wake")],
+  });
+  expect(waiting.outcome()).toBeUndefined();
+  expect(waiting.quiet()).toBe(false);
+  expect(waiting.latestRun()?.id).toBe("own-run");
+  const answered = resumed({
+    runs: [olderRun, ownRoot, olderWake("completed"), ownWake("completed")],
+    providerThreads: [ownProvider([]), olderProvider([])],
+    messages: [
+      ...twoProviders.messages,
+      foreignAnswer,
+      answerOf("own-result", "own-task-wake", "OWN RESULT."),
+    ],
+    turnItems: [wakeOpening("older-task-wake"), wakeOpening("own-task-wake")],
+  });
+  expect(answered.outcome()).toEqual({
+    kind: "completed",
+    output: "Started own work.\n\nOWN RESULT.",
+  });
+});
+
+it("takes only a notification source T3 defines as a wake, and attributes nothing to a malformed or unknown one", () => {
+  const opened = (source: unknown) => {
+    const watch = watchTurn("message-1", "/workspace");
+    watch.apply(snapshot(backgroundRoot));
+    watch.apply(
+      event(2, "provider-thread.updated", {
+        id: "provider-thread",
+        providerSessionId: "session",
+        pendingBackgroundTasks: [],
+      }),
+    );
+    watch.apply(event(3, "run.created", run("running", "woken", 2)));
+    watch.apply(
+      event(4, "turn-item.updated", {
+        ...wakeOpening("run-2"),
+        ...(source === undefined ? { source: undefined } : { source }),
+      }),
+    );
+    const adopted = watch.activeRun()?.id;
+    watch.apply(event(5, "message.updated", answerOf("answer", "run-2", "WAKE ANSWER")));
+    watch.apply(event(6, "run.updated", run("completed", "woken", 2)));
+    return { adopted, outcome: watch.outcome() };
+  };
+  // The coordinator's malformed and unknown sources.
+  for (const source of [undefined, false, { kind: "unrecognised_future_kind" }]) {
+    const { adopted, outcome } = opened(source);
+    expect(adopted, JSON.stringify(source)).toBeUndefined();
+    expect(outcome, JSON.stringify(source)).toMatchObject({ kind: "unresolved" });
+  }
+  // The kinds T3 sends for a wake, on the wire and decoded.
+  for (const source of [
+    { kind: "background_task" },
+    { kind: "background_task", work: "subagent", childThreadId: "child" },
+    { kind: "background_command" },
+    { kind: "monitor" },
+    { kind: "command" },
+    { kind: "subagent" },
+  ]) {
+    const { adopted, outcome } = opened(source);
+    expect(adopted, source.kind).toBe("run-2");
+    expect(outcome, source.kind).toEqual({
+      kind: "completed",
+      output: "Started own background work.\n\nWAKE ANSWER",
+    });
+  }
 });

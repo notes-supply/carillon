@@ -42,6 +42,8 @@ import {
   SubagentSchema,
   TurnItemSchema,
   TurnItemSchemas,
+  UserMessageOpeningSchema,
+  WakeNotificationSchema,
   type BackgroundTask,
   type ContextTransfer,
   type Message,
@@ -199,8 +201,10 @@ const KNOWN_ITEMS: ReadonlySet<string> = new Set(Object.keys(TurnItemSchemas));
  * How T3 opened a run: every run's timeline begins with the message that
  * started it, a person's (`user_message`), or one T3 created itself as a
  * `notification`: a provider's wake, or a delegated task's continuation.
+ * A notification whose source this runtime does not recognise is `unknown`:
+ * it confers nothing.
  */
-type Opening = "message" | "wake" | "delegated";
+type Opening = "message" | "wake" | "delegated" | "unknown";
 
 type ToolItem = TurnItemOf<
   "command_execution" | "file_change" | "file_search" | "web_search" | "dynamic_tool" | "subagent"
@@ -456,11 +460,12 @@ export function watchTurn(
       return false;
     }
     // Only a run T3 opened with a provider's notification can be this
-    // turn's wake: T3 links no wake to the work it reports, so a run a
-    // person's message opened is never taken for one. A run whose opening is
-    // not seen yet is not judged: live, its opening follows it, and a queued
-    // run gets its opening when it starts. A snapshot that shows a started
-    // run without its opening cannot tell what it is.
+    // turn's wake: a run a person's message opened, or a delegated task's
+    // continuation, is another's. A run whose opening is not seen yet is not
+    // judged: live, its opening follows it, and a queued run gets its opening
+    // when it starts. A run opened by a notification this runtime cannot
+    // identify, or that a snapshot shows started without its opening, cannot
+    // be attributed.
     const opening = openings.get(run.id) ?? snapshotOpenings?.get(run.id);
     if (opening === "message" || opening === "delegated") {
       foreign.add(run.id);
@@ -468,6 +473,19 @@ export function watchTurn(
     }
     if (opening === undefined) {
       if (snapshotOpenings !== undefined && !UNOPENED.has(run.status)) stray ??= run.id;
+      return false;
+    }
+    if (opening === "unknown") {
+      stray ??= run.id;
+      return false;
+    }
+    // A wake names no work: it is the provider process's that runs it. Only
+    // a wake on the provider thread whose roster held this turn's work can
+    // report it; one on another provider thread is another process's. A
+    // queued wake's provider thread is known only once it starts.
+    if (run.providerThreadId === null) return false;
+    if (run.providerThreadId !== last?.providerThreadId) {
+      foreign.add(run.id);
       return false;
     }
     if (wakeOwedAfter !== undefined && run.ordinal > wakeOwedAfter) return wake(run);
@@ -1397,7 +1415,7 @@ export function watchTurn(
         return {
           kind: "unresolved",
           explanation:
-            "A run followed this turn's while Carillon was not watching, and T3's state cannot show whether it reports this turn's background work",
+            "A run T3's records cannot attribute followed this turn's, and T3's state cannot show whether it reports this turn's background work",
         };
       switch (last.status) {
         case "completed": {
@@ -1601,14 +1619,12 @@ function withDetail(detail: string | undefined): { detail?: string } {
 
 /** The run a message or notification item belongs to, and how that item would open it. */
 function openingOf(payload: unknown): readonly [string, Opening] | undefined {
-  if (!isRecord(payload) || typeof payload["runId"] !== "string") return undefined;
-  if (payload["type"] === "user_message") return [payload["runId"], "message"];
-  if (payload["type"] !== "notification") return undefined;
-  const source = payload["source"];
-  return [
-    payload["runId"],
-    isRecord(source) && source["kind"] === "delegated_task" ? "delegated" : "wake",
-  ];
+  if (Check(UserMessageOpeningSchema, payload)) return [payload.runId, "message"];
+  if (Check(DelegatedNotificationSchema, payload)) return [payload.runId, "delegated"];
+  if (Check(WakeNotificationSchema, payload)) return [payload.runId, "wake"];
+  if (!isRecord(payload) || payload["type"] !== "notification") return undefined;
+  const run = payload["runId"];
+  return typeof run === "string" && run.length > 0 ? [run, "unknown"] : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

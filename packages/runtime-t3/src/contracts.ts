@@ -281,6 +281,33 @@ export const DelegatedNotificationSchema = Type.Object({
   source: Type.Object({ kind: Type.Literal("delegated_task"), taskIds: Type.Array(Id) }),
 });
 
+/**
+ * The notification a provider's wake run starts with: T3 dispatches the
+ * wake as a message carrying the kind of background work that reported, in
+ * its wire form (`background_command` for a command, `background_task` for
+ * a subagent, with `work: "subagent"`, or for work it cannot name, and
+ * `monitor`), or decoded (`command`, `subagent`). It never names the work.
+ */
+export const WakeNotificationSchema = Type.Object({
+  type: Type.Literal("notification"),
+  runId: Id,
+  source: Type.Object({
+    kind: Type.Union([
+      Type.Literal("background_task"),
+      Type.Literal("background_command"),
+      Type.Literal("command"),
+      Type.Literal("subagent"),
+      Type.Literal("monitor"),
+    ]),
+  }),
+});
+
+/** The item a run a person's message started begins with. */
+export const UserMessageOpeningSchema = Type.Object({
+  type: Type.Literal("user_message"),
+  runId: Id,
+});
+
 /** A thread snapshot. Timeline items are checked one by one as they are folded. */
 /** A native model selection: a provider instance's model, with option values by ID. */
 export const NativeSelectionSchema = Type.Object({
