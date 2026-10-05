@@ -10,7 +10,7 @@ import {
   type ModelQuery,
   type ModelUpdate,
 } from "@carillon/protocol";
-import { diagnostic, displayableExplanation, ExplainedFailure } from "./failure.ts";
+import { diagnostic, displayableExplanation, ExplainedFailure, RuntimeClosed } from "./failure.ts";
 import type { RuntimeOperations, TurnRequest } from "./operations.ts";
 
 interface RuntimeServerOptions {
@@ -33,8 +33,12 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
       // diagnostic stays in this log. Refusing a caller's request (4xx) is
       // an answer, not a runtime failure.
       const explained = failure instanceof ExplainedFailure;
-      if (!explained || failure.status >= 500) logFailure(request, failure);
       if (response.destroyed) return;
+      if (failure instanceof RuntimeClosed) {
+        writeJson(response, 503, {});
+        return;
+      }
+      if (!explained || failure.status >= 500) logFailure(request, failure);
       const explanation = explained ? displayableExplanation(failure.message) : undefined;
       writeJson(
         response,

@@ -1716,6 +1716,38 @@ async fn empty_runtime_output_interrupts_without_empty_delivery_or_replay() -> R
 }
 
 #[tokio::test]
+async fn a_closing_runtime_gives_no_answer_rather_than_a_failure() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    accept(&state, "one", "conversation").await?;
+    let turn = state
+        .core
+        .database
+        .claim_turn("test-runtime")?
+        .context("turn missing")?;
+    let mut runtime = state
+        .config
+        .provider("test-runtime", ProviderRole::Runtime)?
+        .clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    runtime.url = format!("http://{}", listener.local_addr()?);
+    let app = Router::new().route(
+        "/v1/turns",
+        post(|| async { (StatusCode::SERVICE_UNAVAILABLE, Json(json!({}))) }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let request = state.core.runtime_request(&turn, Vec::new());
+    let outcome = call_runtime(&state.client, &runtime, "unused", request).await;
+    // Work may have run, so it is not `Retry`; an observation is asked again.
+    assert!(
+        matches!(outcome, Err(TurnFailure::Unanswered(_))),
+        "{outcome:?}"
+    );
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()> {
     let directory = tempdir()?;
     let state = installation(directory.path())?;

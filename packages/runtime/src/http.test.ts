@@ -1,6 +1,6 @@
 import { once } from "node:events";
 import { afterEach, expect, it, vi } from "vitest";
-import { ExplainedFailure } from "./failure.ts";
+import { ExplainedFailure, RuntimeClosed } from "./failure.ts";
 import { createRuntimeServer } from "./http.ts";
 import type { RuntimeOperations } from "./operations.ts";
 
@@ -17,7 +17,9 @@ async function serve() {
       Promise.reject(
         request.input === "internal"
           ? new Error(`extension state at /private/state rejected ${key}`)
-          : new ExplainedFailure(502, request.input),
+          : request.input === "closing"
+            ? new RuntimeClosed("runtime is closed")
+            : new ExplainedFailure(502, request.input),
       ),
     activity: (correlationId, interfaceId) =>
       correlationId === "turn/1" && interfaceId === "discord-private"
@@ -103,6 +105,8 @@ it("sends callers only the displayable part of explanations and logs redacted di
     for (const text of withheld)
       expect(await call("POST", "/v1/turns", turn(text))).toEqual({ status: 502, body: {} });
     expect(await call("POST", "/v1/turns", turn("internal"))).toEqual({ status: 500, body: {} });
+    // A runtime that closes under a request gives no answer, which is not a failure.
+    expect(await call("POST", "/v1/turns", turn("closing"))).toEqual({ status: 503, body: {} });
     expect(
       await call(
         "GET",

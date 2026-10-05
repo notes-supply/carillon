@@ -18,7 +18,7 @@ import {
   type ModelState,
   type ModelUpdate,
 } from "@carillon/protocol";
-import { diagnostic, ExplainedFailure } from "@carillon/runtime/failure";
+import { diagnostic, ExplainedFailure, RuntimeClosed } from "@carillon/runtime/failure";
 import { validated } from "@carillon/runtime/models";
 import type { RuntimeOperations, TurnRequest, TurnResponse } from "@carillon/runtime/operations";
 import { Serial } from "@carillon/runtime/serial";
@@ -337,7 +337,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       );
     },
     async close() {
-      shutdown.abort(new Error("T3 runtime is closed"));
+      shutdown.abort(new RuntimeClosed("T3 runtime is closed"));
       await Promise.allSettled([...pending]);
     },
   };

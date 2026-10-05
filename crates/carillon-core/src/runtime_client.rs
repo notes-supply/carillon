@@ -66,6 +66,10 @@ impl RuntimeClient {
                 .filter(|explanation| !explanation.trim().is_empty());
             return Err(match explanation {
                 Some(explanation) => TurnFailure::Explained(explanation),
+                // A closing runtime gives no answer; work may still have run.
+                None if status == reqwest::StatusCode::SERVICE_UNAVAILABLE => {
+                    TurnFailure::Unanswered(anyhow!("runtime provider closed before answering"))
+                }
                 None => TurnFailure::Uncertain(anyhow!(
                     "runtime provider failed the turn with {status} and no explanation"
                 )),

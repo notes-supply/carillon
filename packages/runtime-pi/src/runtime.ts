@@ -34,6 +34,7 @@ import {
 } from "./attachments.ts";
 import { ModelSelections } from "./model.ts";
 import { openConversation } from "./namespace.ts";
+import { RuntimeClosed } from "@carillon/runtime/failure";
 import { Serial } from "@carillon/runtime/serial";
 import { createPiExecutionSession, promptSession } from "./session.ts";
 import type { RuntimeOperations, TurnRequest, TurnResponse } from "@carillon/runtime/operations";
@@ -136,7 +137,7 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
       return track(() => Promise.resolve({ commands: [] }));
     },
     async close() {
-      shutdown.abort(new Error("Pi runtime is closed"));
+      shutdown.abort(new RuntimeClosed("Pi runtime is closed"));
       await Promise.allSettled([...pending]);
     },
   };

@@ -23,6 +23,13 @@ export class ExplainedFailure extends Error {
   }
 }
 
+/**
+ * The runtime is closing, so the request gets no answer: the HTTP adapter
+ * answers 503 without an explanation, which core reads as no answer rather
+ * than as a failed turn.
+ */
+export class RuntimeClosed extends Error {}
+
 /** The most an explanation shows. The full diagnostic stays in the runtime log. */
 export const EXPLANATION_LIMIT = 300;
 
