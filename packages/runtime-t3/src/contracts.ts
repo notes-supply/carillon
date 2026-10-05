@@ -136,8 +136,14 @@ export const SubagentSchema = Type.Object({
   startedAt: Nullable(Type.String()),
   /** Whether T3 offers the parent a continuation with the result. */
   completionWake: Type.Optional(Type.String()),
-  /** Where the result's delivery to the parent stands; `pending` and `claimed` still owe a continuation. */
-  completionDelivery: Type.Optional(Type.Object({ state: Type.String() })),
+  /**
+   * Where the result's delivery to the parent stands; `pending` and `claimed`
+   * still owe a continuation. `observedByRunId` names the continuation run
+   * once its agent read the result.
+   */
+  completionDelivery: Type.Optional(
+    Type.Object({ state: Type.String(), observedByRunId: Type.Optional(Nullable(Id)) }),
+  ),
 });
 export type Subagent = Static<typeof SubagentSchema>;
 
@@ -250,6 +256,17 @@ export const TurnItemSchema = Type.Union([
 ]);
 export type TurnItem = Static<typeof TurnItemSchema>;
 export type TurnItemOf<K extends TurnItem["type"]> = Extract<TurnItem, { type: K }>;
+
+/**
+ * The notification a continuation run starts with: the delegated tasks whose
+ * results it reports. Unlike the continuation's message, it is part of the
+ * thread's timeline, so a snapshot shows it while the run is in the window.
+ */
+export const DelegatedNotificationSchema = Type.Object({
+  type: Type.Literal("notification"),
+  runId: Id,
+  source: Type.Object({ kind: Type.Literal("delegated_task"), taskIds: Type.Array(Id) }),
+});
 
 /** A thread snapshot. Timeline items are checked one by one as they are folded. */
 /** A native model selection: a provider instance's model, with option values by ID. */

@@ -31,6 +31,7 @@ import type { Static, TSchema } from "typebox";
 import { Check } from "typebox/value";
 import {
   ContextTransferSchema,
+  DelegatedNotificationSchema,
   MessageSchema,
   ProjectionSchema,
   ProviderSessionDetachedSchema,
@@ -260,6 +261,14 @@ export function watchTurn(
   const pendingLinks = new Map<string, string>();
   /** A snapshot's links while it is folded; never kept beyond it. */
   let snapshotLinks: ReadonlyMap<string, string> | undefined;
+  /**
+   * Continuation runs of the turn's work linked by run rather than message:
+   * T3 drops a delivered continuation's message from its projection and the
+   * parent's announcement once delivered, but the continuation run's own
+   * `delegated_task` notification (and a task's `observedByRunId`) remain.
+   */
+  const ownRunLinks = new Map<string, string>();
+  let snapshotRunLinks: ReadonlyMap<string, string> | undefined;
   /** Later runs not (yet) known to be the turn's, kept briefly in case a continuation link arrives after them. */
   const unclaimed = new Map<string, Run>();
   /** Runs adopted because the turn's process owed a background report (wakes), not by a native link. */
@@ -398,7 +407,8 @@ export function watchTurn(
     }
     remember(unclaimed, run.userMessageId, run);
     // Another run's continuation is never this turn's wake or a stray.
-    if (linkParent(run.userMessageId) !== undefined) return false;
+    if (linkParent(run.userMessageId) !== undefined || runLinkParent(run.id) !== undefined)
+      return false;
     if (foreign.has(run.id)) return false;
     // A follow-up turn owns only its continuations: with the conversation's
     // later messages running beside it, no other run can be attributed to it.
@@ -418,10 +428,40 @@ export function watchTurn(
     return true;
   }
 
-  /** Whether T3 linked this run's message to work of a run the turn holds. */
+  /** Whether T3 linked this run to work of a run the turn holds. */
   function continuationOf(run: Run): boolean {
-    const parent = linkParent(run.userMessageId);
+    const parent = linkParent(run.userMessageId) ?? runLinkParent(run.id);
     return parent !== undefined && linkedRun(parent);
+  }
+
+  function runLinkParent(run: string): string | undefined {
+    return ownRunLinks.get(run) ?? snapshotRunLinks?.get(run);
+  }
+
+  /** Records that `run` reports work of `parentRun`, and folds it again if it was seen first. */
+  function linkRun(run: string, parentRun: string): void {
+    if (!linkedRun(parentRun) || ownRunLinks.get(run) === parentRun) return;
+    if (ownRunLinks.size >= WORK_RETAINED && !ownRunLinks.has(run)) {
+      workOmitted = true;
+      owedUnknown = true;
+      return;
+    }
+    ownRunLinks.set(run, parentRun);
+    const seenFirst = [...unclaimed.values()].find((candidate) => candidate.id === run);
+    if (seenFirst !== undefined) foldRun(seenFirst);
+  }
+
+  /** The run whose delegated task a continuation notification reports. */
+  function notifiedParent(
+    payload: unknown,
+    parentOf: (task: string) => string | null | undefined,
+  ): { readonly run: string; readonly parent: string } | undefined {
+    if (!Check(DelegatedNotificationSchema, payload)) return undefined;
+    for (const task of payload.source.taskIds) {
+      const parent = parentOf(task);
+      if (parent != null) return { run: payload.runId, parent };
+    }
+    return undefined;
   }
 
   /** The run whose delegated work a continuation message reports, if T3 has said. */
@@ -536,6 +576,11 @@ export function watchTurn(
     if (!isRecord(payload)) return;
     const type = payload["type"];
     const runId = payload["runId"];
+    if (type === "notification") {
+      const notified = notifiedParent(payload, (task) => delegations.get(task)?.runId);
+      if (notified !== undefined) linkRun(notified.run, notified.parent);
+      return;
+    }
     // Only the turn's own items of the kinds this runtime reads are checked and kept.
     if (typeof type !== "string" || !KNOWN_ITEMS.has(type)) return;
     if (typeof runId !== "string" || !turnRuns.has(runId)) return;
@@ -578,6 +623,8 @@ export function watchTurn(
   /** A child agent of a run the turn holds; others are another conversation's business. */
   function foldSubagent(task: Subagent): void {
     if (task.runId === null || !linkedRun(task.runId)) return;
+    const observedBy = task.completionDelivery?.observedByRunId;
+    if (observedBy != null) linkRun(observedBy, task.runId);
     if (retain(delegations, task.id, task, settledTask)) unconfirmed.delete(task.id);
     else {
       workOmitted = true;
@@ -1023,15 +1070,28 @@ export function watchTurn(
           for (const run of projection.runs)
             if (run.delegatedCompletion?.delivery != null)
               links.set(run.delegatedCompletion.delivery.messageId, run.id);
+          const taskParents = new Map(projection.subagents.map((task) => [task.id, task.runId]));
+          const runLinks = new Map<string, string>();
+          for (const payload of projection.turnItems) {
+            const notified = notifiedParent(payload, (task) => taskParents.get(task));
+            if (notified !== undefined) runLinks.set(notified.run, notified.parent);
+          }
+          for (const task of projection.subagents) {
+            const observedBy = task.completionDelivery?.observedByRunId;
+            if (observedBy != null && task.runId !== null) runLinks.set(observedBy, task.runId);
+          }
           snapshotLinks = links;
+          snapshotRunLinks = runLinks;
           try {
             for (const run of [...projection.runs].sort((a, b) => a.ordinal - b.ordinal))
               foldRun(run);
             refile();
           } finally {
             snapshotLinks = undefined;
+            snapshotRunLinks = undefined;
           }
           for (const [message, parent] of links) keepLink(message, parent);
+          for (const [run, parent] of runLinks) linkRun(run, parent);
           const windowedSnapshot = item["hasMoreHistory"] === true;
           historyOmitted = windowedSnapshot;
           for (const run of turnRuns.values())
@@ -1345,7 +1405,7 @@ export function watchTurn(
       detachedSessions: detachedSessions.size,
       delegations: delegations.size,
       transfers: transfers.size,
-      links: ownLinks.size + pendingLinks.size,
+      links: ownLinks.size + pendingLinks.size + ownRunLinks.size,
     }),
     onChange(listener) {
       listeners.add(listener);

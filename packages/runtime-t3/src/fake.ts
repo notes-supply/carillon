@@ -530,6 +530,17 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
         `Delegated task ${taskId} reached a terminal state.`,
         { parentRunId: parent.id },
       );
+      fake.tool(threadId, run.id, {
+        type: "notification",
+        status: "completed",
+        source: {
+          kind: "delegated_task",
+          taskIds: [taskId],
+          ...(task.childThreadId === null ? {} : { childThreadId: task.childThreadId }),
+        },
+        outcome: status === "completed" ? "completed" : "failed",
+        summary: `Delegated task "${task.title ?? taskId}" finished`,
+      });
       fake.subagent(threadId, {
         ...task,
         status,
@@ -714,7 +725,10 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
                     runtimeRequests: thread.requests,
                     providerThreads: [thread.providerThread],
                     providerSessions: thread.sessionDetached ? [] : [thread.session],
+                    // As T3: a continuation's own message is sent live but not
+                    // projected; its run's notification item names its tasks.
                     messages: thread.messages
+                      .filter((message) => message.delegatedCompletion === undefined)
                       .slice(fake.messageWindow === undefined ? 0 : -fake.messageWindow)
                       .map((message) => ({ ...message, streaming: false })),
                     turnItems: fake.omitRequestItems
