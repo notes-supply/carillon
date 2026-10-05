@@ -30,6 +30,7 @@ import {
   DispatchResultSchema,
   messageDispatch,
   modelSelectionSet,
+  queuedRunCancel,
   refreshProviders,
   RPC,
   runInterrupt,
@@ -785,12 +786,11 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       );
       return { quiet: true, requestOpen };
     }
-    const accepted = await interrupt(
-      connection,
-      binding.threadId,
-      target.id,
-      "Carillon cancelled the turn",
-    );
+    // A run still waiting in T3's queue is withdrawn; once it has started
+    // (or T3 says it is no longer queued), it is interrupted.
+    const accepted =
+      (target.status === "queued" && (await withdraw(connection, binding.threadId, target.id))) ||
+      (await interrupt(connection, binding.threadId, target.id, "Carillon cancelled the turn"));
     // With nothing running, T3 refuses the interrupt, yet the process may
     // still owe a report (or T3 cannot show whether it does). The only public
     // stop left is a provider-session detach. T3 accepts it, removes the
@@ -827,6 +827,22 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
         `run ${target.id}: T3 did not confirm the stop within ${String(settleMs)} ms (active run: ${watch.activeRun()?.status ?? "none"}); it may still be running, and the next turn interrupts any run it finds active`,
       );
     return stop;
+  }
+
+  /** Whether T3 withdrew the queued run; it refuses once the run has left the queue. */
+  async function withdraw(
+    connection: T3Connection,
+    threadId: string,
+    runId: string,
+  ): Promise<boolean> {
+    try {
+      await connection.call(RPC.dispatchCommand, queuedRunCancel(threadId, runId));
+      return true;
+    } catch (failure) {
+      if (!(failure instanceof T3Failure) || failure.kind !== "rejected") throw failure;
+      log(`run ${runId}: queued-run cancel not accepted (${failure.detail ?? failure.message})`);
+      return false;
+    }
   }
 
   /** Whether T3 accepted the interrupt; it refuses one for a run with nothing to stop. */

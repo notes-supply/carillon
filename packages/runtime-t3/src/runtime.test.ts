@@ -1115,6 +1115,8 @@ async function backgroundTurn(
   // The assertion attaches after the fake has been driven; keep an early rejection handled meanwhile.
   void result.catch(() => undefined);
   const run = await started(correlation);
+  // A run waiting behind another starts before it can start background work.
+  if (run.status === "queued") fake.stop(threadId, run.id, "running");
   fake.background(threadId, [{ taskId: `task-${correlation}`, kind: "command" }]);
   fake.assistant(threadId, run.id, "Started.");
   fake.complete(threadId, run.id);
@@ -1448,10 +1450,16 @@ it("queues behind a person's run in the native UI and cancels only its own queue
   await until(() => runtime.activity("turn-2", "discord-private")?.phase === "queued");
   controller.abort(new Error("core disconnected"));
   await expect(queued).rejects.toThrow("core disconnected");
-  // Only the turn's own queued run was interrupted; the person's run still waits on them.
-  expect(fake.interrupts).toEqual([own.id]);
-  expect(runOf("turn-2")?.status).toBe("interrupted");
+  // Only the turn's own queued run was withdrawn from T3's queue (a queued run
+  // cannot be interrupted); the person's run still waits on them.
+  expect(fake.interrupts).toEqual([]);
+  expect(fake.commands.filter((command) => command.type === "queued-run.cancel")).toMatchObject([
+    { runId: own.id },
+  ]);
+  expect(runOf("turn-2")?.status).toBe("cancelled");
   expect(thread().runs.find((run) => run.id === person.id)?.status).toBe("waiting");
+  const logged = vi.mocked(console.log).mock.calls.map((call) => String(call[0]));
+  expect(logged.some((line) => line.includes("T3 confirmed the stop"))).toBe(true);
 });
 
 it("answers when the parent run completes and delivers the delegated report in a follow-up turn", async () => {

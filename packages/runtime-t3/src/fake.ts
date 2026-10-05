@@ -811,7 +811,8 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
         const run = thread.runs.find((candidate) => candidate.id === runId);
         const latest = thread.runs.at(-1);
         const roster = thread.providerThread.pendingBackgroundTasks ?? [];
-        if (run === undefined) throw new Error(`Run ${runId} is not interruptible.`);
+        // As T3: a run with no provider thread yet (still queued) cannot be interrupted.
+        if (run?.providerThreadId == null) throw new Error(`Run ${runId} is not interruptible.`);
         if (ACTIVE.has(run.status)) {
           interrupts.push(runId);
           if (fake.interruptBehaviour === "settle") updateRun(thread.id, runId, "interrupted");
@@ -820,6 +821,15 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
           interrupts.push(runId);
           if (fake.interruptBehaviour === "settle") settleBackground(thread);
         } else throw new Error(`Run ${runId} is not interruptible.`);
+        receipts.set(command.commandId, thread.sequence);
+        return thread.sequence;
+      }
+      case "queued-run.cancel": {
+        const thread = threadOf(command.threadId);
+        const runId = String(command["runId"]);
+        const run = thread.runs.find((candidate) => candidate.id === runId);
+        if (run?.status !== "queued") throw new Error(`Run ${runId} is not queued.`);
+        updateRun(thread.id, runId, "cancelled");
         receipts.set(command.commandId, thread.sequence);
         return thread.sequence;
       }
@@ -870,7 +880,8 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
       threadId: thread.id,
       ordinal: thread.runs.length + 1,
       userMessageId: messageId,
-      providerThreadId: thread.providerThread.id,
+      // As T3: a queued run takes a provider thread only when it starts.
+      providerThreadId: active ? null : thread.providerThread.id,
       status: active ? "queued" : "running",
     };
     const user: Message = {
@@ -904,8 +915,13 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
     const index = thread.runs.findIndex((run) => run.id === runId);
     const run = thread.runs[index];
     if (run === undefined) throw new Error(`unknown run ${runId}`);
-    const updated = { ...run, status };
+    // A run that leaves the queue other than by being withdrawn has started.
+    const starting = run.providerThreadId === null && status !== "queued" && status !== "cancelled";
+    const updated = starting
+      ? { ...run, status, providerThreadId: thread.providerThread.id }
+      : { ...run, status };
     thread.runs[index] = updated;
+    if (starting) emit(thread, "provider-thread.updated", thread.providerThread);
     emit(thread, "run.updated", updated);
     if (ACTIVE.has(status) || fake.retainRequests) return;
     // A run that ends takes its open requests with it, as T3 does.

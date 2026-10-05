@@ -462,6 +462,16 @@ export function modelSelectionSet(threadId: string, selection: NativeSelection) 
   } as const;
 }
 
+/** Withdraws a run still waiting in T3's queue; a queued run has nothing to interrupt yet. */
+export function queuedRunCancel(threadId: string, runId: string) {
+  return {
+    type: "queued-run.cancel",
+    commandId: crypto.randomUUID(),
+    threadId,
+    runId,
+  } as const;
+}
+
 export function runInterrupt(threadId: string, runId: string, reason: string) {
   return {
     type: "run.interrupt",
