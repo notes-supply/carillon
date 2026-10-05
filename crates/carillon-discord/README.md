@@ -45,9 +45,12 @@ retain the actual Wasm path rather than substituting this direct native call.
   [`HostCalls`](../carillon-discord-commands/src/lib.rs) is the existing native-operation
   boundary, also used by the example. A submission from `/command` posts a silent marker
   message in the conversation and submits an event anchored on it, with the interaction's
-  admission and `native.intent: "command"`.
+  admission and `native.intent: "command"`, all within seven of the module's ten seconds:
+  feedback is bounded and never delays admission, and core's silence is reported as a
+  possible acceptance.
 - [`inbound`](src/inbound.rs) settles one admitted message: it prepares the native
-  conversation, emits feedback and retries only ambiguous transport submission with
+  conversation, emits feedback (at most two seconds of it before admission, see
+  [`delivery`](src/delivery.rs)) and retries only ambiguous transport submission with
   the same event identity. Its [`lanes`](src/inbound/lanes.rs) run messages one at a
   time per conversation, in arrival order, with bounded queues; a message with files
   is downloaded by [`attachments`](src/attachments.rs) into the provider's staging and

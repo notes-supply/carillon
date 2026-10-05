@@ -329,3 +329,95 @@ async fn complete_invalid_receipt_is_not_retried_forever() -> anyhow::Result<()>
 }
 
 mod files;
+
+#[tokio::test]
+async fn slow_feedback_never_delays_a_messages_admission() -> anyhow::Result<()> {
+    let (trace, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    let core_trace = trace.clone();
+    let app = Router::new()
+        .route(
+            "/v1/events",
+            post(move |Json(event): Json<ExternalEvent>| {
+                let trace = core_trace.clone();
+                async move {
+                    let _ = trace.send(format!("submit {}", event.event_id));
+                    Json(EventReceipt {
+                        event_id: event.event_id,
+                        turn_id: "accepted".to_owned(),
+                        duplicate: false,
+                        state: TurnState::Queued,
+                    })
+                }
+            }),
+        )
+        // Reactions and typing take Discord far longer than admission.
+        .fallback(move |method: Method, uri: Uri| {
+            let trace = trace.clone();
+            async move {
+                let _ = trace.send(format!("{method} {uri}"));
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                StatusCode::NO_CONTENT
+            }
+        });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let http = Arc::new(
+        twilight_http::Client::builder()
+            .token("test-only".to_owned())
+            .proxy(address.to_string(), true)
+            .ratelimiter(None)
+            .build(),
+    );
+    let directory = tempfile::tempdir()?;
+    let participation = Arc::new(Participation::load(
+        directory.path().join("participation.json"),
+    )?);
+    let mut config = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
+    config.typing = true;
+    let mut services = tokio::task::JoinSet::new();
+    services.spawn(async move { axum::serve(listener, app).await });
+    let (send, receive) = tokio::sync::mpsc::channel(2);
+    send.send(super::QueuedMessage {
+        request: IncomingMessage {
+            event_id: "400".to_owned(),
+            guild_id: Some("100".to_owned()),
+            user_id: "200".to_owned(),
+            channel_id: "300".to_owned(),
+            parent_channel_id: None,
+            content: "hello".to_owned(),
+            attachments: Vec::new(),
+        },
+        native: Value::Null,
+    })
+    .await?;
+    drop(send);
+    let ingress = ingress(
+        core_client(format!("http://{address}")),
+        config,
+        participation,
+        http,
+        directory.path(),
+    )?;
+    let started = std::time::Instant::now();
+    tokio::time::timeout(
+        crate::delivery::PROMPT_FEEDBACK + Duration::from_secs(2),
+        super::lanes::dispatch(ingress, receive),
+    )
+    .await
+    .context("admission waited for feedback")?;
+    assert!(started.elapsed() >= crate::delivery::PROMPT_FEEDBACK);
+    let requests = std::iter::from_fn(|| observed.try_recv().ok()).collect::<Vec<_>>();
+    // The reaction and typing were asked for first, then the message admitted.
+    assert_eq!(requests.last().map(String::as_str), Some("submit 400"));
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.contains("/messages/400/reactions/"))
+    );
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.ends_with("/channels/300/typing"))
+    );
+    Ok(())
+}

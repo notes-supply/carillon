@@ -16,6 +16,7 @@ use std::{
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
+use tokio::time::{Instant, timeout_at};
 
 use anyhow::{Context as _, Result, bail};
 use carillon_discord_commands::contract::{
@@ -46,7 +47,7 @@ use crate::{
     client::CoreClient,
     config::DiscordConfig,
     conversations::{InteractionOrigin, submitted_event},
-    delivery::{Feedback, processing_feedback, terminal_feedback, trigger_typing},
+    delivery::{Feedback, admission_feedback, promptly, terminal_feedback},
 };
 
 /// The whole invocation, including every native call it makes.
@@ -178,7 +179,10 @@ impl InteractionCalls {
     }
 }
 
-/// How long posting the marker may take inside the module's deadline.
+/// How much of the module's deadline a submission may take, leaving the
+/// module time to answer with its outcome.
+const SUBMIT_LIMIT: Duration = Duration::from_secs(7);
+/// How long posting the marker may take inside the submission's limit.
 const MARKER_LIMIT: Duration = Duration::from_secs(4);
 /// Attempts to hand a submission to core while core is briefly unreachable.
 const SUBMIT_ATTEMPTS: u32 = 3;
@@ -187,6 +191,11 @@ const SUBMIT_ATTEMPTS: u32 = 3;
 /// message in the conversation shows what was sent and by whom, and is the
 /// event's identity and feedback target; core then accepts the event like
 /// any message, and the answer is delivered to the conversation.
+///
+/// Everything happens within [`SUBMIT_LIMIT`], so the module can still say
+/// what happened: feedback is bounded and never delays admission, and an
+/// attempt core has not answered in time may have been accepted, which the
+/// answer says; the marker's ID makes a repeated submission the same event.
 async fn submit(
     core: &CoreClient,
     submissions: &Submissions,
@@ -204,22 +213,23 @@ async fn submit(
         .channel_id
         .parse()
         .map_err(|_| "The conversation's channel is not valid.".to_owned())?;
+    let deadline = Instant::now() + SUBMIT_LIMIT;
     let shown = text.replace('`', "ˋ");
     let shown: String = shown.chars().take(1900).collect();
     let silent = AllowedMentions::default();
-    let marker = tokio::time::timeout(
-        MARKER_LIMIT,
+    // The marker's answer, body included, is bounded: it is the event's identity.
+    let marker = tokio::time::timeout(MARKER_LIMIT, async {
         http.create_message(channel)
             .allowed_mentions(Some(&silent))
             .content(&format!("<@{}> ran `{shown}`", origin.user_id))
-            .into_future(),
-    )
-    .await;
-    let marker = match marker {
-        Ok(Ok(response)) => response.model().await.map_err(|error| error.to_string()),
-        Ok(Err(error)) => Err(error.to_string()),
-        Err(_) => Err("Discord did not answer in time".to_owned()),
-    }
+            .await
+            .map_err(|error| error.to_string())?
+            .model()
+            .await
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .unwrap_or_else(|_| Err("Discord did not answer in time".to_owned()))
     .map_err(|error| {
         warn!(%error, "command marker message could not be posted");
         "Discord did not accept the message that carries it, so it was not sent.".to_owned()
@@ -232,33 +242,36 @@ async fn submit(
         text,
         intent,
     );
-    processing_feedback(http, config, &event.feedback_target_id).await;
-    trigger_typing(http, config, &event.delivery_target_id).await;
+    admission_feedback(http, config, &event).await;
+    let retry = Duration::from_millis(500);
     let mut attempt = 1;
-    loop {
-        match core.submit_event(&event).await {
-            Ok(_) => return Ok(()),
-            Err(failure) if failure.is_transient() && attempt < SUBMIT_ATTEMPTS => {
-                warn!(error = %failure.message, event_id = %event.event_id, "waiting to submit a command");
-                attempt += 1;
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-            Err(failure) if failure.is_transient() => {
-                warn!(error = %failure.message, event_id = %event.event_id, "command submission unconfirmed");
-                terminal_feedback(http, config, &event.feedback_target_id, Feedback::Uncertain)
-                    .await;
-                return Err(
-                    "Carillon did not confirm that it accepted it; if it did, the answer follows in this conversation."
-                        .to_owned(),
-                );
-            }
-            Err(failure) => {
+    let (feedback, refusal) = loop {
+        let failure = match timeout_at(deadline, core.submit_event(&event)).await {
+            Ok(Ok(_)) => return Ok(()),
+            Ok(Err(failure)) if !failure.is_transient() => {
                 warn!(error = %failure.message, event_id = %event.event_id, "core refused a command");
-                terminal_feedback(http, config, &event.feedback_target_id, Feedback::Failed).await;
-                return Err("Carillon could not accept it.".to_owned());
+                break (Feedback::Failed, "Carillon could not accept it.");
             }
+            Ok(Err(failure)) => failure.message,
+            Err(_) => "core did not answer in time".to_owned(),
+        };
+        if attempt == SUBMIT_ATTEMPTS || Instant::now() + retry >= deadline {
+            warn!(error = %failure, event_id = %event.event_id, "command submission unconfirmed");
+            break (
+                Feedback::Uncertain,
+                "Carillon did not confirm that it accepted it; if it did, the answer follows in this conversation.",
+            );
         }
-    }
+        warn!(error = %failure, event_id = %event.event_id, "waiting to submit a command");
+        attempt += 1;
+        tokio::time::sleep(retry).await;
+    };
+    promptly(
+        terminal_feedback(http, config, &event.feedback_target_id, feedback),
+        "command feedback",
+    )
+    .await;
+    Err(refusal.to_owned())
 }
 
 /// Where a module comes from.
@@ -844,6 +857,7 @@ pub(crate) mod tests {
             Arc,
             atomic::{AtomicU16, AtomicUsize, Ordering},
         },
+        time::Duration,
     };
 
     use axum::{Router, http::StatusCode, routing::put};
@@ -1594,12 +1608,14 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// Core and Discord in one fake: lists `catalog`, accepts every event,
-    /// posts every message as `901`, and traces the requests in order.
+    /// Core and Discord in one fake: lists `catalog`, accepts every event
+    /// after `admission` and shows feedback after `feedback`, posts every
+    /// message as `901`, and traces the requests in order as they arrive.
     fn submission_server(
         catalog: carillon_protocol::model::CommandCatalog,
         trace: Arc<tokio::sync::Mutex<Vec<String>>>,
         submitted: Arc<tokio::sync::Mutex<Vec<carillon_protocol::model::ExternalEvent>>>,
+        (admission, feedback): (Duration, Duration),
     ) -> Router {
         use axum::{
             Json,
@@ -1633,6 +1649,7 @@ pub(crate) mod tests {
                             .lock()
                             .await
                             .push(format!("event {}", event.event_id));
+                        tokio::time::sleep(admission).await;
                         submitted.lock().await.push(event.clone());
                         Json(EventReceipt {
                             event_id: event.event_id,
@@ -1675,6 +1692,7 @@ pub(crate) mod tests {
                 let trace = trace.clone();
                 async move {
                     trace.lock().await.push(format!("{method} {}", uri.path()));
+                    tokio::time::sleep(feedback).await;
                     StatusCode::NO_CONTENT
                 }
             })
@@ -1694,7 +1712,12 @@ pub(crate) mod tests {
         };
         let trace = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let submitted = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let router = submission_server(catalog.clone(), trace.clone(), submitted.clone());
+        let router = submission_server(
+            catalog.clone(),
+            trace.clone(),
+            submitted.clone(),
+            (Duration::ZERO, Duration::ZERO),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let server = tokio::spawn(async move { axum::serve(listener, router).await });
@@ -1791,6 +1814,141 @@ pub(crate) mod tests {
                 "accepted {output}"
             );
         }
+        Ok(())
+    }
+
+    /// Calls that submit through `server`, as the person in channel `400`.
+    async fn submitting(
+        router: Router,
+        configure: impl FnOnce(&mut crate::config::DiscordConfig),
+    ) -> anyhow::Result<(
+        super::InteractionCalls,
+        tokio::task::JoinHandle<std::io::Result<()>>,
+    )> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+        let mut config = crate::conversations::tests::discord_config(
+            crate::config::DiscordActivation::Always,
+            crate::config::DiscordConversation::Thread,
+        );
+        configure(&mut config);
+        let calls = super::InteractionCalls::new(
+            crate::client::test_client(format!("http://{address}")),
+            carillon_protocol::model::ModelQuery {
+                agent_id: "default".to_owned(),
+                audience_id: Some("discord-100-400".to_owned()),
+            },
+        )
+        .with_submissions(super::Submissions {
+            http: Arc::new(
+                twilight_http::Client::builder()
+                    .token("test-only".to_owned())
+                    .proxy(address.to_string(), true)
+                    .ratelimiter(None)
+                    .build(),
+            ),
+            config,
+            origin: crate::conversations::InteractionOrigin {
+                guild_id: "100".to_owned(),
+                user_id: "200".to_owned(),
+                channel_id: "400".to_owned(),
+                route_channel_id: "300".to_owned(),
+            },
+        });
+        Ok((calls, server))
+    }
+
+    fn submit_request() -> anyhow::Result<Vec<u8>> {
+        Ok(serde_json::to_vec(
+            &carillon_discord_commands::contract::HostRequest::Submit {
+                text: "/compact keep decisions".to_owned(),
+                intent: carillon_discord_commands::contract::Intent::Command,
+            },
+        )?)
+    }
+
+    #[tokio::test]
+    async fn slow_feedback_never_costs_a_command_its_admission() -> anyhow::Result<()> {
+        use carillon_discord_commands::contract::HostReply;
+        // Discord takes longer than the module's whole deadline to show the
+        // processing reaction and typing.
+        let trace = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let submitted = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let router = submission_server(
+            carillon_protocol::model::CommandCatalog {
+                commands: Vec::new(),
+            },
+            trace.clone(),
+            submitted.clone(),
+            (Duration::ZERO, Duration::from_secs(30)),
+        );
+        let (calls, server) = submitting(router, |config| config.typing = true).await?;
+        let started = std::time::Instant::now();
+        let reply = calls.answer(&submit_request()?).await;
+        let elapsed = started.elapsed();
+        server.abort();
+        assert_eq!(reply, HostReply::Submitted);
+        assert!(
+            elapsed < crate::delivery::PROMPT_FEEDBACK + Duration::from_secs(1),
+            "admission waited {elapsed:?} for feedback"
+        );
+        assert_eq!(submitted.lock().await.len(), 1);
+        // The marker, then the feedback that was asked for, then admission.
+        let trace = trace.lock().await;
+        assert!(trace[0].starts_with("message <@200> ran"));
+        let feedback = &trace[1..3];
+        assert!(
+            feedback
+                .iter()
+                .any(|request| request.contains("/reactions/"))
+        );
+        assert!(feedback.iter().any(|request| request.ends_with("/typing")));
+        assert_eq!(trace[3], "event 901");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_command_core_does_not_answer_in_time_says_so_within_the_module_deadline()
+    -> anyhow::Result<()> {
+        use carillon_discord_commands::contract::HostReply;
+        let trace = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let router = submission_server(
+            carillon_protocol::model::CommandCatalog {
+                commands: Vec::new(),
+            },
+            trace.clone(),
+            Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            (Duration::from_secs(30), Duration::ZERO),
+        );
+        let (calls, server) = submitting(router, |config| config.typing = false).await?;
+        let started = std::time::Instant::now();
+        let reply = calls.answer(&submit_request()?).await;
+        let elapsed = started.elapsed();
+        server.abort();
+        // Core may have accepted it: the answer says so, in time to be shown.
+        assert_eq!(
+            reply,
+            HostReply::Error(
+                "Carillon did not confirm that it accepted it; if it did, the answer follows in this conversation."
+                    .to_owned()
+            )
+        );
+        assert!(elapsed < super::DEADLINE, "answered after {elapsed:?}");
+        let trace = trace.lock().await;
+        assert_eq!(
+            trace
+                .iter()
+                .filter(|request| request.as_str() == "event 901")
+                .count(),
+            1
+        );
+        // The uncertain reaction replaces the processing one.
+        assert!(
+            trace.last().is_some_and(
+                |request| request.starts_with("PUT ") && request.contains("/reactions/")
+            )
+        );
         Ok(())
     }
 }

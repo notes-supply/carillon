@@ -15,7 +15,7 @@ use crate::{
         prepare_conversation,
     },
     delivery::{
-        Feedback, clear_processing_feedback, explain, processing_feedback, terminal_feedback,
+        Feedback, admission_feedback, clear_processing_feedback, explain, terminal_feedback,
         trigger_typing,
     },
     error::discord_failure_is_terminal,
@@ -177,8 +177,7 @@ async fn prepare_text(ingress: &Ingress, plan: MessagePlan) {
         }
         None => return,
     };
-    processing_feedback(http, discord, &resolved.event.feedback_target_id).await;
-    trigger_typing(http, discord, &resolved.event.delivery_target_id).await;
+    admission_feedback(http, discord, &resolved.event).await;
     // Accepting text is a single step in core; a submission cut short by
     // the provider stopping either happened or did not.
     let Some(receipt) = ingress
@@ -283,7 +282,7 @@ async fn prepare_files(ingress: &Ingress, plan: MessagePlan) {
     resolved.event.attachments = Some(staged.manifest.clone());
     // As for text, the processing reaction precedes submission, so the
     // delivered or failed reaction that follows always replaces it.
-    processing_feedback(http, discord, &resolved.event.feedback_target_id).await;
+    admission_feedback(http, discord, &resolved.event).await;
     let settled = submit_files(ingress, &resolved.event, deadline).await;
     typing.abort();
     // Core holds its own copy once it answers; the staged files go.

@@ -180,11 +180,13 @@ fn discord_messages_split_cleanly_at_the_platform_limit() {
 }
 
 /// Core serving the given deliveries in order, then rejecting further claims
-/// to end the delivery loop, beside a Discord API that records created messages.
+/// to end the delivery loop, beside a Discord API that records created
+/// messages and takes `feedback` to answer anything else, such as reactions.
 fn delivering_core(
     deliveries: Vec<Delivery>,
     messages: Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>,
     acks: Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>,
+    feedback: Duration,
 ) -> Router {
     let pending = Arc::new(std::sync::Mutex::new(deliveries.into_iter()));
     Router::new()
@@ -229,7 +231,10 @@ fn delivering_core(
                 }))
             }),
         )
-        .fallback(|| async { StatusCode::NO_CONTENT })
+        .fallback(move || async move {
+            tokio::time::sleep(feedback).await;
+            StatusCode::NO_CONTENT
+        })
 }
 
 #[tokio::test]
@@ -254,6 +259,7 @@ async fn deliveries_reach_discord_verbatim_without_notifying_anyone() -> anyhow:
         ],
         messages.clone(),
         acks.clone(),
+        Duration::ZERO,
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
@@ -316,5 +322,56 @@ async fn deliveries_reach_discord_verbatim_without_notifying_anyone() -> anyhow:
             (second, TurnState::Completed, DeliveryOutcome::Delivered),
         ] if first == "turn-1" && second == "turn-2"
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_slow_reaction_never_holds_up_the_next_delivery() -> anyhow::Result<()> {
+    let delivery = |id: i64| Delivery {
+        turn_state: TurnState::Completed,
+        id,
+        turn_id: format!("turn-{id}"),
+        target_id: "300".to_owned(),
+        feedback_target_id: format!("300:40{id}"),
+        content: format!("answer {id}"),
+    };
+    let messages = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let acks = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    // Each reaction takes Discord far longer than delivering an answer.
+    let app = delivering_core(
+        vec![delivery(1), delivery(2), delivery(3)],
+        messages.clone(),
+        acks.clone(),
+        Duration::from_secs(20),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let http = Arc::new(
+        twilight_http::Client::builder()
+            .proxy(address.to_string(), true)
+            .ratelimiter(None)
+            .build(),
+    );
+    let (outcomes, _observed) = tokio::sync::mpsc::unbounded_channel();
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        delivery_loop(
+            core_client(format!("http://{address}")),
+            discord_config(DiscordActivation::Always, DiscordConversation::Channel),
+            http,
+            outcomes,
+        ),
+    )
+    .await;
+    server.abort();
+    // Every answer was delivered and acknowledged while the reactions waited.
+    assert!(
+        outcome
+            .context("deliveries waited for reactions")?
+            .is_err_and(|failure| failure.to_string().contains("delivery claim rejected"))
+    );
+    assert_eq!(messages.lock().await.len(), 3);
+    assert_eq!(acks.lock().await.len(), 3);
     Ok(())
 }

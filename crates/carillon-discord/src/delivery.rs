@@ -5,10 +5,11 @@ use crate::{
     config::{DiscordConfig, DiscordEmoji},
 };
 use anyhow::{Context, Result, bail};
-use carillon_protocol::model::{Delivery, DeliveryOutcome};
+use carillon_protocol::model::{Delivery, DeliveryOutcome, ExternalEvent};
 use std::{sync::Arc, time::Duration};
 use tokio::{
     sync::mpsc,
+    task::JoinSet,
     time::{sleep, timeout},
 };
 use tracing::warn;
@@ -20,9 +21,15 @@ use twilight_model::{
         marker::{ChannelMarker, EmojiMarker, MessageMarker},
     },
 };
-/// How long one feedback request may take, rate-limit waits included:
-/// feedback must not hold up the work it reports on.
+/// How long one feedback request may take, rate-limit waits included.
 const FEEDBACK_LIMIT: Duration = Duration::from_secs(30);
+/// How long feedback may hold up the work that waits for it: a message's
+/// admission, or a command's answer. Feedback Discord is slower to take is
+/// left out, with a warning, so the work it reports on goes first.
+pub(crate) const PROMPT_FEEDBACK: Duration = Duration::from_secs(2);
+/// Terminal reactions shown at once beside delivery, which never waits for
+/// them; beyond this many, the next delivery waits for one to finish.
+const FEEDBACK_IN_FLIGHT: usize = 8;
 
 /// A feedback request, bounded as a whole.
 async fn bounded<T>(
@@ -40,7 +47,36 @@ pub(crate) enum Feedback {
     Uncertain,
 }
 
-pub(crate) async fn processing_feedback(http: &DiscordHttp, config: &DiscordConfig, target: &str) {
+/// `feedback` that work waits for, bounded by [`PROMPT_FEEDBACK`].
+pub(crate) async fn promptly(feedback: impl Future<Output = ()>, what: &str) {
+    if timeout(PROMPT_FEEDBACK, feedback).await.is_err() {
+        warn!("Discord {what} did not finish in time and was left out");
+    }
+}
+
+/// The processing reaction and a typing indicator, together, before a
+/// message is handed to core. Admission goes first: what Discord has not
+/// taken within [`PROMPT_FEEDBACK`] is left out. Either way it is settled
+/// before core has the message, so the delivered or failed reaction that
+/// follows always replaces it, never the other way round.
+pub(crate) async fn admission_feedback(
+    http: &DiscordHttp,
+    config: &DiscordConfig,
+    event: &ExternalEvent,
+) {
+    promptly(
+        async {
+            tokio::join!(
+                processing_feedback(http, config, &event.feedback_target_id),
+                trigger_typing(http, config, &event.delivery_target_id),
+            );
+        },
+        "feedback before admission",
+    )
+    .await;
+}
+
+async fn processing_feedback(http: &DiscordHttp, config: &DiscordConfig, target: &str) {
     if config.reactions
         && let Err(failure) = create_feedback_reaction(http, target, &config.processing_emoji).await
     {
@@ -176,7 +212,13 @@ pub(crate) async fn delivery_loop(
     http: Arc<DiscordHttp>,
     outcomes: mpsc::UnboundedSender<Outcome>,
 ) -> Result<()> {
+    let config = Arc::new(config);
+    // Terminal reactions run beside delivery, owned by this loop and ending
+    // with it, so a reaction Discord is slow to take never holds up the
+    // next answer.
+    let mut feedback = JoinSet::new();
     loop {
+        while feedback.try_join_next().is_some() {}
         let delivery = match core.claim_delivery().await {
             Ok(Some(delivery)) => delivery,
             Ok(None) => {
@@ -192,7 +234,7 @@ pub(crate) async fn delivery_loop(
             }
             Err(failure) => bail!("delivery claim rejected: {}", failure.message),
         };
-        let (outcome, native_ref, feedback) = attempt_delivery(&http, &delivery).await;
+        let (outcome, native_ref, shown) = attempt_delivery(&http, &delivery).await;
         // The Discord outcome is known at this point. Abandoning the
         // acknowledgement would let a restart downgrade it to uncertain, so
         // transient core failures are waited out while the claim is held.
@@ -219,7 +261,13 @@ pub(crate) async fn delivery_loop(
             turn_state: delivery.turn_state,
             delivery: outcome,
         });
-        terminal_feedback(&http, &config, &delivery.feedback_target_id, feedback).await;
+        if feedback.len() >= FEEDBACK_IN_FLIGHT {
+            feedback.join_next().await;
+        }
+        let (http, config) = (http.clone(), config.clone());
+        feedback.spawn(async move {
+            terminal_feedback(&http, &config, &delivery.feedback_target_id, shown).await;
+        });
     }
 }
 
