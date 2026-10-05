@@ -155,8 +155,8 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
     };
     // A runtime configured for concurrent conversations gets that many
     // workers. Each claim is one transaction that skips conversations with an
-    // earlier queued or running turn, so workers never share a conversation
-    // and each conversation keeps its order.
+    // earlier executable turn queued or running, so workers never share a
+    // conversation and each conversation keeps its order.
     let mut workers = tokio::task::JoinSet::new();
     for runtime in config
         .value
@@ -168,6 +168,13 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
             let runtime_id = runtime.id.clone();
             let worker = state.clone();
             workers.spawn(async move { runtime_worker(worker, runtime_id).await });
+        }
+        // Observations wait on native work that may take hours; a fixed few
+        // run per runtime beside its executable turns, never in their place.
+        for _ in 0..OBSERVATION_WORKERS {
+            let runtime_id = runtime.id.clone();
+            let worker = state.clone();
+            workers.spawn(async move { observation_worker(worker, runtime_id).await });
         }
     }
 
@@ -449,6 +456,55 @@ async fn runtime_worker(state: AppState, runtime_id: String) {
         };
         tokio::time::sleep(delay).await;
     }
+}
+
+/// How many observations of one runtime core follows at once. More wait in
+/// the queue; executable turns are unaffected.
+const OBSERVATION_WORKERS: usize = 4;
+
+async fn observation_worker(state: AppState, runtime_id: String) {
+    loop {
+        let delay =
+            match run_next_observation(&state, &runtime_id, async |runtime, token, request| {
+                call_runtime(&state.client, runtime, token, request).await
+            })
+            .await
+            {
+                Ok(WorkerStep::Advanced) => continue,
+                Ok(WorkerStep::Idle) => Duration::from_millis(500),
+                // An observation asked again waits a little, so a runtime that is
+                // down is not asked in a tight loop.
+                Ok(WorkerStep::Backoff) => Duration::from_secs(5),
+                Err(failure) => {
+                    warn!(runtime_id, error = %failure, "observation worker failed");
+                    Duration::from_secs(5)
+                }
+            };
+        tokio::time::sleep(delay).await;
+    }
+}
+
+/// One observation step; see [`run_next_turn`].
+async fn run_next_observation(
+    state: &AppState,
+    runtime_id: &str,
+    submit: impl AsyncFnOnce(
+        &Provider,
+        &str,
+        RuntimeTurnRequest,
+    ) -> Result<RuntimeTurnResponse, TurnFailure>,
+) -> Result<WorkerStep> {
+    let runtime = state.config.provider(runtime_id, ProviderRole::Runtime)?;
+    if !runtime.enabled {
+        return Ok(WorkerStep::Backoff);
+    }
+    let token = runtime_token(&state.config, runtime)?;
+    state
+        .core
+        .observe_next(runtime_id, async |request| {
+            submit(runtime, &token, request).await
+        })
+        .await
 }
 
 /// One worker iteration without idle or availability waits. Only the runtime

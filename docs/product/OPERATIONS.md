@@ -258,6 +258,8 @@ A write with an uncertain outcome must be inspected before being repeated.
 
 A turn is queued before acceptance is acknowledged. Runtime work is executed only after the turn is durably claimed as running.
 
+With the T3 runtime, a reply may say that work the agent delegated is still running; its report is delivered later as its own message, and the conversation's next messages never wait for it. Such a report only reads T3's records, so a restart of core or the runtime does not lose it: Carillon reads T3 again and delivers the report once.
+
 If Carillon loses a running turn, or the runtime reports that it failed, it marks it interrupted and does not replay it. When the runtime can explain the failure safely, such as a model provider's usage limit, the interruption notice includes that explanation. Otherwise the notice is generic, and the runtime's log (`carillon logs runtime-pi`) holds the technical diagnostic. `carillon inspect TURN_ID` shows either the reported explanation or core's own diagnostic. The runtime retains its saved session. Send another message to continue the conversation normally; separately queued messages continue in order. There is no retry/skip gate. Tool actions may already have happened, and interruption does not undo them. Discord uses warning feedback for interrupted turns, even when the interruption notice itself was delivered successfully.
 
 Pi cancels execution when core disconnects and settles the native operation before admitting another turn. If the runtime process dies, its user service restarts it. A successful runtime result and delivery intent are committed together; delivering a committed answer never requires rerunning the model.

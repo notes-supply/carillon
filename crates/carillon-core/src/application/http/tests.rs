@@ -821,7 +821,7 @@ async fn duplicate_events_share_one_accepted_turn_without_reexecution() -> Resul
 }
 
 #[tokio::test]
-async fn follow_up_turns_carry_only_the_runtime_cursor_and_cannot_be_forged() -> Result<()> {
+async fn follow_up_turns_carry_only_the_runtime_cursor_beside_later_messages() -> Result<()> {
     let directory = tempdir()?;
     let state = installation(directory.path())?;
     let first = accept(&state, "one", "conversation").await?;
@@ -847,10 +847,32 @@ async fn follow_up_turns_carry_only_the_runtime_cursor_and_cannot_be_forged() ->
         DeliveryOutcome::Delivered,
         None,
     )?;
-    // The follow-up turn runs next with the cursor, no input and no files of its own.
+    // The report is observed in its own lane: a later message of the same
+    // conversation runs meanwhile, while its executable lane ignores it.
+    let later = accept(&state, "two", "conversation").await?;
+    run_next_turn(&state, "test-runtime", async move |_, _, request| {
+        assert!(request.native.get("follow_up").is_none());
+        Ok(completed(request))
+    })
+    .await?;
+    assert_eq!(
+        state
+            .core
+            .database
+            .inspect_turn(&later.turn_id)?
+            .context("later turn missing")?
+            .state,
+        TurnState::Completed
+    );
+    // A lost answer only asks again: the observation reads, it does not run work.
+    run_next_observation(&state, "test-runtime", async move |_, _, _| {
+        Err(TurnFailure::Unanswered(anyhow!("connection reset")))
+    })
+    .await?;
+    // The observation runs with the cursor, no input and no files of its own.
     let seen = Arc::new(std::sync::Mutex::new(None));
     let record = seen.clone();
-    run_next_turn(&state, "test-runtime", async move |_, _, request| {
+    run_next_observation(&state, "test-runtime", async move |_, _, request| {
         *record
             .lock()
             .map_err(|_| TurnFailure::Uncertain(anyhow!("poisoned")))? = Some(request.clone());
@@ -871,14 +893,65 @@ async fn follow_up_turns_carry_only_the_runtime_cursor_and_cannot_be_forged() ->
     assert_eq!(request.audience_id, "conversation");
     assert_eq!(request.native, serde_json::json!({ "follow_up": cursor }));
     assert!(request.attachments.is_empty() && request.unanswered.is_empty());
-    let report = state
+    let mut contents = Vec::new();
+    while let Some(delivery) = state
         .core
         .database
         .claim_delivery("test-interface", "instance")?
-        .context("missing report")?;
-    assert_eq!(report.content, "the report");
+    {
+        state.core.database.acknowledge_delivery(
+            "test-interface",
+            delivery.id,
+            "instance",
+            DeliveryOutcome::Delivered,
+            None,
+        )?;
+        contents.push(delivery.content);
+    }
+    assert_eq!(
+        contents
+            .iter()
+            .filter(|content| *content == "the report")
+            .count(),
+        1
+    );
+    Ok(())
+}
 
-    // An interface cannot pose as core's follow-up.
+#[tokio::test]
+async fn an_observation_the_runtime_fails_without_explanation_ends() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    // An answer the runtime fails without explanation ends an observation
+    // like any turn, rather than being asked forever.
+    let third = accept(&state, "three", "elsewhere").await?;
+    let cursor = serde_json::json!({"message": "native-message", "after": 2});
+    run_next_turn(&state, "test-runtime", async move |_, _, request| {
+        Ok(RuntimeTurnResponse {
+            follow_up: Some(cursor),
+            ..completed(request)
+        })
+    })
+    .await?;
+    run_next_observation(&state, "test-runtime", async move |_, _, _| {
+        Err(TurnFailure::Uncertain(anyhow!("runtime failed with 500")))
+    })
+    .await?;
+    let recent = state
+        .core
+        .recent_turns(Some(&format!("follow-up:{}", third.turn_id)), 1)?;
+    assert_eq!(
+        recent.first().map(|turn| turn.state),
+        Some(TurnState::Interrupted)
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_interface_cannot_pose_as_cores_follow_up() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
     let mut headers = HeaderMap::new();
     headers.insert(PROVIDER_HEADER, "test-interface".parse()?);
     headers.insert(
@@ -1716,7 +1789,9 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
     )
     .await
     .map_err(|failure| match failure {
-        TurnFailure::Retry(error) | TurnFailure::Uncertain(error) => error,
+        TurnFailure::Retry(error)
+        | TurnFailure::Unanswered(error)
+        | TurnFailure::Uncertain(error) => error,
         TurnFailure::Explained(explanation) => anyhow!(explanation),
     })?;
     assert_eq!(response.correlation_id, turn.turn_id);

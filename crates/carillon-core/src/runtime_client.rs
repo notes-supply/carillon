@@ -28,7 +28,8 @@ impl RuntimeClient {
     }
     /// Submit one request, distinguishing provably unreceived work from ambiguous execution.
     /// # Errors
-    /// Returns transport, runtime or invalid response failures. Only `Retry` permits automatic replay.
+    /// Returns transport, runtime or invalid response failures. Only `Retry` permits automatic
+    /// replay of executable work; `Unanswered` also permits asking again for an observation.
     pub async fn execute(
         &self,
         request: RuntimeTurnRequest,
@@ -50,7 +51,7 @@ impl RuntimeClient {
                 if retry {
                     TurnFailure::Retry(failure)
                 } else {
-                    TurnFailure::Uncertain(failure)
+                    TurnFailure::Unanswered(failure)
                 }
             })?;
         let status = response.status();

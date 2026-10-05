@@ -293,14 +293,9 @@ impl Core {
             return Ok(WorkerStep::Advanced);
         }
         let limits = &self.options.attachments;
-        // A follow-up turn only reports work an earlier turn started; it
-        // carries no files to the runtime's conversation.
-        let earlier = if turn.native.get(NATIVE_FOLLOW_UP).is_some() {
-            Vec::new()
-        } else {
+        let earlier =
             self.database
-                .unnoted_files(&turn, limits.max_files, limits.max_event_bytes())?
-        };
+                .unnoted_files(&turn, limits.max_files, limits.max_event_bytes())?;
         let offered = self.offer(earlier).await?;
         // The files this turn carries to the runtime: its own and the earlier
         // turns offered with it, even when none of a turn's files was left.
@@ -341,7 +336,7 @@ impl Core {
                 warn!(turn_id = %turn.turn_id, error = %failure, "runtime was unavailable; turn requeued");
                 Ok(WorkerStep::Backoff)
             }
-            Err(TurnFailure::Uncertain(failure)) => {
+            Err(TurnFailure::Uncertain(failure) | TurnFailure::Unanswered(failure)) => {
                 let message = failure.to_string();
                 self.database
                     .interrupt_turn(&turn, &message, None)
@@ -357,6 +352,63 @@ impl Core {
                     .interrupt_turn(&turn, &message, Some(&explanation))
                     .with_context(|| format!("record failure of turn {}", turn.turn_id))?;
                 warn!(turn_id = %turn.turn_id, error = %message, "runtime reported failure");
+                Ok(WorkerStep::Advanced)
+            }
+        }
+    }
+
+    /// Runs the runtime's oldest queued observation: a turn core queued to
+    /// carry the report of work an earlier turn left running. It dispatches
+    /// nothing and only reads native records, so a lost or timed-out answer
+    /// asks again rather than failing, and its report is delivered once,
+    /// when it completes. A runtime's explained failure, or an answer it
+    /// cannot read, ends it like any turn.
+    /// # Errors
+    /// Returns storage errors.
+    pub async fn observe_next(
+        &self,
+        runtime_id: &str,
+        submit: impl AsyncFnOnce(RuntimeTurnRequest) -> Result<RuntimeTurnResponse, TurnFailure>,
+    ) -> Result<WorkerStep> {
+        if !self.runtime(runtime_id)?.enabled {
+            return Ok(WorkerStep::Backoff);
+        }
+        let Some(turn) = self.database.claim_observation(runtime_id)? else {
+            return Ok(WorkerStep::Idle);
+        };
+        let outcome = async {
+            let request = self.runtime_request(&turn, Vec::new());
+            let correlation_id = request.correlation_id.clone();
+            let response = submit(request).await?;
+            validate_response(&correlation_id, &response)?;
+            self.database
+                .complete_turn(&turn, &response)
+                .map_err(TurnFailure::Uncertain)
+        }
+        .await;
+        match outcome {
+            Ok(()) => Ok(WorkerStep::Advanced),
+            Err(TurnFailure::Retry(failure) | TurnFailure::Unanswered(failure)) => {
+                self.database
+                    .requeue_turn(&turn)
+                    .with_context(|| format!("requeue observation {}", turn.turn_id))?;
+                warn!(turn_id = %turn.turn_id, error = %failure, "observation got no answer; asking again");
+                Ok(WorkerStep::Backoff)
+            }
+            Err(TurnFailure::Uncertain(failure)) => {
+                let message = failure.to_string();
+                self.database
+                    .interrupt_turn(&turn, &message, None)
+                    .with_context(|| format!("record failed observation {}", turn.turn_id))?;
+                warn!(turn_id = %turn.turn_id, error = %message, "observation failed");
+                Ok(WorkerStep::Advanced)
+            }
+            Err(TurnFailure::Explained(explanation)) => {
+                let message = format!("runtime reported failure: {explanation}");
+                self.database
+                    .interrupt_turn(&turn, &message, Some(&explanation))
+                    .with_context(|| format!("record failed observation {}", turn.turn_id))?;
+                warn!(turn_id = %turn.turn_id, error = %message, "observation failed");
                 Ok(WorkerStep::Advanced)
             }
         }
@@ -567,6 +619,10 @@ pub enum WorkerStep {
 pub enum TurnFailure {
     /// The runtime provably never received the turn; running it again is safe.
     Retry(anyhow::Error),
+    /// The request may have reached the runtime, but no answer arrived: the
+    /// connection was lost or timed out. An executable turn is treated as
+    /// `Uncertain`; an observation, which only reads, is asked again.
+    Unanswered(anyhow::Error),
     /// Model work may have run; it must not be automatically replayed.
     Uncertain(anyhow::Error),
     /// The runtime reported that the turn failed, explaining why in words

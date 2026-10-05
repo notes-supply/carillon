@@ -48,6 +48,13 @@ use carillon_protocol::model::{
 
 use crate::attachments::{Capture, CapturedFile};
 
+/// SQL condition, over a `turns` row, for an observation: a turn core queued
+/// itself to carry a runtime's follow-up cursor (`native.follow_up`, which
+/// no interface may set).
+const OBSERVATION: &str = "json_type(native_json, '$.follow_up') IS NOT NULL";
+const OBSERVATION_T: &str = "json_type(t.native_json, '$.follow_up') IS NOT NULL";
+const OBSERVATION_EARLIER: &str = "json_type(earlier.native_json, '$.follow_up') IS NOT NULL";
+
 #[derive(Clone)]
 pub struct Database {
     path: PathBuf,
@@ -404,41 +411,67 @@ impl Database {
     /// running. A turn is eligible only when its conversation has no earlier
     /// queued or running turn, which serializes each conversation FIFO.
     /// Interrupted turns are terminal and never hold later messages.
+    /// Claims the oldest executable turn of a conversation with no earlier
+    /// executable turn queued or running. Observations neither wait for
+    /// executable turns nor hold them back (see [`Database::claim_observation`]).
     pub fn claim_turn(&self, runtime_id: &str) -> Result<Option<ClaimedTurn>> {
+        self.claim(
+            &format!(
+                "SELECT id, interface_id, agent_id, audience_id, runtime_id,
+                    target_id, feedback_target_id, input, resource_snapshot_id, native_json
+             FROM turns t
+             WHERE runtime_id = ?1 AND state = 'queued' AND NOT {OBSERVATION_T}
+               AND NOT EXISTS (
+                 SELECT 1 FROM turns earlier
+                 WHERE earlier.interface_id = t.interface_id
+                   AND earlier.agent_id = t.agent_id
+                   AND earlier.audience_id = t.audience_id
+                   AND earlier.state IN ('queued', 'running')
+                   AND earlier.acceptance_sequence < t.acceptance_sequence
+                   AND NOT {OBSERVATION_EARLIER}
+               )
+             ORDER BY acceptance_sequence LIMIT 1"
+            ),
+            runtime_id,
+        )
+    }
+
+    /// Claims the oldest queued observation: a turn core queued to carry the
+    /// report of work an earlier turn left running. It only reads native
+    /// records, so it runs beside the conversation's executable turns, in a
+    /// lane of its own.
+    pub fn claim_observation(&self, runtime_id: &str) -> Result<Option<ClaimedTurn>> {
+        self.claim(
+            &format!(
+                "SELECT id, interface_id, agent_id, audience_id, runtime_id,
+                    target_id, feedback_target_id, input, resource_snapshot_id, native_json
+             FROM turns t
+             WHERE runtime_id = ?1 AND state = 'queued' AND {OBSERVATION_T}
+             ORDER BY acceptance_sequence LIMIT 1"
+            ),
+            runtime_id,
+        )
+    }
+
+    fn claim(&self, query: &str, runtime_id: &str) -> Result<Option<ClaimedTurn>> {
         let mut connection = self.connect()?;
         let transaction = write_transaction(&mut connection)?;
         let turn = transaction
-            .query_row(
-                "SELECT id, interface_id, agent_id, audience_id, runtime_id,
-                        target_id, feedback_target_id, input, resource_snapshot_id, native_json
-                 FROM turns t
-                 WHERE runtime_id = ?1 AND state = 'queued'
-                   AND NOT EXISTS (
-                     SELECT 1 FROM turns earlier
-                     WHERE earlier.interface_id = t.interface_id
-                       AND earlier.agent_id = t.agent_id
-                       AND earlier.audience_id = t.audience_id
-                       AND earlier.state IN ('queued', 'running')
-                       AND earlier.acceptance_sequence < t.acceptance_sequence
-                   )
-                 ORDER BY acceptance_sequence LIMIT 1",
-                [runtime_id],
-                |row| {
-                    Ok(ClaimedTurn {
-                        turn_id: row.get(0)?,
-                        interface_id: row.get(1)?,
-                        agent_id: row.get(2)?,
-                        audience_id: row.get(3)?,
-                        runtime_id: row.get(4)?,
-                        target_id: row.get(5)?,
-                        feedback_target_id: row.get(6)?,
-                        input: row.get(7)?,
-                        resource_snapshot_id: row.get(8)?,
-                        native: json_column(row, 9)?,
-                        attachments: Vec::new(),
-                    })
-                },
-            )
+            .query_row(query, [runtime_id], |row| {
+                Ok(ClaimedTurn {
+                    turn_id: row.get(0)?,
+                    interface_id: row.get(1)?,
+                    agent_id: row.get(2)?,
+                    audience_id: row.get(3)?,
+                    runtime_id: row.get(4)?,
+                    target_id: row.get(5)?,
+                    feedback_target_id: row.get(6)?,
+                    input: row.get(7)?,
+                    resource_snapshot_id: row.get(8)?,
+                    native: json_column(row, 9)?,
+                    attachments: Vec::new(),
+                })
+            })
             .optional()?;
         let Some(mut turn) = turn else {
             transaction.commit()?;
@@ -514,10 +547,10 @@ impl Database {
 
     /// Commits a successful runtime response: completed output and the
     /// delivery intent, atomically. A response with a follow-up cursor also
-    /// queues, in the same transaction, the follow-up turn that will carry
-    /// the report of the work this turn left running: same conversation,
-    /// target and runtime, after every message already accepted there, with
-    /// the cursor as its only `native` fact.
+    /// queues, in the same transaction, the observation that will carry the
+    /// report of the work this turn left running: same conversation, target
+    /// and runtime, with the cursor as its only `native` fact. It does not
+    /// hold back the conversation's later messages.
     pub fn complete_turn(&self, turn: &ClaimedTurn, response: &RuntimeTurnResponse) -> Result<()> {
         let mut connection = self.connect()?;
         let transaction = write_transaction(&mut connection)?;
@@ -583,7 +616,8 @@ impl Database {
     }
 
     /// Returns a running turn to the queue. Only valid when the runtime
-    /// provably never received the work.
+    /// provably never received the work, or for an observation, which only
+    /// reads.
     pub fn requeue_turn(&self, turn: &ClaimedTurn) -> Result<()> {
         let changed = self.connect()?.execute(
             "UPDATE turns SET state = 'queued' WHERE id = ?1 AND runtime_id = ?2 AND state = 'running'",
@@ -595,27 +629,38 @@ impl Database {
         Ok(())
     }
 
-    /// Marks every turn still recorded as running as interrupted. Run at
-    /// startup: a turn that was running when core stopped may or may not have
-    /// executed, and Carillon does not infer that repeating it is safe.
+    /// Marks every executable turn still recorded as running as interrupted,
+    /// and returns running observations to the queue. Run at startup: an
+    /// executable turn that was running when core stopped may or may not have
+    /// executed, and Carillon does not infer that repeating it is safe; an
+    /// observation only reads native records, so it is asked again and
+    /// delivers its report once, when it completes.
     pub fn recover_running_turns(&self) -> Result<usize> {
         let mut connection = self.connect()?;
         let transaction = write_transaction(&mut connection)?;
         let now = timestamp()?;
         transaction.execute(
-            "INSERT INTO deliveries(turn_id, interface_id, target_id, feedback_target_id,
-                 content, state, updated_at)
-             SELECT id, interface_id, target_id, feedback_target_id, ?1, 'pending', ?2
-             FROM turns WHERE state = 'running'",
+            &format!(
+                "INSERT INTO deliveries(turn_id, interface_id, target_id, feedback_target_id,
+                     content, state, updated_at)
+                 SELECT id, interface_id, target_id, feedback_target_id, ?1, 'pending', ?2
+                 FROM turns t WHERE state = 'running' AND NOT {OBSERVATION_T}"
+            ),
             params![
                 "Carillon restarted during that turn. It was not run again. Send another message to continue in this conversation.",
                 now,
             ],
         )?;
         let recovered = transaction.execute(
-            "UPDATE turns SET state = 'interrupted', error = ?1, finished_at = ?2
-             WHERE state = 'running'",
+            &format!(
+                "UPDATE turns SET state = 'interrupted', error = ?1, finished_at = ?2
+                 WHERE state = 'running' AND NOT {OBSERVATION}"
+            ),
             params!["core restarted while the runtime was executing", now],
+        )?;
+        transaction.execute(
+            &format!("UPDATE turns SET state = 'queued' WHERE state = 'running' AND {OBSERVATION}"),
+            [],
         )?;
         transaction.commit()?;
         Ok(recovered)
@@ -1182,49 +1227,15 @@ mod tests {
     }
 
     #[test]
-    fn follow_up_cursor_queues_one_report_turn_behind_accepted_messages() -> Result<()> {
+    fn a_follow_up_cursor_queues_an_observation_beside_later_messages() -> Result<()> {
         let directory = tempdir()?;
         let database = Database::create(&directory.path().join("state.sqlite3"))?;
-        accept(&database, "one", "conversation")?;
-        let first = database
-            .claim_turn("runtime")?
-            .context("first turn missing")?;
-        // A message the person sent while the first turn ran.
-        accept(&database, "two", "conversation")?;
-        let cursor = json!({"message": "native-message", "after": 1});
-        database.complete_turn(
-            &first,
-            &RuntimeTurnResponse {
-                correlation_id: first.turn_id.clone(),
-                output: "delegated".to_owned(),
-                follow_up: Some(cursor.clone()),
-            },
-        )?;
-        // The answer is delivered at once; the report waits its turn, after
-        // the message accepted before it, in the same conversation.
-        assert_eq!(
-            database
-                .claim_delivery("discord", "instance")?
-                .context("delivery missing")?
-                .content,
-            "delegated"
-        );
-        let second = database
-            .claim_turn("runtime")?
-            .context("second turn missing")?;
-        assert_eq!(second.input, "hello");
+        let (first, cursor) = delegated(&database)?;
+        // The report is an observation: executable claims never take it.
         assert!(database.claim_turn("runtime")?.is_none());
-        database.complete_turn(
-            &second,
-            &RuntimeTurnResponse {
-                correlation_id: second.turn_id.clone(),
-                output: "second reply".to_owned(),
-                follow_up: None,
-            },
-        )?;
         let report = database
-            .claim_turn("runtime")?
-            .context("follow-up turn missing")?;
+            .claim_observation("runtime")?
+            .context("observation missing")?;
         assert_eq!(report.input, "");
         assert_eq!(report.native, json!({ "follow_up": cursor }));
         assert_eq!(
@@ -1246,7 +1257,107 @@ mod tests {
                 .turn_id,
             report.turn_id
         );
+        // While it observes, the conversation's next messages run, in order.
+        accept(&database, "two", "conversation")?;
+        accept(&database, "three", "conversation")?;
+        let second = database
+            .claim_turn("runtime")?
+            .context("second turn missing")?;
+        assert!(database.claim_turn("runtime")?.is_none());
+        complete(&database, &second, "second reply")?;
+        assert!(database.claim_turn("runtime")?.is_some());
+        assert!(database.claim_observation("runtime")?.is_none());
         Ok(())
+    }
+
+    #[test]
+    fn a_restart_asks_an_observation_again_and_delivers_its_report_once() -> Result<()> {
+        let directory = tempdir()?;
+        let database = Database::create(&directory.path().join("state.sqlite3"))?;
+        delegated(&database)?;
+        let report = database
+            .claim_observation("runtime")?
+            .context("observation missing")?;
+        accept(&database, "two", "conversation")?;
+        database
+            .claim_turn("runtime")?
+            .context("second turn missing")?;
+        // A restart returns the running observation to its queue; the
+        // executable turn that was running is interrupted, as ever.
+        assert_eq!(database.recover_running_turns()?, 1);
+        let resumed = database
+            .claim_observation("runtime")?
+            .context("observation not resumed")?;
+        assert_eq!(resumed.turn_id, report.turn_id);
+        complete(&database, &resumed, "the report")?;
+        let mut contents = Vec::new();
+        while let Some(delivery) = database.claim_delivery("discord", "instance")? {
+            database.acknowledge_delivery(
+                "discord",
+                delivery.id,
+                "instance",
+                DeliveryOutcome::Delivered,
+                None,
+            )?;
+            contents.push(delivery.content);
+        }
+        // The parent answer was delivered once already; now the restart's
+        // notice for the executable turn only, and the report once.
+        assert_eq!(contents.len(), 2);
+        assert_eq!(
+            contents
+                .iter()
+                .filter(|content| *content == "the report")
+                .count(),
+            1
+        );
+        assert!(
+            contents
+                .iter()
+                .any(|content| content.starts_with("Carillon restarted"))
+        );
+        assert!(database.claim_observation("runtime")?.is_none());
+        Ok(())
+    }
+
+    /// A first turn answered with a follow-up cursor, its answer delivered.
+    fn delegated(database: &Database) -> Result<(super::ClaimedTurn, serde_json::Value)> {
+        accept(database, "one", "conversation")?;
+        let first = database
+            .claim_turn("runtime")?
+            .context("first turn missing")?;
+        let cursor = json!({"message": "native-message", "after": 1});
+        database.complete_turn(
+            &first,
+            &RuntimeTurnResponse {
+                correlation_id: first.turn_id.clone(),
+                output: "delegated".to_owned(),
+                follow_up: Some(cursor.clone()),
+            },
+        )?;
+        let answer = database
+            .claim_delivery("discord", "instance")?
+            .context("delivery missing")?;
+        assert_eq!(answer.content, "delegated");
+        database.acknowledge_delivery(
+            "discord",
+            answer.id,
+            "instance",
+            DeliveryOutcome::Delivered,
+            None,
+        )?;
+        Ok((first, cursor))
+    }
+
+    fn complete(database: &Database, turn: &super::ClaimedTurn, output: &str) -> Result<()> {
+        database.complete_turn(
+            turn,
+            &RuntimeTurnResponse {
+                correlation_id: turn.turn_id.clone(),
+                output: output.to_owned(),
+                follow_up: None,
+            },
+        )
     }
 
     #[test]
