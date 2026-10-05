@@ -2231,6 +2231,21 @@ pub(crate) mod tests {
             self.server.abort();
             Ok(self.accepted.lock().await.clone())
         }
+
+        /// Stops the provider in the order its shutdown does: the lanes
+        /// settle what they hold, at most ten seconds, then the reactions
+        /// get `grace`. Returns the events core accepted and the reactions
+        /// the stop cancelled.
+        async fn stopped(self, grace: Duration) -> anyhow::Result<(Vec<String>, usize)> {
+            self.ingress.stopping.cancel();
+            drop(self.send);
+            tokio::time::timeout(Duration::from_secs(10), self.dispatcher)
+                .await
+                .map_err(|_| anyhow::anyhow!("the lanes did not settle"))??;
+            let cancelled = self.ingress.reactions.stop(grace).await;
+            self.server.abort();
+            Ok((self.accepted.lock().await.clone(), cancelled))
+        }
     }
 
     /// Core and Discord for [`preparing`]: core is slow by `status` to say
@@ -2548,12 +2563,22 @@ pub(crate) mod tests {
     /// three seconds to accept command 901, and the reply to its submission,
     /// due one second in.
     async fn admitting() -> anyhow::Result<(Preparing, Arc<tokio::sync::Mutex<Vec<String>>>)> {
+        unconfirmed(|accepted, markers| admitting_server(Duration::from_secs(3), accepted, markers))
+            .await
+    }
+
+    /// Calls of the conversation served by `serve` as core and Discord, and
+    /// the reply to a submission of command 901, due one second in, before
+    /// core has answered for it.
+    async fn unconfirmed(
+        serve: impl FnOnce(Arc<tokio::sync::Mutex<Vec<String>>>, Arc<AtomicUsize>) -> Router,
+    ) -> anyhow::Result<(Preparing, Arc<tokio::sync::Mutex<Vec<String>>>)> {
         use carillon_discord_commands::contract::HostReply;
         let (accepted, markers) = (
             Arc::new(tokio::sync::Mutex::new(Vec::new())),
             Arc::new(AtomicUsize::new(0)),
         );
-        let router = admitting_server(Duration::from_secs(3), accepted.clone(), markers.clone());
+        let router = serve(accepted.clone(), markers.clone());
         let (calls, preparing) = conversation(router, accepted.clone(), markers).await?;
         let started = std::time::Instant::now();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
@@ -2595,6 +2620,188 @@ pub(crate) mod tests {
         assert_eq!(preparing.settled().await?, ["901"]);
         assert!(started.elapsed() >= Duration::from_secs(1));
         assert_eq!(*accepted.lock().await, ["901"]);
+        Ok(())
+    }
+
+    /// Core that cannot take command 901, answering every attempt as
+    /// unavailable, and accepts other events at once, beside a Discord that
+    /// answers at once. `trace` records core's requests and Discord's
+    /// reactions.
+    fn unavailable_server(
+        trace: Arc<tokio::sync::Mutex<Vec<String>>>,
+        accepted: Arc<tokio::sync::Mutex<Vec<String>>>,
+        markers: Arc<AtomicUsize>,
+    ) -> Router {
+        use axum::{
+            Json,
+            extract::Path as Segment,
+            http::{Method, Uri},
+            response::IntoResponse,
+            routing::{get, post},
+        };
+        use carillon_protocol::model::{EventReceipt, EventStatus, ExternalEvent, TurnState};
+        let (asked, attempted, reacted) = (trace.clone(), trace.clone(), trace);
+        Router::new()
+            .route(
+                "/v1/events/{event_id}",
+                get(move |Segment(event_id): Segment<String>| async move {
+                    asked.lock().await.push(format!("status {event_id}"));
+                    Json(EventStatus::Unknown)
+                }),
+            )
+            .route(
+                "/v1/events",
+                post(move |Json(event): Json<ExternalEvent>| async move {
+                    attempted
+                        .lock()
+                        .await
+                        .push(format!("event {}", event.event_id));
+                    if event.event_id == "901" {
+                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                    }
+                    accepted.lock().await.push(event.event_id.clone());
+                    Json(EventReceipt {
+                        event_id: event.event_id,
+                        turn_id: "turn".to_owned(),
+                        duplicate: false,
+                        state: TurnState::Queued,
+                    })
+                    .into_response()
+                }),
+            )
+            .merge(marking(markers))
+            .fallback(move |method: Method, uri: Uri| async move {
+                reacted
+                    .lock()
+                    .await
+                    .push(format!("{method} {}", uri.path()));
+                StatusCode::NO_CONTENT
+            })
+    }
+
+    #[tokio::test]
+    async fn a_stopping_provider_leaves_a_command_core_cannot_confirm_unconfirmed()
+    -> anyhow::Result<()> {
+        let trace = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let served = trace.clone();
+        let (preparing, _) =
+            unconfirmed(|accepted, markers| unavailable_server(served, accepted, markers)).await?;
+        let attempts = async || {
+            trace
+                .lock()
+                .await
+                .iter()
+                .filter(|request| *request == "event 901")
+                .count()
+        };
+        // The person's next message waits while the lane goes on asking
+        // core, which still cannot take the command.
+        let mut next = crate::inbound::tests::hello();
+        next.request.event_id = "402".to_owned();
+        preparing.send.send(next.into()).await?;
+        let before = attempts().await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(attempts().await > before + 1);
+        // The provider stops: the lanes settle without core's answer, and
+        // the message waiting behind the command is dropped unprepared.
+        let started = std::time::Instant::now();
+        let (accepted, cancelled) = preparing.stopped(crate::delivery::PROMPT_FEEDBACK).await?;
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(accepted.is_empty());
+        assert_eq!(cancelled, 0);
+        let trace = trace.lock().await;
+        assert!(
+            !trace.iter().any(|request| request.ends_with("402")),
+            "{trace:?}"
+        );
+        // The command's marker says it is unconfirmed, not refused.
+        let marker = "/api/v10/channels/300/messages/901/reactions";
+        assert_eq!(
+            trace
+                .iter()
+                .filter(|request| request.contains("/reactions/"))
+                .collect::<Vec<_>>(),
+            [
+                &format!("PUT {marker}/%F0%9F%91%80/@me"),
+                &format!("DELETE {marker}/%F0%9F%91%80/@me"),
+                &format!("PUT {marker}/%E2%9A%A0%EF%B8%8F/@me"),
+            ]
+        );
+        Ok(())
+    }
+
+    /// Core that does not answer the first submission of command 901 and
+    /// refuses it when asked again, accepting other events at once, beside
+    /// a Discord that holds every reaction for a minute.
+    fn refusing_server(
+        accepted: Arc<tokio::sync::Mutex<Vec<String>>>,
+        markers: Arc<AtomicUsize>,
+    ) -> Router {
+        use axum::{
+            Json,
+            extract::Path as Segment,
+            http::Uri,
+            response::IntoResponse,
+            routing::{get, post},
+        };
+        use carillon_protocol::model::{EventReceipt, EventStatus, ExternalEvent, TurnState};
+        let attempts = Arc::new(AtomicUsize::new(0));
+        Router::new()
+            .route(
+                "/v1/events/{event_id}",
+                get(|Segment(_): Segment<String>| async { Json(EventStatus::Unknown) }),
+            )
+            .route(
+                "/v1/events",
+                post(move |Json(event): Json<ExternalEvent>| async move {
+                    if event.event_id == "901" {
+                        if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                            tokio::time::sleep(Duration::from_secs(30)).await;
+                        }
+                        return StatusCode::UNPROCESSABLE_ENTITY.into_response();
+                    }
+                    accepted.lock().await.push(event.event_id.clone());
+                    Json(EventReceipt {
+                        event_id: event.event_id,
+                        turn_id: "turn".to_owned(),
+                        duplicate: false,
+                        state: TurnState::Queued,
+                    })
+                    .into_response()
+                }),
+            )
+            .merge(marking(markers))
+            .fallback(|uri: Uri| async move {
+                if uri.path().contains("/reactions/") {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                }
+                StatusCode::NO_CONTENT
+            })
+    }
+
+    #[tokio::test]
+    async fn a_refused_command_lets_its_conversation_go_on_beside_its_feedback()
+    -> anyhow::Result<()> {
+        let (preparing, accepted) = unconfirmed(refusing_server).await?;
+        // Core refuses the command when the lane asks again, while Discord
+        // still holds its processing reaction, which its failure waits for.
+        let mut next = crate::inbound::tests::hello();
+        next.request.event_id = "402".to_owned();
+        preparing.send.send(next.into()).await?;
+        // The person's next message is accepted within its own wait for
+        // feedback, not after the command's.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while accepted.lock().await.is_empty() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("the conversation waited for the command's feedback"))?;
+        // The reactions still own the command's failure and both processing
+        // requests, and their stop ends them.
+        let (accepted, cancelled) = preparing.stopped(Duration::from_millis(100)).await?;
+        assert_eq!(accepted, ["402"]);
+        assert_eq!(cancelled, 3);
         Ok(())
     }
 

@@ -191,9 +191,10 @@ async fn prepare_text(ingress: &Ingress, plan: MessagePlan) {
     let Some(receipt) = ingress
         .until(
             None,
-            submit_event_with_retry(&ingress.core, &resolved.event),
+            submit_event_with_retry(&ingress.core, &ingress.stopping, &resolved.event),
         )
         .await
+        .flatten()
     else {
         return;
     };
@@ -382,17 +383,27 @@ fn refusal(failure: &InterfaceError) -> Refusal {
     )
 }
 
+/// Submit `event` until core accepts or refuses it. The first attempt is
+/// made even when the provider is `stopping`, as core may already be
+/// accepting an event handed to it, and runs to its end within the client's
+/// own bound. No attempt follows it once the provider is stopping: `None`
+/// then, as core has not answered.
 pub(crate) async fn submit_event_with_retry(
     core: &CoreClient,
+    stopping: &CancellationToken,
     event: &ExternalEvent,
-) -> Result<EventReceipt, InterfaceError> {
+) -> Option<Result<EventReceipt, InterfaceError>> {
     loop {
         match core.submit_event(event).await {
             Err(failure) if failure.is_transient() => {
                 warn!(error = %failure.message, event_id = %event.event_id, "waiting to submit Discord event");
-                sleep(RETRY).await;
+                // However the wait ends, a stop by then ends the submission.
+                stopping.run_until_cancelled(sleep(RETRY)).await;
+                if stopping.is_cancelled() {
+                    return None;
+                }
             }
-            outcome => return outcome,
+            outcome => return Some(outcome),
         }
     }
 }

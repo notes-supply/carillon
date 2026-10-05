@@ -11,7 +11,7 @@
 //! whose answer from core did not come in time hands its event back with
 //! [`Turn::settle`]: core may still be accepting it, so the lane submits it
 //! again under its own identity until core answers, as for a message, and
-//! only then goes on.
+//! only then goes on; the feedback that follows does not hold it.
 //!
 //! Lanes live in memory, bounded overall and per lane; a message beyond the
 //! bounds is refused at once rather than queued without limit. Only a
@@ -22,7 +22,10 @@
 //!
 //! When the provider stops, waiting messages are dropped, as a crash would
 //! drop them, and running ones end their preparation or settle what they
-//! handed to core before the dispatcher returns.
+//! handed to core before the dispatcher returns. A command core has not
+//! answered for gets one attempt, the one under way or its first, and no
+//! other: one core still does not confirm is left unconfirmed rather than
+//! holding the stop.
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
@@ -80,7 +83,8 @@ pub(crate) struct Turn {
 
 impl Turn {
     /// Leaves `event`, which core may still be accepting, to the lane: the
-    /// conversation goes on only once core has accepted or refused it.
+    /// conversation goes on only once core has accepted or refused it, and
+    /// a stopping provider leaves it unconfirmed if core still has not.
     pub(crate) fn settle(self, event: ExternalEvent) {
         let _ = self.unsettled.send(event);
     }
@@ -231,16 +235,22 @@ fn start(
 
 /// Settles a command core may still be accepting, as an ambiguous
 /// submission of a message is settled: the same event again until core
-/// answers. A refusal is shown on the command's marker; an acceptance is
-/// shown by its delivery. Like a message core may have received, it is
-/// settled even when the provider is stopping.
+/// answers. An acceptance is shown by its delivery, and a refusal on the
+/// command's marker, beside the lane. A stopping provider gets one attempt,
+/// the one under way or the first, but no other, so a command core then has
+/// not answered for is left unconfirmed, and its marker says so.
 async fn settle(ingress: &Ingress, event: &ExternalEvent) {
-    if let Err(failure) = submit_event_with_retry(&ingress.core, event).await {
-        warn!(error = %failure.message, event_id = %event.event_id, "core refused a command after its answer was late");
-        ingress
-            .reactions
-            .outcome(&event.feedback_target_id, Feedback::Failed)
-            .await;
+    let target = event.feedback_target_id.clone();
+    match submit_event_with_retry(&ingress.core, &ingress.stopping, event).await {
+        Some(Ok(_)) => {}
+        Some(Err(failure)) => {
+            warn!(error = %failure.message, event_id = %event.event_id, "core refused a command after its answer was late");
+            ingress.reactions.show_outcome(target, Feedback::Failed);
+        }
+        None => {
+            warn!(event_id = %event.event_id, "Discord stopped before core confirmed whether it accepted a command");
+            ingress.reactions.show_outcome(target, Feedback::Uncertain);
+        }
     }
 }
 

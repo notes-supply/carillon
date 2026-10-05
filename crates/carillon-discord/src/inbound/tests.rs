@@ -22,6 +22,7 @@ use std::{
     time::Duration,
 };
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 /// Message preparation with staging under `directory`.
 pub(crate) fn ingress(
@@ -41,7 +42,7 @@ pub(crate) fn ingress(
         config,
         participation,
         http,
-        stopping: tokio_util::sync::CancellationToken::new(),
+        stopping: CancellationToken::new(),
     }))
 }
 
@@ -141,9 +142,10 @@ async fn discord_retries_ambiguous_submission_with_the_same_event_id() -> anyhow
 
     let receipt = tokio::time::timeout(
         Duration::from_secs(2),
-        submit_event_with_retry(&core, &event),
+        submit_event_with_retry(&core, &CancellationToken::new(), &event),
     )
     .await?
+    .context("the submission ended without an answer")?
     .map_err(|failure| anyhow!(failure.message))?;
     server.abort();
 
@@ -217,13 +219,15 @@ async fn interrupted_success_receipt_recovers_the_committed_turn() -> anyhow::Re
     });
     let outcome = tokio::time::timeout(
         Duration::from_secs(3),
-        submit_event_with_retry(&core, &event),
+        submit_event_with_retry(&core, &CancellationToken::new(), &event),
     )
     .await;
-    if !matches!(&outcome, Ok(Ok(_))) {
+    if !matches!(&outcome, Ok(Some(Ok(_)))) {
         server.abort();
     }
-    let receipt = outcome?.map_err(|failure| anyhow!(failure.message))?;
+    let receipt = outcome?
+        .context("the submission ended without an answer")?
+        .map_err(|failure| anyhow!(failure.message))?;
     tokio::time::timeout(Duration::from_secs(3), server).await???;
     assert!(receipt.duplicate);
     assert_eq!(receipt.turn_id, "committed");
@@ -364,13 +368,82 @@ async fn complete_invalid_receipt_is_not_retried_forever() -> anyhow::Result<()>
     };
     let outcome = tokio::time::timeout(
         Duration::from_secs(2),
-        submit_event_with_retry(&core, &event),
+        submit_event_with_retry(&core, &CancellationToken::new(), &event),
     )
     .await;
     server.abort();
-    let failure = outcome?.err().context("invalid receipt was accepted")?;
+    let failure = outcome?
+        .context("the submission ended without an answer")?
+        .err()
+        .context("invalid receipt was accepted")?;
     assert!(!failure.is_transient());
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+/// An event core may hold gets its first attempt however the provider
+/// stops, and no attempt after the provider has stopped.
+#[tokio::test]
+async fn a_stopping_provider_starts_no_attempt_after_the_first() -> anyhow::Result<()> {
+    // Core cannot take the event: every attempt is answered as unavailable.
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counted = attempts.clone();
+    let app = Router::new().route(
+        "/v1/events",
+        post(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            async { StatusCode::SERVICE_UNAVAILABLE }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let core = core_client(format!("http://{}", listener.local_addr()?));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let event = ExternalEvent {
+        event_id: "stopping".to_owned(),
+        agent_id: "agent".to_owned(),
+        user_id: "user".to_owned(),
+        audience_id: "conversation".to_owned(),
+        delivery_target_id: "target".to_owned(),
+        feedback_target_id: "feedback".to_owned(),
+        content: "hello".to_owned(),
+        native: Value::Null,
+        attachments: None,
+    };
+    // Handed over after the stop, it is attempted once.
+    let stopped = CancellationToken::new();
+    stopped.cancel();
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(2),
+        submit_event_with_retry(&core, &stopped, &event),
+    )
+    .await?;
+    assert!(outcome.is_none());
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    // Stopped just as its wait to try again ends: no other attempt starts.
+    let stopping = CancellationToken::new();
+    let submission = tokio::spawn({
+        let (core, stopping, event) = (core.clone(), stopping.clone(), event.clone());
+        async move { submit_event_with_retry(&core, &stopping, &event).await }
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while attempts.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    // It now waits to try again, until a quarter second after its second
+    // attempt. This test's own wait ends earlier, and the runtime's only
+    // thread is then held past both: the runtime ends them together, this
+    // one first, so the submission finds its wait over and the stop together.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let earlier = tokio::time::sleep(Duration::from_millis(50));
+    tokio::spawn(async { std::thread::sleep(super::RETRY + Duration::from_millis(50)) });
+    earlier.await;
+    stopping.cancel();
+    let outcome = tokio::time::timeout(Duration::from_secs(2), submission).await??;
+    server.abort();
+    assert!(outcome.is_none());
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
     Ok(())
 }
 
