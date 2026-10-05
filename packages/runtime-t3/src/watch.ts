@@ -85,6 +85,7 @@ export interface Retained {
   readonly messages: number;
   readonly providerThreads: number;
   readonly sessions: number;
+  /** Provider records and transfers held until the run they belong to is known. */
   readonly pendingProviderRecords: number;
   readonly detachedSessions: number;
   readonly delegations: number;
@@ -229,6 +230,11 @@ export function watchTurn(
   const unconfirmed = new Set<string>();
   /** Handoffs, forks and merges of the turn's runs. */
   const transfers = new Map<string, ContextTransfer>();
+  /**
+   * The few most recent transfers that name no run the turn holds yet: T3
+   * records a provider handoff before it creates the run it hands over to.
+   */
+  const recentTransfers = new Map<string, ContextTransfer>();
   let hasMessages = false;
   /** The turn's assistant messages by ID, kept across snapshots. */
   const assistant = new Map<string, Message>();
@@ -316,6 +322,7 @@ export function watchTurn(
     stray = undefined;
     recentThreads.clear();
     recentSessions.clear();
+    recentTransfers.clear();
     detachedSessions.clear();
   }
 
@@ -392,6 +399,8 @@ export function watchTurn(
       turnRuns.set(run.id, run);
       earlier.delete(run.id);
       if (last === undefined || run.ordinal >= last.ordinal) last = run;
+      for (const transfer of [...recentTransfers.values()])
+        if (namesLinkedRun(transfer)) foldTransfer(transfer);
       return;
     }
     if (anchor !== undefined && run.ordinal >= anchor.ordinal) return;
@@ -502,9 +511,16 @@ export function watchTurn(
 
   function foldTransfer(transfer: ContextTransfer): void {
     if (!TRANSFER_WORK.has(transfer.type)) return;
-    const runs = [transfer.sourcePoint.runId, transfer.targetRunId];
-    if (!runs.some((run) => run != null && linkedRun(run))) return;
-    transfers.set(transfer.id, transfer);
+    if (namesLinkedRun(transfer)) {
+      transfers.set(transfer.id, transfer);
+      recentTransfers.delete(transfer.id);
+    } else remember(recentTransfers, transfer.id, transfer);
+  }
+
+  function namesLinkedRun(transfer: ContextTransfer): boolean {
+    return [transfer.sourcePoint.runId, transfer.targetRunId].some(
+      (run) => run != null && linkedRun(run),
+    );
   }
 
   function foldRequest(request: RuntimeRequest): void {
@@ -1117,7 +1133,7 @@ export function watchTurn(
       messages: assistant.size,
       providerThreads: providerThreads.size,
       sessions: sessions.size,
-      pendingProviderRecords: recentThreads.size + recentSessions.size,
+      pendingProviderRecords: recentThreads.size + recentSessions.size + recentTransfers.size,
       detachedSessions: detachedSessions.size,
       delegations: delegations.size,
       transfers: transfers.size,

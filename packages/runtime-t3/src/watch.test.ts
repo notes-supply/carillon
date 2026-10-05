@@ -291,6 +291,30 @@ it("does not take over background work listed before its run started, but waits 
   expect(resumed.outcome()).toBeUndefined();
 });
 
+it("shows a provider handoff T3 records before the run it hands over to", () => {
+  const watch = watchTurn("message-2", "/workspace");
+  watch.apply(snapshot({ runs: [run("completed", "earlier", 1)] }));
+  const handoff = (status: string) => ({
+    id: "handoff",
+    type: "provider_handoff",
+    status,
+    sourceThreadId: "thread",
+    targetThreadId: "thread",
+    sourcePoint: { threadId: "thread" },
+    targetRunId: "run-2",
+    targetProviderInstanceId: "codex",
+  });
+  const held = watch.retained().pendingProviderRecords;
+  watch.apply(event(2, "context-transfer.created", handoff("pending")));
+  expect(watch.retained().pendingProviderRecords).toBe(held + 1);
+  watch.apply(event(3, "run.created", run("running", "message-2", 2)));
+  watch.apply(event(4, "context-transfer.updated", handoff("consumed")));
+  expect(watch.activity().work?.items).toEqual([
+    { id: "handoff", kind: "handoff", label: "context handoff to codex", state: "succeeded" },
+  ]);
+  expect(watch.retained().pendingProviderRecords).toBe(0);
+});
+
 it("is not finished while background work, an owed wake or a pending request remains", () => {
   const watch = watchTurn("message-1", "/workspace");
   watch.apply(
