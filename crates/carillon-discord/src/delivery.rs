@@ -7,7 +7,7 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use carillon_protocol::model::{Delivery, DeliveryOutcome, ExternalEvent};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, hash_map::Entry},
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
@@ -56,7 +56,8 @@ pub(crate) enum Feedback {
 /// delivered, failed or uncertain one that replaces it.
 ///
 /// A processing reaction is a request these reactions own until Discord
-/// answers it or [`FEEDBACK_LIMIT`] passes. Admission waits for it at most
+/// answers it or [`FEEDBACK_LIMIT`] passes, and a message admitted again
+/// meanwhile, such as a duplicate, shares it. Admission waits for it at most
 /// [`PROMPT_FEEDBACK`], and stopping that wait cancels only the wait: a
 /// request Discord already received may still be applied, so the request
 /// goes on. The message's outcome reaction waits for it to end before
@@ -65,7 +66,7 @@ pub(crate) enum Feedback {
 /// it may still be applied later, and that is logged, not assumed away.
 ///
 /// Reactions that run beside work are tasks these reactions own until
-/// [`Reactions::stop`]: processing requests, one per admission, and
+/// [`Reactions::stop`]: processing requests, one per message at a time, and
 /// at most [`OUTCOMES`] outcome reactions.
 #[derive(Clone)]
 pub(crate) struct Reactions(Arc<Owned>);
@@ -73,8 +74,8 @@ pub(crate) struct Reactions(Arc<Owned>);
 struct Owned {
     http: Arc<DiscordHttp>,
     config: DiscordConfig,
-    /// Processing requests not yet ended, by feedback target. A receiver
-    /// closes when its request ends.
+    /// Processing requests not yet ended, one per feedback target. A
+    /// receiver closes when its request ends.
     unanswered: Mutex<HashMap<String, watch::Receiver<()>>>,
     /// Slots for the outcome reactions shown beside work.
     outcomes: Arc<Semaphore>,
@@ -114,15 +115,24 @@ impl Reactions {
         }
     }
 
-    /// Sends the processing reaction as a task these reactions own. The
-    /// returned receiver closes when the request has ended.
+    /// Sends the message's processing reaction as a task these reactions
+    /// own, unless its request is still under way. The returned receiver
+    /// closes when the request has ended.
     fn processing(&self, target: &str) -> Option<watch::Receiver<()>> {
         if !self.0.config.reactions {
             return None;
         }
-        let (sent, ended) = watch::channel(());
-        lock(&self.0.unanswered).insert(target.to_owned(), ended.clone());
-        let (this, target, mine) = (self.clone(), target.to_owned(), ended.clone());
+        let (sent, ended) = match lock(&self.0.unanswered).entry(target.to_owned()) {
+            // A message admitted again, such as a duplicate, shares the
+            // request under way: a second one could be applied after an
+            // outcome that waited only for the first.
+            Entry::Occupied(under_way) => return Some(under_way.get().clone()),
+            Entry::Vacant(vacant) => {
+                let (sent, ended) = watch::channel(());
+                (sent, vacant.insert(ended).clone())
+            }
+        };
+        let (this, target) = (self.clone(), target.to_owned());
         self.spawn(async move {
             let owned = &this.0;
             if let Err(failure) =
@@ -131,13 +141,7 @@ impl Reactions {
                 // Unanswered, Discord may still apply it after the outcome.
                 warn!(error = %failure, %target, "Discord processing reaction failed or was not answered");
             }
-            let mut unanswered = lock(&owned.unanswered);
-            if unanswered
-                .get(&target)
-                .is_some_and(|current| current.same_channel(&mine))
-            {
-                unanswered.remove(&target);
-            }
+            lock(&owned.unanswered).remove(&target);
             drop(sent);
         });
         Some(ended)

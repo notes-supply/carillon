@@ -422,3 +422,102 @@ async fn slow_feedback_never_delays_a_messages_admission() -> anyhow::Result<()>
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_duplicate_never_lets_the_processing_reaction_land_after_the_outcome()
+-> anyhow::Result<()> {
+    // Discord applies the first processing reaction four seconds after
+    // receiving it, after admission stopped waiting, and any later one at
+    // once; core reports the message's second arrival as a duplicate.
+    let applied = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let submissions = Arc::new(AtomicUsize::new(0));
+    let submitted = submissions.clone();
+    let app = Router::new()
+        .route(
+            "/v1/events",
+            post(move |Json(event): Json<ExternalEvent>| {
+                let duplicate = submitted.fetch_add(1, Ordering::SeqCst) > 0;
+                async move {
+                    Json(EventReceipt {
+                        event_id: event.event_id,
+                        turn_id: "accepted".to_owned(),
+                        duplicate,
+                        state: TurnState::Queued,
+                    })
+                }
+            }),
+        )
+        .merge(crate::delivery::tests::late_processing(
+            Duration::from_secs(4),
+            applied.clone(),
+        ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let http = Arc::new(
+        twilight_http::Client::builder()
+            .token("test-only".to_owned())
+            .proxy(address.to_string(), true)
+            .ratelimiter(None)
+            .build(),
+    );
+    let directory = tempfile::tempdir()?;
+    let participation = Arc::new(Participation::load(
+        directory.path().join("participation.json"),
+    )?);
+    let mut config = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
+    config.typing = false;
+    let (processing, delivered) = (
+        config.processing_emoji.clone(),
+        config.delivered_emoji.clone(),
+    );
+    // The same message arrives twice, as a replayed gateway event does.
+    let (send, receive) = tokio::sync::mpsc::channel(2);
+    for _ in 0..2 {
+        send.send(super::QueuedMessage {
+            request: IncomingMessage {
+                event_id: "400".to_owned(),
+                guild_id: Some("100".to_owned()),
+                user_id: "200".to_owned(),
+                channel_id: "300".to_owned(),
+                parent_channel_id: None,
+                content: "hello".to_owned(),
+                attachments: Vec::new(),
+            },
+            native: Value::Null,
+        })
+        .await?;
+    }
+    drop(send);
+    let ingress = ingress(
+        core_client(format!("http://{address}")),
+        config,
+        participation,
+        http,
+        directory.path(),
+    )?;
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        super::lanes::dispatch(ingress.clone(), receive),
+    )
+    .await?;
+    // The answer is delivered and its outcome shown, as the delivery loop does.
+    ingress
+        .reactions
+        .show_outcome("300:400".to_owned(), crate::delivery::Feedback::Delivered);
+    assert_eq!(ingress.reactions.stop(Duration::from_secs(10)).await, 0);
+    server.abort();
+    assert_eq!(submissions.load(Ordering::SeqCst), 2);
+    // One processing reaction, removed by the duplicate and again by the
+    // outcome, before the delivered one.
+    assert_eq!(
+        *applied.lock().await,
+        [
+            format!("PUT {processing}"),
+            format!("DELETE {processing}"),
+            format!("DELETE {processing}"),
+            format!("PUT {delivered}"),
+        ]
+    );
+    Ok(())
+}

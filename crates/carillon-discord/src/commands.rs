@@ -1959,23 +1959,11 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// Discord receives the processing reaction at once but applies it only
-    /// after `delay`, in work of its own that goes on whatever its client
-    /// does, as an accepted request can; everything else applies at once.
-    /// `applied` records the order in which reactions take effect.
+    /// Core accepting every event, beside a Discord that posts the marker
+    /// and applies the first processing reaction `delay` after receiving it.
     fn applying_server(delay: Duration, applied: Arc<tokio::sync::Mutex<Vec<String>>>) -> Router {
-        use axum::{
-            Json,
-            extract::Path,
-            http::Method,
-            routing::{any, post},
-        };
+        use axum::{Json, routing::post};
         use carillon_protocol::model::{EventReceipt, ExternalEvent, TurnState};
-        let processing = crate::conversations::tests::discord_config(
-            crate::config::DiscordActivation::Always,
-            crate::config::DiscordConversation::Thread,
-        )
-        .processing_emoji;
         Router::new()
             .route(
                 "/v1/events",
@@ -2008,26 +1996,7 @@ pub(crate) mod tests {
                     }))
                 }),
             )
-            .route(
-                "/api/v10/channels/{channel}/messages/{message}/reactions/{emoji}/@me",
-                any(
-                    move |method: Method, Path((_, _, emoji)): Path<(String, String, String)>| {
-                        let (applied, processing) = (applied.clone(), processing.clone());
-                        async move {
-                            let effect = format!("{method} {emoji}");
-                            let pending = method == Method::PUT && emoji == processing;
-                            let applying = tokio::spawn(async move {
-                                if pending {
-                                    tokio::time::sleep(delay).await;
-                                }
-                                applied.lock().await.push(effect);
-                            });
-                            let _ = applying.await;
-                            StatusCode::NO_CONTENT
-                        }
-                    },
-                ),
-            )
+            .merge(crate::delivery::tests::late_processing(delay, applied))
             .fallback(|| async { StatusCode::NO_CONTENT })
     }
 

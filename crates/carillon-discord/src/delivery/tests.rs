@@ -428,6 +428,41 @@ async fn slow_reactions_never_hold_up_deliveries_and_stay_bounded() -> anyhow::R
     Ok(())
 }
 
+/// Discord's reaction endpoint, which receives the first processing reaction
+/// at once but applies it only `delay` later, in work of its own that goes on
+/// whatever its client does, as an accepted request can; later reactions
+/// apply at once. `applied` records the order in which reactions take effect.
+pub(crate) fn late_processing(
+    delay: Duration,
+    applied: Arc<tokio::sync::Mutex<Vec<String>>>,
+) -> Router {
+    let processing =
+        discord_config(DiscordActivation::Always, DiscordConversation::Channel).processing_emoji;
+    let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    Router::new().route(
+        "/api/v10/channels/{channel}/messages/{message}/reactions/{emoji}/@me",
+        any(
+            move |method: Method, Path((_, _, emoji)): Path<(String, String, String)>| {
+                let effect = format!("{method} {emoji}");
+                let late = method == Method::PUT
+                    && emoji == processing
+                    && first.swap(false, Ordering::SeqCst);
+                let applied = applied.clone();
+                async move {
+                    let applying = tokio::spawn(async move {
+                        if late {
+                            tokio::time::sleep(delay).await;
+                        }
+                        applied.lock().await.push(effect);
+                    });
+                    let _ = applying.await;
+                    StatusCode::NO_CONTENT
+                }
+            },
+        ),
+    )
+}
+
 #[tokio::test]
 async fn a_stopping_provider_ends_its_reactions_within_the_grace() -> anyhow::Result<()> {
     // Discord answers message 401's reactions only after 30 seconds and
