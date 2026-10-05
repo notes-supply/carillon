@@ -212,9 +212,10 @@ const SUBMIT_ATTEMPTS: u32 = 3;
 ///
 /// The submission returns by `deadline`, the end of its interaction's
 /// calls, so the module can still say what happened. Before it, posting the
-/// marker takes at most [`MARKER_LIMIT`], and admission waits at most
+/// marker takes at most [`MARKER_LIMIT`], and core's attempts take the rest,
+/// beside the wait of at most
 /// [`PROMPT_FEEDBACK`](crate::delivery::PROMPT_FEEDBACK) for the
-/// processing reaction and typing; core's attempts take the rest. An attempt
+/// processing reaction and typing, which never holds them back. An attempt
 /// core has not answered in time may have been accepted, which the answer
 /// says, and the marker's ID makes a repeated submission the same event. A
 /// refused or unconfirmed submission's reaction is then shown without the
@@ -265,30 +266,38 @@ async fn submit(
         text,
         intent,
     );
-    // Stopping admission's wait leaves the processing request going on.
-    let _ = timeout_at(deadline, reactions.admission(&event)).await;
-    let retry = Duration::from_millis(500);
-    let mut attempt = 1;
-    let (feedback, refusal) = loop {
-        let failure = match timeout_at(deadline, core.submit_event(&event)).await {
-            Ok(Ok(_)) => return Ok(()),
-            Ok(Err(failure)) if !failure.is_transient() => {
-                warn!(error = %failure.message, event_id = %event.event_id, "core refused a command");
-                break (Feedback::Failed, "Carillon could not accept it.");
+    // Admission registers the processing request at once, so the outcome
+    // waits for it. Core's attempts then run beside the optional wait for the
+    // feedback, which never takes time they need.
+    let shown = timeout_at(deadline, reactions.admission(&event));
+    let attempts = async {
+        let retry = Duration::from_millis(500);
+        let mut attempt = 1;
+        loop {
+            let failure = match timeout_at(deadline, core.submit_event(&event)).await {
+                Ok(Ok(_)) => return Ok(()),
+                Ok(Err(failure)) if !failure.is_transient() => {
+                    warn!(error = %failure.message, event_id = %event.event_id, "core refused a command");
+                    return Err((Feedback::Failed, "Carillon could not accept it."));
+                }
+                Ok(Err(failure)) => failure.message,
+                Err(_) => "core did not answer in time".to_owned(),
+            };
+            if attempt == SUBMIT_ATTEMPTS || Instant::now() + retry >= deadline {
+                warn!(error = %failure, event_id = %event.event_id, "command submission unconfirmed");
+                return Err((
+                    Feedback::Uncertain,
+                    "Carillon did not confirm that it accepted it; if it did, the answer follows in this conversation.",
+                ));
             }
-            Ok(Err(failure)) => failure.message,
-            Err(_) => "core did not answer in time".to_owned(),
-        };
-        if attempt == SUBMIT_ATTEMPTS || Instant::now() + retry >= deadline {
-            warn!(error = %failure, event_id = %event.event_id, "command submission unconfirmed");
-            break (
-                Feedback::Uncertain,
-                "Carillon did not confirm that it accepted it; if it did, the answer follows in this conversation.",
-            );
+            warn!(error = %failure, event_id = %event.event_id, "waiting to submit a command");
+            attempt += 1;
+            tokio::time::sleep(retry).await;
         }
-        warn!(error = %failure, event_id = %event.event_id, "waiting to submit a command");
-        attempt += 1;
-        tokio::time::sleep(retry).await;
+    };
+    let (_, submitted) = tokio::join!(shown, attempts);
+    let Err((feedback, refusal)) = submitted else {
+        return Ok(());
     };
     reactions.show_outcome(event.feedback_target_id, feedback);
     Err(refusal.to_owned())
@@ -1799,13 +1808,16 @@ pub(crate) mod tests {
         );
         server.abort();
         let trace = trace.lock().await;
-        // The marker is posted silently first, marked processing, then submitted.
+        // The marker is posted silently first, then marked processing and
+        // submitted.
         assert_eq!(
             trace[0],
             "message <@200> ran `/compact keep ˋthisˋ` mentions {\"parse\":[]}"
         );
-        assert!(trace[1].starts_with("PUT /api/v10/channels/400/messages/901/reactions/"));
-        assert_eq!(trace[2], "event 901");
+        assert!(trace[1..3].iter().any(|request| {
+            request.starts_with("PUT /api/v10/channels/400/messages/901/reactions/")
+        }));
+        assert!(trace[1..3].iter().any(|request| request == "event 901"));
         let event = submitted.lock().await.remove(0);
         assert_eq!(event.content, "/compact keep `this`");
         assert_eq!(event.feedback_target_id, "400:901");
@@ -1932,17 +1944,14 @@ pub(crate) mod tests {
             "admission waited {elapsed:?} for feedback"
         );
         assert_eq!(submitted.lock().await.len(), 1);
-        // The marker, then the feedback that was asked for, then admission.
+        // The marker, then the feedback that was asked for, with admission
+        // beside it.
         let trace = trace.lock().await;
         assert!(trace[0].starts_with("message <@200> ran"));
-        let feedback = &trace[1..3];
-        assert!(
-            feedback
-                .iter()
-                .any(|request| request.contains("/reactions/"))
-        );
-        assert!(feedback.iter().any(|request| request.ends_with("/typing")));
-        assert_eq!(trace[3], "event 901");
+        let after = &trace[1..4];
+        assert!(after.iter().any(|request| request.contains("/reactions/")));
+        assert!(after.iter().any(|request| request.ends_with("/typing")));
+        assert!(after.iter().any(|request| request == "event 901"));
         Ok(())
     }
 
@@ -2084,6 +2093,56 @@ pub(crate) mod tests {
                 .last()
                 .is_some_and(|request| request.starts_with("PUT ")
                     && request.contains("/reactions/%E2%9A%A0")),
+            "{trace:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_run_click_hands_the_command_to_core_however_slow_its_feedback() -> anyhow::Result<()>
+    {
+        // The runtime lists its commands just inside its own limit, leaving
+        // less than the feedback's wait; Discord then takes far longer to
+        // show the processing reaction and typing, while core answers at once.
+        let trace = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let submitted = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let router = submission_server(
+            carillon_protocol::model::CommandCatalog {
+                commands: vec![carillon_protocol::model::RuntimeCommand {
+                    name: "compact".to_owned(),
+                    description: None,
+                    hint: None,
+                }],
+            },
+            trace.clone(),
+            submitted.clone(),
+            (
+                Duration::from_millis(5_500),
+                Duration::ZERO,
+                Duration::from_secs(30),
+            ),
+        );
+        let (calls, reactions, server) = submitting(router, |config| config.typing = true).await?;
+        let directory = tempfile::tempdir()?;
+        std::fs::write(directory.path().join("release.wasm"), running_module()?)?;
+        let commands = Commands::load(files(directory.path())).await?;
+        let started = std::time::Instant::now();
+        let reply = commands.invoke(calls, interaction()).await?;
+        let elapsed = started.elapsed();
+        assert_eq!(reply.content, "ran");
+        assert!(elapsed < super::DEADLINE, "answered after {elapsed:?}");
+        // The optional feedback took none of core's time: it has the command,
+        // once, and the processing request it waits behind is still owned.
+        assert_eq!(submitted.lock().await.len(), 1);
+        assert_eq!(reactions.stop(Duration::from_millis(100)).await, 1);
+        server.abort();
+        let trace = trace.lock().await;
+        assert!(
+            trace[0].starts_with("message <@200> ran `/compact keep decisions`"),
+            "{trace:?}"
+        );
+        assert!(
+            trace.iter().any(|request| request.contains("/reactions/")),
             "{trace:?}"
         );
         Ok(())

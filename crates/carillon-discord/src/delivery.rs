@@ -97,9 +97,14 @@ impl Reactions {
     }
 
     /// The processing reaction and a typing indicator, before a message is
-    /// handed to core. Admission waits for them at most
-    /// [`PROMPT_FEEDBACK`]; the processing request goes on without it.
-    pub(crate) async fn admission(&self, event: &ExternalEvent) {
+    /// handed to core. The processing request is registered when admission
+    /// is asked for, so the message's outcome waits for it; the returned
+    /// wait for both ends within [`PROMPT_FEEDBACK`], and the processing
+    /// request goes on without it.
+    pub(crate) fn admission<'a>(
+        &'a self,
+        event: &'a ExternalEvent,
+    ) -> impl Future<Output = ()> + 'a {
         let Owned {
             http,
             config,
@@ -107,7 +112,7 @@ impl Reactions {
             ..
         } = &*self.0;
         let processing = self.processing(&event.feedback_target_id);
-        let shown = async {
+        let shown = async move {
             tokio::join!(
                 async {
                     if let Some(mut ended) = processing {
@@ -117,11 +122,13 @@ impl Reactions {
                 trigger_typing(http, config, &event.delivery_target_id),
             );
         };
-        if timeout(PROMPT_FEEDBACK, stopped.run_until_cancelled(shown))
-            .await
-            .is_err()
-        {
-            warn!(event_id = %event.event_id, "Discord feedback was not shown in time; the message is admitted without waiting for it");
+        async move {
+            if timeout(PROMPT_FEEDBACK, stopped.run_until_cancelled(shown))
+                .await
+                .is_err()
+            {
+                warn!(event_id = %event.event_id, "Discord feedback was not shown in time; the message is admitted without waiting for it");
+            }
         }
     }
 

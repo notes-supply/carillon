@@ -53,10 +53,11 @@ retain the actual Wasm path rather than substituting this direct native call.
   message in the conversation and submits an event anchored on it, with the interaction's
   admission and `native.intent: "command"`. An interaction's native calls, such as a Run
   click's catalog lookup and the submission that follows it, end within seven of the
-  module's ten seconds together: within them, at most four to post the marker, at most two
-  waiting for the processing reaction and typing before admission, and core's attempts in
-  the rest; core's silence is reported as a possible acceptance, never as not sent, and a
-  refusal's reaction is shown without the answer waiting for it.
+  module's ten seconds together: within them, at most four to post the marker, and core's
+  attempts in the rest, beside the wait of at most two for the processing reaction and
+  typing, which never holds them back; core's silence is reported as a possible
+  acceptance, never as not sent, and a refusal's reaction is shown without the answer
+  waiting for it.
 - [`inbound`](src/inbound.rs) settles one admitted message: it asks core whether it
   already holds the message, such as a replayed one, and if not prepares the native
   conversation, emits feedback (admission waits at most two seconds for it) and retries
