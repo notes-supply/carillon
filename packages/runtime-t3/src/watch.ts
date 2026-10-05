@@ -1174,7 +1174,7 @@ export function watchTurn(
         case "snapshot": {
           const projection = item["projection"];
           const sequence = item["snapshotSequence"];
-          if (!Check(ProjectionSchema, projection) || typeof sequence !== "number")
+          if (!Check(ProjectionSchema, projection) || !isSequence(sequence))
             throw new T3Failure(
               "malformed",
               "T3 sent a thread snapshot this runtime does not understand",
@@ -1282,7 +1282,7 @@ export function watchTurn(
           const executingBefore = ownRunExecuting();
           const event = item["event"];
           const sequence = item["sequence"];
-          if (!isRecord(event) || typeof event["type"] !== "string" || typeof sequence !== "number")
+          if (!isRecord(event) || typeof event["type"] !== "string" || !isSequence(sequence))
             throw new T3Failure(
               "malformed",
               "T3 sent a thread event this runtime does not understand",
@@ -1629,4 +1629,12 @@ function openingOf(payload: unknown): readonly [string, Opening] | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * A stream sequence, which T3 numbers with integers: a fraction would
+ * become the replay cursor and skip the events below it.
+ */
+function isSequence(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value);
 }

@@ -562,6 +562,23 @@ it("explains failures with T3's failure text and treats other stops as stopped",
   expect(stopped.busy()).toBe(true);
 });
 
+it("refuses stream sequences that are not integers before they move the replay cursor", () => {
+  const watch = watchTurn("message-1", "/workspace");
+  expect(() => watch.apply(snapshot({ runs: [run("running")] }, 1.5))).toThrow(
+    "T3 sent a thread snapshot this runtime does not understand",
+  );
+  expect(watch.sequence()).toBeUndefined();
+  watch.apply(snapshot({ runs: [run("running")] }, 4));
+  expect(() => watch.apply(event(4.5, "run.updated", run("completed")))).toThrow(
+    "T3 sent a thread event this runtime does not understand",
+  );
+  expect(watch.sequence()).toBe(4);
+  // The next integer event is still folded.
+  watch.apply(event(5, "run.updated", run("completed")));
+  expect(watch.sequence()).toBe(5);
+  expect(watch.outcome()?.kind).toBe("completed");
+});
+
 it("refuses known kinds it cannot read, ignores unknown kinds and malformed stream items it does not need", () => {
   const watch = watchTurn("message-1", "/workspace");
   expect(() =>
