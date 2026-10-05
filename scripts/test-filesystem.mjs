@@ -839,9 +839,18 @@ async function testAttachments() {
   const copying = baseline.find((line) => /\/attachments\/\.partial-[^/>]+\/0>/u.test(line));
   assert.ok(copying, "captured files must be synced before publication");
   const worker = copying.split(" ")[0];
+  // Tokio wakes its I/O driver by writing to an eventfd, from whichever
+  // thread finished blocking work, so whether the capture's thread writes
+  // one before its files depends on the blocking pool's thread reuse. Writes
+  // to those descriptors are not counted here, nor by strace (`trace-fds`).
+  const wakers = [
+    ...new Set(baseline.flatMap((line) => / write\((\d+)<\{eventfd/u.exec(line)?.slice(1) ?? [])),
+  ];
+  const counted = (line) => !wakers.some((fd) => line.includes(` write(${fd}<`));
   const calls = (name, thread = worker) =>
     baseline.filter(
-      (line) => line.startsWith(`${thread} `) && new RegExp(` ${name}\\(`, "u").test(line),
+      (line) =>
+        line.startsWith(`${thread} `) && new RegExp(` ${name}\\(`, "u").test(line) && counted(line),
     );
   const others = (name) => {
     const threads = new Set(baseline.map((line) => line.split(" ")[0]).filter(Boolean));
@@ -869,7 +878,7 @@ async function testAttachments() {
     else if (call !== "renameat2")
       assert.ok(order(candidates[index]) < published, `${name} precedes publication`);
     const error = name === "full" ? "ENOSPC" : "EIO";
-    await attachmentAttempt(name, { call, error, ordinal: index + 1, predicate });
+    await attachmentAttempt(name, { call, error, ordinal: index + 1, predicate, wakers });
     console.log(`attachment durability failure passed: ${name}`);
   }
 }
@@ -942,8 +951,11 @@ async function attachmentAttempt(name, fault) {
   const log = join(scratch, `capture-${name}.trace`);
   const trace = "trace=mkdir,rename,renameat2,fsync,fdatasync,write";
   const args = ["-f", "-qq", "-yy", "-s", "256", "-e", trace, "-o", log];
-  if (fault)
+  if (fault) {
     args.push("-e", `inject=${fault.call}:error=${fault.error}:when=${String(fault.ordinal)}`);
+    if (fault.call === "write" && fault.wakers.length > 0)
+      args.push("-e", `trace-fds=!${fault.wakers.join(",")}`);
+  }
   await withCore(["strace", [...args, binary, "core", "--config", config]], async (base) => {
     const response = await accept(base);
     const body = await response.text();
