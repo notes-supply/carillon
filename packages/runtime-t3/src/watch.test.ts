@@ -233,6 +233,64 @@ it("bounds finished tools to the recent window while counting every call", () =>
   expect(typeof activity.running[0]?.started_at).toBe("number");
 });
 
+it("does not take over background work listed before its run started, but waits for its own", () => {
+  const watch = watchTurn("message-2", "/workspace");
+  const thread = (taskIds: string[]) => ({
+    id: "provider-thread",
+    providerSessionId: "session",
+    pendingBackgroundTasks: taskIds.map((taskId) => ({
+      taskId,
+      kind: "command",
+      description: taskId,
+    })),
+  });
+  // A run started in T3's own UI completed and left background work listed.
+  watch.apply(
+    snapshot({ runs: [run("completed", "ui", 1)], providerThreads: [thread(["ui-task"])] }),
+  );
+  watch.apply(event(2, "run.created", run("queued", "message-2", 2)));
+  watch.apply(event(3, "run.updated", run("running", "message-2", 2)));
+  expect(watch.activity().running).toEqual([]);
+  watch.apply(
+    event(4, "message.updated", {
+      id: "a",
+      runId: "run-2",
+      role: "assistant",
+      text: "CARILLON-AFTER",
+      createdAt: "2026-10-05T12:34:00Z",
+    }),
+  );
+  watch.apply(event(5, "run.updated", run("completed", "message-2", 2)));
+  // The UI's work is still listed, and its report is the UI's, not this turn's.
+  expect(watch.outcome()).toEqual({ kind: "completed", output: "CARILLON-AFTER" });
+  expect(watch.quiet()).toBe(true);
+
+  // Work the turn's own run starts on the same thread is the turn's.
+  const own = watchTurn("message-3", "/workspace");
+  own.apply(
+    snapshot({ runs: [run("completed", "ui", 1)], providerThreads: [thread(["ui-task"])] }),
+  );
+  own.apply(event(2, "run.created", run("starting", "message-3", 2)));
+  own.apply(event(3, "run.updated", run("running", "message-3", 2)));
+  own.apply(
+    event(
+      4,
+      "turn-item.updated",
+      item("command_execution", "run-2", { input: "sleep 30 &" }, "running"),
+    ),
+  );
+  own.apply(event(5, "provider-thread.updated", thread(["ui-task", "own-task"])));
+  own.apply(event(6, "run.updated", run("completed", "message-3", 2)));
+  expect(own.outcome()).toBeUndefined();
+  expect(own.activity().running.map((tool) => tool.detail)).toEqual(["sleep 30 &", "own-task"]);
+  // A run first seen already running cannot tell what was listed before it: all of it is its own.
+  const resumed = watchTurn("message-4", "/workspace");
+  resumed.apply(
+    snapshot({ runs: [run("completed", "message-4", 1)], providerThreads: [thread(["unknown"])] }),
+  );
+  expect(resumed.outcome()).toBeUndefined();
+});
+
 it("is not finished while background work, an owed wake or a pending request remains", () => {
   const watch = watchTurn("message-1", "/workspace");
   watch.apply(

@@ -275,6 +275,18 @@ export function watchTurn(
    * say whether the result was delivered.
    */
   let backgroundSeenAt: number | undefined;
+  /**
+   * Background work the provider thread already listed when the turn's run
+   * took it over: another run's, such as one started in T3's own UI, whose
+   * report is not this turn's to wait for or answer with. Known only when
+   * the fold saw the run before it started; otherwise every listed task
+   * counts as the turn's.
+   */
+  const inherited = new Set<string>();
+  /** The fold saw the turn's run before it started. */
+  let sawStart = false;
+  /** The work listed when the run took over its provider thread was recorded. */
+  let takenOver = false;
   const listeners = new Set<() => void>();
   /** When each background task was first seen, since T3 does not date them. */
   const backgroundSince = new Map<string, number>();
@@ -501,12 +513,18 @@ export function watchTurn(
   }
 
   /**
-   * The background work a run's provider thread lists. T3 sends the thread
+   * The turn's background work on a run's provider thread: what it lists,
+   * less work inherited from before the turn's run. T3 sends the thread
    * record before the run that names it and lists provider threads whole in
    * a snapshot, so a run that names a thread this fold has not been given
    * is a broken reference: its work is unknown, never an empty roster.
    */
   function roster(run: Run | undefined): readonly BackgroundTask[] {
+    return listedWork(run).filter((task) => !inherited.has(task.taskId));
+  }
+
+  /** Everything the run's provider thread lists, the turn's or not. */
+  function listedWork(run: Run | undefined): readonly BackgroundTask[] {
     if (run?.providerThreadId == null) return [];
     return listed(providerThreads.get(run.providerThreadId), run);
   }
@@ -901,6 +919,14 @@ export function watchTurn(
           break;
         default:
           return;
+      }
+      if (anchor !== undefined && followUp === undefined) {
+        if (BEFORE_PROVIDER.has(anchor.status)) sawStart = true;
+        const thread = anchor.providerThreadId;
+        if (sawStart && !takenOver && thread !== null && providerThreads.has(thread)) {
+          for (const task of listedWork(anchor)) inherited.add(task.taskId);
+          takenOver = true;
+        }
       }
       if (last !== undefined) {
         const listed = roster(last).length > 0;
