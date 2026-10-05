@@ -148,8 +148,9 @@ fn card_text(
 
 /// Delegated and transferred work, one bounded line per item. A known
 /// parent indents its children; items beyond the shown lines and an exact
-/// further count become "… and N more", and incomplete observation without
-/// a count is said as such, never as a guessed total.
+/// further count become "… and N more". Incomplete observation is said as
+/// such beside that count, which covers only what is known, and never
+/// becomes a guessed total.
 fn work_lines(lines: &mut Vec<String>, work: &WorkSummary, markers: &ActivityMarkers) {
     let shown = &work.items[..work.items.len().min(WORK_LINES)];
     for item in shown {
@@ -170,7 +171,8 @@ fn work_lines(lines: &mut Vec<String>, work: &WorkSummary, markers: &ActivityMar
         });
     if more > 0 {
         lines.push(marked(&markers.queued, &format!("… and {more} more")));
-    } else if work.partial {
+    }
+    if work.partial {
         lines.push(marked(
             &markers.uncertain,
             "… additional work not fully observed",

@@ -370,6 +370,35 @@ fn work_items_render_generic_bounded_rows_without_provider_knowledge() {
         text.ends_with("✗ delegation `child` · failed\n⚠️ … additional work not fully observed")
     );
 
+    // Hidden retained rows are counted, and do not stand in for coverage the
+    // runtime could not confirm (the coordinator's reproduction: five
+    // retained rows, partial, no exact further count).
+    let children = (0..5)
+        .map(|index| {
+            work(
+                &index.to_string(),
+                WorkKind::Delegation,
+                &format!("child {index}"),
+                WorkState::Running,
+            )
+        })
+        .collect::<Vec<_>>();
+    for omitted in [None, NonZeroU32::new(2)] {
+        activity.work = Some(WorkSummary {
+            items: children.clone(),
+            partial: true,
+            omitted,
+        });
+        let text = active_text(&turn(Some(activity.clone())), None, &markers);
+        let more = 1 + omitted.map_or(0, NonZeroU32::get);
+        assert!(
+            text.ends_with(&format!(
+                "child 3` · running\n⏳ … and {more} more\n⚠️ … additional work not fully observed"
+            )),
+            "{text}"
+        );
+    }
+
     // Work belongs to the live card: finishing and final cards keep only history.
     assert!(!finishing_text(Some(&activity), &markers).contains("delegation"));
     activity.phase = ActivityPhase::Queued;
