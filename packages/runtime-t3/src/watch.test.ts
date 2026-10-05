@@ -1934,3 +1934,186 @@ it("resumes a follow-up on a fresh snapshot while T3 still owes the delivery, an
   follow.apply(event(6, "run.updated", run("completed", "message:continuation", 2)));
   expect(follow.outcome()).toEqual({ kind: "completed", output: "The child said PONG." });
 });
+
+// Acknowledgement is consumption, not ownership: T3 sets `observedByRunId` to
+// whichever run was active when an agent read the result.
+const acknowledged = (observedByRunId: string) => ({
+  completionDelivery: { state: "acknowledged", observedByRunId },
+});
+const READ_ELSEWHERE =
+  "The agent read the result of the delegated work in another run of this conversation, not in a report of its own; T3 shows it.";
+const userMessageItem = (runId: string) => ({
+  id: `input-${runId}`,
+  runId,
+  type: "user_message",
+  status: "completed",
+  ordinal: 0,
+  title: null,
+  startedAt: null,
+  completedAt: null,
+  updatedAt: "2026-10-05T12:00:00Z",
+});
+const notificationItem = (runId: string, taskIds: readonly string[]) => ({
+  id: `notification-${runId}`,
+  runId,
+  type: "notification",
+  status: "completed",
+  ordinal: 0,
+  title: null,
+  startedAt: null,
+  completedAt: null,
+  updatedAt: "2026-10-05T12:00:00Z",
+  source: { kind: "delegated_task", taskIds },
+  outcome: "completed",
+  summary: "Delegated task finished",
+});
+
+it("never adopts another message's run because an agent read the result in it (coordinator reproduction)", () => {
+  const follow = watchTurn("message-1", "/workspace", { followUp: { after: 1 } });
+  follow.apply(
+    snapshot({
+      runs: [run("completed", "message-1", 1), run("completed", "ui-message", 2)],
+      messages: [
+        {
+          id: "ui-answer",
+          runId: "run-2",
+          role: "assistant",
+          text: "UNRELATED UI ANSWER (already delivered by its own turn)",
+          createdAt: "2026-10-05T12:00:00Z",
+        },
+      ],
+      turnItems: [userMessageItem("run-2")],
+      subagents: [task("child", "completed", "run-1", acknowledged("run-2"))],
+    }),
+  );
+  expect(follow.outcome()).toEqual({ kind: "completed", output: READ_ELSEWHERE });
+  expect(follow.retained().runs).toBe(0);
+});
+
+it("never adopts another message's run from a live acknowledgement, even one named before the run appears", () => {
+  const follow = watchTurn("message-1", "/workspace", { followUp: { after: 1 } });
+  follow.apply(snapshot({ runs: [run("completed")], subagents: [task("child", "running")] }));
+  // The acknowledgement names a run the fold has not seen yet.
+  follow.apply(
+    event(2, "subagent.updated", task("child", "completed", "run-1", acknowledged("run-2"))),
+  );
+  follow.apply(event(3, "run.created", run("running", "ui-message", 2)));
+  follow.apply(event(4, "turn-item.updated", userMessageItem("run-2")));
+  follow.apply(
+    event(5, "message.updated", {
+      id: "ui-answer",
+      runId: "run-2",
+      role: "assistant",
+      text: "UNRELATED UI ANSWER",
+      createdAt: "2026-10-05T12:00:00Z",
+    }),
+  );
+  follow.apply(event(6, "run.updated", run("completed", "ui-message", 2)));
+  expect(follow.outcome()).toEqual({ kind: "completed", output: READ_ELSEWHERE });
+  expect(follow.retained().runs).toBe(0);
+});
+
+it("reports a real continuation that read its own result, live and after a restart, without a note", () => {
+  const live = watchTurn("message-1", "/workspace", { followUp: { after: 1 } });
+  live.apply(snapshot({ runs: [run("completed")], subagents: [task("child", "running")] }));
+  live.apply(event(2, "run.created", run("running", "continuation", 2)));
+  live.apply(event(3, "turn-item.updated", notificationItem("run-2", ["child"])));
+  live.apply(
+    event(4, "subagent.updated", task("child", "completed", "run-1", acknowledged("run-2"))),
+  );
+  live.apply(
+    event(5, "message.updated", {
+      id: "report",
+      runId: "run-2",
+      role: "assistant",
+      text: "The child said PONG.",
+      createdAt: "2026-10-05T12:00:00Z",
+    }),
+  );
+  live.apply(event(6, "run.updated", run("completed", "continuation", 2)));
+  expect(live.outcome()).toEqual({ kind: "completed", output: "The child said PONG." });
+
+  const resumed = watchTurn("message-1", "/workspace", { followUp: { after: 1 } });
+  resumed.apply(
+    snapshot({
+      runs: [run("completed", "message-1", 1), run("completed", "continuation", 2)],
+      messages: [
+        {
+          id: "report",
+          runId: "run-2",
+          role: "assistant",
+          text: "The child said PONG.",
+          createdAt: "2026-10-05T12:00:00Z",
+        },
+      ],
+      turnItems: [notificationItem("run-2", ["child"])],
+      subagents: [task("child", "completed", "run-1", acknowledged("run-2"))],
+    }),
+  );
+  expect(resumed.outcome()).toEqual({ kind: "completed", output: "The child said PONG." });
+});
+
+it("keeps a pending announcement owed when a snapshot meets a full set of links (coordinator reproduction), and reports it when it runs", () => {
+  const base = { runs: [run("completed", "message-1", 1)] };
+  const overflow = watchTurn("message-1", "/workspace", { followUp: { after: 33 } });
+  overflow.apply(snapshot(base));
+  const links = Array.from({ length: 32 }, (_, index) => ({
+    id: `c${String(index + 1)}`,
+    runId: `run-${String(index + 2)}`,
+    role: "user",
+    text: "",
+    createdAt: "2026-10-05T12:00:00Z",
+    delegatedCompletion: { parentRunId: "run-1" },
+  }));
+  links.forEach((link, index) => overflow.apply(event(index + 2, "message.updated", link)));
+  overflow.apply(
+    snapshot(
+      {
+        runs: [
+          {
+            ...run("completed", "message-1", 1),
+            delegatedCompletion: { disposition: "open", delivery: { messageId: "pending-33" } },
+          },
+          ...links.map((link, index) => run("completed", link.id, index + 2)),
+        ],
+        messages: links,
+      },
+      40,
+    ),
+  );
+  // The announced continuation is still owed: the report waits for it.
+  expect(overflow.outcome()).toBeUndefined();
+  expect(overflow.retained().links).toBeLessThanOrEqual(32 + 16);
+  // Its continuation runs, and the report is delivered.
+  overflow.apply(event(41, "run.created", run("running", "pending-33", 34)));
+  overflow.apply(
+    event(42, "message.updated", {
+      id: "r34",
+      runId: "run-34",
+      role: "assistant",
+      text: "The 33rd result.",
+      createdAt: "2026-10-05T12:01:00Z",
+    }),
+  );
+  overflow.apply(event(43, "run.updated", run("completed", "pending-33", 34)));
+  expect(overflow.outcome()).toEqual({ kind: "completed", output: "The 33rd result." });
+});
+
+it("counts announced continuations beyond the bound as owed and partial when none has run", () => {
+  const watch = watchTurn("message-1", "/workspace", { followUp: { after: 1 } });
+  watch.apply(snapshot({ runs: [run("completed")] }));
+  for (let index = 0; index < 40; index += 1)
+    watch.apply(
+      event(index + 2, "message.updated", {
+        id: `owed-${String(index)}`,
+        runId: null,
+        role: "user",
+        text: "",
+        createdAt: "2026-10-05T12:00:00Z",
+        delegatedCompletion: { parentRunId: "run-1" },
+      }),
+    );
+  expect(watch.retained().links).toBeLessThanOrEqual(32 + 16);
+  expect(watch.outcome()).toBeUndefined();
+  expect(watch.activity().work?.partial).toBe(true);
+});

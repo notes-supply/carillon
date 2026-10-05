@@ -1562,7 +1562,7 @@ it("says where a child's result went when T3 delivers it into the next message's
   expect(await followUp).toEqual({
     correlation_id: "turn-1-report",
     output:
-      "T3 delivered the result of the delegated work into the reply to a later message in this conversation; it is there, and in T3.",
+      "T3 gave the result of the delegated work to the agent during a later message's run in this conversation, not in a report of its own; T3 shows it.",
   });
 });
 
@@ -1595,7 +1595,7 @@ it("resumes a follow-up after its observation was lost, reporting what T3 delive
   // reports the continuation once, and does not repeat the next message's reply.
   const resumed = await runtime.executeTurn(turn("turn-1-report", "", cursor));
   expect(resumed.output).toBe(
-    "Quick result.\n\n[T3 delivered the result of the delegated work into the reply to a later message in this conversation; it is there, and in T3.]",
+    "Quick result.\n\n[T3 gave the result of the delegated work to the agent during a later message's run in this conversation, not in a report of its own; T3 shows it.]",
   );
   // No dispatch, interrupt or detach on T3's work: two messages, both the person's.
   expect(dispatches()).toHaveLength(2);

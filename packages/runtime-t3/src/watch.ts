@@ -149,8 +149,12 @@ const ACTIVE_TASK: ReadonlySet<Subagent["status"]> = new Set(["pending", "runnin
 const OWED_DELIVERY: ReadonlySet<string> = new Set(["pending", "claimed"]);
 /** A result T3 delivered to the parent in a continuation. */
 const DELIVERED: ReadonlySet<string> = new Set(["delivered", "acknowledged"]);
+/** What T3's records prove when it gave a result to a run started by another message. */
 const STEERED_REPORT =
-  "T3 delivered the result of the delegated work into the reply to a later message in this conversation; it is there, and in T3.";
+  "T3 gave the result of the delegated work to the agent during a later message's run in this conversation, not in a report of its own; T3 shows it.";
+/** What T3's records prove when an agent read the result in a run that is not this report's. */
+const READ_ELSEWHERE =
+  "The agent read the result of the delegated work in another run of this conversation, not in a report of its own; T3 shows it.";
 const OLDER_REPORT =
   "T3 finished the report of the delegated work, but it is older than the part of the thread this runtime reads; read it in T3";
 /** Transfers shown as work of their own; spawn and result transfers belong to their delegation. */
@@ -267,7 +271,9 @@ export function watchTurn(
    * Continuation runs of the turn's work linked by run rather than message:
    * T3 drops a delivered continuation's message from its projection and the
    * parent's announcement once delivered, but the continuation run's own
-   * `delegated_task` notification (and a task's `observedByRunId`) remain.
+   * `delegated_task` notification remains. A task's `observedByRunId` is not
+   * such a link: it names whichever run was active when an agent read the
+   * result, which may be another message's run.
    */
   const ownRunLinks = new Map<string, string>();
   let snapshotRunLinks: ReadonlyMap<string, string> | undefined;
@@ -504,11 +510,23 @@ export function watchTurn(
       return;
     }
     pendingLinks.delete(message);
-    if (ownLinks.has(message) || ownLinks.size < WORK_RETAINED) ownLinks.set(message, parentRun);
-    else {
-      workOmitted = true;
-      owedUnknown = true;
+    if (!ownLinks.has(message) && ownLinks.size >= WORK_RETAINED) {
+      // Room is made by a link whose continuation already ran; a link still
+      // owed is never dropped for a newer one.
+      const ran = new Set(
+        [...continuationRuns.values()]
+          .filter((run) => !isActive(run))
+          .map((run) => run.userMessageId),
+      );
+      const room = [...ownLinks.keys()].find((kept) => ran.has(kept));
+      if (room === undefined) {
+        workOmitted = true;
+        owedUnknown = true;
+        return;
+      }
+      ownLinks.delete(room);
     }
+    ownLinks.set(message, parentRun);
   }
 
   /** A run whose delegated work and continuations belong to this turn's report. */
@@ -535,8 +553,10 @@ export function watchTurn(
     if (run.userMessageId === messageId) anchor = run;
     const owned =
       anchor !== undefined && ((run.id === anchor.id && followUp === undefined) || adopt(run));
-    // The run names the continuation that will report its delegated work.
-    const delivery = run.delegatedCompletion?.delivery;
+    // The run names the continuation that will report its delegated work. A
+    // snapshot's announcements are collected before its runs are folded and
+    // kept after, once its continuations are known.
+    const delivery = snapshotLinks === undefined ? run.delegatedCompletion?.delivery : undefined;
     if (owned) {
       turnRuns.set(run.id, run);
       earlier.delete(run.id);
@@ -661,8 +681,6 @@ export function watchTurn(
   /** A child agent of a run the turn holds; others are another conversation's business. */
   function foldSubagent(task: Subagent): void {
     if (task.runId === null || !linkedRun(task.runId)) return;
-    const observedBy = task.completionDelivery?.observedByRunId;
-    if (observedBy != null) linkRun(observedBy, task.runId);
     if (retain(delegations, task.id, task, settledTask)) unconfirmed.delete(task.id);
     else {
       workOmitted = true;
@@ -1009,6 +1027,23 @@ export function watchTurn(
   }
 
   /**
+   * Where results went when T3's records show them given to a run that is
+   * not one of this report's continuations: delivered into a run another
+   * message started, or read by an agent in another run.
+   */
+  function elsewhere(): string[] {
+    const read = [...delegations.values()].some((task) => {
+      const delivery = task.completionDelivery;
+      return (
+        delivery?.state === "acknowledged" &&
+        !(delivery.observedByRunId != null && turnRuns.has(delivery.observedByRunId)) &&
+        !steered.has(task.id)
+      );
+    });
+    return [...(steered.size > 0 ? [STEERED_REPORT] : []), ...(read ? [READ_ELSEWHERE] : [])];
+  }
+
+  /**
    * A follow-up turn's outcome once its latest continuation completed: the
    * continuations' text, carrying another cursor while delegated work still
    * owes a report. Text a resumed bounded snapshot may have left outside its
@@ -1021,7 +1056,7 @@ export function watchTurn(
     );
     if (output.length === 0 && missing) return { kind: "failed", explanation: OLDER_REPORT };
     const notes = [
-      ...(steered.size > 0 ? [`[${STEERED_REPORT}]`] : []),
+      ...elsewhere().map((note) => `[${note}]`),
       ...(missing
         ? [
             "[Part of this report is older than the part of the thread Carillon reads; T3 shows all of it.]",
@@ -1097,6 +1132,10 @@ export function watchTurn(
               );
           const before = new Map([...turnRuns].map(([id, run]) => [id, run.status]));
           reset();
+          // A snapshot lists runs, announcements and children whole, so the
+          // coverage of the turn's work is decided afresh from it.
+          workOmitted = false;
+          owedUnknown = false;
           // Continuation links first, from messages and the runs that announce
           // them, so no continuation is ever judged a stray; then runs in
           // ordinal order, so the turn's own is known before the runs that
@@ -1127,10 +1166,6 @@ export function watchTurn(
             if (startedRuns.has(report.run)) reports.push(report);
             else runLinks.set(report.run, report.parent);
           }
-          for (const task of projection.subagents) {
-            const observedBy = task.completionDelivery?.observedByRunId;
-            if (observedBy != null && task.runId !== null) runLinks.set(observedBy, task.runId);
-          }
           snapshotLinks = links;
           snapshotRunLinks = runLinks;
           try {
@@ -1157,8 +1192,6 @@ export function watchTurn(
           );
           const listedIds = new Set(listed.map((task) => task.id));
           for (const id of delegations.keys()) if (!listedIds.has(id)) unconfirmed.add(id);
-          workOmitted = false;
-          owedUnknown = false;
           for (const task of [...listed].sort(
             (left, right) => Number(settledTask(left)) - Number(settledTask(right)),
           ))
@@ -1295,9 +1328,10 @@ export function watchTurn(
         // Only a follow-up turn holds no run of its own: it waits for a
         // continuation as long as the delegated work still owes one.
         if (followUp === undefined || reportOwed()) return undefined;
-        // T3 delivered the result into the run of a later message, whose
-        // reply carries it: reported, not lost, and not repeated here.
-        if (steered.size > 0) return { kind: "completed", output: STEERED_REPORT };
+        // T3 gave the result to another run instead of a report of its own:
+        // that run's reply is its own, never repeated here.
+        const notes = elsewhere();
+        if (notes.length > 0) return { kind: "completed", output: notes.join("\n\n") };
         // T3 says it delivered a result, but the continuation that carries it
         // is not in the window this runtime reads.
         const delivered = [...delegations.values()].some((task) =>
