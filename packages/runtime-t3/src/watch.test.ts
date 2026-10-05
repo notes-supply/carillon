@@ -2117,3 +2117,57 @@ it("counts announced continuations beyond the bound as owed and partial when non
   expect(watch.outcome()).toBeUndefined();
   expect(watch.activity().work?.partial).toBe(true);
 });
+
+it("keeps linking live continuations beyond the bound, making room from those that ran, so the report is not left owed", () => {
+  for (const linkedBy of ["notification", "message"] as const) {
+    const follow = watchTurn("message-1", "/workspace", { followUp: { after: 1 } });
+    follow.apply(snapshot({ runs: [run("completed")] }));
+    let sequence = 2;
+    const delivered = { completionDelivery: { state: "delivered" } };
+    for (let index = 0; index < 40; index += 1) {
+      const ordinal = index + 2;
+      const runId = `run-${String(ordinal)}`;
+      const child = `child-${String(index)}`;
+      const message = `continuation-${String(index)}`;
+      follow.apply(event(sequence++, "subagent.updated", task(child, "running")));
+      follow.apply(
+        event(sequence++, "subagent.updated", task(child, "completed", "run-1", delivered)),
+      );
+      // T3 links a continuation by its own message, then starts its run.
+      if (linkedBy === "message")
+        follow.apply(
+          event(sequence++, "message.updated", {
+            id: message,
+            runId,
+            role: "user",
+            text: "",
+            createdAt: "2026-10-05T12:00:00Z",
+            delegatedCompletion: { parentRunId: "run-1" },
+          }),
+        );
+      follow.apply(event(sequence++, "run.created", run("running", message, ordinal)));
+      if (linkedBy === "notification")
+        follow.apply(event(sequence++, "turn-item.updated", notificationItem(runId, [child])));
+      follow.apply(
+        event(
+          sequence++,
+          "message.updated",
+          reply(
+            `report-${String(index)}`,
+            runId,
+            `REPORT ${String(index)}`,
+            `2026-10-05T12:${String(index).padStart(2, "0")}:00Z`,
+          ),
+        ),
+      );
+      follow.apply(event(sequence++, "run.updated", run("completed", message, ordinal)));
+    }
+    const outcome = follow.outcome();
+    expect(outcome, linkedBy).toMatchObject({ kind: "completed" });
+    expect(outcome, linkedBy).not.toHaveProperty("followUp");
+    expect(outcome?.kind === "completed" && outcome.output.endsWith("REPORT 39"), linkedBy).toBe(
+      true,
+    );
+    expect(follow.retained().links, linkedBy).toBeLessThanOrEqual(32);
+  }
+});

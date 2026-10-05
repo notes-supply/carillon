@@ -257,7 +257,16 @@ export function watchTurn(
    * them; a follow-up turn of the same conversation does (see `followUp`).
    */
   let continuationRuns = new Map<string, Run>();
-  /** Continuation messages of the turn's runs, by message, with the run whose work they report. */
+  /**
+   * Continuation messages of the turn's runs, by message, with the run whose
+   * work they report. T3 links a continuation by its message's
+   * `delegatedCompletion` or the parent run's announcement, and drops both
+   * once it delivered the continuation; the continuation run's own leading
+   * `delegated_task` notification remains, and links it through the run's
+   * message. A task's `observedByRunId` is not a link: it names whichever
+   * run was active when an agent read the result, which may be another
+   * message's run.
+   */
   const ownLinks = new Map<string, string>();
   /**
    * The few most recent continuation links of other runs: a continuation of
@@ -267,16 +276,6 @@ export function watchTurn(
   const pendingLinks = new Map<string, string>();
   /** A snapshot's links while it is folded; never kept beyond it. */
   let snapshotLinks: ReadonlyMap<string, string> | undefined;
-  /**
-   * Continuation runs of the turn's work linked by run rather than message:
-   * T3 drops a delivered continuation's message from its projection and the
-   * parent's announcement once delivered, but the continuation run's own
-   * `delegated_task` notification remains. A task's `observedByRunId` is not
-   * such a link: it names whichever run was active when an agent read the
-   * result, which may be another message's run.
-   */
-  const ownRunLinks = new Map<string, string>();
-  let snapshotRunLinks: ReadonlyMap<string, string> | undefined;
   /**
    * The few most recent runs started by a message (their timeline begins
    * with a `user_message` item). A continuation run has none: its first item
@@ -412,7 +411,12 @@ export function watchTurn(
    */
   function adopt(run: Run): boolean {
     if (anchor === undefined || run.ordinal <= anchor.ordinal) return false;
-    if (turnRuns.has(run.id)) return true;
+    if (turnRuns.has(run.id)) {
+      // An adopted continuation's record follows its run, so a link whose
+      // continuation ran can make room for another (see `keepLink`).
+      if (continuationRuns.has(run.id)) continuationRuns.set(run.id, run);
+      return true;
+    }
     // A continuation is identified by T3's own record, whenever it is seen:
     // it is neither another process's wake nor a stray, and only a
     // follow-up turn answers with it.
@@ -424,8 +428,7 @@ export function watchTurn(
     }
     remember(unclaimed, run.userMessageId, run);
     // Another run's continuation is never this turn's wake or a stray.
-    if (linkParent(run.userMessageId) !== undefined || runLinkParent(run.id) !== undefined)
-      return false;
+    if (linkParent(run.userMessageId) !== undefined) return false;
     if (foreign.has(run.id)) return false;
     // A follow-up turn owns only its continuations: with the conversation's
     // later messages running beside it, no other run can be attributed to it.
@@ -447,25 +450,8 @@ export function watchTurn(
 
   /** Whether T3 linked this run to work of a run the turn holds. */
   function continuationOf(run: Run): boolean {
-    const parent = linkParent(run.userMessageId) ?? runLinkParent(run.id);
+    const parent = linkParent(run.userMessageId);
     return parent !== undefined && linkedRun(parent);
-  }
-
-  function runLinkParent(run: string): string | undefined {
-    return ownRunLinks.get(run) ?? snapshotRunLinks?.get(run);
-  }
-
-  /** Records that `run` reports work of `parentRun`, and folds it again if it was seen first. */
-  function linkRun(run: string, parentRun: string): void {
-    if (!linkedRun(parentRun) || ownRunLinks.get(run) === parentRun) return;
-    if (ownRunLinks.size >= WORK_RETAINED && !ownRunLinks.has(run)) {
-      workOmitted = true;
-      owedUnknown = true;
-      return;
-    }
-    ownRunLinks.set(run, parentRun);
-    const seenFirst = [...unclaimed.values()].find((candidate) => candidate.id === run);
-    if (seenFirst !== undefined) refold(seenFirst);
   }
 
   /** The run whose delegated task a notification reports, with the turn's tasks it names. */
@@ -492,7 +478,9 @@ export function watchTurn(
   ): void {
     if (!linkedRun(report.parent)) return;
     if (!startedByMessage) {
-      linkRun(report.run, report.parent);
+      // T3 sends a run before its items, so the run is among those seen.
+      const run = [...unclaimed.values()].find((candidate) => candidate.id === report.run);
+      if (run !== undefined) link(run.userMessageId, report.parent);
       return;
     }
     for (const task of report.tasks) if (steered.size < WORK_RETAINED) steered.add(task);
@@ -1136,8 +1124,9 @@ export function watchTurn(
           // coverage of the turn's work is decided afresh from it.
           workOmitted = false;
           owedUnknown = false;
-          // Continuation links first, from messages and the runs that announce
-          // them, so no continuation is ever judged a stray; then runs in
+          // Continuation links first, from messages, the runs that announce
+          // them and the notifications continuation runs begin with, so no
+          // continuation is ever judged a stray; then runs in
           // ordinal order, so the turn's own is known before the runs that
           // follow it are judged. Only the turn's links, and the few most
           // recent others, outlive the snapshot.
@@ -1149,6 +1138,7 @@ export function watchTurn(
             if (run.delegatedCompletion?.delivery != null)
               links.set(run.delegatedCompletion.delivery.messageId, run.id);
           const taskParents = new Map(projection.subagents.map((task) => [task.id, task.runId]));
+          const runMessages = new Map(projection.runs.map((run) => [run.id, run.userMessageId]));
           const startedRuns = new Set(
             projection.turnItems.flatMap((payload) =>
               isRecord(payload) &&
@@ -1158,26 +1148,25 @@ export function watchTurn(
                 : [],
             ),
           );
-          const runLinks = new Map<string, string>();
           const reports: { run: string; parent: string; tasks: readonly string[] }[] = [];
           for (const payload of projection.turnItems) {
             const report = notifiedParent(payload, (task) => taskParents.get(task));
             if (report === undefined) continue;
             if (startedRuns.has(report.run)) reports.push(report);
-            else runLinks.set(report.run, report.parent);
+            else {
+              const message = runMessages.get(report.run);
+              if (message !== undefined) links.set(message, report.parent);
+            }
           }
           snapshotLinks = links;
-          snapshotRunLinks = runLinks;
           try {
             for (const run of [...projection.runs].sort((a, b) => a.ordinal - b.ordinal))
               foldRun(run);
             refile();
           } finally {
             snapshotLinks = undefined;
-            snapshotRunLinks = undefined;
           }
           for (const [message, parent] of links) keepLink(message, parent);
-          for (const [run, parent] of runLinks) linkRun(run, parent);
           for (const report of reports) notified(report, true);
           const windowedSnapshot = item["hasMoreHistory"] === true;
           historyOmitted = windowedSnapshot;
@@ -1494,7 +1483,7 @@ export function watchTurn(
       detachedSessions: detachedSessions.size,
       delegations: delegations.size,
       transfers: transfers.size,
-      links: ownLinks.size + pendingLinks.size + ownRunLinks.size,
+      links: ownLinks.size + pendingLinks.size,
     }),
     onChange(listener) {
       listeners.add(listener);
