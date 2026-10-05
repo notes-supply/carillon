@@ -2408,3 +2408,95 @@ async fn a_cut_off_answer_asks_an_observation_again_but_never_replays_an_executa
     server.abort();
     Ok(())
 }
+
+/// One async worker, as when every worker could be taken: another writer
+/// holds SQLite's write lock while an interface claims a delivery and a
+/// runtime worker claims a turn. Their storage waits run beside the async
+/// worker, so unrelated requests are answered meanwhile, and both claims
+/// complete once the lock is released.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn storage_waits_never_hold_the_async_workers() -> Result<()> {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt as _;
+
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    accept(&state, "queued", "conversation").await?;
+    let writer =
+        rusqlite::Connection::open(state.core.options.data_directory.join("carillon.sqlite3"))?;
+    writer.execute_batch("BEGIN IMMEDIATE")?;
+    let router = Router::new()
+        .route("/health", get(health))
+        .route("/v1/deliveries", get(claim_delivery))
+        .with_state(configured(&state));
+    let delivery = tokio::spawn(
+        router.clone().oneshot(
+            Request::builder()
+                .uri("/v1/deliveries")
+                .header(PROVIDER_HEADER, "test-interface")
+                .header(INSTANCE_HEADER, "instance")
+                .header(http::header::AUTHORIZATION, "Bearer test-only")
+                .body(Body::empty())?,
+        ),
+    );
+    let worker = {
+        let state = state.clone();
+        tokio::spawn(async move {
+            run_next_turn(&state, "test-runtime", async |_, _, request| {
+                Ok(completed(request))
+            })
+            .await
+        })
+    };
+    // Both claims are now waiting for the lock.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let asked = std::time::Instant::now();
+    let health = tokio::spawn(
+        router
+            .clone()
+            .oneshot(Request::builder().uri("/health").body(Body::empty())?),
+    );
+    let health = tokio::time::timeout(Duration::from_secs(1), health).await???;
+    assert_eq!(health.status(), StatusCode::OK);
+    assert!(
+        asked.elapsed() < Duration::from_millis(500),
+        "health waited {:?} behind storage",
+        asked.elapsed()
+    );
+    assert!(!delivery.is_finished() && !worker.is_finished());
+    writer.execute_batch("ROLLBACK")?;
+    let delivery = tokio::time::timeout(Duration::from_secs(5), delivery).await???;
+    assert_eq!(delivery.status(), StatusCode::OK);
+    let step = tokio::time::timeout(Duration::from_secs(5), worker).await???;
+    assert_eq!(step, WorkerStep::Advanced);
+    Ok(())
+}
+
+/// Storage work started for an async caller finishes even when the caller
+/// is stopped, as a worker is at shutdown, and the service waits for it
+/// before releasing its exclusive ownership.
+#[tokio::test]
+async fn shutdown_waits_for_storage_work_a_stopped_caller_started() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    let receipt = accept(&state, "running", "conversation").await?;
+    let core = state.core.clone();
+    let (started, began) = tokio::sync::oneshot::channel();
+    let caller = tokio::spawn(async move {
+        core.blocking(move |core| {
+            let _ = started.send(());
+            std::thread::sleep(Duration::from_millis(300));
+            core.database.claim("test-runtime", Lane::Messages)
+        })
+        .await
+    });
+    began.await?;
+    caller.abort();
+    state.core.storage_settled().await;
+    let turn = state
+        .core
+        .inspect_turn(&receipt.turn_id)?
+        .context("turn missing")?;
+    assert_eq!(turn.state, TurnState::Running);
+    Ok(())
+}

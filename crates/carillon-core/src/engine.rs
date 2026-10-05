@@ -14,6 +14,7 @@ use carillon_protocol::model::{
 };
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::watch;
+use tokio_util::task::TaskTracker;
 use tracing::warn;
 
 /// Runtime identity and availability, without credentials or a transport implementation.
@@ -94,6 +95,8 @@ pub struct Core {
     /// Marked changed, per lane, whenever this handle may have made a turn
     /// claimable.
     work: Arc<[watch::Sender<()>; 2]>,
+    /// Storage work running on Tokio's blocking pool for an async caller.
+    storage: TaskTracker,
 }
 
 impl Core {
@@ -121,7 +124,39 @@ impl Core {
             database,
             options,
             work: Arc::new([watch::Sender::new(()), watch::Sender::new(())]),
+            storage: TaskTracker::new(),
         }
+    }
+
+    /// Runs storage work that may block on Tokio's blocking pool and waits
+    /// for it to settle: SQLite writes, which wait up to five seconds for
+    /// another writer, and resource snapshots, which read, hash and sync
+    /// files. An async caller's worker thread meanwhile serves other
+    /// requests. Plain reads need not come here: in WAL mode a reader never
+    /// waits for the writer. The work finishes even if the caller stops
+    /// waiting, and its outcome is the database's, as for a synchronous call.
+    /// # Errors
+    /// Returns the work's error, or a storage error if it panicked.
+    pub async fn blocking<T, E>(
+        &self,
+        work: impl FnOnce(&Self) -> Result<T, E> + Send + 'static,
+    ) -> Result<T, E>
+    where
+        T: Send + 'static,
+        E: From<anyhow::Error> + Send + 'static,
+    {
+        let core = self.clone();
+        self.storage
+            .spawn_blocking(move || work(&core))
+            .await
+            .map_err(|error| E::from(anyhow!(error).context("storage work did not finish")))?
+    }
+
+    /// Wait until storage work started for async callers has finished, so
+    /// exclusive ownership can be released with no write still running.
+    pub async fn storage_settled(&self) {
+        self.storage.close();
+        self.storage.wait().await;
     }
 
     /// Changes whenever a turn of `lane` may have become claimable through
@@ -195,17 +230,22 @@ impl Core {
                 "an interface identity is required".to_owned(),
             ));
         }
-        if let Some(receipt) = self
-            .database
-            .event_receipt(&interface.id, &event.event_id)?
-        {
-            return Ok(receipt);
-        }
+        // Capture checks for an earlier acceptance itself.
         if event.attachments.is_some() {
             return self.intake.accept(self, interface, event).await;
         }
-        self.intake.ensure_in_order(&interface.id, event)?;
-        self.commit(interface, event, None)
+        let (interface, event) = (interface.clone(), event.clone());
+        self.blocking(move |core| {
+            if let Some(receipt) = core
+                .database
+                .event_receipt(&interface.id, &event.event_id)?
+            {
+                return Ok(receipt);
+            }
+            core.intake.ensure_in_order(&interface.id, &event)?;
+            core.commit(&interface, &event, None)
+        })
+        .await
     }
 
     /// Record the turn, referencing a published capture of its attachments.
@@ -324,7 +364,11 @@ impl Core {
         if !self.runtime(runtime_id)?.enabled {
             return Ok(WorkerStep::Backoff);
         }
-        let Some(turn) = self.database.claim(runtime_id, lane)? else {
+        let runtime = runtime_id.to_owned();
+        let Some(turn) = self
+            .blocking(move |core| core.database.claim(&runtime, lane))
+            .await?
+        else {
             return Ok(WorkerStep::Idle);
         };
         let step = self.run(&turn, submit).await?;
@@ -350,8 +394,8 @@ impl Core {
                     Unusable::Altered(message) => (message.clone(), ALTERED_ATTACHMENT),
                     Unusable::Unreadable(error) => (format!("{error:#}"), UNREADABLE_ATTACHMENT),
                 };
-                self.database
-                    .interrupt_turn(turn, &message, Some(explanation))
+                self.interrupt(turn, message.clone(), Some(explanation.to_owned()))
+                    .await
                     .with_context(|| format!("record unrunnable turn {}", turn.turn_id))?;
                 warn!(turn_id = %turn.turn_id, error = %message, "captured attachment is not usable; turn not run");
                 return Ok(WorkerStep::Advanced);
@@ -378,10 +422,12 @@ impl Core {
             let correlation_id = request.correlation_id.clone();
             let response = submit(request).await?;
             validate_response(&correlation_id, &response)?;
-            self.database
-                .complete_turn(turn, &response)
+            let follow_up = response.follow_up.is_some();
+            let claimed = turn.clone();
+            self.blocking(move |core| core.database.complete_turn(&claimed, &response))
+                .await
                 .map_err(TurnFailure::Uncertain)?;
-            Ok(response.follow_up.is_some())
+            Ok(follow_up)
         }
         .await;
         // Each outcome is written once. If that write fails, the turn stays
@@ -397,15 +443,17 @@ impl Core {
                 // it carried. Should recording that fail, the files are
                 // offered again and the runtime skips those it holds.
                 if !carried.is_empty()
-                    && let Err(error) = self.database.mark_noted(&carried)
+                    && let Err(error) = self
+                        .blocking(move |core| core.database.mark_noted(&carried))
+                        .await
                 {
                     warn!(turn_id = %turn.turn_id, %error, "attachments carried by an answered turn were not recorded as noted");
                 }
                 return Ok(WorkerStep::Advanced);
             }
-            Err(TurnFailure::Retry(failure)) => return self.requeue(turn, &failure),
+            Err(TurnFailure::Retry(failure)) => return self.requeue(turn, &failure).await,
             Err(TurnFailure::Unanswered(failure)) if observation => {
-                return self.requeue(turn, &failure);
+                return self.requeue(turn, &failure).await;
             }
             Err(TurnFailure::Uncertain(failure) | TurnFailure::Unanswered(failure)) => {
                 (failure.to_string(), None)
@@ -415,18 +463,34 @@ impl Core {
                 Some(explanation),
             ),
         };
-        self.database
-            .interrupt_turn(turn, &error, explanation.as_deref())
+        self.interrupt(turn, error.clone(), explanation)
+            .await
             .with_context(|| format!("record failure of turn {}", turn.turn_id))?;
         warn!(turn_id = %turn.turn_id, observation, %error, "turn did not complete");
         Ok(WorkerStep::Advanced)
     }
 
+    /// Records that a claimed turn did not complete; see [`Database::interrupt_turn`].
+    async fn interrupt(
+        &self,
+        turn: &ClaimedTurn,
+        error: String,
+        explanation: Option<String>,
+    ) -> Result<()> {
+        let turn = turn.clone();
+        self.blocking(move |core| {
+            core.database
+                .interrupt_turn(&turn, &error, explanation.as_deref())
+        })
+        .await
+    }
+
     /// Returns a turn whose runtime gave no answer to the queue, for its
     /// worker to claim again after backing off.
-    fn requeue(&self, turn: &ClaimedTurn, failure: &anyhow::Error) -> Result<WorkerStep> {
-        self.database
-            .requeue_turn(turn)
+    async fn requeue(&self, turn: &ClaimedTurn, failure: &anyhow::Error) -> Result<WorkerStep> {
+        let claimed = turn.clone();
+        self.blocking(move |core| core.database.requeue_turn(&claimed))
+            .await
             .with_context(|| format!("requeue turn {}", turn.turn_id))?;
         warn!(turn_id = %turn.turn_id, error = %failure, "runtime gave no answer; turn queued again");
         Ok(WorkerStep::Backoff)

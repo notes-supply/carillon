@@ -195,9 +195,12 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
         .with_graceful_shutdown(shutdown(state.core.clone()))
         .await;
     // The caller releases the service lock when this returns, however the
-    // server ended; no copy may still be publishing then.
+    // server ended: no copy may still be publishing then, and no storage
+    // work may still be writing. Workers stop first, so none starts more.
+    workers.shutdown().await;
     state.core.stop_capturing();
     state.core.captures_settled().await;
+    state.core.storage_settled().await;
     served?;
     Ok(())
 }
@@ -530,18 +533,26 @@ async fn claim_delivery(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Option<Delivery>>, ApiError> {
-    let interface = interface_provider(&headers, &state.config)?;
-    let owner = interface_instance(&headers)?;
-    Ok(Json(state.core.claim_delivery(&interface.id, owner)?))
+    let interface = interface_provider(&headers, &state.config)?.id.clone();
+    let owner = interface_instance(&headers)?.to_owned();
+    let claimed = state
+        .core
+        .blocking(move |core| core.claim_delivery(&interface, &owner))
+        .await?;
+    Ok(Json(claimed))
 }
 
 async fn reconcile_delivery_claims(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<DeliveryReconciliation>, ApiError> {
-    let interface = interface_provider(&headers, &state.config)?;
-    let owner = interface_instance(&headers)?;
-    Ok(Json(state.core.reconcile_deliveries(&interface.id, owner)?))
+    let interface = interface_provider(&headers, &state.config)?.id.clone();
+    let owner = interface_instance(&headers)?.to_owned();
+    let reconciled = state
+        .core
+        .blocking(move |core| core.reconcile_deliveries(&interface, &owner))
+        .await?;
+    Ok(Json(reconciled))
 }
 
 async fn acknowledge_delivery(
@@ -550,11 +561,12 @@ async fn acknowledge_delivery(
     AxumPath(id): AxumPath<i64>,
     Json(ack): Json<DeliveryAck>,
 ) -> Result<StatusCode, ApiError> {
-    let interface = interface_provider(&headers, &state.config)?;
-    let owner = interface_instance(&headers)?;
+    let interface = interface_provider(&headers, &state.config)?.id.clone();
+    let owner = interface_instance(&headers)?.to_owned();
     state
         .core
-        .acknowledge_delivery(&interface.id, owner, id, &ack)?;
+        .blocking(move |core| core.acknowledge_delivery(&interface, &owner, id, &ack))
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -377,10 +377,14 @@ impl Run {
                 .event_receipt(&self.interface.id, &self.event.event_id)?
                 .ok_or_else(late);
         }
-        match self
-            .core
-            .commit(&self.interface, &self.event, Some(&capture))
-        {
+        let committed = {
+            let (interface, event, capture) =
+                (self.interface.clone(), self.event.clone(), capture.clone());
+            self.core
+                .blocking(move |core| core.commit(&interface, &event, Some(&capture)))
+                .await
+        };
+        match committed {
             Ok(receipt) => {
                 if receipt.duplicate {
                     // Another acceptance of the event won; this copy is unreferenced.

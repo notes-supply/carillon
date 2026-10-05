@@ -44,7 +44,7 @@ pub(crate) fn store(data_directory: &Path) -> PathBuf {
 }
 
 /// A published capture: one directory holding a turn's files by ordinal.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Capture {
     pub(crate) id: String,
     /// Lowercase hexadecimal SHA-256 of each file, in order.
