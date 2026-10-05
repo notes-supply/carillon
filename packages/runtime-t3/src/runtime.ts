@@ -37,11 +37,13 @@ import {
   subscribeThread,
   threadCreate,
   ThreadSnapshotSchema,
+  type NativeImage,
   type NativeSelection,
   type Projection,
   type ThreadBinding,
 } from "./contracts.ts";
 import { commandCatalog } from "./commands.ts";
+import { uploadImages, type PreparedImages } from "./images.ts";
 import { catalog, modelState, sameSelection, toNative } from "./models.ts";
 import {
   connectT3,
@@ -335,11 +337,6 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
   };
 
   async function executeT3(request: TurnRequest, signal: AbortSignal): Promise<TurnResponse> {
-    if ((request.attachments ?? []).length > 0)
-      throw new ExplainedFailure(
-        422,
-        "This runtime cannot accept attached files yet; please send text only.",
-      );
     const binding = bindThread(request);
     // A follow-up turn core queued to carry the report of work an earlier
     // turn delegated: it reads T3's continuations of that turn's message and
@@ -486,6 +483,8 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     follow: FollowUp | undefined,
   ): Promise<{ readonly outcome: Outcome; readonly stop?: Stop }> {
     let text: string | undefined;
+    /** Uploaded once per attempt: a re-dispatch after a lost answer references the same images. */
+    let prepared: PreparedImages | undefined;
     let attempt = 0;
     /**
      * Whether the turn's work may exist on T3: dispatched by this call, or
@@ -576,14 +575,30 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
           reached() ? undefined : signal,
         );
         if (follow === undefined && watch.run() === undefined && !signal.aborted) {
-          text ??= compose(request);
+          prepared ??= await uploadImages(
+            connection,
+            options.endpoint,
+            request.attachment_root,
+            request.attachments ?? [],
+            signal,
+            timeoutMs,
+          );
+          text ??= compose(request, prepared.unavailable);
           // Nothing of this turn has reached T3 yet, so a caller that
           // aborted meanwhile is honoured before anything is sent. Work
           // already running on the thread, whoever started it, is never
           // interrupted: the message waits behind it in T3's own queue.
           signal.throwIfAborted();
           progress.dispatched = true;
-          await dispatch(connection, binding, request, text, watch.busy(), progress);
+          await dispatch(
+            connection,
+            binding,
+            request,
+            text,
+            prepared.images,
+            watch.busy(),
+            progress,
+          );
         }
         const outcome = await observe(watch, stream, signal);
         // A follow-up turn reports what T3 does with work it started itself
@@ -649,10 +664,11 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     binding: ThreadBinding,
     request: TurnRequest,
     text: string,
+    images: readonly NativeImage[],
     queued: boolean,
     progress: Progress,
   ): Promise<void> {
-    const command = messageDispatch(binding.threadId, request.correlation_id, text, [], queued);
+    const command = messageDispatch(binding.threadId, request.correlation_id, text, images, queued);
     if (queued)
       log(`turn ${request.correlation_id}: the thread is busy; the message waits in T3's queue`);
     let result: unknown;
@@ -912,16 +928,28 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
 
   /**
    * The person's text. A command invocation is sent verbatim, so T3 runs it
-   * as its own; prose names earlier files this runtime cannot provide. The
-   * agent's instructions are the T3 project's own configuration.
+   * as its own; prose names the files of this message and earlier ones that
+   * T3 does not receive. The agent's instructions are the T3 project's own
+   * configuration.
    */
-  function compose(request: TurnRequest): string {
+  function compose(request: TurnRequest, unavailable: readonly string[]): string {
     if (turnIntent(request.native) === "command") return request.input;
     const earlier = (request.unanswered ?? []).flatMap((turn) =>
       turn.attachments.map((attachment) => attachment.name),
     );
-    if (earlier.length === 0) return request.input;
-    return `${request.input}\n\n[Carillon: ${String(earlier.length)} file(s) attached to earlier messages are not available to this runtime: ${earlier.join(", ")}]`;
+    const notes = [
+      ...(unavailable.length === 0
+        ? []
+        : [
+            `[Carillon: ${String(unavailable.length)} file(s) attached to this message are not available to this runtime: ${unavailable.join(", ")}]`,
+          ]),
+      ...(earlier.length === 0
+        ? []
+        : [
+            `[Carillon: ${String(earlier.length)} file(s) attached to earlier messages are not available to this runtime: ${earlier.join(", ")}]`,
+          ]),
+    ];
+    return [request.input, ...notes].filter((part) => part.length > 0).join("\n\n");
   }
 
   function log(message: string): void {

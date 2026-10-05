@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RuntimeOperations } from "@carillon/runtime/operations";
@@ -524,11 +524,116 @@ it("fails closed on an incompatible, unreachable or refusing server, and on answ
   expect(fake.threads.get(threadId)?.runs ?? []).toHaveLength(0);
 });
 
-it("refuses attached files and names earlier files it cannot provide", async () => {
-  await expect(
-    runtime.executeTurn(turn("turn-1", "see", { attachments: [attachment] })),
-  ).rejects.toMatchObject({ status: 422 });
-  expect(fake.threads.size).toBe(0);
+/** A 1×1 PNG. */
+const PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+  "base64",
+);
+const CAPTURE = "11111111-2222-3333-4444-555555555555";
+
+/** Writes the files below the turn's attachment root and describes them as core would. */
+async function captured(files: readonly { name: string; bytes: Buffer }[]) {
+  await mkdir(join(resources, "attachments", CAPTURE), { recursive: true });
+  return Promise.all(
+    files.map(async ({ name, bytes }, index) => {
+      await writeFile(join(resources, "attachments", CAPTURE, String(index)), bytes);
+      return {
+        path: `${CAPTURE}/${String(index)}`,
+        name,
+        size: bytes.length,
+        sha256: "0".repeat(64),
+      };
+    }),
+  );
+}
+
+const imageDispatches = (): unknown[] => dispatches().map((command) => command["attachments"]);
+
+it("uploads a message's images to T3, references them, and names the files T3 does not receive", async () => {
+  // Over T3's 10 MiB image limit, with a header that is still a PNG's.
+  const large = Buffer.concat([PNG, Buffer.alloc(10 * 1024 * 1024)]);
+  const attachments = await captured([
+    { name: "photo.png", bytes: PNG },
+    { name: "notes.txt", bytes: Buffer.from("plain text") },
+    { name: "huge.png", bytes: large },
+  ]);
+  const result = runtime.executeTurn(turn("turn-1", "What is in the photo?", { attachments }));
+  answer(await started("turn-1"), "A pixel.");
+  expect((await result).output).toBe("A pixel.");
+  expect(imageDispatches()).toEqual([
+    [
+      {
+        type: "image",
+        id: "pending-1",
+        name: "photo.png",
+        mimeType: "image/png",
+        sizeBytes: PNG.length,
+      },
+    ],
+  ]);
+  expect(fake.uploads.get("pending-1")?.bytes).toEqual(PNG);
+  expect(fake.uploads.size).toBe(1);
+  expect(userTexts()).toEqual([
+    "What is in the photo?\n\n[Carillon: 2 file(s) attached to this message are not available to this runtime: notes.txt, huge.png]",
+  ]);
+
+  // An image alone is a message of its own.
+  const alone = runtime.executeTurn(
+    turn("turn-2", "", { attachments: await captured([{ name: "again.png", bytes: PNG }]) }),
+  );
+  answer(await started("turn-2"), "The same pixel.");
+  await alone;
+  expect(userTexts()[1]).toBe("");
+  expect(imageDispatches()[1]).toMatchObject([{ id: "pending-2", name: "again.png" }]);
+});
+
+it("reuses its uploads when a dispatch is retried, and dispatches nothing when an upload fails", async () => {
+  const attachments = await captured([{ name: "photo.png", bytes: PNG }]);
+  // The first dispatch is lost before T3 processes it; the retry references the same image.
+  let dropped = false;
+  fake.dropRequest = (command) => {
+    if (command.type !== "message.dispatch" || dropped) return false;
+    dropped = true;
+    return true;
+  };
+  const retried = runtime.executeTurn(turn("turn-1", "look", { attachments }));
+  answer(await started("turn-1"), "Seen.");
+  await retried;
+  expect(fake.uploads.size).toBe(1);
+  expect(
+    fake.received
+      .filter((command) => command.type === "message.dispatch")
+      .map((command) => command["attachments"]),
+  ).toEqual([
+    [expect.objectContaining({ id: "pending-1" })],
+    [expect.objectContaining({ id: "pending-1" })],
+  ]);
+
+  // T3 refuses the bytes: the turn fails before any message is sent.
+  fake.uploadStatus = 500;
+  await expect(runtime.executeTurn(turn("turn-2", "again", { attachments }))).rejects.toMatchObject(
+    {
+      status: 502,
+      message: "T3 did not accept the attached image photo.png (HTTP 500).",
+    },
+  );
+  // An upload address on another origin is never posted to.
+  fake.uploadStatus = 204;
+  fake.uploadUrl = () => "http://198.51.100.7/api/attachments/upload/x.signed";
+  await expect(runtime.executeTurn(turn("turn-3", "again", { attachments }))).rejects.toMatchObject(
+    {
+      status: 502,
+    },
+  );
+  expect(dispatches()).toHaveLength(1);
+  // Nothing reached T3 for those turns, so the conversation is not fenced.
+  fake.uploadUrl = (id) => `/api/attachments/upload/${id}.signed`;
+  const next = runtime.executeTurn(turn("turn-4", "text only"));
+  answer(await started("turn-4"), "Fine.");
+  expect((await next).output).toBe("Fine.");
+});
+
+it("names earlier files it cannot provide", async () => {
   const result = runtime.executeTurn(
     turn("turn-2", "hello", {
       unanswered: [{ correlation_id: "turn-1", attachments: [attachment] }],

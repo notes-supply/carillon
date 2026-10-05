@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@carillon/protocol": "workspace:*",
+    "image-size": "2.0.4",
     "smol-toml": "1.6.0",
     "typebox": "1.0.65"
   }

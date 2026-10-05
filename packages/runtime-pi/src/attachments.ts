@@ -8,14 +8,11 @@
 import type { ImageContent } from "@earendil-works/pi-ai";
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import type { TurnAttachment } from "@carillon/protocol";
-import { imageSize } from "image-size";
-import { open } from "node:fs/promises";
-import { resolve, sep } from "node:path";
+import { capturedPath, detectImage, HEADER_BYTES, readPrefix } from "@carillon/runtime/attachments";
+import { resolve } from "node:path";
 import { Type, type Static } from "typebox";
 
 const MIB = 1024 * 1024;
-/** Enough of any supported image to read its header. */
-const HEADER_BYTES = 512 * 1024;
 export const ATTACHMENT_NOTE = "carillon-attachments";
 const SECTION = "carillon_attachments";
 const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: "grapheme" });
@@ -41,13 +38,6 @@ export const DEFAULT_INLINE_IMAGES: InlineImagePolicy = {
   max_image_mib: 16,
   max_total_mib: 32,
   max_megapixels: 40,
-};
-
-const MEDIA_TYPES: Readonly<Record<string, string>> = {
-  png: "image/png",
-  jpg: "image/jpeg",
-  webp: "image/webp",
-  gif: "image/gif",
 };
 
 export interface PreparedAttachments {
@@ -110,14 +100,6 @@ export function earlierNote(attachments: readonly TurnAttachment[]): string {
   ].join("\n");
 }
 
-/** A captured file's location, refusing anything that is not below the root. */
-export function capturedPath(root: string, attachment: TurnAttachment): string {
-  const base = resolve(root);
-  const path = resolve(base, attachment.path);
-  if (!path.startsWith(base + sep)) throw new Error("attachment path escapes the attachment root");
-  return path;
-}
-
 async function present(
   path: string,
   attachment: TurnAttachment,
@@ -126,7 +108,7 @@ async function present(
   inlineBytes: number,
 ): Promise<Presentation> {
   const header = await readPrefix(path, Math.min(attachment.size, HEADER_BYTES));
-  const detected = header === undefined ? undefined : detect(header);
+  const detected = header === undefined ? undefined : detectImage(header);
   if (detected === undefined) return { kind: "file" };
   const notInline = (reason: string): Presentation => ({ kind: "image-file", reason });
   if (inlined >= policy.max_count)
@@ -147,42 +129,9 @@ async function present(
     image: {
       type: "image",
       data: Buffer.from(bytes).toString("base64"),
-      mimeType: MEDIA_TYPES[detected.type] ?? "application/octet-stream",
+      mimeType: detected.mediaType,
     },
   };
-}
-
-/**
- * A PNG, JPEG, WebP or GIF image's format and declared dimensions, from its
- * header without decoding it. Other formats, including ones image-size
- * recognizes only loosely, are files.
- */
-function detect(header: Uint8Array): { type: string; width: number; height: number } | undefined {
-  try {
-    const { type, width, height } = imageSize(header);
-    return type === undefined || MEDIA_TYPES[type] === undefined
-      ? undefined
-      : { type, width, height };
-  } catch {
-    return undefined;
-  }
-}
-
-async function readPrefix(path: string, length: number): Promise<Uint8Array | undefined> {
-  const file = await open(path, "r").catch(() => undefined);
-  if (file === undefined) return undefined;
-  try {
-    const buffer = new Uint8Array(length);
-    let filled = 0;
-    while (filled < length) {
-      const { bytesRead } = await file.read(buffer, filled, length - filled, filled);
-      if (bytesRead === 0) break;
-      filled += bytesRead;
-    }
-    return buffer.subarray(0, filled);
-  } finally {
-    await file.close();
-  }
 }
 
 function describe(index: number, attachment: TurnAttachment, presentation: Presentation): string {

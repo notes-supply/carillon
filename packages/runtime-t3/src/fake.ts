@@ -95,6 +95,15 @@ export interface FakeT3 {
   readonly subscriptions: Subscription[];
   /** Every `server.refreshProviders` request, in order. */
   readonly refreshes: unknown[];
+  /** Images by attachment ID, as granted and, once posted, with their bytes. */
+  readonly uploads: Map<
+    string,
+    { readonly name: string; readonly mimeType: string; readonly sizeBytes: number; bytes?: Buffer }
+  >;
+  /** The upload address T3 grants for an attachment; a fault may name another origin. */
+  uploadUrl: (attachmentId: string) => string;
+  /** What the upload route answers a complete upload with. */
+  uploadStatus: number;
   /** What protocol discovery announces. */
   protocolVersion: number;
   /** The provider instances `server.getConfig` and `server.refreshProviders` list, as T3 describes them. */
@@ -254,6 +263,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
   const detached: string[] = [];
   const subscriptions: Subscription[] = [];
   const refreshes: unknown[] = [];
+  const uploads: FakeT3["uploads"] = new Map();
   const receipts = new Map<string, number>();
   const rejected = new Map<string, string>();
   const requestRuns = new Map<string, string>();
@@ -279,6 +289,24 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
           orchestrationProtocolVersion: fake.protocolVersion,
         }),
       );
+      return;
+    }
+    const upload = /^\/api\/attachments\/upload\/([^.]+)\.signed$/u.exec(request.url ?? "");
+    const granted = upload?.[1] === undefined ? undefined : uploads.get(upload[1]);
+    if (request.method === "POST" && upload?.[1] !== undefined && granted !== undefined) {
+      // As T3's route: the length must match the grant exactly.
+      if (Number(request.headers["content-length"]) !== granted.sizeBytes) {
+        response.writeHead(400);
+        response.end("Content-Length must match the upload size.");
+        return;
+      }
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk: Buffer) => chunks.push(chunk));
+      request.on("end", () => {
+        if (fake.uploadStatus === 204) granted.bytes = Buffer.concat(chunks);
+        response.writeHead(fake.uploadStatus);
+        response.end();
+      });
       return;
     }
     response.writeHead(404);
@@ -330,6 +358,9 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
     detached,
     subscriptions,
     refreshes,
+    uploads,
+    uploadUrl: (attachmentId) => `/api/attachments/upload/${attachmentId}.signed`,
+    uploadStatus: 204,
     protocolVersion: ORCHESTRATION_PROTOCOL,
     providers: [...FAKE_PROVIDERS],
     dropAnswer: () => false,
@@ -691,6 +722,31 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
       case "server.getConfig":
         exit(socket, id, { _tag: "Success", value: { providers: fake.providers } });
         return;
+      case "attachments.createUploadUrl": {
+        const input = isRecord(payload) ? payload : {};
+        const { name, mimeType, sizeBytes } = input;
+        if (
+          input["type"] !== "image" ||
+          typeof name !== "string" ||
+          typeof mimeType !== "string" ||
+          typeof sizeBytes !== "number" ||
+          sizeBytes > 10 * 1024 * 1024
+        ) {
+          rejectRequest(socket, id, "SchemaError", "invalid upload request");
+          return;
+        }
+        const attachmentId = `pending-${String(uploads.size + 1)}`;
+        uploads.set(attachmentId, { name, mimeType, sizeBytes });
+        exit(socket, id, {
+          _tag: "Success",
+          value: {
+            attachmentId,
+            relativeUrl: fake.uploadUrl(attachmentId),
+            expiresAt: Date.now() + 600_000,
+          },
+        });
+        return;
+      }
       case "server.refreshProviders":
         refreshes.push(payload);
         exit(socket, id, { _tag: "Success", value: { providers: fake.providers } });

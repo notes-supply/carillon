@@ -5,7 +5,7 @@ import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { Type } from "typebox";
 import { Parse } from "typebox/value";
-import { capturedPath } from "./attachments.ts";
+import { capturedPath } from "@carillon/runtime/attachments";
 import { ModelSelections } from "./model.ts";
 import { Serial } from "@carillon/runtime/serial";
 import { conversationDirectory } from "./namespace.ts";
