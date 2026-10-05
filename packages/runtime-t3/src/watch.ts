@@ -168,7 +168,8 @@ export function watchTurn(
   let predecessor: Run | undefined;
   let predecessorThread: ProviderThread | undefined;
   let hasMessages = false;
-  let assistant = new Map<string, Message>();
+  /** The turn's assistant messages by ID, kept across snapshots. */
+  const assistant = new Map<string, Message>();
   let latestAssistant: Message | undefined;
   let running = new Map<string, ToolItem>();
   let recent: ToolItem[] = [];
@@ -216,7 +217,12 @@ export function watchTurn(
   /** When each background task was first seen, since T3 does not date them. */
   const backgroundSince = new Map<string, number>();
 
-  /** Forgets everything but the turn's identity, its request items and its background facts. */
+  /**
+   * Forgets everything but the turn's identity, its request items, its
+   * background facts and the assistant messages of its own runs already
+   * observed: a bounded snapshot may omit earlier messages, and a message it
+   * does list replaces the observed one by ID.
+   */
   function reset(): void {
     turnRuns = new Map();
     last = undefined;
@@ -224,8 +230,6 @@ export function watchTurn(
     predecessor = undefined;
     predecessorThread = undefined;
     hasMessages = false;
-    assistant = new Map();
-    latestAssistant = undefined;
     running = new Map();
     recent = [];
     counted = new Set();
@@ -614,6 +618,15 @@ export function watchTurn(
               "malformed",
               "T3 sent a thread snapshot this runtime does not understand",
             );
+          // A snapshot lists the thread's runs whole: one that omits a run
+          // this turn already observed is broken, and is refused before it
+          // replaces anything the fold knows.
+          for (const id of turnRuns.keys())
+            if (!projection.runs.some((run) => run.id === id))
+              throw new T3Failure(
+                "malformed",
+                `T3 sent a thread snapshot that omits run ${id} this turn observed`,
+              );
           reset();
           // Runs in ordinal order, so the turn's own is known before the
           // runs that follow it are judged.

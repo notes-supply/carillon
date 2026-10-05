@@ -93,8 +93,16 @@ export interface FakeT3 {
   dropRequest: (command: Command) => boolean;
   /** Delays the answer to a command, in milliseconds. */
   delayAnswer: (command: Command) => number;
-  /** Rejects the command with this detail instead of processing it. */
+  /** Rejects the command with this detail instead of processing it; T3 keeps a rejected receipt for it. */
   reject: (command: Command) => string | undefined;
+  /** Processes the command, then answers with this failure instead of its receipt, as a post-commit failure does. */
+  failAfterDispatch: (command: Command) => string | undefined;
+  /** Processes the command, then answers with an internal defect (a `Die` exit). */
+  defect: (command: Command) => boolean;
+  /** Lists only the last so many messages in a snapshot, as T3's bounded window may. */
+  messageWindow: number | undefined;
+  /** Omits matching runs from snapshots: a broken snapshot. */
+  omitRun: (run: Run) => boolean;
   /** Answers the next request with a frame that is not JSON. */
   malformed: boolean;
   /** Whether an interrupt stops the run (and settles background work) or is accepted and ignored. */
@@ -117,7 +125,14 @@ export interface FakeT3 {
   disconnectAll(): void;
   tool(threadId: string, runId: string, item: Partial<FakeItem> & { type: string }): FakeItem;
   finishTool(threadId: string, item: FakeItem, status?: TurnItem["status"]): void;
-  assistant(threadId: string, runId: string, text: string, streaming?: boolean): void;
+  /** The run's assistant message, or a further one of the run when `part` names it. */
+  assistant(
+    threadId: string,
+    runId: string,
+    text: string,
+    streaming?: boolean,
+    part?: string,
+  ): void;
   complete(threadId: string, runId: string): void;
   fail(threadId: string, runId: string, message: string): void;
   stop(threadId: string, runId: string, status: Run["status"]): void;
@@ -159,6 +174,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
   const detached: string[] = [];
   const subscriptions: Subscription[] = [];
   const receipts = new Map<string, number>();
+  const rejected = new Map<string, string>();
   const requestRuns = new Map<string, string>();
   const sockets = new Set<WebSocket>();
 
@@ -237,6 +253,10 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
     dropRequest: () => false,
     delayAnswer: () => 0,
     reject: () => undefined,
+    failAfterDispatch: () => undefined,
+    defect: () => false,
+    messageWindow: undefined,
+    omitRun: () => false,
     malformed: false,
     interruptBehaviour: "settle",
     snapshotOnResume: false,
@@ -276,9 +296,9 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
       thread.items.splice(thread.items.indexOf(item), 1, finished);
       emit(thread, "turn-item.updated", finished);
     },
-    assistant(threadId, runId, text, streaming = false) {
+    assistant(threadId, runId, text, streaming = false, part) {
       const thread = threadOf(threadId);
-      const id = `assistant-${runId}`;
+      const id = part === undefined ? `assistant-${runId}` : `assistant-${runId}-${part}`;
       const existing = thread.messages.findIndex((message) => message.id === id);
       const message: Message = {
         id,
@@ -394,8 +414,21 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
         }
         const delay = fake.delayAnswer(payload);
         if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+        // As T3 does: a command that committed nothing keeps a rejected
+        // receipt, and its replay answers with that receipt.
+        const previous = rejected.get(payload.commandId);
+        if (previous !== undefined) {
+          rejectRequest(
+            socket,
+            id,
+            "OrchestratorCommandPreviouslyRejectedError",
+            `Command ${payload.commandId} was previously rejected: ${previous}`,
+          );
+          return;
+        }
         const rejection = fake.reject(payload);
         if (rejection !== undefined) {
+          rejected.set(payload.commandId, rejection);
           rejectRequest(socket, id, "OrchestrationV2DispatchCommandError", rejection);
           return;
         }
@@ -403,16 +436,25 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
         try {
           sequence = dispatch(payload);
         } catch (failure) {
-          rejectRequest(
-            socket,
-            id,
-            "OrchestrationV2DispatchCommandError",
-            failure instanceof Error ? failure.message : String(failure),
-          );
+          const detail = failure instanceof Error ? failure.message : String(failure);
+          rejected.set(payload.commandId, detail);
+          rejectRequest(socket, id, "OrchestrationV2DispatchCommandError", detail);
           return;
         }
         if (fake.dropAnswer(payload)) {
           socket.terminate();
+          return;
+        }
+        const late = fake.failAfterDispatch(payload);
+        if (late !== undefined) {
+          rejectRequest(socket, id, "OrchestratorDispatchError", late);
+          return;
+        }
+        if (fake.defect(payload)) {
+          exit(socket, id, {
+            _tag: "Failure",
+            cause: [{ _tag: "Die", defect: { message: "internal defect from the fake T3" } }],
+          });
           return;
         }
         exit(socket, id, { _tag: "Success", value: { sequence } });
@@ -456,11 +498,13 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
                     : {}),
                   projection: {
                     thread: { id: thread.id, projectId: thread.projectId },
-                    runs: thread.runs,
+                    runs: thread.runs.filter((run) => !fake.omitRun(run)),
                     runtimeRequests: thread.requests,
                     providerThreads: [thread.providerThread],
                     providerSessions: thread.sessionDetached ? [] : [thread.session],
-                    messages: thread.messages.map((message) => ({ ...message, streaming: false })),
+                    messages: thread.messages
+                      .slice(fake.messageWindow === undefined ? 0 : -fake.messageWindow)
+                      .map((message) => ({ ...message, streaming: false })),
                     turnItems: fake.omitRequestItems
                       ? thread.items.filter((item) => !item.type.endsWith("_request"))
                       : thread.items,

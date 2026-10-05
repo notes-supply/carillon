@@ -21,11 +21,14 @@ export class T3Failure extends Error {
   readonly kind: T3FailureKind;
   /** The server's own words for a rejection, when it gave any. */
   readonly detail: string | undefined;
+  /** The server's error class for a typed rejection, when it named one. */
+  readonly tag: string | undefined;
 
-  constructor(kind: T3FailureKind, message: string, detail?: string) {
+  constructor(kind: T3FailureKind, message: string, detail?: string, tag?: string) {
     super(message);
     this.kind = kind;
     this.detail = detail;
+    this.tag = tag;
   }
 }
 
@@ -324,7 +327,7 @@ function exitOutcome(exit: unknown): [T3Failure | undefined, unknown] {
       const error = entry["error"];
       const tag = isRecord(error) && typeof error["_tag"] === "string" ? error["_tag"] : "failure";
       return [
-        new T3Failure("rejected", `T3 rejected the request (${tag})`, describe(error)),
+        new T3Failure("rejected", `T3 rejected the request (${tag})`, describe(error), tag),
         undefined,
       ];
     }

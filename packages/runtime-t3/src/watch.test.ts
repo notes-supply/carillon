@@ -147,14 +147,27 @@ it("retains only the turn's own work from a long history and keeps its identity 
   expect(watch.blocking().map((blocking) => blocking.id)).toEqual(["run-7"]);
   expect(watch.activity()).toEqual({ phase: "model", running: [], recent: [], tool_calls: 0 });
 
-  // A run evicted from a later snapshot does not lose the turn's identity.
+  // A snapshot lists runs whole: one that omits the observed turn run is refused
+  // before it replaces anything, so the fold keeps what it knew.
   watch.resubscribing();
-  watch.apply(snapshot({ runs: [run("completed", "message-501", 501)] }, 900));
+  expect(() =>
+    watch.apply(snapshot({ runs: [run("completed", "message-501", 501)] }, 900)),
+  ).toThrow("T3 sent a thread snapshot that omits run run-500 this turn observed");
+  expect(watch.run()?.id).toBe("run-500");
+  expect(watch.activeRun()?.id).toBe("run-500");
+  expect(watch.sequence()).toBe(1);
+  // A snapshot that lists the observed run resumes the fold, and replayed
+  // events at or below the folded sequence are ignored.
+  watch.apply(
+    snapshot(
+      { runs: [run("completed", "message-500", 500), run("completed", "message-501", 501)] },
+      900,
+    ),
+  );
   expect(watch.run()?.id).toBe("run-500");
   expect(watch.sequence()).toBe(900);
-  // Replayed events at or below the folded sequence are ignored.
   watch.apply(event(900, "run.updated", run("running", "message-500", 500)));
-  expect(watch.run()?.status).toBe("running");
+  expect(watch.run()?.status).toBe("completed");
   expect(watch.activeRun()).toBeUndefined();
 });
 
@@ -1246,4 +1259,50 @@ it("serves background task kinds through the shared tool-name normalization", ()
     "background_task",
   ]);
   expect(activity.running[3]).toMatchObject({ detail: "sleep 300" });
+});
+
+it("keeps the answer text it observed when a bounded snapshot omits an earlier message", () => {
+  const watch = watchTurn("message-1", "/workspace");
+  watch.apply(snapshot({ runs: [run("running")] }));
+  watch.apply(
+    event(2, "message.updated", {
+      id: "a",
+      runId: "run-1",
+      role: "assistant",
+      text: "Part one.",
+      createdAt: "2026-10-05T08:00:00Z",
+    }),
+  );
+  // The connection resumes with a bounded snapshot whose window starts after that message.
+  watch.resubscribing();
+  watch.apply(
+    snapshot(
+      {
+        runs: [run("completed")],
+        messages: [
+          {
+            id: "b",
+            runId: "run-1",
+            role: "assistant",
+            text: "Part two.",
+            createdAt: "2026-10-05T08:00:05Z",
+          },
+        ],
+      },
+      9,
+    ),
+  );
+  expect(watch.outcome()).toEqual({ kind: "completed", output: "Part one.\n\nPart two." });
+  // A message the snapshot does list replaces the observed one by ID.
+  watch.apply(
+    event(10, "message.updated", {
+      id: "a",
+      runId: "run-1",
+      role: "assistant",
+      text: "Part one, revised.",
+      createdAt: "2026-10-05T08:00:00Z",
+    }),
+  );
+  expect(watch.outcome()).toEqual({ kind: "completed", output: "Part one, revised.\n\nPart two." });
+  expect(watch.retained().messages).toBe(2);
 });

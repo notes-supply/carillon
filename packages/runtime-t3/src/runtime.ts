@@ -338,14 +338,17 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
           reached() ? undefined : signal,
         );
         if (watch.run() === undefined && !signal.aborted) {
-          await stopBlocking(connection, binding, watch, stream, signal);
           text ??= await compose(request, watch.empty());
-          // Nothing of this turn has reached T3 yet; a caller that aborted
-          // while the stale run settled or the message was composed is
-          // honoured here, so no cancelled turn executes tools.
+          // Stale work is settled against the fold as it is now, after the
+          // resource files were read, and the dispatch follows with no
+          // further wait: a run that starts on the thread meanwhile is seen
+          // here, not after the dispatch. Nothing of this turn has reached
+          // T3 yet, so a caller that aborted during either is honoured
+          // before anything is sent.
+          await stopBlocking(connection, binding, watch, stream, signal);
           signal.throwIfAborted();
           progress.dispatched = true;
-          await dispatch(connection, binding, request, text);
+          await dispatch(connection, binding, request, text, progress);
         }
         const outcome = await observe(watch, stream, signal);
         if (outcome === undefined) {
@@ -403,6 +406,29 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
    * ends the settlement wait; interrupt requests already sent are not undone.
    */
   async function stopBlocking(
+    connection: T3Connection,
+    binding: ThreadBinding,
+    watch: TurnWatch,
+    stream: T3Stream,
+    signal: AbortSignal,
+  ): Promise<void> {
+    // The fold as it is now decides, after each pass: a run that started
+    // while the first pass waited is settled by a second, and only work
+    // still present after that is refused, not raced.
+    for (let pass = 0; ; pass += 1) {
+      const stale = watch.stale();
+      if (watch.blocking().length === 0 && (stale === undefined || stale.listed.length === 0))
+        return;
+      if (pass === 2)
+        throw new ExplainedFailure(
+          503,
+          "An earlier turn keeps starting work on T3 while this turn is prepared; try again shortly.",
+        );
+      await settleStale(connection, binding, watch, stream, signal);
+    }
+  }
+
+  async function settleStale(
     connection: T3Connection,
     binding: ThreadBinding,
     watch: TurnWatch,
@@ -467,19 +493,38 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     binding: ThreadBinding,
     request: TurnRequest,
     text: string,
+    progress: Progress,
   ): Promise<void> {
+    const command = messageDispatch(
+      binding.threadId,
+      request.correlation_id,
+      text,
+      options.selection,
+    );
     let result: unknown;
     try {
-      result = await connection.call(
-        RPC.dispatchCommand,
-        messageDispatch(binding.threadId, request.correlation_id, text, options.selection),
-      );
+      result = await connection.call(RPC.dispatchCommand, command);
     } catch (failure) {
-      if (failure instanceof T3Failure && failure.kind === "rejected")
+      if (!(failure instanceof T3Failure) || failure.kind !== "rejected") throw failure;
+      const held = await receipt(connection, command);
+      if (held === "accepted") {
+        log(
+          `turn ${request.correlation_id}: T3 reported a failure for the dispatch but holds its accepted receipt; the run is read back`,
+        );
+        return;
+      }
+      if (held === "rejected") {
+        // Definitive: nothing of this turn was committed, so there is
+        // nothing on T3 to doubt.
+        progress.dispatched = false;
+        log(`turn ${request.correlation_id}: T3 holds a rejected receipt for the message`);
         throw new ExplainedFailure(
           502,
           `T3 refused the message: ${failure.detail ?? failure.message}`,
         );
+      }
+      // Neither receipt could be read: the failure stands as what T3 said,
+      // and the turn exits as work that may still be running.
       throw failure;
     }
     if (!Check(DispatchResultSchema, result))
@@ -490,6 +535,28 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     log(
       `turn ${request.correlation_id}: T3 accepted the message at sequence ${String(result.sequence)}`,
     );
+  }
+
+  /**
+   * What receipt T3 holds for a dispatch it answered with a failure. T3
+   * commits a rejected receipt only for a command that committed nothing,
+   * and commits the run with its accepted receipt in one transaction, so a
+   * failure reported after that commit leaves the accepted receipt in place.
+   * Replaying the same command reads the receipt back: a previously rejected
+   * answer is definitive non-acceptance, a sequence means the run exists,
+   * and any other answer leaves the doubt.
+   */
+  async function receipt(
+    connection: T3Connection,
+    command: unknown,
+  ): Promise<"accepted" | "rejected" | "unknown"> {
+    try {
+      const result = await connection.call(RPC.dispatchCommand, command);
+      return Check(DispatchResultSchema, result) ? "accepted" : "unknown";
+    } catch (failure) {
+      if (!(failure instanceof T3Failure) || failure.kind !== "rejected") throw failure;
+      return failure.tag === "OrchestratorCommandPreviouslyRejectedError" ? "rejected" : "unknown";
+    }
   }
 
   /**
