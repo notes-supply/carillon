@@ -348,6 +348,18 @@ fn recorded(path: &PathBuf) -> anyhow::Result<Value> {
     Ok(serde_json::from_slice(&std::fs::read(path)?)?)
 }
 
+/// Waits until `turn`'s record is `card`. A card is recorded once Discord
+/// has answered its creation, after the request a test saw arrive.
+async fn recorded_soon(path: &PathBuf, turn: &str, card: &Value) -> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !recorded(path).is_ok_and(|records| records[turn] == *card) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_slow_turn_gets_one_delayed_card_that_follows_it_and_is_removed_after_delivery()
 -> anyhow::Result<()> {
@@ -401,6 +413,7 @@ finishing = "◇"
     );
     assert_eq!(card.body["allowed_mentions"], json!({"parse": []}));
     let expected = json!({"channel_id": "300", "message_id": "901"});
+    recorded_soon(&records, "slow", &expected).await?;
     assert_eq!(recorded(&records)?["slow"], expected);
 
     let history = [
