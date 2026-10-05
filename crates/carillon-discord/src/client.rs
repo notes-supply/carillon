@@ -195,6 +195,8 @@ const CAPTURE_SUBMISSION_TIMEOUT: Duration = Duration::from_mins(6);
 /// Model and command calls answer a waiting user and run inside the command
 /// module's deadline, so they give up well before it.
 const MODEL_CALL_TIMEOUT: Duration = Duration::from_secs(6);
+/// What the user is told when a model or command call ran out of time.
+pub(crate) const RUNTIME_LATE: &str = "The runtime did not answer in time.";
 
 /// Performs a model or command call and turns every failure into words for
 /// the user. Core and the runtime phrase their rejections for people;
@@ -203,7 +205,7 @@ async fn runtime_json<T: DeserializeOwned>(request: RequestBuilder) -> Result<T,
     let response = match request.send().await {
         Ok(response) => response,
         Err(error) if error.is_timeout() => {
-            return Err("The runtime did not answer in time.".to_owned());
+            return Err(RUNTIME_LATE.to_owned());
         }
         Err(error) => {
             warn!(%error, "model or command call failed to reach core");

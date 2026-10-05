@@ -44,7 +44,7 @@ use twilight_model::{
 };
 
 use crate::{
-    client::CoreClient,
+    client::{CoreClient, RUNTIME_LATE},
     conversations::{InteractionOrigin, submitted_event},
     delivery::{Feedback, Reactions},
 };
@@ -98,27 +98,42 @@ impl InteractionCalls {
     }
 }
 
-/// Native calls for invocations that must not perform any.
+/// Native calls for invocations that must not perform any, or those of
+/// one interaction, which all end by `until`.
 enum Calls {
     Refused,
-    Interaction(Box<InteractionCalls>),
+    Interaction {
+        calls: Box<InteractionCalls>,
+        until: Instant,
+    },
 }
 
 impl Native for Calls {
     async fn call(&mut self, request: Vec<u8>) -> Vec<u8> {
         let reply = match self {
             Self::Refused => HostReply::Error("native calls are not available".to_owned()),
-            Self::Interaction(calls) => calls.answer(&request).await,
+            Self::Interaction { calls, until } => calls.answer(&request, *until).await,
         };
         serde_json::to_vec(&reply).unwrap_or_default()
     }
 }
 
+/// A runtime call of an interaction, ended by `until` if it has not ended.
+async fn within<T>(
+    until: Instant,
+    call: impl Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    timeout_at(until, call)
+        .await
+        .unwrap_or_else(|_| Err(RUNTIME_LATE.to_owned()))
+}
+
 impl InteractionCalls {
-    async fn answer(&self, request: &[u8]) -> HostReply {
+    /// Answers one of the interaction's native requests by `until`.
+    async fn answer(&self, request: &[u8], until: Instant) -> HostReply {
         let outcome = match serde_json::from_slice::<HostRequest>(request) {
             Ok(HostRequest::Commands) => {
-                return match self.core.commands(&self.query).await {
+                return match within(until, self.core.commands(&self.query)).await {
                     Ok(catalog) => HostReply::Commands(catalog),
                     Err(message) => HostReply::Error(message),
                 };
@@ -133,6 +148,7 @@ impl InteractionCalls {
                             audience_id,
                             &text,
                             intent,
+                            until,
                         )
                         .await
                         {
@@ -148,7 +164,7 @@ impl InteractionCalls {
                     ),
                 };
             }
-            Ok(HostRequest::ModelState) => self.core.model_state(&self.query).await,
+            Ok(HostRequest::ModelState) => within(until, self.core.model_state(&self.query)).await,
             Ok(HostRequest::SetModel {
                 scope,
                 selection,
@@ -159,15 +175,17 @@ impl InteractionCalls {
                         "There is no conversation here to set a model for.".to_owned(),
                     );
                 }
-                self.core
-                    .set_model(&ModelUpdate {
+                within(
+                    until,
+                    self.core.set_model(&ModelUpdate {
                         agent_id: self.query.agent_id.clone(),
                         audience_id: self.query.audience_id.clone(),
                         scope,
                         selection,
                         expected,
-                    })
-                    .await
+                    }),
+                )
+                .await
             }
             Err(error) => Err(format!("invalid host request: {error}")),
         };
@@ -178,10 +196,11 @@ impl InteractionCalls {
     }
 }
 
-/// How much of the module's ten-second deadline a submission may take,
-/// leaving the module time to answer with its outcome.
-const SUBMIT_LIMIT: Duration = Duration::from_secs(7);
-/// How long posting the marker may take inside the submission's limit.
+/// How much of the module's ten-second deadline an interaction's native
+/// calls may take together, such as a Run click's catalog lookup and its
+/// submission, leaving the module time to answer with their outcome.
+const CALLS_LIMIT: Duration = Duration::from_secs(7);
+/// How long posting the marker may take inside the calls' limit.
 const MARKER_LIMIT: Duration = Duration::from_secs(4);
 /// Attempts to hand a submission to core while core is briefly unreachable.
 const SUBMIT_ATTEMPTS: u32 = 3;
@@ -191,9 +210,9 @@ const SUBMIT_ATTEMPTS: u32 = 3;
 /// event's identity and feedback target; core then accepts the event like
 /// any message, and the answer is delivered to the conversation.
 ///
-/// The submission returns within [`SUBMIT_LIMIT`], so the module can still
-/// say what happened. Within it, posting the marker takes at most
-/// [`MARKER_LIMIT`], and admission waits at most
+/// The submission returns by `deadline`, the end of its interaction's
+/// calls, so the module can still say what happened. Before it, posting the
+/// marker takes at most [`MARKER_LIMIT`], and admission waits at most
 /// [`PROMPT_FEEDBACK`](crate::delivery::PROMPT_FEEDBACK) for the
 /// processing reaction and typing; core's attempts take the rest. An attempt
 /// core has not answered in time may have been accepted, which the answer
@@ -207,6 +226,7 @@ async fn submit(
     audience_id: &str,
     text: &str,
     intent: Intent,
+    deadline: Instant,
 ) -> Result<(), String> {
     let Submissions {
         http,
@@ -217,12 +237,11 @@ async fn submit(
         .channel_id
         .parse()
         .map_err(|_| "The conversation's channel is not valid.".to_owned())?;
-    let deadline = Instant::now() + SUBMIT_LIMIT;
     let shown = text.replace('`', "ˋ");
     let shown: String = shown.chars().take(1900).collect();
     let silent = AllowedMentions::default();
     // The marker's answer, body included, is bounded: it is the event's identity.
-    let marker = tokio::time::timeout(MARKER_LIMIT, async {
+    let marker = timeout_at(deadline.min(Instant::now() + MARKER_LIMIT), async {
         http.create_message(channel)
             .allowed_mentions(Some(&silent))
             .content(&format!("<@{}> ran `{shown}`", origin.user_id))
@@ -246,7 +265,8 @@ async fn submit(
         text,
         intent,
     );
-    reactions.admission(&event).await;
+    // Stopping admission's wait leaves the processing request going on.
+    let _ = timeout_at(deadline, reactions.admission(&event)).await;
     let retry = Duration::from_millis(500);
     let mut attempt = 1;
     let (feedback, refusal) = loop {
@@ -614,15 +634,11 @@ impl Commands {
     pub async fn invoke(&self, calls: InteractionCalls, interaction: Interaction) -> Result<Reply> {
         let generation = self.current();
         let payload = serde_json::to_vec(&Invocation::Interaction(interaction))?;
-        match outcome(
-            &self.host,
-            &generation.module,
-            Calls::Interaction(Box::new(calls)),
-            &payload,
-            DEADLINE,
-        )
-        .await?
-        {
+        let calls = Calls::Interaction {
+            calls: Box::new(calls),
+            until: Instant::now() + CALLS_LIMIT,
+        };
+        match outcome(&self.host, &generation.module, calls, &payload, DEADLINE).await? {
             Outcome::Reply(reply) => Ok(reply),
             Outcome::Failure(message) => bail!("command module failed: {message}"),
             Outcome::Description(_) => {
@@ -870,10 +886,14 @@ pub(crate) mod tests {
         Saved, Source,
     };
 
+    /// `text` as the contents of a WAT string.
+    fn escape(text: &str) -> String {
+        text.replace('\\', "\\\\").replace('"', "\\\"")
+    }
+
     /// A module that answers `Describe` with `description` and every other
     /// invocation with `reply`, in binary form.
     pub(crate) fn module(description: &str, reply: &str) -> anyhow::Result<Vec<u8>> {
-        let escape = |text: &str| text.replace('\\', "\\\\").replace('"', "\\\"");
         let describe_length =
             serde_json::to_vec(&carillon_discord_commands::contract::Invocation::Describe)?.len();
         let text = format!(
@@ -1597,25 +1617,29 @@ pub(crate) mod tests {
             },
         );
         let reply = calls
-            .answer(&serde_json::to_vec(&HostRequest::SetModel {
-                scope: Scope::Agent,
-                selection: Some(selection.clone()),
-                expected: Some(selection),
-            })?)
+            .answer(
+                &serde_json::to_vec(&HostRequest::SetModel {
+                    scope: Scope::Agent,
+                    selection: Some(selection.clone()),
+                    expected: Some(selection),
+                })?,
+                calls_until(),
+            )
             .await;
         assert_eq!(reply, HostReply::Error("changed while applying".to_owned()));
         server.abort();
         Ok(())
     }
 
-    /// Core and Discord in one fake: lists `catalog`, accepts every event
-    /// after `admission` and shows feedback after `feedback`, posts every
-    /// message as `901`, and traces the requests in order as they arrive.
+    /// Core and Discord in one fake: lists `catalog` after `listing`, accepts
+    /// every event after `admission` and shows feedback after `feedback`,
+    /// posts every message as `901`, and traces the requests in order as they
+    /// arrive.
     fn submission_server(
         catalog: carillon_protocol::model::CommandCatalog,
         trace: Arc<tokio::sync::Mutex<Vec<String>>>,
         submitted: Arc<tokio::sync::Mutex<Vec<carillon_protocol::model::ExternalEvent>>>,
-        (admission, feedback): (Duration, Duration),
+        (listing, admission, feedback): (Duration, Duration, Duration),
     ) -> Router {
         use axum::{
             Json,
@@ -1636,6 +1660,7 @@ pub(crate) mod tests {
                             query.get("audience_id").map(String::as_str),
                             Some("discord-100-400")
                         );
+                        tokio::time::sleep(listing).await;
                         Json(catalog)
                     }
                 }),
@@ -1716,7 +1741,7 @@ pub(crate) mod tests {
             catalog.clone(),
             trace.clone(),
             submitted.clone(),
-            (Duration::ZERO, Duration::ZERO),
+            (Duration::ZERO, Duration::ZERO, Duration::ZERO),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
@@ -1735,12 +1760,12 @@ pub(crate) mod tests {
         let unanchored = super::InteractionCalls::new(core.clone(), query.clone());
         assert_eq!(
             unanchored
-                .answer(&serde_json::to_vec(&HostRequest::Commands)?)
+                .answer(&serde_json::to_vec(&HostRequest::Commands)?, calls_until())
                 .await,
             HostReply::Commands(catalog)
         );
         assert!(matches!(
-            unanchored.answer(&submit).await,
+            unanchored.answer(&submit, calls_until()).await,
             HostReply::Error(_)
         ));
         assert!(submitted.lock().await.is_empty());
@@ -1768,7 +1793,10 @@ pub(crate) mod tests {
                     route_channel_id: "300".to_owned(),
                 },
             });
-        assert_eq!(calls.answer(&submit).await, HostReply::Submitted);
+        assert_eq!(
+            calls.answer(&submit, calls_until()).await,
+            HostReply::Submitted
+        );
         server.abort();
         let trace = trace.lock().await;
         // The marker is posted silently first, marked processing, then submitted.
@@ -1864,6 +1892,11 @@ pub(crate) mod tests {
         Ok((calls, reactions, server))
     }
 
+    /// The end of an interaction's native calls, were it starting now.
+    fn calls_until() -> tokio::time::Instant {
+        tokio::time::Instant::now() + super::CALLS_LIMIT
+    }
+
     fn submit_request() -> anyhow::Result<Vec<u8>> {
         Ok(serde_json::to_vec(
             &carillon_discord_commands::contract::HostRequest::Submit {
@@ -1886,11 +1919,11 @@ pub(crate) mod tests {
             },
             trace.clone(),
             submitted.clone(),
-            (Duration::ZERO, Duration::from_secs(30)),
+            (Duration::ZERO, Duration::ZERO, Duration::from_secs(30)),
         );
         let (calls, _reactions, server) = submitting(router, |config| config.typing = true).await?;
         let started = std::time::Instant::now();
-        let reply = calls.answer(&submit_request()?).await;
+        let reply = calls.answer(&submit_request()?, calls_until()).await;
         let elapsed = started.elapsed();
         server.abort();
         assert_eq!(reply, HostReply::Submitted);
@@ -1924,11 +1957,11 @@ pub(crate) mod tests {
             },
             trace.clone(),
             Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            (Duration::from_secs(30), Duration::ZERO),
+            (Duration::ZERO, Duration::from_secs(30), Duration::ZERO),
         );
         let (calls, reactions, server) = submitting(router, |config| config.typing = false).await?;
         let started = std::time::Instant::now();
-        let reply = calls.answer(&submit_request()?).await;
+        let reply = calls.answer(&submit_request()?, calls_until()).await;
         let elapsed = started.elapsed();
         // Core may have accepted it: the answer says so, in time to be shown.
         assert_eq!(
@@ -1955,6 +1988,103 @@ pub(crate) mod tests {
             trace.last().is_some_and(
                 |request| request.starts_with("PUT ") && request.contains("/reactions/")
             )
+        );
+        Ok(())
+    }
+
+    /// A module that answers every interaction as a Run click does: it asks
+    /// for the runtime's commands, then submits `/compact keep decisions`,
+    /// then replies `ran`.
+    fn running_module() -> anyhow::Result<Vec<u8>> {
+        use carillon_discord_commands::contract::{HostRequest, Invocation};
+        let describe = describing(&[definition("command")]);
+        let describe_length = serde_json::to_vec(&Invocation::Describe)?.len();
+        let commands = serde_json::to_string(&HostRequest::Commands)?;
+        let submit = String::from_utf8(submit_request()?)?;
+        let reply = replying("ran", &[]);
+        let text = format!(
+            r#"(module
+  (import "carillon" "call" (func $call (param i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (global $length (mut i32) (i32.const 0))
+  (global $output (mut i32) (i32.const 0))
+  (data (i32.const 1024) "{}")
+  (data (i32.const 2048) "{}")
+  (data (i32.const 3072) "{}")
+  (data (i32.const 4096) "{}")
+  (func (export "input") (param $length i32) (result i32)
+    (global.set $length (local.get $length))
+    (i32.const 8192))
+  (func (export "invoke") (result i32)
+    (if (result i32) (i32.eq (global.get $length) (i32.const {describe_length}))
+      (then (global.set $output (i32.const 1024)) (i32.const {}))
+      (else
+        (drop (call $call (i32.const 2048) (i32.const {})))
+        (drop (call $call (i32.const 3072) (i32.const {})))
+        (global.set $output (i32.const 4096))
+        (i32.const {}))))
+  (func (export "output") (result i32) (global.get $output)))"#,
+            escape(&describe),
+            escape(&commands),
+            escape(&submit),
+            escape(&reply),
+            describe.len(),
+            commands.len(),
+            submit.len(),
+            reply.len(),
+        );
+        Ok(wat::parse_str(text)?)
+    }
+
+    #[tokio::test]
+    async fn a_run_click_answers_within_the_module_deadline_however_slow_its_calls()
+    -> anyhow::Result<()> {
+        // The runtime takes five seconds to list its commands, then core
+        // does not answer the submission at all: separately bounded, the two
+        // would outlast the module's deadline.
+        let trace = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let router = submission_server(
+            carillon_protocol::model::CommandCatalog {
+                commands: vec![carillon_protocol::model::RuntimeCommand {
+                    name: "compact".to_owned(),
+                    description: None,
+                    hint: None,
+                }],
+            },
+            trace.clone(),
+            Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            (
+                Duration::from_secs(5),
+                Duration::from_secs(30),
+                Duration::ZERO,
+            ),
+        );
+        let (calls, reactions, server) = submitting(router, |config| config.typing = false).await?;
+        let directory = tempfile::tempdir()?;
+        std::fs::write(directory.path().join("release.wasm"), running_module()?)?;
+        let commands = Commands::load(files(directory.path())).await?;
+        let started = std::time::Instant::now();
+        let reply = commands.invoke(calls, interaction()).await?;
+        let elapsed = started.elapsed();
+        // The module answered in time, after both calls had ended.
+        assert_eq!(reply.content, "ran");
+        assert!(elapsed < super::DEADLINE, "answered after {elapsed:?}");
+        // The submission settled: core's silence replaces the marker's
+        // processing reaction with the uncertain one.
+        assert_eq!(reactions.stop(Duration::from_secs(10)).await, 0);
+        server.abort();
+        let trace = trace.lock().await;
+        assert!(
+            trace[0].starts_with("message <@200> ran `/compact keep decisions`"),
+            "{trace:?}"
+        );
+        assert!(trace.contains(&"event 901".to_owned()), "{trace:?}");
+        assert!(
+            trace
+                .last()
+                .is_some_and(|request| request.starts_with("PUT ")
+                    && request.contains("/reactions/%E2%9A%A0")),
+            "{trace:?}"
         );
         Ok(())
     }
@@ -2009,7 +2139,10 @@ pub(crate) mod tests {
         let router = applying_server(Duration::from_secs(4), applied.clone());
         let (calls, reactions, server) = submitting(router, |config| config.typing = true).await?;
         let started = std::time::Instant::now();
-        assert_eq!(calls.answer(&submit_request()?).await, HostReply::Submitted);
+        assert_eq!(
+            calls.answer(&submit_request()?, calls_until()).await,
+            HostReply::Submitted
+        );
         // Admission did not wait for Discord to apply it.
         assert!(started.elapsed() < crate::delivery::PROMPT_FEEDBACK + Duration::from_secs(1));
         // The answer is delivered at once and its outcome shown, as the

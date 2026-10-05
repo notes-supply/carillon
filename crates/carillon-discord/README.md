@@ -51,11 +51,12 @@ retain the actual Wasm path rather than substituting this direct native call.
   [`HostCalls`](../carillon-discord-commands/src/lib.rs) is the existing native-operation
   boundary, also used by the example. A submission from `/command` posts a silent marker
   message in the conversation and submits an event anchored on it, with the interaction's
-  admission and `native.intent: "command"`. The submission returns within seven of the
-  module's ten seconds: at most four to post the marker, at most two waiting for the
-  processing reaction and typing before admission, and core's attempts in the rest; core's
-  silence is reported as a possible acceptance, and a refusal's reaction is shown without
-  the answer waiting for it.
+  admission and `native.intent: "command"`. An interaction's native calls, such as a Run
+  click's catalog lookup and the submission that follows it, end within seven of the
+  module's ten seconds together: within them, at most four to post the marker, at most two
+  waiting for the processing reaction and typing before admission, and core's attempts in
+  the rest; core's silence is reported as a possible acceptance, never as not sent, and a
+  refusal's reaction is shown without the answer waiting for it.
 - [`inbound`](src/inbound.rs) settles one admitted message: it asks core whether it
   already holds the message, such as a replayed one, and if not prepares the native
   conversation, emits feedback (admission waits at most two seconds for it) and retries
