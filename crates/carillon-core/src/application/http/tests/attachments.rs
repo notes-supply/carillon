@@ -657,19 +657,24 @@ async fn an_altered_capture_interrupts_its_turn_without_running_it() -> Result<(
 /// it was offered. An empty answer ends the turn unanswered, as a command
 /// that consumed its message does.
 async fn offered(state: &AppState, output: &str) -> Result<Vec<UnansweredTurn>> {
+    offered_answering(state, serde_json::json!({ "output": output })).await
+}
+
+/// Run the next turn, answering with the fields of `answer` as a runtime's
+/// response reads on the wire, and return the earlier files it was offered.
+async fn offered_answering(
+    state: &AppState,
+    mut answer: serde_json::Value,
+) -> Result<Vec<UnansweredTurn>> {
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let record = seen.clone();
-    let output = output.to_owned();
     run_next_turn(state, "test-runtime", async move |_, _, request| {
         record
             .lock()
             .map_err(|_| TurnFailure::Uncertain(anyhow!("poisoned")))?
             .clone_from(&request.unanswered);
-        Ok(RuntimeTurnResponse {
-            correlation_id: request.correlation_id,
-            output,
-            follow_up: None,
-        })
+        answer["correlation_id"] = request.correlation_id.into();
+        serde_json::from_value(answer).map_err(|error| TurnFailure::Uncertain(error.into()))
     })
     .await?;
     let offered = seen.lock().map_err(|_| anyhow!("poisoned"))?.clone();
@@ -715,6 +720,41 @@ async fn files_of_unanswered_turns_are_offered_again_until_a_turn_is_answered() 
         }]
     );
     // Once a turn of the conversation is answered, they are not offered again.
+    accept(&state, "later", "files").await?;
+    assert!(offered(&state, "another answer").await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn files_an_answered_command_left_are_offered_again_until_a_turn_carries_them() -> Result<()>
+{
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    // A message with a file is interrupted before it is answered.
+    let staged = stage(&state, "photo", &[("photo.png", b"pixels")])?;
+    let photo = submit(&state, event("photo", "look", staged))
+        .await
+        .map_err(|error| anyhow!(error.message))?;
+    assert!(offered(&state, "").await?.is_empty());
+    let left = vec![UnansweredTurn {
+        correlation_id: photo.turn_id.clone(),
+        attachments: state
+            .core
+            .inspect_turn(&photo.turn_id)?
+            .context("turn")?
+            .attachments,
+    }];
+    // A command is answered after it ran as written, as T3's runtime runs
+    // one, without the file it was offered.
+    accept(&state, "compact", "files").await?;
+    let command = serde_json::json!({
+        "output": "`/compact` finished.",
+        "unanswered_left": true,
+    });
+    assert_eq!(offered_answering(&state, command).await?, left);
+    // The next message is offered the file again, and its answer carries it.
+    accept(&state, "prose", "files").await?;
+    assert_eq!(offered(&state, "the photo is pixels").await?, left);
     accept(&state, "later", "files").await?;
     assert!(offered(&state, "another answer").await?.is_empty());
     Ok(())

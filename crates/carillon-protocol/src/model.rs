@@ -238,6 +238,12 @@ pub struct RuntimeTurnResponse {
     /// whose request carries this runtime-owned cursor as `follow_up`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub follow_up: Option<Value>,
+    /// The answer left the earlier turns' files the request offered as
+    /// `unanswered` out of the runtime's conversation, as a command passed
+    /// to its engine as written may: core offers them again with a later
+    /// turn rather than counting them carried.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unanswered_left: bool,
 }
 
 /// The neutral key of a turn's `native` metadata through which an

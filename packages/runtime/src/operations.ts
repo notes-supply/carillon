@@ -30,6 +30,12 @@ export interface TurnResponse {
    * (an observation) whose request carries this runtime-owned cursor as `follow_up`.
    */
   readonly follow_up?: unknown;
+  /**
+   * The answer left the earlier turns' files the request offered as
+   * `unanswered` out of the native conversation, as a command passed to the
+   * engine as written may: core offers them again with a later turn.
+   */
+  readonly unanswered_left?: boolean;
 }
 
 export interface RuntimeOperations {

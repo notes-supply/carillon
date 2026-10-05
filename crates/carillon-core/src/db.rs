@@ -1225,6 +1225,7 @@ mod tests {
                 correlation_id: turn.turn_id.clone(),
                 output: "reply".to_owned(),
                 follow_up: None,
+                unanswered_left: false,
             },
         )?;
         assert_eq!(
@@ -1345,6 +1346,7 @@ mod tests {
                 correlation_id: first.turn_id.clone(),
                 output: "delegated".to_owned(),
                 follow_up: Some(cursor.clone()),
+                unanswered_left: false,
             },
         )?;
         let answer = database
@@ -1368,6 +1370,7 @@ mod tests {
                 correlation_id: turn.turn_id.clone(),
                 output: output.to_owned(),
                 follow_up: None,
+                unanswered_left: false,
             },
         )
     }
@@ -1386,6 +1389,7 @@ mod tests {
                 correlation_id: first.turn_id.clone(),
                 output: "first reply".to_owned(),
                 follow_up: None,
+                unanswered_left: false,
             },
         )?;
         accept(&database, "two", "conversation")?;
@@ -1402,6 +1406,7 @@ mod tests {
             correlation_id: second.turn_id.clone(),
             output: "second reply".to_owned(),
             follow_up: None,
+            unanswered_left: false,
         };
         let failure = database
             .complete_turn(&second, &response)
@@ -1512,6 +1517,7 @@ mod tests {
                     correlation_id: turn.turn_id.clone(),
                     output: output.to_owned(),
                     follow_up: None,
+                    unanswered_left: false,
                 },
             )?;
         }
@@ -1596,6 +1602,7 @@ mod tests {
             correlation_id: requeued.turn_id.clone(),
             output: "done".to_owned(),
             follow_up: None,
+            unanswered_left: false,
         };
         database.complete_turn(&requeued, &response)?;
         assert!(database.complete_turn(&requeued, &response).is_err());

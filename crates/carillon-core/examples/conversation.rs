@@ -74,6 +74,7 @@ async fn conversation() -> Result<()> {
                 correlation_id: request.correlation_id,
                 output: format!("{} — {captured}", request.input),
                 follow_up: None,
+                unanswered_left: false,
             })
         })
         .await?;

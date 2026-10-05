@@ -1200,6 +1200,7 @@ mod tests {
             Ok(RuntimeTurnResponse {
                 output: "read it".to_owned(),
                 follow_up: None,
+                unanswered_left: false,
                 correlation_id: request.correlation_id,
             })
         })
@@ -1253,6 +1254,7 @@ mod tests {
                 Ok(RuntimeTurnResponse {
                     output: "read it".to_owned(),
                     follow_up: None,
+                    unanswered_left: false,
                     correlation_id: request.correlation_id,
                 })
             })

@@ -1775,7 +1775,7 @@ it("does not call a missing report older than the window when only T3's byte bud
   ).rejects.toMatchObject({ status: 502, message: "T3 finished the run without an answer." });
 });
 
-it("sends a command invocation verbatim, without notes about earlier files", async () => {
+it("sends a command invocation verbatim, leaving the earlier files' notes for a later turn", async () => {
   const earlier = [{ correlation_id: "turn-0", attachments: [attachment] }];
   const command = runtime.executeTurn(
     turn("turn-1", "/compact keep the decisions", {
@@ -1784,10 +1784,15 @@ it("sends a command invocation verbatim, without notes about earlier files", asy
     }),
   );
   answer(await started("turn-1"), "Compacted.");
-  await command;
+  // The answer says the files were left, so core offers them again.
+  expect(await command).toEqual({
+    correlation_id: "turn-1",
+    output: "Compacted.",
+    unanswered_left: true,
+  });
   const prose = runtime.executeTurn(turn("turn-2", "hello", { unanswered: earlier }));
   answer(await started("turn-2"), "hi");
-  await prose;
+  expect(await prose).toEqual({ correlation_id: "turn-2", output: "hi" });
   expect(userTexts()).toEqual([
     "/compact keep the decisions",
     "hello\n\n[Carillon: 1 file(s) attached to earlier messages are not available to this runtime: a.png]",
@@ -1797,7 +1802,8 @@ it("sends a command invocation verbatim, without notes about earlier files", asy
   // by name; a failed one keeps T3's explanation.
   const silent = runtime.executeTurn(turn("turn-3", "/compact", { native: { intent: "command" } }));
   fake.complete(threadId, (await started("turn-3")).id);
-  expect((await silent).output).toBe("`/compact` finished.");
+  // Offered no earlier files, it leaves none.
+  expect(await silent).toEqual({ correlation_id: "turn-3", output: "`/compact` finished." });
   const failed = runtime.executeTurn(
     turn("turn-4", "/review main", { native: { intent: "command" } }),
   );

@@ -386,7 +386,7 @@ impl Core {
     ) -> Result<WorkerStep> {
         let observation = turn.follow_up.is_some();
         // An observation carries no files and offers none.
-        let (unanswered, carried) = if observation {
+        let (unanswered, mut carried) = if observation {
             (Vec::new(), Vec::new())
         } else {
             if let Err(unusable) = self.check_attachments(turn).await {
@@ -405,8 +405,8 @@ impl Core {
                 self.database
                     .unnoted_files(turn, limits.max_files, limits.max_event_bytes())?;
             let offered = self.offer(earlier).await?;
-            // The files this turn carries to the runtime: its own and the
-            // earlier turns offered with it, even when none of a turn's
+            // The files this turn carries to the runtime: its own, first, and
+            // the earlier turns offered with it, even when none of a turn's
             // files was left.
             let carried = std::iter::once(turn.turn_id.clone())
                 .chain(offered.iter().map(|earlier| earlier.correlation_id.clone()))
@@ -422,12 +422,12 @@ impl Core {
             let correlation_id = request.correlation_id.clone();
             let response = submit(request).await?;
             validate_response(&correlation_id, &response)?;
-            let follow_up = response.follow_up.is_some();
+            let answered = (response.follow_up.is_some(), response.unanswered_left);
             let claimed = turn.clone();
             self.blocking(move |core| core.database.complete_turn(&claimed, &response))
                 .await
                 .map_err(TurnFailure::Uncertain)?;
-            Ok(follow_up)
+            Ok(answered)
         }
         .await;
         // Each outcome is written once. If that write fails, the turn stays
@@ -435,13 +435,18 @@ impl Core {
         // again; startup recovery then records it as interrupted, or asks an
         // observation again.
         let (error, explanation) = match outcome {
-            Ok(follow_up) => {
+            Ok((follow_up, unanswered_left)) => {
                 if follow_up {
                     self.wake(Lane::Observations);
                 }
                 // An answered turn's conversation was saved with everything
-                // it carried. Should recording that fail, the files are
-                // offered again and the runtime skips those it holds.
+                // it carried: its own files, and the earlier ones unless its
+                // runtime left them for a later turn. Should recording that
+                // fail, the files are offered again and the runtime skips
+                // those it holds.
+                if unanswered_left {
+                    carried.truncate(1);
+                }
                 if !carried.is_empty()
                     && let Err(error) = self
                         .blocking(move |core| core.database.mark_noted(&carried))

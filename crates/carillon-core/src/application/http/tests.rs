@@ -142,6 +142,7 @@ fn completed(request: RuntimeTurnRequest) -> RuntimeTurnResponse {
         correlation_id: request.correlation_id,
         output: format!("reply to {}", request.input),
         follow_up: None,
+        unanswered_left: false,
     }
 }
 
@@ -842,6 +843,7 @@ async fn follow_up_turns_carry_only_the_runtime_cursor_beside_later_messages() -
     run_next_turn(&state, "test-runtime", async move |_, _, request| {
         Ok(RuntimeTurnResponse {
             follow_up: Some(answered),
+            unanswered_left: false,
             ..completed(request)
         })
     })
@@ -892,6 +894,7 @@ async fn follow_up_turns_carry_only_the_runtime_cursor_beside_later_messages() -
             correlation_id: request.correlation_id,
             output: "the report".to_owned(),
             follow_up: None,
+            unanswered_left: false,
         })
     })
     .await?;
@@ -942,6 +945,7 @@ async fn an_observation_the_runtime_fails_without_explanation_ends() -> Result<(
     run_next_turn(&state, "test-runtime", async move |_, _, request| {
         Ok(RuntimeTurnResponse {
             follow_up: Some(cursor),
+            unanswered_left: false,
             ..completed(request)
         })
     })
@@ -1035,6 +1039,7 @@ async fn workers_hear_of_claimable_turns_in_their_own_lane() -> Result<()> {
     run_next_turn(&state, "test-runtime", async |_, _, request| {
         Ok(RuntimeTurnResponse {
             follow_up: Some(serde_json::json!({"message": "m", "after": 1})),
+            unanswered_left: false,
             ..completed(request)
         })
     })
@@ -1724,6 +1729,7 @@ async fn empty_runtime_output_interrupts_without_empty_delivery_or_replay() -> R
                     }
                     .to_owned(),
                     follow_up: None,
+                    unanswered_left: false,
                 })
             }
         }),
@@ -2337,6 +2343,7 @@ async fn a_cut_off_answer_asks_an_observation_again_but_never_replays_an_executa
     run_next_turn(&state, "test-runtime", async move |_, _, request| {
         Ok(RuntimeTurnResponse {
             follow_up: Some(cursor),
+            unanswered_left: false,
             ..completed(request)
         })
     })

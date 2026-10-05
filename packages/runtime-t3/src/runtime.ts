@@ -390,6 +390,11 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
             correlation_id: request.correlation_id,
             output,
             ...(outcome.followUp === undefined ? {} : { follow_up: outcome.followUp }),
+            // A command went as written, without the notes of the earlier
+            // files it was offered: core offers them again with a later turn.
+            ...(turnIntent(request.native) === "command" && (request.unanswered ?? []).length > 0
+              ? { unanswered_left: true }
+              : {}),
           };
         }
         case "failed":
