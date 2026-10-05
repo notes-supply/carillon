@@ -28,10 +28,11 @@ retain the actual Wasm path rather than substituting this direct native call.
   Delivered content is sent as given, split at Discord's length limit, with mentions
   disabled. Its `Reactions` keep each message's reactions in order: the processing
   reaction is a request they own until Discord answers it, and the delivered, failed or
-  uncertain reaction waits for that request before replacing it. Reactions beside the
-  work are their tasks, with at most 64 outcomes under way (one beyond them is not
-  shown, and that is logged), until the connection stops: they then get two seconds to
-  end, and the rest are cancelled.
+  uncertain reaction waits for that request before replacing it. Feedback beside the
+  work, including the lanes' overload refusals, runs as their tasks, with at most 64
+  outcomes under way (one beyond them is not shown, and that is logged), until the
+  connection stops: it then gets two seconds to end, and the rest, like any outcome still
+  awaited, is cancelled; nothing is sent after that.
 - [`activity`](src/activity.rs) shows temporary activity cards and typing while turns
   run. It reads core's activity list, receives each turn's outcome from the delivery
   loop, and records only the channel and message of cards it created, so a restart

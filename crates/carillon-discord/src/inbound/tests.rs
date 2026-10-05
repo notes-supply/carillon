@@ -627,3 +627,56 @@ async fn a_message_stopped_before_core_says_whether_it_holds_it_gets_no_feedback
     assert_eq!(requests, ["GET /v1/events/400"]);
     Ok(())
 }
+
+#[tokio::test]
+async fn an_overload_refusal_ends_with_the_reactions() -> anyhow::Result<()> {
+    // Discord receives the refusal's explanation but answers it only after
+    // the provider has stopped.
+    let trace = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let (explaining, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    let app = {
+        let (trace, explaining, release) = (trace.clone(), explaining.clone(), release.clone());
+        Router::new().fallback(move |method: Method, uri: Uri| {
+            let (trace, explaining, release) = (trace.clone(), explaining.clone(), release.clone());
+            async move {
+                trace.lock().await.push(format!("{method} {}", uri.path()));
+                if method == Method::POST {
+                    explaining.notify_one();
+                    release.notified().await;
+                }
+                StatusCode::NO_CONTENT
+            }
+        })
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let directory = tempfile::tempdir()?;
+    let participation = Arc::new(Participation::load(
+        directory.path().join("participation.json"),
+    )?);
+    let mut config = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
+    config.typing = false;
+    let ingress = ingress(
+        core_client(format!("http://{address}")),
+        config,
+        participation,
+        discord_client(address),
+        directory.path(),
+    )?;
+    let refusals = Arc::new(tokio::sync::Semaphore::new(1));
+    super::lanes::refuse_overloaded(&ingress, &refusals, hello().request);
+    tokio::time::timeout(Duration::from_secs(2), explaining.notified()).await?;
+    ingress.stopping.cancel();
+    // The refusal is the reactions' own: given the grace, then cancelled,
+    // its slot returned at once.
+    assert_eq!(ingress.reactions.stop(Duration::from_millis(200)).await, 1);
+    assert_eq!(refusals.available_permits(), 1);
+    release.notify_one();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    server.abort();
+    // The explanation Discord already received is all it got: no reaction
+    // followed after the stop.
+    assert_eq!(*trace.lock().await, ["POST /api/v10/channels/300/messages"]);
+    Ok(())
+}

@@ -513,32 +513,45 @@ async fn a_message_admitted_again_shares_its_processing_request() -> anyhow::Res
 
 #[tokio::test]
 async fn a_stopping_provider_ends_its_reactions_within_the_grace() -> anyhow::Result<()> {
-    // Discord answers message 401's reactions only after 30 seconds and
-    // message 402's after a moment.
+    // Discord answers the reactions of messages 401 and 406 only after 30
+    // seconds, and those of message 402 after a moment.
     let received = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-    let trace = received.clone();
-    let app = Router::new().route(
-        "/api/v10/channels/{channel}/messages/{message}/reactions/{emoji}/@me",
-        any(
-            move |method: Method, Path((_, message, emoji)): Path<(String, String, String)>| {
-                let trace = trace.clone();
-                async move {
-                    trace
-                        .lock()
-                        .await
-                        .push(format!("{method} {message} {emoji}"));
-                    let answer = if message == "401" { 30_000 } else { 100 };
-                    tokio::time::sleep(Duration::from_millis(answer)).await;
-                    StatusCode::NO_CONTENT
-                }
-            },
-        ),
-    );
+    let (trace, other) = (received.clone(), received.clone());
+    let app = Router::new()
+        .route(
+            "/api/v10/channels/{channel}/messages/{message}/reactions/{emoji}/@me",
+            any(
+                move |method: Method, Path((_, message, emoji)): Path<(String, String, String)>| {
+                    let trace = trace.clone();
+                    async move {
+                        trace
+                            .lock()
+                            .await
+                            .push(format!("{method} {message} {emoji}"));
+                        let answer = if matches!(message.as_str(), "401" | "406") {
+                            30_000
+                        } else {
+                            100
+                        };
+                        tokio::time::sleep(Duration::from_millis(answer)).await;
+                        StatusCode::NO_CONTENT
+                    }
+                },
+            ),
+        )
+        // Anything else, such as typing.
+        .fallback(move |method: Method, uri: Uri| {
+            let other = other.clone();
+            async move {
+                other.lock().await.push(format!("{method} {}", uri.path()));
+                StatusCode::NO_CONTENT
+            }
+        });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
-    let mut config = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
-    config.typing = false;
+    // Typing is on, so an admission after the stop could show it.
+    let config = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
     let (processing, delivered) = (
         config.processing_emoji.clone(),
         config.delivered_emoji.clone(),
@@ -546,35 +559,35 @@ async fn a_stopping_provider_ends_its_reactions_within_the_grace() -> anyhow::Re
     let reactions = Reactions::new(discord_client(address), config);
     reactions.show_outcome("300:401".to_owned(), Feedback::Delivered);
     reactions.show_outcome("300:402".to_owned(), Feedback::Delivered);
+    // Work of its own awaits message 406's outcome.
+    let awaited = tokio::spawn({
+        let reactions = reactions.clone();
+        async move { reactions.outcome("300:406", Feedback::Delivered).await }
+    });
     let started = std::time::Instant::now();
     // The provider stops: what ends within the grace ends, the rest is
-    // cancelled rather than awaited for thirty seconds.
+    // cancelled rather than awaited for thirty seconds, the awaited outcome
+    // included.
     assert_eq!(reactions.stop(Duration::from_secs(1)).await, 1);
     let stopping = started.elapsed();
     assert!(
         stopping >= Duration::from_secs(1) && stopping < Duration::from_secs(2),
         "stopping took {stopping:?}"
     );
-    // Nothing starts after the stop, whether an outcome or an admission.
+    tokio::time::timeout(Duration::from_millis(500), awaited)
+        .await
+        .context("an awaited outcome outlived the stop")??;
+    // Nothing starts after the stop: an outcome shown or awaited, or an
+    // admission.
     reactions.show_outcome("300:403".to_owned(), Feedback::Delivered);
-    let event = ExternalEvent {
-        event_id: "404".to_owned(),
-        agent_id: "default".to_owned(),
-        user_id: "200".to_owned(),
-        audience_id: "discord-100-300".to_owned(),
-        delivery_target_id: "300".to_owned(),
-        feedback_target_id: "300:404".to_owned(),
-        content: "hello".to_owned(),
-        native: serde_json::Value::Null,
-        attachments: None,
-    };
+    reactions.outcome("300:405", Feedback::Failed).await;
     let admitting = std::time::Instant::now();
-    reactions.admission(&event).await;
+    reactions.admission(&event("404")).await;
     assert!(admitting.elapsed() < Duration::from_millis(500));
     tokio::time::sleep(Duration::from_millis(300)).await;
     server.abort();
-    // 402's outcome was shown; 401's was cut while removing the processing
-    // reaction, so its outcome reaction never followed.
+    // 402's outcome was shown; 401's and 406's were cut while removing the
+    // processing reaction, so their outcome reactions never followed.
     let mut received = received.lock().await.clone();
     received.sort();
     assert_eq!(
@@ -582,6 +595,7 @@ async fn a_stopping_provider_ends_its_reactions_within_the_grace() -> anyhow::Re
         [
             format!("DELETE 401 {processing}"),
             format!("DELETE 402 {processing}"),
+            format!("DELETE 406 {processing}"),
             format!("PUT 402 {delivered}"),
         ]
     );

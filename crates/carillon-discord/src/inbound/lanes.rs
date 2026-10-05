@@ -163,16 +163,18 @@ pub(crate) fn refuse_overloaded(
     let Ok(permit) = refusals.clone().try_acquire_owned() else {
         return;
     };
-    let ingress = ingress.clone();
-    tokio::spawn(async move {
+    // The refusal is feedback: the connection's reactions own it, so it
+    // ends when they stop.
+    let owner = ingress.clone();
+    ingress.reactions.spawn(async move {
         let source = format!("{}:{}", message.channel_id, message.event_id);
         explain(
-            &ingress.http,
+            &owner.http,
             &source,
             "Carillon is too busy to take this message right now; please send it again shortly.",
         )
         .await;
-        ingress.reactions.outcome(&source, Feedback::Failed).await;
+        owner.reactions.outcome(&source, Feedback::Failed).await;
         drop(permit);
     });
 }

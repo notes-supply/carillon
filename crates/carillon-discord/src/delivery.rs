@@ -65,9 +65,10 @@ pub(crate) enum Feedback {
 /// after the outcome. One Discord never answers leaves its effect unknown:
 /// it may still be applied later, and that is logged, not assumed away.
 ///
-/// Reactions that run beside work are tasks these reactions own until
-/// [`Reactions::stop`]: processing requests, one per message at a time, and
-/// at most [`OUTCOMES`] outcome reactions.
+/// Feedback that runs beside work runs as tasks these reactions own until
+/// [`Reactions::stop`]: processing requests, one per message at a time, at
+/// most [`OUTCOMES`] outcome reactions, and the lanes' overload refusals.
+/// After the stop nothing is sent, not even an outcome a caller awaits.
 #[derive(Clone)]
 pub(crate) struct Reactions(Arc<Owned>);
 
@@ -99,6 +100,12 @@ impl Reactions {
     /// handed to core. Admission waits for them at most
     /// [`PROMPT_FEEDBACK`]; the processing request goes on without it.
     pub(crate) async fn admission(&self, event: &ExternalEvent) {
+        let Owned {
+            http,
+            config,
+            stopped,
+            ..
+        } = &*self.0;
         let processing = self.processing(&event.feedback_target_id);
         let shown = async {
             tokio::join!(
@@ -107,10 +114,13 @@ impl Reactions {
                         let _ = ended.changed().await;
                     }
                 },
-                trigger_typing(&self.0.http, &self.0.config, &event.delivery_target_id),
+                trigger_typing(http, config, &event.delivery_target_id),
             );
         };
-        if timeout(PROMPT_FEEDBACK, shown).await.is_err() {
+        if timeout(PROMPT_FEEDBACK, stopped.run_until_cancelled(shown))
+            .await
+            .is_err()
+        {
             warn!(event_id = %event.event_id, "Discord feedback was not shown in time; the message is admitted without waiting for it");
         }
     }
@@ -147,11 +157,11 @@ impl Reactions {
         Some(ended)
     }
 
-    /// Runs `reaction` as a task these reactions own, until it ends or they
+    /// Runs `feedback` as a task these reactions own, until it ends or they
     /// stop.
-    fn spawn(&self, reaction: impl Future<Output = ()> + Send + 'static) {
+    pub(crate) fn spawn(&self, feedback: impl Future<Output = ()> + Send + 'static) {
         let Owned { tasks, stopped, .. } = &*self.0;
-        tasks.spawn(stopped.clone().run_until_cancelled_owned(reaction));
+        tasks.spawn(stopped.clone().run_until_cancelled_owned(feedback));
     }
 
     /// Waits until the message's processing request, if one is under way,
@@ -164,24 +174,35 @@ impl Reactions {
     }
 
     /// Replaces the message's processing reaction with its outcome, once
-    /// the processing request has ended.
+    /// the processing request has ended, unless these reactions stop first.
     pub(crate) async fn outcome(&self, target: &str, feedback: Feedback) {
-        let Owned { http, config, .. } = &*self.0;
+        let Owned {
+            http,
+            config,
+            stopped,
+            ..
+        } = &*self.0;
         if !config.reactions {
             return;
-        }
-        self.after_processing(target).await;
-        if let Err(failure) = delete_feedback_reaction(http, target, &config.processing_emoji).await
-        {
-            warn!(error = %failure, "Discord processing reaction removal failed");
         }
         let emoji = match feedback {
             Feedback::Delivered => &config.delivered_emoji,
             Feedback::Failed => &config.failed_emoji,
             Feedback::Uncertain => &config.uncertain_emoji,
         };
-        if let Err(failure) = create_feedback_reaction(http, target, emoji).await {
-            warn!(error = %failure, "Discord terminal reaction failed");
+        let shown = stopped.run_until_cancelled(async {
+            self.after_processing(target).await;
+            if let Err(failure) =
+                delete_feedback_reaction(http, target, &config.processing_emoji).await
+            {
+                warn!(error = %failure, "Discord processing reaction removal failed");
+            }
+            if let Err(failure) = create_feedback_reaction(http, target, emoji).await {
+                warn!(error = %failure, "Discord terminal reaction failed");
+            }
+        });
+        if shown.await.is_none() {
+            warn!(%target, "Discord outcome reaction ended by the provider's stop");
         }
     }
 
@@ -200,11 +221,11 @@ impl Reactions {
         });
     }
 
-    /// Ends the reaction tasks under way when the provider stops: they get
-    /// `grace` to end, then the rest are cancelled, as is any asked for
-    /// later. Returns how many were cancelled. A cancelled request Discord
-    /// already received may still be applied; its effect is unknown. An
-    /// [`outcome`](Self::outcome) another task awaits is that task's own.
+    /// Ends the feedback under way when the provider stops: its tasks get
+    /// `grace` to end, then the rest, and any outcome a caller awaits, are
+    /// cancelled, as is anything asked for later. Returns how many tasks
+    /// were cancelled. A cancelled request Discord already received may
+    /// still be applied; its effect is unknown.
     pub(crate) async fn stop(&self, grace: Duration) -> usize {
         let Owned { tasks, stopped, .. } = &*self.0;
         tasks.close();
