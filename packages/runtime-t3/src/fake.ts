@@ -185,10 +185,12 @@ export interface FakeT3 {
   subagent(threadId: string, task: Subagent): void;
   /**
    * The child finishes and T3 reports it to its parent as the serving build
-   * does: the task's result is published with its delivery claimed, the
-   * parent run announces the continuation message, then T3 starts the
-   * continuation run (queued behind active work) and marks the delivery
-   * delivered. Returns the continuation run.
+   * does. With the thread idle, the task's result is published with its
+   * delivery claimed, the parent run announces the continuation message, T3
+   * starts the continuation run (its first item the task's notification) and
+   * marks the delivery delivered; it returns the continuation run. With a
+   * run active, T3 delivers the result into that run (a notification item in
+   * it) and returns that run.
    */
   finishDelegation(threadId: string, taskId: string, status?: Subagent["status"]): Run;
   /** A context transfer T3 records for the thread, such as a provider handoff. */
@@ -506,6 +508,24 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
       const parentIndex = thread.runs.findIndex((run) => run.id === task.runId);
       const parent = thread.runs[parentIndex];
       if (parent === undefined) throw new Error(`unknown parent run ${task.runId}`);
+      const notification = (runId: string) =>
+        fake.tool(threadId, runId, {
+          type: "notification",
+          status: "completed",
+          source: {
+            kind: "delegated_task",
+            taskIds: [taskId],
+            ...(task.childThreadId === null ? {} : { childThreadId: task.childThreadId }),
+          },
+          outcome: status === "completed" ? "completed" : "failed",
+          summary: `Delegated task "${task.title ?? taskId}" finished`,
+        });
+      const active = thread.runs.find((run) => ACTIVE.has(run.status));
+      if (active !== undefined) {
+        notification(active.id);
+        fake.subagent(threadId, { ...task, status, completionDelivery: { state: "delivered" } });
+        return active;
+      }
       const messageId = `message:${thread.id}:continuation:${String(thread.runs.length + 1)}`;
       fake.subagent(threadId, { ...task, status, completionDelivery: { state: "claimed" } });
       const announcing = {
@@ -530,17 +550,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
         `Delegated task ${taskId} reached a terminal state.`,
         { parentRunId: parent.id },
       );
-      fake.tool(threadId, run.id, {
-        type: "notification",
-        status: "completed",
-        source: {
-          kind: "delegated_task",
-          taskIds: [taskId],
-          ...(task.childThreadId === null ? {} : { childThreadId: task.childThreadId }),
-        },
-        outcome: status === "completed" ? "completed" : "failed",
-        summary: `Delegated task "${task.title ?? taskId}" finished`,
-      });
+      notification(run.id);
       fake.subagent(threadId, {
         ...task,
         status,
@@ -924,6 +934,14 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
       emit(thread, "message.updated", { ...user, streaming: false });
     emit(thread, "provider-thread.updated", thread.providerThread);
     emit(thread, "run.created", run);
+    // As T3: a run a message starts begins its timeline with that message.
+    if (delegatedCompletion === undefined)
+      fake.tool(thread.id, run.id, {
+        type: "user_message",
+        status: "completed",
+        messageId,
+        text,
+      });
     if (delegatedCompletion !== undefined)
       emit(thread, "message.updated", { ...user, streaming: false });
     if (!thread.sessionDetached)

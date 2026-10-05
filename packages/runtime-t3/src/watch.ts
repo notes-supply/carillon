@@ -149,6 +149,8 @@ const ACTIVE_TASK: ReadonlySet<Subagent["status"]> = new Set(["pending", "runnin
 const OWED_DELIVERY: ReadonlySet<string> = new Set(["pending", "claimed"]);
 /** A result T3 delivered to the parent in a continuation. */
 const DELIVERED: ReadonlySet<string> = new Set(["delivered", "acknowledged"]);
+const STEERED_REPORT =
+  "T3 delivered the result of the delegated work into the reply to a later message in this conversation; it is there, and in T3.";
 const OLDER_REPORT =
   "T3 finished the report of the delegated work, but it is older than the part of the thread this runtime reads; read it in T3";
 /** Transfers shown as work of their own; spawn and result transfers belong to their delegation. */
@@ -269,6 +271,15 @@ export function watchTurn(
    */
   const ownRunLinks = new Map<string, string>();
   let snapshotRunLinks: ReadonlyMap<string, string> | undefined;
+  /**
+   * The few most recent runs started by a message (their timeline begins
+   * with a `user_message` item). A continuation run has none: its first item
+   * is the notification. A notification inside a run started by a message
+   * means T3 delivered the result into that run instead.
+   */
+  const messageRuns = new Map<string, true>();
+  /** The turn's delegated tasks whose results T3 delivered into a run started by another message. */
+  const steered = new Set<string>();
   /** Later runs not (yet) known to be the turn's, kept briefly in case a continuation link arrives after them. */
   const unclaimed = new Map<string, Run>();
   /** Runs adopted because the turn's process owed a background report (wakes), not by a native link. */
@@ -451,17 +462,34 @@ export function watchTurn(
     if (seenFirst !== undefined) foldRun(seenFirst);
   }
 
-  /** The run whose delegated task a continuation notification reports. */
+  /** The run whose delegated task a notification reports, with the turn's tasks it names. */
   function notifiedParent(
     payload: unknown,
     parentOf: (task: string) => string | null | undefined,
-  ): { readonly run: string; readonly parent: string } | undefined {
+  ):
+    | { readonly run: string; readonly parent: string; readonly tasks: readonly string[] }
+    | undefined {
     if (!Check(DelegatedNotificationSchema, payload)) return undefined;
-    for (const task of payload.source.taskIds) {
-      const parent = parentOf(task);
-      if (parent != null) return { run: payload.runId, parent };
+    const tasks = payload.source.taskIds.filter((task) => parentOf(task) != null);
+    const parent = tasks.length === 0 ? undefined : parentOf(tasks[0] ?? "");
+    return parent == null ? undefined : { run: payload.runId, parent, tasks };
+  }
+
+  /**
+   * A notification of the turn's delegated work: a continuation of it when
+   * the run starts with the notification, a delivery into another message's
+   * run when that run started with a message.
+   */
+  function notified(
+    report: { readonly run: string; readonly parent: string; readonly tasks: readonly string[] },
+    startedByMessage: boolean,
+  ): void {
+    if (!linkedRun(report.parent)) return;
+    if (!startedByMessage) {
+      linkRun(report.run, report.parent);
+      return;
     }
-    return undefined;
+    for (const task of report.tasks) if (steered.size < WORK_RETAINED) steered.add(task);
   }
 
   /** The run whose delegated work a continuation message reports, if T3 has said. */
@@ -576,9 +604,13 @@ export function watchTurn(
     if (!isRecord(payload)) return;
     const type = payload["type"];
     const runId = payload["runId"];
+    if (type === "user_message" && typeof runId === "string") {
+      remember(messageRuns, runId, true, PENDING_LINKS);
+      return;
+    }
     if (type === "notification") {
-      const notified = notifiedParent(payload, (task) => delegations.get(task)?.runId);
-      if (notified !== undefined) linkRun(notified.run, notified.parent);
+      const report = notifiedParent(payload, (task) => delegations.get(task)?.runId);
+      if (report !== undefined) notified(report, messageRuns.has(report.run));
       return;
     }
     // Only the turn's own items of the kinds this runtime reads are checked and kept.
@@ -983,6 +1015,7 @@ export function watchTurn(
     );
     if (output.length === 0 && missing) return { kind: "failed", explanation: OLDER_REPORT };
     const notes = [
+      ...(steered.size > 0 ? [`[${STEERED_REPORT}]`] : []),
       ...(missing
         ? [
             "[Part of this report is older than the part of the thread Carillon reads; T3 shows all of it.]",
@@ -1071,10 +1104,22 @@ export function watchTurn(
             if (run.delegatedCompletion?.delivery != null)
               links.set(run.delegatedCompletion.delivery.messageId, run.id);
           const taskParents = new Map(projection.subagents.map((task) => [task.id, task.runId]));
+          const startedRuns = new Set(
+            projection.turnItems.flatMap((payload) =>
+              isRecord(payload) &&
+              payload["type"] === "user_message" &&
+              typeof payload["runId"] === "string"
+                ? [payload["runId"]]
+                : [],
+            ),
+          );
           const runLinks = new Map<string, string>();
+          const reports: { run: string; parent: string; tasks: readonly string[] }[] = [];
           for (const payload of projection.turnItems) {
-            const notified = notifiedParent(payload, (task) => taskParents.get(task));
-            if (notified !== undefined) runLinks.set(notified.run, notified.parent);
+            const report = notifiedParent(payload, (task) => taskParents.get(task));
+            if (report === undefined) continue;
+            if (startedRuns.has(report.run)) reports.push(report);
+            else runLinks.set(report.run, report.parent);
           }
           for (const task of projection.subagents) {
             const observedBy = task.completionDelivery?.observedByRunId;
@@ -1092,6 +1137,7 @@ export function watchTurn(
           }
           for (const [message, parent] of links) keepLink(message, parent);
           for (const [run, parent] of runLinks) linkRun(run, parent);
+          for (const report of reports) notified(report, true);
           const windowedSnapshot = item["hasMoreHistory"] === true;
           historyOmitted = windowedSnapshot;
           for (const run of turnRuns.values())
@@ -1243,6 +1289,9 @@ export function watchTurn(
         // Only a follow-up turn holds no run of its own: it waits for a
         // continuation as long as the delegated work still owes one.
         if (followUp === undefined || reportOwed()) return undefined;
+        // T3 delivered the result into the run of a later message, whose
+        // reply carries it: reported, not lost, and not repeated here.
+        if (steered.size > 0) return { kind: "completed", output: STEERED_REPORT };
         // T3 says it delivered a result, but the continuation that carries it
         // is not in the window this runtime reads.
         const delivered = [...delegations.values()].some((task) =>
