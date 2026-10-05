@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import type { RuntimeOperations } from "@carillon/runtime/operations";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { derivedId, type Run } from "./contracts.ts";
@@ -943,6 +944,47 @@ it("keeps a request's ownership and wording through a bounded snapshot that omit
     message:
       "T3 asked a question this runtime cannot relay yet (Scope: Which file?); T3 has not confirmed that the run stopped, so it may still be waiting. Send the answer in a new message.",
   });
+});
+
+it("never answers with, waits for or stops a run a person started in T3 while its own wake is owed", async () => {
+  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const run = await started("turn-1");
+  fake.background(threadId, [{ taskId: "task-1", kind: "command" }]);
+  fake.assistant(threadId, run.id, "Started own background work.");
+  fake.complete(threadId, run.id);
+  await until(() => activity()?.phase === "tools");
+  fake.background(threadId, []);
+  // A person writes in T3's own UI while the turn waits for its wake.
+  const person = fake.message(threadId, "Something else?");
+  fake.assistant(threadId, person.id, "UNRELATED UI ANSWER");
+  fake.complete(threadId, person.id);
+  const settled = await Promise.race([result.then(() => true), sleep(200).then(() => false)]);
+  expect(settled).toBe(false);
+  // The wake T3 starts for the provider is the turn's.
+  const wake = fake.wake(threadId, "Background command completed");
+  fake.assistant(threadId, wake.id, "OWN RESULT.");
+  fake.complete(threadId, wake.id);
+  expect((await result).output).toBe("Started own background work.\n\nOWN RESULT.");
+  expect(fake.interrupts).toEqual([]);
+});
+
+it("neither interrupts nor detaches the session of a person's run when cancelled while its wake is owed", async () => {
+  const controller = new AbortController();
+  const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
+  void result.catch(() => undefined);
+  const run = await started("turn-1");
+  fake.background(threadId, [{ taskId: "task-1", kind: "command" }]);
+  fake.complete(threadId, run.id);
+  await until(() => activity()?.phase === "tools");
+  fake.background(threadId, []);
+  const person = fake.message(threadId, "Something else?");
+  // The fold hears of the person's run before Carillon cancels.
+  await sleep(200);
+  controller.abort();
+  await expect(result).rejects.toThrow();
+  expect(fake.interrupts).toEqual([]);
+  expect(fake.detached).toEqual([]);
+  expect(thread().runs.find((candidate) => candidate.id === person.id)?.status).toBe("running");
 });
 
 it("does not adopt a later run the turn does not owe, and the next turn waits behind it", async () => {

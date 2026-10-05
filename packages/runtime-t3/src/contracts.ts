@@ -137,12 +137,25 @@ export const SubagentSchema = Type.Object({
   /** Whether T3 offers the parent a continuation with the result. */
   completionWake: Type.Optional(Type.String()),
   /**
-   * Where the result's delivery to the parent stands; `pending` and `claimed`
-   * still owe a continuation. `observedByRunId` names the continuation run
-   * once its agent read the result.
+   * Where the result's delivery to the parent stands, in T3's closed set:
+   * `pending` and `claimed` still owe a continuation, `delivered` gave it to
+   * the parent, `acknowledged` means an agent read it through T3's task tool
+   * (no continuation follows) and `disposed` dropped it. `observedByRunId`
+   * names the parent thread's run that was active when the result was
+   * acknowledged, if one of the same provider was; it may be another
+   * message's run, and is null when none was.
    */
   completionDelivery: Type.Optional(
-    Type.Object({ state: Type.String(), observedByRunId: Type.Optional(Nullable(Id)) }),
+    Type.Object({
+      state: Type.Union([
+        Type.Literal("pending"),
+        Type.Literal("claimed"),
+        Type.Literal("acknowledged"),
+        Type.Literal("delivered"),
+        Type.Literal("disposed"),
+      ]),
+      observedByRunId: Type.Optional(Nullable(Id)),
+    }),
   ),
 });
 export type Subagent = Static<typeof SubagentSchema>;

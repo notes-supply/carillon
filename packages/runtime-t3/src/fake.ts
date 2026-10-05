@@ -168,6 +168,8 @@ export interface FakeT3 {
   background(threadId: string, tasks: ProviderThread["pendingBackgroundTasks"]): void;
   /** A run T3 starts itself, as when finished background work wakes the agent. */
   wake(threadId: string, text: string): Run;
+  /** A message a person sends in T3's own UI: a run it opens, queued behind any active run. */
+  message(threadId: string, text: string): Run;
   /**
    * The run delegates a task to a T3-owned child agent, as `delegate_task`
    * does: the task record names the run that started it.
@@ -472,7 +474,13 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
       const thread = threadOf(threadId);
       if (thread.sessionClosed)
         throw new Error("the provider process has closed; no wake can come");
-      return startRun(thread, `message:${thread.id}:wake:${String(thread.runs.length + 1)}`, text);
+      return startRun(thread, `message:${thread.id}:wake:${String(thread.runs.length + 1)}`, text, {
+        wake: true,
+      });
+    },
+    message(threadId, text) {
+      const thread = threadOf(threadId);
+      return startRun(thread, `message:${thread.id}:ui:${String(thread.runs.length + 1)}`, text);
     },
     delegate(threadId, runId, task) {
       const thread = threadOf(threadId);
@@ -548,7 +556,9 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
         thread,
         messageId,
         `Delegated task ${taskId} reached a terminal state.`,
-        { parentRunId: parent.id },
+        {
+          delegatedCompletion: { parentRunId: parent.id },
+        },
       );
       notification(run.id);
       fake.subagent(threadId, {
@@ -901,12 +911,21 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
     fake.background(thread.id, []);
   }
 
+  /**
+   * Starts a run for a message: a person's, a provider's wake (opened by a
+   * notification of the background work), or a delegated task's
+   * continuation (whose notification the caller sends).
+   */
   function startRun(
     thread: FakeThread,
     messageId: string,
     text: string,
-    delegatedCompletion?: { readonly parentRunId: string },
+    origin: {
+      readonly wake?: true;
+      readonly delegatedCompletion?: { readonly parentRunId: string };
+    } = {},
   ): Run {
+    const { delegatedCompletion } = origin;
     const active = thread.runs.some((run) => ACTIVE.has(run.status));
     const run: Run = {
       id: `run-${thread.id.slice(0, 8)}-${String(thread.runs.length + 1)}`,
@@ -934,8 +953,17 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
       emit(thread, "message.updated", { ...user, streaming: false });
     emit(thread, "provider-thread.updated", thread.providerThread);
     emit(thread, "run.created", run);
-    // As T3: a run a message starts begins its timeline with that message.
-    if (delegatedCompletion === undefined)
+    // As T3: a run begins its timeline with the message that started it, a
+    // wake with the notification of the provider's background work.
+    if (origin.wake === true)
+      fake.tool(thread.id, run.id, {
+        type: "notification",
+        status: "completed",
+        source: { kind: "background_task" },
+        outcome: "updated",
+        summary: "Background activity updated",
+      });
+    else if (delegatedCompletion === undefined)
       fake.tool(thread.id, run.id, {
         type: "user_message",
         status: "completed",

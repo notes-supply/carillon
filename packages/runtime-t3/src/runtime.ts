@@ -804,6 +804,14 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     // receipt, never a confirmed stop.
     const session = watch.providerSession();
     if (!accepted && watch.activeRun() === undefined && session !== undefined) {
+      // The session is shared by every run on the thread: while a run this
+      // turn does not own is active, detaching it would stop that run too.
+      if (watch.busy()) {
+        log(
+          `thread ${binding.threadId}: another run is active, so provider session ${session} is not detached; the stop is unconfirmed and the next turn interrupts any run it finds active`,
+        );
+        return { quiet: false, requestOpen: watch.requestOpen() };
+      }
       try {
         await connection.call(
           RPC.dispatchCommand,

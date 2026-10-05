@@ -36,6 +36,14 @@ const item = (
   ...fields,
 });
 
+/** The item T3 opens a provider's wake run with: the notification of its background work. */
+const wakeOpening = (runId: string) =>
+  item("notification", runId, {
+    source: { kind: "background_task" },
+    outcome: "updated",
+    summary: "Background activity updated",
+  });
+
 function snapshot(overrides: Record<string, unknown>, sequence = 1) {
   return {
     kind: "snapshot",
@@ -357,9 +365,10 @@ it("is not finished while background work, an owed wake or a pending request rem
   expect(watch.quiet()).toBe(false);
   // The wake arrives and completes.
   watch.apply(event(3, "run.created", run("running", "wake", 2)));
+  watch.apply(event(4, "turn-item.updated", wakeOpening("run-2")));
   expect(watch.activeRun()?.id).toBe("run-2");
   watch.apply(
-    event(4, "message.updated", {
+    event(5, "message.updated", {
       id: "w",
       runId: "run-2",
       role: "assistant",
@@ -367,12 +376,12 @@ it("is not finished while background work, an owed wake or a pending request rem
       createdAt: "2026-10-03T10:00:05Z",
     }),
   );
-  watch.apply(event(5, "run.updated", run("completed", "wake", 2)));
+  watch.apply(event(6, "run.updated", run("completed", "wake", 2)));
   expect(watch.outcome()).toEqual({ kind: "completed", output: "done\n\nresult" });
 
-  watch.apply(event(6, "run.updated", run("waiting", "wake", 2)));
+  watch.apply(event(7, "run.updated", run("waiting", "wake", 2)));
   watch.apply(
-    event(7, "runtime-request.updated", {
+    event(8, "runtime-request.updated", {
       id: "request-1",
       kind: "tool_approval",
       status: "pending",
@@ -382,7 +391,7 @@ it("is not finished while background work, an owed wake or a pending request rem
   expect(watch.outcome()).toBeUndefined();
   watch.apply(
     event(
-      8,
+      9,
       "turn-item.updated",
       item(
         "approval_request",
@@ -703,8 +712,9 @@ it("marks a resumed snapshot that hides how listed work ended as unresolved, not
   expect(watch.quiet()).toBe(false);
   // A later run resolves it: the result was delivered.
   watch.apply(event(51, "run.created", run("completed", "wake", 2)));
+  watch.apply(event(52, "turn-item.updated", wakeOpening("run-2")));
   watch.apply(
-    event(52, "message.updated", {
+    event(53, "message.updated", {
       id: "w",
       runId: "run-2",
       role: "assistant",
@@ -928,8 +938,9 @@ it("owns its provider thread and session through the serving event order, after 
   watch.apply(
     event(11, "run.created", { ...run("running", "wake", 501), providerThreadId: "thread-9" }),
   );
+  watch.apply(event(12, "turn-item.updated", wakeOpening("run-501")));
   watch.apply(
-    event(12, "message.updated", {
+    event(13, "message.updated", {
       id: "w",
       runId: "run-501",
       role: "assistant",
@@ -938,7 +949,7 @@ it("owns its provider thread and session through the serving event order, after 
     }),
   );
   watch.apply(
-    event(13, "run.updated", { ...run("completed", "wake", 501), providerThreadId: "thread-9" }),
+    event(14, "run.updated", { ...run("completed", "wake", 501), providerThreadId: "thread-9" }),
   );
   expect(watch.outcome()).toEqual({ kind: "completed", output: "Done." });
   expect(watch.retained()).toMatchObject({ providerThreads: 1, sessions: 1 });
@@ -1018,6 +1029,7 @@ it("adopts a later run only while the turn expects a follow-up", () => {
     }),
   );
   owing.apply(event(2, "run.created", run("running", "wake", 2)));
+  owing.apply(event(3, "turn-item.updated", wakeOpening("run-2")));
   expect(owing.activeRun()?.id).toBe("run-2");
 });
 
@@ -1113,8 +1125,9 @@ it("never adopts a run first seen while its own run was active, even once it owe
     status: "running",
   };
   watch.apply(event(9, "run.created", own));
+  watch.apply(event(10, "turn-item.updated", wakeOpening("own-wake")));
   watch.apply(
-    event(10, "message.updated", {
+    event(11, "message.updated", {
       id: "own-output",
       runId: "own-wake",
       role: "assistant",
@@ -1122,7 +1135,7 @@ it("never adopts a run first seen while its own run was active, even once it owe
       createdAt: "2026-10-04T15:00:03Z",
     }),
   );
-  watch.apply(event(11, "run.updated", { ...own, status: "completed" }));
+  watch.apply(event(12, "run.updated", { ...own, status: "completed" }));
   expect(watch.outcome()).toEqual({
     kind: "completed",
     output: "Current acknowledgement.\n\nOWN RESULT.",
@@ -1140,6 +1153,7 @@ it("ends unresolved on a fresh snapshot whose follow-up no fact of the turn acco
     runs: [root, wake],
     providerThreads: [{ id: "provider", providerSessionId: "session", pendingBackgroundTasks: [] }],
     providerSessions: [{ id: "session", status: "ready" }],
+    turnItems: [wakeOpening("owed-wake")],
     messages: [
       {
         id: "ack",
@@ -1224,8 +1238,9 @@ it("ends unresolved on a follow-up after an unconfirmed earlier stop, and comple
       status: "running",
     };
     watch.apply(event(4, "run.created", wake));
+    watch.apply(event(5, "turn-item.updated", wakeOpening("wake")));
     watch.apply(
-      event(5, "message.updated", {
+      event(6, "message.updated", {
         id: "w",
         runId: "wake",
         role: "assistant",
@@ -1233,7 +1248,7 @@ it("ends unresolved on a follow-up after an unconfirmed earlier stop, and comple
         createdAt: "2026-10-04T15:00:03Z",
       }),
     );
-    watch.apply(event(6, "run.updated", { ...wake, status: "completed" }));
+    watch.apply(event(7, "run.updated", { ...wake, status: "completed" }));
     return watch;
   };
   expect(owedWake({}).outcome()?.kind).toBe("completed");
@@ -1863,8 +1878,9 @@ it("keeps only the turn's continuation links and a bounded window of others, acr
   watch.apply(event(10, "run.updated", run("completed", "late-report", 501)));
   // The turn's own wake, which delegated in turn.
   watch.apply(event(11, "run.created", run("running", "wake", 502)));
+  watch.apply(event(12, "turn-item.updated", wakeOpening("run-502")));
   watch.apply(
-    event(12, "message.updated", {
+    event(13, "message.updated", {
       id: "w",
       runId: "run-502",
       role: "assistant",
@@ -1872,7 +1888,7 @@ it("keeps only the turn's continuation links and a bounded window of others, acr
       createdAt: "2026-10-05T12:00:01Z",
     }),
   );
-  watch.apply(event(13, "run.updated", run("completed", "wake", 502)));
+  watch.apply(event(14, "run.updated", run("completed", "wake", 502)));
   // Its continuation, announced before its parent was known, is linked to the turn.
   expect(watch.outcome()).toMatchObject({ kind: "completed", output: "Result.", followUp: {} });
 });
@@ -2170,4 +2186,151 @@ it("keeps linking live continuations beyond the bound, making room from those th
     );
     expect(follow.retained().links, linkedBy).toBeLessThanOrEqual(32);
   }
+});
+
+// Direct background work: T3 links no wake to the work it reports, so only a
+// run T3 opened for the provider can be the turn's wake.
+const backgroundRoot = {
+  runs: [run("completed")],
+  providerThreads: [
+    {
+      id: "provider-thread",
+      providerSessionId: "session",
+      pendingBackgroundTasks: [{ taskId: "t", kind: "command" }],
+    },
+  ],
+  messages: [
+    {
+      id: "root-answer",
+      runId: "run-1",
+      role: "assistant",
+      text: "Started own background work.",
+      createdAt: "2026-10-05T12:00:00Z",
+    },
+  ],
+};
+const answerOf = (id: string, runId: string, text: string) => ({
+  id,
+  runId,
+  role: "assistant",
+  text,
+  createdAt: "2026-10-05T12:00:05Z",
+});
+
+it("never owns, answers with or waits on a run a person's message opened while its wake is owed (coordinator reproduction)", () => {
+  const watch = watchTurn("message-1", "/workspace");
+  watch.apply(snapshot(backgroundRoot));
+  watch.apply(
+    event(2, "provider-thread.updated", {
+      id: "provider-thread",
+      providerSessionId: "session",
+      pendingBackgroundTasks: [],
+    }),
+  );
+  // The coordinator's order: the run is created running, then its opening item.
+  watch.apply(event(3, "run.created", run("running", "ui-message", 2)));
+  watch.apply(event(4, "turn-item.updated", userMessageItem("run-2")));
+  watch.apply(event(5, "message.updated", answerOf("ui-answer", "run-2", "UNRELATED UI ANSWER")));
+  watch.apply(event(6, "run.updated", run("completed", "ui-message", 2)));
+  expect(watch.outcome()).toBeUndefined();
+  expect(watch.activeRun()).toBeUndefined();
+  expect(watch.latestRun()?.id).toBe("run-1");
+  expect(watch.retained().runs).toBe(1);
+  // A person's run queued while the turn waits is not judged before it starts, nor after.
+  watch.apply(event(7, "run.created", run("queued", "ui-later", 3)));
+  expect(watch.busy()).toBe(true);
+  watch.apply(event(8, "turn-item.updated", userMessageItem("run-3")));
+  watch.apply(event(9, "run.updated", run("running", "ui-later", 3)));
+  expect(watch.activeRun()).toBeUndefined();
+  watch.apply(event(10, "run.updated", run("completed", "ui-later", 3)));
+  // The wake T3 opens with the provider's notification is the turn's.
+  watch.apply(event(11, "run.created", run("running", "wake", 4)));
+  watch.apply(event(12, "turn-item.updated", wakeOpening("run-4")));
+  expect(watch.activeRun()?.id).toBe("run-4");
+  watch.apply(event(13, "message.updated", answerOf("own-result", "run-4", "OWN RESULT.")));
+  watch.apply(event(14, "run.updated", run("completed", "wake", 4)));
+  expect(watch.outcome()).toEqual({
+    kind: "completed",
+    output: "Started own background work.\n\nOWN RESULT.",
+  });
+  expect(watch.retained().runs).toBe(2);
+});
+
+it("tells a person's run from the turn's wake in a resumed snapshot by how T3 opened each", () => {
+  const resumed = (projection: Record<string, unknown>) => {
+    const watch = watchTurn("message-1", "/workspace");
+    watch.apply(snapshot(backgroundRoot));
+    watch.resubscribing();
+    watch.apply(
+      snapshot(
+        {
+          ...backgroundRoot,
+          providerThreads: [{ id: "provider-thread", providerSessionId: "session" }],
+          ...projection,
+        },
+        40,
+      ),
+    );
+    return watch;
+  };
+  const ui = run("completed", "ui-message", 2);
+  const uiAnswer = answerOf("ui-answer", "run-2", "UNRELATED UI ANSWER");
+  // Only the person's run followed: it is not the wake, which is still owed.
+  const waiting = resumed({
+    runs: [run("completed"), ui],
+    messages: [...backgroundRoot.messages, uiAnswer],
+    turnItems: [userMessageItem("run-2")],
+  });
+  expect(waiting.outcome()).toBeUndefined();
+  expect(waiting.retained().runs).toBe(1);
+  // The wake followed it: the answer is the turn's own.
+  const answered = resumed({
+    runs: [run("completed"), ui, run("completed", "wake", 3)],
+    messages: [
+      ...backgroundRoot.messages,
+      uiAnswer,
+      answerOf("own-result", "run-3", "OWN RESULT."),
+    ],
+    turnItems: [userMessageItem("run-2"), wakeOpening("run-3")],
+  });
+  expect(answered.outcome()).toEqual({
+    kind: "completed",
+    output: "Started own background work.\n\nOWN RESULT.",
+  });
+  // A started run whose opening the snapshot does not show cannot be told: never adopted.
+  const unknown = resumed({
+    runs: [run("completed"), ui],
+    messages: [...backgroundRoot.messages, uiAnswer],
+  });
+  expect(unknown.outcome()).toMatchObject({ kind: "unresolved" });
+  expect(unknown.retained().runs).toBe(1);
+});
+
+it("says only that a result was acknowledged when T3 names no run it was read in (coordinator reproduction)", () => {
+  const follow = watchTurn("message-1", "/workspace", { followUp: { after: 1 } });
+  follow.apply(
+    snapshot({
+      runs: [run("completed")],
+      subagents: [
+        task("child", "completed", "run-1", {
+          completionDelivery: { state: "acknowledged", observedByRunId: null },
+        }),
+      ],
+    }),
+  );
+  expect(follow.outcome()).toEqual({
+    kind: "completed",
+    output:
+      "T3 records the result of the delegated work as acknowledged, so no report of its own follows here; T3 shows it.",
+  });
+  // A named run that is not the report's is still said to be another run.
+  const named = watchTurn("message-1", "/workspace", { followUp: { after: 1 } });
+  named.apply(
+    snapshot({
+      runs: [run("completed"), run("completed", "ui-message", 2)],
+      turnItems: [userMessageItem("run-2")],
+      subagents: [task("child", "completed", "run-1", acknowledged("run-2"))],
+    }),
+  );
+  expect(named.outcome()).toEqual({ kind: "completed", output: READ_ELSEWHERE });
 });
