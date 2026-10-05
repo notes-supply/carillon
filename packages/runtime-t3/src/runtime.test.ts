@@ -1851,3 +1851,20 @@ it("cancels one conversation's turn without touching another's", async () => {
   fake.complete(otherThread, other.id);
   expect((await kept).output).toBe("Still here.");
 });
+
+it("refuses a snapshot of another thread, whether read once or followed through a turn", async () => {
+  const reply = runtime.executeTurn(turn("turn-1", "hi"));
+  answer(await started("turn-1"), "Hello.");
+  await reply;
+  fake.snapshotThread = () => "another-thread";
+  // Another conversation's model and commands are never shown as this one's.
+  await expect(runtime.modelState(conversation)).rejects.toMatchObject({ status: 502 });
+  await expect(runtime.commands(conversation)).rejects.toMatchObject({ status: 502 });
+  // A turn does not fold another thread's state as its own, nor send its
+  // message on the strength of it.
+  await expect(runtime.executeTurn(turn("turn-2", "again"))).rejects.toMatchObject({
+    status: 502,
+    message: "T3 answered in a form this runtime does not understand.",
+  });
+  expect(fake.received.filter((command) => command.type === "message.dispatch")).toHaveLength(1);
+});

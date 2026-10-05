@@ -236,6 +236,14 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
   }
 
   /**
+   * A subscription's snapshot that names a thread other than the one asked
+   * for: nothing of it is shown or folded as that thread's.
+   */
+  function anotherThread(): T3Failure {
+    return new T3Failure("malformed", "T3 sent the snapshot of another thread");
+  }
+
+  /**
    * The thread's current record, read from the first item of a fresh
    * subscription; undefined when T3 has no such thread.
    */
@@ -251,14 +259,15 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
         (item) => {
           clearTimeout(timer);
           stream.end();
-          if (Check(ThreadSnapshotSchema, item)) resolve(item.projection);
-          else
+          if (!Check(ThreadSnapshotSchema, item))
             reject(
               new T3Failure(
                 "malformed",
                 "T3 sent a thread snapshot this runtime does not understand",
               ),
             );
+          else if (item.projection.thread.id !== threadId) reject(anotherThread());
+          else resolve(item.projection);
         },
       );
       stream.done.then(
@@ -655,7 +664,11 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     return connection.subscribe(
       RPC.subscribeThread,
       subscribeThread(threadId, watch.sequence()),
-      (item) => watch.apply(item),
+      (item) => {
+        if (Check(ThreadSnapshotSchema, item) && item.projection.thread.id !== threadId)
+          throw anotherThread();
+        watch.apply(item);
+      },
     );
   }
 

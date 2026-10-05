@@ -126,6 +126,8 @@ export interface FakeT3 {
   messageWindow: number | undefined;
   /** Omits matching runs from snapshots: a broken snapshot. */
   omitRun: (run: Run) => boolean;
+  /** The thread a snapshot names: the one subscribed to, unless a fault names another. */
+  snapshotThread: (threadId: string) => string;
   /** Answers the next request with a frame that is not JSON. */
   malformed: boolean;
   /** Whether an interrupt stops the run (and settles background work) or is accepted and ignored. */
@@ -382,6 +384,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
     defect: () => false,
     messageWindow: undefined,
     omitRun: () => false,
+    snapshotThread: (threadId) => threadId,
     malformed: false,
     interruptBehaviour: "settle",
     snapshotOnResume: false,
@@ -750,7 +753,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
                     : {}),
                   projection: {
                     thread: {
-                      id: thread.id,
+                      id: fake.snapshotThread(thread.id),
                       projectId: thread.projectId,
                       modelSelection: thread.modelSelection,
                     },
