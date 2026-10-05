@@ -6,6 +6,7 @@
  * every other file is named to the model as unavailable. Nothing is
  * recorded: an upload the message never references is swept by T3.
  */
+import { createHash } from "node:crypto";
 import type { TurnAttachment } from "@carillon/protocol";
 import { capturedPath, detectImage, HEADER_BYTES, readPrefix } from "@carillon/runtime/attachments";
 import { ExplainedFailure } from "@carillon/runtime/failure";
@@ -33,8 +34,9 @@ export interface PreparedImages {
 }
 
 /**
- * Uploads the turn's images. A file that changed since core captured it, or
- * an upload T3 refuses, fails the turn before anything is dispatched; a lost
+ * Uploads the turn's images, each as the bytes core captured, by their
+ * recorded digest. A file that changed since core captured it, or an upload
+ * T3 refuses, fails the turn before anything is dispatched; a lost
  * connection is a `T3Failure`, so the caller may start again.
  */
 export async function uploadImages(
@@ -51,9 +53,9 @@ export async function uploadImages(
   for (const attachment of attachments) {
     const path = capturedPath(root, attachment);
     const header = await readPrefix(path, Math.min(attachment.size, HEADER_BYTES));
-    const detected = header === undefined ? undefined : detectImage(header);
     if (
-      detected === undefined ||
+      header === undefined ||
+      detectImage(header) === undefined ||
       attachment.size === 0 ||
       attachment.size > MAX_IMAGE_BYTES ||
       total + attachment.size > MAX_TOTAL_BYTES
@@ -66,6 +68,17 @@ export async function uploadImages(
       throw new ExplainedFailure(
         502,
         `The attached file ${attachment.name} could not be read; please send it again.`,
+      );
+    // The bytes uploaded are those core captured, and their own header gives
+    // the type they are uploaded as; an image read before is no longer them.
+    const detected =
+      createHash("sha256").update(bytes).digest("hex") === attachment.sha256
+        ? detectImage(bytes)
+        : undefined;
+    if (detected === undefined)
+      throw new ExplainedFailure(
+        502,
+        `The attached file ${attachment.name} changed after Carillon received it; please send it again.`,
       );
     const image = {
       name: shortened(attachment.name.trim() || "image"),

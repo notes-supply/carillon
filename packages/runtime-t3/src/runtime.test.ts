@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -542,7 +543,7 @@ async function captured(files: readonly { name: string; bytes: Buffer }[]) {
         path: `${CAPTURE}/${String(index)}`,
         name,
         size: bytes.length,
-        sha256: "0".repeat(64),
+        sha256: createHash("sha256").update(bytes).digest("hex"),
       };
     }),
   );
@@ -586,6 +587,35 @@ it("uploads a message's images to T3, references them, and names the files T3 do
   await alone;
   expect(userTexts()[1]).toBe("");
   expect(imageDispatches()[1]).toMatchObject([{ id: "pending-2", name: "again.png" }]);
+});
+
+it("uploads only the bytes core captured, failing a turn whose image changed since", async () => {
+  const [photo] = await captured([{ name: "photo.png", bytes: PNG }]);
+  if (photo === undefined) throw new Error("no capture");
+  // Another image of the same length, its header still a PNG's, is written
+  // over the capture after core checked it, while the turn waits for T3.
+  const other = Buffer.from(PNG);
+  other[PNG.length - 20] = (other[PNG.length - 20] ?? 0) ^ 0xff;
+  fake.delayAnswer = (command) => (command.type === "thread.create" ? 500 : 0);
+  const changed = runtime.executeTurn(turn("turn-1", "look", { attachments: [photo] }));
+  await until(() => fake.received.some((command) => command.type === "thread.create"));
+  await writeFile(join(resources, "attachments", photo.path), other);
+  await expect(changed).rejects.toMatchObject({
+    status: 502,
+    message:
+      "The attached file photo.png changed after Carillon received it; please send it again.",
+  });
+  // Nothing was granted, uploaded or dispatched.
+  expect(fake.uploads.size).toBe(0);
+  expect(dispatches()).toHaveLength(0);
+
+  // The bytes core captured upload as they are.
+  fake.delayAnswer = () => 0;
+  await writeFile(join(resources, "attachments", photo.path), PNG);
+  const unchanged = runtime.executeTurn(turn("turn-2", "look", { attachments: [photo] }));
+  answer(await started("turn-2"), "A pixel.");
+  await unchanged;
+  expect(fake.uploads.get("pending-1")).toMatchObject({ mimeType: "image/png", bytes: PNG });
 });
 
 it("reuses its uploads when a dispatch is retried, and dispatches nothing when an upload fails", async () => {
