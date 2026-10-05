@@ -7,7 +7,11 @@
 //! A `/command` submission takes its place in its conversation's lane like
 //! a message, so core accepts it after the messages before it and before
 //! those after. When the lane reaches it, the submission is given the
-//! lane's [`Turn`], and the lane waits until that is dropped.
+//! lane's [`Turn`], and the lane waits until that is dropped. A submission
+//! whose answer from core did not come in time hands its event back with
+//! [`Turn::settle`]: core may still be accepting it, so the lane submits it
+//! again under its own identity until core answers, as for a message, and
+//! only then goes on.
 //!
 //! Lanes live in memory, bounded overall and per lane; a message beyond the
 //! bounds is refused at once rather than queued without limit. Only a
@@ -24,15 +28,15 @@ use std::{
     sync::Arc,
 };
 
+use carillon_protocol::model::ExternalEvent;
 use serde_json::Value;
 use tokio::{
     sync::{Semaphore, mpsc, oneshot},
     task::JoinSet,
 };
-use tokio_util::sync::{CancellationToken, DropGuard};
 use tracing::warn;
 
-use super::{Ingress, QueuedMessage, prepare};
+use super::{Ingress, QueuedMessage, prepare, submit_event_with_retry};
 use crate::{
     config::{DiscordConfig, DiscordConversation},
     conversations::{IncomingMessage, admit_message},
@@ -69,9 +73,17 @@ pub(crate) struct Submission {
 }
 
 /// The lane's turn, held by a submission while it runs; the lane goes on
-/// once it is dropped.
+/// once it is dropped, or once the event handed to [`Turn::settle`] is.
 pub(crate) struct Turn {
-    _ending: DropGuard,
+    unsettled: oneshot::Sender<ExternalEvent>,
+}
+
+impl Turn {
+    /// Leaves `event`, which core may still be accepting, to the lane: the
+    /// conversation goes on only once core has accepted or refused it.
+    pub(crate) fn settle(self, event: ExternalEvent) {
+        let _ = self.unsettled.send(event);
+    }
 }
 
 /// Where `/command` submissions take their place among the messages of
@@ -200,19 +212,35 @@ fn start(
             // The submission runs while it holds the turn. A turn nobody
             // takes, as for a submission that stopped waiting, is dropped
             // here, and the lane goes on at once.
-            let ended = CancellationToken::new();
-            let turn = Turn {
-                _ending: ended.clone().drop_guard(),
-            };
+            let (unsettled, handed) = oneshot::channel();
+            let turn = Turn { unsettled };
             if let Some(waiting) = head.turn.take() {
                 let _ = waiting.send(turn);
             }
+            let ingress = ingress.clone();
             running.spawn(async move {
-                ended.cancelled().await;
+                if let Ok(event) = handed.await {
+                    settle(&ingress, &event).await;
+                }
                 key
             });
         }
         None => {}
+    }
+}
+
+/// Settles a command core may still be accepting, as an ambiguous
+/// submission of a message is settled: the same event again until core
+/// answers. A refusal is shown on the command's marker; an acceptance is
+/// shown by its delivery. Like a message core may have received, it is
+/// settled even when the provider is stopping.
+async fn settle(ingress: &Ingress, event: &ExternalEvent) {
+    if let Err(failure) = submit_event_with_retry(&ingress.core, event).await {
+        warn!(error = %failure.message, event_id = %event.event_id, "core refused a command after its answer was late");
+        ingress
+            .reactions
+            .outcome(&event.feedback_target_id, Feedback::Failed)
+            .await;
     }
 }
 
