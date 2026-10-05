@@ -170,11 +170,7 @@ impl Reactions {
         if !config.reactions {
             return;
         }
-        self.after_processing(target).await;
-        if let Err(failure) = delete_feedback_reaction(http, target, &config.processing_emoji).await
-        {
-            warn!(error = %failure, "Discord processing reaction removal failed");
-        }
+        self.clear(target).await;
         let emoji = match feedback {
             Feedback::Delivered => &config.delivered_emoji,
             Feedback::Failed => &config.failed_emoji,
