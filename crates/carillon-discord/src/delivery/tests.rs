@@ -177,6 +177,32 @@ fn discord_messages_split_cleanly_at_the_platform_limit() {
             .all(|chunk| !chunk.is_empty() && chunk.chars().count() <= 2_000)
     );
     assert_eq!(unbroken.concat(), content);
+
+    // Exactly at the limit is one message; a whitespace break is preferred
+    // to a cut, and the whitespace around a split is dropped.
+    assert_eq!(discord_chunks(&"é".repeat(2_000)).len(), 1);
+    let spaced = format!("  {} {}  ", "x".repeat(1_500), "y".repeat(1_000));
+    assert_eq!(
+        discord_chunks(&spaced),
+        ["x".repeat(1_500), "y".repeat(1_000)]
+    );
+}
+
+#[test]
+fn a_long_answer_is_split_in_one_pass() {
+    // 12,000 chunks of an answer with nowhere to break. Counting the whole
+    // remaining answer for every chunk scanned it 6,000 times over, which
+    // took seconds; one bounded scan per chunk reads it about once.
+    let answer = "a".repeat(24_000_000);
+    let started = std::time::Instant::now();
+    let chunks = discord_chunks(&answer);
+    let elapsed = started.elapsed();
+    assert_eq!(chunks.len(), 12_000);
+    assert!(chunks.iter().all(|chunk| chunk.len() == 2_000));
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "splitting took {elapsed:?}"
+    );
 }
 
 /// Core serving the given deliveries in order, then rejecting further claims

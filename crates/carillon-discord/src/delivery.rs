@@ -352,11 +352,9 @@ pub(crate) fn discord_chunks(content: &str) -> Vec<String> {
     const LIMIT: usize = 2_000;
     let mut remaining = content.trim();
     let mut chunks = Vec::new();
-    while remaining.chars().count() > LIMIT {
-        let end = remaining
-            .char_indices()
-            .nth(LIMIT)
-            .map_or(remaining.len(), |(index, _)| index);
+    // One scan of at most LIMIT characters per chunk finds where the rest
+    // exceeds the limit, if it does; the rest is never counted whole.
+    while let Some((end, _)) = remaining.char_indices().nth(LIMIT) {
         let candidate = &remaining[..end];
         let split = candidate
             .rfind("\n\n")
