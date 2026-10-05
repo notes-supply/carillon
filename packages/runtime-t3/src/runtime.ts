@@ -13,6 +13,7 @@
 import {
   followUpCursor,
   turnIntent,
+  type CommandCatalog,
   type ModelQuery,
   type ModelState,
   type ModelUpdate,
@@ -29,6 +30,7 @@ import {
   DispatchResultSchema,
   messageDispatch,
   modelSelectionSet,
+  refreshProviders,
   RPC,
   runInterrupt,
   sessionDetach,
@@ -39,6 +41,7 @@ import {
   type Projection,
   type ThreadBinding,
 } from "./contracts.ts";
+import { commandCatalog } from "./commands.ts";
 import { catalog, modelState, sameSelection, toNative } from "./models.ts";
 import {
   connectT3,
@@ -299,6 +302,32 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     setModel(update: ModelUpdate): Promise<ModelState> {
       return track(() => setModel(update));
     },
+    commands(query: ModelQuery): Promise<CommandCatalog> {
+      return track(() =>
+        connected(async (connection) => {
+          // The conversation's provider instance: its thread's, or the one
+          // the thread will be opened with.
+          const audience = query.audience_id;
+          const thread =
+            audience === undefined
+              ? undefined
+              : await readThread(
+                  connection,
+                  bindThread({ ...query, audience_id: audience }).threadId,
+                );
+          const instanceId =
+            thread?.thread.modelSelection.instanceId ?? options.selection.instanceId;
+          return commandCatalog(
+            await connection.call(
+              RPC.refreshProviders,
+              refreshProviders(instanceId, options.workspace),
+            ),
+            instanceId,
+            options.workspace,
+          );
+        }),
+      );
+    },
     async close() {
       shutdown.abort(new Error("T3 runtime is closed"));
       await Promise.allSettled([...pending]);
@@ -335,9 +364,11 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       switch (outcome.kind) {
         case "completed": {
           const output =
-            outcome.output.trim().length === 0 && outcome.followUp !== undefined
-              ? "The work this message started is still running; its report follows."
-              : outcome.output;
+            outcome.output.trim().length > 0
+              ? outcome.output
+              : outcome.followUp !== undefined
+                ? "The work this message started is still running; its report follows."
+                : acknowledged(request);
           if (output.trim().length === 0)
             throw new ExplainedFailure(502, "T3 finished the run without an answer.");
           return {
@@ -377,6 +408,17 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       if (reached && !ceased(settled, progress.stop, watch)) unconfirmed(binding);
       executing.delete(request.correlation_id);
     }
+  }
+
+  /**
+   * The answer to a command invocation T3 ran to completion without a reply
+   * of its own, such as a compaction; any other run without an answer has
+   * failed to answer.
+   */
+  function acknowledged(request: TurnRequest): string {
+    if (turnIntent(request.native) !== "command") return "";
+    const [name = ""] = request.input.trim().split(/\s+/u);
+    return `\`${name.replaceAll("`", "")}\` finished.`;
   }
 
   /** The follow-up cursor core carries back, checked: anything else is not a follow-up. */

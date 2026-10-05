@@ -3,32 +3,39 @@
 //! keeps the gateway connection, admission, and every Discord or core call;
 //! this module only decides what to show and what to ask for.
 
-use carillon_protocol::model::ModelScope as Scope;
+use carillon_protocol::model::{CommandCatalog, ModelScope as Scope};
 use carillon_protocol::models::{ModelState, Selection};
+mod components;
 pub mod contract;
 mod model;
+mod run;
 
 #[cfg(target_arch = "wasm32")]
 mod abi;
 
-use contract::{HostRequest, Invocation, Outcome};
+use contract::{HostReply, HostRequest, Intent, Invocation, Outcome};
 
 /// Native operations the provider performs on the module's behalf. Each call
-/// answers with the runtime's confirmed model state or the reason it could
-/// not, in words meant for the user.
+/// answers with what the provider confirmed, or the reason it could not, in
+/// words meant for the user.
 pub trait HostCalls {
+    /// The provider's answer; never [`HostReply::Error`], which is the error.
+    ///
     /// # Errors
     ///
     /// Returns the user-facing reason the operation was refused or failed.
-    fn call(&mut self, request: HostRequest) -> Result<ModelState, String>;
+    fn call(&mut self, request: HostRequest) -> Result<HostReply, String>;
 
     /// # Errors
     ///
     /// See [`HostCalls::call`].
     fn model_state(&mut self) -> Result<ModelState, String> {
-        self.call(HostRequest::ModelState)
+        model_state(self.call(HostRequest::ModelState)?)
     }
 
+    /// Changes a scope's selection, only if it still resolves to `expected`
+    /// when one is given.
+    ///
     /// # Errors
     ///
     /// See [`HostCalls::call`].
@@ -36,12 +43,47 @@ pub trait HostCalls {
         &mut self,
         scope: Scope,
         selection: Option<Selection>,
+        expected: Option<Selection>,
     ) -> Result<ModelState, String> {
-        self.call(HostRequest::SetModel {
+        model_state(self.call(HostRequest::SetModel {
             scope,
             selection,
-            expected: None,
-        })
+            expected,
+        })?)
+    }
+
+    /// # Errors
+    ///
+    /// See [`HostCalls::call`].
+    fn commands(&mut self) -> Result<CommandCatalog, String> {
+        match self.call(HostRequest::Commands)? {
+            HostReply::Commands(catalog) => Ok(catalog),
+            _ => Err(UNEXPECTED.to_owned()),
+        }
+    }
+
+    /// Sends one of the runtime's commands as the person's message.
+    ///
+    /// # Errors
+    ///
+    /// See [`HostCalls::call`].
+    fn submit_command(&mut self, text: String) -> Result<(), String> {
+        match self.call(HostRequest::Submit {
+            text,
+            intent: Intent::Command,
+        })? {
+            HostReply::Submitted => Ok(()),
+            _ => Err(UNEXPECTED.to_owned()),
+        }
+    }
+}
+
+const UNEXPECTED: &str = "The provider gave an unexpected answer.";
+
+fn model_state(reply: HostReply) -> Result<ModelState, String> {
+    match reply {
+        HostReply::ModelState(state) => Ok(state),
+        _ => Err(UNEXPECTED.to_owned()),
     }
 }
 
@@ -51,8 +93,12 @@ pub fn handle(host: &mut impl HostCalls, invocation: Invocation) -> Outcome {
     match invocation {
         Invocation::Describe => Outcome::Description(contract::Description {
             contract: contract::CONTRACT,
-            commands: vec![model::definition()],
+            commands: vec![model::definition(), run::definition()],
         }),
-        Invocation::Interaction(interaction) => model::interact(host, &interaction),
+        // A command's components carry its name before the first `:`.
+        Invocation::Interaction(interaction) => match interaction.name.split(':').next() {
+            Some(run::COMMAND) => run::interact(host, &interaction),
+            _ => model::interact(host, &interaction),
+        },
     }
 }

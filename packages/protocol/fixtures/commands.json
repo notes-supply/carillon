@@ -1,0 +1,58 @@
+{
+  "catalogs": [
+    {
+      "commands": [
+        {
+          "name": "compact",
+          "description": "Summarize the conversation and reduce context usage",
+          "hint": "<optional custom summarization instructions>"
+        },
+        {
+          "name": "review"
+        },
+        {
+          "name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      ]
+    },
+    {
+      "commands": []
+    }
+  ],
+  "invalid_catalogs": [
+    {},
+    {
+      "commands": [{}]
+    },
+    {
+      "commands": [
+        {
+          "name": ""
+        }
+      ]
+    },
+    {
+      "commands": [
+        {
+          "name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      ]
+    },
+    {
+      "commands": [
+        {
+          "name": "compact",
+          "description": ""
+        }
+      ]
+    },
+    {
+      "commands": [
+        {
+          "name": "compact",
+          "hint": ""
+        }
+      ]
+    }
+  ]
+}

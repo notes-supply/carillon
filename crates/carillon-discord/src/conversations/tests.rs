@@ -85,6 +85,30 @@ fn interaction_admission_follows_routes_and_conversations() -> anyhow::Result<()
         .map_err(|failure| anyhow!(failure.message))?;
     assert_eq!(in_thread.audience_id.as_deref(), Some("discord-100-400"));
     assert!(in_thread.interaction.conversation);
+    assert_eq!(
+        in_thread.origin,
+        InteractionOrigin {
+            guild_id: "100".to_owned(),
+            user_id: "200".to_owned(),
+            channel_id: "400".to_owned(),
+            route_channel_id: "300".to_owned(),
+        }
+    );
+    assert_eq!(in_channel.origin.route_channel_id, "300");
+
+    // A submission is anchored on its marker like a message, with its intent.
+    let event = submitted_event(
+        "default",
+        "discord-100-300",
+        &admitted.origin,
+        "901",
+        "/compact",
+        Intent::Command,
+    );
+    assert_eq!(event.event_id, "901");
+    assert_eq!(event.feedback_target_id, "300:901");
+    assert_eq!(event.native["intent"], "command");
+    assert_eq!(event.native["origin"]["parent_channel_id"], Value::Null);
 
     for refused in [
         interaction("301", None),

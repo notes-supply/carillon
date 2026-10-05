@@ -549,7 +549,8 @@ pub struct RuntimeModelQuery {
 /// engine names and describes it.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RuntimeCommand {
-    #[serde(deserialize_with = "crate::models::nonempty_string")]
+    /// At most [`COMMAND_NAME_LIMIT`] UTF-16 code units, as JavaScript counts them.
+    #[serde(deserialize_with = "command_name")]
     pub name: String,
     #[serde(
         default,
@@ -564,6 +565,23 @@ pub struct RuntimeCommand {
         skip_serializing_if = "Option::is_none"
     )]
     pub hint: Option<String>,
+}
+
+/// The longest command name a runtime may list, which an interface can
+/// carry whole in its own controls.
+pub const COMMAND_NAME_LIMIT: usize = 100;
+
+fn command_name<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let name = crate::models::nonempty_string(deserializer)?;
+    if name.encode_utf16().count() > COMMAND_NAME_LIMIT {
+        return Err(serde::de::Error::custom(format!(
+            "a command name has at most {COMMAND_NAME_LIMIT} characters"
+        )));
+    }
+    Ok(name)
 }
 
 /// The commands a person may run in a conversation, in the runtime's order.

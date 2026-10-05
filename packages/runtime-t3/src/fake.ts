@@ -93,9 +93,11 @@ export interface FakeT3 {
   readonly detached: string[];
   /** Every thread subscription received, in order. */
   readonly subscriptions: Subscription[];
+  /** Every `server.refreshProviders` request, in order. */
+  readonly refreshes: unknown[];
   /** What protocol discovery announces. */
   protocolVersion: number;
-  /** The provider instances `server.getConfig` lists, as T3 describes them. */
+  /** The provider instances `server.getConfig` and `server.refreshProviders` list, as T3 describes them. */
   providers: unknown[];
   /** Processes the command, then drops the socket before answering. */
   dropAnswer: (command: Command) => boolean;
@@ -251,6 +253,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
   const interrupts: string[] = [];
   const detached: string[] = [];
   const subscriptions: Subscription[] = [];
+  const refreshes: unknown[] = [];
   const receipts = new Map<string, number>();
   const rejected = new Map<string, string>();
   const requestRuns = new Map<string, string>();
@@ -326,6 +329,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
     interrupts,
     detached,
     subscriptions,
+    refreshes,
     protocolVersion: ORCHESTRATION_PROTOCOL,
     providers: [...FAKE_PROVIDERS],
     dropAnswer: () => false,
@@ -685,6 +689,10 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
         return;
       }
       case "server.getConfig":
+        exit(socket, id, { _tag: "Success", value: { providers: fake.providers } });
+        return;
+      case "server.refreshProviders":
+        refreshes.push(payload);
         exit(socket, id, { _tag: "Success", value: { providers: fake.providers } });
         return;
       default:

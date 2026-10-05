@@ -55,6 +55,10 @@ export async function createDeterministicRuntime(
       shutdown.signal.throwIfAborted();
       return selections.update(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, update);
     },
+    commands() {
+      shutdown.signal.throwIfAborted();
+      return Promise.resolve({ commands: [] });
+    },
     async close() {
       shutdown.abort();
       await turns.run(() => Promise.resolve());

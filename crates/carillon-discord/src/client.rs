@@ -2,8 +2,9 @@
 use crate::InterfaceError;
 use anyhow::Result;
 use carillon_protocol::model::{
-    ActiveTurn, Delivery, DeliveryAck, DeliveryOutcome, DeliveryReconciliation, EventReceipt,
-    EventStatus, ExternalEvent, INSTANCE_HEADER, ModelQuery, ModelUpdate, PROVIDER_HEADER,
+    ActiveTurn, CommandCatalog, Delivery, DeliveryAck, DeliveryOutcome, DeliveryReconciliation,
+    EventReceipt, EventStatus, ExternalEvent, INSTANCE_HEADER, ModelQuery, ModelUpdate,
+    PROVIDER_HEADER,
 };
 use carillon_protocol::models::ModelState;
 use reqwest::{Client, IntoUrl, Method, RequestBuilder, Url};
@@ -147,7 +148,23 @@ impl CoreClient {
     /// # Errors
     /// Returns core rejection, transport, or malformed-response failures.
     pub async fn model_state(&self, query: &ModelQuery) -> Result<ModelState, String> {
-        let mut url = Url::parse(&self.url("/v1/model")).map_err(|error| error.to_string())?;
+        self.runtime_query("/v1/model", query).await
+    }
+
+    /// The runtime's own commands a person may run in the conversation.
+    ///
+    /// # Errors
+    /// Returns core rejection, transport, or malformed-response failures.
+    pub async fn commands(&self, query: &ModelQuery) -> Result<CommandCatalog, String> {
+        self.runtime_query("/v1/commands", query).await
+    }
+
+    async fn runtime_query<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &ModelQuery,
+    ) -> Result<T, String> {
+        let mut url = Url::parse(&self.url(path)).map_err(|error| error.to_string())?;
         {
             let mut pairs = url.query_pairs_mut();
             pairs.append_pair("agent_id", &query.agent_id);
@@ -156,7 +173,7 @@ impl CoreClient {
             }
         }
         let request = self.request(Method::GET, url).timeout(MODEL_CALL_TIMEOUT);
-        model_json(request).await
+        runtime_json(request).await
     }
 
     /// Changes a model selection and returns the resulting state.
@@ -168,28 +185,28 @@ impl CoreClient {
             .request(Method::PUT, self.url("/v1/model"))
             .timeout(MODEL_CALL_TIMEOUT)
             .json(update);
-        model_json(request).await
+        runtime_json(request).await
     }
 }
 
 /// Core captures an event's files for at most five minutes before it answers.
 const CAPTURE_SUBMISSION_TIMEOUT: Duration = Duration::from_mins(6);
 
-/// Model calls answer a waiting user and run inside the command module's
-/// deadline, so they give up well before it.
+/// Model and command calls answer a waiting user and run inside the command
+/// module's deadline, so they give up well before it.
 const MODEL_CALL_TIMEOUT: Duration = Duration::from_secs(6);
 
-/// Performs a model call and turns every failure into words for the user.
-/// Core and the runtime phrase their rejections for people; transport
-/// failures are described here.
-async fn model_json(request: RequestBuilder) -> Result<ModelState, String> {
+/// Performs a model or command call and turns every failure into words for
+/// the user. Core and the runtime phrase their rejections for people;
+/// transport failures are described here.
+async fn runtime_json<T: DeserializeOwned>(request: RequestBuilder) -> Result<T, String> {
     let response = match request.send().await {
         Ok(response) => response,
         Err(error) if error.is_timeout() => {
             return Err("The runtime did not answer in time.".to_owned());
         }
         Err(error) => {
-            warn!(%error, "model call failed to reach core");
+            warn!(%error, "model or command call failed to reach core");
             return Err("The runtime is not reachable right now.".to_owned());
         }
     };
@@ -197,13 +214,13 @@ async fn model_json(request: RequestBuilder) -> Result<ModelState, String> {
     let body = response.bytes().await.unwrap_or_default();
     if status.is_success() {
         return serde_json::from_slice(&body)
-            .map_err(|_| "The runtime reported an unusable model state.".to_owned());
+            .map_err(|_| "The runtime gave an unusable answer.".to_owned());
     }
     let detail = serde_json::from_slice::<Value>(&body)
         .ok()
         .and_then(|value| value.get("error")?.as_str().map(str::to_owned))
         .filter(|detail| !detail.is_empty());
-    warn!(%status, detail, "model call was rejected");
+    warn!(%status, detail, "model or command call was rejected");
     Err(detail.unwrap_or_else(|| "The runtime refused the request.".to_owned()))
 }
 

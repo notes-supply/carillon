@@ -15,6 +15,7 @@ import {
 } from "@earendil-works/pi-ai";
 import type {
   AvailableModel,
+  CommandCatalog,
   Selection,
   ModelQuery,
   ModelUpdate,
@@ -128,6 +129,11 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
       return track(async () =>
         selections.update(offeredPiModels(await availablePiModels()), runtimeDefault(), update),
       );
+    },
+    // Pi runs its own commands, prompt templates and skills from a message's
+    // text; this runtime does not list them yet.
+    commands(): Promise<CommandCatalog> {
+      return track(() => Promise.resolve({ commands: [] }));
     },
     async close() {
       shutdown.abort(new Error("Pi runtime is closed"));

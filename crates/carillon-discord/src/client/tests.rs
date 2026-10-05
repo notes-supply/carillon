@@ -117,7 +117,7 @@ async fn model_calls_relay_rejections_in_the_runtime_words() -> anyhow::Result<(
     };
     assert_eq!(
         core.set_model(&update).await.err().as_deref(),
-        Some("The runtime reported an unusable model state.")
+        Some("The runtime gave an unusable answer.")
     );
     server.abort();
     let unreachable = core_client("http://127.0.0.1:1".to_owned());

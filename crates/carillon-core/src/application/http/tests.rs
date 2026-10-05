@@ -326,7 +326,22 @@ fn fake_runtime(
         headers.get(http::header::AUTHORIZATION)?.to_str().ok()
     }
     let recorded = sent.clone();
-    Router::new().route(
+    let listed = sent.clone();
+    Router::new()
+        .route(
+            "/v1/commands",
+            get(
+                move |headers: HeaderMap,
+                      Query(query): Query<std::collections::HashMap<String, String>>| {
+                    let sent = listed.clone();
+                    async move {
+                        let _ = sent.send((id, json!({"auth": bearer(&headers), "query": query})));
+                        Json(json!({"runtime": id, "commands": [{"name": "compact"}]}))
+                    }
+                },
+            ),
+        )
+        .route(
         "/v1/model",
         get(
             move |headers: HeaderMap,
@@ -406,6 +421,7 @@ async fn model_call(
 
     let router = Router::new()
         .route("/v1/model", get(model_state).put(set_model))
+        .route("/v1/commands", get(commands))
         .with_state(configured(state));
     let mut request = Request::builder()
         .method(method)
@@ -480,6 +496,41 @@ async fn model_calls_follow_conversation_ownership() -> Result<()> {
     assert_eq!(called, "test-runtime");
     assert_eq!(call["update"]["interface_id"], "test-interface");
     assert_eq!(call["update"]["selection"], update["selection"]);
+    services.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn command_catalogues_come_from_the_conversation_runtime() -> Result<()> {
+    let directory = tempdir()?;
+    let (state, mut received, mut services) = model_fixture(directory.path()).await?;
+    let (status, _) = model_call(
+        &state,
+        "GET",
+        "/v1/commands?agent_id=test-agent&audience_id=pinned",
+        false,
+        None,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(received.try_recv().is_err());
+    let (status, body) = model_call(
+        &state,
+        "GET",
+        "/v1/commands?agent_id=test-agent&audience_id=pinned",
+        true,
+        None,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["runtime"], "test-runtime");
+    assert_eq!(body["commands"], json!([{"name": "compact"}]));
+    let (called, call) = received.try_recv()?;
+    assert_eq!(called, "test-runtime");
+    assert_eq!(
+        call["query"],
+        json!({"interface_id": "test-interface", "agent_id": "test-agent", "audience_id": "pinned"})
+    );
     services.shutdown().await;
     Ok(())
 }

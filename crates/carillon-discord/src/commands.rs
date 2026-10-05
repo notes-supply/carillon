@@ -19,7 +19,7 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use carillon_discord_commands::contract::{
-    CONTRACT, Description, HostReply, HostRequest, Interaction, Invocation, Outcome, Reply,
+    CONTRACT, Description, HostReply, HostRequest, Intent, Interaction, Invocation, Outcome, Reply,
 };
 use carillon_installation::{
     config::LoadedConfig,
@@ -35,13 +35,19 @@ use tracing::{info, warn};
 use twilight_http::Client as DiscordHttp;
 use twilight_model::{
     application::command::Command,
+    channel::message::AllowedMentions,
     id::{
         Id,
-        marker::{ApplicationMarker, GuildMarker},
+        marker::{ApplicationMarker, ChannelMarker, GuildMarker},
     },
 };
 
-use crate::client::CoreClient;
+use crate::{
+    client::CoreClient,
+    config::DiscordConfig,
+    conversations::{InteractionOrigin, submitted_event},
+    delivery::{Feedback, processing_feedback, terminal_feedback, trigger_typing},
+};
 
 /// The whole invocation, including every native call it makes.
 const DEADLINE: Duration = Duration::from_secs(10);
@@ -59,37 +65,89 @@ pub struct DiscordApp {
 }
 
 /// The native operations one interaction may perform: model state and
-/// selection for the agent and, inside a conversation, for that audience.
-pub struct ModelCalls {
+/// selection for the agent and, inside a conversation, for that audience;
+/// the runtime's commands there; and, with a Discord connection, submitting
+/// text to the conversation as the person who invoked it.
+pub struct InteractionCalls {
     core: CoreClient,
     query: ModelQuery,
+    submissions: Option<Submissions>,
 }
 
-impl ModelCalls {
+/// What submitting needs: the conversation's channel to anchor the text in,
+/// and Discord to post that anchor and its feedback.
+pub struct Submissions {
+    pub http: Arc<DiscordHttp>,
+    pub config: DiscordConfig,
+    pub origin: InteractionOrigin,
+}
+
+impl InteractionCalls {
     pub const fn new(core: CoreClient, query: ModelQuery) -> Self {
-        Self { core, query }
+        Self {
+            core,
+            query,
+            submissions: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_submissions(mut self, submissions: Submissions) -> Self {
+        self.submissions = Some(submissions);
+        self
     }
 }
 
 /// Native calls for invocations that must not perform any.
 enum Calls {
     Refused,
-    Model(ModelCalls),
+    Interaction(Box<InteractionCalls>),
 }
 
 impl Native for Calls {
     async fn call(&mut self, request: Vec<u8>) -> Vec<u8> {
         let reply = match self {
             Self::Refused => HostReply::Error("native calls are not available".to_owned()),
-            Self::Model(calls) => calls.answer(&request).await,
+            Self::Interaction(calls) => calls.answer(&request).await,
         };
         serde_json::to_vec(&reply).unwrap_or_default()
     }
 }
 
-impl ModelCalls {
+impl InteractionCalls {
     async fn answer(&self, request: &[u8]) -> HostReply {
         let outcome = match serde_json::from_slice::<HostRequest>(request) {
+            Ok(HostRequest::Commands) => {
+                return match self.core.commands(&self.query).await {
+                    Ok(catalog) => HostReply::Commands(catalog),
+                    Err(message) => HostReply::Error(message),
+                };
+            }
+            Ok(HostRequest::Submit { text, intent }) => {
+                return match (&self.submissions, &self.query.audience_id) {
+                    (Some(submissions), Some(audience_id)) => {
+                        match submit(
+                            &self.core,
+                            submissions,
+                            &self.query.agent_id,
+                            audience_id,
+                            &text,
+                            intent,
+                        )
+                        .await
+                        {
+                            Ok(()) => HostReply::Submitted,
+                            Err(message) => HostReply::Error(message),
+                        }
+                    }
+                    (_, None) => {
+                        HostReply::Error("There is no conversation here to send it to.".to_owned())
+                    }
+                    (None, Some(_)) => HostReply::Error(
+                        "Sending to the conversation needs the Discord connection.".to_owned(),
+                    ),
+                };
+            }
             Ok(HostRequest::ModelState) => self.core.model_state(&self.query).await,
             Ok(HostRequest::SetModel {
                 scope,
@@ -116,6 +174,89 @@ impl ModelCalls {
         match outcome {
             Ok(state) => HostReply::ModelState(state),
             Err(message) => HostReply::Error(message),
+        }
+    }
+}
+
+/// How long posting the marker may take inside the module's deadline.
+const MARKER_LIMIT: Duration = Duration::from_secs(4);
+/// Attempts to hand a submission to core while core is briefly unreachable.
+const SUBMIT_ATTEMPTS: u32 = 3;
+
+/// Sends text to the conversation as the invoking person's: a silent marker
+/// message in the conversation shows what was sent and by whom, and is the
+/// event's identity and feedback target; core then accepts the event like
+/// any message, and the answer is delivered to the conversation.
+async fn submit(
+    core: &CoreClient,
+    submissions: &Submissions,
+    agent_id: &str,
+    audience_id: &str,
+    text: &str,
+    intent: Intent,
+) -> Result<(), String> {
+    let Submissions {
+        http,
+        config,
+        origin,
+    } = submissions;
+    let channel: Id<ChannelMarker> = origin
+        .channel_id
+        .parse()
+        .map_err(|_| "The conversation's channel is not valid.".to_owned())?;
+    let shown = text.replace('`', "ˋ");
+    let shown: String = shown.chars().take(1900).collect();
+    let silent = AllowedMentions::default();
+    let marker = tokio::time::timeout(
+        MARKER_LIMIT,
+        http.create_message(channel)
+            .allowed_mentions(Some(&silent))
+            .content(&format!("<@{}> ran `{shown}`", origin.user_id))
+            .into_future(),
+    )
+    .await;
+    let marker = match marker {
+        Ok(Ok(response)) => response.model().await.map_err(|error| error.to_string()),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(_) => Err("Discord did not answer in time".to_owned()),
+    }
+    .map_err(|error| {
+        warn!(%error, "command marker message could not be posted");
+        "Discord did not accept the message that carries it, so it was not sent.".to_owned()
+    })?;
+    let event = submitted_event(
+        agent_id,
+        audience_id,
+        origin,
+        &marker.id.to_string(),
+        text,
+        intent,
+    );
+    processing_feedback(http, config, &event.feedback_target_id).await;
+    trigger_typing(http, config, &event.delivery_target_id).await;
+    let mut attempt = 1;
+    loop {
+        match core.submit_event(&event).await {
+            Ok(_) => return Ok(()),
+            Err(failure) if failure.is_transient() && attempt < SUBMIT_ATTEMPTS => {
+                warn!(error = %failure.message, event_id = %event.event_id, "waiting to submit a command");
+                attempt += 1;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            Err(failure) if failure.is_transient() => {
+                warn!(error = %failure.message, event_id = %event.event_id, "command submission unconfirmed");
+                terminal_feedback(http, config, &event.feedback_target_id, Feedback::Uncertain)
+                    .await;
+                return Err(
+                    "Carillon did not confirm that it accepted it; if it did, the answer follows in this conversation."
+                        .to_owned(),
+                );
+            }
+            Err(failure) => {
+                warn!(error = %failure.message, event_id = %event.event_id, "core refused a command");
+                terminal_feedback(http, config, &event.feedback_target_id, Feedback::Failed).await;
+                return Err("Carillon could not accept it.".to_owned());
+            }
         }
     }
 }
@@ -457,13 +598,13 @@ impl Commands {
     }
 
     /// Runs one interaction through the module.
-    pub async fn invoke(&self, calls: ModelCalls, interaction: Interaction) -> Result<Reply> {
+    pub async fn invoke(&self, calls: InteractionCalls, interaction: Interaction) -> Result<Reply> {
         let generation = self.current();
         let payload = serde_json::to_vec(&Invocation::Interaction(interaction))?;
         match outcome(
             &self.host,
             &generation.module,
-            Calls::Model(calls),
+            Calls::Interaction(Box::new(calls)),
             &payload,
             DEADLINE,
         )
@@ -854,8 +995,8 @@ pub(crate) mod tests {
         ))
     }
 
-    fn calls() -> super::ModelCalls {
-        super::ModelCalls::new(
+    fn calls() -> super::InteractionCalls {
+        super::InteractionCalls::new(
             crate::client::test_client("http://127.0.0.1:1".to_owned()),
             carillon_protocol::model::ModelQuery {
                 agent_id: "default".to_owned(),
@@ -1434,7 +1575,7 @@ pub(crate) mod tests {
             }),
         );
         let server = tokio::spawn(async move { axum::serve(listener, router).await });
-        let calls = super::ModelCalls::new(
+        let calls = super::InteractionCalls::new(
             crate::client::test_client(format!("http://{address}")),
             ModelQuery {
                 agent_id: "default".to_owned(),
@@ -1450,6 +1591,177 @@ pub(crate) mod tests {
             .await;
         assert_eq!(reply, HostReply::Error("changed while applying".to_owned()));
         server.abort();
+        Ok(())
+    }
+
+    /// Core and Discord in one fake: lists `catalog`, accepts every event,
+    /// posts every message as `901`, and traces the requests in order.
+    fn submission_server(
+        catalog: carillon_protocol::model::CommandCatalog,
+        trace: Arc<tokio::sync::Mutex<Vec<String>>>,
+        submitted: Arc<tokio::sync::Mutex<Vec<carillon_protocol::model::ExternalEvent>>>,
+    ) -> Router {
+        use axum::{
+            Json,
+            extract::Query,
+            http::{Method, Uri},
+            routing::{get, post},
+        };
+        use carillon_protocol::model::{EventReceipt, ExternalEvent, TurnState};
+        use std::collections::HashMap;
+        let (messages, events) = (trace.clone(), trace.clone());
+        Router::new()
+            .route(
+                "/v1/commands",
+                get(move |Query(query): Query<HashMap<String, String>>| {
+                    let catalog = catalog.clone();
+                    async move {
+                        assert_eq!(
+                            query.get("audience_id").map(String::as_str),
+                            Some("discord-100-400")
+                        );
+                        Json(catalog)
+                    }
+                }),
+            )
+            .route(
+                "/v1/events",
+                post(move |Json(event): Json<ExternalEvent>| {
+                    let (events, submitted) = (events.clone(), submitted.clone());
+                    async move {
+                        events
+                            .lock()
+                            .await
+                            .push(format!("event {}", event.event_id));
+                        submitted.lock().await.push(event.clone());
+                        Json(EventReceipt {
+                            event_id: event.event_id,
+                            turn_id: "turn".to_owned(),
+                            duplicate: false,
+                            state: TurnState::Queued,
+                        })
+                    }
+                }),
+            )
+            .route(
+                "/api/v10/channels/{channel}/messages",
+                post(move |Json(body): Json<Value>| {
+                    let messages = messages.clone();
+                    async move {
+                        messages.lock().await.push(format!(
+                            "message {} mentions {}",
+                            body["content"].as_str().unwrap_or_default(),
+                            body["allowed_mentions"]
+                        ));
+                        Json(json!({
+                            "id": "901",
+                            "channel_id": "400",
+                            "author": {"id": "201", "username": "carillon", "discriminator": "0"},
+                            "content": body["content"],
+                            "attachments": [],
+                            "embeds": [],
+                            "mention_everyone": false,
+                            "mention_roles": [],
+                            "mentions": [],
+                            "pinned": false,
+                            "timestamp": "2026-10-05T00:00:00.000000+00:00",
+                            "tts": false,
+                            "type": 0,
+                        }))
+                    }
+                }),
+            )
+            .fallback(move |method: Method, uri: Uri| {
+                let trace = trace.clone();
+                async move {
+                    trace.lock().await.push(format!("{method} {}", uri.path()));
+                    StatusCode::NO_CONTENT
+                }
+            })
+    }
+
+    #[tokio::test]
+    async fn commands_are_listed_and_submissions_anchored_in_the_conversation() -> anyhow::Result<()>
+    {
+        use carillon_discord_commands::contract::{HostReply, HostRequest, Intent};
+        use carillon_protocol::model::{CommandCatalog, ModelQuery, RuntimeCommand};
+        let catalog = CommandCatalog {
+            commands: vec![RuntimeCommand {
+                name: "compact".to_owned(),
+                description: None,
+                hint: None,
+            }],
+        };
+        let trace = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let submitted = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let router = submission_server(catalog.clone(), trace.clone(), submitted.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+        let core = crate::client::test_client(format!("http://{address}"));
+        let query = ModelQuery {
+            agent_id: "default".to_owned(),
+            audience_id: Some("discord-100-400".to_owned()),
+        };
+        let submit = serde_json::to_vec(&HostRequest::Submit {
+            text: "/compact keep `this`".to_owned(),
+            intent: Intent::Command,
+        })?;
+
+        // Without a Discord connection there is nowhere to anchor it.
+        let unanchored = super::InteractionCalls::new(core.clone(), query.clone());
+        assert_eq!(
+            unanchored
+                .answer(&serde_json::to_vec(&HostRequest::Commands)?)
+                .await,
+            HostReply::Commands(catalog)
+        );
+        assert!(matches!(
+            unanchored.answer(&submit).await,
+            HostReply::Error(_)
+        ));
+        assert!(submitted.lock().await.is_empty());
+
+        let mut config = crate::conversations::tests::discord_config(
+            crate::config::DiscordActivation::Always,
+            crate::config::DiscordConversation::Thread,
+        );
+        config.typing = false;
+        let calls =
+            super::InteractionCalls::new(core, query).with_submissions(super::Submissions {
+                http: Arc::new(
+                    twilight_http::Client::builder()
+                        .token("test-only".to_owned())
+                        .proxy(address.to_string(), true)
+                        .ratelimiter(None)
+                        .build(),
+                ),
+                config,
+                origin: crate::conversations::InteractionOrigin {
+                    guild_id: "100".to_owned(),
+                    user_id: "200".to_owned(),
+                    channel_id: "400".to_owned(),
+                    route_channel_id: "300".to_owned(),
+                },
+            });
+        assert_eq!(calls.answer(&submit).await, HostReply::Submitted);
+        server.abort();
+        let trace = trace.lock().await;
+        // The marker is posted silently first, marked processing, then submitted.
+        assert_eq!(
+            trace[0],
+            "message <@200> ran `/compact keep ˋthisˋ` mentions {\"parse\":[]}"
+        );
+        assert!(trace[1].starts_with("PUT /api/v10/channels/400/messages/901/reactions/"));
+        assert_eq!(trace[2], "event 901");
+        let event = submitted.lock().await.remove(0);
+        assert_eq!(event.content, "/compact keep `this`");
+        assert_eq!(event.feedback_target_id, "400:901");
+        assert_eq!(event.delivery_target_id, "400");
+        assert_eq!(event.audience_id, "discord-100-400");
+        assert_eq!(event.native["intent"], "command");
+        assert_eq!(event.native["route_channel_id"], "300");
+        assert_eq!(event.native["origin"]["parent_channel_id"], "300");
         Ok(())
     }
 

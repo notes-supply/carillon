@@ -31,6 +31,11 @@ async function serve() {
           `Local reasoner has no ${Object.keys(update.selection?.options ?? {}).join(", ")} setting.`,
         ),
       ),
+    commands: (query) =>
+      Promise.resolve({
+        commands:
+          query.audience_id === undefined ? [] : [{ name: "compact", hint: "<instructions>" }],
+      }),
     close: () => Promise.resolve(),
   };
   const server = createRuntimeServer({
@@ -112,6 +117,14 @@ it("sends callers only the displayable part of explanations and logs redacted di
     expect(await call("PUT", "/v1/model", option("password=short-secret"))).toEqual({
       status: 422,
       body: {},
+    });
+    // The command catalogue is the runtime's, for the queried conversation.
+    expect(
+      await call("GET", "/v1/commands?interface_id=discord-private&agent_id=default&audience_id=c"),
+    ).toEqual({ status: 200, body: { commands: [{ name: "compact", hint: "<instructions>" }] } });
+    expect(await call("GET", "/v1/commands?agent_id=default")).toEqual({
+      status: 400,
+      body: { error: "invalid command query" },
     });
   } finally {
     await close();

@@ -135,9 +135,19 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
         writeJson(response, 400, { error: "invalid model update" });
         return;
       }
-      // Not queued behind turns: a running turn resolved its selection when it
-      // started, and the next turn resolves after this change is written.
+      // The runtime decides how a change relates to the turns it runs.
       writeJson(response, 200, await options.runtime.setModel(update));
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/v1/commands") {
+      let query: ModelQuery;
+      try {
+        query = Parse(ModelQuerySchema, Object.fromEntries(url.searchParams));
+      } catch {
+        writeJson(response, 400, { error: "invalid command query" });
+        return;
+      }
+      writeJson(response, 200, await options.runtime.commands(query));
       return;
     }
 

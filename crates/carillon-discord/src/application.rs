@@ -13,8 +13,8 @@ use crate::{
     activity::{CardRecords, activity_monitor},
     client::CoreClient,
     commands::{
-        Change, ChangeError, CommandFiles, Commands, DiscordApp, MODULE_LIMIT, ModelCalls, Refusal,
-        Status,
+        Change, ChangeError, CommandFiles, Commands, DiscordApp, InteractionCalls, MODULE_LIMIT,
+        Refusal, Status, Submissions,
     },
     config::{DiscordConfig, state_directory},
     conversations::{
@@ -785,13 +785,21 @@ fn interaction_source(interaction: &DiscordInteraction) -> Option<InteractionSou
 }
 
 async fn run_interaction(state: &DiscordState, admitted: AdmittedInteraction) -> Result<Reply> {
-    let calls = ModelCalls::new(
+    let mut calls = InteractionCalls::new(
         state.core.clone(),
         ModelQuery {
             agent_id: state.discord.agent.clone(),
             audience_id: admitted.audience_id,
         },
     );
+    // Without a Discord connection there is nowhere to anchor a submission.
+    if let Some(app) = &state.app {
+        calls = calls.with_submissions(Submissions {
+            http: Arc::clone(&app.http),
+            config: state.discord.clone(),
+            origin: admitted.origin,
+        });
+    }
     state.commands.invoke(calls, admitted.interaction).await
 }
 

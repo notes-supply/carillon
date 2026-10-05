@@ -27,21 +27,16 @@ use serde_json::{Value, json};
 
 use crate::{
     HostCalls,
-    contract::{HostRequest, Interaction, InteractionKind, Outcome, Reply},
+    components::{PAGE, PRIMARY, SECONDARY, button, choice, fingerprint, select, shorten, text},
+    contract::{Interaction, InteractionKind, Outcome, Reply},
 };
 
 pub const COMMAND: &str = "model";
-/// Discord shows at most this many options per select menu.
-const PAGE: usize = 25;
 /// Provider, model, and action buttons leave two of Discord's five rows.
 const SETTING_ROWS: usize = 2;
-/// Discord's length limit for select labels, values, and descriptions.
-const TEXT_LIMIT: usize = 100;
 /// Bound for a runtime's explanation shown above the panel, which leaves
 /// room for both scopes' summaries within Discord's message limit.
 const NOTE_LIMIT: usize = 400;
-const PRIMARY: u8 = 1;
-const SECONDARY: u8 = 2;
 const STALE_PROVIDER: &str = "That provider is no longer available; the list below is current.";
 const STALE_MODEL: &str = "That model is no longer available; the list below is current.";
 const STALE_SETTING: &str = "That setting is no longer available; the controls below are current.";
@@ -74,7 +69,9 @@ pub fn interact(host: &mut impl HostCalls, interaction: &Interaction) -> Outcome
             view = shown;
             host.model_state().map_err(Unavailable::Read)
         }
-        Action::Default { scope } => host.set_model(scope, None).map_err(Unavailable::Write),
+        Action::Default { scope } => host
+            .set_model(scope, None, None)
+            .map_err(Unavailable::Write),
         Action::ChooseModel { scope, model } => {
             host.model_state()
                 .map_err(Unavailable::Read)
@@ -93,6 +90,7 @@ pub fn interact(host: &mut impl HostCalls, interaction: &Interaction) -> Outcome
                                 model: model.model.clone(),
                                 options: BTreeMap::new(),
                             }),
+                            None,
                         )
                         .map_err(Unavailable::Write)
                     } else {
@@ -112,12 +110,11 @@ pub fn interact(host: &mut impl HostCalls, interaction: &Interaction) -> Outcome
             .and_then(|state| {
                 if let Some(selection) = next_selection(&state, scope, &model, &option, &choice) {
                     view.setting = Some(option);
-                    host.call(HostRequest::SetModel {
+                    host.set_model(
                         scope,
-                        selection: Some(selection),
-                        expected: effective(&state, scope)
-                            .and_then(|scope| scope.selection.clone()),
-                    })
+                        Some(selection),
+                        effective(&state, scope).and_then(|scope| scope.selection.clone()),
+                    )
                     .map_err(Unavailable::Write)
                 } else {
                     view.note = Some(STALE_SETTING.to_owned());
@@ -725,76 +722,17 @@ fn model_key(model: &AvailableModel) -> String {
     fingerprint(&[&model.provider, &model.model])
 }
 
-/// FNV-1a over the length-prefixed parts, as 16 hex digits.
-fn fingerprint(parts: &[&str]) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for part in parts {
-        for byte in part.len().to_le_bytes().into_iter().chain(part.bytes()) {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0100_0000_01b3);
-        }
-    }
-    format!("{hash:016x}")
-}
-
-fn select(custom_id: &str, placeholder: &str, options: impl Iterator<Item = Value>) -> Value {
-    json!({
-        "type": 1,
-        "components": [{
-            "type": 3,
-            "custom_id": custom_id,
-            "placeholder": placeholder,
-            "options": options.take(PAGE).collect::<Vec<_>>(),
-        }],
-    })
-}
-
-fn choice(label: &str, value: &str, description: Option<&str>, default: bool) -> Value {
-    let mut option = json!({ "label": text(label), "value": value, "default": default });
-    if let Some(description) = description {
-        option["description"] = text(description).into();
-    }
-    option
-}
-
-fn button(custom_id: &str, label: &str, style: u8, disabled: bool) -> Value {
-    json!({
-        "type": 2,
-        "style": style,
-        "custom_id": custom_id,
-        "label": label,
-        "disabled": disabled,
-    })
-}
-
-/// Display text within Discord's limit; identity is carried by fingerprints,
-/// so shortening here loses nothing.
-fn text(value: &str) -> String {
-    if value.is_empty() {
-        return "(unnamed)".to_owned();
-    }
-    value.chars().take(TEXT_LIMIT).collect()
-}
-
-/// Bound free-form summaries without hiding the other scope or its controls.
-fn shorten(value: &str, limit: usize) -> String {
-    if value.chars().count() <= limit {
-        value.to_owned()
-    } else {
-        value.chars().take(limit - 1).chain(['…']).collect()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
     use serde_json::Value;
 
-    use super::{COMMAND, PAGE, TEXT_LIMIT, fingerprint, interact};
+    use super::{COMMAND, interact};
+    use crate::components::{PAGE, TEXT_LIMIT, fingerprint};
     use crate::{
         HostCalls,
-        contract::{HostRequest, Interaction, InteractionKind, Outcome, Reply},
+        contract::{HostReply, HostRequest, Interaction, InteractionKind, Outcome, Reply},
     };
     use carillon_protocol::{
         model::ModelScope as Scope,
@@ -818,7 +756,7 @@ mod tests {
     }
 
     impl HostCalls for FakeRuntime {
-        fn call(&mut self, request: HostRequest) -> Result<ModelState, String> {
+        fn call(&mut self, request: HostRequest) -> Result<HostReply, String> {
             if let Some(failure) = &self.failure {
                 return Err(failure.clone());
             }
@@ -889,7 +827,7 @@ mod tests {
                 };
             }
             self.requests.push(request);
-            Ok(self.state.clone())
+            Ok(HostReply::ModelState(self.state.clone()))
         }
     }
 

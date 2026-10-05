@@ -5,9 +5,9 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use axum::http::StatusCode;
-use carillon_discord_commands::contract::{Interaction, InteractionKind};
+use carillon_discord_commands::contract::{Intent, Interaction, InteractionKind};
 use carillon_installation::filesystem::sync_ancestors;
-use carillon_protocol::model::ExternalEvent;
+use carillon_protocol::model::{ExternalEvent, NATIVE_INTENT};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -487,11 +487,23 @@ pub struct InteractionSource {
     pub options: Value,
 }
 
-/// An admitted interaction: what the module sees, and the conversation it
-/// happened in when the agent participates there.
+/// An admitted interaction: what the module sees, the conversation it
+/// happened in when the agent participates there, and where it came from.
 pub struct AdmittedInteraction {
     pub interaction: Interaction,
     pub audience_id: Option<String>,
+    pub origin: InteractionOrigin,
+}
+
+/// Who invoked an admitted interaction, and where.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InteractionOrigin {
+    pub guild_id: String,
+    pub user_id: String,
+    /// The channel or thread the interaction happened in.
+    pub channel_id: String,
+    /// The configured route that admitted it.
+    pub route_channel_id: String,
 }
 
 /// Fail-closed admission for interactions: the configured guild, an
@@ -506,19 +518,25 @@ pub fn admit_interaction(
 ) -> Result<AdmittedInteraction, InterfaceError> {
     admit_identity(config, source.guild_id.as_deref(), &source.user_id)?;
     let guild_id = source.guild_id.unwrap_or_default();
-    let audience_id = if let Some(route) = config
+    let (audience_id, route_channel_id) = if let Some(route) = config
         .routes
         .iter()
         .find(|route| route.channel_id == source.channel_id)
     {
-        (route.conversation == DiscordConversation::Channel)
-            .then(|| format!("discord-{guild_id}-{}", source.channel_id))
-    } else if source.parent_channel_id.as_deref().is_some_and(|parent| {
-        config.routes.iter().any(|route| {
+        (
+            (route.conversation == DiscordConversation::Channel)
+                .then(|| format!("discord-{guild_id}-{}", source.channel_id)),
+            route.channel_id.clone(),
+        )
+    } else if let Some(route) = source.parent_channel_id.as_deref().and_then(|parent| {
+        config.routes.iter().find(|route| {
             route.channel_id == parent && route.conversation == DiscordConversation::Thread
         })
     }) {
-        Some(format!("discord-{guild_id}-{}", source.channel_id))
+        (
+            Some(format!("discord-{guild_id}-{}", source.channel_id)),
+            route.channel_id.clone(),
+        )
     } else {
         return Err(InterfaceError {
             status: StatusCode::FORBIDDEN,
@@ -534,7 +552,51 @@ pub fn admit_interaction(
             conversation: audience_id.is_some(),
         },
         audience_id,
+        origin: InteractionOrigin {
+            guild_id,
+            user_id: source.user_id,
+            channel_id: source.channel_id,
+            route_channel_id,
+        },
     })
+}
+
+/// The event for text a person submitted through an interaction in a
+/// conversation, anchored on the provider's marker message for it: the
+/// marker is the event's identity and feedback target, as a person's own
+/// message would be. `native.intent` tells the runtime why it was sent.
+pub(crate) fn submitted_event(
+    agent_id: &str,
+    audience_id: &str,
+    origin: &InteractionOrigin,
+    marker_id: &str,
+    text: &str,
+    intent: Intent,
+) -> ExternalEvent {
+    let parent = (origin.channel_id != origin.route_channel_id).then_some(&origin.route_channel_id);
+    ExternalEvent {
+        event_id: marker_id.to_owned(),
+        agent_id: agent_id.to_owned(),
+        user_id: origin.user_id.clone(),
+        audience_id: audience_id.to_owned(),
+        delivery_target_id: origin.channel_id.clone(),
+        feedback_target_id: format!("{}:{marker_id}", origin.channel_id),
+        content: text.to_owned(),
+        native: json!({
+            NATIVE_INTENT: intent,
+            "origin": {
+                "guild_id": origin.guild_id,
+                "channel_id": origin.channel_id,
+                "source_channel_id": origin.channel_id,
+                "message_id": marker_id,
+                "user_id": origin.user_id,
+                "parent_channel_id": parent,
+            },
+            "guild_id": origin.guild_id,
+            "route_channel_id": origin.route_channel_id,
+        }),
+        attachments: None,
+    }
 }
 
 #[cfg(test)]

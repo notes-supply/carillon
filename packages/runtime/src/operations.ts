@@ -1,4 +1,5 @@
 import type {
+  CommandCatalog,
   ModelQuery,
   ModelUpdate,
   ModelState,
@@ -25,5 +26,7 @@ export interface RuntimeOperations {
   activity(correlationId: string, interfaceId: string): TurnActivity | undefined;
   modelState(query: ModelQuery): Promise<ModelState>;
   setModel(update: ModelUpdate): Promise<ModelState>;
+  /** The engine's own commands a person may run in the agent's conversation, as the engine lists them now. */
+  commands(query: ModelQuery): Promise<CommandCatalog>;
   close(): Promise<void>;
 }

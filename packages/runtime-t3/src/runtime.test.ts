@@ -1422,6 +1422,79 @@ it("sends a command invocation verbatim, without notes about earlier files", asy
     "/compact keep the decisions",
     "hello\n\n[Carillon: 1 file(s) attached to earlier messages are not available to this runtime: a.png]",
   ]);
+
+  // A command T3 runs to completion without a reply of its own is acknowledged
+  // by name; a failed one keeps T3's explanation.
+  const silent = runtime.executeTurn(turn("turn-3", "/compact", { native: { intent: "command" } }));
+  fake.complete(threadId, (await started("turn-3")).id);
+  expect((await silent).output).toBe("`/compact` finished.");
+  const failed = runtime.executeTurn(
+    turn("turn-4", "/review main", { native: { intent: "command" } }),
+  );
+  fake.fail(threadId, (await started("turn-4")).id, "Unknown skill: review");
+  await expect(failed).rejects.toMatchObject({ status: 502, message: "Unknown skill: review" });
+});
+
+it("lists the commands and user-invocable skills T3 offers the conversation's provider in the workspace", async () => {
+  const listing = (instanceId: string, names: string[]) => ({
+    instanceId,
+    driver: instanceId,
+    enabled: true,
+    installed: true,
+    status: "ready",
+    models: [],
+    slashCommands: [{ name: "machine-only" }],
+    skills: [],
+    workspaceSnapshots: [
+      {
+        cwd: resources,
+        checkedAt: "2026-10-05T10:00:00Z",
+        slashCommands: names.map((name, index) =>
+          index === 0
+            ? {
+                name,
+                description: " Summarize the conversation ",
+                input: { hint: "<instructions>" },
+              }
+            : { name },
+        ),
+        skills: [
+          { name: "deploy-notes", description: "Write deploy notes", path: "/s", enabled: true },
+          { name: "disabled", path: "/s", enabled: false },
+          { name: "agent-only", path: "/s", enabled: true, userInvocable: false },
+          { name: "only-person", path: "/s", enabled: true, userInvocationOnly: true },
+          { name: names[1], path: "/s", enabled: true },
+          { name: "x".repeat(101), path: "/s", enabled: true },
+          { malformed: true },
+        ],
+      },
+    ],
+  });
+  const commands = Array.from({ length: 30 }, (_, index) =>
+    index === 0 ? "compact" : `command-${String(index)}`,
+  );
+  fake.providers = [listing("claudeAgent", commands), listing("codex", ["status"])];
+  const { commands: listed } = await runtime.commands(conversation);
+  expect(listed.slice(0, 2)).toEqual([
+    { name: "compact", description: "Summarize the conversation", hint: "<instructions>" },
+    { name: "command-1" },
+  ]);
+  expect(listed.map((command) => command.name).slice(30)).toEqual(["deploy-notes", "only-person"]);
+  expect(listed).toHaveLength(32);
+  // Reading creates no thread; the instance is the one the thread would open with.
+  expect(fake.threads.size).toBe(0);
+  expect(fake.refreshes).toEqual([{ instanceId: "claudeAgent", cwd: resources }]);
+
+  // Once the thread runs on another instance, that instance's commands are offered.
+  const reply = runtime.executeTurn(turn("turn-1", "hi"));
+  answer(await started("turn-1"), "Hello.");
+  await reply;
+  thread().modelSelection = { instanceId: "codex", model: "gpt-6-astra", options: [] };
+  expect((await runtime.commands(conversation)).commands.map((command) => command.name)).toEqual([
+    "status",
+    "deploy-notes",
+    "only-person",
+  ]);
 });
 
 it("runs different conversations at once and each conversation's turns in order", async () => {

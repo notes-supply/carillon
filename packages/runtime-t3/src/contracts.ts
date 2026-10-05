@@ -334,7 +334,46 @@ export const ProviderSchema = Type.Object({
 });
 export type Provider = Static<typeof ProviderSchema>;
 
+/** T3's answer to `server.getConfig` and `server.refreshProviders`: its provider instances. */
 export const ServerConfigSchema = Type.Object({ providers: Type.Array(Type.Unknown()) });
+
+/**
+ * What a provider instance offers a person to invoke, machine-wide and per
+ * workspace. Entries outside the shapes below are skipped.
+ */
+export const ProviderCommandsSchema = Type.Object({
+  instanceId: Id,
+  slashCommands: Type.Optional(Type.Array(Type.Unknown())),
+  skills: Type.Optional(Type.Array(Type.Unknown())),
+  workspaceSnapshots: Type.Optional(
+    Type.Array(
+      Type.Object({
+        cwd: Type.String(),
+        slashCommands: Type.Array(Type.Unknown()),
+        skills: Type.Array(Type.Unknown()),
+      }),
+    ),
+  ),
+});
+
+export const SlashCommandSchema = Type.Object({
+  name: Id,
+  description: Type.Optional(Type.String()),
+  input: Type.Optional(Type.Object({ hint: Type.String() })),
+});
+
+/** A skill; `userInvocable: false` keeps it out of the person's commands. */
+export const SkillSchema = Type.Object({
+  name: Id,
+  description: Type.Optional(Type.String()),
+  enabled: Type.Boolean(),
+  userInvocable: Type.Optional(Type.Boolean()),
+});
+
+/** Asks T3 for a provider instance's commands and skills in a workspace, scanning it once if T3 has not. */
+export function refreshProviders(instanceId: string, cwd: string) {
+  return { instanceId, cwd } as const;
+}
 
 /**
  * A stable identifier for one Carillon fact. The same facts always name the

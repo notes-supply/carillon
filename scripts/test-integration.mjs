@@ -609,7 +609,36 @@ async function testModelPicker() {
     body: JSON.stringify(interaction("305", null, "command", "model", [])),
   });
   assert.equal(unauthenticated.status, 403, "interactions require the provider credential");
+  await testRuntimeCommands();
   await testCommandModuleOperations();
+}
+
+/**
+ * `/command` reaches the conversation's runtime through core: Pi lists no
+ * commands, and without a Discord connection a submission has nowhere to be
+ * anchored, so nothing is sent.
+ */
+async function testRuntimeCommands() {
+  const listed = await interact("305", null, "command", "command");
+  assert.match(listed.content, /^The agent's runtime lists no commands here\./u);
+  assert.deepEqual(listed.components, []);
+  const before = run("--home", installation, "recent", "--limit", "100");
+  const refused = await interact(
+    "305",
+    null,
+    "command",
+    "command",
+    [],
+    [{ name: "invocation", type: 3, value: "compact" }],
+  );
+  assert.match(refused.content, /^`\/compact` was not sent: .*Discord connection/u);
+  assert.equal(
+    run("--home", installation, "recent", "--limit", "100"),
+    before,
+    "an unanchored submission is not accepted",
+  );
+  const outside = await interact("301", null, "command", "command");
+  assert.equal(outside.content, "Use /command inside a conversation with the agent.");
 }
 
 /**
@@ -618,17 +647,20 @@ async function testModelPicker() {
  */
 async function testCommandModuleOperations() {
   const commands = (...args) => run("--home", installation, "discord", "commands", ...args);
-  assert.equal(commands(), "discord-private serves the release command module: /model.");
-  assert.match(commands("check", commandsModule), /is a usable command module .*: \/model\.$/u);
+  assert.equal(commands(), "discord-private serves the release command module: /model, /command.");
+  assert.match(
+    commands("check", commandsModule),
+    /is a usable command module .*: \/model, \/command\.$/u,
+  );
   assert.equal(
     commands("install", commandsModule),
-    "discord-private now serves the installed command module: /model.",
+    "discord-private now serves the installed command module: /model, /command.",
   );
   assert.match((await interact("305", null, "command", "model")).content, /Agent default:/u);
   // Repeating an install finishes its save; it serves the same module.
   assert.equal(
     commands("install", commandsModule),
-    "discord-private was already serving the installed command module: /model.",
+    "discord-private was already serving the installed command module: /model, /command.",
   );
   const broken = join(workspace, "broken-commands.wasm");
   await writeFile(broken, "\0asm broken");
@@ -642,12 +674,21 @@ async function testCommandModuleOperations() {
     assert.notEqual(refused.status, 0, `${args[0]} accepted a broken module`);
     assert.match(refused.stderr, /^error: .*not a usable command module/u);
     if (args[0] === "install") {
-      assert.match(refused.stderr, /Still serving the installed command module: \/model\.$/mu);
+      assert.match(
+        refused.stderr,
+        /Still serving the installed command module: \/model, \/command\.$/mu,
+      );
     }
   }
   await rm(broken);
-  assert.equal(commands(), "discord-private serves the installed command module: /model.");
-  assert.equal(commands("reset"), "discord-private now serves the release command module: /model.");
+  assert.equal(
+    commands(),
+    "discord-private serves the installed command module: /model, /command.",
+  );
+  assert.equal(
+    commands("reset"),
+    "discord-private now serves the release command module: /model, /command.",
+  );
   assert.match((await interact("305", null, "command", "model")).content, /Agent default:/u);
 }
 
@@ -1455,7 +1496,7 @@ async function simulateRoute(eventId, channelId, parentChannelId, content) {
   return JSON.parse(body);
 }
 
-function interaction(channelId, parentChannelId, kind, name, values) {
+function interaction(channelId, parentChannelId, kind, name, values, options = {}) {
   return {
     guild_id: "100",
     user_id: "200",
@@ -1464,7 +1505,7 @@ function interaction(channelId, parentChannelId, kind, name, values) {
     kind,
     name,
     values,
-    options: {},
+    options,
   };
 }
 
@@ -1480,9 +1521,9 @@ async function requestInteraction(source) {
 }
 
 /** Runs a slash command or component interaction and returns the reply. */
-async function interact(channelId, parentChannelId, kind, name, values = []) {
+async function interact(channelId, parentChannelId, kind, name, values = [], options = {}) {
   const response = await requestInteraction(
-    interaction(channelId, parentChannelId, kind, name, values),
+    interaction(channelId, parentChannelId, kind, name, values, options),
   );
   const body = await response.text();
   assert.equal(response.status, 200, body);

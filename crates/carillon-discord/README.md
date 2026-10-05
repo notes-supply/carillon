@@ -40,9 +40,12 @@ retain the actual Wasm path rather than substituting this direct native call.
   validate, register, activate and save under the installation's maintenance lock,
   reporting activation, registration and save durability separately. Construct it
   with `CommandFiles` naming the release module, installed module, registration
-  record and installation. [Command presentation](../carillon-discord-commands/src/model.rs)
-  lives in the separate guest library; [`HostCalls`](../carillon-discord-commands/src/lib.rs)
-  is the existing native-operation boundary, also used by the example.
+  record and installation. Command presentation ([`/model`](../carillon-discord-commands/src/model.rs),
+  [`/command`](../carillon-discord-commands/src/run.rs)) lives in the separate guest library;
+  [`HostCalls`](../carillon-discord-commands/src/lib.rs) is the existing native-operation
+  boundary, also used by the example. A submission from `/command` posts a silent marker
+  message in the conversation and submits an event anchored on it, with the interaction's
+  admission and `native.intent: "command"`.
 - [`inbound`](src/inbound.rs) settles one admitted message: it prepares the native
   conversation, emits feedback and retries only ambiguous transport submission with
   the same event identity. Its [`lanes`](src/inbound/lanes.rs) run messages one at a
@@ -72,8 +75,8 @@ writers is not supported.
 ## Change and test locally
 
 Admission and identity tests live [beside conversations](src/conversations/tests.rs).
-Change picker layout in the [command library](../carillon-discord-commands/src/model.rs),
-not in core or Pi. Host, install and reset tests live in `commands.rs`; HTTP/gateway composition,
+Change picker and command-menu layout in the [command library](../carillon-discord-commands/src/),
+not in core or a runtime. Host, install and reset tests live in `commands.rs`; HTTP/gateway composition,
 tests live in [application tests](src/application/tests.rs). Transport-failure tests
 live [beside the core client](src/client/tests.rs), native delivery recovery tests
 [beside delivery](src/delivery/tests.rs), activity lifecycle tests, several with Twilight's real

@@ -182,6 +182,7 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
         .route("/v1/turns", get(recent_turns))
         .route("/v1/turns/{id}", get(inspect_turn))
         .route("/v1/model", get(model_state).put(set_model))
+        .route("/v1/commands", get(commands))
         .route("/v1/status", get(status))
         .with_state(state.clone());
     info!(listen = %config.value.core.listen, "Carillon core ready");
@@ -232,8 +233,8 @@ async fn event_status(
     Ok(Json(state.core.event_status(&interface.id, &event_id)?))
 }
 
-/// Model calls answer a waiting user; they give up well before the
-/// interface's own deadline does.
+/// Model and command calls answer a waiting user; they give up well before
+/// the interface's own deadline does.
 const MODEL_CALL_TIMEOUT: Duration = Duration::from_secs(5);
 
 async fn model_state(
@@ -241,14 +242,34 @@ async fn model_state(
     headers: HeaderMap,
     Query(query): Query<ModelQuery>,
 ) -> Result<Response, ApiError> {
-    let interface = interface_provider(&headers, &state.config)?;
-    let runtime = model_runtime(&state, &interface.id, &query)?;
+    relay_query(&state, &headers, "/v1/model", query).await
+}
+
+/// The runtime's own commands for the conversation, relayed like a model read.
+async fn commands(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ModelQuery>,
+) -> Result<Response, ApiError> {
+    relay_query(&state, &headers, "/v1/commands", query).await
+}
+
+/// Relays a read about the agent or one conversation to the runtime that
+/// owns the conversation, naming the calling interface.
+async fn relay_query(
+    state: &AppState,
+    headers: &HeaderMap,
+    path: &str,
+    query: ModelQuery,
+) -> Result<Response, ApiError> {
+    let interface = interface_provider(headers, &state.config)?;
+    let runtime = model_runtime(state, &interface.id, &query)?;
     let token = runtime_token(&state.config, &runtime)?;
     let query = RuntimeModelQuery {
         interface_id: interface.id.clone(),
         query,
     };
-    let mut url = Url::parse(&format!("{}/v1/model", runtime.url))
+    let mut url = Url::parse(&format!("{}{path}", runtime.url))
         .with_context(|| format!("runtime provider {} has an invalid URL", runtime.id))?;
     {
         let mut pairs = url.query_pairs_mut();
@@ -328,10 +349,10 @@ async fn relay_model_call(request: RequestBuilder) -> Result<Response, ApiError>
         })?;
     let status = response.status();
     let body = response.json::<Value>().await.map_err(|error| {
-        warn!(%error, %status, "runtime model response was not JSON");
+        warn!(%error, %status, "runtime model or command response was not JSON");
         ApiError::new(
             StatusCode::BAD_GATEWAY,
-            "The runtime reported an unusable model state.",
+            "The runtime gave an unusable answer.",
         )
     })?;
     Ok((status, Json(body)).into_response())
