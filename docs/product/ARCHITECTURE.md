@@ -80,7 +80,9 @@ Pi extension plus skill, not a Wasm capability. A small activation tool enables
 its detailed schemas in the current conversation; native Pi system messages retain
 the loadout. No selection model or separate activation store exists.
 `carillon discord tools install` copies the bundled extension/skill into ordinary
-agent resources. Core captures their bytes with accepted work, as for any resource.
+agent resources, with core stopped: it holds core's service lock throughout, so
+no accepted turn captures one file without the other. Core captures their bytes
+with accepted work, as for any resource.
 
 Core forwards the event's opaque `native` metadata on runtime requests. Discord
 constructs `native.origin` from admitted input and the resolved delivery target;

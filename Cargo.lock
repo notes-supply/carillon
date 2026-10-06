@@ -263,7 +263,6 @@ dependencies = [
  "carillon-protocol",
  "clap",
  "flate2",
- "fs2",
  "hex",
  "http",
  "reqwest",

@@ -7,16 +7,21 @@ load model credentials, or make Discord calls when imported.
 ## Installed use
 
 ```sh
+carillon stop
 carillon discord tools install
+carillon start
 ```
 
 This copies the release's bundled extension and skill into the configured agent's
 resource root. It replaces only `extensions/carillon-discord.js` and
-`skills/discord/SKILL.md`; put personal customizations elsewhere. Re-run after a
-release update to update this optional integration. Remove those two files to
-stop including it in newly accepted turns. No gateway restart is required.
-Already accepted turns keep their captured extension and skill, as with other
-agent resources. The ordinary release installer does not enable these tools.
+`skills/discord/SKILL.md`; put personal customizations elsewhere. Core must be
+stopped: the install refuses while it serves and keeps it from starting until
+both files are in place. If the install fails, the two files may not match: run
+it again until it succeeds before starting core. Re-run after a release update to
+update this optional integration. Remove those two files to stop including it in
+newly accepted turns. No separate gateway restart is required. Already accepted turns keep
+their captured extension and skill, as with other agent resources. The ordinary
+release installer does not enable these tools.
 
 The skill teaches the assistant to call `enable_discord`. A fresh conversation
 exposes that small activation tool, not the detailed Discord schemas. Activation
