@@ -9,17 +9,20 @@ import {
   clampThinkingLevel,
   getSupportedThinkingLevels,
   type Api,
+  type AssistantMessage,
   type ImageContent,
   type Model,
   type ModelThinkingLevel,
 } from "@earendil-works/pi-ai";
 import type {
   AvailableModel,
+  CommandCatalog,
   Selection,
   ModelQuery,
   ModelUpdate,
   ModelState,
 } from "@carillon/protocol";
+import { existsSync } from "node:fs";
 import { mkdir, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { trackActivity, type ActivityTracker } from "./activity.ts";
@@ -31,11 +34,18 @@ import {
   prepareAttachments,
   type InlineImagePolicy,
 } from "./attachments.ts";
-import { ModelSelections, resolved } from "./model.ts";
+import { ModelSelections } from "./model.ts";
+import { resolved } from "@carillon/runtime/models";
 import { openConversation } from "./namespace.ts";
-import { Serial } from "./serial.ts";
+import { RuntimeClosed } from "@carillon/runtime/failure";
+import { Serial } from "@carillon/runtime/serial";
 import { createPiExecutionSession, promptSession } from "./session.ts";
-import type { RuntimeOperations, TurnRequest, TurnResponse } from "./operations.ts";
+import {
+  commandFinished,
+  type RuntimeOperations,
+  type TurnRequest,
+  type TurnResponse,
+} from "@carillon/runtime/operations";
 
 export interface PiRuntimeOptions {
   readonly workspace: string;
@@ -129,8 +139,13 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
         selections.update(offeredPiModels(await availablePiModels()), runtimeDefault(), update),
       );
     },
+    // Pi runs its own commands, prompt templates and skills from a message's
+    // text; this runtime does not list them yet.
+    commands(): Promise<CommandCatalog> {
+      return track(() => Promise.resolve({ commands: [] }));
+    },
     async close() {
-      shutdown.abort(new Error("Pi runtime is closed"));
+      shutdown.abort(new RuntimeClosed("Pi runtime is closed"));
       await Promise.allSettled([...pending]);
     },
   };
@@ -250,23 +265,51 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
       modelRuntime: runtime,
       model,
       ...(isThinkingLevel(model, thinking) ? { thinkingLevel: thinking } : {}),
+      onWork: (fact) => {
+        activity.report(fact);
+      },
     });
     const { session, extensionsResult } = created;
     try {
       assertExtensionsLoaded(extensionsResult.errors);
       let output = "";
+      // Whether an extension reported a failure while the prompt ran, such
+      // as a command's.
+      const seen = { failure: false };
       const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
         activity.observe(event);
         if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta")
           output += event.assistantMessageEvent.delta;
       });
+      const unwatch = session.extensionRunner.onError(() => {
+        seen.failure = true;
+      });
       try {
-        await promptWithNotes(session, request.input, signal, attachments.images, notes);
+        const answer = await promptWithNotes(
+          session,
+          request.input,
+          signal,
+          attachments.images,
+          notes,
+        );
+        // A command Pi ran to completion without a message, such as an
+        // extension's, is acknowledged; a failed one, and any message the
+        // model answered with nothing, still has no answer.
+        const silent = answer === undefined && !seen.failure;
+        // Notes Pi has not saved, such as those of a command that opened the
+        // conversation, are left for core to offer again with a later turn.
+        const unsaved = !saved(session.sessionManager);
+        const earlierLeft =
+          unsaved && notes.some((pending) => pending.details.turn !== request.correlation_id);
+        const ownLeft = unsaved && attachments.note !== undefined;
         return {
           correlation_id: request.correlation_id,
-          output,
+          output: silent ? (commandFinished(request) ?? output) : output,
+          ...(earlierLeft ? { unanswered_left: true } : {}),
+          ...(ownLeft ? { attachments_left: true } : {}),
         };
       } finally {
+        unwatch();
         unsubscribe();
       }
     } finally {
@@ -283,8 +326,9 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
    * Prompt with the turn's images, its attachment notes travelling with the
    * message after any compaction. A command or input an extension handles
    * consumes the prompt without a message; the notes are then kept on their
-   * own. Pi saves them once the conversation has a message; until then, core
-   * offers the files again with later turns.
+   * own. Pi saves them once the conversation has a message; until then, the
+   * turn leaves them, and core offers the files again with later turns.
+   * Returns the prompt's own answer, as `promptSession` does.
    */
   async function promptWithNotes(
     session: AgentSession,
@@ -292,17 +336,23 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
     signal: AbortSignal,
     images: ImageContent[],
     notes: readonly ReturnType<typeof note>[],
-  ): Promise<void> {
+  ): Promise<AssistantMessage | undefined> {
     for (const pending of notes)
       await session.sendCustomMessage(pending, { deliverAs: "nextTurn" });
     try {
-      await promptSession(session, input, signal, images);
+      return await promptSession(session, input, signal, images);
     } finally {
       if (!signal.aborted)
         for (const pending of notes)
           if (!noted(session.sessionManager, pending.details.turn))
             await session.sendCustomMessage(pending);
     }
+  }
+
+  /** Whether Pi has written the conversation's file, which it does once there is a message. */
+  function saved(manager: SessionManager): boolean {
+    const file = manager.getSessionFile();
+    return file !== undefined && existsSync(file);
   }
 
   function noted(manager: SessionManager, turn: string): boolean {

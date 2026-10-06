@@ -74,6 +74,8 @@ async fn discord_state(core: CoreClient, directory: &Path) -> anyhow::Result<Dis
         participation: Arc::new(Participation::load(directory.join("participation.json"))?),
         commands: stub_commands(directory, &replying("stub reply", &[])).await?,
         app: None,
+        reactions: None,
+        lanes: None,
         operator_token_hash: hash_token("operator"),
     })
 }
@@ -1074,6 +1076,7 @@ async fn an_acknowledged_interaction_is_answered_before_the_provider_returns() -
         config: state.discord.clone(),
         participation: state.participation.clone(),
         http: target.http.clone(),
+        reactions: crate::delivery::Reactions::new(target.http.clone(), state.discord.clone()),
         downloads: state.downloads.clone(),
         refusals: Arc::new(tokio::sync::Semaphore::new(crate::inbound::lanes::REFUSALS)),
         stopping: tokio_util::sync::CancellationToken::new(),

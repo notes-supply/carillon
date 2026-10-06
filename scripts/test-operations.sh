@@ -186,12 +186,12 @@ case "$(simulate installed-1)" in *'Local provider response 1'*) ;; *) fail 'fir
 # Provider commands receive the resolved installation and infer the only Discord instance.
 MODULE=$INSTALLATION/app/lib/carillon_discord_commands.wasm
 INSTALLED=$INSTALLATION/state/components/discord-private/command-module.wasm
-carillon discord commands | grep -Fx 'discord-private serves the release command module: /model.' >/dev/null
+carillon discord commands | grep -Fx 'discord-private serves the release command module: /model, /command.' >/dev/null
 carillon discord commands check "$MODULE" | grep -F 'is a usable command module' >/dev/null
 # The running provider takes the installation's maintenance lock for its own changes.
 refuse locked-install flock "$INSTALLATION/.maintenance.lock" carillon discord commands install "$MODULE"
 grep -F 'another Carillon maintenance operation is running' "$TEST_ROOT/locked-install.log" >/dev/null
-grep -F 'Still serving the release command module: /model.' "$TEST_ROOT/locked-install.log" >/dev/null
+grep -F 'Still serving the release command module: /model, /command.' "$TEST_ROOT/locked-install.log" >/dev/null
 [ ! -e "$INSTALLED" ]
 carillon discord configure --guild-id 100 --bot-user-id 201 --user-id 200 --user-id 250 \
   --route 300:always:channel >/dev/null
@@ -322,7 +322,7 @@ rm -f "$TRACE"
 # installed command module lives outside the replaced application and is
 # checked by the new release before anything stops.
 carillon discord commands install "$MODULE" >"$TEST_ROOT/commands-install.log"
-grep -Fx 'discord-private now serves the installed command module: /model.' \
+grep -Fx 'discord-private now serves the installed command module: /model, /command.' \
   "$TEST_ROOT/commands-install.log" >/dev/null
 cmp "$MODULE" "$INSTALLED"
 carillon update "$TEST_ROOT/next.tar.gz" >"$TEST_ROOT/update.log"
@@ -338,8 +338,8 @@ assert_preserved
 [ "$(carillon recent)" = "$recent_before" ]
 case "$(simulate installed-2)" in *'Local provider response 2'*) ;; *) fail 'conversation did not continue' ;; esac
 [ "$(carillon review check)" = "review $INSTALLATION check" ]
-carillon discord commands | grep -Fx 'discord-private serves the installed command module: /model.' >/dev/null
-carillon discord commands reset | grep -Fx 'discord-private now serves the release command module: /model.' >/dev/null
+carillon discord commands | grep -Fx 'discord-private serves the installed command module: /model, /command.' >/dev/null
+carillon discord commands reset | grep -Fx 'discord-private now serves the release command module: /model, /command.' >/dev/null
 [ ! -e "$INSTALLED" ]
 
 # A stopped installation stays stopped.

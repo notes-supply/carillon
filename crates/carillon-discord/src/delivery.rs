@@ -5,13 +5,17 @@ use crate::{
     config::{DiscordConfig, DiscordEmoji},
 };
 use anyhow::{Context, Result, bail};
-use carillon_protocol::model::{Delivery, DeliveryOutcome};
-use std::{sync::Arc, time::Duration};
+use carillon_protocol::model::{Delivery, DeliveryOutcome, ExternalEvent};
+use std::{
+    collections::{HashMap, hash_map::Entry},
+    sync::{Arc, Mutex, PoisonError},
+    time::Duration,
+};
 use tokio::{
-    sync::mpsc,
+    sync::{Semaphore, mpsc, watch},
     time::{sleep, timeout},
 };
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::warn;
 use twilight_http::{Client as DiscordHttp, request::channel::reaction::RequestReactionType};
 use twilight_model::{
@@ -21,9 +25,16 @@ use twilight_model::{
         marker::{ChannelMarker, EmojiMarker, MessageMarker},
     },
 };
-/// How long one feedback request may take, rate-limit waits included:
-/// feedback must not hold up the work it reports on.
+/// How long one feedback request may take, rate-limit waits included.
 const FEEDBACK_LIMIT: Duration = Duration::from_secs(30);
+/// How long work waits for feedback it does not depend on before going on
+/// without it: a message's admission, for its processing reaction and
+/// typing indicator, and the provider's stop, for reactions under way.
+pub(crate) const PROMPT_FEEDBACK: Duration = Duration::from_secs(2);
+/// Outcome reactions shown beside work that are owned at once, from when
+/// they are asked for until they end. Beyond them an outcome reaction is
+/// not shown, and that is logged: the work never waits for its feedback.
+const OUTCOMES: usize = 64;
 
 /// A feedback request, bounded as a whole.
 async fn bounded<T>(
@@ -41,44 +52,208 @@ pub(crate) enum Feedback {
     Uncertain,
 }
 
-pub(crate) async fn processing_feedback(http: &DiscordHttp, config: &DiscordConfig, target: &str) {
-    if config.reactions
-        && let Err(failure) = create_feedback_reaction(http, target, &config.processing_emoji).await
-    {
-        warn!(error = %failure, "Discord processing reaction failed");
+/// A message's reactions, in order: its processing reaction, then the
+/// delivered, failed or uncertain one that replaces it.
+///
+/// A processing reaction is a request these reactions own until Discord
+/// answers it or [`FEEDBACK_LIMIT`] passes, and a message admitted again
+/// meanwhile shares it. Admission waits for it at most
+/// [`PROMPT_FEEDBACK`], and stopping that wait cancels only the wait: a
+/// request Discord already received may still be applied, so the request
+/// goes on. The message's outcome reaction waits for it to end before
+/// removing it, so a processing reaction Discord answered cannot be added
+/// after the outcome. One Discord never answers leaves its effect unknown:
+/// it may still be applied later, and that is logged, not assumed away.
+///
+/// Feedback that runs beside work runs as tasks these reactions own until
+/// [`Reactions::stop`]: processing requests, one per message at a time, at
+/// most [`OUTCOMES`] outcome reactions, and the lanes' overload refusals.
+/// After the stop nothing is sent, not even an outcome a caller awaits.
+#[derive(Clone)]
+pub(crate) struct Reactions(Arc<Owned>);
+
+struct Owned {
+    http: Arc<DiscordHttp>,
+    config: DiscordConfig,
+    /// Processing requests not yet ended, one per feedback target. A
+    /// receiver closes when its request ends.
+    unanswered: Mutex<HashMap<String, watch::Receiver<()>>>,
+    /// Slots for the outcome reactions shown beside work.
+    outcomes: Arc<Semaphore>,
+    tasks: TaskTracker,
+    stopped: CancellationToken,
+}
+
+impl Reactions {
+    pub(crate) fn new(http: Arc<DiscordHttp>, config: DiscordConfig) -> Self {
+        Self(Arc::new(Owned {
+            http,
+            config,
+            unanswered: Mutex::new(HashMap::new()),
+            outcomes: Arc::new(Semaphore::new(OUTCOMES)),
+            tasks: TaskTracker::new(),
+            stopped: CancellationToken::new(),
+        }))
+    }
+
+    /// The processing reaction and a typing indicator, before a message is
+    /// handed to core. The processing request is registered when admission
+    /// is asked for, so the message's outcome waits for it; the returned
+    /// wait for both ends within [`PROMPT_FEEDBACK`], and the processing
+    /// request goes on without it.
+    pub(crate) fn admission<'a>(
+        &'a self,
+        event: &'a ExternalEvent,
+    ) -> impl Future<Output = ()> + 'a {
+        let Owned {
+            http,
+            config,
+            stopped,
+            ..
+        } = &*self.0;
+        let processing = self.processing(&event.feedback_target_id);
+        let shown = async move {
+            tokio::join!(
+                async {
+                    if let Some(mut ended) = processing {
+                        let _ = ended.changed().await;
+                    }
+                },
+                trigger_typing(http, config, &event.delivery_target_id),
+            );
+        };
+        async move {
+            if timeout(PROMPT_FEEDBACK, stopped.run_until_cancelled(shown))
+                .await
+                .is_err()
+            {
+                warn!(event_id = %event.event_id, "Discord feedback was not shown in time; the message is admitted without waiting for it");
+            }
+        }
+    }
+
+    /// Sends the message's processing reaction as a task these reactions
+    /// own, unless its request is still under way. The returned receiver
+    /// closes when the request has ended.
+    fn processing(&self, target: &str) -> Option<watch::Receiver<()>> {
+        if !self.0.config.reactions {
+            return None;
+        }
+        let (sent, ended) = match lock(&self.0.unanswered).entry(target.to_owned()) {
+            // A message admitted again shares the request under way: a
+            // second one could be applied after an outcome that waited only
+            // for the first.
+            Entry::Occupied(under_way) => return Some(under_way.get().clone()),
+            Entry::Vacant(vacant) => {
+                let (sent, ended) = watch::channel(());
+                (sent, vacant.insert(ended).clone())
+            }
+        };
+        let (this, target) = (self.clone(), target.to_owned());
+        self.spawn(async move {
+            let owned = &this.0;
+            if let Err(failure) =
+                create_feedback_reaction(&owned.http, &target, &owned.config.processing_emoji).await
+            {
+                // Unanswered, Discord may still apply it after the outcome.
+                warn!(error = %failure, %target, "Discord processing reaction failed or was not answered");
+            }
+            lock(&owned.unanswered).remove(&target);
+            drop(sent);
+        });
+        Some(ended)
+    }
+
+    /// Runs `feedback` as a task these reactions own, until it ends or they
+    /// stop.
+    pub(crate) fn spawn(&self, feedback: impl Future<Output = ()> + Send + 'static) {
+        let Owned { tasks, stopped, .. } = &*self.0;
+        tasks.spawn(stopped.clone().run_until_cancelled_owned(feedback));
+    }
+
+    /// Waits until the message's processing request, if one is under way,
+    /// has ended.
+    async fn after_processing(&self, target: &str) {
+        let under_way = lock(&self.0.unanswered).get(target).cloned();
+        if let Some(mut ended) = under_way {
+            let _ = ended.changed().await;
+        }
+    }
+
+    /// Replaces the message's processing reaction with its outcome, once
+    /// the processing request has ended, unless these reactions stop first.
+    pub(crate) async fn outcome(&self, target: &str, feedback: Feedback) {
+        let Owned {
+            http,
+            config,
+            stopped,
+            ..
+        } = &*self.0;
+        if !config.reactions {
+            return;
+        }
+        let emoji = match feedback {
+            Feedback::Delivered => &config.delivered_emoji,
+            Feedback::Failed => &config.failed_emoji,
+            Feedback::Uncertain => &config.uncertain_emoji,
+        };
+        let shown = stopped.run_until_cancelled(async {
+            self.after_processing(target).await;
+            if let Err(failure) =
+                delete_feedback_reaction(http, target, &config.processing_emoji).await
+            {
+                warn!(error = %failure, "Discord processing reaction removal failed");
+            }
+            if let Err(failure) = create_feedback_reaction(http, target, emoji).await {
+                warn!(error = %failure, "Discord terminal reaction failed");
+            }
+        });
+        if shown.await.is_none() {
+            warn!(%target, "Discord outcome reaction ended by the provider's stop");
+        }
+    }
+
+    /// Shows the message's outcome as a task these reactions own, so the
+    /// work that asked for it goes on. Beyond [`OUTCOMES`] under way, it is
+    /// not shown, and that is logged.
+    pub(crate) fn show_outcome(&self, target: String, feedback: Feedback) {
+        let Ok(slot) = self.0.outcomes.clone().try_acquire_owned() else {
+            warn!(%target, "Discord outcome reaction not shown: too many are under way");
+            return;
+        };
+        let this = self.clone();
+        self.spawn(async move {
+            this.outcome(&target, feedback).await;
+            drop(slot);
+        });
+    }
+
+    /// Ends the feedback under way when the provider stops: its tasks get
+    /// `grace` to end, then the rest, and any outcome a caller awaits, are
+    /// cancelled, as is anything asked for later. Returns how many tasks
+    /// were cancelled. A cancelled request Discord already received may
+    /// still be applied; its effect is unknown.
+    pub(crate) async fn stop(&self, grace: Duration) -> usize {
+        let Owned { tasks, stopped, .. } = &*self.0;
+        tasks.close();
+        let unfinished = match timeout(grace, tasks.wait()).await {
+            Ok(()) => 0,
+            Err(_) => tasks.len(),
+        };
+        stopped.cancel();
+        if unfinished > 0 {
+            warn!(
+                unfinished,
+                "Discord reactions still under way at stop were cancelled; Discord may still apply those it received"
+            );
+            tasks.wait().await;
+        }
+        unfinished
     }
 }
 
-pub(crate) async fn clear_processing_feedback(
-    http: &DiscordHttp,
-    config: &DiscordConfig,
-    target: &str,
-) {
-    if config.reactions
-        && let Err(failure) = delete_feedback_reaction(http, target, &config.processing_emoji).await
-    {
-        warn!(error = %failure, "Discord processing reaction removal failed");
-    }
-}
-
-pub(crate) async fn terminal_feedback(
-    http: &DiscordHttp,
-    config: &DiscordConfig,
-    target: &str,
-    feedback: Feedback,
-) {
-    if !config.reactions {
-        return;
-    }
-    clear_processing_feedback(http, config, target).await;
-    let emoji = match feedback {
-        Feedback::Delivered => &config.delivered_emoji,
-        Feedback::Failed => &config.failed_emoji,
-        Feedback::Uncertain => &config.uncertain_emoji,
-    };
-    if let Err(failure) = create_feedback_reaction(http, target, emoji).await {
-        warn!(error = %failure, "Discord terminal reaction failed");
-    }
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 async fn create_feedback_reaction(
@@ -175,7 +350,7 @@ pub(crate) async fn trigger_typing(http: &DiscordHttp, config: &DiscordConfig, t
 /// `outcomes` without waiting for whoever receives it.
 pub(crate) async fn delivery_loop(
     core: CoreClient,
-    config: DiscordConfig,
+    reactions: Reactions,
     http: Arc<DiscordHttp>,
     outcomes: mpsc::UnboundedSender<Outcome>,
     stopping: CancellationToken,
@@ -194,14 +369,14 @@ pub(crate) async fn delivery_loop(
             Err(failure) if failure.is_transient() => {
                 warn!(error = %failure.message, "waiting to claim Discord delivery");
                 tokio::select! {
-                    reconciled = reconcile_after_claim_failure(&core, &config, &http) => reconciled?,
+                    reconciled = reconcile_after_claim_failure(&core, &reactions) => reconciled?,
                     () = stopping.cancelled() => break,
                 }
                 continue;
             }
             Err(failure) => bail!("delivery claim rejected: {}", failure.message),
         };
-        let (outcome, native_ref, feedback) = attempt_delivery(&http, &delivery).await;
+        let (outcome, native_ref, shown) = attempt_delivery(&http, &delivery).await;
         // The Discord outcome is known at this point. Abandoning the
         // acknowledgement would let a restart downgrade it to uncertain, so
         // transient core failures are waited out while the claim is held.
@@ -228,7 +403,9 @@ pub(crate) async fn delivery_loop(
             turn_state: delivery.turn_state,
             delivery: outcome,
         });
-        terminal_feedback(&http, &config, &delivery.feedback_target_id, feedback).await;
+        // The reactions run beside delivery, so a reaction Discord is slow
+        // to take never holds up the next answer.
+        reactions.show_outcome(delivery.feedback_target_id, shown);
     }
     Ok(())
 }
@@ -236,16 +413,12 @@ pub(crate) async fn delivery_loop(
 /// A failed claim response is ambiguous: core may have committed the claim
 /// before disconnecting. Reconciliation preserves this instance's claim so
 /// polling can recover it, while surfacing claims abandoned by older instances.
-async fn reconcile_after_claim_failure(
-    core: &CoreClient,
-    config: &DiscordConfig,
-    http: &DiscordHttp,
-) -> Result<()> {
+async fn reconcile_after_claim_failure(core: &CoreClient, reactions: &Reactions) -> Result<()> {
     loop {
         match core.reconcile().await {
             Ok(reconciled) => {
                 for target in reconciled.feedback_target_ids {
-                    terminal_feedback(http, config, &target, Feedback::Uncertain).await;
+                    reactions.outcome(&target, Feedback::Uncertain).await;
                 }
                 return Ok(());
             }
@@ -314,11 +487,9 @@ pub(crate) fn discord_chunks(content: &str) -> Vec<String> {
     const LIMIT: usize = 2_000;
     let mut remaining = content.trim();
     let mut chunks = Vec::new();
-    while remaining.chars().count() > LIMIT {
-        let end = remaining
-            .char_indices()
-            .nth(LIMIT)
-            .map_or(remaining.len(), |(index, _)| index);
+    // One scan of at most LIMIT characters per chunk finds where the rest
+    // exceeds the limit, if it does; the rest is never counted whole.
+    while let Some((end, _)) = remaining.char_indices().nth(LIMIT) {
         let candidate = &remaining[..end];
         let split = candidate
             .rfind("\n\n")
@@ -336,4 +507,4 @@ pub(crate) fn discord_chunks(content: &str) -> Vec<String> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -5,11 +5,11 @@ import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { Type } from "typebox";
 import { Parse } from "typebox/value";
-import { capturedPath } from "./attachments.ts";
+import { capturedPath } from "@carillon/runtime/attachments";
 import { ModelSelections } from "./model.ts";
-import { Serial } from "./serial.ts";
+import { Serial } from "@carillon/runtime/serial";
 import { conversationDirectory } from "./namespace.ts";
-import type { RuntimeOperations, TurnRequest, TurnResponse } from "./operations.ts";
+import type { RuntimeOperations, TurnRequest, TurnResponse } from "@carillon/runtime/operations";
 interface DeterministicSession {
   readonly turns: readonly {
     readonly correlation_id: string;
@@ -54,6 +54,10 @@ export async function createDeterministicRuntime(
     setModel(update) {
       shutdown.signal.throwIfAborted();
       return selections.update(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, update);
+    },
+    commands() {
+      shutdown.signal.throwIfAborted();
+      return Promise.resolve({ commands: [] });
     },
     async close() {
       shutdown.abort();

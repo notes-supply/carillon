@@ -5,7 +5,10 @@ use crate::conversations::{
 use crate::{
     attachments::Downloads,
     error::discord_failure_is_terminal,
-    inbound::{Ingress, PREPARATION_DEADLINE, QueuedMessage, known_receipt, lanes},
+    inbound::{
+        Ingress, PREPARATION_DEADLINE, QueuedMessage, known_receipt,
+        lanes::{self, Lanes, Queued},
+    },
 };
 
 use crate::{
@@ -13,15 +16,15 @@ use crate::{
     activity::{CardRecords, activity_monitor},
     client::CoreClient,
     commands::{
-        Change, ChangeError, CommandFiles, Commands, DiscordApp, MODULE_LIMIT, ModelCalls, Refusal,
-        Status,
+        Change, ChangeError, CommandFiles, Commands, DiscordApp, InteractionCalls, MODULE_LIMIT,
+        Refusal, Status, Submissions,
     },
     config::{DiscordConfig, state_directory},
     conversations::{
         IncomingMessage, Participation, admit_identity, admit_message,
         prepare_deterministic_conversation,
     },
-    delivery::{Feedback, delivery_loop, terminal_feedback},
+    delivery::{Feedback, PROMPT_FEEDBACK, Reactions, delivery_loop},
 };
 #[cfg(test)]
 use crate::{
@@ -92,6 +95,11 @@ struct DiscordState {
     commands: Arc<Commands>,
     /// Absent in deterministic mode, where no Discord application exists.
     app: Option<Arc<DiscordApp>>,
+    /// The reactions shown on messages, with the Discord application.
+    reactions: Option<Reactions>,
+    /// The conversation lanes `/command` submissions take their place in,
+    /// with the Discord application.
+    lanes: Option<Lanes>,
     /// The provider's attachment downloads and staging, in either mode.
     downloads: Arc<Downloads>,
     operator_token_hash: String,
@@ -171,6 +179,8 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
         participation,
         commands,
         app: None,
+        reactions: None,
+        lanes: None,
         downloads,
         operator_token_hash: config.value.core.operator_token_hash.clone(),
     };
@@ -225,10 +235,13 @@ async fn connect(
     });
     state.commands.reconcile(&app).await?;
     state.app = Some(app);
+    let reactions = Reactions::new(http.clone(), state.discord.clone());
+    state.reactions = Some(reactions.clone());
     for target in reconciled.feedback_target_ids {
-        terminal_feedback(&http, &state.discord, &target, Feedback::Uncertain).await;
+        reactions.outcome(&target, Feedback::Uncertain).await;
     }
     let (messages, receiver) = mpsc::channel(lanes::MAX_PENDING);
+    state.lanes = Some(Lanes::new(messages.clone()));
     let delivery_state = state.clone();
     let stopping = CancellationToken::new();
     let ingress = Arc::new(Ingress {
@@ -236,6 +249,7 @@ async fn connect(
         config: state.discord.clone(),
         participation: state.participation.clone(),
         http: http.clone(),
+        reactions: reactions.clone(),
         downloads: state.downloads.clone(),
         refusals: Arc::new(Semaphore::new(lanes::REFUSALS)),
         stopping: stopping.clone(),
@@ -255,7 +269,7 @@ async fn connect(
     // sent and its outcome recorded.
     let mut deliveries = tokio::spawn(delivery_loop(
         delivery_state.core,
-        delivery_state.discord,
+        reactions.clone(),
         http,
         outcomes,
         stopping.clone(),
@@ -280,19 +294,20 @@ async fn connect(
     // No new message, interaction or delivery is taken. Preparation not yet
     // handed to core ends; a submission core may have received is settled,
     // so its staged files stay until core no longer needs them; an
-    // interaction already acknowledged gets its reply; a claimed delivery is
-    // sent and acknowledged.
+    // interaction already acknowledged finishes its invocation and attempts
+    // its reply; a claimed delivery is sent and acknowledged. Reactions still
+    // under way then get a moment to end before the rest are cancelled.
     stopping.cancel();
     answered(&mut interactions).await;
     let prepared = dispatcher.await;
-    if delivering {
-        deliveries
-            .await
-            .map_err(Into::into)
-            .flatten()
-            .context("Discord delivery worker stopped")?;
-    }
+    let delivered = if delivering {
+        deliveries.await.map_err(Into::into).flatten()
+    } else {
+        Ok(())
+    };
+    reactions.stop(PROMPT_FEEDBACK).await;
     prepared.context("Discord message preparation failed")?;
+    delivered.context("Discord delivery worker stopped")?;
     outcome
 }
 
@@ -645,7 +660,7 @@ async fn simulate_interaction(
 async fn gateway_loop(
     state: DiscordState,
     token: String,
-    messages: mpsc::Sender<QueuedMessage>,
+    messages: mpsc::Sender<Queued>,
     ingress: Arc<Ingress>,
     interactions: &mut JoinSet<()>,
 ) -> Result<()> {
@@ -664,7 +679,7 @@ async fn gateway_loop(
 fn take_event(
     state: &DiscordState,
     event: Event,
-    messages: &mpsc::Sender<QueuedMessage>,
+    messages: &mpsc::Sender<Queued>,
     ingress: &Arc<Ingress>,
     interactions: &mut JoinSet<()>,
 ) -> Result<()> {
@@ -744,7 +759,7 @@ fn native_message(message: &twilight_model::channel::Message) -> Value {
 /// refused as overload, as one beyond a lane's bound is: only a message
 /// admission would activate is answered, within the shared refusal bound.
 pub(crate) fn queue_or_refuse(
-    messages: &mpsc::Sender<QueuedMessage>,
+    messages: &mpsc::Sender<Queued>,
     ingress: &Arc<Ingress>,
     inbound: QueuedMessage,
 ) -> Result<()> {
@@ -758,13 +773,16 @@ pub(crate) fn queue_or_refuse(
 /// keep reading so heartbeats and interactions go on while the lanes are
 /// busy; a message that finds the queue full is returned refused.
 fn queue_message(
-    messages: &mpsc::Sender<QueuedMessage>,
+    messages: &mpsc::Sender<Queued>,
     inbound: QueuedMessage,
 ) -> Result<Result<(), QueuedMessage>> {
-    match messages.try_send(inbound) {
-        Ok(()) => Ok(Ok(())),
-        Err(mpsc::error::TrySendError::Full(inbound)) => Ok(Err(inbound)),
-        Err(mpsc::error::TrySendError::Closed(_)) => bail!("Discord message worker stopped"),
+    match messages.try_reserve() {
+        Ok(room) => {
+            room.send(inbound.into());
+            Ok(Ok(()))
+        }
+        Err(mpsc::error::TrySendError::Full(())) => Ok(Err(inbound)),
+        Err(mpsc::error::TrySendError::Closed(())) => bail!("Discord message worker stopped"),
     }
 }
 
@@ -806,13 +824,23 @@ fn interaction_source(interaction: &DiscordInteraction) -> Option<InteractionSou
 }
 
 async fn run_interaction(state: &DiscordState, admitted: AdmittedInteraction) -> Result<Reply> {
-    let calls = ModelCalls::new(
+    let mut calls = InteractionCalls::new(
         state.core.clone(),
         ModelQuery {
             agent_id: state.discord.agent.clone(),
             audience_id: admitted.audience_id,
         },
     );
+    // Without a Discord connection there is nowhere to anchor a submission.
+    if let (Some(app), Some(reactions), Some(lanes)) = (&state.app, &state.reactions, &state.lanes)
+    {
+        calls = calls.with_submissions(Submissions {
+            http: Arc::clone(&app.http),
+            reactions: reactions.clone(),
+            lanes: lanes.clone(),
+            origin: admitted.origin,
+        });
+    }
     state.commands.invoke(calls, admitted.interaction).await
 }
 

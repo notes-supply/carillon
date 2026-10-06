@@ -482,6 +482,7 @@ pub(crate) mod tests {
                 url: format!("http://127.0.0.1:{port}"),
                 token_hash: hash_token(id),
                 enabled: true,
+                parallel_turns: None,
             });
         }
         fs::write(root.join("credentials").join("operator.token"), "operator")?;

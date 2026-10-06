@@ -52,6 +52,10 @@ bun build --compile --target "$BUN_TARGET" --no-compile-autoload-bunfig \
   --root "$BUNDLE" "$BUNDLE/pi.ts" "$BUNDLE/src/extensions/codemode/worker.ts" \
   "$BUNDLE/src/utils/image-resize-worker.ts" \
   --outfile "$STAGE/bin/pi"
+# The T3 runtime is an optional provider: shipped as its own executable and
+# unit, registered and started only when the operator configures it.
+bun build --compile --target "$BUN_TARGET" --no-compile-autoload-bunfig \
+  packages/runtime-t3/src/cli.ts --outfile "$STAGE/bin/carillon-runtime-t3"
 install -m 0755 "target/$TARGET/release/carillon" "$STAGE/bin/carillon"
 install -m 0755 "target/$TARGET/release/carillon-discord" "$STAGE/bin/carillon-discord"
 install -m 0644 target/wasm32-unknown-unknown/wasm/carillon_discord_commands.wasm "$STAGE/lib/carillon_discord_commands.wasm"

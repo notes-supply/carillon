@@ -33,7 +33,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    Core, CoreError, CoreOptions, RuntimeClient, RuntimeProvider, TurnFailure, WorkerStep,
+    Core, CoreError, CoreOptions, Lane, RuntimeClient, RuntimeProvider, TurnFailure, WorkerStep,
 };
 
 #[derive(Clone)]
@@ -154,7 +154,13 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
         core,
         client: Client::new(),
     };
-    // Cancelled as shutdown begins: workers then claim no further turn.
+    // A runtime configured for concurrent conversations gets that many
+    // message workers. Each claim is one transaction that skips
+    // conversations with an earlier message queued or running, so workers
+    // never share a conversation and each conversation keeps its order.
+    // Observations wait on native work that may take hours; a fixed few run
+    // per runtime beside its messages, never in their place. All of them
+    // claim no further turn once `stopping` is cancelled, as shutdown begins.
     let stopping = CancellationToken::new();
     let mut workers = tokio::task::JoinSet::new();
     for runtime in config
@@ -163,8 +169,14 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
         .iter()
         .filter(|provider| provider.role == ProviderRole::Runtime && provider.enabled)
     {
-        let (runtime_id, worker, stopping) = (runtime.id.clone(), state.clone(), stopping.clone());
-        workers.spawn(async move { runtime_worker(worker, runtime_id, stopping).await });
+        let lanes = (0..runtime.parallel_turns())
+            .map(|_| Lane::Messages)
+            .chain((0..OBSERVATION_WORKERS).map(|_| Lane::Observations));
+        for lane in lanes {
+            let (runtime_id, worker, stopping) =
+                (runtime.id.clone(), state.clone(), stopping.clone());
+            workers.spawn(async move { runtime_worker(worker, runtime_id, lane, stopping).await });
+        }
     }
 
     let router = Router::new()
@@ -178,6 +190,7 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
         .route("/v1/turns", get(recent_turns))
         .route("/v1/turns/{id}", get(inspect_turn))
         .route("/v1/model", get(model_state).put(set_model))
+        .route("/v1/commands", get(commands))
         .route("/v1/status", get(status))
         .with_state(state.clone());
     info!(listen = %config.value.core.listen, "Carillon core ready");
@@ -185,8 +198,9 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
         .with_graceful_shutdown(shutdown(state.core.clone(), stopping.clone()))
         .await;
     // The caller releases the service lock when this returns, however the
-    // server ended: no copy may still be publishing then, and no worker may
-    // still hold a turn, which settles rather than being dropped.
+    // server ended: no copy may still be publishing then, no worker may
+    // still hold a turn, which settles rather than being dropped, and no
+    // storage work may still be writing.
     stopping.cancel();
     state.core.stop_capturing();
     state.core.captures_settled().await;
@@ -195,6 +209,7 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
             error!(%error, "runtime worker ended abnormally");
         }
     }
+    state.core.storage_settled().await;
     served?;
     Ok(())
 }
@@ -235,8 +250,8 @@ async fn event_status(
     Ok(Json(state.core.event_status(&interface.id, &event_id)?))
 }
 
-/// Model calls answer a waiting user; they give up well before the
-/// interface's own deadline does.
+/// Model and command calls answer a waiting user; they give up well before
+/// the interface's own deadline does.
 const MODEL_CALL_TIMEOUT: Duration = Duration::from_secs(5);
 
 async fn model_state(
@@ -244,14 +259,34 @@ async fn model_state(
     headers: HeaderMap,
     Query(query): Query<ModelQuery>,
 ) -> Result<Response, ApiError> {
-    let interface = interface_provider(&headers, &state.config)?;
-    let runtime = model_runtime(&state, &interface.id, &query)?;
+    relay_query(&state, &headers, "/v1/model", query).await
+}
+
+/// The runtime's own commands for the conversation, relayed like a model read.
+async fn commands(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ModelQuery>,
+) -> Result<Response, ApiError> {
+    relay_query(&state, &headers, "/v1/commands", query).await
+}
+
+/// Relays a read about the agent or one conversation to the runtime that
+/// owns the conversation, naming the calling interface.
+async fn relay_query(
+    state: &AppState,
+    headers: &HeaderMap,
+    path: &str,
+    query: ModelQuery,
+) -> Result<Response, ApiError> {
+    let interface = interface_provider(headers, &state.config)?;
+    let runtime = model_runtime(state, &interface.id, &query)?;
     let token = runtime_token(&state.config, &runtime)?;
     let query = RuntimeModelQuery {
         interface_id: interface.id.clone(),
         query,
     };
-    let mut url = Url::parse(&format!("{}/v1/model", runtime.url))
+    let mut url = Url::parse(&format!("{}{path}", runtime.url))
         .with_context(|| format!("runtime provider {} has an invalid URL", runtime.id))?;
     {
         let mut pairs = url.query_pairs_mut();
@@ -331,10 +366,10 @@ async fn relay_model_call(request: RequestBuilder) -> Result<Response, ApiError>
         })?;
     let status = response.status();
     let body = response.json::<Value>().await.map_err(|error| {
-        warn!(%error, %status, "runtime model response was not JSON");
+        warn!(%error, %status, "runtime model or command response was not JSON");
         ApiError::new(
             StatusCode::BAD_GATEWAY,
-            "The runtime reported an unusable model state.",
+            "The runtime gave an unusable answer.",
         )
     })?;
     Ok((status, Json(body)).into_response())
@@ -348,8 +383,9 @@ const ACTIVITY_TIMEOUT: Duration = Duration::from_secs(2);
 /// runtime's latest snapshot when the runtime supplies one. The durable
 /// states come from storage; `activity: null` never means the turn ended.
 /// Runtimes are asked at once, so the list takes one snapshot timeout at
-/// most however many runtimes cannot answer. Each runtime runs at most one
-/// turn at a time, so there is one request per configured runtime at most.
+/// most however many runtimes cannot answer. A runtime runs at most its
+/// configured number of conversations at once, so the requests are bounded
+/// by the configured workers.
 async fn active_turns(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -413,13 +449,33 @@ async fn runtime_activity(
     })
 }
 
-/// Runs a runtime's turns until `stopping` is cancelled. A turn already
-/// claimed runs to its outcome; none is claimed after the cancellation.
-async fn runtime_worker(state: AppState, runtime_id: String, stopping: CancellationToken) {
+/// How many observations of one runtime core follows at once. More wait in
+/// the queue; messages are unaffected.
+const OBSERVATION_WORKERS: u32 = 4;
+
+/// Runs a runtime's turns of one lane until `stopping` is cancelled. An idle
+/// worker waits for core to signal new work instead of polling. A turn
+/// already claimed runs to its outcome; none is claimed after the
+/// cancellation.
+async fn runtime_worker(
+    state: AppState,
+    runtime_id: String,
+    lane: Lane,
+    stopping: CancellationToken,
+) {
+    // A runtime that gave an observation no answer is asked again after a
+    // pause, not in a tight loop.
+    let backoff = match lane {
+        Lane::Messages => Duration::from_secs(1),
+        Lane::Observations => Duration::from_secs(5),
+    };
+    let mut work = state.core.work(lane);
     while !stopping.is_cancelled() {
-        let delay = match run_next_turn(
+        work.mark_unchanged();
+        match run_next(
             &state,
             &runtime_id,
+            lane,
             &stopping,
             async |runtime, token, request| {
                 call_runtime(&state.client, runtime, token, request).await
@@ -427,25 +483,32 @@ async fn runtime_worker(state: AppState, runtime_id: String, stopping: Cancellat
         )
         .await
         {
-            Ok(WorkerStep::Advanced) => continue,
-            Ok(WorkerStep::Idle) => Duration::from_millis(100),
-            Ok(WorkerStep::Backoff) => Duration::from_secs(1),
-            Err(failure) => {
-                warn!(runtime_id, error = %failure, "runtime worker failed");
-                Duration::from_secs(1)
+            Ok(WorkerStep::Advanced) => {}
+            Ok(WorkerStep::Idle) => {
+                // The sender lives as long as `state`, which this task holds.
+                let _ = stopping.run_until_cancelled(work.changed()).await;
             }
-        };
-        stopping
-            .run_until_cancelled(tokio::time::sleep(delay))
-            .await;
+            Ok(WorkerStep::Backoff) => {
+                stopping
+                    .run_until_cancelled(tokio::time::sleep(backoff))
+                    .await;
+            }
+            Err(failure) => {
+                warn!(runtime_id, ?lane, error = %failure, "runtime worker failed");
+                stopping
+                    .run_until_cancelled(tokio::time::sleep(backoff))
+                    .await;
+            }
+        }
     }
 }
 
 /// One worker iteration without idle or availability waits. Only the runtime
 /// call is substitutable; claims and outcome writes use the real database.
-async fn run_next_turn(
+async fn run_next(
     state: &AppState,
     runtime_id: &str,
+    lane: Lane,
     stopping: &CancellationToken,
     submit: impl AsyncFnOnce(
         &Provider,
@@ -460,7 +523,7 @@ async fn run_next_turn(
     let token = runtime_token(&state.config, runtime)?;
     state
         .core
-        .execute_next(runtime_id, stopping, async |request| {
+        .run_next(runtime_id, lane, stopping, async |request| {
             submit(runtime, &token, request).await
         })
         .await
@@ -500,23 +563,29 @@ async fn claim_delivery(
     headers: HeaderMap,
     Query(query): Query<ClaimQuery>,
 ) -> Result<Json<Option<Delivery>>, ApiError> {
-    let interface = interface_provider(&headers, &state.config)?;
-    let owner = interface_instance(&headers)?;
-    Ok(Json(match query.turn_id {
-        Some(turn) => state
-            .core
-            .claim_turn_delivery(&interface.id, owner, &turn)?,
-        None => state.core.claim_delivery(&interface.id, owner)?,
-    }))
+    let interface = interface_provider(&headers, &state.config)?.id.clone();
+    let owner = interface_instance(&headers)?.to_owned();
+    let claimed = state
+        .core
+        .blocking(move |core| match query.turn_id {
+            Some(turn) => core.claim_turn_delivery(&interface, &owner, &turn),
+            None => core.claim_delivery(&interface, &owner),
+        })
+        .await?;
+    Ok(Json(claimed))
 }
 
 async fn reconcile_delivery_claims(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<DeliveryReconciliation>, ApiError> {
-    let interface = interface_provider(&headers, &state.config)?;
-    let owner = interface_instance(&headers)?;
-    Ok(Json(state.core.reconcile_deliveries(&interface.id, owner)?))
+    let interface = interface_provider(&headers, &state.config)?.id.clone();
+    let owner = interface_instance(&headers)?.to_owned();
+    let reconciled = state
+        .core
+        .blocking(move |core| core.reconcile_deliveries(&interface, &owner))
+        .await?;
+    Ok(Json(reconciled))
 }
 
 async fn acknowledge_delivery(
@@ -525,11 +594,12 @@ async fn acknowledge_delivery(
     AxumPath(id): AxumPath<i64>,
     Json(ack): Json<DeliveryAck>,
 ) -> Result<StatusCode, ApiError> {
-    let interface = interface_provider(&headers, &state.config)?;
-    let owner = interface_instance(&headers)?;
+    let interface = interface_provider(&headers, &state.config)?.id.clone();
+    let owner = interface_instance(&headers)?.to_owned();
     state
         .core
-        .acknowledge_delivery(&interface.id, owner, id, &ack)?;
+        .blocking(move |core| core.acknowledge_delivery(&interface, &owner, id, &ack))
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

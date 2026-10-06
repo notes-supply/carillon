@@ -26,7 +26,13 @@ retain the actual Wasm path rather than substituting this direct native call.
 - [`delivery`](src/delivery.rs) implements native delivery and feedback using the
   concrete core and Discord clients. It does not own a second delivery queue.
   Delivered content is sent as given, split at Discord's length limit, with mentions
-  disabled.
+  disabled. Its `Reactions` keep each message's reactions in order: the processing
+  reaction is a request they own until Discord answers it, and the delivered, failed or
+  uncertain reaction waits for that request before replacing it. Feedback beside the
+  work, including the lanes' overload refusals, runs as their tasks, with at most 64
+  outcomes under way (one beyond them is not shown, and that is logged), until the
+  connection stops: it then gets two seconds to end, and the rest, like any outcome still
+  awaited, is cancelled; nothing is sent after that.
 - [`activity`](src/activity.rs) shows temporary activity cards and typing while turns
   run. It reads core's activity list, receives each turn's outcome from the delivery
   loop, and records only the channel and message of cards it created, so a restart
@@ -40,13 +46,31 @@ retain the actual Wasm path rather than substituting this direct native call.
   validate, register, activate and save under the installation's maintenance lock,
   reporting activation, registration and save durability separately. Construct it
   with `CommandFiles` naming the release module, installed module, registration
-  record and installation. [Command presentation](../carillon-discord-commands/src/model.rs)
-  lives in the separate guest library; [`HostCalls`](../carillon-discord-commands/src/lib.rs)
-  is the existing native-operation boundary, also used by the example.
-- [`inbound`](src/inbound.rs) settles one admitted message: it prepares the native
-  conversation, emits feedback and retries only ambiguous transport submission with
-  the same event identity. Its [`lanes`](src/inbound/lanes.rs) run messages one at a
-  time per conversation, in arrival order, with bounded queues; a message with files
+  record and installation. Command presentation ([`/model`](../carillon-discord-commands/src/model.rs),
+  [`/command`](../carillon-discord-commands/src/run.rs)) lives in the separate guest library;
+  [`HostCalls`](../carillon-discord-commands/src/lib.rs) is the existing native-operation
+  boundary, also used by the example. A submission from `/command` posts a silent marker
+  message in the conversation and submits an event anchored on it, with the interaction's
+  admission and `native.intent: "command"`. An interaction's native calls, such as a Run
+  click's catalog lookup and the submission that follows it, end within seven of the
+  module's ten seconds together: within them, at most four to post the marker, and core's
+  attempts in the rest, beside the wait of at most two for the processing reaction and
+  typing, which never holds them back; core's silence is reported as a possible
+  acceptance, never as not sent, and a refusal's reaction is shown without the answer
+  waiting for it. A marker Discord does not confirm in time may still have been posted,
+  but without its ID nothing reaches core: the reply says the marker was not confirmed and
+  the command was not sent to Carillon, and the marker's wording ("asked to run") claims
+  nothing ran.
+- [`inbound`](src/inbound.rs) settles one admitted message: it asks core whether it
+  already holds the message, such as a replayed one, and if not prepares the native
+  conversation, emits feedback (admission waits at most two seconds for it) and retries
+  only ambiguous transport submission with the same event identity. Its [`lanes`](src/inbound/lanes.rs) run messages one at a
+  time per conversation, in arrival order, with bounded queues, and give a `/command`
+  submission its turn among them, so core accepts it after the messages before it; one
+  core has not answered for by its reply is settled by the lane, under its own identity,
+  before later messages go on, or, when the provider stops first, left unconfirmed once the
+  attempt under way, or its first, has ended, with none after it, and shown as uncertain;
+  a message with files
   is downloaded by [`attachments`](src/attachments.rs) into the provider's staging and
   submitted as a staged batch, accepted whole or refused with an explanation, within
   a preparation deadline. It receives its core client, configuration, participation
@@ -74,8 +98,8 @@ writers is not supported.
 ## Change and test locally
 
 Admission and identity tests live [beside conversations](src/conversations/tests.rs).
-Change picker layout in the [command library](../carillon-discord-commands/src/model.rs),
-not in core or Pi. Host, install and reset tests live in `commands.rs`; HTTP/gateway composition,
+Change picker and command-menu layout in the [command library](../carillon-discord-commands/src/),
+not in core or a runtime. Host, install and reset tests live in `commands.rs`; HTTP/gateway composition,
 tests live in [application tests](src/application/tests.rs). Transport-failure tests
 live [beside the core client](src/client/tests.rs), native delivery recovery tests
 [beside delivery](src/delivery/tests.rs), activity lifecycle tests, several with Twilight's real

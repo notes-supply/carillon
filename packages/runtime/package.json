@@ -1,0 +1,15 @@
+{
+  "name": "@carillon/runtime",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "dependencies": {
+    "@carillon/protocol": "workspace:*",
+    "image-size": "2.0.4",
+    "smol-toml": "1.6.0",
+    "typebox": "1.0.65"
+  }
+}

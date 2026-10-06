@@ -70,6 +70,44 @@
         "selection": null,
         "overridden": false
       }
+    },
+    {
+      "available": [
+        {
+          "provider": "claudeAgent",
+          "model": "claude-fable-5-1",
+          "name": "Claude Fable 5.1",
+          "options": [
+            {
+              "id": "effort",
+              "name": "Reasoning",
+              "choices": ["low", "high"],
+              "default": "low"
+            }
+          ]
+        }
+      ],
+      "agent": {
+        "selection": {
+          "provider": "claudeAgent",
+          "model": "claude-fable-5-1",
+          "options": {
+            "effort": "high"
+          }
+        },
+        "overridden": false,
+        "read_only": true
+      },
+      "conversation": {
+        "selection": {
+          "provider": "claudeAgent",
+          "model": "claude-fable-5-1",
+          "options": {
+            "effort": "low"
+          }
+        },
+        "overridden": true
+      }
     }
   ],
   "queries": [

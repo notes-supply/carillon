@@ -88,7 +88,7 @@ for arch in x86_64 aarch64; do
   for binary in carillon carillon-discord; do
     [ "$(tar -xOf "$archive" "carillon-1.2.3/bin/$binary")" = "$target" ]
   done
-  for binary in carillon-runtime-pi pi; do
+  for binary in carillon-runtime-pi pi carillon-runtime-t3; do
     [ "$(tar -xOf "$archive" "carillon-1.2.3/bin/$binary")" = "bun-linux-$bun_arch" ]
   done
   [ "$(tar -xOf "$archive" carillon-1.2.3/lib/carillon_discord_commands.wasm)" = wasm ]
@@ -103,7 +103,7 @@ for arch in x86_64 aarch64; do
   [ "$(wc -l <"$TEST_ROOT/$arch.manifest")" -eq \
     "$(tar -tzvf "$archive" | grep -c '^-' | awk '{ print $1 - 1 }')" ]
   [ "$(wc -l <"$TEST_ROOT/$arch.cargo")" -eq 2 ]
-  [ "$(wc -l <"$TEST_ROOT/$arch.bun")" -eq 3 ]
+  [ "$(wc -l <"$TEST_ROOT/$arch.bun")" -eq 4 ]
   printf 'package target selection passed: %s\n' "$arch"
 done
 rm -rf "$FIXTURE/target" "$FIXTURE/dist"

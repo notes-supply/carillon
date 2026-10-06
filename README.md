@@ -20,7 +20,7 @@ Discord <-> carillon-discord <-> carillon <-> carillon-runtime-pi <-> Pi
 
 Core is platform-neutral. Each provider is a separate program installed beside it and launched through the one command line: `carillon discord serve …` runs `carillon-discord`. A provider keeps its own settings in `providers/<id>.toml`; `carillon.toml` is the registry of provider identities, roles, and loopback credentials. The included installation runs the three parts as separate user services, and configuration can describe multiple interface and runtime provider instances while each agent selects a runtime.
 
-Discord's slash commands—currently `/model`, which shows and changes the model and engine settings for a conversation or the agent default—live in a WebAssembly module the provider loads and can replace while running (`carillon discord commands install FILE`), without reconnecting its gateway. An installed module keeps serving across restarts and updates until `carillon discord commands reset`. The shared `carillon-wasm` crate hosts such modules with bounded memory and time; the module can only ask the provider for the native operations it exposes.
+Discord's slash commands—`/model`, which shows and changes the model and engine settings for a conversation or the agent default, and `/command`, which runs one of the runtime's own commands or skills in the conversation—live in a WebAssembly module the provider loads and can replace while running (`carillon discord commands install FILE`), without reconnecting its gateway. An installed module keeps serving across restarts and updates until `carillon discord commands reset`. The shared `carillon-wasm` crate hosts such modules with bounded memory and time; the module can only ask the provider for the native operations it exposes.
 
 Carillon does not define its own command permissions or filesystem sandbox. Services run with the authority of the Unix user that installed them. Pi extensions and tools use Pi's native mechanisms.
 
@@ -37,6 +37,13 @@ that owns the behavior you want to change:
   sessions, model selection and explicit shutdown.
   [Run a native session](packages/runtime-pi/examples/session.ts) without Discord
   or Carillon HTTP: `mise run example:pi -- …` (configured credentials required).
+- **[T3 runtime](packages/runtime-t3/README.md)** — `createT3Runtime`, the same
+  runtime boundary executed on a T3 Code server: derived thread and message
+  identities, read-back instead of re-execution, native interruption and
+  activity from T3's timeline. A text-only proof of concept.
+- **[Shared runtime boundary](packages/runtime/README.md)** — the authenticated
+  HTTP adapter, failure display rules, tool descriptions and registry loading
+  every runtime provider serves, with no engine dependency.
 - **[Discord interface](crates/carillon-discord/README.md)** — admission,
   conversation mapping, native delivery and command hosting.
   [Render the model picker](crates/carillon-discord/examples/model_picker.rs)
@@ -129,6 +136,11 @@ Extract it and run `install.sh` as the Unix user that should own the agent. The 
 - `carillon-discord.service`
 - `carillon-runtime-pi.service`
 - `carillon.target`
+
+The release also ships the optional `carillon-runtime-t3.service` and its
+`bin/carillon-runtime-t3` executable; the target does not want it, so it runs
+only once the operator has registered the `runtime-t3` provider and enables the
+unit (see the [T3 runtime](packages/runtime-t3/README.md)).
 
 After setup, operate the installation with `carillon status`, `start`, `stop`, `restart`, `logs` and `discord commands`. Update the software from a later archive with `carillon update carillon-VERSION-linux-ARCH.tar.gz`; this keeps configuration, credentials and state, and returns the services to their previous running or stopped state.
 

@@ -14,7 +14,8 @@ import { join } from "node:path";
 import { deflateSync } from "node:zlib";
 import { afterEach, expect, it } from "vitest";
 import type { RuntimeTurnRequest, TurnAttachment } from "@carillon/protocol";
-import { createPiRuntime, type RuntimeOperations } from "@carillon/runtime-pi";
+import type { RuntimeOperations } from "@carillon/runtime/operations";
+import { createPiRuntime } from "@carillon/runtime-pi";
 import { conversationDirectory } from "./namespace.ts";
 import { DEFAULT_INLINE_IMAGES, prepareAttachments } from "./attachments.ts";
 
@@ -35,14 +36,20 @@ const SentSchema = Type.Object({
 type Sent = Static<typeof SentSchema>;
 type Content = Sent["messages"][number]["content"] | undefined;
 
-type Reply = string | ((sent: Sent) => { tool: string; arguments: unknown } | string);
+type Reply =
+  | string
+  | { readonly refuse: number }
+  | ((sent: Sent) => { tool: string; arguments: unknown } | string);
 
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const step of cleanup.splice(0).reverse()) await step();
 });
 
-/** A local OpenAI-compatible endpoint answering with `replies` in order. */
+/**
+ * A local OpenAI-compatible endpoint answering with `replies` in order; a
+ * `refuse` reply answers with that HTTP status instead.
+ */
 async function inference(replies: Reply[]) {
   const sent: Sent[] = [];
   const server: Server = createServer((request, response) => {
@@ -54,6 +61,11 @@ async function inference(replies: Reply[]) {
       const body = Parse(SentSchema, JSON.parse(raw));
       sent.push(body);
       const reply = replies.shift() ?? "done";
+      if (typeof reply === "object") {
+        response.writeHead(reply.refuse, { "content-type": "application/json" });
+        response.end(JSON.stringify({ error: { message: "The fixture refused this request." } }));
+        return;
+      }
       const answer = typeof reply === "string" ? reply : reply(body);
       const delta =
         typeof answer === "string"
@@ -440,22 +452,43 @@ it("keeps files sent with commands that open a conversation", async () => {
     [{ name: "report.txt", bytes: Buffer.from("figures\n") }],
     "0190a6e0-0000-7000-8000-0000000000a2",
   );
-  // The conversation's first messages are commands: Pi saves nothing yet.
+  const command = (input: string, files: TurnAttachment[], correlation: string) => ({
+    ...turn(resources, store, input, files, correlation),
+    native: { intent: "command" },
+  });
+  // The conversation's first messages are commands: Pi saves nothing yet, so
+  // each acknowledgment leaves its own files, and the earlier ones core
+  // offered again, for a later turn.
+  expect(await runtime.executeTurn(command("/note hello there", attachments, "command"))).toEqual({
+    correlation_id: "command",
+    output: "`/note` finished.",
+    attachments_left: true,
+  });
   expect(
-    await execute(runtime, turn(resources, store, "/note hello there", attachments, "command")),
-  ).toBe("");
-  expect(await execute(runtime, turn(resources, store, "/note again", report, "again"))).toBe("");
+    await runtime.executeTurn({
+      ...command("/note again", report, "again"),
+      unanswered: [{ correlation_id: "command", attachments }],
+    }),
+  ).toEqual({
+    correlation_id: "again",
+    output: "`/note` finished.",
+    unanswered_left: true,
+    attachments_left: true,
+  });
   expect(sent).toHaveLength(0);
   const directory = conversationDirectory(join(state, "sessions"), turn(resources, store, ""));
   expect(await readdir(directory).catch(() => [])).toEqual([]);
-  // Those turns got no answer, so core offers their files with the next one.
-  await execute(runtime, {
-    ...turn(resources, store, "describe", attachments, "prompt"),
-    unanswered: [
-      { correlation_id: "command", attachments },
-      { correlation_id: "again", attachments: report },
-    ],
-  });
+  // So core offers their files with the next turn, whose message Pi saves
+  // with every note: nothing is left.
+  expect(
+    await runtime.executeTurn({
+      ...turn(resources, store, "describe", attachments, "prompt"),
+      unanswered: [
+        { correlation_id: "command", attachments },
+        { correlation_id: "again", attachments: report },
+      ],
+    }),
+  ).toEqual({ correlation_id: "prompt", output: "described" });
   expect(await observed()).toEqual([
     { command: "hello there" },
     { command: "again" },
@@ -484,6 +517,15 @@ it("keeps files sent with commands that open a conversation", async () => {
   const history = await readFile(join(directory, file ?? ""), "utf8");
   expect(history).toContain('"details":{"turn":"command"}');
   expect(history).toContain('"details":{"turn":"again"}');
+  // In the saved conversation a command's own note is saved at once, so its
+  // acknowledgment leaves nothing.
+  expect(await runtime.executeTurn(command("/note saved", report, "saved"))).toEqual({
+    correlation_id: "saved",
+    output: "`/note` finished.",
+  });
+  expect(await readFile(join(directory, file ?? ""), "utf8")).toContain(
+    '"details":{"turn":"saved"}',
+  );
 });
 
 it("applies the inline policy's count and byte limits and leaves other files alone", async () => {
@@ -572,4 +614,62 @@ it("lets an extension choose the model before Pi prepares the images", async () 
   const message = prompt(request);
   expect(images(message?.content)).toEqual([]);
   expect(text(message?.content)).toContain("image omitted: model does not support images");
+});
+
+/** An extension with a command that answers nothing and one that fails. */
+async function commands(resources: string) {
+  await mkdir(join(resources, "extensions"));
+  await writeFile(
+    join(resources, "extensions", "commands.ts"),
+    `export default function commands(pi) {
+  pi.registerCommand("quiet", { description: "Answer nothing", handler: async () => {} });
+  pi.registerCommand("broken", {
+    description: "Fail",
+    handler: async () => {
+      throw new Error("broken on purpose");
+    },
+  });
+}
+`,
+  );
+}
+
+/** A `/command` invocation of `input`, with the command intent. */
+function commandTurn(resources: string, store: string, input: string, correlation: string) {
+  return { ...turn(resources, store, input, [], correlation), native: { intent: "command" } };
+}
+
+it("acknowledges a command Pi ran without an answer, but not a failed one or an empty answer", async () => {
+  const { root, resources, runtime, sent } = await setup(["text"], [""]);
+  await commands(resources);
+  const store = join(root, "attachments");
+  const command = (input: string, correlation: string) =>
+    commandTurn(resources, store, input, correlation);
+  // The extension's command ran to completion and answered nothing.
+  expect(await execute(runtime, command("/quiet now", "quiet"))).toBe("`/quiet` finished.");
+  // As a person's ordinary message, nothing answered is still no answer.
+  expect(await execute(runtime, turn(resources, store, "/quiet", [], "plain"))).toBe("");
+  // A command that failed is not acknowledged.
+  expect(await execute(runtime, command("/broken", "broken"))).toBe("");
+  // Nor is one the model answered with nothing.
+  expect(await execute(runtime, command("/unknown", "empty"))).toBe("");
+  expect(sent).toHaveLength(1);
+});
+
+it("acknowledges a silent command after a failed turn without repeating that failure", async () => {
+  const { root, resources, runtime } = await setup(["text"], [{ refuse: 400 }, { refuse: 400 }]);
+  await commands(resources);
+  const store = join(root, "attachments");
+  // The conversation's last answer is Pi's record of a failure.
+  await expect(
+    execute(runtime, turn(resources, store, "hello", [], "failed")),
+  ).rejects.toMatchObject({ status: 502 });
+  // A command that then runs without an answer of its own is acknowledged.
+  expect(await execute(runtime, commandTurn(resources, store, "/quiet", "quiet"))).toBe(
+    "`/quiet` finished.",
+  );
+  // A prompt that fails now still fails.
+  await expect(
+    execute(runtime, commandTurn(resources, store, "/unknown", "refused")),
+  ).rejects.toMatchObject({ status: 502 });
 });

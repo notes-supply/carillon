@@ -93,10 +93,16 @@ if [ "$OWN_UNITS" -eq 1 ]; then
     carillon.target \
     carillon-core.service \
     carillon-runtime-pi.service \
+    carillon-runtime-t3.service \
     carillon-discord.service
   do
     rm -f "$UNIT_DIR/$unit"
   done
+  # Disabling the target removes links to it, not the optional T3 unit's own
+  # enablement link inside the target's wants directory.
+  rm -f "$UNIT_DIR/carillon.target.wants/carillon-runtime-t3.service"
+  [ ! -d "$UNIT_DIR/carillon.target.wants" ] ||
+    rmdir --ignore-fail-on-non-empty -- "$UNIT_DIR/carillon.target.wants"
   [ ! -d "$UNIT_DIR" ] || sync -f -- "$UNIT_DIR"
 fi
 remove_entry_point

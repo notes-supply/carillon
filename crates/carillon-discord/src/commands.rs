@@ -16,10 +16,11 @@ use std::{
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
+use tokio::time::{Instant, timeout_at};
 
 use anyhow::{Context as _, Result, bail};
 use carillon_discord_commands::contract::{
-    CONTRACT, Description, HostReply, HostRequest, Interaction, Invocation, Outcome, Reply,
+    CONTRACT, Description, HostReply, HostRequest, Intent, Interaction, Invocation, Outcome, Reply,
 };
 use carillon_installation::{
     config::LoadedConfig,
@@ -35,13 +36,19 @@ use tracing::{info, warn};
 use twilight_http::Client as DiscordHttp;
 use twilight_model::{
     application::command::Command,
+    channel::message::AllowedMentions,
     id::{
         Id,
-        marker::{ApplicationMarker, GuildMarker},
+        marker::{ApplicationMarker, ChannelMarker, GuildMarker},
     },
 };
 
-use crate::client::CoreClient;
+use crate::{
+    client::{CoreClient, RUNTIME_LATE},
+    conversations::{InteractionOrigin, submitted_event},
+    delivery::{Feedback, Reactions},
+    inbound::lanes::Lanes,
+};
 
 /// The whole invocation, including every native call it makes.
 const DEADLINE: Duration = Duration::from_secs(10);
@@ -59,38 +66,108 @@ pub struct DiscordApp {
 }
 
 /// The native operations one interaction may perform: model state and
-/// selection for the agent and, inside a conversation, for that audience.
-pub struct ModelCalls {
+/// selection for the agent and, inside a conversation, for that audience;
+/// the runtime's commands there; and, with a Discord connection, submitting
+/// text to the conversation as the person who invoked it.
+pub struct InteractionCalls {
     core: CoreClient,
     query: ModelQuery,
+    submissions: Option<Submissions>,
 }
 
-impl ModelCalls {
+/// What submitting needs: the conversation's channel to anchor the text in,
+/// Discord to post that anchor, the reactions that show its progress, and
+/// the lanes in which it takes its place among the conversation's messages.
+pub struct Submissions {
+    pub http: Arc<DiscordHttp>,
+    pub reactions: Reactions,
+    pub lanes: Lanes,
+    pub origin: InteractionOrigin,
+}
+
+impl InteractionCalls {
     pub const fn new(core: CoreClient, query: ModelQuery) -> Self {
-        Self { core, query }
+        Self {
+            core,
+            query,
+            submissions: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_submissions(mut self, submissions: Submissions) -> Self {
+        self.submissions = Some(submissions);
+        self
     }
 }
 
-/// Native calls for invocations that must not perform any.
+/// Native calls for invocations that must not perform any, or those of
+/// one interaction, which all end by `until`.
 enum Calls {
     Refused,
-    Model(ModelCalls),
+    Interaction {
+        calls: Box<InteractionCalls>,
+        until: Instant,
+    },
 }
 
 impl Native for Calls {
     async fn call(&mut self, request: Vec<u8>) -> Vec<u8> {
         let reply = match self {
             Self::Refused => HostReply::Error("native calls are not available".to_owned()),
-            Self::Model(calls) => calls.answer(&request).await,
+            Self::Interaction { calls, until } => calls.answer(&request, *until).await,
         };
         serde_json::to_vec(&reply).unwrap_or_default()
     }
 }
 
-impl ModelCalls {
-    async fn answer(&self, request: &[u8]) -> HostReply {
+/// A runtime call of an interaction, ended by `until` if it has not ended.
+async fn within<T>(
+    until: Instant,
+    call: impl Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    timeout_at(until, call)
+        .await
+        .unwrap_or_else(|_| Err(RUNTIME_LATE.to_owned()))
+}
+
+impl InteractionCalls {
+    /// Answers one of the interaction's native requests by `until`.
+    async fn answer(&self, request: &[u8], until: Instant) -> HostReply {
         let outcome = match serde_json::from_slice::<HostRequest>(request) {
-            Ok(HostRequest::ModelState) => self.core.model_state(&self.query).await,
+            Ok(HostRequest::Commands) => {
+                return match within(until, self.core.commands(&self.query)).await {
+                    Ok(catalog) => HostReply::Commands(catalog),
+                    Err(message) => HostReply::Error(message),
+                };
+            }
+            Ok(HostRequest::Submit { text, intent }) => {
+                return match (&self.submissions, &self.query.audience_id) {
+                    (Some(submissions), Some(audience_id)) => {
+                        match submit(
+                            &self.core,
+                            submissions,
+                            &self.query.agent_id,
+                            audience_id,
+                            &text,
+                            intent,
+                            until,
+                        )
+                        .await
+                        {
+                            Ok(()) => HostReply::Submitted,
+                            Err(message) => HostReply::Error(message),
+                        }
+                    }
+                    (_, None) => {
+                        HostReply::Error("There is no conversation here to send it to.".to_owned())
+                    }
+                    (None, Some(_)) => HostReply::Error(
+                        "Sending to the conversation needs the Discord connection.".to_owned(),
+                    ),
+                };
+            }
+            Ok(HostRequest::ModelState) => within(until, self.core.model_state(&self.query)).await,
             Ok(HostRequest::SetModel {
                 scope,
                 selection,
@@ -101,15 +178,17 @@ impl ModelCalls {
                         "There is no conversation here to set a model for.".to_owned(),
                     );
                 }
-                self.core
-                    .set_model(&ModelUpdate {
+                within(
+                    until,
+                    self.core.set_model(&ModelUpdate {
                         agent_id: self.query.agent_id.clone(),
                         audience_id: self.query.audience_id.clone(),
                         scope,
                         selection,
                         expected,
-                    })
-                    .await
+                    }),
+                )
+                .await
             }
             Err(error) => Err(format!("invalid host request: {error}")),
         };
@@ -118,6 +197,154 @@ impl ModelCalls {
             Err(message) => HostReply::Error(message),
         }
     }
+}
+
+/// How much of the module's ten-second deadline an interaction's native
+/// calls may take together, such as a Run click's catalog lookup and its
+/// submission, leaving the module time to answer with their outcome.
+const CALLS_LIMIT: Duration = Duration::from_secs(7);
+/// How long posting the marker may take inside the calls' limit.
+const MARKER_LIMIT: Duration = Duration::from_secs(4);
+/// Attempts to hand a submission to core while core is briefly unreachable.
+const SUBMIT_ATTEMPTS: u32 = 3;
+
+/// Sends text to the conversation as the invoking person's: a silent marker
+/// message in the conversation shows what was asked and by whom, and is the
+/// event's identity and feedback target; core then accepts the event like
+/// any message, and the answer is delivered to the conversation. A marker
+/// Discord does not confirm in time may still have been posted, but without
+/// its ID there is no event: the command is not sent to core, and the
+/// marker's wording claims nothing ran.
+///
+/// The submission first waits for its turn in the conversation's lane, after
+/// the messages before it. It returns by `deadline`, the end of its
+/// interaction's calls, so the module can still say what happened. Before
+/// it, posting the marker takes at most [`MARKER_LIMIT`], and core's attempts
+/// take the rest,
+/// beside the wait of at most
+/// [`PROMPT_FEEDBACK`](crate::delivery::PROMPT_FEEDBACK) for the
+/// processing reaction and typing, which never holds them back. An attempt
+/// core has not answered in time may have been accepted, which the answer
+/// says, and the marker's ID makes a repeated submission the same event. A
+/// refused submission's reaction is then shown without the answer waiting
+/// for it. An unconfirmed one is left to the conversation's lane, which
+/// submits it again under its own identity until core accepts or refuses
+/// it, as for a message, before the conversation goes on. Once the provider
+/// is stopping, neither starts an attempt after the first: the attempt under
+/// way ends, and a command core then has not answered for is left
+/// unconfirmed.
+async fn submit(
+    core: &CoreClient,
+    submissions: &Submissions,
+    agent_id: &str,
+    audience_id: &str,
+    text: &str,
+    intent: Intent,
+    deadline: Instant,
+) -> Result<(), String> {
+    let Submissions {
+        http,
+        reactions,
+        lanes,
+        origin,
+    } = submissions;
+    let channel: Id<ChannelMarker> = origin
+        .channel_id
+        .parse()
+        .map_err(|_| "The conversation's channel is not valid.".to_owned())?;
+    // The command takes its place among the conversation's messages, so
+    // core accepts it after the messages before it and before those after.
+    // The lane waits for it while it holds the turn, and settles it if core's
+    // answer does not come by the deadline.
+    let turn = match timeout_at(deadline, lanes.turn(&origin.channel_id)).await {
+        Ok(Some(turn)) => turn,
+        Ok(None) => {
+            return Err(
+                "Carillon is too busy or restarting, so it was not sent; please run it again shortly."
+                    .to_owned(),
+            );
+        }
+        Err(_) => {
+            return Err("Earlier messages in this conversation are still being prepared, so it was not sent; please run it again once they are answered.".to_owned());
+        }
+    };
+    let shown = text.replace('`', "ˋ");
+    let shown: String = shown.chars().take(1900).collect();
+    let silent = AllowedMentions::default();
+    // The marker's answer, body included, is bounded: it is the event's identity.
+    let marker = timeout_at(deadline.min(Instant::now() + MARKER_LIMIT), async {
+        http.create_message(channel)
+            .allowed_mentions(Some(&silent))
+            .content(&format!("<@{}> asked to run `{shown}`", origin.user_id))
+            .await
+            .map_err(|error| error.to_string())?
+            .model()
+            .await
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .unwrap_or_else(|_| Err("Discord did not answer in time".to_owned()))
+    .map_err(|error| {
+        warn!(%error, "command marker message was not confirmed");
+        "Discord did not confirm the marker message, so the command was not sent to Carillon."
+            .to_owned()
+    })?;
+    let event = submitted_event(
+        agent_id,
+        audience_id,
+        origin,
+        &marker.id.to_string(),
+        text,
+        intent,
+    );
+    // Admission registers the processing request at once, so the outcome
+    // waits for it. Core's attempts then run beside the optional wait for the
+    // feedback, which never takes time they need.
+    let shown = timeout_at(deadline, reactions.admission(&event));
+    let stopping = turn.stopping();
+    let attempts = async {
+        let retry = Duration::from_millis(500);
+        let mut attempt = 1;
+        loop {
+            let failure = match timeout_at(deadline, core.submit_event(&event)).await {
+                Ok(Ok(_)) => return Ok(()),
+                Ok(Err(failure)) if !failure.is_transient() => {
+                    warn!(error = %failure.message, event_id = %event.event_id, "core refused a command");
+                    return Err((Feedback::Failed, "Carillon could not accept it."));
+                }
+                Ok(Err(failure)) => failure.message,
+                Err(_) => "core did not answer in time".to_owned(),
+            };
+            if attempt < SUBMIT_ATTEMPTS && Instant::now() + retry < deadline {
+                warn!(error = %failure, event_id = %event.event_id, "waiting to submit a command");
+                attempt += 1;
+                // However the wait ends, a provider stopping by then starts
+                // no other attempt.
+                stopping
+                    .run_until_cancelled(tokio::time::sleep(retry))
+                    .await;
+                if !stopping.is_cancelled() {
+                    continue;
+                }
+            }
+            warn!(error = %failure, event_id = %event.event_id, "command submission unconfirmed");
+            return Err((
+                Feedback::Uncertain,
+                "Carillon did not confirm that it accepted it; if it did, the answer follows in this conversation.",
+            ));
+        }
+    };
+    let (_, submitted) = tokio::join!(shown, attempts);
+    let Err((feedback, refusal)) = submitted else {
+        return Ok(());
+    };
+    match feedback {
+        // Core may still be accepting it: the lane settles it before the
+        // conversation goes on, and shows a refusal if one comes.
+        Feedback::Uncertain => turn.settle(event),
+        refused => reactions.show_outcome(event.feedback_target_id, refused),
+    }
+    Err(refusal.to_owned())
 }
 
 /// Where a module comes from.
@@ -457,18 +684,14 @@ impl Commands {
     }
 
     /// Runs one interaction through the module.
-    pub async fn invoke(&self, calls: ModelCalls, interaction: Interaction) -> Result<Reply> {
+    pub async fn invoke(&self, calls: InteractionCalls, interaction: Interaction) -> Result<Reply> {
         let generation = self.current();
         let payload = serde_json::to_vec(&Invocation::Interaction(interaction))?;
-        match outcome(
-            &self.host,
-            &generation.module,
-            Calls::Model(calls),
-            &payload,
-            DEADLINE,
-        )
-        .await?
-        {
+        let calls = Calls::Interaction {
+            calls: Box::new(calls),
+            until: Instant::now() + CALLS_LIMIT,
+        };
+        match outcome(&self.host, &generation.module, calls, &payload, DEADLINE).await? {
             Outcome::Reply(reply) => Ok(reply),
             Outcome::Failure(message) => bail!("command module failed: {message}"),
             Outcome::Description(_) => {
@@ -703,6 +926,7 @@ pub(crate) mod tests {
             Arc,
             atomic::{AtomicU16, AtomicUsize, Ordering},
         },
+        time::Duration,
     };
 
     use axum::{Router, http::StatusCode, routing::put};
@@ -715,10 +939,14 @@ pub(crate) mod tests {
         Saved, Source,
     };
 
+    /// `text` as the contents of a WAT string.
+    fn escape(text: &str) -> String {
+        text.replace('\\', "\\\\").replace('"', "\\\"")
+    }
+
     /// A module that answers `Describe` with `description` and every other
     /// invocation with `reply`, in binary form.
     pub(crate) fn module(description: &str, reply: &str) -> anyhow::Result<Vec<u8>> {
-        let escape = |text: &str| text.replace('\\', "\\\\").replace('"', "\\\"");
         let describe_length =
             serde_json::to_vec(&carillon_discord_commands::contract::Invocation::Describe)?.len();
         let text = format!(
@@ -854,8 +1082,8 @@ pub(crate) mod tests {
         ))
     }
 
-    fn calls() -> super::ModelCalls {
-        super::ModelCalls::new(
+    fn calls() -> super::InteractionCalls {
+        super::InteractionCalls::new(
             crate::client::test_client("http://127.0.0.1:1".to_owned()),
             carillon_protocol::model::ModelQuery {
                 agent_id: "default".to_owned(),
@@ -1434,7 +1662,7 @@ pub(crate) mod tests {
             }),
         );
         let server = tokio::spawn(async move { axum::serve(listener, router).await });
-        let calls = super::ModelCalls::new(
+        let calls = super::InteractionCalls::new(
             crate::client::test_client(format!("http://{address}")),
             ModelQuery {
                 agent_id: "default".to_owned(),
@@ -1442,14 +1670,208 @@ pub(crate) mod tests {
             },
         );
         let reply = calls
-            .answer(&serde_json::to_vec(&HostRequest::SetModel {
-                scope: Scope::Agent,
-                selection: Some(selection.clone()),
-                expected: Some(selection),
-            })?)
+            .answer(
+                &serde_json::to_vec(&HostRequest::SetModel {
+                    scope: Scope::Agent,
+                    selection: Some(selection.clone()),
+                    expected: Some(selection),
+                })?,
+                calls_until(),
+            )
             .await;
         assert_eq!(reply, HostReply::Error("changed while applying".to_owned()));
         server.abort();
+        Ok(())
+    }
+
+    /// Core and Discord in one fake: lists `catalog` after `listing`, accepts
+    /// every event after `admission` and shows feedback after `feedback`,
+    /// posts every message as `901`, and traces the requests in order as they
+    /// arrive.
+    fn submission_server(
+        catalog: carillon_protocol::model::CommandCatalog,
+        trace: Arc<tokio::sync::Mutex<Vec<String>>>,
+        submitted: Arc<tokio::sync::Mutex<Vec<carillon_protocol::model::ExternalEvent>>>,
+        (listing, admission, feedback): (Duration, Duration, Duration),
+    ) -> Router {
+        use axum::{
+            Json,
+            extract::Query,
+            http::{Method, Uri},
+            routing::{get, post},
+        };
+        use carillon_protocol::model::{EventReceipt, ExternalEvent, TurnState};
+        use std::collections::HashMap;
+        let (messages, events) = (trace.clone(), trace.clone());
+        Router::new()
+            .route(
+                "/v1/commands",
+                get(move |Query(query): Query<HashMap<String, String>>| {
+                    let catalog = catalog.clone();
+                    async move {
+                        assert_eq!(
+                            query.get("audience_id").map(String::as_str),
+                            Some("discord-100-400")
+                        );
+                        tokio::time::sleep(listing).await;
+                        Json(catalog)
+                    }
+                }),
+            )
+            .route(
+                "/v1/events",
+                post(move |Json(event): Json<ExternalEvent>| {
+                    let (events, submitted) = (events.clone(), submitted.clone());
+                    async move {
+                        events
+                            .lock()
+                            .await
+                            .push(format!("event {}", event.event_id));
+                        tokio::time::sleep(admission).await;
+                        submitted.lock().await.push(event.clone());
+                        Json(EventReceipt {
+                            event_id: event.event_id,
+                            turn_id: "turn".to_owned(),
+                            duplicate: false,
+                            state: TurnState::Queued,
+                        })
+                    }
+                }),
+            )
+            .route(
+                "/api/v10/channels/{channel}/messages",
+                post(move |Json(body): Json<Value>| {
+                    let messages = messages.clone();
+                    async move {
+                        messages.lock().await.push(format!(
+                            "message {} mentions {}",
+                            body["content"].as_str().unwrap_or_default(),
+                            body["allowed_mentions"]
+                        ));
+                        Json(json!({
+                            "id": "901",
+                            "channel_id": "400",
+                            "author": {"id": "201", "username": "carillon", "discriminator": "0"},
+                            "content": body["content"],
+                            "attachments": [],
+                            "embeds": [],
+                            "mention_everyone": false,
+                            "mention_roles": [],
+                            "mentions": [],
+                            "pinned": false,
+                            "timestamp": "2026-10-05T00:00:00.000000+00:00",
+                            "tts": false,
+                            "type": 0,
+                        }))
+                    }
+                }),
+            )
+            .fallback(move |method: Method, uri: Uri| {
+                let trace = trace.clone();
+                async move {
+                    trace.lock().await.push(format!("{method} {}", uri.path()));
+                    tokio::time::sleep(feedback).await;
+                    StatusCode::NO_CONTENT
+                }
+            })
+    }
+
+    #[tokio::test]
+    async fn commands_are_listed_and_submissions_anchored_in_the_conversation() -> anyhow::Result<()>
+    {
+        use carillon_discord_commands::contract::{HostReply, HostRequest, Intent};
+        use carillon_protocol::model::{CommandCatalog, ModelQuery, RuntimeCommand};
+        let catalog = CommandCatalog {
+            commands: vec![RuntimeCommand {
+                name: "compact".to_owned(),
+                description: None,
+                hint: None,
+            }],
+        };
+        let trace = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let submitted = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let router = submission_server(
+            catalog.clone(),
+            trace.clone(),
+            submitted.clone(),
+            (Duration::ZERO, Duration::ZERO, Duration::ZERO),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+        let core = crate::client::test_client(format!("http://{address}"));
+        let query = ModelQuery {
+            agent_id: "default".to_owned(),
+            audience_id: Some("discord-100-400".to_owned()),
+        };
+        let submit = serde_json::to_vec(&HostRequest::Submit {
+            text: "/compact keep `this`".to_owned(),
+            intent: Intent::Command,
+        })?;
+
+        // Without a Discord connection there is nowhere to anchor it.
+        let unanchored = super::InteractionCalls::new(core.clone(), query.clone());
+        assert_eq!(
+            unanchored
+                .answer(&serde_json::to_vec(&HostRequest::Commands)?, calls_until())
+                .await,
+            HostReply::Commands(catalog)
+        );
+        assert!(matches!(
+            unanchored.answer(&submit, calls_until()).await,
+            HostReply::Error(_)
+        ));
+        assert!(submitted.lock().await.is_empty());
+
+        let mut config = crate::conversations::tests::discord_config(
+            crate::config::DiscordActivation::Always,
+            crate::config::DiscordConversation::Thread,
+        );
+        config.typing = false;
+        let http = Arc::new(
+            twilight_http::Client::builder()
+                .token("test-only".to_owned())
+                .proxy(address.to_string(), true)
+                .ratelimiter(None)
+                .build(),
+        );
+        let calls = super::InteractionCalls::new(core.clone(), query).with_submissions(
+            super::Submissions {
+                reactions: crate::delivery::Reactions::new(http.clone(), config),
+                lanes: serving_lanes(core, http.clone())?,
+                http,
+                origin: crate::conversations::InteractionOrigin {
+                    guild_id: "100".to_owned(),
+                    user_id: "200".to_owned(),
+                    channel_id: "400".to_owned(),
+                    route_channel_id: "300".to_owned(),
+                },
+            },
+        );
+        assert_eq!(
+            calls.answer(&submit, calls_until()).await,
+            HostReply::Submitted
+        );
+        server.abort();
+        let trace = trace.lock().await;
+        // The marker is posted silently first, then marked processing and
+        // submitted.
+        assert_eq!(
+            trace[0],
+            "message <@200> asked to run `/compact keep ˋthisˋ` mentions {\"parse\":[]}"
+        );
+        assert!(trace[1..3].iter().any(|request| {
+            request.starts_with("PUT /api/v10/channels/400/messages/901/reactions/")
+        }));
+        assert!(trace[1..3].iter().any(|request| request == "event 901"));
+        let event = submitted.lock().await.remove(0);
+        assert_eq!(event.content, "/compact keep `this`");
+        assert_eq!(event.feedback_target_id, "400:901");
+        assert_eq!(event.delivery_target_id, "400");
+        assert_eq!(event.audience_id, "discord-100-400");
+        assert_eq!(event.native["intent"], "command");
+        assert_eq!(event.native["route_channel_id"], "300");
+        assert_eq!(event.native["origin"]["parent_channel_id"], "300");
         Ok(())
     }
 
@@ -1479,6 +1901,1226 @@ pub(crate) mod tests {
                 "accepted {output}"
             );
         }
+        Ok(())
+    }
+
+    /// Calls that submit through `server`, as the person in channel `400`,
+    /// with the reactions they show.
+    async fn submitting(
+        router: Router,
+        configure: impl FnOnce(&mut crate::config::DiscordConfig),
+    ) -> anyhow::Result<(
+        super::InteractionCalls,
+        crate::delivery::Reactions,
+        tokio::task::JoinHandle<std::io::Result<()>>,
+    )> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+        let mut config = crate::conversations::tests::discord_config(
+            crate::config::DiscordActivation::Always,
+            crate::config::DiscordConversation::Thread,
+        );
+        configure(&mut config);
+        let http = Arc::new(
+            twilight_http::Client::builder()
+                .token("test-only".to_owned())
+                .proxy(address.to_string(), true)
+                .ratelimiter(None)
+                .build(),
+        );
+        let reactions = crate::delivery::Reactions::new(http.clone(), config);
+        let core = crate::client::test_client(format!("http://{address}"));
+        let calls = super::InteractionCalls::new(
+            core.clone(),
+            carillon_protocol::model::ModelQuery {
+                agent_id: "default".to_owned(),
+                audience_id: Some("discord-100-400".to_owned()),
+            },
+        )
+        .with_submissions(super::Submissions {
+            lanes: serving_lanes(core, http.clone())?,
+            http,
+            reactions: reactions.clone(),
+            origin: crate::conversations::InteractionOrigin {
+                guild_id: "100".to_owned(),
+                user_id: "200".to_owned(),
+                channel_id: "400".to_owned(),
+                route_channel_id: "300".to_owned(),
+            },
+        });
+        Ok((calls, reactions, server))
+    }
+
+    /// Lanes served by the provider's own dispatcher, in which no message of
+    /// the conversation is waiting.
+    fn serving_lanes(
+        core: crate::client::CoreClient,
+        http: Arc<twilight_http::Client>,
+    ) -> anyhow::Result<crate::inbound::lanes::Lanes> {
+        let directory = tempfile::tempdir()?;
+        let participation = Arc::new(crate::conversations::Participation::load(
+            directory.path().join("participation.json"),
+        )?);
+        let ingress = crate::inbound::tests::ingress(
+            core,
+            crate::conversations::tests::discord_config(
+                crate::config::DiscordActivation::Always,
+                crate::config::DiscordConversation::Thread,
+            ),
+            participation,
+            http,
+            directory.path(),
+        )?;
+        let (sender, receiver) = tokio::sync::mpsc::channel(crate::inbound::lanes::MAX_PENDING);
+        tokio::spawn(async move {
+            let _directory = directory;
+            crate::inbound::lanes::dispatch(ingress, receiver).await;
+        });
+        Ok(crate::inbound::lanes::Lanes::new(sender))
+    }
+
+    /// The end of an interaction's native calls, were it starting now.
+    fn calls_until() -> tokio::time::Instant {
+        tokio::time::Instant::now() + super::CALLS_LIMIT
+    }
+
+    fn submit_request() -> anyhow::Result<Vec<u8>> {
+        Ok(serde_json::to_vec(
+            &carillon_discord_commands::contract::HostRequest::Submit {
+                text: "/compact keep decisions".to_owned(),
+                intent: carillon_discord_commands::contract::Intent::Command,
+            },
+        )?)
+    }
+
+    #[tokio::test]
+    async fn slow_feedback_never_costs_a_command_its_admission() -> anyhow::Result<()> {
+        use carillon_discord_commands::contract::HostReply;
+        // Discord takes longer than the module's whole deadline to show the
+        // processing reaction and typing.
+        let trace = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let submitted = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let router = submission_server(
+            carillon_protocol::model::CommandCatalog {
+                commands: Vec::new(),
+            },
+            trace.clone(),
+            submitted.clone(),
+            (Duration::ZERO, Duration::ZERO, Duration::from_secs(30)),
+        );
+        let (calls, _reactions, server) = submitting(router, |config| config.typing = true).await?;
+        let started = std::time::Instant::now();
+        let reply = calls.answer(&submit_request()?, calls_until()).await;
+        let elapsed = started.elapsed();
+        server.abort();
+        assert_eq!(reply, HostReply::Submitted);
+        assert!(
+            elapsed < crate::delivery::PROMPT_FEEDBACK + Duration::from_secs(1),
+            "admission waited {elapsed:?} for feedback"
+        );
+        assert_eq!(submitted.lock().await.len(), 1);
+        // The marker, then the feedback that was asked for, with admission
+        // beside it.
+        let trace = trace.lock().await;
+        assert!(trace[0].starts_with("message <@200> asked to run"));
+        let after = &trace[1..4];
+        assert!(after.iter().any(|request| request.contains("/reactions/")));
+        assert!(after.iter().any(|request| request.ends_with("/typing")));
+        assert!(after.iter().any(|request| request == "event 901"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_command_core_does_not_answer_in_time_says_so_within_the_module_deadline()
+    -> anyhow::Result<()> {
+        use carillon_discord_commands::contract::HostReply;
+        let trace = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let router = submission_server(
+            carillon_protocol::model::CommandCatalog {
+                commands: Vec::new(),
+            },
+            trace.clone(),
+            Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            (Duration::ZERO, Duration::from_secs(30), Duration::ZERO),
+        );
+        let (calls, reactions, server) = submitting(router, |config| config.typing = false).await?;
+        let started = std::time::Instant::now();
+        let reply = calls.answer(&submit_request()?, calls_until()).await;
+        let elapsed = started.elapsed();
+        // Core may have accepted it: the answer says so, in time to be shown.
+        assert_eq!(
+            reply,
+            HostReply::Error(
+                "Carillon did not confirm that it accepted it; if it did, the answer follows in this conversation."
+                    .to_owned()
+            )
+        );
+        assert!(elapsed < super::DEADLINE, "answered after {elapsed:?}");
+        assert_eq!(reactions.stop(Duration::from_secs(10)).await, 0);
+        server.abort();
+        // Core received it, and its conversation's lane goes on settling it:
+        // the marker keeps its processing reaction, with no outcome yet.
+        let trace = trace.lock().await;
+        assert!(trace.contains(&"event 901".to_owned()), "{trace:?}");
+        assert_eq!(
+            trace
+                .iter()
+                .filter(|request| request.contains("/reactions/"))
+                .collect::<Vec<_>>(),
+            ["PUT /api/v10/channels/400/messages/901/reactions/%F0%9F%91%80/@me"]
+        );
+        Ok(())
+    }
+
+    /// A module that answers every interaction as a Run click does: it asks
+    /// for the runtime's commands, then submits `/compact keep decisions`,
+    /// then replies `ran`.
+    fn running_module() -> anyhow::Result<Vec<u8>> {
+        use carillon_discord_commands::contract::{HostRequest, Invocation};
+        let describe = describing(&[definition("command")]);
+        let describe_length = serde_json::to_vec(&Invocation::Describe)?.len();
+        let commands = serde_json::to_string(&HostRequest::Commands)?;
+        let submit = String::from_utf8(submit_request()?)?;
+        let reply = replying("ran", &[]);
+        let text = format!(
+            r#"(module
+  (import "carillon" "call" (func $call (param i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (global $length (mut i32) (i32.const 0))
+  (global $output (mut i32) (i32.const 0))
+  (data (i32.const 1024) "{}")
+  (data (i32.const 2048) "{}")
+  (data (i32.const 3072) "{}")
+  (data (i32.const 4096) "{}")
+  (func (export "input") (param $length i32) (result i32)
+    (global.set $length (local.get $length))
+    (i32.const 8192))
+  (func (export "invoke") (result i32)
+    (if (result i32) (i32.eq (global.get $length) (i32.const {describe_length}))
+      (then (global.set $output (i32.const 1024)) (i32.const {}))
+      (else
+        (drop (call $call (i32.const 2048) (i32.const {})))
+        (drop (call $call (i32.const 3072) (i32.const {})))
+        (global.set $output (i32.const 4096))
+        (i32.const {}))))
+  (func (export "output") (result i32) (global.get $output)))"#,
+            escape(&describe),
+            escape(&commands),
+            escape(&submit),
+            escape(&reply),
+            describe.len(),
+            commands.len(),
+            submit.len(),
+            reply.len(),
+        );
+        Ok(wat::parse_str(text)?)
+    }
+
+    #[tokio::test]
+    async fn a_run_click_answers_within_the_module_deadline_however_slow_its_calls()
+    -> anyhow::Result<()> {
+        // The runtime takes five seconds to list its commands, then core
+        // does not answer the submission at all: separately bounded, the two
+        // would outlast the module's deadline.
+        let trace = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let router = submission_server(
+            carillon_protocol::model::CommandCatalog {
+                commands: vec![carillon_protocol::model::RuntimeCommand {
+                    name: "compact".to_owned(),
+                    description: None,
+                    hint: None,
+                }],
+            },
+            trace.clone(),
+            Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            (
+                Duration::from_secs(5),
+                Duration::from_secs(30),
+                Duration::ZERO,
+            ),
+        );
+        let (calls, reactions, server) = submitting(router, |config| config.typing = false).await?;
+        let directory = tempfile::tempdir()?;
+        std::fs::write(directory.path().join("release.wasm"), running_module()?)?;
+        let commands = Commands::load(files(directory.path())).await?;
+        let started = std::time::Instant::now();
+        let reply = commands.invoke(calls, interaction()).await?;
+        let elapsed = started.elapsed();
+        // The module answered in time, after both calls had ended.
+        assert_eq!(reply.content, "ran");
+        assert!(elapsed < super::DEADLINE, "answered after {elapsed:?}");
+        // Core received the command; its silence is left to the
+        // conversation's lane to settle, so no outcome is shown yet.
+        assert_eq!(reactions.stop(Duration::from_secs(10)).await, 0);
+        server.abort();
+        let trace = trace.lock().await;
+        assert!(
+            trace[0].starts_with("message <@200> asked to run `/compact keep decisions`"),
+            "{trace:?}"
+        );
+        assert!(trace.contains(&"event 901".to_owned()), "{trace:?}");
+        assert!(
+            !trace
+                .iter()
+                .any(|request| request.contains("/reactions/%E2%9A%A0")),
+            "{trace:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_run_click_hands_the_command_to_core_however_slow_its_feedback() -> anyhow::Result<()>
+    {
+        // The runtime lists its commands just inside its own limit, leaving
+        // less than the feedback's wait; Discord then takes far longer to
+        // show the processing reaction and typing, while core answers at once.
+        let trace = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let submitted = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let router = submission_server(
+            carillon_protocol::model::CommandCatalog {
+                commands: vec![carillon_protocol::model::RuntimeCommand {
+                    name: "compact".to_owned(),
+                    description: None,
+                    hint: None,
+                }],
+            },
+            trace.clone(),
+            submitted.clone(),
+            (
+                Duration::from_millis(5_500),
+                Duration::ZERO,
+                Duration::from_secs(30),
+            ),
+        );
+        let (calls, reactions, server) = submitting(router, |config| config.typing = true).await?;
+        let directory = tempfile::tempdir()?;
+        std::fs::write(directory.path().join("release.wasm"), running_module()?)?;
+        let commands = Commands::load(files(directory.path())).await?;
+        let started = std::time::Instant::now();
+        let reply = commands.invoke(calls, interaction()).await?;
+        let elapsed = started.elapsed();
+        assert_eq!(reply.content, "ran");
+        assert!(elapsed < super::DEADLINE, "answered after {elapsed:?}");
+        // The optional feedback took none of core's time: it has the command,
+        // once, and the processing request it waits behind is still owned.
+        assert_eq!(submitted.lock().await.len(), 1);
+        assert_eq!(reactions.stop(Duration::from_millis(100)).await, 1);
+        server.abort();
+        let trace = trace.lock().await;
+        assert!(
+            trace[0].starts_with("message <@200> asked to run `/compact keep decisions`"),
+            "{trace:?}"
+        );
+        assert!(
+            trace.iter().any(|request| request.contains("/reactions/")),
+            "{trace:?}"
+        );
+        Ok(())
+    }
+
+    /// A conversation in channel 300 whose message 400 is still being
+    /// prepared, core taking `status` to say whether it holds it. Beside it
+    /// [`preparing`] returns calls of a person in that conversation, which
+    /// take their place in the same lanes. `accepted` records the events
+    /// core accepts, `markers` the marker messages posted.
+    struct Preparing {
+        ingress: Arc<crate::inbound::Ingress>,
+        send: tokio::sync::mpsc::Sender<crate::inbound::lanes::Queued>,
+        dispatcher: tokio::task::JoinHandle<()>,
+        accepted: Arc<tokio::sync::Mutex<Vec<String>>>,
+        markers: Arc<AtomicUsize>,
+        server: tokio::task::JoinHandle<std::io::Result<()>>,
+        _directory: tempfile::TempDir,
+    }
+
+    impl Preparing {
+        /// Closes the lanes and waits, at most ten seconds, for the
+        /// dispatcher to settle what it holds; the calls must be gone, as
+        /// they hold the lanes too. Returns the events core accepted.
+        async fn settled(self) -> anyhow::Result<Vec<String>> {
+            drop(self.send);
+            tokio::time::timeout(Duration::from_secs(10), self.dispatcher)
+                .await
+                .map_err(|_| anyhow::anyhow!("the lanes did not settle"))??;
+            self.server.abort();
+            Ok(self.accepted.lock().await.clone())
+        }
+
+        /// Stops the provider in the order its shutdown does: the lanes
+        /// settle what they hold, at most ten seconds, then the reactions
+        /// get `grace`. Returns the events core accepted and the reactions
+        /// the stop cancelled.
+        async fn stopped(self, grace: Duration) -> anyhow::Result<(Vec<String>, usize)> {
+            self.ingress.stopping.cancel();
+            drop(self.send);
+            tokio::time::timeout(Duration::from_secs(10), self.dispatcher)
+                .await
+                .map_err(|_| anyhow::anyhow!("the lanes did not settle"))??;
+            let cancelled = self.ingress.reactions.stop(grace).await;
+            self.server.abort();
+            Ok((self.accepted.lock().await.clone(), cancelled))
+        }
+    }
+
+    /// Core and Discord for [`preparing`]: core is slow by `status` to say
+    /// whether it holds message 400, and records what it accepts and the
+    /// marker messages posted.
+    fn preparing_server(
+        status: Duration,
+        accepted: Arc<tokio::sync::Mutex<Vec<String>>>,
+        markers: Arc<AtomicUsize>,
+    ) -> Router {
+        use axum::{
+            Json,
+            extract::Path as Segment,
+            routing::{get, post},
+        };
+        use carillon_protocol::model::{EventReceipt, EventStatus, ExternalEvent, TurnState};
+        Router::new()
+            .route(
+                "/v1/events/{event_id}",
+                get(move |Segment(event_id): Segment<String>| async move {
+                    if event_id == "400" {
+                        tokio::time::sleep(status).await;
+                    }
+                    Json(EventStatus::Unknown)
+                }),
+            )
+            .route(
+                "/v1/events",
+                post(move |Json(event): Json<ExternalEvent>| {
+                    let accepted = accepted.clone();
+                    async move {
+                        accepted.lock().await.push(event.event_id.clone());
+                        Json(EventReceipt {
+                            event_id: event.event_id,
+                            turn_id: "turn".to_owned(),
+                            duplicate: false,
+                            state: TurnState::Queued,
+                        })
+                    }
+                }),
+            )
+            .route(
+                "/v1/commands",
+                get(|| async { Json(json!({"commands": [{"name": "compact"}]})) }),
+            )
+            .merge(marking(markers))
+            .fallback(|| async { StatusCode::NO_CONTENT })
+    }
+
+    /// Discord posting every marker in channel 300 as `901`, counting them.
+    fn marking(markers: Arc<AtomicUsize>) -> Router {
+        use axum::{Json, routing::post};
+        Router::new().route(
+            "/api/v10/channels/{channel}/messages",
+            post(move || {
+                markers.fetch_add(1, Ordering::SeqCst);
+                async {
+                    Json(json!({
+                        "id": "901",
+                        "channel_id": "300",
+                        "author": {"id": "201", "username": "carillon", "discriminator": "0"},
+                        "content": "marker",
+                        "attachments": [],
+                        "embeds": [],
+                        "mention_everyone": false,
+                        "mention_roles": [],
+                        "mentions": [],
+                        "pinned": false,
+                        "timestamp": "2026-10-05T00:00:00.000000+00:00",
+                        "tts": false,
+                        "type": 0,
+                    }))
+                }
+            }),
+        )
+    }
+
+    /// Core whose acceptance of command 901 takes `admission`, in work of
+    /// its own that goes on whatever its caller does, as core's storage work
+    /// does: a request for an event already being accepted waits for that
+    /// and is answered as its duplicate, as core's transaction answers.
+    /// Other events are accepted at once. `accepted` records the events in
+    /// the order core commits them, and `posts` counts the submissions.
+    fn admitting_server(
+        admission: Duration,
+        accepted: Arc<tokio::sync::Mutex<Vec<String>>>,
+        markers: Arc<AtomicUsize>,
+        posts: Arc<AtomicUsize>,
+    ) -> Router {
+        use axum::{
+            Json,
+            extract::Path as Segment,
+            routing::{get, post},
+        };
+        use carillon_protocol::model::{EventReceipt, EventStatus, ExternalEvent, TurnState};
+        use std::collections::HashMap;
+        let jobs = Arc::new(std::sync::Mutex::new(HashMap::<
+            String,
+            tokio::sync::watch::Receiver<bool>,
+        >::new()));
+        let committed = accepted.clone();
+        Router::new()
+            .route(
+                "/v1/events/{event_id}",
+                get(move |Segment(event_id): Segment<String>| {
+                    let committed = committed.clone();
+                    async move {
+                        if committed.lock().await.contains(&event_id) {
+                            Json(EventStatus::Accepted(EventReceipt {
+                                event_id,
+                                turn_id: "turn".to_owned(),
+                                duplicate: false,
+                                state: TurnState::Queued,
+                            }))
+                        } else {
+                            Json(EventStatus::Unknown)
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/events",
+                post(move |Json(event): Json<ExternalEvent>| {
+                    posts.fetch_add(1, Ordering::SeqCst);
+                    let (mut done, first) = {
+                        let mut jobs = jobs
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if let Some(job) = jobs.get(&event.event_id) {
+                            (job.clone(), false)
+                        } else {
+                            let (commit, done) = tokio::sync::watch::channel(false);
+                            jobs.insert(event.event_id.clone(), done.clone());
+                            let (accepted, id) = (accepted.clone(), event.event_id.clone());
+                            let delay = if id == "901" {
+                                admission
+                            } else {
+                                Duration::ZERO
+                            };
+                            tokio::spawn(async move {
+                                tokio::time::sleep(delay).await;
+                                accepted.lock().await.push(id);
+                                let _ = commit.send(true);
+                            });
+                            (done, true)
+                        }
+                    };
+                    async move {
+                        let _ = done.wait_for(|committed| *committed).await;
+                        Json(EventReceipt {
+                            event_id: event.event_id,
+                            turn_id: "turn".to_owned(),
+                            duplicate: !first,
+                            state: TurnState::Queued,
+                        })
+                    }
+                }),
+            )
+            .merge(marking(markers))
+            .fallback(|| async { StatusCode::NO_CONTENT })
+    }
+
+    async fn preparing(status: Duration) -> anyhow::Result<(super::InteractionCalls, Preparing)> {
+        let (accepted, markers) = (
+            Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        let router = preparing_server(status, accepted.clone(), markers.clone());
+        let (calls, preparing) = conversation(router, accepted, markers).await?;
+        // Message 400 arrives first, through the gateway's lanes.
+        preparing
+            .send
+            .send(crate::inbound::tests::hello().into())
+            .await?;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        Ok((calls, preparing))
+    }
+
+    /// Conversation 300's lanes, served by `router` as core and Discord, and
+    /// calls of a person in that conversation, which take their place in the
+    /// same lanes.
+    async fn conversation(
+        router: Router,
+        accepted: Arc<tokio::sync::Mutex<Vec<String>>>,
+        markers: Arc<AtomicUsize>,
+    ) -> anyhow::Result<(super::InteractionCalls, Preparing)> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+        let mut config = crate::conversations::tests::discord_config(
+            crate::config::DiscordActivation::Always,
+            crate::config::DiscordConversation::Channel,
+        );
+        config.typing = false;
+        let http = Arc::new(
+            twilight_http::Client::builder()
+                .token("test-only".to_owned())
+                .proxy(address.to_string(), true)
+                .ratelimiter(None)
+                .build(),
+        );
+        let core = crate::client::test_client(format!("http://{address}"));
+        let directory = tempfile::tempdir()?;
+        let participation = Arc::new(crate::conversations::Participation::load(
+            directory.path().join("participation.json"),
+        )?);
+        let ingress = crate::inbound::tests::ingress(
+            core.clone(),
+            config,
+            participation,
+            http.clone(),
+            directory.path(),
+        )?;
+        let (send, receive) = tokio::sync::mpsc::channel(4);
+        let dispatcher = tokio::spawn(crate::inbound::lanes::dispatch(ingress.clone(), receive));
+        let calls = super::InteractionCalls::new(
+            core,
+            carillon_protocol::model::ModelQuery {
+                agent_id: "default".to_owned(),
+                audience_id: Some("discord-100-300".to_owned()),
+            },
+        )
+        .with_submissions(super::Submissions {
+            http,
+            reactions: ingress.reactions.clone(),
+            lanes: crate::inbound::lanes::Lanes::new(send.clone()),
+            origin: crate::conversations::InteractionOrigin {
+                guild_id: "100".to_owned(),
+                user_id: "200".to_owned(),
+                channel_id: "300".to_owned(),
+                route_channel_id: "300".to_owned(),
+            },
+        });
+        let preparing = Preparing {
+            ingress,
+            send,
+            dispatcher,
+            accepted,
+            markers,
+            server,
+            _directory: directory,
+        };
+        Ok((calls, preparing))
+    }
+
+    #[tokio::test]
+    async fn a_command_is_accepted_after_the_messages_before_it_in_its_conversation()
+    -> anyhow::Result<()> {
+        // Core takes two seconds to say whether it holds message 400 when a
+        // Run click comes in the same conversation.
+        let (calls, preparing) = preparing(Duration::from_secs(2)).await?;
+        let directory = tempfile::tempdir()?;
+        std::fs::write(directory.path().join("release.wasm"), running_module()?)?;
+        let commands = Commands::load(files(directory.path())).await?;
+        assert_eq!(commands.invoke(calls, interaction()).await?.content, "ran");
+        // Core accepted the message before the command that followed it.
+        assert_eq!(preparing.settled().await?, ["400", "901"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_command_still_waiting_at_its_deadline_is_not_sent_and_its_conversation_goes_on()
+    -> anyhow::Result<()> {
+        use carillon_discord_commands::contract::HostReply;
+        let (calls, preparing) = preparing(Duration::from_secs(3)).await?;
+        let started = std::time::Instant::now();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let reply = calls.answer(&submit_request()?, deadline).await;
+        drop(calls);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(
+            reply,
+            HostReply::Error("Earlier messages in this conversation are still being prepared, so it was not sent; please run it again once they are answered.".to_owned())
+        );
+        let markers = preparing.markers.clone();
+        // The message was accepted; nothing of the command was posted or sent.
+        assert_eq!(preparing.settled().await?, ["400"]);
+        assert_eq!(markers.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    /// Core accepting every event at once, and Discord that records each
+    /// marker it is asked to post, counts it, and never answers.
+    fn unanswered_marker_server(
+        accepted: Arc<tokio::sync::Mutex<Vec<String>>>,
+        markers: Arc<AtomicUsize>,
+        posted: Arc<tokio::sync::Mutex<Vec<String>>>,
+    ) -> Router {
+        use axum::{
+            Json,
+            routing::{get, post},
+        };
+        use carillon_protocol::model::{EventReceipt, EventStatus, ExternalEvent, TurnState};
+        Router::new()
+            .route(
+                "/v1/events/{event_id}",
+                get(|| async { Json(EventStatus::Unknown) }),
+            )
+            .route(
+                "/v1/events",
+                post(move |Json(event): Json<ExternalEvent>| {
+                    let accepted = accepted.clone();
+                    async move {
+                        accepted.lock().await.push(event.event_id.clone());
+                        Json(EventReceipt {
+                            event_id: event.event_id,
+                            turn_id: "turn".to_owned(),
+                            duplicate: false,
+                            state: TurnState::Queued,
+                        })
+                    }
+                }),
+            )
+            .route(
+                "/api/v10/channels/{channel}/messages",
+                post(move |Json(body): Json<Value>| {
+                    let (markers, posted) = (markers.clone(), posted.clone());
+                    async move {
+                        markers.fetch_add(1, Ordering::SeqCst);
+                        posted
+                            .lock()
+                            .await
+                            .push(body["content"].as_str().unwrap_or_default().to_owned());
+                        std::future::pending::<StatusCode>().await
+                    }
+                }),
+            )
+            .fallback(|| async { StatusCode::NO_CONTENT })
+    }
+
+    #[tokio::test]
+    async fn a_command_whose_marker_discord_does_not_confirm_is_not_sent_and_its_conversation_goes_on()
+    -> anyhow::Result<()> {
+        use carillon_discord_commands::contract::HostReply;
+        let (accepted, markers, posted) = (
+            Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        );
+        let router = unanswered_marker_server(accepted.clone(), markers.clone(), posted.clone());
+        let (calls, preparing) = conversation(router, accepted.clone(), markers).await?;
+        let started = std::time::Instant::now();
+        let submit = submit_request()?;
+        let answering = tokio::spawn(async move { calls.answer(&submit, calls_until()).await });
+        // The person's next message arrives while Discord holds the marker's
+        // answer: it waits behind the command.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        preparing
+            .send
+            .send(crate::inbound::tests::hello().into())
+            .await?;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(accepted.lock().await.is_empty());
+        let reply = answering.await?;
+        let elapsed = started.elapsed();
+        // Discord may have posted the marker, but without its answer the
+        // command has no identity: nothing of it reaches core, and the reply
+        // claims no more than that.
+        assert_eq!(
+            reply,
+            HostReply::Error(
+                "Discord did not confirm the marker message, so the command was not sent to Carillon."
+                    .to_owned()
+            )
+        );
+        assert!(
+            elapsed >= super::MARKER_LIMIT && elapsed < super::DEADLINE,
+            "answered after {elapsed:?}"
+        );
+        // The marker asks; it never says the command ran.
+        assert_eq!(
+            *posted.lock().await,
+            ["<@200> asked to run `/compact keep decisions`"]
+        );
+        // The conversation goes on with the message, and only the message.
+        assert_eq!(preparing.settled().await?, ["400"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_command_waiting_when_the_provider_stops_is_not_sent() -> anyhow::Result<()> {
+        use carillon_discord_commands::contract::HostReply;
+        let (calls, preparing) = preparing(Duration::from_secs(30)).await?;
+        let submit = submit_request()?;
+        let waiting = tokio::spawn(async move { calls.answer(&submit, calls_until()).await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        preparing.ingress.stopping.cancel();
+        let reply = tokio::time::timeout(Duration::from_secs(2), waiting).await??;
+        assert_eq!(
+            reply,
+            HostReply::Error("Carillon is too busy or restarting, so it was not sent; please run it again shortly.".to_owned())
+        );
+        let markers = preparing.markers.clone();
+        assert!(preparing.settled().await?.is_empty());
+        assert_eq!(markers.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn listing_commands_never_waits_for_the_conversation() -> anyhow::Result<()> {
+        use carillon_discord_commands::contract::{HostReply, HostRequest};
+        // The conversation's message is being prepared for half a minute.
+        let (calls, preparing) = preparing(Duration::from_secs(30)).await?;
+        let started = std::time::Instant::now();
+        let reply = calls
+            .answer(&serde_json::to_vec(&HostRequest::Commands)?, calls_until())
+            .await;
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(matches!(reply, HostReply::Commands(catalog) if catalog.commands.len() == 1));
+        preparing.server.abort();
+        Ok(())
+    }
+
+    /// Calls of the conversation of [`admitting_server`], whose core takes
+    /// three seconds to accept command 901, the reply to its submission,
+    /// due one second in, and the count of core's submissions.
+    async fn admitting() -> anyhow::Result<(
+        Preparing,
+        Arc<tokio::sync::Mutex<Vec<String>>>,
+        Arc<AtomicUsize>,
+    )> {
+        let posts = Arc::new(AtomicUsize::new(0));
+        let counted = posts.clone();
+        let (preparing, accepted) = unconfirmed(|accepted, markers| {
+            admitting_server(Duration::from_secs(3), accepted, markers, counted)
+        })
+        .await?;
+        Ok((preparing, accepted, posts))
+    }
+
+    /// Calls of the conversation served by `serve` as core and Discord, and
+    /// the reply to a submission of command 901, due one second in, before
+    /// core has answered for it.
+    async fn unconfirmed(
+        serve: impl FnOnce(Arc<tokio::sync::Mutex<Vec<String>>>, Arc<AtomicUsize>) -> Router,
+    ) -> anyhow::Result<(Preparing, Arc<tokio::sync::Mutex<Vec<String>>>)> {
+        use carillon_discord_commands::contract::HostReply;
+        let (accepted, markers) = (
+            Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        let router = serve(accepted.clone(), markers.clone());
+        let (calls, preparing) = conversation(router, accepted.clone(), markers).await?;
+        let started = std::time::Instant::now();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let reply = calls.answer(&submit_request()?, deadline).await;
+        // The reply is due before core has answered: it says core may have
+        // accepted the command, in time.
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(
+            reply,
+            HostReply::Error("Carillon did not confirm that it accepted it; if it did, the answer follows in this conversation.".to_owned())
+        );
+        assert_eq!(preparing.markers.load(Ordering::SeqCst), 1);
+        Ok((preparing, accepted))
+    }
+
+    #[tokio::test]
+    async fn a_command_core_is_still_accepting_keeps_its_conversation_until_core_answers()
+    -> anyhow::Result<()> {
+        let (preparing, accepted, _) = admitting().await?;
+        // The person's next message arrives while core is still accepting
+        // the command.
+        let mut next = crate::inbound::tests::hello();
+        next.request.event_id = "402".to_owned();
+        preparing.send.send(next.into()).await?;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(accepted.lock().await.is_empty());
+        // Core accepts the command before the message that followed it.
+        assert_eq!(preparing.settled().await?, ["901", "402"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_stopping_provider_waits_for_a_command_core_is_still_accepting() -> anyhow::Result<()>
+    {
+        let (preparing, accepted, posts) = admitting().await?;
+        // The lane asks core again at once, and the provider stops while
+        // that attempt waits for core to accept the command.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while posts.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        preparing.ingress.stopping.cancel();
+        // The lanes settle only once core has answered that attempt, and no
+        // other is made.
+        let started = std::time::Instant::now();
+        assert_eq!(preparing.settled().await?, ["901"]);
+        assert!(started.elapsed() >= Duration::from_secs(1));
+        assert_eq!(*accepted.lock().await, ["901"]);
+        assert_eq!(posts.load(Ordering::SeqCst), 2);
+        Ok(())
+    }
+
+    /// Core that cannot take command 901, answering every attempt as
+    /// unavailable after `answer`, and accepts other events at once, beside
+    /// a Discord that answers at once. `trace` records core's requests and
+    /// Discord's reactions.
+    fn unavailable_server(
+        trace: Arc<tokio::sync::Mutex<Vec<String>>>,
+        accepted: Arc<tokio::sync::Mutex<Vec<String>>>,
+        markers: Arc<AtomicUsize>,
+        answer: Duration,
+    ) -> Router {
+        use axum::{
+            Json,
+            extract::Path as Segment,
+            http::{Method, Uri},
+            response::IntoResponse,
+            routing::{get, post},
+        };
+        use carillon_protocol::model::{EventReceipt, EventStatus, ExternalEvent, TurnState};
+        let (asked, attempted, reacted) = (trace.clone(), trace.clone(), trace);
+        Router::new()
+            .route(
+                "/v1/events/{event_id}",
+                get(move |Segment(event_id): Segment<String>| async move {
+                    asked.lock().await.push(format!("status {event_id}"));
+                    Json(EventStatus::Unknown)
+                }),
+            )
+            .route(
+                "/v1/events",
+                post(move |Json(event): Json<ExternalEvent>| async move {
+                    attempted
+                        .lock()
+                        .await
+                        .push(format!("event {}", event.event_id));
+                    if event.event_id == "901" {
+                        tokio::time::sleep(answer).await;
+                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                    }
+                    accepted.lock().await.push(event.event_id.clone());
+                    Json(EventReceipt {
+                        event_id: event.event_id,
+                        turn_id: "turn".to_owned(),
+                        duplicate: false,
+                        state: TurnState::Queued,
+                    })
+                    .into_response()
+                }),
+            )
+            .merge(marking(markers))
+            .fallback(move |method: Method, uri: Uri| async move {
+                reacted
+                    .lock()
+                    .await
+                    .push(format!("{method} {}", uri.path()));
+                StatusCode::NO_CONTENT
+            })
+    }
+
+    #[tokio::test]
+    async fn a_stopping_provider_leaves_a_command_core_cannot_confirm_unconfirmed()
+    -> anyhow::Result<()> {
+        let trace = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let served = trace.clone();
+        let (preparing, _) = unconfirmed(|accepted, markers| {
+            unavailable_server(served, accepted, markers, Duration::ZERO)
+        })
+        .await?;
+        let attempts = async || {
+            trace
+                .lock()
+                .await
+                .iter()
+                .filter(|request| *request == "event 901")
+                .count()
+        };
+        // The person's next message waits while the lane goes on asking
+        // core, which still cannot take the command.
+        let mut next = crate::inbound::tests::hello();
+        next.request.event_id = "402".to_owned();
+        preparing.send.send(next.into()).await?;
+        let before = attempts().await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(attempts().await > before + 1);
+        // The provider stops: the lanes settle without core's answer, and
+        // the message waiting behind the command is dropped unprepared.
+        let started = std::time::Instant::now();
+        let (accepted, cancelled) = preparing.stopped(crate::delivery::PROMPT_FEEDBACK).await?;
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(accepted.is_empty());
+        assert_eq!(cancelled, 0);
+        let trace = trace.lock().await;
+        assert!(
+            !trace.iter().any(|request| request.ends_with("402")),
+            "{trace:?}"
+        );
+        // The command's marker says it is unconfirmed, not refused.
+        let marker = "/api/v10/channels/300/messages/901/reactions";
+        assert_eq!(
+            trace
+                .iter()
+                .filter(|request| request.contains("/reactions/"))
+                .collect::<Vec<_>>(),
+            [
+                &format!("PUT {marker}/%F0%9F%91%80/@me"),
+                &format!("DELETE {marker}/%F0%9F%91%80/@me"),
+                &format!("PUT {marker}/%E2%9A%A0%EF%B8%8F/@me"),
+            ]
+        );
+        Ok(())
+    }
+
+    /// A Run click's command in conversation 300 while core cannot take it,
+    /// core taking `answer` to say so for each attempt. Once core has
+    /// received the command's first attempt, message 402 arrives behind it,
+    /// and the provider stops `after` that. Returns the reply and, in order, core's
+    /// requests and Discord's reactions.
+    async fn stopped_while_submitting(
+        answer: Duration,
+        after: Duration,
+    ) -> anyhow::Result<(carillon_discord_commands::contract::HostReply, Vec<String>)> {
+        let trace = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (accepted, markers) = (
+            Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        let router = unavailable_server(trace.clone(), accepted.clone(), markers.clone(), answer);
+        let (calls, preparing) = conversation(router, accepted, markers).await?;
+        let submit = submit_request()?;
+        let reply = tokio::spawn(async move { calls.answer(&submit, calls_until()).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !trace.lock().await.contains(&"event 901".to_owned()) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        // The command holds its conversation's turn; the message waits.
+        let mut next = crate::inbound::tests::hello();
+        next.request.event_id = "402".to_owned();
+        preparing.send.send(next.into()).await?;
+        tokio::time::sleep(after).await;
+        let started = std::time::Instant::now();
+        let (accepted, cancelled) = preparing.stopped(crate::delivery::PROMPT_FEEDBACK).await?;
+        assert!(
+            started.elapsed() < answer + Duration::from_secs(1),
+            "the stop took {:?}",
+            started.elapsed()
+        );
+        assert!(accepted.is_empty());
+        assert_eq!(cancelled, 0);
+        let reply = tokio::time::timeout(Duration::from_secs(2), reply).await??;
+        let trace = trace.lock().await.clone();
+        Ok((reply, trace))
+    }
+
+    /// What a command core never confirmed shows once the provider stopped:
+    /// the reply says it may have been accepted, core got one attempt, the
+    /// message behind it was never prepared, and the marker shows the
+    /// uncertain reaction.
+    fn assert_unconfirmed(
+        reply: &carillon_discord_commands::contract::HostReply,
+        trace: &[String],
+    ) {
+        use carillon_discord_commands::contract::HostReply;
+        assert_eq!(
+            *reply,
+            HostReply::Error("Carillon did not confirm that it accepted it; if it did, the answer follows in this conversation.".to_owned())
+        );
+        assert_eq!(
+            trace
+                .iter()
+                .filter(|request| *request == "event 901")
+                .count(),
+            1,
+            "{trace:?}"
+        );
+        assert!(
+            !trace.iter().any(|request| request.ends_with("402")),
+            "{trace:?}"
+        );
+        let marker = "/api/v10/channels/300/messages/901/reactions";
+        assert_eq!(
+            trace
+                .iter()
+                .filter(|request| request.contains("/reactions/"))
+                .collect::<Vec<_>>(),
+            [
+                &format!("PUT {marker}/%F0%9F%91%80/@me"),
+                &format!("DELETE {marker}/%F0%9F%91%80/@me"),
+                &format!("PUT {marker}/%E2%9A%A0%EF%B8%8F/@me"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_command_stopped_while_waiting_to_try_again_makes_no_other_attempt()
+    -> anyhow::Result<()> {
+        // Core says at once that it cannot take the command; the provider
+        // stops while the submission waits to try again.
+        let (reply, trace) =
+            stopped_while_submitting(Duration::ZERO, Duration::from_millis(100)).await?;
+        assert_unconfirmed(&reply, &trace);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_command_stopped_while_core_answers_its_attempt_makes_no_other() -> anyhow::Result<()>
+    {
+        // The provider stops while core takes half a second to say it
+        // cannot take the command: that attempt ends, and none follows.
+        let (reply, trace) =
+            stopped_while_submitting(Duration::from_millis(500), Duration::from_millis(100))
+                .await?;
+        assert_unconfirmed(&reply, &trace);
+        Ok(())
+    }
+
+    /// Core that does not answer the first submission of command 901 and
+    /// refuses it when asked again, accepting other events at once, beside
+    /// a Discord that holds every reaction for a minute.
+    fn refusing_server(
+        accepted: Arc<tokio::sync::Mutex<Vec<String>>>,
+        markers: Arc<AtomicUsize>,
+    ) -> Router {
+        use axum::{
+            Json,
+            extract::Path as Segment,
+            http::Uri,
+            response::IntoResponse,
+            routing::{get, post},
+        };
+        use carillon_protocol::model::{EventReceipt, EventStatus, ExternalEvent, TurnState};
+        let attempts = Arc::new(AtomicUsize::new(0));
+        Router::new()
+            .route(
+                "/v1/events/{event_id}",
+                get(|Segment(_): Segment<String>| async { Json(EventStatus::Unknown) }),
+            )
+            .route(
+                "/v1/events",
+                post(move |Json(event): Json<ExternalEvent>| async move {
+                    if event.event_id == "901" {
+                        if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                            tokio::time::sleep(Duration::from_secs(30)).await;
+                        }
+                        return StatusCode::UNPROCESSABLE_ENTITY.into_response();
+                    }
+                    accepted.lock().await.push(event.event_id.clone());
+                    Json(EventReceipt {
+                        event_id: event.event_id,
+                        turn_id: "turn".to_owned(),
+                        duplicate: false,
+                        state: TurnState::Queued,
+                    })
+                    .into_response()
+                }),
+            )
+            .merge(marking(markers))
+            .fallback(|uri: Uri| async move {
+                if uri.path().contains("/reactions/") {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                }
+                StatusCode::NO_CONTENT
+            })
+    }
+
+    #[tokio::test]
+    async fn a_refused_command_lets_its_conversation_go_on_beside_its_feedback()
+    -> anyhow::Result<()> {
+        let (preparing, accepted) = unconfirmed(refusing_server).await?;
+        // Core refuses the command when the lane asks again, while Discord
+        // still holds its processing reaction, which its failure waits for.
+        let mut next = crate::inbound::tests::hello();
+        next.request.event_id = "402".to_owned();
+        preparing.send.send(next.into()).await?;
+        // The person's next message is accepted within its own wait for
+        // feedback, not after the command's.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while accepted.lock().await.is_empty() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("the conversation waited for the command's feedback"))?;
+        // The reactions still own the command's failure and both processing
+        // requests, and their stop ends them.
+        let (accepted, cancelled) = preparing.stopped(Duration::from_millis(100)).await?;
+        assert_eq!(accepted, ["402"]);
+        assert_eq!(cancelled, 3);
+        Ok(())
+    }
+
+    /// Core accepting every event, beside a Discord that posts the marker
+    /// and applies the first processing reaction `delay` after receiving it.
+    fn applying_server(delay: Duration, applied: Arc<tokio::sync::Mutex<Vec<String>>>) -> Router {
+        use axum::{Json, routing::post};
+        use carillon_protocol::model::{EventReceipt, ExternalEvent, TurnState};
+        Router::new()
+            .route(
+                "/v1/events",
+                post(|Json(event): Json<ExternalEvent>| async move {
+                    Json(EventReceipt {
+                        event_id: event.event_id,
+                        turn_id: "turn".to_owned(),
+                        duplicate: false,
+                        state: TurnState::Queued,
+                    })
+                }),
+            )
+            .route(
+                "/api/v10/channels/{channel}/messages",
+                post(|Json(body): Json<Value>| async move {
+                    Json(json!({
+                        "id": "901",
+                        "channel_id": "400",
+                        "author": {"id": "201", "username": "carillon", "discriminator": "0"},
+                        "content": body["content"],
+                        "attachments": [],
+                        "embeds": [],
+                        "mention_everyone": false,
+                        "mention_roles": [],
+                        "mentions": [],
+                        "pinned": false,
+                        "timestamp": "2026-10-05T00:00:00.000000+00:00",
+                        "tts": false,
+                        "type": 0,
+                    }))
+                }),
+            )
+            .merge(crate::delivery::tests::late_processing(delay, applied))
+            .fallback(|| async { StatusCode::NO_CONTENT })
+    }
+
+    #[tokio::test]
+    async fn a_late_processing_reaction_never_lands_after_the_outcome() -> anyhow::Result<()> {
+        use carillon_discord_commands::contract::HostReply;
+        // The coordinator's fault: Discord applies the processing reaction
+        // four seconds after receiving it, after admission stopped waiting.
+        let applied = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let router = applying_server(Duration::from_secs(4), applied.clone());
+        let (calls, reactions, server) = submitting(router, |config| config.typing = true).await?;
+        let started = std::time::Instant::now();
+        assert_eq!(
+            calls.answer(&submit_request()?, calls_until()).await,
+            HostReply::Submitted
+        );
+        // Admission did not wait for Discord to apply it.
+        assert!(started.elapsed() < crate::delivery::PROMPT_FEEDBACK + Duration::from_secs(1));
+        // The answer is delivered at once and its outcome shown, as the
+        // delivery loop does.
+        reactions.show_outcome("400:901".to_owned(), super::Feedback::Delivered);
+        assert_eq!(reactions.stop(Duration::from_secs(10)).await, 0);
+        server.abort();
+        let config = crate::conversations::tests::discord_config(
+            crate::config::DiscordActivation::Always,
+            crate::config::DiscordConversation::Thread,
+        );
+        assert_eq!(
+            *applied.lock().await,
+            [
+                format!("PUT {}", config.processing_emoji),
+                format!("DELETE {}", config.processing_emoji),
+                format!("PUT {}", config.delivered_emoji),
+            ]
+        );
         Ok(())
     }
 }

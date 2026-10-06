@@ -1,13 +1,8 @@
 import { once } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
-import { ExplainedFailure } from "./failure.ts";
+import { ExplainedFailure, RuntimeClosed } from "./failure.ts";
 import { createRuntimeServer } from "./http.ts";
-import { ModelSelections } from "./model.ts";
 import type { RuntimeOperations } from "./operations.ts";
-import { DETERMINISTIC_DEFAULT, DETERMINISTIC_MODELS } from "./testing.ts";
 
 const key = `sk-proj-${"Ab1".repeat(20)}`;
 
@@ -15,23 +10,34 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-/** A runtime whose turns fail with the input as the provider's explanation, and whose model changes use real selection rules. */
+/** A runtime whose turns fail with the input as the provider's explanation, and whose model changes are refused quoting the requested option. */
 async function serve() {
-  const state = await mkdtemp(join(tmpdir(), "carillon-http-"));
-  const selections = await ModelSelections.open(join(state, "model-selection.json"));
   const runtime: RuntimeOperations = {
     executeTurn: (request) =>
       Promise.reject(
         request.input === "internal"
           ? new Error(`extension state at /private/state rejected ${key}`)
-          : new ExplainedFailure(502, request.input),
+          : request.input === "closing"
+            ? new RuntimeClosed("runtime is closed")
+            : new ExplainedFailure(502, request.input),
       ),
     activity: (correlationId, interfaceId) =>
       correlationId === "turn/1" && interfaceId === "discord-private"
         ? { phase: "tools", running: [], recent: [{ tool: "read", ok: true }], tool_calls: 1 }
         : undefined,
     modelState: () => Promise.reject(new Error("model catalogue file is corrupt")),
-    setModel: (update) => selections.update(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, update),
+    setModel: (update) =>
+      Promise.reject(
+        new ExplainedFailure(
+          422,
+          `Local reasoner has no ${Object.keys(update.selection?.options ?? {}).join(", ")} setting.`,
+        ),
+      ),
+    commands: (query) =>
+      Promise.resolve({
+        commands:
+          query.audience_id === undefined ? [] : [{ name: "compact", hint: "<instructions>" }],
+      }),
     close: () => Promise.resolve(),
   };
   const server = createRuntimeServer({
@@ -39,6 +45,8 @@ async function serve() {
     token: "test-only",
     providerId: "runtime-pi",
     provider: "deterministic-local-substitute",
+    version: "9.9.9-test",
+    features: [],
     workspace: "/unused",
   });
   server.listen(0, "127.0.0.1");
@@ -56,7 +64,6 @@ async function serve() {
   };
   const close = async () => {
     await new Promise((done) => server.close(done));
-    await rm(state, { recursive: true, force: true });
   };
   return { call, close };
 }
@@ -98,6 +105,8 @@ it("sends callers only the displayable part of explanations and logs redacted di
     for (const text of withheld)
       expect(await call("POST", "/v1/turns", turn(text))).toEqual({ status: 502, body: {} });
     expect(await call("POST", "/v1/turns", turn("internal"))).toEqual({ status: 500, body: {} });
+    // A runtime that closes under a request gives no answer, which is not a failure.
+    expect(await call("POST", "/v1/turns", turn("closing"))).toEqual({ status: 503, body: {} });
     expect(
       await call(
         "GET",
@@ -112,6 +121,14 @@ it("sends callers only the displayable part of explanations and logs redacted di
     expect(await call("PUT", "/v1/model", option("password=short-secret"))).toEqual({
       status: 422,
       body: {},
+    });
+    // The command catalogue is the runtime's, for the queried conversation.
+    expect(
+      await call("GET", "/v1/commands?interface_id=discord-private&agent_id=default&audience_id=c"),
+    ).toEqual({ status: 200, body: { commands: [{ name: "compact", hint: "<instructions>" }] } });
+    expect(await call("GET", "/v1/commands?agent_id=default")).toEqual({
+      status: 400,
+      body: { error: "invalid command query" },
     });
   } finally {
     await close();
@@ -128,6 +145,18 @@ it("sends callers only the displayable part of explanations and logs redacted di
   );
   expect(logged[6]).toMatch(/^GET \/v1\/model failed: Error: model catalogue file is corrupt\n/u);
   for (const secret of [key, "short-secret"]) expect(logged.join("\n")).not.toContain(secret);
+});
+
+it("reports the build version its runtime was given, not a shared package's", async () => {
+  const { call, close } = await serve();
+  try {
+    expect(await call("GET", "/health")).toMatchObject({
+      status: 200,
+      body: { id: "runtime-pi", role: "runtime", version: "9.9.9-test", status: "ready" },
+    });
+  } finally {
+    await close();
+  }
 });
 
 it("describes an executing turn only to its own interface, after authentication", async () => {

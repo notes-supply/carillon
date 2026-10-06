@@ -159,9 +159,23 @@ pub struct Provider {
     pub url: String,
     pub token_hash: String,
     pub enabled: bool,
+    /// For a runtime that executes different conversations at once: how many
+    /// of its conversations core runs concurrently. Each conversation still
+    /// runs one turn at a time, in order. Absent means one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallel_turns: Option<u32>,
 }
 
+/// The most conversations one runtime may be configured to run at once.
+pub const MAX_PARALLEL_TURNS: u32 = 16;
+
 impl Provider {
+    /// How many of this runtime's conversations core runs at once.
+    #[must_use]
+    pub fn parallel_turns(&self) -> u32 {
+        self.parallel_turns.unwrap_or(1)
+    }
+
     /// The loopback socket address behind the provider's URL.
     ///
     /// # Errors
@@ -363,6 +377,15 @@ impl Config {
             }
             if !provider_ids.insert(&provider.id) {
                 bail!("provider ID {} is configured more than once", provider.id);
+            }
+            if let Some(parallel) = provider.parallel_turns
+                && (provider.role != ProviderRole::Runtime
+                    || !(1..=MAX_PARALLEL_TURNS).contains(&parallel))
+            {
+                bail!(
+                    "provider {} parallel_turns must be between 1 and {MAX_PARALLEL_TURNS}, on a runtime",
+                    provider.id
+                );
             }
         }
         self.provider(&self.agent.runtime_provider, ProviderRole::Runtime)?;

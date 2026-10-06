@@ -4,7 +4,7 @@
 //! version.
 
 use carillon_protocol::{
-    model::ModelScope as Scope,
+    model::{CommandCatalog, ModelScope as Scope},
     models::{ModelState, Selection},
 };
 
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Contract version the module speaks; the provider refuses others.
-pub const CONTRACT: u32 = 2;
+pub const CONTRACT: u32 = 3;
 
 /// Provider to module: the invocation payload.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -85,10 +85,31 @@ pub enum HostRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected: Option<Selection>,
     },
+    /// The runtime's own commands for the conversation.
+    Commands,
+    /// Send `text` to the agent as the person's message in the conversation
+    /// where the interaction happened, marked with its intent. The answer
+    /// arrives in the conversation like any other.
+    Submit {
+        text: String,
+        intent: Intent,
+    },
+}
+
+/// Why the person submitted text through an interaction rather than writing
+/// a message, as the runtime learns it (`native.intent`).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Intent {
+    /// One of the runtime's own commands, sent verbatim.
+    Command,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum HostReply {
     ModelState(ModelState),
+    Commands(CommandCatalog),
+    /// Core accepted the submission.
+    Submitted,
     Error(String),
 }

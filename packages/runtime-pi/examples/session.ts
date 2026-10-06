@@ -1,7 +1,8 @@
 /** Direct native Pi execution: no Carillon HTTP server or Discord. */
 import { parseArgs } from "node:util";
 import { join, resolve } from "node:path";
-import { createPiRuntime, type RuntimeOperations } from "@carillon/runtime-pi";
+import type { RuntimeOperations } from "@carillon/runtime/operations";
+import { createPiRuntime } from "@carillon/runtime-pi";
 
 /** The same example is exercised with Pi's real adapter and a controlled model in tests. */
 export async function runSessionExample(runtime: RuntimeOperations, resourceRoot: string) {

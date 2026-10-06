@@ -10,15 +10,18 @@ import {
   type ModelQuery,
   type ModelUpdate,
 } from "@carillon/protocol";
-import { diagnostic, displayableExplanation, ExplainedFailure } from "./failure.ts";
+import { diagnostic, displayableExplanation, ExplainedFailure, RuntimeClosed } from "./failure.ts";
 import type { RuntimeOperations, TurnRequest } from "./operations.ts";
-import packageInfo from "../package.json" with { type: "json" };
 
 interface RuntimeServerOptions {
   readonly runtime: RuntimeOperations;
   readonly token: string;
   readonly providerId: string;
-  readonly provider: "pi" | "deterministic-local-substitute";
+  /** The engine behind this runtime, as `/health` names it. */
+  readonly provider: string;
+  /** The runtime's own build version, which core compares with the registry's expectation. */
+  readonly version: string;
+  readonly features: readonly string[];
   readonly workspace: string;
 }
 
@@ -30,8 +33,12 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
       // diagnostic stays in this log. Refusing a caller's request (4xx) is
       // an answer, not a runtime failure.
       const explained = failure instanceof ExplainedFailure;
-      if (!explained || failure.status >= 500) logFailure(request, failure);
       if (response.destroyed) return;
+      if (failure instanceof RuntimeClosed) {
+        writeJson(response, 503, {});
+        return;
+      }
+      if (!explained || failure.status >= 500) logFailure(request, failure);
       const explanation = explained ? displayableExplanation(failure.message) : undefined;
       writeJson(
         response,
@@ -45,9 +52,9 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
       writeJson(response, 200, {
         id: options.providerId,
         role: "runtime",
-        version: packageInfo.version,
+        version: options.version,
         status: "ready",
-        features: ["native-continuations", "native-extensions", "skills"],
+        features: options.features,
         provider: options.provider,
       });
       return;
@@ -132,9 +139,19 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
         writeJson(response, 400, { error: "invalid model update" });
         return;
       }
-      // Not queued behind turns: a running turn resolved its selection when it
-      // started, and the next turn resolves after this change is written.
+      // The runtime decides how a change relates to the turns it runs.
       writeJson(response, 200, await options.runtime.setModel(update));
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/v1/commands") {
+      let query: ModelQuery;
+      try {
+        query = Parse(ModelQuerySchema, Object.fromEntries(url.searchParams));
+      } catch {
+        writeJson(response, 400, { error: "invalid command query" });
+        return;
+      }
+      writeJson(response, 200, await options.runtime.commands(query));
       return;
     }
 
@@ -177,7 +194,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
 
   function unixIdentity(): { readonly uid: number; readonly groups: number[] } {
     if (process.getuid === undefined || process.getgroups === undefined)
-      throw new Error("Carillon Pi runtime requires Unix process identity APIs");
+      throw new Error("Carillon runtimes require Unix process identity APIs");
     return { uid: process.getuid(), groups: process.getgroups() };
   }
 }

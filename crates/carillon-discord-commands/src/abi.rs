@@ -9,7 +9,6 @@ use crate::{
     HostCalls,
     contract::{HostReply, HostRequest, Invocation, Outcome},
 };
-use carillon_protocol::models::ModelState;
 
 thread_local! {
     static INPUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
@@ -65,7 +64,7 @@ pub extern "C" fn invoke() -> u32 {
 struct Provider;
 
 impl HostCalls for Provider {
-    fn call(&mut self, request: HostRequest) -> Result<ModelState, String> {
+    fn call(&mut self, request: HostRequest) -> Result<HostReply, String> {
         let request = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
         let length = call(
             request.as_ptr() as u32,
@@ -79,8 +78,8 @@ impl HostCalls for Provider {
             serde_json::from_slice::<HostReply>(&buffer)
         });
         match reply {
-            Ok(HostReply::ModelState(state)) => Ok(state),
             Ok(HostReply::Error(message)) => Err(message),
+            Ok(reply) => Ok(reply),
             Err(error) => Err(format!("invalid host reply: {error}")),
         }
     }

@@ -40,6 +40,68 @@
         }
       ],
       "tool_calls": 1
+    },
+    {
+      "phase": "queued",
+      "running": [],
+      "recent": [],
+      "tool_calls": 0
+    },
+    {
+      "phase": "waiting",
+      "headline": "Delegated two research tasks.",
+      "running": [],
+      "recent": [],
+      "tool_calls": 2,
+      "work": {
+        "items": [
+          {
+            "id": "node:delegated-task:1",
+            "kind": "delegation",
+            "label": "pong child",
+            "state": "running",
+            "actor": "claude-sonnet-5",
+            "started_at": 1790000100
+          },
+          {
+            "id": "node:delegated-task:2",
+            "kind": "delegation",
+            "label": "grandchild",
+            "state": "waiting",
+            "parent": "node:delegated-task:1"
+          },
+          {
+            "id": "transfer:1",
+            "kind": "handoff",
+            "label": "context handoff to codex",
+            "state": "unknown"
+          },
+          {
+            "id": "fork:1",
+            "kind": "fork",
+            "label": "fork to another thread",
+            "state": "succeeded"
+          },
+          {
+            "id": "report",
+            "kind": "task",
+            "label": "report to this conversation",
+            "state": "queued"
+          }
+        ],
+        "partial": true,
+        "omitted": 3
+      }
+    },
+    {
+      "phase": "model",
+      "running": [],
+      "recent": [],
+      "tool_calls": 0,
+      "work": {
+        "items": [],
+        "partial": false
+      }
     }
   ],
   "invalid_activities": [
@@ -89,6 +151,197 @@
       "phase": "model",
       "running": [],
       "tool_calls": 0
+    },
+    {
+      "phase": "model",
+      "running": [],
+      "recent": [],
+      "tool_calls": 0,
+      "work": {
+        "items": [
+          {
+            "id": "a",
+            "kind": "agent",
+            "label": "x",
+            "state": "running"
+          }
+        ],
+        "partial": false
+      }
+    },
+    {
+      "phase": "model",
+      "running": [],
+      "recent": [],
+      "tool_calls": 0,
+      "work": {
+        "items": [
+          {
+            "id": "a",
+            "kind": "task",
+            "label": "x",
+            "state": "done"
+          }
+        ],
+        "partial": false
+      }
+    },
+    {
+      "phase": "model",
+      "running": [],
+      "recent": [],
+      "tool_calls": 0,
+      "work": {
+        "items": [
+          {
+            "id": "a",
+            "kind": "task",
+            "label": "",
+            "state": "running"
+          }
+        ],
+        "partial": false
+      }
+    },
+    {
+      "phase": "model",
+      "running": [],
+      "recent": [],
+      "tool_calls": 0,
+      "work": {
+        "items": [
+          {
+            "id": "i0",
+            "kind": "task",
+            "label": "x",
+            "state": "running"
+          },
+          {
+            "id": "i1",
+            "kind": "task",
+            "label": "x",
+            "state": "running"
+          },
+          {
+            "id": "i2",
+            "kind": "task",
+            "label": "x",
+            "state": "running"
+          },
+          {
+            "id": "i3",
+            "kind": "task",
+            "label": "x",
+            "state": "running"
+          },
+          {
+            "id": "i4",
+            "kind": "task",
+            "label": "x",
+            "state": "running"
+          },
+          {
+            "id": "i5",
+            "kind": "task",
+            "label": "x",
+            "state": "running"
+          },
+          {
+            "id": "i6",
+            "kind": "task",
+            "label": "x",
+            "state": "running"
+          },
+          {
+            "id": "i7",
+            "kind": "task",
+            "label": "x",
+            "state": "running"
+          },
+          {
+            "id": "i8",
+            "kind": "task",
+            "label": "x",
+            "state": "running"
+          },
+          {
+            "id": "i9",
+            "kind": "task",
+            "label": "x",
+            "state": "running"
+          },
+          {
+            "id": "i10",
+            "kind": "task",
+            "label": "x",
+            "state": "running"
+          },
+          {
+            "id": "i11",
+            "kind": "task",
+            "label": "x",
+            "state": "running"
+          },
+          {
+            "id": "i12",
+            "kind": "task",
+            "label": "x",
+            "state": "running"
+          },
+          {
+            "id": "i13",
+            "kind": "task",
+            "label": "x",
+            "state": "running"
+          },
+          {
+            "id": "i14",
+            "kind": "task",
+            "label": "x",
+            "state": "running"
+          },
+          {
+            "id": "i15",
+            "kind": "task",
+            "label": "x",
+            "state": "running"
+          },
+          {
+            "id": "i16",
+            "kind": "task",
+            "label": "x",
+            "state": "running"
+          }
+        ],
+        "partial": false
+      }
+    },
+    {
+      "phase": "model",
+      "running": [],
+      "recent": [],
+      "tool_calls": 0,
+      "work": {
+        "items": [],
+        "partial": false,
+        "omitted": 0
+      }
+    },
+    {
+      "phase": "model",
+      "running": [],
+      "recent": [],
+      "tool_calls": 0,
+      "work": {
+        "items": []
+      }
+    },
+    {
+      "phase": "model",
+      "running": [],
+      "recent": [],
+      "tool_calls": 0,
+      "work": null
     }
   ]
 }

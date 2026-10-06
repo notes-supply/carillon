@@ -9,10 +9,10 @@ use carillon_discord::{
 };
 use carillon_discord_commands::{
     HostCalls,
-    contract::{HostRequest, InteractionKind, Invocation, Outcome},
+    contract::{HostReply, HostRequest, InteractionKind, Invocation, Outcome},
     handle,
 };
-use carillon_protocol::models::ModelState;
+use carillon_protocol::{model::CommandCatalog, models::ModelState};
 use serde_json::{Value, json};
 
 // A deliberately controlled model-state collaborator, not a second command implementation.
@@ -20,12 +20,13 @@ struct ModelFixture {
     state: ModelState,
 }
 impl HostCalls for ModelFixture {
-    fn call(&mut self, request: HostRequest) -> Result<ModelState, String> {
+    fn call(&mut self, request: HostRequest) -> Result<HostReply, String> {
         match request {
-            HostRequest::ModelState => Ok(self.state.clone()),
-            HostRequest::SetModel { .. } => {
-                Err("This read-only example does not change a model.".to_owned())
+            HostRequest::ModelState => Ok(HostReply::ModelState(self.state.clone())),
+            HostRequest::SetModel { .. } | HostRequest::Submit { .. } => {
+                Err("This read-only example changes and sends nothing.".to_owned())
             }
+            HostRequest::Commands => Ok(HostReply::Commands(CommandCatalog::default())),
         }
     }
 }

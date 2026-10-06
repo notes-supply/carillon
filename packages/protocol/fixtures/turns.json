@@ -53,6 +53,20 @@
           ]
         }
       ]
+    },
+    {
+      "correlation_id": "01a0fc1e-0b7d-7a52-8c11-5e6f7a8b9c0d",
+      "interface_id": "discord-private",
+      "agent_id": "default",
+      "audience_id": "discord-100-300",
+      "input": "",
+      "resource_root": "/home/owner/.carillon/state/resource-snapshots/419ebb9a13f728315bc30ff6cb2523105de7a2da7f0eed72753185fb511cb9c4",
+      "native": {},
+      "attachment_root": "/home/owner/.carillon/state/attachments",
+      "follow_up": {
+        "message": "a-runtime-owned-message-id",
+        "after": 3
+      }
     }
   ],
   "invalid_requests": [

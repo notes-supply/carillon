@@ -1,7 +1,7 @@
 import { isIP } from "node:net";
 
-// Pi starts independently of core, so validate provider endpoints here too:
-// its own bind address, and the interfaces' it hands to extensions.
+// A runtime starts independently of core, so it validates provider endpoints
+// too: its own bind address, and the interfaces' it hands to extensions.
 export function providerAddress(value: string) {
   const url = new URL(value);
   const host = url.hostname.replace(/^\[|\]$/gu, "");

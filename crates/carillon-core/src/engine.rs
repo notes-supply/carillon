@@ -13,7 +13,8 @@ use carillon_protocol::model::{
     StateCounts, TurnInspection, TurnSummary, UnansweredTurn,
 };
 use std::{path::PathBuf, sync::Arc};
-use tokio_util::sync::CancellationToken;
+use tokio::sync::watch;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::warn;
 
 /// Runtime identity and availability, without credentials or a transport implementation.
@@ -72,6 +73,18 @@ Carillon accepted it, so the message was not run";
 const UNREADABLE_ATTACHMENT: &str = "a file attached to that message could not be read, so the \
 message was not run";
 
+/// The two kinds of queued turn, each run by workers of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Lane {
+    /// Turns for the messages people send: each conversation's run one at
+    /// a time, in acceptance order.
+    Messages,
+    /// Turns core queues to carry the report of work a message's turn left
+    /// running. They only read native records and may wait for hours, so
+    /// they run beside messages, never in their place.
+    Observations,
+}
+
 /// A core handle does not spawn workers or initialize any provider.
 /// Clones share the same SQLite authority. The application owns the exclusive worker lifetime.
 #[derive(Clone)]
@@ -79,6 +92,11 @@ pub struct Core {
     pub(crate) database: Database,
     pub(crate) options: CoreOptions,
     pub(crate) intake: Arc<Intake>,
+    /// Marked changed, per lane, whenever this handle may have made a turn
+    /// claimable.
+    work: Arc<[watch::Sender<()>; 2]>,
+    /// Storage work running on Tokio's blocking pool for an async caller.
+    storage: TaskTracker,
 }
 
 impl Core {
@@ -105,7 +123,55 @@ impl Core {
             intake: Arc::new(Intake::new(options.attachments)),
             database,
             options,
+            work: Arc::new([watch::Sender::new(()), watch::Sender::new(())]),
+            storage: TaskTracker::new(),
         }
+    }
+
+    /// Runs storage work that may block on Tokio's blocking pool and waits
+    /// for it to settle: SQLite writes, which wait up to five seconds for
+    /// another writer, and resource snapshots, which read, hash and sync
+    /// files. An async caller's worker thread meanwhile serves other
+    /// requests. Plain reads need not come here: in WAL mode a reader never
+    /// waits for the writer. The work finishes even if the caller stops
+    /// waiting, and its outcome is the database's, as for a synchronous call.
+    /// # Errors
+    /// Returns the work's error, or a storage error if it panicked.
+    pub async fn blocking<T, E>(
+        &self,
+        work: impl FnOnce(&Self) -> Result<T, E> + Send + 'static,
+    ) -> Result<T, E>
+    where
+        T: Send + 'static,
+        E: From<anyhow::Error> + Send + 'static,
+    {
+        let core = self.clone();
+        self.storage
+            .spawn_blocking(move || work(&core))
+            .await
+            .map_err(|error| E::from(anyhow!(error).context("storage work did not finish")))?
+    }
+
+    /// Wait until storage work started for async callers has finished, so
+    /// exclusive ownership can be released with no write still running.
+    pub async fn storage_settled(&self) {
+        self.storage.close();
+        self.storage.wait().await;
+    }
+
+    /// Changes whenever a turn of `lane` may have become claimable through
+    /// this handle or its clones: a message accepted, a message finished,
+    /// which frees its conversation's next one, or an observation queued.
+    /// A worker that finds nothing to claim waits for the next change
+    /// rather than polling; marking the receiver unchanged before each
+    /// claim means no change is missed.
+    #[must_use]
+    pub fn work(&self, lane: Lane) -> watch::Receiver<()> {
+        self.work[lane as usize].subscribe()
+    }
+
+    fn wake(&self, lane: Lane) {
+        self.work[lane as usize].send_replace(());
     }
 
     /// Mark orphaned running turns interrupted, never replaying their input.
@@ -164,17 +230,22 @@ impl Core {
                 "an interface identity is required".to_owned(),
             ));
         }
-        if let Some(receipt) = self
-            .database
-            .event_receipt(&interface.id, &event.event_id)?
-        {
-            return Ok(receipt);
-        }
+        // Capture checks for an earlier acceptance itself.
         if event.attachments.is_some() {
             return self.intake.accept(self, interface, event).await;
         }
-        self.intake.ensure_in_order(&interface.id, event)?;
-        self.commit(interface, event, None)
+        let (interface, event) = (interface.clone(), event.clone());
+        self.blocking(move |core| {
+            if let Some(receipt) = core
+                .database
+                .event_receipt(&interface.id, &event.event_id)?
+            {
+                return Ok(receipt);
+            }
+            core.intake.ensure_in_order(&interface.id, &event)?;
+            core.commit(&interface, &event, None)
+        })
+        .await
     }
 
     /// Record the turn, referencing a published capture of its attachments.
@@ -201,14 +272,18 @@ impl Core {
         };
         let providers =
             serde_json::to_value([interface, &selected]).map_err(anyhow::Error::from)?;
-        Ok(self.database.accept_event(
+        let receipt = self.database.accept_event(
             &interface.id,
             &runtime.id,
             event,
             &providers,
             &resources,
             capture,
-        )?)
+        )?;
+        if !receipt.duplicate {
+            self.wake(Lane::Messages);
+        }
+        Ok(receipt)
     }
 
     /// What core knows about an event of an authenticated interface: its
@@ -267,97 +342,175 @@ impl Core {
             .ok_or_else(|| CoreError::Conflict(format!("runtime provider {id} is not configured")))
     }
 
-    /// Claim and execute one eligible turn through a caller-supplied runtime operation.
-    /// The application must verify local transport prerequisites (such as credentials) before this call.
-    /// Once `stopping` is cancelled no turn is claimed; one already claimed runs to its outcome.
+    /// Claim and run a runtime's oldest claimable turn of `lane` through a
+    /// caller-supplied runtime operation, and record its outcome once.
+    /// The application must verify local transport prerequisites (such as
+    /// credentials) before this call.
+    ///
+    /// A message whose runtime provably never received it is queued again;
+    /// any other failure ends it, never replaying work that may have run.
+    /// An observation dispatches nothing and only reads native records, so
+    /// one that got no answer is asked again too, and its report is
+    /// delivered once, when it completes. A runtime's explained failure, or
+    /// an answer core cannot read, ends it like a message.
+    ///
+    /// Once `stopping` is cancelled no turn is claimed, even by storage work
+    /// that was waiting for the database writer; one already claimed runs to
+    /// its outcome.
     /// # Errors
     /// Returns registry or storage errors. A failed outcome commit leaves the turn running for recovery.
-    pub async fn execute_next(
+    pub async fn run_next(
         &self,
         runtime_id: &str,
+        lane: Lane,
         stopping: &CancellationToken,
         submit: impl AsyncFnOnce(RuntimeTurnRequest) -> Result<RuntimeTurnResponse, TurnFailure>,
     ) -> Result<WorkerStep> {
         if !self.runtime(runtime_id)?.enabled {
             return Ok(WorkerStep::Backoff);
         }
-        let Some(turn) = self.database.claim_turn(runtime_id, stopping)? else {
+        let (runtime, stopping) = (runtime_id.to_owned(), stopping.clone());
+        let Some(turn) = self
+            .blocking(move |core| core.database.claim(&runtime, lane, &stopping))
+            .await?
+        else {
             return Ok(WorkerStep::Idle);
         };
-        if let Err(unusable) = self.check_attachments(&turn).await {
-            let (message, explanation) = match &unusable {
-                Unusable::Altered(message) => (message.clone(), ALTERED_ATTACHMENT),
-                Unusable::Unreadable(error) => (format!("{error:#}"), UNREADABLE_ATTACHMENT),
-            };
-            self.database
-                .interrupt_turn(&turn, &message, Some(explanation))
-                .with_context(|| format!("record unrunnable turn {}", turn.turn_id))?;
-            warn!(turn_id = %turn.turn_id, error = %message, "captured attachment is not usable; turn not run");
-            return Ok(WorkerStep::Advanced);
+        let step = self.run(&turn, submit).await?;
+        // A message that left `running` frees its conversation's next one.
+        if step == WorkerStep::Advanced && turn.follow_up.is_none() {
+            self.wake(Lane::Messages);
         }
-        let limits = &self.options.attachments;
-        let earlier =
-            self.database
-                .unnoted_files(&turn, limits.max_files, limits.max_event_bytes())?;
-        let offered = self.offer(earlier).await?;
-        // The files this turn carries to the runtime: its own and the earlier
-        // turns offered with it, even when none of a turn's files was left.
-        let carried = std::iter::once(turn.turn_id.clone())
-            .chain(offered.iter().map(|earlier| earlier.correlation_id.clone()))
-            .collect::<Vec<_>>();
-        let unanswered = offered
-            .into_iter()
-            .filter(|earlier| !earlier.attachments.is_empty())
-            .collect();
+        Ok(step)
+    }
+
+    async fn run(
+        &self,
+        turn: &ClaimedTurn,
+        submit: impl AsyncFnOnce(RuntimeTurnRequest) -> Result<RuntimeTurnResponse, TurnFailure>,
+    ) -> Result<WorkerStep> {
+        let observation = turn.follow_up.is_some();
+        // An observation carries no files and offers none.
+        let (unanswered, mut carried) = if observation {
+            (Vec::new(), Vec::new())
+        } else {
+            if let Err(unusable) = self.check_attachments(turn).await {
+                let (message, explanation) = match &unusable {
+                    Unusable::Altered(message) => (message.clone(), ALTERED_ATTACHMENT),
+                    Unusable::Unreadable(error) => (format!("{error:#}"), UNREADABLE_ATTACHMENT),
+                };
+                self.interrupt(turn, message.clone(), Some(explanation.to_owned()))
+                    .await
+                    .with_context(|| format!("record unrunnable turn {}", turn.turn_id))?;
+                warn!(turn_id = %turn.turn_id, error = %message, "captured attachment is not usable; turn not run");
+                return Ok(WorkerStep::Advanced);
+            }
+            let limits = &self.options.attachments;
+            let earlier =
+                self.database
+                    .unnoted_files(turn, limits.max_files, limits.max_event_bytes())?;
+            let offered = self.offer(earlier).await?;
+            // The files this turn carries to the runtime: its own, first, and
+            // the earlier turns offered with it, even when none of a turn's
+            // files was left.
+            let carried = std::iter::once(turn.turn_id.clone())
+                .chain(offered.iter().map(|earlier| earlier.correlation_id.clone()))
+                .collect::<Vec<_>>();
+            let unanswered = offered
+                .into_iter()
+                .filter(|earlier| !earlier.attachments.is_empty())
+                .collect();
+            (unanswered, carried)
+        };
         let outcome = async {
-            let request = self.runtime_request(&turn, unanswered);
+            let request = self.runtime_request(turn, unanswered);
             let correlation_id = request.correlation_id.clone();
             let response = submit(request).await?;
             validate_response(&correlation_id, &response)?;
-            self.database
-                .complete_turn(&turn, &response)
-                .map_err(TurnFailure::Uncertain)
+            let answered = (
+                response.follow_up.is_some(),
+                response.unanswered_left,
+                response.attachments_left,
+            );
+            let claimed = turn.clone();
+            self.blocking(move |core| core.database.complete_turn(&claimed, &response))
+                .await
+                .map_err(TurnFailure::Uncertain)?;
+            Ok(answered)
         }
         .await;
         // Each outcome is written once. If that write fails, the turn stays
         // `running`, which blocks only its conversation and is never claimed
-        // again; startup recovery then records it as interrupted.
-        match outcome {
-            Ok(()) => {
+        // again; startup recovery then records it as interrupted, or asks an
+        // observation again.
+        let (error, explanation) = match outcome {
+            Ok((follow_up, unanswered_left, attachments_left)) => {
+                if follow_up {
+                    self.wake(Lane::Observations);
+                }
                 // An answered turn's conversation was saved with everything
-                // it carried. Should recording that fail, the files are
-                // offered again and the runtime skips those it holds.
-                if let Err(error) = self.database.mark_noted(&carried) {
+                // it carried: its own files and the earlier ones, unless its
+                // runtime left either for a later turn. Should recording that
+                // fail, the files are offered again and the runtime skips
+                // those it holds.
+                if unanswered_left {
+                    carried.truncate(1);
+                }
+                if attachments_left {
+                    carried.retain(|carried| *carried != turn.turn_id);
+                }
+                if !carried.is_empty()
+                    && let Err(error) = self
+                        .blocking(move |core| core.database.mark_noted(&carried))
+                        .await
+                {
                     warn!(turn_id = %turn.turn_id, %error, "attachments carried by an answered turn were not recorded as noted");
                 }
-                Ok(WorkerStep::Advanced)
+                return Ok(WorkerStep::Advanced);
             }
-            Err(TurnFailure::Retry(failure)) => {
-                self.database
-                    .requeue_turn(&turn)
-                    .with_context(|| format!("requeue turn {}", turn.turn_id))?;
-                warn!(turn_id = %turn.turn_id, error = %failure, "runtime was unavailable; turn requeued");
-                Ok(WorkerStep::Backoff)
+            Err(TurnFailure::Retry(failure)) => return self.requeue(turn, &failure).await,
+            Err(TurnFailure::Unanswered(failure)) if observation => {
+                return self.requeue(turn, &failure).await;
             }
-            Err(TurnFailure::Uncertain(failure)) => {
-                let message = failure.to_string();
-                self.database
-                    .interrupt_turn(&turn, &message, None)
-                    .with_context(|| {
-                        format!("record uncertain outcome of turn {}", turn.turn_id)
-                    })?;
-                warn!(turn_id = %turn.turn_id, error = %message, "runtime outcome is uncertain");
-                Ok(WorkerStep::Advanced)
+            Err(TurnFailure::Uncertain(failure) | TurnFailure::Unanswered(failure)) => {
+                (failure.to_string(), None)
             }
-            Err(TurnFailure::Explained(explanation)) => {
-                let message = format!("runtime reported failure: {explanation}");
-                self.database
-                    .interrupt_turn(&turn, &message, Some(&explanation))
-                    .with_context(|| format!("record failure of turn {}", turn.turn_id))?;
-                warn!(turn_id = %turn.turn_id, error = %message, "runtime reported failure");
-                Ok(WorkerStep::Advanced)
-            }
-        }
+            Err(TurnFailure::Explained(explanation)) => (
+                format!("runtime reported failure: {explanation}"),
+                Some(explanation),
+            ),
+        };
+        self.interrupt(turn, error.clone(), explanation)
+            .await
+            .with_context(|| format!("record failure of turn {}", turn.turn_id))?;
+        warn!(turn_id = %turn.turn_id, observation, %error, "turn did not complete");
+        Ok(WorkerStep::Advanced)
+    }
+
+    /// Records that a claimed turn did not complete; see [`Database::interrupt_turn`].
+    async fn interrupt(
+        &self,
+        turn: &ClaimedTurn,
+        error: String,
+        explanation: Option<String>,
+    ) -> Result<()> {
+        let turn = turn.clone();
+        self.blocking(move |core| {
+            core.database
+                .interrupt_turn(&turn, &error, explanation.as_deref())
+        })
+        .await
+    }
+
+    /// Returns a turn whose runtime gave no answer to the queue, for its
+    /// worker to claim again after backing off.
+    async fn requeue(&self, turn: &ClaimedTurn, failure: &anyhow::Error) -> Result<WorkerStep> {
+        let claimed = turn.clone();
+        self.blocking(move |core| core.database.requeue_turn(&claimed))
+            .await
+            .with_context(|| format!("requeue turn {}", turn.turn_id))?;
+        warn!(turn_id = %turn.turn_id, error = %failure, "runtime gave no answer; turn queued again");
+        Ok(WorkerStep::Backoff)
     }
 
     /// Claim pending output for an authenticated interface process instance.
@@ -465,6 +618,7 @@ impl Core {
             audience_id: turn.audience_id.clone(),
             input: turn.input.clone(),
             native: turn.native.clone(),
+            follow_up: turn.follow_up.clone(),
             resource_root: resources::root(&self.snapshot_store(), &turn.resource_snapshot_id)
                 .display()
                 .to_string(),
@@ -550,6 +704,15 @@ impl Core {
                     .to_owned(),
             ));
         }
+        if event
+            .event_id
+            .starts_with(crate::db::FOLLOW_UP_EVENT_PREFIX)
+        {
+            return Err(CoreError::InvalidInput(format!(
+                "event identities starting {} are reserved for core",
+                crate::db::FOLLOW_UP_EVENT_PREFIX
+            )));
+        }
         if event.agent_id != self.options.agent_id {
             return Err(CoreError::InvalidInput("unknown agent".to_owned()));
         }
@@ -571,6 +734,10 @@ pub enum WorkerStep {
 pub enum TurnFailure {
     /// The runtime provably never received the turn; running it again is safe.
     Retry(anyhow::Error),
+    /// The request may have reached the runtime, but no answer arrived: the
+    /// connection was lost or timed out. A message is treated as
+    /// `Uncertain`; an observation, which only reads, is asked again.
+    Unanswered(anyhow::Error),
     /// Model work may have run; it must not be automatically replayed.
     Uncertain(anyhow::Error),
     /// The runtime reported that the turn failed, explaining why in words

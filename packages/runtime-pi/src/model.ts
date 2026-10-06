@@ -18,8 +18,9 @@ import {
   type ScopeState,
 } from "@carillon/protocol";
 import { Parse } from "typebox/value";
-import { ExplainedFailure } from "./failure.ts";
-import { Serial } from "./serial.ts";
+import { ExplainedFailure } from "@carillon/runtime/failure";
+import { resolved, validated } from "@carillon/runtime/models";
+import { Serial } from "@carillon/runtime/serial";
 
 const LedgerSchema = Type.Object({
   agents: Type.Array(Type.Object({ agent_id: Type.String(), selection: SelectionSchema })),
@@ -227,49 +228,6 @@ function sameConversation(
     entry.agent_id === query.agent_id &&
     entry.audience_id === query.audience_id
   );
-}
-
-function offered(available: readonly AvailableModel[], selection: Selection) {
-  return available.find(
-    (candidate) => candidate.provider === selection.provider && candidate.model === selection.model,
-  );
-}
-
-/**
- * The selection as it runs: every option the model supports, with the chosen
- * value where it is still supported and the model's default elsewhere. A
- * model the catalogue no longer offers is returned as chosen; a turn on it
- * fails rather than substituting another model.
- */
-export function resolved(available: readonly AvailableModel[], selection: Selection): Selection {
-  const model = offered(available, selection);
-  if (model === undefined) return selection;
-  const options: Record<string, string> = {};
-  for (const option of model.options) {
-    const choice = selection.options?.[option.id];
-    options[option.id] =
-      choice !== undefined && option.choices.includes(choice) ? choice : option.default;
-  }
-  return { provider: model.provider, model: model.model, options };
-}
-
-/** A selection the catalog supports, with unset options omitted. */
-function validated(available: readonly AvailableModel[], selection: Selection): Selection {
-  const model = offered(available, selection);
-  if (model === undefined) throw new ExplainedFailure(422, "That model is not available.");
-  const options: Record<string, string> = {};
-  for (const [id, choice] of Object.entries(selection.options ?? {})) {
-    const option = model.options.find((candidate) => candidate.id === id);
-    if (option === undefined)
-      throw new ExplainedFailure(422, `${model.name} has no ${id} setting.`);
-    if (!option.choices.includes(choice))
-      throw new ExplainedFailure(
-        422,
-        `${choice} is not a ${option.name} setting ${model.name} supports.`,
-      );
-    options[id] = choice;
-  }
-  return { provider: model.provider, model: model.model, options };
 }
 
 async function readLedger(path: string): Promise<Ledger> {

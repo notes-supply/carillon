@@ -18,7 +18,7 @@ An operator can:
 2. configure a private Discord guild, allowlisted users, and explicit channel routes;
 3. converse through Pi with channel- or thread-scoped continuity, including files and images attached to messages;
 4. use Pi-native tools, extensions, and skills with the owner's Unix authority, and follow what a running turn is doing in a temporary Discord message;
-5. choose the model and its engine settings for the agent or for one conversation with `/model` in Discord;
+5. choose the model and its engine settings for the agent or for one conversation with `/model` in Discord, and run the runtime's own commands and skills in a conversation with `/command`;
 6. restart the Discord or Pi provider independently, and install or reset Discord's command module without restarting it, keeping an installed module across restarts and updates;
 7. inspect recent turns and current provider/resource identity; and
 8. back up and restore the stopped installation.
@@ -52,7 +52,7 @@ A running turn whose outcome can no longer be proved, or that the runtime report
 
 ### Activity visibility
 
-While a turn is queued or running, its Discord conversation shows a temporary card after a short delay: the current operation with its relevant target (a Bash command's first line, a file path, a search pattern, a Discord action and target), a few recent calls, and a phase label when no call runs. Rapid work updates the card at most every three seconds and only when it changes. It never shows tool output, full scripts or private reasoning; redaction of what it does show is best-effort. The card is removed once a completed turn's answer is delivered and otherwise says honestly how the turn ended. Delivery of the answer never depends on the card.
+While a turn is queued or running, its Discord conversation shows a temporary card after a short delay: the current operation with its relevant target (a Bash command's first line, a file path, a search pattern, a Discord action and target), a few recent calls, and a phase label when no call runs. Rapid work updates the card at most every three seconds and only when it changes. When the runtime runs child agents, hands the conversation's context to another model or forks it, the card lists that work too, with the state the runtime last confirmed and an honest note when it cannot see all of it. Work an answer started keeps its card after the answer is delivered, until the runtime has reported it. It never shows tool output, prompts, full scripts or private reasoning; redaction of what it does show is best-effort. The card is removed once a completed turn's answer is delivered and otherwise says honestly how the turn ended. Delivery of the answer never depends on the card.
 
 ### Runtime ownership
 

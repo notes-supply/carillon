@@ -149,6 +149,7 @@ fn default_providers(
             url: format!("http://127.0.0.1:{}", checked_port(base_port, 1)?),
             token_hash: hash_token(discord_token),
             enabled: true,
+            parallel_turns: None,
         },
         Provider {
             id: "runtime-pi".to_owned(),
@@ -157,6 +158,7 @@ fn default_providers(
             url: format!("http://127.0.0.1:{}", checked_port(base_port, 2)?),
             token_hash: hash_token(runtime_token),
             enabled: true,
+            parallel_turns: None,
         },
     ])
 }
@@ -524,6 +526,7 @@ mod tests {
     use carillon_installation::config::{Config, LoadedConfig, ProviderRole, RELEASE_VERSION};
 
     use super::{backup, initialize, restore, set_provider};
+    use crate::Lane;
 
     fn initialize_test_installation(
         root: &Path,
@@ -532,6 +535,11 @@ mod tests {
     ) -> Result<PathBuf> {
         initialize(root, workspace, base_port)
     }
+
+    /// A base port for backups that must find their services stopped, away
+    /// from 44800-44842, where the install, maintenance and operations tests
+    /// run real services by default.
+    const OFFLINE_BACKUP_PORT: u16 = 45_400;
 
     #[test]
     fn configuration_edits_preserve_unrelated_temporary_siblings() -> Result<()> {
@@ -898,7 +906,8 @@ mod tests {
         ] {
             let directory = tempdir()?;
             let source = directory.path().join("source");
-            let config_path = initialize_test_installation(&source, directory.path(), 44_800)?;
+            let config_path =
+                initialize_test_installation(&source, directory.path(), OFFLINE_BACKUP_PORT)?;
             let valid = directory.path().join("valid.tar.gz");
             backup(&LoadedConfig::load(&config_path)?, &valid)?;
             let database = source.join("state/carillon.sqlite3");
@@ -1003,7 +1012,8 @@ mod tests {
             for damage in ["missing", "content", "executable", "address", "malformed"] {
                 let directory = tempdir()?;
                 let source = directory.path().join("source");
-                let config_path = initialize_test_installation(&source, directory.path(), 44_800)?;
+                let config_path =
+                    initialize_test_installation(&source, directory.path(), OFFLINE_BACKUP_PORT)?;
                 let config = LoadedConfig::load(&config_path)?;
                 let store = config.value.data_dir.join("resource-snapshots");
                 let snapshot = resources::materialize(&config.value.agent.resource_root, &store)?;
@@ -1029,7 +1039,7 @@ mod tests {
                 )?;
                 let expected_state = if uncertain {
                     assert!(
-                        db.claim_turn("runtime-pi", &CancellationToken::new())?
+                        db.claim("runtime-pi", Lane::Messages, &CancellationToken::new())?
                             .is_some()
                     );
                     assert_eq!(db.recover_running_turns()?, 1);
@@ -1176,12 +1186,20 @@ mod tests {
                 .await?;
             turns.push(receipt.turn_id);
         }
-        core.execute_next("runtime-pi", &CancellationToken::new(), async |request| {
-            Ok(RuntimeTurnResponse {
-                output: "read it".to_owned(),
-                correlation_id: request.correlation_id,
-            })
-        })
+        core.run_next(
+            "runtime-pi",
+            Lane::Messages,
+            &CancellationToken::new(),
+            async |request| {
+                Ok(RuntimeTurnResponse {
+                    output: "read it".to_owned(),
+                    follow_up: None,
+                    unanswered_left: false,
+                    attachments_left: false,
+                    correlation_id: request.correlation_id,
+                })
+            },
+        )
         .await?;
         // Scratch the archive must not carry: interface staging still in
         // place, an abandoned copy and a published capture never committed.
@@ -1220,20 +1238,28 @@ mod tests {
         let restored = LoadedConfig::load(&restore(&archive, &relocated)?)?;
         let restored_core = installed_core(&restored)?;
         restored_core
-            .execute_next("runtime-pi", &CancellationToken::new(), async |request| {
-                assert_eq!(request.correlation_id, turns[1]);
-                let root = std::path::Path::new(&request.attachment_root);
-                assert!(root.starts_with(&relocated), "{}", root.display());
-                assert_eq!(
-                    fs::read(root.join(&request.attachments[0].path))
-                        .map_err(|error| crate::TurnFailure::Uncertain(error.into()))?,
-                    b"queued file"
-                );
-                Ok(RuntimeTurnResponse {
-                    output: "read it".to_owned(),
-                    correlation_id: request.correlation_id,
-                })
-            })
+            .run_next(
+                "runtime-pi",
+                Lane::Messages,
+                &CancellationToken::new(),
+                async |request| {
+                    assert_eq!(request.correlation_id, turns[1]);
+                    let root = std::path::Path::new(&request.attachment_root);
+                    assert!(root.starts_with(&relocated), "{}", root.display());
+                    assert_eq!(
+                        fs::read(root.join(&request.attachments[0].path))
+                            .map_err(|error| crate::TurnFailure::Uncertain(error.into()))?,
+                        b"queued file"
+                    );
+                    Ok(RuntimeTurnResponse {
+                        output: "read it".to_owned(),
+                        follow_up: None,
+                        unanswered_left: false,
+                        attachments_left: false,
+                        correlation_id: request.correlation_id,
+                    })
+                },
+            )
             .await?;
 
         // Damaged archives are refused before publication.

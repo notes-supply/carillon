@@ -1,0 +1,24 @@
+[Unit]
+Description=Carillon T3 runtime adapter (optional; enable only with a configured runtime-t3 provider)
+After=network-online.target
+Wants=network-online.target
+PartOf=carillon.target
+
+[Service]
+Type=simple
+WorkingDirectory=@OWNER_HOME@
+Environment="HOME=@OWNER_HOME@"
+Environment="USER=@OWNER@"
+Environment="LOGNAME=@OWNER@"
+Environment="SHELL=@OWNER_SHELL@"
+Environment="PATH=@OWNER_PATH@"
+Environment="CARILLON_HOME=@CARILLON_HOME@"
+ExecStart="@CARILLON_HOME@/app/bin/carillon-runtime-t3" --config "@CARILLON_HOME@/carillon.toml" --provider runtime-t3 --token-file "@CARILLON_HOME@/credentials/runtime-t3.token"
+Restart=on-failure
+RestartSec=2s
+UMask=0077
+StandardOutput=append:@CARILLON_HOME@/logs/runtime-t3.log
+StandardError=append:@CARILLON_HOME@/logs/runtime-t3.log
+
+[Install]
+WantedBy=carillon.target

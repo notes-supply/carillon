@@ -42,6 +42,7 @@ fn installation(root: &Path) -> Result<AppState> {
             url: format!("http://127.0.0.1:{}", index + 2),
             token_hash: hash_token("test-only"),
             enabled: true,
+            parallel_turns: None,
         })
     })
     .collect::<Result<Vec<_>>>()?;
@@ -94,9 +95,29 @@ async fn run_next_turn(
         RuntimeTurnRequest,
     ) -> Result<RuntimeTurnResponse, TurnFailure>,
 ) -> Result<WorkerStep> {
-    super::run_next_turn(
+    super::run_next(
         &configured(state),
         runtime_id,
+        Lane::Messages,
+        &CancellationToken::new(),
+        submit,
+    )
+    .await
+}
+
+async fn run_next_observation(
+    state: &AppState,
+    runtime_id: &str,
+    submit: impl AsyncFnOnce(
+        &Provider,
+        &str,
+        RuntimeTurnRequest,
+    ) -> Result<RuntimeTurnResponse, TurnFailure>,
+) -> Result<WorkerStep> {
+    super::run_next(
+        &configured(state),
+        runtime_id,
+        Lane::Observations,
         &CancellationToken::new(),
         submit,
     )
@@ -134,6 +155,9 @@ fn completed(request: RuntimeTurnRequest) -> RuntimeTurnResponse {
     RuntimeTurnResponse {
         correlation_id: request.correlation_id,
         output: format!("reply to {}", request.input),
+        follow_up: None,
+        unanswered_left: false,
+        attachments_left: false,
     }
 }
 
@@ -175,6 +199,21 @@ fn configuration_rejects_malformed_provider_endpoints_before_startup() -> Result
             LoadedConfig::load(&path)?;
         }
         state.config.value.providers[index].url = original;
+    }
+    // Concurrent conversations are a bounded runtime setting.
+    for index in 0..state.config.value.providers.len() {
+        let runtime = state.config.value.providers[index].role == ProviderRole::Runtime;
+        for (parallel, valid) in [(0, false), (1, runtime), (16, runtime), (17, false)] {
+            state.config.value.providers[index].parallel_turns = Some(parallel);
+            fs::write(&path, toml::to_string(&state.config.value)?)?;
+            assert_eq!(
+                LoadedConfig::load(&path).is_ok(),
+                valid,
+                "parallel_turns {parallel} on {:?}",
+                state.config.value.providers[index].role
+            );
+        }
+        state.config.value.providers[index].parallel_turns = None;
     }
     state.config.value.core.listen.set_port(0);
     fs::write(&path, toml::to_string(&state.config.value)?)?;
@@ -378,7 +417,22 @@ fn fake_runtime(
         headers.get(http::header::AUTHORIZATION)?.to_str().ok()
     }
     let recorded = sent.clone();
-    Router::new().route(
+    let listed = sent.clone();
+    Router::new()
+        .route(
+            "/v1/commands",
+            get(
+                move |headers: HeaderMap,
+                      Query(query): Query<std::collections::HashMap<String, String>>| {
+                    let sent = listed.clone();
+                    async move {
+                        let _ = sent.send((id, json!({"auth": bearer(&headers), "query": query})));
+                        Json(json!({"runtime": id, "commands": [{"name": "compact"}]}))
+                    }
+                },
+            ),
+        )
+        .route(
         "/v1/model",
         get(
             move |headers: HeaderMap,
@@ -458,6 +512,7 @@ async fn model_call(
 
     let router = Router::new()
         .route("/v1/model", get(model_state).put(set_model))
+        .route("/v1/commands", get(commands))
         .with_state(configured(state));
     let mut request = Request::builder()
         .method(method)
@@ -537,6 +592,41 @@ async fn model_calls_follow_conversation_ownership() -> Result<()> {
 }
 
 #[tokio::test]
+async fn command_catalogues_come_from_the_conversation_runtime() -> Result<()> {
+    let directory = tempdir()?;
+    let (state, mut received, mut services) = model_fixture(directory.path()).await?;
+    let (status, _) = model_call(
+        &state,
+        "GET",
+        "/v1/commands?agent_id=test-agent&audience_id=pinned",
+        false,
+        None,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(received.try_recv().is_err());
+    let (status, body) = model_call(
+        &state,
+        "GET",
+        "/v1/commands?agent_id=test-agent&audience_id=pinned",
+        true,
+        None,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["runtime"], "test-runtime");
+    assert_eq!(body["commands"], json!([{"name": "compact"}]));
+    let (called, call) = received.try_recv()?;
+    assert_eq!(called, "test-runtime");
+    assert_eq!(
+        call["query"],
+        json!({"interface_id": "test-interface", "agent_id": "test-agent", "audience_id": "pinned"})
+    );
+    services.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn model_calls_describe_unavailable_runtimes_for_people() -> Result<()> {
     let directory = tempdir()?;
     let (mut state, mut received, mut services) = model_fixture(directory.path()).await?;
@@ -568,7 +658,7 @@ async fn occupied_listener_leaves_accepted_and_running_work_untouched() -> Resul
     state
         .core
         .database
-        .claim_turn("test-runtime", &CancellationToken::new())?
+        .claim("test-runtime", Lane::Messages, &CancellationToken::new())?
         .context("missing running turn")?;
     let queued = accept(&state, "queued", "other").await?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -822,6 +912,326 @@ async fn duplicate_events_share_one_accepted_turn_without_reexecution() -> Resul
 }
 
 #[tokio::test]
+async fn follow_up_turns_carry_only_the_runtime_cursor_beside_later_messages() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    let first = accept(&state, "one", "conversation").await?;
+    let cursor = serde_json::json!({"message": "native-message", "after": 1});
+    let answered = cursor.clone();
+    run_next_turn(&state, "test-runtime", async move |_, _, request| {
+        Ok(RuntimeTurnResponse {
+            follow_up: Some(answered),
+            unanswered_left: false,
+            attachments_left: false,
+            ..completed(request)
+        })
+    })
+    .await?;
+    let delivery = state
+        .core
+        .database
+        .claim_delivery("test-interface", "instance")?
+        .context("missing reply")?;
+    assert_eq!(delivery.turn_id, first.turn_id);
+    state.core.database.acknowledge_delivery(
+        "test-interface",
+        delivery.id,
+        "instance",
+        DeliveryOutcome::Delivered,
+        None,
+    )?;
+    // The report is observed in its own lane: a later message of the same
+    // conversation runs meanwhile, while its executable lane ignores it.
+    let later = accept(&state, "two", "conversation").await?;
+    run_next_turn(&state, "test-runtime", async move |_, _, request| {
+        assert!(request.follow_up.is_none());
+        Ok(completed(request))
+    })
+    .await?;
+    assert_eq!(
+        state
+            .core
+            .database
+            .inspect_turn(&later.turn_id)?
+            .context("later turn missing")?
+            .state,
+        TurnState::Completed
+    );
+    // A lost answer only asks again: the observation reads, it does not run work.
+    run_next_observation(&state, "test-runtime", async move |_, _, _| {
+        Err(TurnFailure::Unanswered(anyhow!("connection reset")))
+    })
+    .await?;
+    // The observation runs with the cursor, no input and no files of its own.
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    let record = seen.clone();
+    run_next_observation(&state, "test-runtime", async move |_, _, request| {
+        *record
+            .lock()
+            .map_err(|_| TurnFailure::Uncertain(anyhow!("poisoned")))? = Some(request.clone());
+        Ok(RuntimeTurnResponse {
+            correlation_id: request.correlation_id,
+            output: "the report".to_owned(),
+            follow_up: None,
+            unanswered_left: false,
+            attachments_left: false,
+        })
+    })
+    .await?;
+    let request = seen
+        .lock()
+        .map_err(|_| anyhow!("poisoned"))?
+        .clone()
+        .context("follow-up turn did not run")?;
+    assert_ne!(request.correlation_id, first.turn_id);
+    assert_eq!(request.input, "");
+    assert_eq!(request.audience_id, "conversation");
+    assert_eq!(request.follow_up, Some(cursor));
+    assert_eq!(request.native, serde_json::json!({}));
+    assert!(request.attachments.is_empty() && request.unanswered.is_empty());
+    let mut contents = Vec::new();
+    while let Some(delivery) = state
+        .core
+        .database
+        .claim_delivery("test-interface", "instance")?
+    {
+        state.core.database.acknowledge_delivery(
+            "test-interface",
+            delivery.id,
+            "instance",
+            DeliveryOutcome::Delivered,
+            None,
+        )?;
+        contents.push(delivery.content);
+    }
+    assert_eq!(
+        contents
+            .iter()
+            .filter(|content| *content == "the report")
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_observation_the_runtime_fails_without_explanation_ends() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    // An answer the runtime fails without explanation ends an observation
+    // like any turn, rather than being asked forever.
+    let third = accept(&state, "three", "elsewhere").await?;
+    let cursor = serde_json::json!({"message": "native-message", "after": 2});
+    run_next_turn(&state, "test-runtime", async move |_, _, request| {
+        Ok(RuntimeTurnResponse {
+            follow_up: Some(cursor),
+            unanswered_left: false,
+            attachments_left: false,
+            ..completed(request)
+        })
+    })
+    .await?;
+    run_next_observation(&state, "test-runtime", async move |_, _, _| {
+        Err(TurnFailure::Uncertain(anyhow!("runtime failed with 500")))
+    })
+    .await?;
+    let recent = state
+        .core
+        .recent_turns(Some(&format!("follow-up:{}", third.turn_id)), 1)?;
+    assert_eq!(
+        recent.first().map(|turn| turn.state),
+        Some(TurnState::Interrupted)
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_interface_cannot_pose_as_cores_follow_up() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    let mut headers = HeaderMap::new();
+    headers.insert(PROVIDER_HEADER, "test-interface".parse()?);
+    headers.insert(
+        http::header::AUTHORIZATION,
+        format!("Bearer {}", state.config.credential("test-interface")?).parse()?,
+    );
+    let native = serde_json::json!({ "follow_up": {"message": "x", "after": 0} });
+    let _receipt = accept_event(
+        State(configured(&state)),
+        headers,
+        Json(ExternalEvent {
+            event_id: "forged".to_owned(),
+            agent_id: state.config.value.agent.id.clone(),
+            user_id: "test-user".to_owned(),
+            audience_id: "conversation".to_owned(),
+            delivery_target_id: "test-destination".to_owned(),
+            feedback_target_id: "test-feedback".to_owned(),
+            content: "hello".to_owned(),
+            native: native.clone(),
+            attachments: None,
+        }),
+    )
+    .await
+    .map_err(|error| anyhow!(error.message))?;
+    // Native data is the interface's own: the event is a message like any
+    // other, never an observation, and carries no cursor.
+    assert_eq!(
+        run_next_observation(&state, "test-runtime", async |_, _, _| {
+            Err(TurnFailure::Uncertain(anyhow!("ran as an observation")))
+        })
+        .await?,
+        WorkerStep::Idle
+    );
+    run_next_turn(&state, "test-runtime", async move |_, _, request| {
+        assert_eq!(
+            (request.native.clone(), request.follow_up.clone()),
+            (native, None)
+        );
+        Ok(completed(request))
+    })
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn workers_hear_of_claimable_turns_in_their_own_lane() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    let mut messages = state.core.work(Lane::Messages);
+    let mut observations = state.core.work(Lane::Observations);
+    let mut changed = || {
+        let seen = (messages.has_changed().ok(), observations.has_changed().ok());
+        messages.mark_unchanged();
+        observations.mark_unchanged();
+        seen
+    };
+    accept(&state, "one", "conversation").await?;
+    assert_eq!(changed(), (Some(true), Some(false)));
+    // A turn the runtime never received waits for its own worker's backoff;
+    // waking the others would ask a down runtime in a tight loop.
+    run_next_turn(&state, "test-runtime", async |_, _, _| {
+        Err(TurnFailure::Retry(anyhow!("connection refused")))
+    })
+    .await?;
+    assert_eq!(changed(), (Some(false), Some(false)));
+    // A finished message frees its conversation's next one, and its cursor
+    // queues an observation.
+    run_next_turn(&state, "test-runtime", async |_, _, request| {
+        Ok(RuntimeTurnResponse {
+            follow_up: Some(serde_json::json!({"message": "m", "after": 1})),
+            unanswered_left: false,
+            attachments_left: false,
+            ..completed(request)
+        })
+    })
+    .await?;
+    assert_eq!(changed(), (Some(true), Some(true)));
+    // An observation holds back no message.
+    run_next_observation(&state, "test-runtime", async |_, _, request| {
+        Ok(completed(request))
+    })
+    .await?;
+    assert_eq!(changed(), (Some(false), Some(false)));
+    Ok(())
+}
+
+/// An interface may name its events anything but the identities core gives
+/// its own follow-up observations; otherwise one sent after a parent's
+/// receipt would make the parent's completion fail, losing its answer.
+#[tokio::test]
+async fn an_interface_cannot_take_a_follow_up_identity_from_a_parent_turn() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    let parent = accept(&state, "parent", "conversation").await?;
+    let internal = format!("follow-up:{}", parent.turn_id);
+    let claimed = accept(&state, &internal, "conversation").await;
+    let step = run_next_turn(&state, "test-runtime", async |_, _, request| {
+        Ok(RuntimeTurnResponse {
+            follow_up: Some(json!({"after": 1})),
+            ..completed(request)
+        })
+    })
+    .await;
+    // The parent completed with its answer, and its observation is queued.
+    assert!(step.is_ok(), "{step:?}");
+    let inspection = state
+        .core
+        .inspect_turn(&parent.turn_id)?
+        .context("missing parent")?;
+    assert_eq!(inspection.state, TurnState::Completed);
+    assert_eq!(inspection.output.as_deref(), Some("reply to parent"));
+    let observation = state
+        .core
+        .database
+        .event_receipt("test-interface", &internal)?
+        .context("missing observation")?;
+    assert_eq!(observation.state, TurnState::Queued);
+    assert_ne!(observation.turn_id, parent.turn_id);
+    // The interface's event was refused at admission, before anything was recorded.
+    let refusal = claimed
+        .err()
+        .context("an interface took a follow-up identity")?;
+    assert!(refusal.to_string().contains("reserved"), "{refusal}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_workers_progress_other_conversations_and_keep_each_in_order() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    let first = accept(&state, "a1", "conversation-a").await?;
+    let second = accept(&state, "a2", "conversation-a").await?;
+    let other = accept(&state, "b1", "conversation-b").await?;
+    // One worker holds conversation A's first turn running.
+    let (release, held) = tokio::sync::oneshot::channel::<()>();
+    let (started, running) = tokio::sync::oneshot::channel::<String>();
+    let worker = configured(&state);
+    let long = tokio::spawn(async move {
+        super::run_next(
+            &worker,
+            "test-runtime",
+            Lane::Messages,
+            &CancellationToken::new(),
+            async move |_, _, request| {
+                let _ = started.send(request.correlation_id.clone());
+                let _ = held.await;
+                Ok(completed(request))
+            },
+        )
+        .await
+    });
+    assert_eq!(running.await?, first.turn_id);
+    // Another worker meanwhile runs the other conversation's turn, never A's next one.
+    let mut ran = Vec::new();
+    let step = run_next_turn(&state, "test-runtime", async |_, _, request| {
+        ran.push(request.correlation_id.clone());
+        Ok(completed(request))
+    })
+    .await?;
+    assert_eq!(step, WorkerStep::Advanced);
+    assert_eq!(ran, std::slice::from_ref(&other.turn_id));
+    assert_eq!(
+        run_next_turn(&state, "test-runtime", async |_, _, _| {
+            Err(TurnFailure::Uncertain(anyhow!(
+                "A's next turn ran beside its first"
+            )))
+        })
+        .await?,
+        WorkerStep::Idle
+    );
+    let _ = release.send(());
+    assert_eq!(long.await??, WorkerStep::Advanced);
+    run_next_turn(&state, "test-runtime", async |_, _, request| {
+        ran.push(request.correlation_id.clone());
+        Ok(completed(request))
+    })
+    .await?;
+    assert_eq!(ran, [other.turn_id, second.turn_id]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn missing_resource_root_refuses_new_acceptance_without_losing_receipts() -> Result<()> {
     let directory = tempdir()?;
     let state = installation(directory.path())?;
@@ -1019,7 +1429,7 @@ async fn startup_drains_queued_nondefault_runtime_without_replaying_running_work
     state
         .core
         .database
-        .claim_turn("test-runtime", &CancellationToken::new())?
+        .claim("test-runtime", Lane::Messages, &CancellationToken::new())?
         .context("missing claim")?;
     let blocked = accept(&state, "successor", "blocked").await?;
     let queued = accept(&state, "queued", "old-conversation").await?;
@@ -1234,6 +1644,7 @@ async fn a_stopping_worker_settles_its_turn_and_claims_no_other() -> Result<()> 
     let worker = tokio::spawn(runtime_worker(
         configured(&state),
         "test-runtime".to_owned(),
+        Lane::Messages,
         stopping.clone(),
     ));
     tokio::time::timeout(Duration::from_secs(5), called.notified()).await?;
@@ -1281,11 +1692,12 @@ async fn a_claim_waiting_for_the_database_writer_is_not_made_once_stopping() -> 
     let writer = rusqlite::Connection::open(state.config.value.data_dir.join("carillon.sqlite3"))?;
     writer.execute_batch("BEGIN IMMEDIATE")?;
     // The worker reads its runtime credential after checking whether core is
-    // stopping, with no await before it claims; read from a FIFO, it waits
-    // for the test. Opening the FIFO thus shows the worker is past that
-    // check, and the held writer keeps it from claiming until the test
-    // releases the writer after shutdown has begun. The test does not observe
-    // whether the worker has already reached its wait for the writer.
+    // stopping, and checks nothing more before its storage work claims; read
+    // from a FIFO, it waits for the test. Opening the FIFO thus shows the
+    // worker is past that check, and the held writer keeps the claim from
+    // being made until the test releases the writer after shutdown has
+    // begun. The test does not observe whether that storage work has already
+    // reached its wait for the writer.
     let credential = directory.path().join("credentials/test-runtime.token");
     fs::remove_file(&credential)?;
     rustix::fs::mknodat(
@@ -1299,6 +1711,7 @@ async fn a_claim_waiting_for_the_database_writer_is_not_made_once_stopping() -> 
     let worker = tokio::spawn(runtime_worker(
         configured(&state),
         "test-runtime".to_owned(),
+        Lane::Messages,
         stopping.clone(),
     ));
     let mut fifo =
@@ -1561,6 +1974,9 @@ async fn empty_runtime_output_interrupts_without_empty_delivery_or_replay() -> R
                         " \t\n"
                     }
                     .to_owned(),
+                    follow_up: None,
+                    unanswered_left: false,
+                    attachments_left: false,
                 })
             }
         }),
@@ -1626,6 +2042,38 @@ async fn empty_runtime_output_interrupts_without_empty_delivery_or_replay() -> R
 }
 
 #[tokio::test]
+async fn a_closing_runtime_gives_no_answer_rather_than_a_failure() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    accept(&state, "one", "conversation").await?;
+    let turn = state
+        .core
+        .database
+        .claim("test-runtime", Lane::Messages, &CancellationToken::new())?
+        .context("turn missing")?;
+    let mut runtime = state
+        .config
+        .provider("test-runtime", ProviderRole::Runtime)?
+        .clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    runtime.url = format!("http://{}", listener.local_addr()?);
+    let app = Router::new().route(
+        "/v1/turns",
+        post(|| async { (StatusCode::SERVICE_UNAVAILABLE, Json(json!({}))) }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let request = state.core.runtime_request(&turn, Vec::new());
+    let outcome = call_runtime(&state.client, &runtime, "unused", request).await;
+    // Work may have run, so it is not `Retry`; an observation is asked again.
+    assert!(
+        matches!(outcome, Err(TurnFailure::Unanswered(_))),
+        "{outcome:?}"
+    );
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()> {
     let directory = tempdir()?;
     let state = installation(directory.path())?;
@@ -1633,7 +2081,7 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
     let turn = state
         .core
         .database
-        .claim_turn("test-runtime", &CancellationToken::new())?
+        .claim("test-runtime", Lane::Messages, &CancellationToken::new())?
         .context("missing claim")?;
     let mut runtime = state
         .config
@@ -1699,7 +2147,9 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
     )
     .await
     .map_err(|failure| match failure {
-        TurnFailure::Retry(error) | TurnFailure::Uncertain(error) => error,
+        TurnFailure::Retry(error)
+        | TurnFailure::Unanswered(error)
+        | TurnFailure::Uncertain(error) => error,
         TurnFailure::Explained(explanation) => anyhow!(explanation),
     })?;
     assert_eq!(response.correlation_id, turn.turn_id);
@@ -2066,3 +2516,314 @@ async fn activity_answers_promptly_when_several_runtimes_cannot_describe_their_t
     Ok(())
 }
 mod attachments;
+
+/// A runtime endpoint written at the socket level: while `cut` is set it sends
+/// a successful answer's headers and only the start of its body, then closes;
+/// otherwise it answers the request whole, with `output`.
+async fn cut_off_runtime(
+    cut: Arc<std::sync::atomic::AtomicBool>,
+    output: &'static str,
+) -> Result<(String, tokio::task::JoinHandle<()>)> {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let server = tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 8192];
+            // Read the headers, then as much body as they announce.
+            let body = loop {
+                let Ok(read) = socket.read(&mut buffer).await else {
+                    break None;
+                };
+                if read == 0 {
+                    break None;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                let length = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if request.len() >= end + 4 + length {
+                    break Some(request[end + 4..end + 4 + length].to_vec());
+                }
+            };
+            let Some(body) = body else { continue };
+            let correlation = serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|request| request["correlation_id"].as_str().map(str::to_owned))
+                .unwrap_or_default();
+            let answer =
+                serde_json::to_string(&json!({"correlation_id": correlation, "output": output}))
+                    .unwrap_or_default();
+            let response = if cut.load(std::sync::atomic::Ordering::SeqCst) {
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    answer.len() + 100,
+                    &answer[..answer.len() / 2]
+                )
+            } else {
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{answer}",
+                    answer.len()
+                )
+            };
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.shutdown().await;
+        }
+    });
+    Ok((url, server))
+}
+
+#[tokio::test]
+async fn a_cut_off_answer_asks_an_observation_again_but_never_replays_an_executable_turn()
+-> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    let first = accept(&state, "one", "conversation").await?;
+    let cursor = serde_json::json!({"message": "native-message", "after": 1});
+    run_next_turn(&state, "test-runtime", async move |_, _, request| {
+        Ok(RuntimeTurnResponse {
+            follow_up: Some(cursor),
+            unanswered_left: false,
+            attachments_left: false,
+            ..completed(request)
+        })
+    })
+    .await?;
+    let answer = state
+        .core
+        .database
+        .claim_delivery("test-interface", "instance")?
+        .context("missing reply")?;
+    state.core.database.acknowledge_delivery(
+        "test-interface",
+        answer.id,
+        "instance",
+        DeliveryOutcome::Delivered,
+        None,
+    )?;
+    let cut = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let (url, server) = cut_off_runtime(cut.clone(), "the report").await?;
+    let mut runtime = state
+        .config
+        .provider("test-runtime", ProviderRole::Runtime)?
+        .clone();
+    runtime.url = url;
+    let observation = format!("follow-up:{}", first.turn_id);
+    let state_of = |event: &str| -> Result<Option<TurnState>> {
+        Ok(state
+            .core
+            .recent_turns(Some(event), 1)?
+            .first()
+            .map(|turn| turn.state))
+    };
+
+    // The answer's body is cut off: the observation goes back to its queue,
+    // with nothing delivered.
+    run_next_observation(&state, "test-runtime", async |_, _, request| {
+        call_runtime(&state.client, &runtime, "unused", request).await
+    })
+    .await?;
+    assert_eq!(state_of(&observation)?, Some(TurnState::Queued));
+    assert!(
+        state
+            .core
+            .database
+            .claim_delivery("test-interface", "instance")?
+            .is_none()
+    );
+    // Asked again, it completes and its report is delivered once.
+    cut.store(false, std::sync::atomic::Ordering::SeqCst);
+    run_next_observation(&state, "test-runtime", async |_, _, request| {
+        call_runtime(&state.client, &runtime, "unused", request).await
+    })
+    .await?;
+    assert_eq!(state_of(&observation)?, Some(TurnState::Completed));
+    let report = state
+        .core
+        .database
+        .claim_delivery("test-interface", "instance")?
+        .context("missing report")?;
+    assert_eq!(report.content, "the report");
+
+    // An executable turn whose answer is cut off is interrupted, never replayed.
+    cut.store(true, std::sync::atomic::Ordering::SeqCst);
+    accept(&state, "two", "elsewhere").await?;
+    run_next_turn(&state, "test-runtime", async |_, _, request| {
+        call_runtime(&state.client, &runtime, "unused", request).await
+    })
+    .await?;
+    assert_eq!(state_of("two")?, Some(TurnState::Interrupted));
+    server.abort();
+    Ok(())
+}
+
+/// One async worker, as when every worker could be taken: another writer
+/// holds SQLite's write lock while an interface claims a delivery and a
+/// runtime worker claims a turn. Their storage waits run beside the async
+/// worker, so unrelated requests are answered meanwhile, and both claims
+/// complete once the lock is released.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn storage_waits_never_hold_the_async_workers() -> Result<()> {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt as _;
+
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    accept(&state, "queued", "conversation").await?;
+    let writer =
+        rusqlite::Connection::open(state.core.options.data_directory.join("carillon.sqlite3"))?;
+    writer.execute_batch("BEGIN IMMEDIATE")?;
+    let router = Router::new()
+        .route("/health", get(health))
+        .route("/v1/deliveries", get(claim_delivery))
+        .with_state(configured(&state));
+    let delivery = tokio::spawn(
+        router.clone().oneshot(
+            Request::builder()
+                .uri("/v1/deliveries")
+                .header(PROVIDER_HEADER, "test-interface")
+                .header(INSTANCE_HEADER, "instance")
+                .header(http::header::AUTHORIZATION, "Bearer test-only")
+                .body(Body::empty())?,
+        ),
+    );
+    let worker = {
+        let state = state.clone();
+        tokio::spawn(async move {
+            run_next_turn(&state, "test-runtime", async |_, _, request| {
+                Ok(completed(request))
+            })
+            .await
+        })
+    };
+    // Both claims are now waiting for the lock.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let asked = std::time::Instant::now();
+    let health = tokio::spawn(
+        router
+            .clone()
+            .oneshot(Request::builder().uri("/health").body(Body::empty())?),
+    );
+    let health = tokio::time::timeout(Duration::from_secs(1), health).await???;
+    assert_eq!(health.status(), StatusCode::OK);
+    assert!(
+        asked.elapsed() < Duration::from_millis(500),
+        "health waited {:?} behind storage",
+        asked.elapsed()
+    );
+    assert!(!delivery.is_finished() && !worker.is_finished());
+    writer.execute_batch("ROLLBACK")?;
+    let delivery = tokio::time::timeout(Duration::from_secs(5), delivery).await???;
+    assert_eq!(delivery.status(), StatusCode::OK);
+    let step = tokio::time::timeout(Duration::from_secs(5), worker).await???;
+    assert_eq!(step, WorkerStep::Advanced);
+    Ok(())
+}
+
+/// Storage work started for an async caller finishes even when the caller
+/// is stopped, as a worker is at shutdown, and the service waits for it
+/// before releasing its exclusive ownership.
+#[tokio::test]
+async fn shutdown_waits_for_storage_work_a_stopped_caller_started() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    let receipt = accept(&state, "running", "conversation").await?;
+    let core = state.core.clone();
+    let (started, began) = tokio::sync::oneshot::channel();
+    let caller = tokio::spawn(async move {
+        core.blocking(move |core| {
+            let _ = started.send(());
+            std::thread::sleep(Duration::from_millis(300));
+            core.database
+                .claim("test-runtime", Lane::Messages, &CancellationToken::new())
+        })
+        .await
+    });
+    began.await?;
+    caller.abort();
+    state.core.storage_settled().await;
+    let turn = state
+        .core
+        .inspect_turn(&receipt.turn_id)?
+        .context("turn missing")?;
+    assert_eq!(turn.state, TurnState::Running);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_turn_takes_as_long_as_its_runtime_and_ends_when_its_caller_stops() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    accept(&state, "one", "conversation").await?;
+    let turn = state
+        .core
+        .database
+        .claim("test-runtime", Lane::Messages, &CancellationToken::new())?
+        .context("missing claim")?;
+    let mut runtime = state
+        .config
+        .provider("test-runtime", ProviderRole::Runtime)?
+        .clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    runtime.url = format!("http://{}", listener.local_addr()?);
+    // The runtime's native work runs past half an hour, in the paused
+    // clock's virtual time; it reports when its request is dropped.
+    let (ended, mut endings) = tokio::sync::mpsc::unbounded_channel();
+    let app = Router::new().route(
+        "/v1/turns",
+        post(move |Json(request): Json<RuntimeTurnRequest>| {
+            let ended = ended.clone();
+            async move {
+                struct Ending(tokio::sync::mpsc::UnboundedSender<()>);
+                impl Drop for Ending {
+                    fn drop(&mut self) {
+                        let _ = self.0.send(());
+                    }
+                }
+                let _ending = Ending(ended);
+                tokio::time::sleep(Duration::from_mins(31)).await;
+                Json(completed(request))
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let started = tokio::time::Instant::now();
+    let response = call_runtime(
+        &state.client,
+        &runtime,
+        "unused",
+        state.core.runtime_request(&turn, Vec::new()),
+    )
+    .await;
+    // No transport deadline cuts the work short.
+    assert!(
+        matches!(&response, Ok(answer) if answer.correlation_id == turn.turn_id),
+        "{response:?}"
+    );
+    assert!(started.elapsed() >= Duration::from_mins(31));
+    endings
+        .recv()
+        .await
+        .context("the answered request did not end")?;
+    // A caller that stops, as a stopping worker does, ends the request at
+    // the runtime, which takes it as cancellation.
+    let request = state.core.runtime_request(&turn, Vec::new());
+    let (client, cancelled) = (state.client.clone(), runtime.clone());
+    let call =
+        tokio::spawn(async move { call_runtime(&client, &cancelled, "unused", request).await });
+    tokio::time::sleep(Duration::from_mins(1)).await;
+    call.abort();
+    tokio::time::timeout(Duration::from_secs(5), endings.recv())
+        .await
+        .context("the runtime kept working after its caller stopped")?
+        .context("the runtime's request did not end")?;
+    server.abort();
+    Ok(())
+}

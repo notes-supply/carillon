@@ -14,10 +14,7 @@ use crate::{
         IncomingMessage, MessagePlan, Participation, admit_message, discord_parent_channel,
         prepare_conversation,
     },
-    delivery::{
-        Feedback, clear_processing_feedback, explain, processing_feedback, terminal_feedback,
-        trigger_typing,
-    },
+    delivery::{Feedback, Reactions, explain, trigger_typing},
     error::discord_failure_is_terminal,
 };
 use anyhow::{Result, anyhow};
@@ -65,6 +62,8 @@ pub(crate) struct Ingress {
     pub(crate) config: DiscordConfig,
     pub(crate) participation: Arc<Participation>,
     pub(crate) http: Arc<DiscordHttp>,
+    /// The reactions that show each message's progress, in order.
+    pub(crate) reactions: Reactions,
     pub(crate) downloads: Arc<Downloads>,
     /// Overload replies being sent at once, for the lanes and the gateway
     /// alike; beyond them refusals are only logged.
@@ -149,7 +148,7 @@ pub(crate) async fn prepare(ingress: &Ingress, mut inbound: QueuedMessage) {
         Some(Ok(parent)) => parent,
         Some(Err(failure)) => {
             let source = format!("{channel}:{}", inbound.request.event_id);
-            terminal_feedback(http, discord, &source, Feedback::Failed).await;
+            ingress.reactions.outcome(&source, Feedback::Failed).await;
             warn!(error = %failure, "Discord message route is unavailable");
             return;
         }
@@ -174,12 +173,38 @@ pub(crate) async fn prepare(ingress: &Ingress, mut inbound: QueuedMessage) {
 /// submit it until core answers: once submitted, core may hold it, so only
 /// the stop ends that.
 async fn prepare_text(ingress: &Ingress, plan: MessagePlan, deadline: Instant) {
-    let (discord, http) = (&ingress.config, &*ingress.http);
+    let (reactions, http) = (&ingress.reactions, &*ingress.http);
     let source = format!("{}:{}", plan.channel_id, plan.message_id);
     let unfinished = async || {
         explain(http, &source, &ingress.unfinished().0).await;
-        terminal_feedback(http, discord, &source, Feedback::Failed).await;
+        reactions.outcome(&source, Feedback::Failed).await;
     };
+    // A message core already holds, such as one the gateway replayed, is
+    // not admitted again: its feedback belongs to its first admission. A
+    // stop or the deadline ends the lookup and starts no submission; core's
+    // answer then decides the feedback, which the reactions own like any
+    // other.
+    match ingress
+        .until(
+            Some(deadline),
+            known_receipt(&ingress.core, &plan.message_id),
+        )
+        .await
+    {
+        Some(None) => {}
+        Some(Some(_)) => return,
+        None => {
+            reactions.spawn(settle_unfinished_text(
+                ingress.core.clone(),
+                reactions.clone(),
+                ingress.http.clone(),
+                plan.message_id,
+                source,
+                ingress.unfinished(),
+            ));
+            return;
+        }
+    }
     let opened = ingress
         .retry(Some(deadline), "prepare a Discord conversation", || {
             prepare_conversation(&ingress.participation, &ingress.http, plan.clone())
@@ -189,7 +214,7 @@ async fn prepare_text(ingress: &Ingress, plan: MessagePlan, deadline: Instant) {
         Some(Ok(resolved)) => resolved,
         Some(Err(failure)) => {
             warn!(error = %failure, "Discord conversation cannot be prepared");
-            terminal_feedback(http, discord, &source, Feedback::Failed).await;
+            reactions.outcome(&source, Feedback::Failed).await;
             return;
         }
         None => {
@@ -197,33 +222,60 @@ async fn prepare_text(ingress: &Ingress, plan: MessagePlan, deadline: Instant) {
             return;
         }
     };
-    processing_feedback(http, discord, &resolved.event.feedback_target_id).await;
-    trigger_typing(http, discord, &resolved.event.delivery_target_id).await;
-    // Feedback can outlast the window; a text it closed on is not submitted.
+    reactions.admission(&resolved.event).await;
+    // Admission feedback can outlast the window; a text it closed on is not
+    // submitted.
     if Instant::now() >= deadline {
         unfinished().await;
         return;
     }
-    let Some(receipt) =
-        submit_event_with_retry(&ingress.core, &resolved.event, &ingress.stopping).await
-    else {
+    // Unless the provider has already stopped, submission makes an attempt
+    // core may receive. A stop cuts none short; when core has not answered
+    // by then, it is asked whether it holds the event, as for files.
+    let attempted = !ingress.stopping.is_cancelled();
+    let receipt =
+        match submit_event_with_retry(&ingress.core, &ingress.stopping, &resolved.event).await {
+            Some(receipt) => Some(receipt),
+            None if attempted => known_receipt(&ingress.core, &resolved.event.event_id)
+                .await
+                .map(Ok),
+            None => None,
+        };
+    let Some(receipt) = receipt else {
         unfinished().await;
         return;
     };
-    match receipt {
-        Ok(receipt) if receipt.duplicate => {
-            clear_processing_feedback(http, discord, &resolved.event.feedback_target_id).await;
-        }
-        Ok(_) => {}
-        Err(failure) => {
-            warn!(error = %failure.message, "Discord event submission failed");
-            terminal_feedback(
-                http,
-                discord,
-                &resolved.event.feedback_target_id,
-                Feedback::Failed,
-            )
+    // Accepted, even as a duplicate of its own earlier attempt, the message
+    // gets its outcome from delivery.
+    if let Err(failure) = receipt {
+        warn!(error = %failure.message, "Discord event submission failed");
+        reactions
+            .outcome(&resolved.event.feedback_target_id, Feedback::Failed)
             .await;
+    }
+}
+
+/// Feedback for a text whose preparation the stop or the deadline ended
+/// before core said whether it holds it: none when core holds it, as its
+/// first admission's feedback stands; the explanation and failure when core
+/// does not; uncertain when core cannot say.
+async fn settle_unfinished_text(
+    core: CoreClient,
+    reactions: Reactions,
+    http: Arc<DiscordHttp>,
+    event_id: String,
+    source: String,
+    refusal: Refusal,
+) {
+    match core.event_status(&event_id).await {
+        Ok(EventStatus::Accepted(_) | EventStatus::Capturing) => {}
+        Ok(EventStatus::Unknown) => {
+            explain(&http, &source, &refusal.0).await;
+            reactions.outcome(&source, Feedback::Failed).await;
+        }
+        Err(failure) => {
+            warn!(error = %failure.message, %event_id, "Discord stopped before core said whether it holds a message");
+            reactions.outcome(&source, Feedback::Uncertain).await;
         }
     }
 }
@@ -232,11 +284,11 @@ async fn prepare_text(ingress: &Ingress, plan: MessagePlan, deadline: Instant) {
 /// sender sees typing; the processing reaction appears once they are handed
 /// to core. Everything before submission ends by `deadline`.
 async fn prepare_files(ingress: &Ingress, plan: MessagePlan, deadline: Instant) {
-    let (discord, http) = (&ingress.config, &*ingress.http);
+    let (reactions, http) = (&ingress.reactions, &*ingress.http);
     let source = format!("{}:{}", plan.channel_id, plan.message_id);
     let refuse = async |refusal: Refusal| {
         explain(http, &source, &refusal.0).await;
-        terminal_feedback(http, discord, &source, Feedback::Failed).await;
+        reactions.outcome(&source, Feedback::Failed).await;
     };
     if let Err(refusal) = ingress.downloads.admit(&plan.attachments) {
         refuse(refusal).await;
@@ -252,7 +304,7 @@ async fn prepare_files(ingress: &Ingress, plan: MessagePlan, deadline: Instant) 
             return;
         }
         Replayed::Uncertain => {
-            terminal_feedback(http, discord, &source, Feedback::Uncertain).await;
+            reactions.outcome(&source, Feedback::Uncertain).await;
             return;
         }
     }
@@ -290,7 +342,7 @@ async fn prepare_files(ingress: &Ingress, plan: MessagePlan, deadline: Instant) 
             drop(staged);
             if let Some(Err(failure)) = unopened {
                 warn!(error = %failure, "Discord conversation cannot be prepared");
-                terminal_feedback(http, discord, &source, Feedback::Failed).await;
+                reactions.outcome(&source, Feedback::Failed).await;
             } else {
                 refuse(ingress.unfinished()).await;
             }
@@ -298,9 +350,9 @@ async fn prepare_files(ingress: &Ingress, plan: MessagePlan, deadline: Instant) 
         }
     };
     resolved.event.attachments = Some(staged.manifest.clone());
-    // As for text, the processing reaction precedes submission, so the
+    // As for text, the processing reaction precedes submission, and the
     // delivered or failed reaction that follows always replaces it.
-    processing_feedback(http, discord, &resolved.event.feedback_target_id).await;
+    reactions.admission(&resolved.event).await;
     let settled = submit_files(ingress, &resolved.event, deadline).await;
     typing.abort();
     // Core holds its own copy once it answers; the staged files go.
@@ -466,32 +518,29 @@ fn refusal(failure: &InterfaceError) -> Refusal {
     )
 }
 
-/// Submit an event until core answers, retrying transport failures with the
-/// same event identity. Once the provider stops no attempt starts, and one
-/// already made is settled by asking core: `None` when the provider stopped
-/// and core does not report holding the event.
+/// Submit `event` until core accepts or refuses it. No attempt starts once
+/// the provider is `stopping`, whether or not this call made one: `None`
+/// then, as core has not answered. An attempt under way runs to its end,
+/// within the client's own bound.
 pub(crate) async fn submit_event_with_retry(
     core: &CoreClient,
-    event: &ExternalEvent,
     stopping: &CancellationToken,
+    event: &ExternalEvent,
 ) -> Option<Result<EventReceipt, InterfaceError>> {
-    let mut submitted = false;
-    while !stopping.is_cancelled() {
-        submitted = true;
+    loop {
+        // However the wait before it ended, a stop by then starts no attempt.
+        if stopping.is_cancelled() {
+            return None;
+        }
         match core.submit_event(event).await {
             Err(failure) if failure.is_transient() => {
                 warn!(error = %failure.message, event_id = %event.event_id, "waiting to submit Discord event");
-                let _ = timeout(RETRY, stopping.cancelled()).await;
+                stopping.run_until_cancelled(sleep(RETRY)).await;
             }
             outcome => return Some(outcome),
         }
     }
-    if submitted {
-        known_receipt(core, &event.event_id).await.map(Ok)
-    } else {
-        None
-    }
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

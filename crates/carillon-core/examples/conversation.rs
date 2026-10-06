@@ -1,10 +1,11 @@
 //! A complete durable conversation with no HTTP, Discord or model account.
 use anyhow::{Context as _, Result, ensure};
-use carillon_core::{Core, CoreOptions, RuntimeProvider, WorkerStep};
+use carillon_core::{Core, CoreOptions, Lane, RuntimeProvider, WorkerStep};
 use carillon_installation::config::AttachmentLimits;
 use carillon_protocol::model::{
     DeliveryAck, DeliveryOutcome, ExternalEvent, RuntimeTurnResponse, SelectedProvider, TurnState,
 };
+use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -61,24 +62,25 @@ async fn conversation() -> Result<()> {
         "duplicate acceptance changed the turn"
     );
     std::fs::write(resources.join("SYSTEM.md"), "Changed after acceptance")?;
+    // This example never stops; a service cancels the token as it shuts down.
+    let stopping = CancellationToken::new();
     let step = core
-        .execute_next(
-            "echo",
-            &tokio_util::sync::CancellationToken::new(),
-            async |request| {
-                // Opaque interface data is captured on acceptance, not supplied by a duplicate.
-                assert_eq!(request.native, event.native);
-                // This deterministic test runtime is deliberately not Pi. The snapshot is real.
-                let captured = std::fs::read_to_string(
-                    std::path::Path::new(&request.resource_root).join("SYSTEM.md"),
-                )
-                .map_err(|error| carillon_core::TurnFailure::Uncertain(error.into()))?;
-                Ok(RuntimeTurnResponse {
-                    correlation_id: request.correlation_id,
-                    output: format!("{} — {captured}", request.input),
-                })
-            },
-        )
+        .run_next("echo", Lane::Messages, &stopping, async |request| {
+            // Opaque interface data is captured on acceptance, not supplied by a duplicate.
+            assert_eq!(request.native, event.native);
+            // This deterministic test runtime is deliberately not Pi. The snapshot is real.
+            let captured = std::fs::read_to_string(
+                std::path::Path::new(&request.resource_root).join("SYSTEM.md"),
+            )
+            .map_err(|error| carillon_core::TurnFailure::Uncertain(error.into()))?;
+            Ok(RuntimeTurnResponse {
+                correlation_id: request.correlation_id,
+                output: format!("{} — {captured}", request.input),
+                follow_up: None,
+                unanswered_left: false,
+                attachments_left: false,
+            })
+        })
         .await?;
     ensure!(step == WorkerStep::Advanced, "no turn executed");
     let delivery = core

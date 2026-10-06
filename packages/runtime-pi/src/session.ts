@@ -12,10 +12,17 @@ import {
   SettingsManager,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type { Api, ImageContent, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type {
+  Api,
+  AssistantMessage,
+  ImageContent,
+  Model,
+  ModelThinkingLevel,
+} from "@earendil-works/pi-ai";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { ExplainedFailure } from "./failure.ts";
+import { ExplainedFailure } from "@carillon/runtime/failure";
+import { WORK_CHANNEL } from "./activity.ts";
 
 interface PiExecutionSessionOptions {
   readonly resourceRoot: string;
@@ -30,6 +37,8 @@ interface PiExecutionSessionOptions {
   readonly extensionContext?: unknown;
   /** Host context for this turn's attachments, as a native extension. */
   readonly attachmentContext?: ExtensionFactory;
+  /** Receives each fact participating extensions report on the session's `carillon:work` channel. */
+  readonly onWork?: (fact: unknown) => void;
 }
 
 export async function createPiExecutionSession(options: PiExecutionSessionOptions) {
@@ -42,6 +51,7 @@ export async function createPiExecutionSession(options: PiExecutionSessionOption
   );
   const settingsManager = SettingsManager.create(options.workspace, options.resourceRoot);
   const eventBus = createEventBus();
+  if (options.onWork !== undefined) eventBus.on(WORK_CHANNEL, options.onWork);
   const loader = new DefaultResourceLoader({
     eventBus,
     cwd: options.workspace,
@@ -82,36 +92,45 @@ export async function createPiExecutionSession(options: PiExecutionSessionOption
 /**
  * Cancel native execution on disconnect, and settle it before releasing the serial queue.
  * Images are Pi's native prompt input; the text keeps its command semantics.
+ *
+ * Returns the prompt's own answer: the last assistant message Pi ended
+ * while it ran, or none when Pi consumed the prompt without one, as an
+ * extension's command may. Only that answer's failure is this prompt's: a
+ * saved conversation can end with an earlier turn's.
  */
 export async function promptSession(
   session: AgentSession,
   input: string,
   signal: AbortSignal,
   images: ImageContent[] = [],
-) {
+): Promise<AssistantMessage | undefined> {
   signal.throwIfAborted();
   let cancellation: Promise<void> | undefined;
   const cancel = () => {
     cancellation = session.abort();
   };
   signal.addEventListener("abort", cancel, { once: true });
+  const own: { answer?: AssistantMessage } = {};
   // Preparation can await extensions before Pi starts its agent loop.
   const unsubscribe = session.subscribe((event) => {
     if (event.type === "agent_start" && signal.aborted) cancel();
+    if (event.type === "message_end" && event.message.role === "assistant")
+      own.answer = event.message;
   });
   try {
     await session.prompt(input, images.length === 0 ? undefined : { images });
     signal.throwIfAborted();
-    const last = session.messages.at(-1);
-    if (last?.role !== "assistant") return;
+    const { answer } = own;
+    if (answer === undefined) return undefined;
     // Pi reports provider and agent-loop failures alike as the assistant's
     // `errorMessage`, its explanation for Pi's user. Which of it may be shown
     // is decided where it leaves the runtime.
-    if (last.stopReason === "error")
-      throw last.errorMessage === undefined
+    if (answer.stopReason === "error")
+      throw answer.errorMessage === undefined
         ? new Error("Pi reported an error without a message")
-        : new ExplainedFailure(502, last.errorMessage);
-    if (last.stopReason === "aborted") throw new Error("Pi execution was interrupted");
+        : new ExplainedFailure(502, answer.errorMessage);
+    if (answer.stopReason === "aborted") throw new Error("Pi execution was interrupted");
+    return answer;
   } finally {
     signal.removeEventListener("abort", cancel);
     unsubscribe();
