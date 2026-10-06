@@ -8,8 +8,8 @@ import type { NativeSelection } from "./contracts.ts";
 
 const SettingsSchema = Type.Object(
   {
-    /** The T3 server's HTTP origin. */
-    url: Type.String({ pattern: "^https?://[^/]+$" }),
+    /** The T3 server's HTTP origin, checked by {@link origin}. */
+    url: Type.String({ minLength: 1 }),
     /** A file holding a bearer token T3 issued, relative to the installation. */
     token_file: Type.String({ minLength: 1 }),
     /** The T3 project whose workspace is the agent's workspace. */
@@ -59,8 +59,14 @@ export async function loadSettings(path: string, root: string): Promise<T3Settin
       `${path}: ${first === undefined ? "invalid settings" : `${first.instancePath || "/"} ${first.message}`}`,
     );
   }
+  // Refused without repeating the value, which may hold a credential.
+  const url = origin(settings.url);
+  if (url === undefined)
+    throw new Error(
+      `${path}: /url must be an HTTP or HTTPS origin, without credentials, a path, a query or a fragment`,
+    );
   return {
-    url: settings.url,
+    url,
     tokenFile: resolve(root, settings.token_file),
     projectId: settings.project_id,
     title: settings.title ?? "Carillon",
@@ -70,4 +76,24 @@ export async function loadSettings(path: string, root: string): Promise<T3Settin
       options: Object.entries(settings.model.options ?? {}).map(([id, value]) => ({ id, value })),
     },
   };
+}
+
+/** `value` as an HTTP(S) origin, or undefined when it is not only one. */
+function origin(value: string): string | undefined {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return undefined;
+  }
+  if (
+    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.pathname !== "/" ||
+    url.search !== "" ||
+    url.hash !== ""
+  )
+    return undefined;
+  return url.origin;
 }

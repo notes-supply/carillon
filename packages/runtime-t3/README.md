@@ -47,7 +47,7 @@ The runtime speaks T3 orchestration protocol 2 only: `orchestration.dispatchComm
 The service reads the registry for its own entry and `providers/<id>.toml`, checked strictly:
 
 ```toml
-url = "http://127.0.0.1:3773"           # T3's HTTP origin (https for a tailnet)
+url = "http://127.0.0.1:3773"           # T3's HTTP origin only (https for a tailnet): no credentials, path, query or fragment
 token_file = "credentials/t3.token"     # relative to the installation
 project_id = "…"                        # the T3 project whose workspace is the agent's
 title = "Carillon"                      # optional thread title prefix
