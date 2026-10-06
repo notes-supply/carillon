@@ -119,6 +119,9 @@ struct Job {
     requested_at: Option<i64>,
     /// What the job's ended turns reported, oldest first.
     ended: Vec<Ended>,
+    /// The report of an ended turn was let go to keep `ended` bounded: what
+    /// the job shows is partial from then on.
+    dropped: bool,
     /// The answer that carries the job's summary, once one does.
     hosted: Option<Card>,
 }
@@ -177,7 +180,7 @@ impl Job {
                 report: delivery.activity.clone(),
             });
             if self.ended.len() > REPORTS_KEPT {
-                self.ended.remove(0);
+                self.dropped |= self.ended.remove(0).report.is_some();
             }
         }
         self.hosted = hosted.or(self.hosted);
@@ -272,6 +275,7 @@ impl Job {
                 requested_at: self.requested_at,
                 reports,
                 live,
+                dropped: self.dropped,
             },
             markers,
         )
@@ -541,11 +545,13 @@ struct Cards {
 }
 
 /// Follows this provider's jobs until `outcomes` closes. Cards recorded
-/// before this start are taken up again. Without readable `records` there
-/// are no cards, only typing. Once `stopping`, nothing more is read, typed
-/// or made a card, but outcomes are still taken until `outcomes` closes:
-/// then the cards of jobs they settled get up to [`FINAL_DRAIN`] to show
-/// their summaries, and every other card stays recorded for the next start.
+/// before this start are taken up again. Without readable `records`, or
+/// with activity cards turned off, there are no cards, only typing:
+/// recorded cards and their records are left as they are. Once
+/// `stopping`, nothing more is read, typed or made a card, but outcomes are
+/// still taken until `outcomes` closes: then the cards of jobs they settled
+/// get up to [`FINAL_DRAIN`] to show their summaries, and every other card
+/// stays recorded for the next start.
 pub(crate) async fn activity_monitor(
     core: CoreClient,
     http: Arc<DiscordHttp>,
@@ -555,7 +561,7 @@ pub(crate) async fn activity_monitor(
     stopping: CancellationToken,
 ) {
     let typing = config.typing.then(|| http.clone());
-    let cards = records.map(|records| Cards {
+    let cards = records.filter(|_| config.activity).map(|records| Cards {
         http,
         config,
         records,
@@ -760,9 +766,7 @@ async fn obtain(cards: &Cards, job_id: &str, view: &mut watch::Receiver<Job>) ->
         if job.is_settled() {
             return None;
         }
-        if let State::Active(turn) = &job.state
-            && cards.config.activity
-        {
+        if let State::Active(turn) = &job.state {
             let channel = match turn.target_id.parse::<Id<ChannelMarker>>() {
                 Ok(channel) => channel,
                 Err(error) => {
@@ -792,7 +796,7 @@ async fn obtain(cards: &Cards, job_id: &str, view: &mut watch::Receiver<Job>) ->
                     }
                     Reservation::Free => {
                         let embed = job.embed(None, false, &cards.config.activity_markers);
-                        match cards.create(channel, &embed, view).await {
+                        match cards.create(channel, &embed).await {
                             Call::Done(message_id) => {
                                 let card = Card {
                                     channel_id: channel,
@@ -953,12 +957,10 @@ impl Cards {
         );
     }
 
-    async fn create(
-        &self,
-        channel: Id<ChannelMarker>,
-        embed: &Embed,
-        view: &watch::Receiver<Job>,
-    ) -> Call<Id<MessageMarker>> {
+    /// Makes a job's reserved card. It is wanted until the provider stops,
+    /// however its job ends meanwhile: an answer that found the card
+    /// reserved carries no summary, so the card shows it once made.
+    async fn create(&self, channel: Id<ChannelMarker>, embed: &Embed) -> Call<Id<MessageMarker>> {
         let silent = AllowedMentions::default();
         let embeds = [embed.clone()];
         let request = self
@@ -970,7 +972,7 @@ impl Cards {
         bounded(
             request,
             CARD_WAIT,
-            Some(still_active(view, &self.stopping)),
+            Some(until_stopped(&self.stopping)),
             async |response| Ok(response.model().await?.id),
         )
         .await
@@ -1015,26 +1017,44 @@ enum Call<T> {
     Unknown,
 }
 
-/// While a request waits for the rate limiter, the job must still want it
-/// and the provider must not be stopping.
+/// While a request waits for the rate limiter, the provider must not be
+/// stopping and, for a request about how its job stands, the job must
+/// still want it.
 struct Wanted {
+    job: Option<JobNeed>,
+    stopping: CancellationToken,
+}
+
+/// What of its job a request needs, watched on the job's view.
+#[derive(Clone)]
+struct JobNeed {
     view: watch::Receiver<Job>,
     holds: fn(&Job) -> bool,
-    stopping: CancellationToken,
 }
 
 fn still_active(view: &watch::Receiver<Job>, stopping: &CancellationToken) -> Wanted {
     Wanted {
-        view: view.clone(),
-        holds: Job::is_active,
+        job: Some(JobNeed {
+            view: view.clone(),
+            holds: Job::is_active,
+        }),
         stopping: stopping.clone(),
     }
 }
 
 fn not_settled(view: &watch::Receiver<Job>, stopping: &CancellationToken) -> Wanted {
     Wanted {
-        view: view.clone(),
-        holds: |job| !job.is_settled(),
+        job: Some(JobNeed {
+            view: view.clone(),
+            holds: |job| !job.is_settled(),
+        }),
+        stopping: stopping.clone(),
+    }
+}
+
+fn until_stopped(stopping: &CancellationToken) -> Wanted {
+    Wanted {
+        job: None,
         stopping: stopping.clone(),
     }
 }
@@ -1061,11 +1081,14 @@ async fn bounded<T: Unpin, U>(
     let marked = sent.clone();
     let check = wanted
         .as_ref()
-        .map(|wanted| (wanted.view.clone(), wanted.holds, wanted.stopping.clone()));
+        .map(|wanted| (wanted.job.clone(), wanted.stopping.clone()));
     let preflight = request.set_pre_flight(move || {
         let proceed = Instant::now() < deadline
-            && check.as_ref().is_none_or(|(view, holds, stopping)| {
-                !stopping.is_cancelled() && holds(&view.borrow())
+            && check.as_ref().is_none_or(|(job, stopping)| {
+                !stopping.is_cancelled()
+                    && job
+                        .as_ref()
+                        .is_none_or(|need| (need.holds)(&need.view.borrow()))
             });
         // Only a passed check sends; a refused one proves nothing was sent.
         if proceed {
@@ -1118,18 +1141,21 @@ async fn bounded<T: Unpin, U>(
 }
 
 async fn unwanted(wanted: Option<Wanted>) {
-    match wanted {
-        Some(Wanted {
-            mut view,
-            holds,
-            stopping,
-        }) => {
-            tokio::select! {
-                _ = view.wait_for(|view| !holds(view)) => {}
-                () = stopping.cancelled() => {}
+    let Some(Wanted { job, stopping }) = wanted else {
+        return pending().await;
+    };
+    let job_gone = async {
+        match job {
+            Some(JobNeed { mut view, holds }) => {
+                let _ = view.wait_for(|job| !holds(job)).await;
             }
+            // Its job's end, or the closing of its view, does not end it.
+            None => pending().await,
         }
-        None => pending().await,
+    };
+    tokio::select! {
+        () = job_gone => {}
+        () = stopping.cancelled() => {}
     }
 }
 

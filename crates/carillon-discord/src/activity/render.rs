@@ -54,6 +54,9 @@ pub(super) struct Shown<'a> {
     /// The snapshot of the job's turn running now: the only part shown as
     /// still running.
     pub(super) live: Option<&'a TurnActivity>,
+    /// Reports of the job's earliest turns were let go to keep it bounded:
+    /// what is shown is partial.
+    pub(super) dropped: bool,
 }
 
 /// Whether a turn's end earns a retained summary: it stopped before
@@ -84,6 +87,7 @@ pub(crate) fn summary(delivery: &Delivery, markers: &ActivityMarkers) -> Embed {
             requested_at: Some(delivery.origin.accepted_at),
             reports: delivery.activity.iter().collect(),
             live: None,
+            dropped: false,
         },
         markers,
     )
@@ -96,7 +100,7 @@ pub(super) fn card(shown: &Shown<'_>, markers: &ActivityMarkers) -> Embed {
     if let Some(headline) = shown.live.and_then(|live| live.headline.as_deref()) {
         description.push(format!("> {}", escaped(&cut(headline, HEADLINE_LIMIT))));
     }
-    if merged.partial {
+    if merged.partial || shown.dropped {
         description.push(marked(
             &markers.uncertain,
             "Part of this work's report was left out to keep it short.",
