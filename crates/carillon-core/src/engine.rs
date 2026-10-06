@@ -364,6 +364,18 @@ impl Core {
         self.database.claim_delivery(interface, owner)
     }
 
+    /// Claim the pending output of one turn, as [`Self::claim_delivery`] does.
+    /// # Errors
+    /// Returns storage errors.
+    pub fn claim_turn_delivery(
+        &self,
+        interface: &str,
+        owner: &str,
+        turn_id: &str,
+    ) -> Result<Option<Delivery>> {
+        self.database.claim_turn_delivery(interface, owner, turn_id)
+    }
+
     /// Settle abandoned delivery claims without silently resending uncertain output.
     /// # Errors
     /// Returns storage errors.

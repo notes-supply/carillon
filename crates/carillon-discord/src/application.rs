@@ -42,7 +42,7 @@ use carillon_installation::config::{
     LoadedConfig, ProviderRole, RELEASE_VERSION, attachment_staging, read_token_file, token_matches,
 };
 use carillon_protocol::model::{
-    Delivery, DeliveryOutcome, DeliveryReconciliation, EventReceipt, Health, ModelQuery,
+    Delivery, DeliveryOutcome, DeliveryReconciliation, EventReceipt, Health, ModelQuery, TurnState,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -565,19 +565,15 @@ async fn simulate(
         drop(staged);
         settled?
     };
-    let delivery = if receipt.duplicate {
-        None
-    } else {
+    // Simulation settles its own turn's delivery and no other. A turn still
+    // queued or running is waited for; a finished one, whose simulation may
+    // have stopped waiting before its answer, is settled if still pending.
+    let turn = &receipt.turn_id;
+    let delivery = if matches!(receipt.state, TurnState::Queued | TurnState::Running) {
         let delivery = timeout(Duration::from_secs(10), async {
             loop {
-                if let Some(delivery) = state.core.claim_delivery().await? {
-                    if delivery.turn_id != receipt.turn_id {
-                        return Err(InterfaceError {
-                            status: StatusCode::CONFLICT,
-                            message: "deterministic delivery order was violated".to_owned(),
-                        });
-                    }
-                    return Ok(delivery);
+                if let Some(delivery) = state.core.claim_turn_delivery(turn).await? {
+                    return Ok::<_, InterfaceError>(delivery);
                 }
                 sleep(Duration::from_millis(25)).await;
             }
@@ -587,6 +583,11 @@ async fn simulate(
             status: StatusCode::GATEWAY_TIMEOUT,
             message: "timed out waiting for deterministic delivery".to_owned(),
         })??;
+        Some(delivery)
+    } else {
+        state.core.claim_turn_delivery(turn).await?
+    };
+    if let Some(delivery) = &delivery {
         state
             .core
             .acknowledge_delivery(
@@ -598,8 +599,7 @@ async fn simulate(
         if state.discord.reactions {
             feedback.push("delivered".to_owned());
         }
-        Some(delivery)
-    };
+    }
     Ok(Json(SimulateResponse {
         receipt,
         delivery,

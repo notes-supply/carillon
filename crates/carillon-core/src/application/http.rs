@@ -471,13 +471,24 @@ async fn call_runtime(
         .await
 }
 
+#[derive(Deserialize)]
+struct ClaimQuery {
+    turn_id: Option<String>,
+}
+
 async fn claim_delivery(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<ClaimQuery>,
 ) -> Result<Json<Option<Delivery>>, ApiError> {
     let interface = interface_provider(&headers, &state.config)?;
     let owner = interface_instance(&headers)?;
-    Ok(Json(state.core.claim_delivery(&interface.id, owner)?))
+    Ok(Json(match query.turn_id {
+        Some(turn) => state
+            .core
+            .claim_turn_delivery(&interface.id, owner, &turn)?,
+        None => state.core.claim_delivery(&interface.id, owner)?,
+    }))
 }
 
 async fn reconcile_delivery_claims(

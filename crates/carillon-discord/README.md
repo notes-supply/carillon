@@ -51,7 +51,9 @@ retain the actual Wasm path rather than substituting this direct native call.
   submitted as a staged batch, accepted whole or refused with an explanation, within
   a preparation deadline. It receives its core client, configuration, participation
   store and downloads explicitly. Deterministic `/v1/simulate` admits a message the
-  same way and stages its files with the same downloads.
+  same way, stages its files with the same downloads and settles only its own
+  turn's delivery, so a repeat settles an answer that arrived after its first request
+  stopped waiting.
 - [`operations`](src/operations.rs) owns authenticated assistant actions using the existing
   Discord client, independently of admission and the delivery outbox. The optional
   [Pi extension](../../packages/discord-pi/README.md) exposes them on demand.
