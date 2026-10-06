@@ -264,7 +264,7 @@ If core cannot persist an outcome, it logs the storage error and leaves the turn
 carillon inspect TURN_ID
 ```
 
-Discord delivery uses a separate outbox. An unclaimed delivery can be retried. A delivery that was claimed when the interface stopped is marked uncertain because the external send may already have succeeded.
+Discord delivery uses a separate outbox. An unclaimed delivery can be retried. A stopping provider claims no further delivery but sends one it has claimed and records its outcome before it exits. A delivery still claimed when the interface crashed or was killed is marked uncertain when it starts again, because the external send may already have succeeded.
 
 ## Credentials
 

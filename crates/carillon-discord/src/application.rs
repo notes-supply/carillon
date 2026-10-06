@@ -246,25 +246,43 @@ async fn connect(
         cards.map(Arc::new),
         observed,
     );
+    // Deliveries outlast whatever ends the provider: a claimed one is still
+    // sent and its outcome recorded.
+    let mut deliveries = tokio::spawn(delivery_loop(
+        delivery_state.core,
+        delivery_state.discord,
+        http,
+        outcomes,
+        stopping.clone(),
+    ));
+    let mut delivering = true;
     let outcome = tokio::select! {
         result = axum::serve(listener, router).into_future() => result.map_err(Into::into),
         result = gateway_loop(state, discord_token, messages) => {
             result.context("Discord gateway stopped")
         },
-        result = delivery_loop(delivery_state.core, delivery_state.discord, http, outcomes) => {
-            result.context("Discord delivery worker stopped")
+        result = &mut deliveries => {
+            delivering = false;
+            result.map_err(Into::into).flatten().context("Discord delivery worker stopped")
         },
         () = monitor => Err(anyhow::anyhow!("Discord activity monitor stopped")),
         interrupted = tokio::signal::ctrl_c() => interrupted.context("handle interruption"),
         _ = terminate.recv() => Ok(()),
     };
-    // No new message is taken. Preparation not yet handed to core ends; a
-    // submission core may have received is settled, so its staged files
-    // stay until core no longer needs them.
+    // No new message or delivery is taken. Preparation not yet handed to
+    // core ends; a submission core may have received is settled, so its
+    // staged files stay until core no longer needs them; a claimed delivery
+    // is sent and acknowledged.
     stopping.cancel();
-    dispatcher
-        .await
-        .context("Discord message preparation failed")?;
+    let prepared = dispatcher.await;
+    if delivering {
+        deliveries
+            .await
+            .map_err(Into::into)
+            .flatten()
+            .context("Discord delivery worker stopped")?;
+    }
+    prepared.context("Discord message preparation failed")?;
     outcome
 }
 

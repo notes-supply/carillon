@@ -107,7 +107,13 @@ async fn ambiguous_claim_failures_reconcile_before_polling_again() -> anyhow::Re
     let (outcomes, _) = tokio::sync::mpsc::unbounded_channel();
     let outcome = tokio::time::timeout(
         Duration::from_secs(5),
-        delivery_loop(core, config, http, outcomes),
+        delivery_loop(
+            core,
+            config,
+            http,
+            outcomes,
+            tokio_util::sync::CancellationToken::new(),
+        ),
     )
     .await;
     server.abort();
@@ -212,24 +218,128 @@ fn delivering_core(
             post(move |Json(body): Json<serde_json::Value>| async move {
                 let mut messages = messages.lock().await;
                 messages.push(body.clone());
-                Json(json!({
-                    "id": (900 + messages.len()).to_string(),
-                    "channel_id": "300",
-                    "author": {"id": "201", "username": "carillon", "discriminator": "0"},
-                    "content": body["content"],
-                    "attachments": [],
-                    "embeds": [],
-                    "mention_everyone": false,
-                    "mention_roles": [],
-                    "mentions": [],
-                    "pinned": false,
-                    "timestamp": "2026-09-24T00:00:00.000000+00:00",
-                    "tts": false,
-                    "type": 0,
-                }))
+                Json(created(900 + messages.len(), &body))
             }),
         )
         .fallback(|| async { StatusCode::NO_CONTENT })
+}
+
+/// The message Discord reports creating, as message `id`, from `body`.
+fn created(id: usize, body: &serde_json::Value) -> serde_json::Value {
+    json!({
+        "id": id.to_string(),
+        "channel_id": "300",
+        "author": {"id": "201", "username": "carillon", "discriminator": "0"},
+        "content": body["content"],
+        "attachments": [],
+        "embeds": [],
+        "mention_everyone": false,
+        "mention_roles": [],
+        "mentions": [],
+        "pinned": false,
+        "timestamp": "2026-09-24T00:00:00.000000+00:00",
+        "tts": false,
+        "type": 0,
+    })
+}
+
+#[tokio::test]
+async fn stopping_finishes_a_claimed_delivery_and_claims_no_more() -> anyhow::Result<()> {
+    // Core offers one delivery, then none; Discord holds the message it is
+    // sent until released.
+    let claims = Arc::new(AtomicUsize::new(0));
+    let acks = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let sending = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let app = Router::new()
+        .route(
+            "/v1/deliveries",
+            get({
+                let claims = claims.clone();
+                move || {
+                    let first = claims.fetch_add(1, Ordering::SeqCst) == 0;
+                    async move {
+                        Json(first.then(|| Delivery {
+                            turn_state: TurnState::Completed,
+                            id: 1,
+                            turn_id: "turn-1".to_owned(),
+                            target_id: "300".to_owned(),
+                            feedback_target_id: "300:400".to_owned(),
+                            content: "answer".to_owned(),
+                        }))
+                    }
+                }
+            }),
+        )
+        .route(
+            "/v1/deliveries/{id}/ack",
+            post({
+                let acks = acks.clone();
+                move |Json(ack): Json<serde_json::Value>| async move {
+                    acks.lock().await.push(ack);
+                    StatusCode::NO_CONTENT
+                }
+            }),
+        )
+        .route(
+            "/api/v10/channels/{channel}/messages",
+            post({
+                let (sending, release) = (sending.clone(), release.clone());
+                move |Json(body): Json<serde_json::Value>| async move {
+                    sending.notify_one();
+                    release.notified().await;
+                    Json(created(901, &body))
+                }
+            }),
+        )
+        .fallback(|| async { StatusCode::NO_CONTENT });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let http = Arc::new(
+        twilight_http::Client::builder()
+            .proxy(address.to_string(), true)
+            .ratelimiter(None)
+            .build(),
+    );
+    let run = |stopping: &tokio_util::sync::CancellationToken| {
+        let (outcomes, _) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(delivery_loop(
+            core_client(format!("http://{address}")),
+            discord_config(DiscordActivation::Always, DiscordConversation::Channel),
+            http.clone(),
+            outcomes,
+            stopping.clone(),
+        ))
+    };
+    // The provider stops while Discord is still answering the send.
+    let stopping = tokio_util::sync::CancellationToken::new();
+    let delivering = run(&stopping);
+    tokio::time::timeout(Duration::from_secs(5), sending.notified()).await?;
+    stopping.cancel();
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), delivering).await???;
+    {
+        let acks = acks.lock().await;
+        assert_eq!(acks.len(), 1);
+        assert_eq!(acks[0]["outcome"], "delivered");
+        assert_eq!(acks[0]["native_ref"], "901");
+    }
+    assert_eq!(claims.load(Ordering::SeqCst), 1);
+    // An idle worker ends as soon as the provider stops, without waiting
+    // out its pause between claims.
+    let stopping = tokio_util::sync::CancellationToken::new();
+    let idle = run(&stopping);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while claims.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await?;
+    stopping.cancel();
+    tokio::time::timeout(Duration::from_millis(400), idle).await???;
+    server.abort();
+    Ok(())
 }
 
 #[tokio::test]
@@ -272,6 +382,7 @@ async fn deliveries_reach_discord_verbatim_without_notifying_anyone() -> anyhow:
             discord_config(DiscordActivation::Always, DiscordConversation::Channel),
             http,
             outcomes,
+            tokio_util::sync::CancellationToken::new(),
         ),
     )
     .await;
