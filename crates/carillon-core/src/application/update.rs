@@ -21,12 +21,16 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use carillon_installation::{
-    config::LoadedConfig, home::is_managed_application, maintenance::MaintenanceLock,
+    config::LoadedConfig,
+    home::is_managed_application,
+    maintenance::{MaintenanceLock, UnitsLock},
 };
 
 use super::{
     admin::unpack_regular,
-    operations::{Action, Activity, Registration, Services, print_health, wait_until_healthy},
+    operations::{
+        Action, Activity, HeldUnits, Registration, Services, print_health, wait_until_healthy,
+    },
 };
 
 pub(super) async fn update(home: &Path, archive: &Path, timeout: Duration) -> Result<()> {
@@ -49,7 +53,10 @@ pub(super) async fn update(home: &Path, archive: &Path, timeout: Duration) -> Re
         );
     }
     let _lock = MaintenanceLock::acquire(home)?;
-    let services = match Registration::of(home)? {
+    // Held until the services run again, so no other installation's
+    // operation changes the units between the check and the restart.
+    let units = HeldUnits::acquire()?;
+    let services = match Registration::of(home, &units)? {
         Registration::Owned | Registration::Absent => Services::new(home),
         Registration::Other(other) => bail!(
             "Carillon's user units run the installation at {}; updating {} would take them over. Stop that installation and run {} first",
@@ -64,7 +71,7 @@ pub(super) async fn update(home: &Path, archive: &Path, timeout: Duration) -> Re
         .prefix(".update-")
         .tempdir_in(home)
         .with_context(|| format!("create staging directory in {}", home.display()))?;
-    let release = prepare(home, archive, staging.path())
+    let release = prepare(home, &units, archive, staging.path())
         .with_context(|| format!("refused release {}; nothing was changed", archive.display()))?;
     let version = &release.version;
     println!(
@@ -82,7 +89,7 @@ pub(super) async fn update(home: &Path, archive: &Path, timeout: Duration) -> Re
         Activity::Running => "Services are stopped (they were running)",
         Activity::Stopped => "Services are stopped as before",
     };
-    let published = release.install(home, false).with_context(|| {
+    let published = release.install(home, &units, false).with_context(|| {
         format!(
             "could not run the release installer, so the application was not replaced. \
              {stopped}; `carillon start` resumes the current release"
@@ -114,6 +121,7 @@ pub(super) async fn update(home: &Path, archive: &Path, timeout: Duration) -> Re
     services
         .control(Action::Start)
         .with_context(|| format!("restarting the services failed. {recovery}"))?;
+    drop(units);
     let health = wait_until_healthy(&config, timeout)
         .await
         .with_context(|| format!("services started but are not healthy. {recovery}"))?;
@@ -130,8 +138,9 @@ struct Release {
 
 impl Release {
     /// Run the release's `install.sh --update`, or only its read-only
-    /// `--check`, for an installation whose maintenance lock is held.
-    fn install(&self, home: &Path, check: bool) -> std::io::Result<ExitStatus> {
+    /// `--check`, for an installation whose maintenance lock is held, with
+    /// the owner's `units` held too.
+    fn install(&self, home: &Path, units: &HeldUnits, check: bool) -> std::io::Result<ExitStatus> {
         let mut installer = Process::new(self.root.join("install.sh"));
         installer.arg("--update");
         if check {
@@ -140,6 +149,7 @@ impl Release {
         installer
             .env("CARILLON_HOME", home)
             .env(MaintenanceLock::HELD_FOR, home)
+            .env(UnitsLock::HELD_FOR, units.directory())
             .status()
     }
 }
@@ -147,10 +157,10 @@ impl Release {
 /// Everything that must hold before services are disturbed: a safely
 /// unpacked, correctly identified release whose own preflight accepts its
 /// payload, this system and the installation's current state.
-fn prepare(home: &Path, archive: &Path, staging: &Path) -> Result<Release> {
+fn prepare(home: &Path, units: &HeldUnits, archive: &Path, staging: &Path) -> Result<Release> {
     let release = unpack_release(archive, staging)?;
     let preflight = release
-        .install(home, true)
+        .install(home, units, true)
         .context("run the release's preflight")?;
     if !preflight.success() {
         bail!(

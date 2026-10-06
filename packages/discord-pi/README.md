@@ -7,16 +7,21 @@ load model credentials, or make Discord calls when imported.
 ## Installed use
 
 ```sh
+carillon stop
 carillon discord tools install
+carillon start
 ```
 
 This copies the release's bundled extension and skill into the configured agent's
 resource root. It replaces only `extensions/carillon-discord.js` and
-`skills/discord/SKILL.md`; put personal customizations elsewhere. Re-run after a
-release update to update this optional integration. Remove those two files to
-stop including it in newly accepted turns. No gateway restart is required.
-Already accepted turns keep their captured extension and skill, as with other
-agent resources. The ordinary release installer does not enable these tools.
+`skills/discord/SKILL.md`; put personal customizations elsewhere. Core must be
+stopped: the install refuses while it serves and keeps it from starting until
+both files are in place. If the install fails, the two files may not match: run
+it again until it succeeds before starting core. Re-run after a release update to
+update this optional integration. Remove those two files to stop including it in
+newly accepted turns. No separate gateway restart is required. Already accepted turns keep
+their captured extension and skill, as with other agent resources. The ordinary
+release installer does not enable these tools.
 
 The skill teaches the assistant to call `enable_discord`. A fresh conversation
 exposes that small activation tool, not the detailed Discord schemas. Activation
@@ -33,7 +38,8 @@ barrier: native extensions and Bash have the installing Unix user's authority.
 - [`schemas.ts`](src/schemas.ts): model-facing action-specific schemas, grouped by
   server, messages, channels, threads, roles and members.
 - [`client.ts`](src/client.ts): bounded authenticated provider client. No bot token
-  and no model-supplied endpoint.
+  and no model-supplied endpoint; the operator credential is read for, and sent to,
+  only an HTTP loopback socket address, as the registry records providers.
 - [Rust operations](../../crates/carillon-discord/src/operations.rs): Discord
   API execution, configured-guild validation, mention behavior and failures.
 - [`skill`](skill/SKILL.md): progressive discovery and operating guidance.
@@ -82,6 +88,13 @@ up to ten explicit local files, 4 MiB combined. File reads happen in the extensi
 not via arbitrary provider filesystem paths. `files` become bounded wire
 `attachments` containing filenames and base64 bytes. The provider uses Twilight's
 multipart API. Mentions are disabled except explicitly listed user/role IDs.
+Results leave out Discord's signed attachment addresses: messages read, sent
+or edited keep their attachments' names, sizes and types, including those of
+nested replied-to and forwarded messages, without their `url` and `proxy_url`,
+and an attachment link that stands as a whole value, such as an embed's, loses
+its signature, even when it is all of a message's content. Other text people
+wrote, including attachment links pasted among other words, is returned as
+written.
 
 Not all Discord APIs are covered: no DMs, private-thread membership, archived
 thread enumeration, custom emoji management, webhooks, voice, audit logs or bulk

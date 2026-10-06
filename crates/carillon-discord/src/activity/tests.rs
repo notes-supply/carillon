@@ -280,6 +280,7 @@ impl Substitute {
             http.clone(),
             Summaries::new(records.clone(), &config),
             outcomes,
+            tokio_util::sync::CancellationToken::new(),
         );
         let monitor = activity_monitor(core, http, config, records, observed);
         Provider {

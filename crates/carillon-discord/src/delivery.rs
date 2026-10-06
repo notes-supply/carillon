@@ -345,29 +345,37 @@ pub(crate) async fn trigger_typing(http: &DiscordHttp, config: &DiscordConfig, t
     }
 }
 
-/// Claims, sends and acknowledges deliveries. Each recorded outcome is
-/// reported to `outcomes` without waiting for whoever receives it. With
-/// `summaries`, an answer whose turn earned a summary but whose job has no
-/// card carries the job's summary, and is its card from then on.
+/// Claims, sends and acknowledges deliveries until the provider stops.
+/// Stopping ends the wait for work, never a delivery already claimed: it is
+/// sent and its outcome recorded first. Each recorded outcome is reported to
+/// `outcomes` without waiting for whoever receives it. With `summaries`, an
+/// answer whose turn earned a summary but whose job has no card carries the
+/// job's summary, and is its card from then on.
 pub(crate) async fn delivery_loop(
     core: CoreClient,
     reactions: Reactions,
     http: Arc<DiscordHttp>,
     summaries: Option<Summaries>,
     outcomes: mpsc::UnboundedSender<Outcome>,
+    stopping: CancellationToken,
 ) -> Result<()> {
-    loop {
+    while !stopping.is_cancelled() {
         let delivery = match core.claim_delivery().await {
             Ok(Some(delivery)) => delivery,
             Ok(None) => {
-                sleep(Duration::from_millis(500)).await;
+                let _ = timeout(Duration::from_millis(500), stopping.cancelled()).await;
                 continue;
             }
             // A briefly unreachable core must not cost the gateway session,
-            // so transient claim failures wait in place.
+            // so transient claim failures wait in place. A claim core took
+            // without answering is taken up by the next claim or, once the
+            // provider stops, recorded as uncertain by the next instance.
             Err(failure) if failure.is_transient() => {
                 warn!(error = %failure.message, "waiting to claim Discord delivery");
-                reconcile_after_claim_failure(&core, &reactions).await?;
+                tokio::select! {
+                    reconciled = reconcile_after_claim_failure(&core, &reactions) => reconciled?,
+                    () = stopping.cancelled() => break,
+                }
                 continue;
             }
             Err(failure) => bail!("delivery claim rejected: {}", failure.message),
@@ -421,6 +429,7 @@ pub(crate) async fn delivery_loop(
             hosted,
         });
     }
+    Ok(())
 }
 
 /// A failed claim response is ambiguous: core may have committed the claim

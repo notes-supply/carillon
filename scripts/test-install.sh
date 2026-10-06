@@ -44,11 +44,35 @@ grep -F carillon-runtime-t3 "$RELEASE/systemd/carillon.target" >/dev/null && {
 }
 # The T3 executable is standalone: it starts without a source checkout and
 # fails closed on its arguments before touching anything.
-if "$RELEASE/bin/carillon-runtime-t3" >"$TEST_ROOT_T3_OUT" 2>&1; then
+if "$RELEASE/bin/carillon-runtime-t3" --provider runtime-t3 >"$TEST_ROOT_T3_OUT" 2>&1; then
   printf '%s\n' "carillon-runtime-t3 must refuse to start without --config" >&2
   exit 1
 fi
 grep -F -- '--config is required' "$TEST_ROOT_T3_OUT" >/dev/null
+# Disabled in its registry, it exits successfully before reading its
+# credential, settings or state, or reaching T3, so its unit is not restarted.
+T3_DISABLED=$(mktemp -d)
+mkdir "$T3_DISABLED/agent" "$T3_DISABLED/workspace"
+T3_HASH=$(printf synthetic | sha256sum | cut -d' ' -f1)
+printf '%s\n' \
+  'data_dir = "state"' \
+  '[core]' \
+  "operator_token_hash = \"$T3_HASH\"" \
+  '[agent]' \
+  'resource_root = "agent"' \
+  'workspace = "workspace"' \
+  '[[providers]]' \
+  'id = "runtime-t3"' \
+  'role = "runtime"' \
+  'version = "0.0.0"' \
+  'url = "http://127.0.0.1:1"' \
+  "token_hash = \"$T3_HASH\"" \
+  'enabled = false' >"$T3_DISABLED/carillon.toml"
+"$RELEASE/bin/carillon-runtime-t3" --config "$T3_DISABLED/carillon.toml" --provider runtime-t3 \
+  --token-file "$T3_DISABLED/missing.token" --state-dir "$T3_DISABLED/state" >"$TEST_ROOT_T3_OUT" 2>&1
+grep -F 'runtime provider runtime-t3 is disabled; not serving' "$TEST_ROOT_T3_OUT" >/dev/null
+[ ! -e "$T3_DISABLED/state" ]
+rm -rf -- "$T3_DISABLED"
 rm -f "$TEST_ROOT_T3_OUT"
 
 node "$ROOT/scripts/test-codemode.mjs" "$RELEASE"
@@ -346,6 +370,17 @@ for offset in 0 1 2; do
     sleep 0.05
   done
 done
+
+# While core serves, the tools install refuses before changing either file.
+TOOLS_HASH=$(cat "$CARILLON_HOME/agents/default/extensions/carillon-discord.js" \
+  "$CARILLON_HOME/agents/default/skills/discord/SKILL.md" | sha256sum)
+if env CARILLON_HOME="$CARILLON_HOME" "$APP/carillon" discord tools install >"$TEST_ROOT/tools.log" 2>&1; then
+  printf '%s\n' "the Discord tools must not install while core is serving" >&2
+  exit 1
+fi
+grep -F 'Carillon core is running' "$TEST_ROOT/tools.log" >/dev/null
+[ "$(cat "$CARILLON_HOME/agents/default/extensions/carillon-discord.js" \
+  "$CARILLON_HOME/agents/default/skills/discord/SKILL.md" | sha256sum)" = "$TOOLS_HASH" ]
 
 grep -F -- '--provider runtime-pi' "$XDG_CONFIG_HOME/systemd/user/carillon-runtime-pi.service" >/dev/null
 # The optional T3 unit is registered with the others but neither wanted by the

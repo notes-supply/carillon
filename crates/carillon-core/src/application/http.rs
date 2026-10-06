@@ -29,6 +29,7 @@ use reqwest::{Client, RequestBuilder, Url};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::{
@@ -158,7 +159,9 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
     // conversations with an earlier message queued or running, so workers
     // never share a conversation and each conversation keeps its order.
     // Observations wait on native work that may take hours; a fixed few run
-    // per runtime beside its messages, never in their place.
+    // per runtime beside its messages, never in their place. All of them
+    // claim no further turn once `stopping` is cancelled, as shutdown begins.
+    let stopping = CancellationToken::new();
     let mut workers = tokio::task::JoinSet::new();
     for runtime in config
         .value
@@ -170,9 +173,9 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
             .map(|_| Lane::Messages)
             .chain((0..OBSERVATION_WORKERS).map(|_| Lane::Observations));
         for lane in lanes {
-            let runtime_id = runtime.id.clone();
-            let worker = state.clone();
-            workers.spawn(async move { runtime_worker(worker, runtime_id, lane).await });
+            let (runtime_id, worker, stopping) =
+                (runtime.id.clone(), state.clone(), stopping.clone());
+            workers.spawn(async move { runtime_worker(worker, runtime_id, lane, stopping).await });
         }
     }
 
@@ -192,14 +195,20 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
         .with_state(state.clone());
     info!(listen = %config.value.core.listen, "Carillon core ready");
     let served = axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown(state.core.clone()))
+        .with_graceful_shutdown(shutdown(state.core.clone(), stopping.clone()))
         .await;
     // The caller releases the service lock when this returns, however the
-    // server ended: no copy may still be publishing then, and no storage
-    // work may still be writing. Workers stop first, so none starts more.
-    workers.shutdown().await;
+    // server ended: no copy may still be publishing then, no worker may
+    // still hold a turn, which settles rather than being dropped, and no
+    // storage work may still be writing.
+    stopping.cancel();
     state.core.stop_capturing();
     state.core.captures_settled().await;
+    while let Some(worker) = workers.join_next().await {
+        if let Err(error) = worker {
+            error!(%error, "runtime worker ended abnormally");
+        }
+    }
     state.core.storage_settled().await;
     served?;
     Ok(())
@@ -444,9 +453,16 @@ async fn runtime_activity(
 /// the queue; messages are unaffected.
 const OBSERVATION_WORKERS: u32 = 4;
 
-/// Runs a runtime's turns of one lane until shutdown. An idle worker waits
-/// for core to signal new work instead of polling.
-async fn runtime_worker(state: AppState, runtime_id: String, lane: Lane) {
+/// Runs a runtime's turns of one lane until `stopping` is cancelled. An idle
+/// worker waits for core to signal new work instead of polling. A turn
+/// already claimed runs to its outcome; none is claimed after the
+/// cancellation.
+async fn runtime_worker(
+    state: AppState,
+    runtime_id: String,
+    lane: Lane,
+    stopping: CancellationToken,
+) {
     // A runtime that gave an observation no answer is asked again after a
     // pause, not in a tight loop.
     let backoff = match lane {
@@ -454,12 +470,13 @@ async fn runtime_worker(state: AppState, runtime_id: String, lane: Lane) {
         Lane::Observations => Duration::from_secs(5),
     };
     let mut work = state.core.work(lane);
-    loop {
+    while !stopping.is_cancelled() {
         work.mark_unchanged();
         match run_next(
             &state,
             &runtime_id,
             lane,
+            &stopping,
             async |runtime, token, request| {
                 call_runtime(&state.client, runtime, token, request).await
             },
@@ -469,12 +486,18 @@ async fn runtime_worker(state: AppState, runtime_id: String, lane: Lane) {
             Ok(WorkerStep::Advanced) => {}
             Ok(WorkerStep::Idle) => {
                 // The sender lives as long as `state`, which this task holds.
-                let _ = work.changed().await;
+                let _ = stopping.run_until_cancelled(work.changed()).await;
             }
-            Ok(WorkerStep::Backoff) => tokio::time::sleep(backoff).await,
+            Ok(WorkerStep::Backoff) => {
+                stopping
+                    .run_until_cancelled(tokio::time::sleep(backoff))
+                    .await;
+            }
             Err(failure) => {
                 warn!(runtime_id, ?lane, error = %failure, "runtime worker failed");
-                tokio::time::sleep(backoff).await;
+                stopping
+                    .run_until_cancelled(tokio::time::sleep(backoff))
+                    .await;
             }
         }
     }
@@ -486,6 +509,7 @@ async fn run_next(
     state: &AppState,
     runtime_id: &str,
     lane: Lane,
+    stopping: &CancellationToken,
     submit: impl AsyncFnOnce(
         &Provider,
         &str,
@@ -499,7 +523,7 @@ async fn run_next(
     let token = runtime_token(&state.config, runtime)?;
     state
         .core
-        .run_next(runtime_id, lane, async |request| {
+        .run_next(runtime_id, lane, stopping, async |request| {
             submit(runtime, &token, request).await
         })
         .await
@@ -529,15 +553,24 @@ async fn call_runtime(
         .await
 }
 
+#[derive(Deserialize)]
+struct ClaimQuery {
+    turn_id: Option<String>,
+}
+
 async fn claim_delivery(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<ClaimQuery>,
 ) -> Result<Json<Option<Delivery>>, ApiError> {
     let interface = interface_provider(&headers, &state.config)?.id.clone();
     let owner = interface_instance(&headers)?.to_owned();
     let claimed = state
         .core
-        .blocking(move |core| core.claim_delivery(&interface, &owner))
+        .blocking(move |core| match query.turn_id {
+            Some(turn) => core.claim_turn_delivery(&interface, &owner, &turn),
+            None => core.claim_delivery(&interface, &owner),
+        })
         .await?;
     Ok(Json(claimed))
 }
@@ -617,16 +650,35 @@ async fn status(
     }))
 }
 
+/// Core's health, then each provider's in registry order. Enabled providers
+/// are asked at once, so the report takes one health timeout at most however
+/// many cannot answer.
 async fn provider_health(client: &Client, config: &LoadedConfig) -> Vec<Health> {
-    let mut reports = vec![core_health()];
-    for provider in &config.value.providers {
-        if !provider.enabled {
-            reports.push(provider_status(provider, "disabled"));
-            continue;
+    let providers = &config.value.providers;
+    let mut probes = tokio::task::JoinSet::new();
+    for (index, provider) in providers.iter().enumerate() {
+        if provider.enabled {
+            let (client, provider) = (client.clone(), provider.clone());
+            probes.spawn(async move { (index, fetch_health(&client, &provider).await) });
         }
-        reports.push(fetch_health(client, provider).await);
     }
-    reports
+    let mut reports = providers
+        .iter()
+        .map(|provider| {
+            let status = if provider.enabled {
+                "unavailable"
+            } else {
+                "disabled"
+            };
+            provider_status(provider, status)
+        })
+        .collect::<Vec<_>>();
+    while let Some(probe) = probes.join_next().await {
+        if let Ok((index, health)) = probe {
+            reports[index] = health;
+        }
+    }
+    std::iter::once(core_health()).chain(reports).collect()
 }
 
 async fn fetch_health(client: &Client, provider: &Provider) -> Health {
@@ -727,7 +779,7 @@ fn selected_provider(provider: &Provider) -> SelectedProvider {
 }
 
 /// Interrupt or termination, as the service manager stops core.
-async fn shutdown(core: Core) {
+async fn shutdown(core: Core, stopping: CancellationToken) {
     let terminated = async {
         match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
             Ok(mut terminate) => {
@@ -747,6 +799,8 @@ async fn shutdown(core: Core) {
         }
         () = terminated => {}
     }
-    // Waiting submissions then answer promptly; interfaces retry them.
+    // No turn is claimed after this; waiting submissions answer promptly,
+    // and interfaces retry them.
+    stopping.cancel();
     core.stop_capturing();
 }

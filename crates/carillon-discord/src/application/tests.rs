@@ -118,6 +118,35 @@ fn deterministic_options<'a>(token_file: &'a Path, module: &'a Path) -> ServeOpt
 }
 
 #[tokio::test]
+async fn a_disabled_provider_ends_before_credentials_state_or_core() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    // Its address is taken, core does not answer and its credential is
+    // missing: a disabled provider needs none of them.
+    let occupant = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let (mut config, _, module) = served_installation(
+        &directory.path().join("installation"),
+        "127.0.0.1:1".parse()?,
+        occupant.local_addr()?,
+    )?;
+    config
+        .value
+        .providers
+        .iter_mut()
+        .find(|provider| provider.id == "discord-private")
+        .context("missing interface")?
+        .enabled = false;
+    let state = crate::config::state_directory(&config, "discord-private");
+    let missing = directory.path().join("missing.token");
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        super::serve(config, deterministic_options(&missing, &module)),
+    )
+    .await??;
+    assert!(!state.exists(), "a disabled provider created its state");
+    Ok(())
+}
+
+#[tokio::test]
 async fn startup_reconciliation_refuses_permanent_errors_and_recovers_transient_errors()
 -> anyhow::Result<()> {
     for status in [
@@ -894,6 +923,193 @@ async fn an_abandoned_install_completes_while_holding_the_maintenance_lock() -> 
     Ok(())
 }
 
+/// A command module that asks core for the model state through its one
+/// native call, then replies `answered` when core gave the state, or
+/// `failed` when it did not.
+fn calling_model(answered: &str, failed: &str) -> anyhow::Result<Vec<u8>> {
+    let description = describing(&[definition("model")]);
+    let describe_length =
+        serde_json::to_vec(&carillon_discord_commands::contract::Invocation::Describe)?.len();
+    let request =
+        serde_json::to_string(&carillon_discord_commands::contract::HostRequest::ModelState)?;
+    let (answered, failed) = (replying(answered, &[]), replying(failed, &[]));
+    let escape = |text: &str| text.replace('\\', "\\\\").replace('"', "\\\"");
+    let text = format!(
+        r#"(module
+  (import "carillon" "call" (func $call (param i32 i32) (result i32)))
+  (import "carillon" "take" (func $take (param i32 i32)))
+  (memory (export "memory") 1)
+  (global $length (mut i32) (i32.const 0))
+  (global $output (mut i32) (i32.const 0))
+  (data (i32.const 1024) "{}")
+  (data (i32.const 4096) "{}")
+  (data (i32.const 5120) "{}")
+  (data (i32.const 6144) "{}")
+  (func (export "input") (param $length i32) (result i32)
+    (global.set $length (local.get $length))
+    (i32.const 8192))
+  (func (export "invoke") (result i32)
+    (local $reply i32)
+    (if (result i32) (i32.eq (global.get $length) (i32.const {describe_length}))
+      (then (global.set $output (i32.const 1024)) (i32.const {}))
+      (else
+        (local.set $reply (call $call (i32.const 4096) (i32.const {})))
+        (call $take (i32.const 32768) (local.get $reply))
+        ;; {{"ModelState": ...}} or {{"Error": ...}}
+        (if (result i32) (i32.eq (i32.load8_u (i32.const 32770)) (i32.const 77))
+          (then (global.set $output (i32.const 5120)) (i32.const {}))
+          (else (global.set $output (i32.const 6144)) (i32.const {}))))))
+  (func (export "output") (result i32) (global.get $output)))"#,
+        escape(&description),
+        escape(&request),
+        escape(&answered),
+        escape(&failed),
+        description.len(),
+        request.len(),
+        answered.len(),
+        failed.len(),
+    );
+    Ok(wat::parse_str(text)?)
+}
+
+/// A gateway `/model` command from an allowed user in route channel 300.
+fn model_command() -> anyhow::Result<twilight_gateway::Event> {
+    use twilight_model::gateway::payload::incoming::InteractionCreate;
+
+    let command = json!({
+        "id": "1",
+        "application_id": "2",
+        "authorizing_integration_owners": {},
+        "token": "t",
+        "version": 1,
+        "type": 2,
+        "guild_id": "100",
+        "channel": {"id": "300", "type": 0},
+        "member": {
+            "user": {"id": "200", "username": "u", "discriminator": "0", "avatar": null},
+            "roles": [],
+            "joined_at": null,
+            "deaf": false,
+            "mute": false,
+            "flags": 0
+        },
+        "data": {"id": "3", "name": "model", "type": 1}
+    });
+    Ok(twilight_gateway::Event::InteractionCreate(Box::new(
+        InteractionCreate(serde_json::from_value(command)?),
+    )))
+}
+
+/// The gateway goes, as when the provider stops, after taking an
+/// interaction that Discord has acknowledged and whose native call to core
+/// is still running: the call's result is still part of the reply sent
+/// before the provider returns.
+#[tokio::test]
+async fn an_acknowledged_interaction_is_answered_before_the_provider_returns() -> anyhow::Result<()>
+{
+    use axum::routing::patch;
+    use tokio::sync::Notify;
+
+    let directory = tempfile::tempdir()?;
+    // Discord takes the acknowledgement and the reply at once.
+    let acknowledged = Arc::new(Notify::new());
+    let replies = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let discord = Router::new()
+        .route(
+            "/api/v10/interactions/{id}/{token}/callback",
+            post({
+                let acknowledged = acknowledged.clone();
+                move || async move {
+                    acknowledged.notify_one();
+                    StatusCode::NO_CONTENT
+                }
+            }),
+        )
+        .route(
+            "/api/v10/webhooks/{application}/{token}/messages/@original",
+            patch({
+                let replies = replies.clone();
+                move |Json(reply): Json<Value>| async move {
+                    if let Ok(mut replies) = replies.lock() {
+                        replies.push(reply);
+                    }
+                    Json(json!({}))
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let discord_address = listener.local_addr()?;
+    let discord_server = tokio::spawn(async move { axum::serve(listener, discord).await });
+    // Core answers the module's native call only when the test releases it.
+    let (asked, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    let core = Router::new().route(
+        "/v1/model",
+        get({
+            let (asked, release) = (asked.clone(), release.clone());
+            move || async move {
+                asked.notify_one();
+                release.notified().await;
+                Json(json!({
+                    "available": [],
+                    "agent": {"selection": null, "overridden": false}
+                }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let core_address = listener.local_addr()?;
+    let core_server = tokio::spawn(async move { axum::serve(listener, core).await });
+    let mut state = discord_state(
+        core_client(format!("http://{core_address}")),
+        directory.path(),
+    )
+    .await?;
+    std::fs::write(
+        directory.path().join("release.wasm"),
+        calling_model("model state received", "the native call failed")?,
+    )?;
+    state.commands = Arc::new(Commands::load(files(directory.path())).await?);
+    let target = Arc::new(app(&discord_address.to_string(), 2, 100));
+    state.app = Some(target.clone());
+    let ingress = Arc::new(crate::inbound::Ingress {
+        core: state.core.clone(),
+        config: state.discord.clone(),
+        participation: state.participation.clone(),
+        http: target.http.clone(),
+        reactions: crate::delivery::Reactions::new(target.http.clone(), state.discord.clone()),
+        downloads: state.downloads.clone(),
+        refusals: Arc::new(tokio::sync::Semaphore::new(crate::inbound::lanes::REFUSALS)),
+        stopping: tokio_util::sync::CancellationToken::new(),
+    });
+    let event = model_command()?;
+    let (messages, _queue) = tokio::sync::mpsc::channel(1);
+    let mut interactions = tokio::task::JoinSet::new();
+    super::take_event(&state, event, &messages, &ingress, &mut interactions)?;
+    // No event follows: the gateway is gone. Discord has the acknowledgement,
+    // and the module's native call is waiting for core.
+    tokio::time::timeout(Duration::from_secs(5), acknowledged.notified()).await?;
+    tokio::time::timeout(Duration::from_secs(5), asked.notified()).await?;
+    let answering = super::answered(&mut interactions);
+    tokio::pin!(answering);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut answering)
+            .await
+            .is_err(),
+        "the provider returned while an acknowledged interaction was still running"
+    );
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), answering).await?;
+    let replies = replies
+        .lock()
+        .map_err(|_| anyhow::anyhow!("poisoned"))?
+        .clone();
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert_eq!(replies[0]["content"], "model state received");
+    discord_server.abort();
+    core_server.abort();
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_full_message_queue_refuses_instead_of_holding_the_gateway() -> anyhow::Result<()> {
     let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
@@ -990,7 +1206,9 @@ fn native_messages_keep_attachment_metadata_without_signed_addresses() -> anyhow
 struct SimulatedCore {
     events: Vec<carillon_protocol::model::ExternalEvent>,
     staged: Vec<Vec<Vec<u8>>>,
-    pending: Option<carillon_protocol::model::Delivery>,
+    /// Unacknowledged deliveries, oldest first, each with whether this
+    /// provider instance holds its claim.
+    deliveries: Vec<(carillon_protocol::model::Delivery, bool)>,
     /// Events core is still capturing, for this many more status lookups.
     capturing: HashMap<String, (usize, carillon_protocol::model::ExternalEvent)>,
     /// An event whose next submission core receives but whose answer is lost.
@@ -1013,16 +1231,60 @@ impl SimulatedCore {
         self.staged.push(staged);
         self.events.push(event);
     }
+
+    /// Claim as core does: this instance's own claim first, then the oldest
+    /// pending delivery, of `turn` if one is named.
+    fn claim(&mut self, turn: Option<&String>) -> Option<carillon_protocol::model::Delivery> {
+        let wanted = |held: bool| {
+            move |(delivery, claimed): &(carillon_protocol::model::Delivery, bool)| {
+                *claimed == held && turn.is_none_or(|turn| *turn == delivery.turn_id)
+            }
+        };
+        let next = self
+            .deliveries
+            .iter()
+            .position(wanted(true))
+            .or_else(|| self.deliveries.iter().position(wanted(false)))?;
+        self.deliveries[next].1 = true;
+        Some(self.deliveries[next].0.clone())
+    }
+
+    /// Offer the answer to `event`'s turn for delivery.
+    fn answer(&mut self, event: &carillon_protocol::model::ExternalEvent) {
+        self.deliveries.push((
+            carillon_protocol::model::Delivery {
+                turn_state: carillon_protocol::model::TurnState::Completed,
+                id: i64::try_from(self.events.len()).unwrap_or(i64::MAX),
+                turn_id: format!("turn-{}", event.event_id),
+                target_id: event.delivery_target_id.clone(),
+                feedback_target_id: event.feedback_target_id.clone(),
+                content: "answer".to_owned(),
+                origin: carillon_protocol::model::Origin {
+                    turn_id: format!("turn-{}", event.event_id),
+                    accepted_at: 1_790_000_000,
+                },
+                finished_at: 1_790_000_001,
+                activity: None,
+                continued_by: None,
+            },
+            false,
+        ));
+    }
 }
 
 async fn simulated_core(staging: PathBuf) -> anyhow::Result<(std::net::SocketAddr, SharedCore)> {
-    use axum::extract::{Path as AxumPath, State};
-    use carillon_protocol::model::{Delivery, EventReceipt, EventStatus, ExternalEvent, TurnState};
+    use axum::extract::{Path as AxumPath, Query, State};
+    use carillon_protocol::model::{EventReceipt, EventStatus, ExternalEvent, TurnState};
     let shared = SharedCore::default();
+    // A turn core already held has finished.
     let receipt = |event_id: &str, duplicate| EventReceipt {
         event_id: event_id.to_owned(),
         turn_id: format!("turn-{event_id}"),
-        state: TurnState::Queued,
+        state: if duplicate {
+            TurnState::Completed
+        } else {
+            TurnState::Queued
+        },
         duplicate,
     };
     let (submitted, looked_up) = (staging.clone(), staging);
@@ -1041,22 +1303,8 @@ async fn simulated_core(staging: PathBuf) -> anyhow::Result<(std::net::SocketAdd
                     }
                     let duplicate = core.events.iter().any(|seen| seen.event_id == event.event_id);
                     if !duplicate {
-                        core.pending = Some(Delivery {
-                            turn_state: TurnState::Completed,
-                            id: 1,
-                            turn_id: format!("turn-{}", event.event_id),
-                            target_id: event.delivery_target_id.clone(),
-                            feedback_target_id: event.feedback_target_id.clone(),
-                            content: "answer".to_owned(),
-                            origin: carillon_protocol::model::Origin {
-                                turn_id: format!("turn-{}", event.event_id),
-                                accepted_at: 1_790_000_000,
-                            },
-                            finished_at: 1_790_000_001,
-                            activity: None,
-                            continued_by: None,
-                        });
                         core.capture(&submitted, event.clone());
+                        core.answer(&event);
                     }
                     Json(receipt(&event.event_id, duplicate)).into_response()
                 },
@@ -1090,13 +1338,26 @@ async fn simulated_core(staging: PathBuf) -> anyhow::Result<(std::net::SocketAdd
         )
         .route(
             "/v1/deliveries",
-            get(|State(core): State<SharedCore>| async move {
-                Json(core.lock().ok().and_then(|mut core| core.pending.take()))
-            }),
+            get(
+                |State(core): State<SharedCore>,
+                 Query(claim): Query<HashMap<String, String>>| async move {
+                    let Ok(mut core) = core.lock() else {
+                        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    };
+                    Json(core.claim(claim.get("turn_id"))).into_response()
+                },
+            ),
         )
         .route(
             "/v1/deliveries/{id}/ack",
-            post(|| async { StatusCode::NO_CONTENT }),
+            post(
+                |State(core): State<SharedCore>, AxumPath(id): AxumPath<i64>| async move {
+                    if let Ok(mut core) = core.lock() {
+                        core.deliveries.retain(|(delivery, _)| delivery.id != id);
+                    }
+                    StatusCode::NO_CONTENT
+                },
+            ),
         )
         .with_state(shared.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -1112,16 +1373,27 @@ async fn simulate(
     user: &str,
     files: &[crate::conversations::SourceAttachment],
 ) -> anyhow::Result<(StatusCode, Value)> {
-    let message = json!({
-        "event_id": id, "guild_id": "100", "user_id": user, "channel_id": "300",
-        "content": "", "attachments": files,
-    });
+    simulate_message(
+        state,
+        &json!({
+            "event_id": id, "guild_id": "100", "user_id": user, "channel_id": "300",
+            "content": "", "attachments": files,
+        }),
+    )
+    .await
+}
+
+/// Send `message` through deterministic simulation.
+async fn simulate_message(
+    state: &DiscordState,
+    message: &Value,
+) -> anyhow::Result<(StatusCode, Value)> {
     let request = Request::builder()
         .method(Method::POST)
         .uri("/v1/simulate")
         .header("authorization", "Bearer token")
         .header("content-type", "application/json")
-        .body(Body::from(serde_json::to_vec(&message)?))?;
+        .body(Body::from(serde_json::to_vec(message)?))?;
     let response = discord_router(state.clone(), true).oneshot(request).await?;
     let status = response.status();
     let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
@@ -1239,5 +1511,66 @@ async fn simulation_admits_then_downloads_files_under_the_provider_policy() -> a
         Some("6")
     );
     assert_eq!(core.staged.last(), Some(&vec![vec![7; 32]]));
+    Ok(())
+}
+
+#[tokio::test]
+async fn simulation_settles_its_own_turns_delivery_and_no_other() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (core_address, core) = simulated_core(directory.path().join("staging")).await?;
+    let state = discord_state(
+        core_client(format!("http://{core_address}")),
+        directory.path(),
+    )
+    .await?;
+    // Earlier simulations of these were accepted, but their turns finished
+    // only after the requests stopped waiting: both answers are pending, the
+    // abandoned one oldest.
+    {
+        let mut core = core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
+        for id in ["abandoned", "late"] {
+            let event = carillon_protocol::model::ExternalEvent {
+                event_id: id.to_owned(),
+                agent_id: "default".to_owned(),
+                user_id: "200".to_owned(),
+                audience_id: "discord:channel:300".to_owned(),
+                delivery_target_id: "300".to_owned(),
+                feedback_target_id: format!("300:{id}"),
+                content: String::new(),
+                native: Value::Null,
+                attachments: None,
+            };
+            core.events.push(event.clone());
+            core.answer(&event);
+        }
+    }
+    let text = |id: &str| {
+        json!({
+            "event_id": id, "guild_id": "100", "user_id": "200", "channel_id": "300",
+            "content": "hello", "attachments": [],
+        })
+    };
+    // Sending one again delivers its answer, once.
+    let (status, body) = simulate_message(&state, &text("late")).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["receipt"]["duplicate"], true);
+    assert_eq!(body["delivery"]["turn_id"], "turn-late");
+    let (status, body) = simulate_message(&state, &text("late")).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["delivery"], Value::Null);
+    // A new message gets its own answer, not a stale one.
+    let (status, body) = simulate_message(&state, &text("next")).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["delivery"]["turn_id"], "turn-next");
+    // Nobody claimed the abandoned turn's answer.
+    let core = core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
+    assert!(
+        matches!(
+            core.deliveries.as_slice(),
+            [(delivery, false)] if delivery.turn_id == "turn-abandoned"
+        ),
+        "{:?}",
+        core.deliveries
+    );
     Ok(())
 }

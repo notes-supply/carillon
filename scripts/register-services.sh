@@ -43,6 +43,13 @@ case "$UNIT_DIR" in /*) ;; *) echo "XDG_CONFIG_HOME must be an absolute path" >&
 [ -f "$CARILLON_HOME/carillon.toml" ] || { echo "installed configuration is missing" >&2; exit 1; }
 # This directory is shared with unrelated user services. Preserve its mode.
 mkdir -p "$UNIT_DIR"
+# Every installation of this owner shares the units. Hold their lock while
+# changing them, unless the caller (`carillon update`) already holds it.
+UNIT_DIR=$(realpath -e -- "$UNIT_DIR")
+if [ "${CARILLON_UNITS_LOCK:-}" != "$UNIT_DIR" ]; then
+  exec 8>>"$UNIT_DIR/.carillon-units.lock"
+  flock -n 8 || { echo "another Carillon operation is changing the user units in $UNIT_DIR" >&2; exit 1; }
+fi
 
 unit_escape() {
   printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/%/%%/g'

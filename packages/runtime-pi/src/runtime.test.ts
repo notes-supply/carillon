@@ -146,6 +146,82 @@ it("composes native Pi directly, retains history and isolates independently cons
   }
 });
 
+it("keeps a running turn's model when an update commits while its catalogue is read", async () => {
+  const root = await mkdtemp(join(tmpdir(), "carillon-pin-"));
+  const later: Model<"openai-responses"> = { ...model, id: "later", name: "Later" };
+  const models = await ModelRuntime.create({
+    authPath: join(root, "auth.json"),
+    modelsPath: null,
+    modelsStorePath: join(root, "models.json"),
+    allowModelNetwork: false,
+    refreshOnCreate: false,
+  });
+  const catalogue = vi.spyOn(models, "getAvailable").mockResolvedValue([model, later]);
+  vi.spyOn(models, "getAuth").mockResolvedValue({ auth: { apiKey: "test-only" } });
+  vi.spyOn(models, "hasConfiguredAuth").mockReturnValue(true);
+  const used: string[] = [];
+  vi.spyOn(models, "streamSimple").mockImplementation((selected) => {
+    used.push(selected.id);
+    const message: AssistantMessage = {
+      role: "assistant",
+      content: [{ type: "text", text: "done" }],
+      api: model.api,
+      provider: model.provider,
+      model: selected.id,
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "stop",
+      timestamp: Date.now(),
+    };
+    const stream = createAssistantMessageEventStream();
+    queueMicrotask(() => {
+      stream.push({ type: "start", partial: message });
+      stream.push({ type: "done", reason: "stop", message });
+    });
+    return stream;
+  });
+  const runtime = await createPiRuntime({
+    workspace: root,
+    stateDirectory: join(root, "state"),
+    modelRuntime: models,
+    settings: SettingsManager.inMemory({ defaultProvider: model.provider, defaultModel: model.id }),
+  });
+  const query = { interface_id: "test", agent_id: "test", audience_id: "test" };
+  try {
+    // The turn starts, and its catalogue read is slow.
+    const slow = Promise.withResolvers<readonly Model<typeof model.api>[]>();
+    catalogue.mockReturnValueOnce(slow.promise);
+    const turn = runtime.executeTurn({
+      ...query,
+      correlation_id: "running",
+      input: "hello",
+      resource_root: root,
+      attachment_root: root,
+    });
+    await Promise.resolve();
+    // Meanwhile an update reads its own catalogue and commits.
+    await runtime.setModel({
+      ...query,
+      scope: "agent",
+      selection: { provider: later.provider, model: later.id },
+    });
+    expect((await runtime.modelState(query)).agent.selection?.model).toBe(later.id);
+    slow.resolve([model, later]);
+    await turn;
+    expect(used).toEqual([model.id]);
+  } finally {
+    await runtime.close();
+    vi.restoreAllMocks();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 it("close waits for accepted operations and prevents queued execution from starting", async () => {
   const root = await mkdtemp(join(tmpdir(), "carillon-close-"));
   const models = await ModelRuntime.create({

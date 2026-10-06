@@ -14,7 +14,7 @@ import {
 import { createDeterministicRuntime } from "./testing.ts";
 import { createRuntimeServer } from "@carillon/runtime/http";
 import packageInfo from "../package.json" with { type: "json" };
-import { runtimeListenAddress } from "@carillon/runtime/endpoint";
+import { providerAddress } from "@carillon/runtime/endpoint";
 import {
   loadInstallation,
   loadRuntimeCredential,
@@ -34,16 +34,20 @@ const ProviderFileSchema = Type.Object(
 
 async function main(values: readonly string[]): Promise<void> {
   const args = parseArguments(values, ["deterministic"]);
-  const config = await loadInstallation(
-    requiredArgument(args, "config"),
-    requiredArgument(args, "provider"),
-  );
+  const providerId = requiredArgument(args, "provider");
+  const config = await loadInstallation(requiredArgument(args, "config"), providerId);
+  // Disabled on purpose, the runtime ends successfully, so its service is not
+  // restarted, before it reads its credential or creates any state.
+  if (config === "disabled") {
+    process.stdout.write(`runtime provider ${providerId} is disabled; not serving\n`);
+    return;
+  }
   const inlineImages = await loadInlineImages(config.providerFile);
   if (!(await stat(config.workspace)).isDirectory())
     throw new Error("workspace must be an existing directory");
   if (!(await stat(config.resourceRoot)).isDirectory())
     throw new Error("resource root must be an existing directory");
-  const listenAddress = runtimeListenAddress(config.runtime.url);
+  const listenAddress = providerAddress(config.runtime.url);
   const token = await loadRuntimeCredential(requiredArgument(args, "token-file"), config.runtime);
   const deterministic = args.has("deterministic");
   const stateDirectory = resolve(requiredArgument(args, "state-dir"));

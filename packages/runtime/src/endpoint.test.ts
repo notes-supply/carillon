@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { runtimeListenAddress } from "./endpoint.ts";
+import { providerAddress } from "./endpoint.ts";
 
 it("converts supported loopback URLs to native listener addresses", () => {
   for (const [url, address] of [
@@ -9,7 +9,7 @@ it("converts supported loopback URLs to native listener addresses", () => {
     ["http://127.0.0.1:80", { host: "127.0.0.1", port: 80 }],
     ["http://[::1]:80", { host: "::1", port: 80 }],
   ] as const)
-    expect(runtimeListenAddress(url)).toEqual(address);
+    expect(providerAddress(url)).toEqual(address);
 });
 
 it("rejects unusable and non-loopback endpoints before Pi starts", () => {
@@ -32,5 +32,5 @@ it("rejects unusable and non-loopback endpoints before Pi starts", () => {
     "http://127.0.0.1:0",
     "http://[::1]:0",
   ])
-    expect(() => runtimeListenAddress(url), url).toThrow();
+    expect(() => providerAddress(url), url).toThrow();
 });

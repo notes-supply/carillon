@@ -154,6 +154,24 @@ for failure in unset stale partial-term partial-kill sync-cleanup marker-kill rm
       esac
       ;;
   esac
+  case "$failure" in
+    marker-kill | rmdir-kill)
+      # Finishing an already removed application still reloads the service
+      # manager, so it waits for the owner's shared units like any change.
+      exec 7>>"$UNIT_DIR/.carillon-units.lock"
+      flock -n 7
+      held=0
+      env HOME="$OWNER_HOME" XDG_CONFIG_HOME="$OWNER_HOME/.config" \
+        CARILLON_HOME="$ROOT" CARILLON_SKIP_SYSTEMD_RELOAD=0 PATH="$COMMANDS:$PATH" \
+        ROOT="$ROOT" FAILURE=recovery MARKER="$TEST_ROOT/held-$failure" \
+        "$RELEASE/uninstall.sh" >"$TEST_ROOT/held-recovery.log" 2>&1 || held=$?
+      exec 7>&-
+      [ "$held" -ne 0 ] || { echo "recovery ignored the held user units: $failure" >&2; exit 1; }
+      grep -F 'another Carillon operation is changing the user units' \
+        "$TEST_ROOT/held-recovery.log" >/dev/null
+      [ ! -e "$TEST_ROOT/held-$failure.systemctl" ]
+      ;;
+  esac
   # The archive helper remains available even after the installed one is gone.
   env HOME="$OWNER_HOME" XDG_CONFIG_HOME="$OWNER_HOME/.config" \
     CARILLON_HOME="$ROOT" CARILLON_SKIP_SYSTEMD_RELOAD=0 PATH="$COMMANDS:$PATH" \

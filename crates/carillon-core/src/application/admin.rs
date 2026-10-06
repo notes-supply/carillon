@@ -13,15 +13,15 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
-use fs2::FileExt;
 use tar::{Archive, Builder};
 use uuid::Uuid;
 
 use carillon_installation::config::{
     AgentConfig, AttachmentLimits, Config, CoreConfig, LoadedConfig, Provider, ProviderRole,
-    RELEASE_VERSION, hash_token, new_token, validate_provider_identity,
+    RELEASE_VERSION, attachment_staging, hash_token, new_token, validate_provider_identity,
 };
 use carillon_installation::filesystem::{atomic_write, sync_ancestors, sync_tree};
+use carillon_installation::maintenance::ServiceLock;
 
 use crate::{attachments, db::Database};
 
@@ -46,28 +46,6 @@ const NATIVE_EXTENSION: &str = r#"export default function carillonContext(pi) {
 }
 "#;
 const SKILL: &str = "---\nname: carillon-status\ndescription: Explain Carillon component and continuity status when the operator asks.\n---\n\nReport component identity, resource selection, and delivery certainty plainly.\n";
-
-/// Exclusive lock over an installation's durable state directory. Core holds
-/// one while serving; backup takes it to prove the services are stopped.
-pub struct ServiceLock {
-    _file: fs::File,
-}
-
-impl ServiceLock {
-    pub fn acquire(data_dir: &Path) -> Result<Self> {
-        fs::create_dir_all(data_dir)?;
-        let path = data_dir.join("service.lock");
-        let file = fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&path)?;
-        file.try_lock_exclusive()
-            .with_context(|| format!("Carillon core already owns {}", path.display()))?;
-        Ok(Self { _file: file })
-    }
-}
 
 /// Creates an installation with the bundled providers registered and
 /// credentialed. Provider-owned settings (such as Discord admission) are
@@ -308,10 +286,14 @@ pub fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
     )?;
     validate_installation(config)?;
     // Interfaces' attachment staging is disposable scratch, never archived.
-    let components = data
-        .canonicalize()
-        .context("resolve backup data_dir")?
-        .join("components");
+    let data = data.canonicalize().context("resolve backup data_dir")?;
+    let scratch = config
+        .value
+        .providers
+        .iter()
+        .filter(|provider| provider.role == ProviderRole::Interface)
+        .map(|provider| attachment_staging(&data, &provider.id))
+        .collect::<Vec<_>>();
     let staging = parent.join(format!(
         ".{}.backup-{}",
         name.to_string_lossy(),
@@ -328,7 +310,7 @@ pub fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
         // Keep the writer inside restore's regular-file/directory format even
         // when installed binaries or provider files have filesystem holes.
         archive.sparse(false);
-        append_directory(&mut archive, &root, &root, &components)?;
+        append_directory(&mut archive, &root, &root, &scratch)?;
         archive.finish()?;
         let encoder = archive.into_inner()?;
         let mut writer = encoder.finish()?;
@@ -480,21 +462,18 @@ fn ensure_stopped(config: &LoadedConfig) -> Result<ServiceLock> {
     Ok(lock)
 }
 
-/// Archive `directory` below `root`, leaving out each component's `incoming`
-/// staging under `components`.
+/// Archive `directory` below `root`, leaving out the `scratch` directories.
 fn append_directory<W: std::io::Write>(
     archive: &mut Builder<W>,
     root: &Path,
     directory: &Path,
-    components: &Path,
+    scratch: &[PathBuf],
 ) -> Result<()> {
     let mut entries = fs::read_dir(directory)?.collect::<Result<Vec<_>, _>>()?;
     entries.sort_by_key(fs::DirEntry::file_name);
     for entry in entries {
         let path = entry.path();
-        if entry.file_name() == "incoming"
-            && path.parent().and_then(Path::parent) == Some(components)
-        {
+        if scratch.contains(&path) {
             continue;
         }
         let relative = path.strip_prefix(root)?;
@@ -507,7 +486,7 @@ fn append_directory<W: std::io::Write>(
         }
         if file_type.is_dir() {
             archive.append_dir(relative, &path)?;
-            append_directory(archive, root, &path, components)?;
+            append_directory(archive, root, &path, scratch)?;
         } else if file_type.is_file() {
             archive.append_path_with_name(&path, relative)?;
         } else {
@@ -542,6 +521,7 @@ mod tests {
     use flate2::{Compression, write::GzEncoder};
     use tar::{Builder, Header};
     use tempfile::tempdir;
+    use tokio_util::sync::CancellationToken;
 
     use carillon_installation::config::{Config, LoadedConfig, ProviderRole, RELEASE_VERSION};
 
@@ -555,6 +535,11 @@ mod tests {
     ) -> Result<PathBuf> {
         initialize(root, workspace, base_port)
     }
+
+    /// A base port for backups that must find their services stopped, away
+    /// from 44800-44842, where the install, maintenance and operations tests
+    /// run real services by default.
+    const OFFLINE_BACKUP_PORT: u16 = 45_400;
 
     #[test]
     fn configuration_edits_preserve_unrelated_temporary_siblings() -> Result<()> {
@@ -900,7 +885,7 @@ mod tests {
     fn archive_test_tree(root: &Path, destination: &Path) -> Result<()> {
         let encoder = GzEncoder::new(fs::File::create(destination)?, Compression::default());
         let mut archive = Builder::new(encoder);
-        super::append_directory(&mut archive, root, root, Path::new("/nonexistent"))?;
+        super::append_directory(&mut archive, root, root, &[])?;
         archive.into_inner()?.finish()?;
         Ok(())
     }
@@ -921,7 +906,8 @@ mod tests {
         ] {
             let directory = tempdir()?;
             let source = directory.path().join("source");
-            let config_path = initialize_test_installation(&source, directory.path(), 44_800)?;
+            let config_path =
+                initialize_test_installation(&source, directory.path(), OFFLINE_BACKUP_PORT)?;
             let valid = directory.path().join("valid.tar.gz");
             backup(&LoadedConfig::load(&config_path)?, &valid)?;
             let database = source.join("state/carillon.sqlite3");
@@ -1026,7 +1012,8 @@ mod tests {
             for damage in ["missing", "content", "executable", "address", "malformed"] {
                 let directory = tempdir()?;
                 let source = directory.path().join("source");
-                let config_path = initialize_test_installation(&source, directory.path(), 44_800)?;
+                let config_path =
+                    initialize_test_installation(&source, directory.path(), OFFLINE_BACKUP_PORT)?;
                 let config = LoadedConfig::load(&config_path)?;
                 let store = config.value.data_dir.join("resource-snapshots");
                 let snapshot = resources::materialize(&config.value.agent.resource_root, &store)?;
@@ -1051,7 +1038,10 @@ mod tests {
                     None,
                 )?;
                 let expected_state = if uncertain {
-                    assert!(db.claim("runtime-pi", Lane::Messages)?.is_some());
+                    assert!(
+                        db.claim("runtime-pi", Lane::Messages, &CancellationToken::new())?
+                            .is_some()
+                    );
                     assert_eq!(db.recover_running_turns()?, 1);
                     TurnState::Interrupted
                 } else {
@@ -1196,15 +1186,20 @@ mod tests {
                 .await?;
             turns.push(receipt.turn_id);
         }
-        core.run_next("runtime-pi", Lane::Messages, async |request| {
-            Ok(RuntimeTurnResponse {
-                output: "read it".to_owned(),
-                follow_up: None,
-                unanswered_left: false,
-                activity: None,
-                correlation_id: request.correlation_id,
-            })
-        })
+        core.run_next(
+            "runtime-pi",
+            Lane::Messages,
+            &CancellationToken::new(),
+            async |request| {
+                Ok(RuntimeTurnResponse {
+                    output: "read it".to_owned(),
+                    follow_up: None,
+                    unanswered_left: false,
+                    activity: None,
+                    correlation_id: request.correlation_id,
+                })
+            },
+        )
         .await?;
         // Scratch the archive must not carry: interface staging still in
         // place, an abandoned copy and a published capture never committed.
@@ -1243,23 +1238,28 @@ mod tests {
         let restored = LoadedConfig::load(&restore(&archive, &relocated)?)?;
         let restored_core = installed_core(&restored)?;
         restored_core
-            .run_next("runtime-pi", Lane::Messages, async |request| {
-                assert_eq!(request.correlation_id, turns[1]);
-                let root = std::path::Path::new(&request.attachment_root);
-                assert!(root.starts_with(&relocated), "{}", root.display());
-                assert_eq!(
-                    fs::read(root.join(&request.attachments[0].path))
-                        .map_err(|error| crate::TurnFailure::Uncertain(error.into()))?,
-                    b"queued file"
-                );
-                Ok(RuntimeTurnResponse {
-                    output: "read it".to_owned(),
-                    follow_up: None,
-                    unanswered_left: false,
-                    activity: None,
-                    correlation_id: request.correlation_id,
-                })
-            })
+            .run_next(
+                "runtime-pi",
+                Lane::Messages,
+                &CancellationToken::new(),
+                async |request| {
+                    assert_eq!(request.correlation_id, turns[1]);
+                    let root = std::path::Path::new(&request.attachment_root);
+                    assert!(root.starts_with(&relocated), "{}", root.display());
+                    assert_eq!(
+                        fs::read(root.join(&request.attachments[0].path))
+                            .map_err(|error| crate::TurnFailure::Uncertain(error.into()))?,
+                        b"queued file"
+                    );
+                    Ok(RuntimeTurnResponse {
+                        output: "read it".to_owned(),
+                        follow_up: None,
+                        unanswered_left: false,
+                        activity: None,
+                        correlation_id: request.correlation_id,
+                    })
+                },
+            )
             .await?;
 
         // Damaged archives are refused before publication.
@@ -1330,6 +1330,10 @@ mod tests {
         for (name, content) in fixtures {
             fs::write(native.join(name), content)?;
         }
+        // Only interfaces stage attachments: a runtime's own `incoming` is state.
+        let incoming = root.join("state/components/other-runtime/incoming");
+        fs::create_dir_all(&incoming)?;
+        fs::write(incoming.join("queue"), "durable runtime queue")?;
         let destination = directory.path().join("backup.tar.gz");
         backup(&LoadedConfig::load(&config_path)?, &destination)?;
         fs::remove_dir_all(&root)?;
@@ -1341,6 +1345,10 @@ mod tests {
                 content
             );
         }
+        assert_eq!(
+            fs::read_to_string(target.join("state/components/other-runtime/incoming/queue"))?,
+            "durable runtime queue"
+        );
         assert!(!target.join("pi").exists());
         Ok(())
     }

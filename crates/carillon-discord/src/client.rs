@@ -97,6 +97,21 @@ impl CoreClient {
         core_json(request, "claim core delivery").await
     }
 
+    /// Claim the delivery of one turn for this provider instance, if it has
+    /// one pending or held.
+    ///
+    /// # Errors
+    /// Returns core rejection, transport, or malformed-response failures.
+    pub async fn claim_turn_delivery(
+        &self,
+        turn_id: &str,
+    ) -> Result<Option<Delivery>, InterfaceError> {
+        let mut url = Url::parse(&self.url("/v1/deliveries"))
+            .map_err(|error| InterfaceError::protocol(error.to_string()))?;
+        url.query_pairs_mut().append_pair("turn_id", turn_id);
+        core_json(self.request(Method::GET, url), "claim core delivery").await
+    }
+
     /// Commit the observed outcome of a held delivery claim.
     ///
     /// # Errors

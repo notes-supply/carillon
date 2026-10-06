@@ -23,6 +23,7 @@ import { join, resolve } from "node:path";
 
 // This fixture uses the bundled providers and simulated model responses.
 // Counters/activation markers below are test output, not a required reply format.
+const basePort = await availableBasePort();
 const root = await mkdtemp(join(tmpdir(), "carillon-integration-"));
 const restoredRoot = await mkdtemp(join(tmpdir(), "carillon-restored-"));
 const workspace = await mkdtemp(join(tmpdir(), "carillon-workspace-"));
@@ -34,7 +35,6 @@ const commandsModule = resolve(
 );
 const runtimeEntry = resolve("packages/runtime-pi/src/cli.ts");
 const packagedRuntime = process.env.CARILLON_RUNTIME_BINARY;
-const basePort = 45_000 + (process.pid % 10_000);
 let installation = root;
 let runtimeHost = "127.0.0.1";
 let runtimeConfigPath;
@@ -378,6 +378,17 @@ function configureDiscord(home, guildId, botUserId, userId, ...routes) {
     userId,
     ...routes.flatMap((route) => ["--route", route]),
   );
+}
+
+/** A provider disabled on purpose exits successfully, serving nothing. */
+function assertDisabledExit(name, expected) {
+  const [program, args] = serviceArguments(name);
+  const result = spawnSync(program, args, { encoding: "utf8", timeout: 10_000 });
+  assert.ifError(result.error);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, `${name} must exit successfully when disabled: ${result.stderr}`);
+  assert.doesNotMatch(result.stdout, /ready/u, `${name} must not serve when disabled`);
+  assert.match(`${result.stdout}${result.stderr}`, expected);
 }
 
 function assertStartupRefused(name, expected, extraArgs = [], options = {}) {
@@ -1334,8 +1345,31 @@ async function testRuntimeStartupRefusals(turnId) {
       await assert.rejects(stat(sessions), { code: "ENOENT" });
     }
     await rm(runtimeSettings);
+    // An interface endpoint off the loopback socket rule is refused before
+    // Pi starts, even while the running core holds the earlier registry:
+    // extensions would receive it with the operator credential.
+    const interfaceUrl = `url = "http://127.0.0.1:${String(basePort + 1)}"`;
+    const remote = original.replace(interfaceUrl, 'url = "http://192.0.2.1:8080"');
+    assert.notEqual(remote, original);
+    await writeFile(configPath(), remote);
+    assertStartupRefused("runtime", /provider URL must use an HTTP loopback socket address/u);
+    await assert.rejects(stat(sessions), { code: "ENOENT" });
+    await writeFile(configPath(), original);
     run("--home", installation, "provider", "runtime-pi", "disable");
-    assertStartupRefused("runtime", /runtime provider runtime-pi is disabled/u);
+    // Disabled on purpose, the runtime exits successfully before reading its
+    // credential or creating state, so its service is not restarted; a
+    // malformed registry is still refused.
+    const disabled = await readFile(configPath(), "utf8");
+    const token = credential("runtime-pi");
+    await rename(token, `${token}-saved`);
+    try {
+      assertDisabledExit("runtime", /runtime provider runtime-pi is disabled/u);
+      await writeFile(configPath(), disabled.replaceAll('"runtime-pi"', '"operator"'));
+      assertStartupRefused("runtime", /provider ID operator is reserved/u);
+    } finally {
+      await rename(`${token}-saved`, token);
+      await writeFile(configPath(), disabled);
+    }
     await assert.rejects(stat(sessions), { code: "ENOENT" });
     await assert.rejects(stat(privateState), { code: "ENOENT" });
     assert.equal(JSON.parse(run("--home", installation, "inspect", turnId)).state, "queued");
@@ -1476,6 +1510,24 @@ async function testConfigurationRefusals() {
       assertStartupRefused("discord", /read Discord configuration/u);
     } finally {
       await rename(`${providerConfigPath()}-saved`, providerConfigPath());
+    }
+    // Disabled on purpose, the provider exits successfully before reading its
+    // credential or settings, so its service is not restarted; a malformed
+    // registry is still refused.
+    run("--home", installation, "provider", "discord-private", "disable");
+    const withoutDiscord = await readFile(configPath(), "utf8");
+    const token = credential("discord-private");
+    await rename(token, `${token}-saved`);
+    await rename(providerConfigPath(), `${providerConfigPath()}-saved`);
+    try {
+      assertDisabledExit("discord", /Discord interface provider is disabled/u);
+      await writeFile(configPath(), withoutDiscord.replaceAll('"discord-private"', '"operator"'));
+      assertStartupRefused("discord", /provider ID operator is reserved/u);
+      assert.deepEqual(await readFile(database), previousDatabase);
+    } finally {
+      await rename(`${token}-saved`, token);
+      await rename(`${providerConfigPath()}-saved`, providerConfigPath());
+      await writeFile(configPath(), original);
     }
     // Invalid inline presentation fails before the provider starts any work.
     const discordSettings = await readFile(providerConfigPath(), "utf8");
@@ -1774,13 +1826,6 @@ async function testAttachments() {
   const body = await response.text();
   assert.equal(response.status, 200, body);
   const receipt = JSON.parse(body);
-  const status = await fetch(`http://127.0.0.1:${String(basePort)}/v1/events/attachments-1`, {
-    headers: {
-      authorization: `Bearer ${await credentialValue("discord-private")}`,
-      "x-carillon-provider": "discord-private",
-    },
-  });
-  assert.deepEqual(await status.json(), { status: "accepted", ...receipt, duplicate: true });
   // The interface's staging is its own; accepted files no longer need it.
   await rm(incoming, { recursive: true });
   const inspection = await waitForTurn(receipt.turn_id, "completed", "pending");
@@ -1788,6 +1833,20 @@ async function testAttachments() {
   assert.match(inspection.output, /attachment notes\.txt 5 bytes intact/u);
   assert.equal(inspection.attachments.length, 2);
   assert.match(inspection.attachments[0].path, /^[0-9a-f-]{36}\/0$/u);
+  // Asked about the event again, core names the same accepted turn, in the
+  // state it has now reached.
+  const status = await fetch(`http://127.0.0.1:${String(basePort)}/v1/events/attachments-1`, {
+    headers: {
+      authorization: `Bearer ${await credentialValue("discord-private")}`,
+      "x-carillon-provider": "discord-private",
+    },
+  });
+  assert.deepEqual(await status.json(), {
+    status: "accepted",
+    ...receipt,
+    state: "completed",
+    duplicate: true,
+  });
   const delivery = await waitForDeliveryClaim("attachments-check");
   assert.equal(delivery.turn_id, receipt.turn_id);
   await acknowledgeDelivery(delivery.id, "attachments-check");
@@ -1940,6 +1999,33 @@ function serviceArguments(name, { nativePi = false, commands = commandsModule } 
   ];
 }
 
+// init assigns three consecutive ports, and the T3 runtime case takes the
+// next. Probe the whole range rather than deriving it from a PID that can
+// collide with an unrelated host service.
+async function availableBasePort() {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const listeners = [];
+    try {
+      const first = createServer().listen(0, "127.0.0.1");
+      listeners.push(first);
+      await once(first, "listening");
+      const { port } = first.address();
+      if (port > 65_532) continue;
+      for (const offset of [1, 2, 3]) {
+        const next = createServer().listen(port + offset, "127.0.0.1");
+        listeners.push(next);
+        await once(next, "listening");
+      }
+      return port;
+    } catch (error) {
+      if (error.code !== "EADDRINUSE") throw error;
+    } finally {
+      await Promise.all(listeners.map((server) => new Promise((resolve) => server.close(resolve))));
+    }
+  }
+  throw new Error("could not find four available integration service ports");
+}
+
 function servicePort(name) {
   return basePort + { core: 0, discord: 1, runtime: 2, "runtime-t3": 3 }[name];
 }
@@ -1947,7 +2033,7 @@ function servicePort(name) {
 async function start(name, options = {}) {
   const [program, args] = serviceArguments(name, options);
   const child = spawn(program, args, {
-    stdio: ["ignore", "ignore", options.log === undefined ? "ignore" : "pipe"],
+    stdio: ["ignore", "ignore", options.log === undefined ? "inherit" : "pipe"],
     env: options.env,
   });
   child.stderr?.setEncoding("utf8").on("data", (text) => options.log.push(text));

@@ -1,6 +1,11 @@
-//! The lock serializing changes to one installation. Operator maintenance,
-//! the release scripts, and the Discord provider's command-module changes
-//! take the same `flock(2)` lock on `CARILLON_HOME/.maintenance.lock`.
+//! The locks serializing changes to one installation and to the owner's
+//! user units. Operator maintenance, the release scripts, and the Discord
+//! provider's command-module changes take the same `flock(2)` lock on
+//! `CARILLON_HOME/.maintenance.lock`. Every installation of an owner shares
+//! the owner's Carillon user units, so whatever reads or changes which
+//! installation they run also takes `.carillon-units.lock` beside them,
+//! always after its installation's lock. Core holds [`ServiceLock`] over its
+//! state while it serves; what needs core stopped takes it too.
 
 use std::{
     fs,
@@ -52,21 +57,101 @@ impl MaintenanceLock {
     /// Returns an error when the lock file cannot be opened or locked for a
     /// reason other than another holder.
     pub fn try_acquire(home: &Path) -> Result<Option<Self>> {
-        let path = Self::path(home);
-        let file = fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .mode(0o600)
-            .open(&path)
-            .with_context(|| format!("open maintenance lock {}", path.display()))?;
-        match file.try_lock_exclusive() {
-            Ok(()) => Ok(Some(Self { _file: file })),
-            Err(error) if error.kind() == fs2::lock_contended_error().kind() => Ok(None),
-            Err(error) => {
-                Err(error).with_context(|| format!("lock maintenance lock {}", path.display()))
-            }
-        }
+        Ok(try_lock(&Self::path(home))?.map(|file| Self { _file: file }))
+    }
+}
+
+/// Exclusive, non-blocking lock over the owner's Carillon user units in
+/// `units`, the owner's `systemd/user` directory. Taken after the
+/// installation's [`MaintenanceLock`]; the release scripts take the same
+/// lock unless a caller already holds it for them and says so through
+/// [`UnitsLock::HELD_FOR`].
+#[derive(Debug)]
+pub struct UnitsLock {
+    _file: fs::File,
+}
+
+impl UnitsLock {
+    /// Environment variable naming the unit directory whose lock the caller
+    /// already holds on behalf of a child process.
+    pub const HELD_FOR: &str = "CARILLON_UNITS_LOCK";
+
+    /// The lock file beside the units in `units`.
+    #[must_use]
+    pub fn path(units: &Path) -> PathBuf {
+        units.join(".carillon-units.lock")
+    }
+
+    /// Take the lock, or report that another operation holds it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the lock is held or its file cannot be opened.
+    pub fn acquire(units: &Path) -> Result<Self> {
+        let file = try_lock(&Self::path(units))?.with_context(|| {
+            format!(
+                "another Carillon operation is changing the user units in {}",
+                units.display()
+            )
+        })?;
+        Ok(Self { _file: file })
+    }
+}
+
+/// Exclusive lock over an installation's durable state directory. Core
+/// holds one while serving; backup and the Discord tools installation take
+/// it to prove core is stopped and to keep it from starting meanwhile.
+#[derive(Debug)]
+pub struct ServiceLock {
+    _file: fs::File,
+}
+
+impl ServiceLock {
+    /// The lock file in the state directory `data_dir`.
+    #[must_use]
+    pub fn path(data_dir: &Path) -> PathBuf {
+        data_dir.join("service.lock")
+    }
+
+    /// Take the lock, or report that core owns the state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the lock is held or its file cannot be opened.
+    pub fn acquire(data_dir: &Path) -> Result<Self> {
+        Self::try_acquire(data_dir)?.with_context(|| {
+            format!(
+                "Carillon core already owns {}",
+                Self::path(data_dir).display()
+            )
+        })
+    }
+
+    /// Take the lock, or return `None` while core or another holder has it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the state directory or lock file cannot be
+    /// created, or the lock fails for a reason other than another holder.
+    pub fn try_acquire(data_dir: &Path) -> Result<Option<Self>> {
+        fs::create_dir_all(data_dir).with_context(|| format!("create {}", data_dir.display()))?;
+        Ok(try_lock(&Self::path(data_dir))?.map(|file| Self { _file: file }))
+    }
+}
+
+/// The exclusively locked file at `path`, or `None` while another holds it.
+fn try_lock(path: &Path) -> Result<Option<fs::File>> {
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("open lock {}", path.display()))?;
+    match file.try_lock_exclusive() {
+        Ok(()) => Ok(Some(file)),
+        Err(error) if error.kind() == fs2::lock_contended_error().kind() => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("lock {}", path.display())),
     }
 }
 

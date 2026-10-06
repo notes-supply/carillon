@@ -14,7 +14,7 @@ use carillon_protocol::model::{
 };
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::watch;
-use tokio_util::task::TaskTracker;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::warn;
 
 /// Runtime identity and availability, without credentials or a transport implementation.
@@ -353,20 +353,25 @@ impl Core {
     /// one that got no answer is asked again too, and its report is
     /// delivered once, when it completes. A runtime's explained failure, or
     /// an answer core cannot read, ends it like a message.
+    ///
+    /// Once `stopping` is cancelled no turn is claimed, even by storage work
+    /// that was waiting for the database writer; one already claimed runs to
+    /// its outcome.
     /// # Errors
     /// Returns registry or storage errors. A failed outcome commit leaves the turn running for recovery.
     pub async fn run_next(
         &self,
         runtime_id: &str,
         lane: Lane,
+        stopping: &CancellationToken,
         submit: impl AsyncFnOnce(RuntimeTurnRequest) -> Result<RuntimeTurnResponse, TurnFailure>,
     ) -> Result<WorkerStep> {
         if !self.runtime(runtime_id)?.enabled {
             return Ok(WorkerStep::Backoff);
         }
-        let runtime = runtime_id.to_owned();
+        let (runtime, stopping) = (runtime_id.to_owned(), stopping.clone());
         let Some(turn) = self
-            .blocking(move |core| core.database.claim(&runtime, lane))
+            .blocking(move |core| core.database.claim(&runtime, lane, &stopping))
             .await?
         else {
             return Ok(WorkerStep::Idle);
@@ -523,6 +528,18 @@ impl Core {
     /// Returns storage errors.
     pub fn claim_delivery(&self, interface: &str, owner: &str) -> Result<Option<Delivery>> {
         self.database.claim_delivery(interface, owner)
+    }
+
+    /// Claim the pending output of one turn, as [`Self::claim_delivery`] does.
+    /// # Errors
+    /// Returns storage errors.
+    pub fn claim_turn_delivery(
+        &self,
+        interface: &str,
+        owner: &str,
+        turn_id: &str,
+    ) -> Result<Option<Delivery>> {
+        self.database.claim_turn_delivery(interface, owner, turn_id)
     }
 
     /// Settle abandoned delivery claims without silently resending uncertain output.

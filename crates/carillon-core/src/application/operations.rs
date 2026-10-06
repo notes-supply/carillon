@@ -1,18 +1,23 @@
 //! Everyday operation of an installed release: the owner's `carillon.target`
 //! user service, its logs and health. `systemctl` and `tail` are used
 //! directly; Carillon does not supervise processes itself. Maintenance is
-//! serialized by `carillon_installation::maintenance::MaintenanceLock`.
+//! serialized by `carillon_installation::maintenance::MaintenanceLock`, and
+//! everything that reads or changes which installation the owner's units
+//! run, by `UnitsLock`, held as [`HeldUnits`].
 
 use std::{
     fmt, fs,
-    os::unix::process::CommandExt as _,
+    os::unix::{fs::DirBuilderExt as _, process::CommandExt as _},
     path::{Path, PathBuf},
     process::Command as Process,
     time::{Duration, Instant},
 };
 
 use anyhow::{Context as _, Result, bail};
-use carillon_installation::config::{LoadedConfig, validate_provider_identity};
+use carillon_installation::{
+    config::{LoadedConfig, validate_provider_identity},
+    maintenance::UnitsLock,
+};
 use carillon_protocol::model::{Health, StatusReport};
 use reqwest::Url;
 use serde::de::DeserializeOwned;
@@ -20,6 +25,41 @@ use serde::de::DeserializeOwned;
 const TARGET: &str = "carillon.target";
 /// The registered core unit records which installation the units run.
 const CORE_UNIT: &str = "carillon-core.service";
+
+/// The owner's user units, which every installation of the owner shares,
+/// locked against any other Carillon operation on them while held.
+pub(super) struct HeldUnits {
+    directory: PathBuf,
+    _lock: UnitsLock,
+}
+
+impl HeldUnits {
+    /// Lock the owner's unit directory, creating it as registration would.
+    /// Take the installation's maintenance lock first.
+    ///
+    /// # Errors
+    /// Refuses while another operation holds the units.
+    pub(super) fn acquire() -> Result<Self> {
+        let directory = unit_directory()?;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&directory)
+            .with_context(|| format!("create {}", directory.display()))?;
+        let directory = directory.canonicalize()?;
+        let lock = UnitsLock::acquire(&directory)?;
+        Ok(Self {
+            directory,
+            _lock: lock,
+        })
+    }
+
+    /// The unit directory, as a child changing the units on this holder's
+    /// behalf is told through [`UnitsLock::HELD_FOR`].
+    pub(super) fn directory(&self) -> &Path {
+        &self.directory
+    }
+}
 
 /// Which installation, if any, the owner's Carillon user units belong to.
 #[derive(Debug, Eq, PartialEq)]
@@ -30,8 +70,9 @@ pub(super) enum Registration {
 }
 
 impl Registration {
-    pub(super) fn of(home: &Path) -> Result<Self> {
-        let unit = unit_directory()?.join(CORE_UNIT);
+    /// Read while `units` are held, so the answer stays true until released.
+    pub(super) fn of(home: &Path, units: &HeldUnits) -> Result<Self> {
+        let unit = units.directory.join(CORE_UNIT);
         let text = match fs::read_to_string(&unit) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Self::Absent),
@@ -93,9 +134,10 @@ pub(super) struct Services<'a> {
 impl<'a> Services<'a> {
     /// # Errors
     /// Refuses when the units are absent or run another installation, so
-    /// `--home` never starts or stops a different installation.
-    pub(super) fn registered(home: &'a Path) -> Result<Self> {
-        match Registration::of(home)? {
+    /// `--home` never starts or stops a different installation while
+    /// `units` are held.
+    pub(super) fn registered(home: &'a Path, units: &HeldUnits) -> Result<Self> {
+        match Registration::of(home, units)? {
             Registration::Owned => Ok(Self { home }),
             Registration::Absent => bail!(
                 "Carillon's user units are not registered; run {} to register {}",

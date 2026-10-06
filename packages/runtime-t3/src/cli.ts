@@ -1,6 +1,6 @@
 import { once } from "node:events";
 import { readFile, stat } from "node:fs/promises";
-import { runtimeListenAddress } from "@carillon/runtime/endpoint";
+import { providerAddress } from "@carillon/runtime/endpoint";
 import { createRuntimeServer } from "@carillon/runtime/http";
 import {
   loadInstallation,
@@ -15,13 +15,17 @@ import { connectT3 } from "./t3.ts";
 
 async function main(values: readonly string[]): Promise<void> {
   const args = parseArguments(values);
-  const installation = await loadInstallation(
-    requiredArgument(args, "config"),
-    requiredArgument(args, "provider"),
-  );
+  const providerId = requiredArgument(args, "provider");
+  const installation = await loadInstallation(requiredArgument(args, "config"), providerId);
+  // Disabled on purpose, the runtime ends successfully, so its service is not
+  // restarted, before it reads any credential, settings or state, or reaches T3.
+  if (installation === "disabled") {
+    process.stdout.write(`runtime provider ${providerId} is disabled; not serving\n`);
+    return;
+  }
   if (!(await stat(installation.workspace)).isDirectory())
     throw new Error("workspace must be an existing directory");
-  const listenAddress = runtimeListenAddress(installation.runtime.url);
+  const listenAddress = providerAddress(installation.runtime.url);
   const token = await loadRuntimeCredential(
     requiredArgument(args, "token-file"),
     installation.runtime,

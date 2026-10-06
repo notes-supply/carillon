@@ -42,6 +42,7 @@ pub(crate) fn ingress(
         config,
         participation,
         http,
+        refusals: Arc::new(tokio::sync::Semaphore::new(super::lanes::REFUSALS)),
         stopping: CancellationToken::new(),
     }))
 }
@@ -765,11 +766,13 @@ async fn a_message_stopped_before_core_says_whether_it_holds_it_gets_no_feedback
     tokio::time::timeout(Duration::from_secs(1), preparing)
         .await
         .context("preparation waited out core after the stop")??;
-    assert_eq!(ingress.reactions.stop(Duration::from_secs(1)).await, 0);
+    // Core's answer would decide the feedback, as a task of the reactions,
+    // but core does not answer within their grace: the task is cut, and
+    // nothing is shown or submitted.
+    assert_eq!(ingress.reactions.stop(Duration::from_secs(1)).await, 1);
     server.abort();
-    // Neither feedback nor a submission: the message was never admitted.
     let requests = std::iter::from_fn(|| observed.try_recv().ok()).collect::<Vec<_>>();
-    assert_eq!(requests, ["GET /v1/events/400"]);
+    assert_eq!(requests, ["GET /v1/events/400", "GET /v1/events/400"]);
     Ok(())
 }
 
@@ -809,14 +812,13 @@ async fn an_overload_refusal_ends_with_the_reactions() -> anyhow::Result<()> {
         discord_client(address),
         directory.path(),
     )?;
-    let refusals = Arc::new(tokio::sync::Semaphore::new(1));
-    super::lanes::refuse_overloaded(&ingress, &refusals, hello().request);
+    super::lanes::refuse_overloaded(&ingress, hello().request);
     tokio::time::timeout(Duration::from_secs(2), explaining.notified()).await?;
     ingress.stopping.cancel();
     // The refusal is the reactions' own: given the grace, then cancelled,
     // its slot returned at once.
     assert_eq!(ingress.reactions.stop(Duration::from_millis(200)).await, 1);
-    assert_eq!(refusals.available_permits(), 1);
+    assert_eq!(ingress.refusals.available_permits(), super::lanes::REFUSALS);
     release.notify_one();
     tokio::time::sleep(Duration::from_millis(300)).await;
     server.abort();

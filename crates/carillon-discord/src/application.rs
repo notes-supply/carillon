@@ -45,7 +45,7 @@ use carillon_installation::config::{
     LoadedConfig, ProviderRole, RELEASE_VERSION, attachment_staging, read_token_file, token_matches,
 };
 use carillon_protocol::model::{
-    Delivery, DeliveryOutcome, DeliveryReconciliation, EventReceipt, Health, ModelQuery,
+    Delivery, DeliveryOutcome, DeliveryReconciliation, EventReceipt, Health, ModelQuery, TurnState,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -53,7 +53,8 @@ use std::{path::Path, sync::Arc, time::Duration};
 use tokio::{
     net::TcpListener,
     signal::unix::{SignalKind, signal},
-    sync::mpsc,
+    sync::{Semaphore, mpsc},
+    task::{JoinError, JoinSet},
     time::{Instant, sleep, timeout, timeout_at},
 };
 use tokio_util::sync::CancellationToken;
@@ -121,8 +122,11 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
     let provider = config
         .provider(options.provider_id, ProviderRole::Interface)?
         .clone();
+    // Disabled on purpose, the provider ends successfully, so its service is
+    // not restarted, before it reads credentials or touches any state.
     if !provider.enabled {
-        bail!("Discord interface provider is disabled");
+        info!(provider = %provider.id, "Discord interface provider is disabled; not serving");
+        return Ok(());
     }
     let discord = DiscordConfig::load(&config, &provider.id)?;
     let token = read_token_file(options.token_file)?;
@@ -251,9 +255,10 @@ async fn connect(
         http: http.clone(),
         reactions: reactions.clone(),
         downloads: state.downloads.clone(),
+        refusals: Arc::new(Semaphore::new(lanes::REFUSALS)),
         stopping: stopping.clone(),
     });
-    let dispatcher = tokio::spawn(lanes::dispatch(ingress, receiver));
+    let dispatcher = tokio::spawn(lanes::dispatch(ingress.clone(), receiver));
     let mut terminate = signal(SignalKind::terminate()).context("handle termination")?;
     let router = discord_router(state.clone(), false);
     let (outcomes, observed) = mpsc::unbounded_channel();
@@ -268,26 +273,50 @@ async fn connect(
         cards,
         observed,
     );
+    // Deliveries outlast whatever ends the provider: a claimed one is still
+    // sent and its outcome recorded.
+    let mut deliveries = tokio::spawn(delivery_loop(
+        delivery_state.core,
+        reactions.clone(),
+        http,
+        summaries,
+        outcomes,
+        stopping.clone(),
+    ));
+    let mut delivering = true;
+    // Interactions are this function's tasks, not the gateway's, so ending
+    // the gateway does not cut short one it already took.
+    let mut interactions = JoinSet::new();
     let outcome = tokio::select! {
         result = axum::serve(listener, router).into_future() => result.map_err(Into::into),
-        result = gateway_loop(state, discord_token, messages) => {
+        result = gateway_loop(state, discord_token, messages, ingress, &mut interactions) => {
             result.context("Discord gateway stopped")
         },
-        result = delivery_loop(delivery_state.core, reactions.clone(), http, summaries, outcomes) => {
-            result.context("Discord delivery worker stopped")
+        result = &mut deliveries => {
+            delivering = false;
+            result.map_err(Into::into).flatten().context("Discord delivery worker stopped")
         },
         () = monitor => Err(anyhow::anyhow!("Discord activity monitor stopped")),
         interrupted = tokio::signal::ctrl_c() => interrupted.context("handle interruption"),
         _ = terminate.recv() => Ok(()),
     };
-    // No new message is taken. Preparation not yet handed to core ends; a
-    // submission core may have received is settled, so its staged files
-    // stay until core no longer needs them. Reactions still under way then
-    // get a moment to end before the rest are cancelled.
+    // No new message, interaction or delivery is taken. Preparation not yet
+    // handed to core ends; a submission core may have received is settled,
+    // so its staged files stay until core no longer needs them; an
+    // interaction already acknowledged finishes its invocation and attempts
+    // its reply; a claimed delivery is sent and acknowledged. Reactions still
+    // under way then get a moment to end before the rest are cancelled.
     stopping.cancel();
+    answered(&mut interactions).await;
     let prepared = dispatcher.await;
+    let delivered = if delivering {
+        deliveries.await.map_err(Into::into).flatten()
+    } else {
+        Ok(())
+    };
     reactions.stop(PROMPT_FEEDBACK).await;
     prepared.context("Discord message preparation failed")?;
+    delivered.context("Discord delivery worker stopped")?;
     outcome
 }
 
@@ -570,16 +599,11 @@ async fn simulate(
         drop(staged);
         settled?
     };
-    let delivery = if receipt.duplicate {
-        None
-    } else {
-        let native_ref = format!("local:{}", resolved.event.event_id);
-        let delivery = deliver_locally(&state.core, &receipt.turn_id, native_ref).await?;
-        if state.discord.reactions {
-            feedback.push("delivered".to_owned());
-        }
-        Some(delivery)
-    };
+    let native_ref = format!("local:{}", resolved.event.event_id);
+    let delivery = settle_own_delivery(&state.core, &receipt, native_ref).await?;
+    if delivery.is_some() && state.discord.reactions {
+        feedback.push("delivered".to_owned());
+    }
     let summary = delivery
         .as_ref()
         .filter(|_| state.discord.activity)
@@ -594,35 +618,38 @@ async fn simulate(
     .into_response())
 }
 
-/// Claims the delivery of `turn_id`, which must be the next one, and records
-/// it as delivered under `native_ref`, as the delivery loop does once Discord
-/// has the answer.
-async fn deliver_locally(
+/// Settles the simulated message's own turn's delivery and no other, as the
+/// delivery loop does once Discord has the answer. A turn still queued or
+/// running is waited for; a finished one, whose simulation may have stopped
+/// waiting before its answer, is settled if still pending.
+async fn settle_own_delivery(
     core: &CoreClient,
-    turn_id: &str,
+    receipt: &EventReceipt,
     native_ref: String,
-) -> Result<Delivery, InterfaceError> {
-    let delivery = timeout(Duration::from_secs(10), async {
-        loop {
-            if let Some(delivery) = core.claim_delivery().await? {
-                if delivery.turn_id != turn_id {
-                    return Err(InterfaceError {
-                        status: StatusCode::CONFLICT,
-                        message: "deterministic delivery order was violated".to_owned(),
-                    });
+) -> Result<Option<Delivery>, InterfaceError> {
+    let turn = &receipt.turn_id;
+    let delivery = if matches!(receipt.state, TurnState::Queued | TurnState::Running) {
+        let delivery = timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(delivery) = core.claim_turn_delivery(turn).await? {
+                    return Ok::<_, InterfaceError>(delivery);
                 }
-                return Ok(delivery);
+                sleep(Duration::from_millis(25)).await;
             }
-            sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .map_err(|_| InterfaceError {
-        status: StatusCode::GATEWAY_TIMEOUT,
-        message: "timed out waiting for deterministic delivery".to_owned(),
-    })??;
-    core.acknowledge_delivery(delivery.id, DeliveryOutcome::Delivered, Some(native_ref))
-        .await?;
+        })
+        .await
+        .map_err(|_| InterfaceError {
+            status: StatusCode::GATEWAY_TIMEOUT,
+            message: "timed out waiting for deterministic delivery".to_owned(),
+        })??;
+        Some(delivery)
+    } else {
+        core.claim_turn_delivery(turn).await?
+    };
+    if let Some(delivery) = &delivery {
+        core.acknowledge_delivery(delivery.id, DeliveryOutcome::Delivered, Some(native_ref))
+            .await?;
+    }
     Ok(delivery)
 }
 
@@ -653,72 +680,89 @@ async fn gateway_loop(
     state: DiscordState,
     token: String,
     messages: mpsc::Sender<Queued>,
+    ingress: Arc<Ingress>,
+    interactions: &mut JoinSet<()>,
 ) -> Result<()> {
     let intents = Intents::GUILDS | Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT;
     let mut shard = Shard::new(ShardId::ONE, token, intents);
     let event_types = EventTypeFlags::MESSAGE_CREATE | EventTypeFlags::INTERACTION_CREATE;
     while let Some(event) = shard.next_event(event_types).await {
-        match event.context("receive Discord gateway event")? {
-            Event::MessageCreate(message) => {
-                if message.author.bot || message.kind == MessageType::ThreadStarterMessage {
-                    continue;
-                }
-                let guild = message.guild_id.map(|id| id.to_string());
-                if admit_identity(
-                    &state.discord,
-                    guild.as_deref(),
-                    &message.author.id.to_string(),
-                )
-                .is_err()
-                {
-                    continue;
-                }
-                let request = IncomingMessage {
-                    event_id: message.id.to_string(),
-                    guild_id: guild,
-                    user_id: message.author.id.to_string(),
-                    channel_id: message.channel_id.to_string(),
-                    parent_channel_id: None,
-                    content: message.content.clone(),
-                    attachments: message
-                        .attachments
-                        .iter()
-                        .map(|attachment| SourceAttachment {
-                            id: attachment.id.to_string(),
-                            filename: attachment.filename.clone(),
-                            size: attachment.size,
-                            content_type: attachment.content_type.clone(),
-                            url: attachment.url.clone(),
-                        })
-                        .collect(),
-                };
-                let native = native_message(&message);
-                if let Err(refused) = queue_message(&messages, QueuedMessage { request, native })? {
-                    warn!(
-                        channel = %refused.request.channel_id,
-                        message = %refused.request.event_id,
-                        "Discord message refused: the message queue is full"
-                    );
-                    if let Some(reactions) = &state.reactions {
-                        reactions.show_outcome(
-                            format!(
-                                "{}:{}",
-                                refused.request.channel_id, refused.request.event_id
-                            ),
-                            Feedback::Failed,
-                        );
-                    }
-                }
-            }
-            Event::InteractionCreate(interaction) => {
-                // Interactions are independent of message order and of each
-                // other; each answers within Discord's own deadline.
-                tokio::spawn(handle_interaction(state.clone(), interaction.0));
-            }
-            _ => {}
-        }
+        let event = event.context("receive Discord gateway event")?;
+        take_event(&state, event, &messages, &ingress, interactions)?;
     }
     bail!("Discord gateway event stream ended")
+}
+
+/// One gateway event: a message goes to the lanes, and an interaction
+/// becomes a task in `interactions`, whose finished tasks are reaped here.
+fn take_event(
+    state: &DiscordState,
+    event: Event,
+    messages: &mpsc::Sender<Queued>,
+    ingress: &Arc<Ingress>,
+    interactions: &mut JoinSet<()>,
+) -> Result<()> {
+    while let Some(finished) = interactions.try_join_next() {
+        reap(finished);
+    }
+    match event {
+        Event::MessageCreate(message) => {
+            if message.author.bot || message.kind == MessageType::ThreadStarterMessage {
+                return Ok(());
+            }
+            let guild = message.guild_id.map(|id| id.to_string());
+            if admit_identity(
+                &state.discord,
+                guild.as_deref(),
+                &message.author.id.to_string(),
+            )
+            .is_err()
+            {
+                return Ok(());
+            }
+            let request = IncomingMessage {
+                event_id: message.id.to_string(),
+                guild_id: guild,
+                user_id: message.author.id.to_string(),
+                channel_id: message.channel_id.to_string(),
+                parent_channel_id: None,
+                content: message.content.clone(),
+                attachments: message
+                    .attachments
+                    .iter()
+                    .map(|attachment| SourceAttachment {
+                        id: attachment.id.to_string(),
+                        filename: attachment.filename.clone(),
+                        size: attachment.size,
+                        content_type: attachment.content_type.clone(),
+                        url: attachment.url.clone(),
+                    })
+                    .collect(),
+            };
+            let native = native_message(&message);
+            queue_or_refuse(messages, ingress, QueuedMessage { request, native })?;
+        }
+        Event::InteractionCreate(interaction) => {
+            // Interactions are independent of message order and of each
+            // other; each answers within Discord's own deadline.
+            interactions.spawn(handle_interaction(state.clone(), interaction.0));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Wait until every interaction already taken has been answered.
+async fn answered(interactions: &mut JoinSet<()>) {
+    while let Some(finished) = interactions.join_next().await {
+        reap(finished);
+    }
+}
+
+fn reap(finished: Result<(), JoinError>) {
+    if let Err(error) = finished {
+        error!(%error, "a Discord interaction task failed");
+    }
 }
 
 /// The message as Discord sent it, for the runtime's native context, without
@@ -726,50 +770,27 @@ async fn gateway_loop(
 /// files are core's captures, not CDN links.
 fn native_message(message: &twilight_model::channel::Message) -> Value {
     let mut native = serde_json::to_value(message).unwrap_or(Value::Null);
-    strip_attachment_addresses(&mut native);
+    crate::operations::strip_attachment_addresses(&mut native);
     native
 }
 
-/// Remove signed addresses from every attachment list, including those of
-/// referenced and forwarded messages nested in the payload, and the signature
-/// of any other attachment address, such as an embed's.
-fn strip_attachment_addresses(value: &mut Value) {
-    match value {
-        Value::Object(object) => {
-            for (key, nested) in object.iter_mut() {
-                if key == "attachments"
-                    && let Value::Array(attachments) = nested
-                {
-                    for attachment in attachments.iter_mut().filter_map(Value::as_object_mut) {
-                        attachment.remove("url");
-                        attachment.remove("proxy_url");
-                    }
-                }
-                strip_attachment_addresses(nested);
-            }
-        }
-        Value::Array(items) => items.iter_mut().for_each(strip_attachment_addresses),
-        Value::String(text) => {
-            if let Ok(mut url) = reqwest::Url::parse(text)
-                && matches!(
-                    url.host_str(),
-                    Some("cdn.discordapp.com" | "media.discordapp.net")
-                )
-                && url.path().starts_with("/attachments/")
-                && url.query().is_some()
-            {
-                url.set_query(None);
-                *text = url.to_string();
-            }
-        }
-        _ => {}
+/// Hands a gateway message to the lanes. One that finds their queue full is
+/// refused as overload, as one beyond a lane's bound is: only a message
+/// admission would activate is answered, within the shared refusal bound.
+pub(crate) fn queue_or_refuse(
+    messages: &mpsc::Sender<Queued>,
+    ingress: &Arc<Ingress>,
+    inbound: QueuedMessage,
+) -> Result<()> {
+    if let Err(refused) = queue_message(messages, inbound)? {
+        lanes::refuse_overloaded(ingress, refused.request);
     }
+    Ok(())
 }
 
-/// Hands a message to the worker without waiting for room. The gateway must
-/// keep reading so heartbeats and interactions go on while the worker is
-/// retrying; a message that finds the queue full is returned refused, and
-/// the person who sent it is told it failed rather than left waiting.
+/// Hands a message to the lanes without waiting for room. The gateway must
+/// keep reading so heartbeats and interactions go on while the lanes are
+/// busy; a message that finds the queue full is returned refused.
 fn queue_message(
     messages: &mpsc::Sender<Queued>,
     inbound: QueuedMessage,

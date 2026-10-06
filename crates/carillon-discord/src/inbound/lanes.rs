@@ -34,7 +34,7 @@ use std::{
 use carillon_protocol::model::ExternalEvent;
 use serde_json::Value;
 use tokio::{
-    sync::{Semaphore, mpsc, oneshot},
+    sync::{mpsc, oneshot},
     task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
@@ -52,7 +52,7 @@ pub(crate) const MAX_PENDING: usize = 64;
 /// Messages waiting or in preparation in one conversation.
 pub(crate) const MAX_PER_LANE: usize = 16;
 /// Overload replies being sent at once; beyond them refusals are only logged.
-const REFUSALS: usize = 4;
+pub(crate) const REFUSALS: usize = 4;
 
 /// What a conversation's lane holds, in arrival order.
 pub(crate) enum Queued {
@@ -144,7 +144,6 @@ pub(crate) async fn dispatch(ingress: Arc<Ingress>, mut messages: mpsc::Receiver
     let mut lanes: HashMap<String, VecDeque<Queued>> = HashMap::new();
     let mut pending = 0_usize;
     let mut running = JoinSet::new();
-    let refusals = Arc::new(Semaphore::new(REFUSALS));
     let mut open = true;
     loop {
         tokio::select! {
@@ -164,7 +163,7 @@ pub(crate) async fn dispatch(ingress: Arc<Ingress>, mut messages: mpsc::Receiver
                     }
                     // A refused submission is dropped: its command is not sent.
                     if let Queued::Message(message) = queued {
-                        refuse_overloaded(&ingress, &refusals, message.request);
+                        refuse_overloaded(&ingress, message.request);
                     }
                     continue;
                 }
@@ -270,11 +269,7 @@ async fn settle(ingress: &Ingress, event: &ExternalEvent) {
 /// Refuse a message beyond the bounds. Only a message admission would
 /// activate is answered, so overload never replies to messages Carillon
 /// would ignore; a thread the provider has not yet seen is not answered.
-pub(crate) fn refuse_overloaded(
-    ingress: &Arc<Ingress>,
-    refusals: &Arc<Semaphore>,
-    message: IncomingMessage,
-) {
+pub(crate) fn refuse_overloaded(ingress: &Arc<Ingress>, message: IncomingMessage) {
     warn!(
         channel = %message.channel_id,
         message = %message.event_id,
@@ -295,7 +290,7 @@ pub(crate) fn refuse_overloaded(
     ) {
         return;
     }
-    let Ok(permit) = refusals.clone().try_acquire_owned() else {
+    let Ok(permit) = ingress.refusals.clone().try_acquire_owned() else {
         return;
     };
     // The refusal is feedback: the connection's reactions own it, so it

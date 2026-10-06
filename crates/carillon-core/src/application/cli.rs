@@ -21,13 +21,13 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
 
+use carillon_installation::maintenance::ServiceLock;
+
 use super::{
-    admin::{
-        ServiceLock, backup, enable_demo_resources, initialize as init, restore, set_provider,
-    },
+    admin::{backup, enable_demo_resources, initialize as init, restore, set_provider},
     http::{check, serve},
     operations::{
-        Action, Services, logs, operator_get, operator_url, print_health, status,
+        Action, HeldUnits, Services, logs, operator_get, operator_url, print_health, status,
         wait_until_healthy,
     },
     update::update,
@@ -240,11 +240,12 @@ pub(crate) async fn run() -> Result<()> {
     Ok(())
 }
 
-/// Act on this installation's units, serialized with other maintenance.
+/// Act on this installation's units, serialized with this installation's
+/// maintenance and with every installation's use of the owner's units.
 fn control(home: &Path, action: Action) -> Result<()> {
-    let services = Services::registered(home)?;
     let _lock = MaintenanceLock::acquire(home)?;
-    services.control(action)
+    let units = HeldUnits::acquire()?;
+    Services::registered(home, &units)?.control(action)
 }
 
 async fn report_running(config: &LoadedConfig, wait: &Wait) -> Result<()> {
