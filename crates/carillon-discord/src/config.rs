@@ -21,7 +21,7 @@ pub struct DiscordConfig {
     pub routes: Vec<DiscordRoute>,
     #[serde(default = "enabled")]
     pub typing: bool,
-    /// Show a temporary card of what a running turn is doing.
+    /// Show a card of what each job is doing, kept as its summary.
     #[serde(default = "enabled")]
     pub activity: bool,
     #[serde(default)]

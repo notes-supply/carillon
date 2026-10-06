@@ -1,4 +1,4 @@
-use super::{Shown, Status, card, compact, shows_work, summary};
+use super::{Shown, Status, card, compact, earns_summary, summary};
 use crate::config::ActivityMarkers;
 use carillon_protocol::model::{
     ActivityPhase, AgentInfo, ContextUse, Delivery, DeliveryOutcome, FinishedTool, Origin,
@@ -63,6 +63,26 @@ fn live<'a>(activity: &'a TurnActivity, reports: Vec<&'a TurnActivity>) -> Shown
         requested_at: Some(1_790_000_000),
         reports,
         live: Some(activity),
+    }
+}
+
+/// The delivery of a message turn asked for at 1 790 000 000 and finished
+/// 45 seconds later, reporting `activity`.
+fn delivered(turn_state: TurnState, activity: Option<TurnActivity>) -> Delivery {
+    Delivery {
+        turn_state,
+        id: 1,
+        turn_id: "turn".to_owned(),
+        target_id: "300".to_owned(),
+        feedback_target_id: "300:400".to_owned(),
+        content: "answer".to_owned(),
+        origin: Origin {
+            turn_id: "turn".to_owned(),
+            accepted_at: 1_790_000_000,
+        },
+        finished_at: 1_790_000_045,
+        activity,
+        continued_by: None,
     }
 }
 
@@ -532,25 +552,11 @@ fn every_runtimes_report_renders_as_a_summary_within_discords_limits() -> anyhow
     ))?;
     let markers = ActivityMarkers::default();
     for activity in fixtures.activities {
-        let delivery = Delivery {
-            turn_state: TurnState::Completed,
-            id: 1,
-            turn_id: "turn".to_owned(),
-            target_id: "300".to_owned(),
-            feedback_target_id: "300:400".to_owned(),
-            content: "answer".to_owned(),
-            origin: Origin {
-                turn_id: "turn".to_owned(),
-                accepted_at: 1_790_000_000,
-            },
-            finished_at: 1_790_000_045,
-            activity: Some(activity.clone()),
-            continued_by: None,
-        };
+        let delivery = delivered(TurnState::Completed, Some(activity.clone()));
         let embed = summary(&delivery, &markers);
         valid(&embed);
         let shown = text(&embed);
-        if shows_work(Some(&activity)) {
+        if earns_summary(&delivery) {
             assert!(
                 shown.starts_with("✓ Done · answered 45s after the request"),
                 "{shown}"
@@ -562,24 +568,36 @@ fn every_runtimes_report_renders_as_a_summary_within_discords_limits() -> anyhow
 }
 
 #[test]
-fn only_work_earns_a_summary() {
+fn work_or_a_stop_earns_a_summary() {
     let mut answer_only = tools();
     answer_only.running.clear();
     answer_only.recent.clear();
     answer_only.tool_calls = 0;
-    assert!(!shows_work(None));
-    assert!(!shows_work(Some(&answer_only)));
+    let earns = |turn_state, report: Option<&TurnActivity>| {
+        earns_summary(&delivered(turn_state, report.cloned()))
+    };
+    let completed = TurnState::Completed;
+    assert!(!earns(completed, None));
+    assert!(!earns(completed, Some(&answer_only)));
     let mut thought = answer_only.clone();
     thought.notes = vec!["Thinking.".to_owned()];
-    assert!(shows_work(Some(&thought)));
+    assert!(earns(completed, Some(&thought)));
     let mut called = answer_only.clone();
     called.tool_calls = 1;
-    assert!(shows_work(Some(&called)));
-    let mut delegated = answer_only;
+    assert!(earns(completed, Some(&called)));
+    let mut delegated = answer_only.clone();
     delegated.work = Some(WorkSummary {
         items: vec![work("a", WorkKind::Delegation, "child", WorkState::Running)],
         partial: false,
         omitted: None,
     });
-    assert!(shows_work(Some(&delegated)));
+    assert!(earns(completed, Some(&delegated)));
+    // A turn that stopped earns one whatever it reported, and it shows only the stop.
+    assert!(earns(TurnState::Interrupted, None));
+    assert!(earns(TurnState::Interrupted, Some(&answer_only)));
+    let stopped = summary(
+        &delivered(TurnState::Interrupted, None),
+        &ActivityMarkers::default(),
+    );
+    assert_eq!(text(valid(&stopped)), "⏹️ Stopped before finishing.");
 }

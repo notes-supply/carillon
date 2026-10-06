@@ -205,7 +205,11 @@ async fn empty_discord_delivery_is_not_successful() -> anyhow::Result<()> {
     .await
     .err()
     .context("empty content was accepted for delivery")?;
-    assert_eq!(failure.to_string(), "Discord delivery content is empty");
+    assert_eq!(
+        failure.failure.to_string(),
+        "Discord delivery content is empty"
+    );
+    assert!(!failure.last_may_exist);
     Ok(())
 }
 
@@ -629,8 +633,50 @@ async fn a_stopping_provider_ends_its_reactions_within_the_grace() -> anyhow::Re
     Ok(())
 }
 
+/// Runs the delivery loop with `summaries` over `deliveries` until core
+/// refuses further claims, returning the messages Discord received and the
+/// outcomes reported, in order.
+async fn delivered_with(
+    deliveries: Vec<Delivery>,
+    summaries: Option<crate::activity::Summaries>,
+    config: crate::config::DiscordConfig,
+) -> anyhow::Result<(Vec<serde_json::Value>, Vec<crate::activity::Outcome>)> {
+    let messages = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let app = delivering_core(
+        deliveries,
+        messages.clone(),
+        Arc::default(),
+        Duration::ZERO,
+        Arc::default(),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let http = discord_client(address);
+    let (outcomes, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        delivery_loop(
+            core_client(format!("http://{address}")),
+            Reactions::new(http.clone(), config),
+            http,
+            summaries,
+            outcomes,
+        ),
+    )
+    .await;
+    server.abort();
+    assert!(outcome?.is_err_and(|failure| failure.to_string().contains("delivery claim rejected")));
+    let messages = messages.lock().await.clone();
+    Ok((
+        messages,
+        std::iter::from_fn(|| observed.try_recv().ok()).collect(),
+    ))
+}
+
 #[tokio::test]
-async fn an_answer_carries_its_jobs_summary_when_no_card_shows_its_work() -> anyhow::Result<()> {
+async fn an_answer_carries_its_jobs_summary_when_its_turn_earned_one_and_no_card_shows_it()
+-> anyhow::Result<()> {
     use crate::activity::{CardRecords, Summaries};
     let directory = tempfile::tempdir()?;
     let records = directory.path().join("activity-cards.json");
@@ -663,33 +709,19 @@ async fn an_answer_carries_its_jobs_summary_when_no_card_shows_its_work() -> any
     delegated.continued_by = Some("turn-3-report".to_owned());
     let mut carded = answer(4, TurnState::Completed);
     carded.activity = worked(json!(null))?;
-    let messages = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-    let app = delivering_core(
-        vec![answer(1, TurnState::Completed), quick, delegated, carded],
-        messages.clone(),
-        Arc::default(),
-        Duration::ZERO,
-        Arc::default(),
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let address = listener.local_addr()?;
-    let server = tokio::spawn(async move { axum::serve(listener, app).await });
-    let http = discord_client(address);
-    let (outcomes, mut observed) = tokio::sync::mpsc::unbounded_channel();
-    let outcome = tokio::time::timeout(
-        Duration::from_secs(5),
-        delivery_loop(
-            core_client(format!("http://{address}")),
-            Reactions::new(http.clone(), config),
-            http,
-            summaries,
-            outcomes,
-        ),
-    )
-    .await;
-    server.abort();
-    assert!(outcome?.is_err_and(|failure| failure.to_string().contains("delivery claim rejected")));
-    let messages = messages.lock().await;
+    // A turn that stopped at once, reporting nothing, with core's notice.
+    let stopped = Delivery {
+        content: "That turn was interrupted: the provider failed.".to_owned(),
+        ..answer(5, TurnState::Interrupted)
+    };
+    let deliveries = vec![
+        answer(1, TurnState::Completed),
+        quick,
+        delegated,
+        carded,
+        stopped,
+    ];
+    let (messages, observed) = delivered_with(deliveries, summaries, config).await?;
     let summary = |index: usize| {
         messages[index]["embeds"][0]["description"]
             .as_str()
@@ -715,10 +747,19 @@ async fn an_answer_carries_its_jobs_summary_when_no_card_shows_its_work() -> any
     );
     // A job that has a card already gets no second one.
     assert_eq!(summary(3), None);
-    let hosted = std::iter::from_fn(|| observed.try_recv().ok())
+    // A stop is worth its summary even with no report: its notice says why,
+    // and the summary only that it stopped.
+    assert_eq!(
+        messages[4]["content"],
+        "That turn was interrupted: the provider failed."
+    );
+    assert_eq!(summary(4).as_deref(), Some("⏹️ Stopped before finishing."));
+    assert_eq!(messages[4]["embeds"][0].get("fields"), None);
+    let hosted = observed
+        .iter()
         .map(|outcome| outcome.hosted.map(|card| card.message_id.get()))
         .collect::<Vec<_>>();
-    assert_eq!(hosted, [None, Some(902), Some(903), None]);
+    assert_eq!(hosted, [None, Some(902), Some(903), None, Some(905)]);
     let recorded: serde_json::Value = serde_json::from_slice(&std::fs::read(&records)?)?;
     assert_eq!(
         recorded,

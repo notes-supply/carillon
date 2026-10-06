@@ -38,8 +38,11 @@ retain the actual Wasm path rather than substituting this direct native call.
   core's activity list, receives each turn's outcome and final report from the
   delivery loop, keeps the card as the job's summary when the job ends, and records
   only the channel and message of unfinished jobs' cards, so a restart goes on with
-  them. A job that ended without a card but showed work gets its summary on its
-  answer, which the delivery loop sends; one reservation per job keeps it to one card.
+  them. A job that ended without a card but showed work, or stopped, gets its summary
+  on its answer, which the delivery loop sends; one reservation per job keeps it to one
+  card, and an answer that ended its job keeps it until the monitor has that outcome. A
+  card someone deleted, or one whose creation Discord did not confirm, on an answer or
+  not, is recorded without a message until the job settles, so the job gets no other.
   Every Discord call is bounded, including rate-limiter waits and Twilight's 429
   retries. Its ordinary [`render` module](src/activity/render.rs) owns pure card embed rendering,
   using the concrete activity markers from [`config`](src/config.rs). Markers have
@@ -75,7 +78,8 @@ retain the actual Wasm path rather than substituting this direct native call.
   submitted as a staged batch, accepted whole or refused with an explanation, within
   a preparation deadline. It receives its core client, configuration, participation
   store and downloads explicitly. Deterministic `/v1/simulate` admits a message the
-  same way and stages its files with the same downloads.
+  same way and stages its files with the same downloads, and returns the delivery with
+  the work summary its answer would carry.
 - [`operations`](src/operations.rs) owns authenticated assistant actions using the existing
   Discord client, independently of admission and the delivery outbox. The optional
   [Pi extension](../../packages/discord-pi/README.md) exposes them on demand.

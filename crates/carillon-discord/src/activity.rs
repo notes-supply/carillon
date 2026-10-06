@@ -15,17 +15,21 @@
 //! A job's card is one embed, edited as the job goes on and kept as its
 //! summary when it ends. A turn's answer does not end a job an observation
 //! continues, and a delivery older than the job's live turn never takes the
-//! card back. A job with work worth a summary but no card gets its summary
-//! on its answer instead, and that answer is its card from then on.
+//! card back. A job that earned a summary but has no card gets its summary
+//! on its answer instead, and that answer is its card from then on; until
+//! the job's last outcome reaches the monitor, the answer's claim on the
+//! job's card keeps the monitor from making another.
 //!
 //! Every Discord call is bounded, and its outcome is classified by what it
-//! proves: a job gets at most one card, a card whose creation is unknown is
-//! never followed by another, and cards are shown only while their records
-//! can be read, so a restart knows which cards may exist and goes on
-//! editing them, saying what it does not know.
+//! proves: a job gets at most one card, a card whose creation is unknown or
+//! which someone deleted is never followed by another before the job
+//! settles, and cards are shown only while their records can be read, so a
+//! restart knows which cards may exist and goes on editing them, saying
+//! what it does not know.
 use crate::{
     client::CoreClient,
     config::{ActivityMarkers, DiscordConfig},
+    delivery::Sent,
 };
 use anyhow::{Context as _, Result};
 use carillon_installation::filesystem::atomic_write;
@@ -182,6 +186,14 @@ impl Job {
         };
     }
 
+    /// Core's latest read does not list the job's turn: one shown running is
+    /// finishing, until its outcome says how it ended.
+    fn unlisted(&mut self) {
+        if matches!(self.state, State::Active(_) | State::Unread) {
+            self.state = State::Finishing;
+        }
+    }
+
     /// The card's embed: `last` is the latest snapshot the job's running
     /// turn gave, kept while a read has none; `restarted` when the card was
     /// recorded before this start and nothing since has said anything of
@@ -261,8 +273,9 @@ pub(crate) struct Card {
     pub(crate) hosted: bool,
 }
 
-/// What a later start must know of a job's card: the card, or, when its
-/// creation was never confirmed, that a card may exist which nobody can name.
+/// What a later start must know of a job's card: the card, or that the job
+/// has one nobody can name or follow, whose creation was never confirmed or
+/// which someone deleted, so it gets no other.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 struct Recorded {
     channel_id: Id<ChannelMarker>,
@@ -273,6 +286,14 @@ struct Recorded {
 }
 
 impl Recorded {
+    const fn unnamed(channel_id: Id<ChannelMarker>) -> Self {
+        Self {
+            channel_id,
+            message_id: None,
+            hosted: false,
+        }
+    }
+
     const fn card(self) -> Option<Card> {
         match self.message_id {
             Some(message_id) => Some(Card {
@@ -310,8 +331,8 @@ enum Reservation {
 /// that carries a summary, until the job's summary is final. A restart goes
 /// on with them. A card is recorded only after Discord confirms it: a crash
 /// in between leaves one card no later start knows of. A creation whose
-/// outcome is unknown is recorded without a message, so no start makes a
-/// second card for the same job.
+/// outcome is unknown, or a card someone deleted, is recorded without a
+/// message until the job settles, so no start makes the job another card.
 pub(crate) struct CardRecords {
     path: PathBuf,
     cards: Mutex<BTreeMap<String, Recorded>>,
@@ -380,17 +401,23 @@ impl CardRecords {
         self.change(|cards| cards.remove(job).is_some());
     }
 
-    /// Forgets a card nobody can name once its job has ended: it can no
+    /// Ends what a settled job's records hold back: the reservation of the
+    /// answer that carries its summary, when `hosted`, and a card nobody can
+    /// name.
+    fn settle(&self, job: &str, hosted: bool) {
+        if hosted {
+            self.release(job);
+        }
+        self.forget_unnamed(job);
+    }
+
+    /// Forgets a card nobody can name once its job has settled: it can no
     /// longer stand in the way of another, and there is nothing to finish.
     fn forget_unnamed(&self, job: &str) {
         self.change(|cards| {
             let unnamed = cards.get(job).is_some_and(|card| card.message_id.is_none());
             if unnamed {
                 cards.remove(job);
-                warn!(
-                    job,
-                    "an activity card of unknown identity may remain in Discord"
-                );
             }
             unnamed
         });
@@ -431,39 +458,62 @@ impl Summaries {
         })
     }
 
-    /// The summary `delivery`'s answer carries, when the turn's report shows
-    /// work and its job has no card, nor one being made: the answer is then
-    /// reserved as the job's card. The caller says how sending it went with
+    /// The summary `delivery`'s answer carries when the turn earned one and
+    /// its job has no card, nor one being made: the answer is then reserved
+    /// as the job's card, and the caller says how sending it went with
     /// [`Self::sent`].
     pub(crate) fn reserve(&self, delivery: &Delivery) -> Option<Embed> {
-        if !render::shows_work(delivery.activity.as_ref()) {
-            return None;
-        }
-        let job = &delivery.origin.turn_id;
-        if self.records.reserve(job) != Reservation::Free {
-            return None;
-        }
-        let summary = render::summary(delivery, &self.markers);
-        // Display never costs an answer: a summary Discord would refuse is left out.
-        if let Err(error) = twilight_validate::embed::embed(&summary) {
-            warn!(%error, "a work summary was left off its answer");
-            self.records.release(job);
-            return None;
-        }
-        Some(summary)
+        let summary = answer_summary(delivery, &self.markers)?;
+        (self.records.reserve(&delivery.origin.turn_id) == Reservation::Free).then_some(summary)
     }
 
-    /// Records the answer that carries `delivery`'s summary as its job's
-    /// card while the job goes on, so later turns update it; or ends the
-    /// reservation when no answer carries it, or the summary is already
-    /// the job's last.
-    pub(crate) fn sent(&self, delivery: &Delivery, card: Option<Card>) {
+    /// Takes how the answer reserved as `delivery`'s job card was sent, and
+    /// returns the card it is when it carries the summary. While the job
+    /// goes on, the answer is recorded as its card, so later turns update
+    /// it; at the job's end, the reservation stays until the monitor has
+    /// the job's last outcome, which ends it. An answer Discord may hold
+    /// without anyone able to name it is recorded so: the job gets no other
+    /// card.
+    pub(crate) fn sent(&self, delivery: &Delivery, sent: &Sent) -> Option<Card> {
         let job = &delivery.origin.turn_id;
+        let card = match sent {
+            Sent::Whole(channel_id, messages) => messages.last().map(|&message_id| Card {
+                channel_id: *channel_id,
+                message_id,
+                hosted: true,
+            }),
+            Sent::Unnamed(channel_id) => {
+                self.records.insert(job, Recorded::unnamed(*channel_id));
+                warn!(
+                    job,
+                    "a work summary of unknown identity may be in Discord; the job gets no other card"
+                );
+                return None;
+            }
+            Sent::Incomplete => None,
+        };
         match card {
             Some(card) if delivery.continued_by.is_some() => self.records.insert(job, card),
-            _ => self.records.release(job),
+            Some(_) => {}
+            None => self.records.release(job),
         }
+        card
     }
+}
+
+/// The summary an answer carries when its job has no card: one its turn
+/// earned, and Discord would accept.
+pub(crate) fn answer_summary(delivery: &Delivery, markers: &ActivityMarkers) -> Option<Embed> {
+    if !render::earns_summary(delivery) {
+        return None;
+    }
+    let summary = render::summary(delivery, markers);
+    // Display never costs an answer: a summary Discord would refuse is left out.
+    if let Err(error) = twilight_validate::embed::embed(&summary) {
+        warn!(%error, "a work summary was left off its answer");
+        return None;
+    }
+    Some(summary)
 }
 
 /// What every job task shares.
@@ -532,6 +582,10 @@ pub(crate) async fn activity_monitor(
                     let view = track(&mut tasks, &job_id, job, None);
                     jobs.insert(job_id, view);
                 }
+                // The job has its last outcome, and any answer card with it.
+                if let (None, Some(cards)) = (&delivery.continued_by, &cards) {
+                    cards.records.settle(&delivery.origin.turn_id, hosted.is_some());
+                }
             }
             Some(read) = reads.recv() => {
                 let active = match read {
@@ -573,11 +627,7 @@ pub(crate) async fn activity_monitor(
                 // a card whose edit failed is tried again.
                 for (job_id, view) in &jobs {
                     if !listed.contains(job_id) {
-                        view.send_modify(|job| {
-                            if matches!(job.state, State::Active(_) | State::Unread) {
-                                job.state = State::Finishing;
-                            }
-                        });
+                        view.send_modify(Job::unlisted);
                     }
                 }
                 // A job whose tasks have ended is forgotten; a job stays
@@ -632,8 +682,8 @@ async fn keep_typing(http: Arc<DiscordHttp>, mut view: watch::Receiver<Job>) {
 
 /// One job's card: the card recorded before this start, or one made or
 /// hosted once the job is worth it, followed until the job's summary is
-/// final. A card nobody can name keeps the job without one, and is
-/// forgotten once the job has ended.
+/// final. The job stays tracked until it settles, so a card nobody can name
+/// or follow keeps it without another until then, and is forgotten then.
 async fn show_card(
     cards: Cards,
     job_id: String,
@@ -644,13 +694,10 @@ async fn show_card(
         Some(recorded) => recorded.card(),
         None => obtain(&cards, &job_id, &mut view).await,
     };
-    match card {
-        Some(card) => follow(&cards, &job_id, &mut view, card, old.is_some()).await,
-        None => {
-            let _ = view.wait_for(|job| !job.is_active()).await;
-        }
+    if let Some(card) = card {
+        follow(&cards, &job_id, &mut view, card, old.is_some()).await;
     }
-    if !view.borrow().is_active() {
+    if view.wait_for(Job::is_settled).await.is_ok() {
         cards.records.forget_unnamed(&job_id);
     }
 }
@@ -688,6 +735,12 @@ async fn obtain(cards: &Cards, job_id: &str, view: &mut watch::Receiver<Job>) ->
                 Reservation::Recorded(recorded) => return recorded.card(),
                 // An answer is being given the job's summary: it says which.
                 Reservation::Taken => {}
+                // The job changed meanwhile; an answer may have its summary
+                // and have handed its reservation back.
+                Reservation::Free if view.has_changed().unwrap_or(true) => {
+                    cards.records.release(job_id);
+                    continue;
+                }
                 Reservation::Free => {
                     let embed = job.embed(None, false, &cards.config.activity_markers);
                     match cards.create(channel, &embed, view).await {
@@ -701,21 +754,19 @@ async fn obtain(cards: &Cards, job_id: &str, view: &mut watch::Receiver<Job>) ->
                             return Some(card);
                         }
                         Call::NotSent => cards.records.release(job_id),
-                        outcome @ (Call::Refused(_) | Call::Unknown) => {
-                            // Discord refused it, or may hold a card this task
-                            // cannot name: either way the job gets no card,
-                            // even after a restart.
-                            if outcome == Call::Unknown {
-                                let unnamed = Recorded {
-                                    channel_id: channel,
-                                    message_id: None,
-                                    hosted: false,
-                                };
-                                cards.records.insert(job_id, unnamed);
-                            } else {
-                                cards.records.release(job_id);
-                            }
-                            warn!(job_id, refused = ?outcome.refused(), "no activity card for this job");
+                        Call::Refused(status) => {
+                            cards.records.release(job_id);
+                            warn!(job_id, status, "Discord refused this job's activity card");
+                            return None;
+                        }
+                        Call::Unknown => {
+                            // Discord may hold a card this task cannot name:
+                            // the job gets no other, even after a restart.
+                            cards.records.insert(job_id, Recorded::unnamed(channel));
+                            warn!(
+                                job_id,
+                                "an activity card of unknown identity may be in Discord; the job gets no other"
+                            );
                             return None;
                         }
                     }
@@ -790,10 +841,12 @@ async fn follow(
             // The next read brings the latest again.
             Call::NotSent | Call::Unknown => {}
             Call::Refused(404) => {
-                // Deleted by someone: never replace it.
-                cards.records.remove(job_id);
+                // Deleted by someone: the job gets no other card, on an
+                // answer or after a restart, before it settles.
+                cards
+                    .records
+                    .insert(job_id, Recorded::unnamed(card.channel_id));
                 warn!(job_id, "activity card was deleted in Discord");
-                let _ = view.wait_for(|job| !job.is_active()).await;
                 return;
             }
             Call::Refused(status) => {
@@ -907,15 +960,6 @@ enum Call<T> {
     Refused(u16),
     /// It may or may not have taken effect.
     Unknown,
-}
-
-impl<T> Call<T> {
-    const fn refused(&self) -> Option<u16> {
-        match self {
-            Self::Refused(status) => Some(*status),
-            _ => None,
-        }
-    }
 }
 
 /// While a request waits for the rate limiter, the job must still want it.

@@ -85,6 +85,7 @@ export type Outcome =
 
 export interface Retained {
   readonly runs: number;
+  /** Calls under way: running, pending or waiting. */
   readonly running: number;
   readonly recent: number;
   readonly counted: number;
@@ -148,6 +149,8 @@ const BEFORE_PROVIDER: ReadonlySet<RunStatus> = new Set(["preparing", "queued", 
 /** Run statuses before T3 sends the run's opening item. */
 const UNOPENED: ReadonlySet<RunStatus> = new Set(["preparing", "queued"]);
 const RUNNING_ITEM: ReadonlySet<string> = new Set(["pending", "running", "waiting"]);
+/** A call T3 has asked for or holds without showing it executing. */
+const HELD_CALL: ReadonlySet<string> = new Set(["pending", "waiting"]);
 const FINISHED_ITEM: ReadonlySet<string> = new Set([
   "completed",
   "failed",
@@ -343,6 +346,8 @@ export function watchTurn(
   const assistant = new Map<string, Message>();
   let latestAssistant: Message | undefined;
   let running = new Map<string, ToolItem>();
+  /** Calls pending or waiting: neither executing nor finished. */
+  let held = new Set<string>();
   let recent: ToolItem[] = [];
   let counted = new Set<string>();
   const requestItems = new Map<string, RequestItem>();
@@ -417,6 +422,7 @@ export function watchTurn(
     unclaimed.clear();
     hasMessages = false;
     running = new Map();
+    held = new Set();
     recent = [];
     counted = new Set();
     pendingRequests = new Map();
@@ -706,18 +712,27 @@ export function watchTurn(
       case "web_search":
       case "dynamic_tool":
       case "subagent":
-        counted.add(item.id);
-        if (RUNNING_ITEM.has(item.status)) {
+        // Only a running call is executing: one pending or waiting is held,
+        // and counted and timed once T3 shows it running or finished.
+        if (item.status === "running") {
+          counted.add(item.id);
+          held.delete(item.id);
           running.set(item.id, item);
           if (!firstSeen.has(item.id)) firstSeen.set(item.id, Math.floor(Date.now() / 1000));
-        } else {
-          running.delete(item.id);
-          firstSeen.delete(item.id);
-          if (FINISHED_ITEM.has(item.status)) {
-            recent = recent.filter((finished) => finished.id !== item.id);
-            recent.push(item);
-            if (recent.length > RECENT_CALLS) recent.shift();
-          }
+          return;
+        }
+        running.delete(item.id);
+        if (HELD_CALL.has(item.status)) {
+          held.add(item.id);
+          return;
+        }
+        held.delete(item.id);
+        firstSeen.delete(item.id);
+        if (FINISHED_ITEM.has(item.status)) {
+          counted.add(item.id);
+          recent = recent.filter((finished) => finished.id !== item.id);
+          recent.push(item);
+          if (recent.length > RECENT_CALLS) recent.shift();
         }
         return;
       case "user_input_request":
@@ -1547,7 +1562,8 @@ export function watchTurn(
       const runningTools: RunningTool[] = [...running.values()]
         .filter((item) => !shownAsWork(item))
         .map((item) => ({ ...tool(item), ...started(item) }));
-      for (const id of firstSeen.keys()) if (!running.has(id)) firstSeen.delete(id);
+      for (const id of firstSeen.keys())
+        if (!running.has(id) && !held.has(id)) firstSeen.delete(id);
       const now = Math.floor(Date.now() / 1000);
       const tasks = roster(run).filter(
         (task) => task.childThreadId === undefined || !childThreads.has(task.childThreadId),
@@ -1570,7 +1586,7 @@ export function watchTurn(
         phase:
           run === undefined && followUp !== undefined
             ? "waiting"
-            : phase(run, compacting.size > 0, retrying.size > 0, runningTools.length),
+            : phase(run, compacting.size > 0, retrying.size > 0, runningTools.length, held.size),
         ...(headline === undefined ? {} : { headline }),
         running: runningTools.slice(0, RUNNING_CALLS),
         recent: recent
@@ -1590,7 +1606,7 @@ export function watchTurn(
     },
     retained: () => ({
       runs: turnRuns.size + earlier.size,
-      running: running.size,
+      running: running.size + held.size,
       recent: recent.length,
       counted: counted.size,
       requests: requestItems.size + pendingRequests.size,
@@ -1615,13 +1631,14 @@ function phase(
   compacting: boolean,
   retrying: boolean,
   runningTools: number,
+  heldCalls: number,
 ): ActivityPhase {
   if (run?.status === "queued") return "queued";
   if (run === undefined || BEFORE_PROVIDER.has(run.status)) return "starting";
   if (compacting) return "compacting";
   if (retrying) return "retrying";
   if (runningTools > 0) return "tools";
-  return run.status === "waiting" ? "waiting" : "model";
+  return run.status === "waiting" || heldCalls > 0 ? "waiting" : "model";
 }
 
 const TASK_STATE: Readonly<Record<Subagent["status"], WorkItem["state"]>> = {

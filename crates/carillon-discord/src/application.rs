@@ -13,7 +13,7 @@ use crate::{
 
 use crate::{
     InterfaceError,
-    activity::{CardRecords, Summaries, activity_monitor},
+    activity::{CardRecords, Summaries, activity_monitor, answer_summary},
     client::CoreClient,
     commands::{
         Change, ChangeError, CommandFiles, Commands, DiscordApp, InteractionCalls, MODULE_LIMIT,
@@ -65,7 +65,7 @@ use twilight_model::{
     application::interaction::{
         Interaction as DiscordInteraction, InteractionData, InteractionType,
     },
-    channel::message::{Component, MessageFlags, MessageType, component::SelectMenuType},
+    channel::message::{Component, Embed, MessageFlags, MessageType, component::SelectMenuType},
     http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
     id::Id,
 };
@@ -75,6 +75,10 @@ use twilight_validate::component::{COMPONENT_COUNT, component_v1};
 struct SimulateResponse {
     pub receipt: EventReceipt,
     pub delivery: Option<Delivery>,
+    /// The work summary the delivery's answer carries when its job has no
+    /// card, as the delivery loop gives it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<Embed>,
     pub conversation_id: String,
     pub feedback: Vec<String>,
 }
@@ -569,45 +573,57 @@ async fn simulate(
     let delivery = if receipt.duplicate {
         None
     } else {
-        let delivery = timeout(Duration::from_secs(10), async {
-            loop {
-                if let Some(delivery) = state.core.claim_delivery().await? {
-                    if delivery.turn_id != receipt.turn_id {
-                        return Err(InterfaceError {
-                            status: StatusCode::CONFLICT,
-                            message: "deterministic delivery order was violated".to_owned(),
-                        });
-                    }
-                    return Ok(delivery);
-                }
-                sleep(Duration::from_millis(25)).await;
-            }
-        })
-        .await
-        .map_err(|_| InterfaceError {
-            status: StatusCode::GATEWAY_TIMEOUT,
-            message: "timed out waiting for deterministic delivery".to_owned(),
-        })??;
-        state
-            .core
-            .acknowledge_delivery(
-                delivery.id,
-                DeliveryOutcome::Delivered,
-                Some(format!("local:{}", resolved.event.event_id)),
-            )
-            .await?;
+        let native_ref = format!("local:{}", resolved.event.event_id);
+        let delivery = deliver_locally(&state.core, &receipt.turn_id, native_ref).await?;
         if state.discord.reactions {
             feedback.push("delivered".to_owned());
         }
         Some(delivery)
     };
+    let summary = delivery
+        .as_ref()
+        .filter(|_| state.discord.activity)
+        .and_then(|delivery| answer_summary(delivery, &state.discord.activity_markers));
     Ok(Json(SimulateResponse {
         receipt,
         delivery,
+        summary,
         conversation_id: resolved.conversation_id,
         feedback,
     })
     .into_response())
+}
+
+/// Claims the delivery of `turn_id`, which must be the next one, and records
+/// it as delivered under `native_ref`, as the delivery loop does once Discord
+/// has the answer.
+async fn deliver_locally(
+    core: &CoreClient,
+    turn_id: &str,
+    native_ref: String,
+) -> Result<Delivery, InterfaceError> {
+    let delivery = timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(delivery) = core.claim_delivery().await? {
+                if delivery.turn_id != turn_id {
+                    return Err(InterfaceError {
+                        status: StatusCode::CONFLICT,
+                        message: "deterministic delivery order was violated".to_owned(),
+                    });
+                }
+                return Ok(delivery);
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .map_err(|_| InterfaceError {
+        status: StatusCode::GATEWAY_TIMEOUT,
+        message: "timed out waiting for deterministic delivery".to_owned(),
+    })??;
+    core.acknowledge_delivery(delivery.id, DeliveryOutcome::Delivered, Some(native_ref))
+        .await?;
+    Ok(delivery)
 }
 
 /// Runs an interaction exactly as the gateway would, returning the reply the

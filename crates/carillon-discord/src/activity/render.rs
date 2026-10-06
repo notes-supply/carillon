@@ -56,13 +56,14 @@ pub(super) struct Shown<'a> {
     pub(super) live: Option<&'a TurnActivity>,
 }
 
-/// Whether a turn's report shows work worth a retained summary: calls,
-/// published reasoning, or delegated and transferred work. An answer alone
-/// needs no card.
-pub(crate) fn shows_work(report: Option<&TurnActivity>) -> bool {
-    report.is_some_and(|report| {
-        report.tool_calls > 0 || !report.notes.is_empty() || report.work.is_some()
-    })
+/// Whether a turn's end earns a retained summary: it stopped before
+/// finishing, or its report shows work (calls, published reasoning, or
+/// delegated and transferred work). An answer alone needs no card.
+pub(crate) fn earns_summary(delivery: &Delivery) -> bool {
+    delivery.turn_state == TurnState::Interrupted
+        || delivery.activity.as_ref().is_some_and(|report| {
+            report.tool_calls > 0 || !report.notes.is_empty() || report.work.is_some()
+        })
 }
 
 /// The summary an answer carries when its job has no card: what the turn

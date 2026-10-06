@@ -1,10 +1,11 @@
 //! Native delivery and feedback. Core remains the owner of delivery claims/outcomes.
 use crate::{
-    activity::{Card, Outcome, Summaries},
+    activity::{Outcome, Summaries},
     client::CoreClient,
     config::{DiscordConfig, DiscordEmoji},
+    error::discord_failure_is_terminal,
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use carillon_protocol::model::{Delivery, DeliveryOutcome, ExternalEvent};
 use std::{
     collections::{HashMap, hash_map::Entry},
@@ -346,8 +347,8 @@ pub(crate) async fn trigger_typing(http: &DiscordHttp, config: &DiscordConfig, t
 
 /// Claims, sends and acknowledges deliveries. Each recorded outcome is
 /// reported to `outcomes` without waiting for whoever receives it. With
-/// `summaries`, an answer whose job shows work but has no card carries the
-/// job's summary, and is its card from then on.
+/// `summaries`, an answer whose turn earned a summary but whose job has no
+/// card carries the job's summary, and is its card from then on.
 pub(crate) async fn delivery_loop(
     core: CoreClient,
     reactions: Reactions,
@@ -375,24 +376,21 @@ pub(crate) async fn delivery_loop(
             .as_ref()
             .and_then(|summaries| summaries.reserve(&delivery));
         let (outcome, sent, shown) = attempt_delivery(&http, &delivery, summary.as_ref()).await;
-        let native_ref = sent.as_ref().map(|(_, messages)| {
-            messages
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(",")
-        });
-        // The summary rides on the answer's last message.
-        let hosted = summary.and(sent).and_then(|(channel_id, messages)| {
-            messages.last().map(|&message_id| Card {
-                channel_id,
-                message_id,
-                hosted: true,
-            })
-        });
-        if let Some(summaries) = &summaries {
-            summaries.sent(&delivery, hosted);
-        }
+        let native_ref = match &sent {
+            Sent::Whole(_, messages) => Some(
+                messages
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+            Sent::Unnamed(_) | Sent::Incomplete => None,
+        };
+        // Only an answer reserved as its job's card says how that went.
+        let hosted = match (&summaries, &summary) {
+            (Some(summaries), Some(_)) => summaries.sent(&delivery, &sent),
+            _ => None,
+        };
         // The Discord outcome is known at this point. Abandoning the
         // acknowledgement would let a restart downgrade it to uncertain, so
         // transient core failures are waited out while the claim is held.
@@ -446,36 +444,64 @@ async fn reconcile_after_claim_failure(core: &CoreClient, reactions: &Reactions)
     }
 }
 
-/// What was sent: the channel and the messages, in order.
-type Sent = (Id<ChannelMarker>, Vec<Id<MessageMarker>>);
+/// What Discord holds of an answer.
+pub(crate) enum Sent {
+    /// All of it: its messages in this channel, in order.
+    Whole(Id<ChannelMarker>, Vec<Id<MessageMarker>>),
+    /// Perhaps its last message, which nobody can name.
+    Unnamed(Id<ChannelMarker>),
+    /// Not its last message: that was never sent, or Discord refused it.
+    Incomplete,
+}
 
 async fn attempt_delivery(
     http: &DiscordHttp,
     delivery: &Delivery,
     summary: Option<&Embed>,
-) -> (DeliveryOutcome, Option<Sent>, Feedback) {
+) -> (DeliveryOutcome, Sent, Feedback) {
     let channel = match delivery.target_id.parse::<Id<ChannelMarker>>() {
         Ok(channel) => channel,
         Err(failure) => {
             warn!(error = %failure, "invalid Discord delivery target");
-            return (DeliveryOutcome::Uncertain, None, Feedback::Uncertain);
+            return (
+                DeliveryOutcome::Uncertain,
+                Sent::Incomplete,
+                Feedback::Uncertain,
+            );
         }
     };
     match send_discord_message(http, channel, &delivery.content, summary).await {
         Ok(messages) => (
             DeliveryOutcome::Delivered,
-            Some((channel, messages)),
+            Sent::Whole(channel, messages),
             if delivery.turn_state == carillon_protocol::model::TurnState::Completed {
                 Feedback::Delivered
             } else {
                 Feedback::Uncertain
             },
         ),
-        Err(failure) => {
+        Err(Unsent {
+            failure,
+            last_may_exist,
+        }) => {
             warn!(error = %failure, delivery_id = delivery.id, "Discord delivery outcome uncertain");
-            (DeliveryOutcome::Uncertain, None, Feedback::Uncertain)
+            let sent = if last_may_exist {
+                Sent::Unnamed(channel)
+            } else {
+                Sent::Incomplete
+            };
+            (DeliveryOutcome::Uncertain, sent, Feedback::Uncertain)
         }
     }
+}
+
+/// Why an answer was not sent whole.
+#[derive(Debug)]
+pub(crate) struct Unsent {
+    pub(crate) failure: anyhow::Error,
+    /// Discord may hold the answer's last message, the one that carries
+    /// any summary: its request failed without Discord refusing it.
+    pub(crate) last_may_exist: bool,
 }
 
 /// Sends `content` in as many messages as it takes, the last carrying
@@ -485,10 +511,13 @@ pub(crate) async fn send_discord_message(
     channel_id: Id<ChannelMarker>,
     content: &str,
     summary: Option<&Embed>,
-) -> Result<Vec<Id<MessageMarker>>> {
+) -> Result<Vec<Id<MessageMarker>>, Unsent> {
     let chunks = discord_chunks(content);
     if chunks.is_empty() {
-        bail!("Discord delivery content is empty");
+        return Err(Unsent {
+            failure: anyhow!("Discord delivery content is empty"),
+            last_may_exist: false,
+        });
     }
     // Delivered text is the agent's and the runtime's, not the user's: it
     // must not notify anyone, whatever mention syntax it contains.
@@ -506,7 +535,18 @@ pub(crate) async fn send_discord_message(
         {
             request = request.embeds(embeds);
         }
-        ids.push(request.await?.model().await?.id);
+        match async { anyhow::Ok(request.await?.model().await?.id) }.await {
+            Ok(id) => ids.push(id),
+            // Only a refusal, or a request that never left, proves the
+            // message does not exist.
+            Err(failure) => {
+                let last_may_exist = index == last && !discord_failure_is_terminal(&failure);
+                return Err(Unsent {
+                    failure,
+                    last_may_exist,
+                });
+            }
+        }
     }
     Ok(ids)
 }

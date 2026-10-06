@@ -1,6 +1,6 @@
 import { TurnActivitySchema } from "@carillon/protocol";
 import { Check } from "typebox/value";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { watchTurn } from "./watch.ts";
 
 /** Synthetic projection fixtures; shapes follow the live server's protocol 2 answers. */
@@ -2600,6 +2600,88 @@ it("times calls from T3's own dates, and estimates a stable start only when T3 g
     event(4, "turn-item.updated", { ...undated("2026-10-04T08:11:00Z"), status: "completed" }),
   );
   expect(watch.activity().recent.at(-1)).toEqual({ tool: "bash", detail: "make", ok: true });
+});
+
+it("holds a pending or waiting call, counting and timing it only once T3 shows it running", () => {
+  const at = (time: string) => Date.parse(`2026-10-04T${time}Z`);
+  vi.useFakeTimers({ now: at("08:00:00"), toFake: ["Date"] });
+  try {
+    const watch = watchTurn("message-1", "/workspace");
+    const call = (id: string, status: string, startedAt: string | null = null) =>
+      item(
+        "command_execution",
+        "run-1",
+        { id, input: id, startedAt, updatedAt: new Date().toISOString() },
+        status,
+      );
+    // T3 lists both calls before running either.
+    watch.apply(
+      snapshot({
+        runs: [run("running")],
+        turnItems: [call("make", "pending"), call("ls", "pending")],
+      }),
+    );
+    const listed = watch.activity();
+    expect(listed).toMatchObject({ phase: "waiting", running: [], recent: [], tool_calls: 0 });
+    // A resumed snapshot still showing them pending changes nothing.
+    vi.setSystemTime(at("08:00:30"));
+    watch.resubscribing();
+    watch.apply(
+      snapshot(
+        { runs: [run("running")], turnItems: [call("make", "pending"), call("ls", "pending")] },
+        2,
+      ),
+    );
+    expect(watch.activity()).toEqual(listed);
+    // An undated call's estimated start is when T3 first shows it running;
+    // a dated one's is T3's own.
+    vi.setSystemTime(at("08:01:00"));
+    watch.apply(event(3, "turn-item.updated", call("make", "running")));
+    watch.apply(event(4, "turn-item.updated", call("ls", "running", "2026-10-04T08:00:55Z")));
+    const estimated = {
+      tool: "bash",
+      detail: "make",
+      started_at: at("08:01:00") / 1000,
+      estimated: true,
+    };
+    const dated = { tool: "bash", detail: "ls", started_at: at("08:00:55") / 1000 };
+    expect(watch.activity()).toMatchObject({
+      phase: "tools",
+      running: [estimated, dated],
+      tool_calls: 2,
+    });
+    // Waiting again, a call is held, still counted; running again, its start has not moved.
+    vi.setSystemTime(at("08:02:00"));
+    watch.apply(event(5, "turn-item.updated", call("make", "waiting")));
+    watch.apply(event(6, "turn-item.updated", { ...call("ls", "completed"), startedAt: null }));
+    expect(watch.activity()).toMatchObject({ phase: "waiting", running: [], tool_calls: 2 });
+    vi.setSystemTime(at("08:03:00"));
+    watch.apply(event(7, "turn-item.updated", call("make", "running")));
+    expect(watch.activity().running).toEqual([estimated]);
+    watch.resubscribing();
+    watch.apply(
+      snapshot(
+        {
+          runs: [run("running")],
+          turnItems: [call("make", "running"), { ...call("ls", "completed"), startedAt: null }],
+        },
+        8,
+      ),
+    );
+    expect(watch.activity().running).toEqual([estimated]);
+    watch.apply(event(9, "turn-item.updated", call("make", "completed")));
+    expect(watch.activity()).toMatchObject({
+      phase: "model",
+      running: [],
+      recent: [
+        { tool: "bash", detail: "ls", ok: true },
+        { tool: "bash", detail: "make", ok: true },
+      ],
+      tool_calls: 2,
+    });
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 it("keeps the reasoning T3 publishes for the turn's runs as notes, across snapshots, and none of other runs", () => {

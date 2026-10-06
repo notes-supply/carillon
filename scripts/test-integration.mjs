@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { constants } from "node:fs";
 import {
@@ -317,6 +318,7 @@ try {
   await testModelPicker();
   await testProviderFailure();
   await testActivityVisibility();
+  await testT3ActivityThroughDelivery();
 
   process.stdout.write(
     `${JSON.stringify(
@@ -335,6 +337,8 @@ try {
           "explained once without replay, pages and credentials withheld, conversation continues",
         activity:
           "a slow native command is visible to its interface before the answer, whose delivery carries the final report",
+        t3_activity:
+          "T3 runtime reports of a call and of a failure reach core's delivery and the same work summary",
         attachments:
           "staged files captured by core, linked staging refused, files reach the runtime by relative path and survive backup",
       },
@@ -1083,7 +1087,7 @@ async function testActivityVisibility() {
       assert.equal((await activeTurns(authorization)).status, 403);
 
     await writeFile(join(workspace, marker), "");
-    const { receipt, delivery } = await answered;
+    const { receipt, delivery, summary } = await answered;
     assert.equal(receipt.turn_id, running.turn_id);
     assert.equal(delivery.turn_state, "completed");
     assert.match(delivery.content, /The marker appeared\.$/u);
@@ -1100,6 +1104,9 @@ async function testActivityVisibility() {
     assert.equal(typeof delivery.activity.recent[0].duration_ms, "number");
     assert.equal(delivery.activity.agent?.model, "activity-model");
     assert.ok(!delivery.content.includes(command), "the report stays out of the answer");
+    // The answer's work summary, as the delivery loop renders it.
+    assert.match(embedText(summary), /^✓ Done · answered \S+ after the request\n/u);
+    assert.match(embedText(summary), /✓ bash `until /u);
     const after = await activeTurns(`Bearer ${await credentialValue("discord-private")}`);
     assert.deepEqual(after.body, []);
     assert.equal(requests, 2);
@@ -1112,6 +1119,133 @@ async function testActivityVisibility() {
     await rename(`${privateState}-saved`, privateState);
     await rename(`${sessions}-saved`, sessions);
   }
+}
+
+/**
+ * The T3 runtime against the fake T3 server: one run calls a tool and
+ * answers, another fails before any call. New conversations run on T3 while
+ * the registry names it the agent's runtime; both reports reach core's
+ * ordinary delivery and the Discord provider's work summary.
+ */
+async function testT3ActivityThroughDelivery() {
+  const { startFakeT3 } = await import(
+    new URL("../packages/runtime-t3/src/fake.ts", import.meta.url).href
+  );
+  const fake = await startFakeT3();
+  const original = await readFile(configPath(), "utf8");
+  const settings = join(installation, "providers/runtime-t3.toml");
+  const t3Token = join(installation, "credentials/t3.token");
+  const token = crypto.randomUUID();
+  const { version } = JSON.parse(await readFile("packages/runtime-t3/package.json", "utf8"));
+  const registered = original.replace(
+    'runtime_provider = "runtime-pi"',
+    'runtime_provider = "runtime-t3"',
+  );
+  assert.notEqual(registered, original);
+  try {
+    await writeFile(
+      configPath(),
+      `${registered}
+[[providers]]
+id = "runtime-t3"
+role = "runtime"
+version = "${version}"
+url = "http://127.0.0.1:${String(servicePort("runtime-t3"))}"
+token_hash = "${createHash("sha256").update(token).digest("hex")}"
+enabled = true
+`,
+    );
+    await writeFile(credential("runtime-t3"), token, { mode: 0o600 });
+    await writeFile(t3Token, fake.token, { mode: 0o600 });
+    await writeFile(
+      settings,
+      `url = "${fake.url}"
+token_file = "credentials/t3.token"
+project_id = "project-1"
+
+[model]
+instance_id = "claudeAgent"
+model = "claude-sonnet-5"
+
+[model.options]
+effort = "low"
+`,
+    );
+    await restart("core");
+    await start("runtime-t3");
+    const known = new Set();
+    /** The next run T3 opens for a message, by thread. */
+    const opened = async () => {
+      let found;
+      await fake.waitFor(() => {
+        for (const thread of fake.threads.values())
+          for (const run of thread.runs)
+            if (!known.has(run.id)) found ??= { thread: thread.id, run: run.id };
+        return found !== undefined;
+      }, 10_000);
+      known.add(found.run);
+      return found;
+    };
+
+    // Channel 302 opens a new conversation per message.
+    const answered = simulateRoute("t3-activity", "302", null, "check the build");
+    const first = await opened();
+    const call = fake.tool(first.thread, first.run, {
+      type: "command_execution",
+      input: "make check",
+    });
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+    fake.finishTool(first.thread, call);
+    fake.assistant(first.thread, first.run, "The build passes.");
+    fake.complete(first.thread, first.run);
+    const { delivery, summary } = await answered;
+    assert.equal(delivery.turn_state, "completed");
+    assert.equal(delivery.content, "The build passes.");
+    assert.deepEqual(delivery.origin, {
+      turn_id: delivery.turn_id,
+      accepted_at: delivery.origin.accepted_at,
+    });
+    assert.equal(delivery.activity.tool_calls, 1);
+    assert.deepEqual(
+      delivery.activity.recent.map(({ tool, detail, ok }) => ({ tool, detail, ok })),
+      [{ tool: "bash", detail: "make check", ok: true }],
+    );
+    assert.equal(typeof delivery.activity.recent[0].duration_ms, "number");
+    assert.equal(delivery.activity.agent?.model, "claude-sonnet-5");
+    assert.equal(delivery.activity.agent?.effort, "low");
+    assert.match(embedText(summary), /^✓ Done · answered \S+ after the request\n/u);
+    assert.match(embedText(summary), /✓ bash `make check`/u);
+
+    // A run T3 reports failed before any call ends the turn with core's
+    // notice; the summary says only that it stopped.
+    const stopped = simulateRoute("t3-failure", "302", null, "check again");
+    const second = await opened();
+    fake.fail(second.thread, second.run, "The provider is overloaded.");
+    const failed = await stopped;
+    assert.equal(failed.delivery.turn_state, "interrupted");
+    assert.match(failed.delivery.content, /The provider is overloaded\./u);
+    assert.equal(failed.delivery.activity.tool_calls, 0);
+    assert.equal(failed.delivery.activity.agent?.model, "claude-sonnet-5");
+    assert.match(embedText(failed.summary), /^⏹️ Stopped before finishing\./u);
+    assert.doesNotMatch(embedText(failed.summary), /bash/u);
+  } finally {
+    await stop("runtime-t3");
+    await writeFile(configPath(), original);
+    await rm(settings, { force: true });
+    await rm(credential("runtime-t3"), { force: true });
+    await rm(t3Token, { force: true });
+    await restart("core");
+    await fake.close();
+  }
+}
+
+/** A work summary's text: its description, then each field under its name. */
+function embedText(embed) {
+  assert.ok(embed, "the answer carries no work summary");
+  return [
+    embed.description,
+    ...(embed.fields ?? []).map(({ name, value }) => `${name}:\n${value}`),
+  ].join("\n");
 }
 
 async function activeTurns(authorization) {
@@ -1759,6 +1893,19 @@ async function waitForTurn(turnId, state, deliveryState = null) {
 
 function serviceArguments(name, { nativePi = false, commands = commandsModule } = {}) {
   if (name === "core") return [binary, ["core", "--config", configPath()]];
+  if (name === "runtime-t3")
+    return [
+      process.execPath,
+      [
+        resolve("packages/runtime-t3/src/cli.ts"),
+        "--config",
+        configPath(),
+        "--provider",
+        "runtime-t3",
+        "--token-file",
+        credential("runtime-t3"),
+      ],
+    ];
   if (name === "runtime") {
     const args = [
       "--config",
@@ -1794,7 +1941,7 @@ function serviceArguments(name, { nativePi = false, commands = commandsModule } 
 }
 
 function servicePort(name) {
-  return basePort + { core: 0, discord: 1, runtime: 2 }[name];
+  return basePort + { core: 0, discord: 1, runtime: 2, "runtime-t3": 3 }[name];
 }
 
 async function start(name, options = {}) {

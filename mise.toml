@@ -46,7 +46,7 @@ depends = ["install"]
 run = "bun packages/runtime-pi/examples/session.ts"
 
 [tasks."test:integration"]
-description = "Test local core, Discord, and Pi services together"
+description = "Test local core, Discord, Pi and T3 runtime services together"
 depends = ["install", "build:commands"]
 run = "cargo build --locked --bin carillon --bin carillon-discord && node scripts/test-integration.mjs"
 
