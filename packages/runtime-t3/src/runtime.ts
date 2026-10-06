@@ -222,8 +222,15 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
           );
         }
         log(`thread ${binding.threadId}: model set to ${target.instanceId}/${target.model}`);
+        // T3 may have committed the change: a thread it no longer lists
+        // says nothing about the selection, so none is reported.
         const after = await readThread(connection, binding.threadId);
-        return modelState(offered, options.selection, { thread: after?.thread.modelSelection });
+        if (after === undefined)
+          throw new T3Failure(
+            "malformed",
+            "T3 did not list the conversation's thread after changing its model",
+          );
+        return modelState(offered, options.selection, { thread: after.thread.modelSelection });
       }),
     );
   }

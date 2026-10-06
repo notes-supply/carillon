@@ -804,6 +804,29 @@ it("changes the thread's own selection, which later messages inherit, and reads 
   expect(thread().modelSelection).toEqual(selection);
 });
 
+it("reports no model when T3 no longer lists the thread whose model it changed", async () => {
+  const haiku = { provider: "claudeAgent", model: "claude-haiku-4-5" };
+  // T3 commits the change and answers with its receipt, then answers the
+  // read that follows with its typed missing-projection error.
+  let committed: unknown;
+  fake.failAfterDispatch = (command) => {
+    if (command.type === "thread.model-selection.set") {
+      committed = structuredClone(thread().modelSelection);
+      fake.threads.delete(threadId);
+    }
+    return undefined;
+  };
+  await expect(
+    runtime.setModel({ ...conversation, scope: "conversation", selection: haiku }),
+  ).rejects.toMatchObject({
+    status: 502,
+    message: "T3 answered in a form this runtime does not understand.",
+  });
+  // The change T3 committed is neither reported as the default nor sent again.
+  expect(committed).toEqual({ instanceId: "claudeAgent", model: "claude-haiku-4-5", options: [] });
+  expect(modelSets()).toHaveLength(1);
+});
+
 it("refuses changes it cannot make, without sending them to T3", async () => {
   const change = (selection: {
     provider: string;
