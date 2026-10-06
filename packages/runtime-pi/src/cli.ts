@@ -64,10 +64,14 @@ const FileConfigSchema = Type.Object({
 
 async function main(values: readonly string[]): Promise<void> {
   const args = parseArguments(values);
-  const config = await loadConfig(
-    requiredArgument(args, "config"),
-    requiredArgument(args, "provider"),
-  );
+  const providerId = requiredArgument(args, "provider");
+  const config = await loadConfig(requiredArgument(args, "config"), providerId);
+  // Disabled on purpose, the runtime ends successfully, so its service is not
+  // restarted, before it reads its credential or creates any state.
+  if (config === "disabled") {
+    process.stdout.write(`runtime provider ${providerId} is disabled; not serving\n`);
+    return;
+  }
   if (!(await stat(config.workspace)).isDirectory())
     throw new Error("workspace must be an existing directory");
   if (!(await stat(config.resourceRoot)).isDirectory())
@@ -137,7 +141,8 @@ async function main(values: readonly string[]): Promise<void> {
   }
 }
 
-async function loadConfig(path: string, providerId: string): Promise<Config> {
+/** The registry as it concerns this runtime, unless it disables it. */
+async function loadConfig(path: string, providerId: string): Promise<Config | "disabled"> {
   Parse(ProviderIdentitySchema, providerId);
   const configPath = await realpath(path);
   const root = resolve(configPath, "..");
@@ -151,7 +156,7 @@ async function loadConfig(path: string, providerId: string): Promise<Config> {
     (provider) => provider.id === providerId && provider.role === "runtime",
   );
   if (runtime === undefined) throw new Error(`runtime provider ${providerId} is not configured`);
-  if (!runtime.enabled) throw new Error(`runtime provider ${providerId} is disabled`);
+  if (!runtime.enabled) return "disabled";
   const interfaces = parsed.providers.filter(
     (provider) => provider.role === "interface" && provider.enabled,
   );

@@ -375,6 +375,17 @@ function configureDiscord(home, guildId, botUserId, userId, ...routes) {
   );
 }
 
+/** A provider disabled on purpose exits successfully, serving nothing. */
+function assertDisabledExit(name, expected) {
+  const [program, args] = serviceArguments(name);
+  const result = spawnSync(program, args, { encoding: "utf8", timeout: 10_000 });
+  assert.ifError(result.error);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, `${name} must exit successfully when disabled: ${result.stderr}`);
+  assert.doesNotMatch(result.stdout, /ready/u, `${name} must not serve when disabled`);
+  assert.match(`${result.stdout}${result.stderr}`, expected);
+}
+
 function assertStartupRefused(name, expected, extraArgs = [], options = {}) {
   const [program, args] = serviceArguments(name, options);
   const result = spawnSync(program, [...args, ...extraArgs], {
@@ -1149,7 +1160,20 @@ async function testRuntimeStartupRefusals(turnId) {
     await assert.rejects(stat(sessions), { code: "ENOENT" });
     await writeFile(configPath(), original);
     run("--home", installation, "provider", "runtime-pi", "disable");
-    assertStartupRefused("runtime", /runtime provider runtime-pi is disabled/u);
+    // Disabled on purpose, the runtime exits successfully before reading its
+    // credential or creating state, so its service is not restarted; a
+    // malformed registry is still refused.
+    const disabled = await readFile(configPath(), "utf8");
+    const token = credential("runtime-pi");
+    await rename(token, `${token}-saved`);
+    try {
+      assertDisabledExit("runtime", /runtime provider runtime-pi is disabled/u);
+      await writeFile(configPath(), disabled.replaceAll('"runtime-pi"', '"operator"'));
+      assertStartupRefused("runtime", /provider ID operator is reserved/u);
+    } finally {
+      await rename(`${token}-saved`, token);
+      await writeFile(configPath(), disabled);
+    }
     await assert.rejects(stat(sessions), { code: "ENOENT" });
     await assert.rejects(stat(privateState), { code: "ENOENT" });
     assert.equal(JSON.parse(run("--home", installation, "inspect", turnId)).state, "queued");
@@ -1290,6 +1314,24 @@ async function testConfigurationRefusals() {
       assertStartupRefused("discord", /read Discord configuration/u);
     } finally {
       await rename(`${providerConfigPath()}-saved`, providerConfigPath());
+    }
+    // Disabled on purpose, the provider exits successfully before reading its
+    // credential or settings, so its service is not restarted; a malformed
+    // registry is still refused.
+    run("--home", installation, "provider", "discord-private", "disable");
+    const withoutDiscord = await readFile(configPath(), "utf8");
+    const token = credential("discord-private");
+    await rename(token, `${token}-saved`);
+    await rename(providerConfigPath(), `${providerConfigPath()}-saved`);
+    try {
+      assertDisabledExit("discord", /Discord interface provider is disabled/u);
+      await writeFile(configPath(), withoutDiscord.replaceAll('"discord-private"', '"operator"'));
+      assertStartupRefused("discord", /provider ID operator is reserved/u);
+      assert.deepEqual(await readFile(database), previousDatabase);
+    } finally {
+      await rename(`${token}-saved`, token);
+      await rename(`${providerConfigPath()}-saved`, providerConfigPath());
+      await writeFile(configPath(), original);
     }
     // Invalid inline presentation fails before the provider starts any work.
     const discordSettings = await readFile(providerConfigPath(), "utf8");

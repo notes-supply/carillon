@@ -76,7 +76,7 @@ systemctl --user restart carillon-discord.service
 systemctl --user restart carillon-runtime-pi.service
 ```
 
-Core is restarted separately. Registry and provider configuration are static until restart.
+Core is restarted separately. Registry and provider configuration are static until restart. A bundled provider disabled in the registry (`carillon provider ID disable`) still starts with the target, but exits successfully at once without serving or reading its credential, so its unit is not restarted; status shows it as `disabled`.
 
 ### Discord commands
 
