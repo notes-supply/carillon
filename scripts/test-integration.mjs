@@ -22,6 +22,7 @@ import { join, resolve } from "node:path";
 
 // This fixture uses the bundled providers and simulated model responses.
 // Counters/activation markers below are test output, not a required reply format.
+const basePort = await availableBasePort();
 const root = await mkdtemp(join(tmpdir(), "carillon-integration-"));
 const restoredRoot = await mkdtemp(join(tmpdir(), "carillon-restored-"));
 const workspace = await mkdtemp(join(tmpdir(), "carillon-workspace-"));
@@ -33,7 +34,6 @@ const commandsModule = resolve(
 );
 const runtimeEntry = resolve("packages/runtime-pi/src/cli.ts");
 const packagedRuntime = process.env.CARILLON_RUNTIME_BINARY;
-const basePort = 45_000 + (process.pid % 10_000);
 let installation = root;
 let runtimeHost = "127.0.0.1";
 let runtimeConfigPath;
@@ -1731,6 +1731,32 @@ function serviceArguments(name, { nativePi = false, commands = commandsModule } 
   ];
 }
 
+// init assigns three consecutive ports. Probe the whole range rather than
+// deriving it from a PID that can collide with an unrelated host service.
+async function availableBasePort() {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const listeners = [];
+    try {
+      const first = createServer().listen(0, "127.0.0.1");
+      listeners.push(first);
+      await once(first, "listening");
+      const { port } = first.address();
+      if (port > 65_533) continue;
+      for (const offset of [1, 2]) {
+        const next = createServer().listen(port + offset, "127.0.0.1");
+        listeners.push(next);
+        await once(next, "listening");
+      }
+      return port;
+    } catch (error) {
+      if (error.code !== "EADDRINUSE") throw error;
+    } finally {
+      await Promise.all(listeners.map((server) => new Promise((resolve) => server.close(resolve))));
+    }
+  }
+  throw new Error("could not find three available integration service ports");
+}
+
 function servicePort(name) {
   return basePort + { core: 0, discord: 1, runtime: 2 }[name];
 }
@@ -1738,7 +1764,7 @@ function servicePort(name) {
 async function start(name, options = {}) {
   const [program, args] = serviceArguments(name, options);
   const child = spawn(program, args, {
-    stdio: ["ignore", "ignore", options.log === undefined ? "ignore" : "pipe"],
+    stdio: ["ignore", "ignore", options.log === undefined ? "inherit" : "pipe"],
     env: options.env,
   });
   child.stderr?.setEncoding("utf8").on("data", (text) => options.log.push(text));
