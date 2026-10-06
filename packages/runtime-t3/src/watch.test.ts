@@ -681,6 +681,51 @@ it("refuses a run whose ordinal T3 numbers from one", () => {
   }
 });
 
+/** A run of another thread, for the turn's message. */
+const foreignRun = (status: string, id: string) => ({
+  ...run(status, "message-1", 1, id),
+  threadId: "another-thread",
+});
+
+it("refuses another thread's run for the turn's message in the first snapshot", () => {
+  // A snapshot of the turn's thread listing another thread's run folds none
+  // of it: that run's message is no answer of this turn.
+  const initial = watchTurn("thread", "message-1", "/workspace");
+  expect(() =>
+    initial.apply(
+      snapshot({
+        runs: [foreignRun("completed", "run-9")],
+        messages: [
+          {
+            id: "a",
+            runId: "run-9",
+            role: "assistant",
+            text: "Not this turn's.",
+            createdAt: "2026-10-06T08:00:00Z",
+          },
+        ],
+      }),
+    ),
+  ).toThrow("T3 sent run run-9 of another thread");
+  expect(initial.run()).toBeUndefined();
+  expect(initial.outcome()).toBeUndefined();
+  expect(initial.sequence()).toBeUndefined();
+  expect(initial.synchronized()).toBe(false);
+});
+
+it("refuses another thread's run for the turn's message live", () => {
+  // It neither replaces the turn's run nor becomes what a cancel stops, and
+  // the cursor stays before it.
+  const live = watchTurn("thread", "message-1", "/workspace");
+  live.apply(snapshot({ runs: [run("running")] }));
+  expect(() => live.apply(event(2, "run.created", foreignRun("running", "run-9")))).toThrow(
+    "T3 sent run run-9 of another thread",
+  );
+  expect(live.run()?.id).toBe("run-1");
+  expect(live.activeRun()?.id).toBe("run-1");
+  expect(live.sequence()).toBe(1);
+});
+
 it("orders the turn's answer by when T3 made each message, refusing one with no readable time", () => {
   const said = (id: string, text: string, createdAt: string) => ({
     id,

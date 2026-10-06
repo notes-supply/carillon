@@ -1027,6 +1027,13 @@ export function watchTurn(
     return Number.isNaN(parsed) ? Math.floor(Date.now() / 1000) : Math.floor(parsed / 1000);
   }
 
+  /** The run, refused when it is another thread's: T3 streams one thread's runs. */
+  function ofThread(run: Run): Run {
+    if (run.threadId !== threadId)
+      throw new T3Failure("malformed", `T3 sent run ${run.id} of another thread`);
+    return run;
+  }
+
   function parsed<S extends TSchema>(schema: S, payload: unknown, what: string): Static<S> {
     if (!Check(schema, payload))
       throw new T3Failure("malformed", `T3 sent a ${what} this runtime does not understand`);
@@ -1193,6 +1200,7 @@ export function watchTurn(
           // Nothing of another thread is folded as this turn's.
           if (projection.thread.id !== threadId)
             throw new T3Failure("malformed", "T3 sent the snapshot of another thread");
+          for (const run of projection.runs) ofThread(run);
           // A snapshot lists the thread's runs whole: one that omits a run
           // this turn already observed is broken, and is refused before it
           // replaces anything the fold knows.
@@ -1310,7 +1318,7 @@ export function watchTurn(
           switch (event["type"]) {
             case "run.created":
             case "run.updated":
-              foldRun(parsed(RunSchema, payload, "run"));
+              foldRun(ofThread(parsed(RunSchema, payload, "run")));
               refile();
               pruneProviders();
               break;
