@@ -1,6 +1,6 @@
 import { once } from "node:events";
 import { readFile, stat } from "node:fs/promises";
-import { runtimeListenAddress } from "@carillon/runtime/endpoint";
+import { providerAddress } from "@carillon/runtime/endpoint";
 import { createRuntimeServer } from "@carillon/runtime/http";
 import {
   loadInstallation,
@@ -21,7 +21,7 @@ async function main(values: readonly string[]): Promise<void> {
   );
   if (!(await stat(installation.workspace)).isDirectory())
     throw new Error("workspace must be an existing directory");
-  const listenAddress = runtimeListenAddress(installation.runtime.url);
+  const listenAddress = providerAddress(installation.runtime.url);
   const token = await loadRuntimeCredential(
     requiredArgument(args, "token-file"),
     installation.runtime,

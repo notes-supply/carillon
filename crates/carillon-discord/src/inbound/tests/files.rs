@@ -50,6 +50,11 @@ struct Core {
     stalled: Vec<String>,
     /// Event IDs whose status lookups core fails.
     unanswered: Vec<String>,
+    /// Events core is already capturing, as for a replayed message, with how
+    /// many more status lookups find them capturing before it accepts them.
+    replayed: HashMap<String, usize>,
+    /// Event IDs whose status lookups core refuses once their capture ends.
+    refused_status: Vec<String>,
     /// Whether Discord fails every thread creation, as during an outage.
     threads_fail: bool,
     submissions: Vec<ExternalEvent>,
@@ -206,6 +211,20 @@ fn status(core: &Shared, event_id: &str) -> Response {
     {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
+    if let Some(remaining) = core.replayed.get_mut(event_id) {
+        if *remaining > 0 {
+            *remaining -= 1;
+            return Json(EventStatus::Capturing).into_response();
+        }
+        if core
+            .refused_status
+            .iter()
+            .any(|refused| refused == event_id)
+        {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+        core.known.push(event_id.to_owned());
+    }
     let submitted = core
         .submissions
         .iter()
@@ -313,6 +332,7 @@ fn ingress(
         http: world.http.clone(),
         reactions: crate::delivery::Reactions::new(world.http.clone(), config.clone()),
         config,
+        refusals: Arc::new(tokio::sync::Semaphore::new(lanes::REFUSALS)),
         stopping: tokio_util::sync::CancellationToken::new(),
     }))
 }
@@ -821,9 +841,9 @@ async fn overload_replies_only_to_messages_admission_would_activate() -> Result<
         http: world.http.clone(),
         reactions: crate::delivery::Reactions::new(world.http.clone(), config.clone()),
         config,
+        refusals: Arc::new(tokio::sync::Semaphore::new(lanes::REFUSALS)),
         stopping: tokio_util::sync::CancellationToken::new(),
     });
-    let refusals = Arc::new(tokio::sync::Semaphore::new(4));
     for ignored in [
         // A mention route, not mentioned.
         message("80", "300", "200", "just chatting", Vec::new()),
@@ -832,11 +852,10 @@ async fn overload_replies_only_to_messages_admission_would_activate() -> Result<
         // Not allowlisted.
         message("82", "301", "999", "hello", Vec::new()),
     ] {
-        lanes::refuse_overloaded(&ingress, &refusals, ignored.request);
+        lanes::refuse_overloaded(&ingress, ignored.request);
     }
     lanes::refuse_overloaded(
         &ingress,
-        &refusals,
         message("83", "301", "200", "hello", Vec::new()).request,
     );
     for _ in 0..200 {
@@ -855,6 +874,175 @@ async fn overload_replies_only_to_messages_admission_would_activate() -> Result<
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     Err(anyhow!("no overload refusal for an activated message"))
+}
+
+#[tokio::test]
+async fn a_full_gateway_queue_refuses_only_messages_admission_would_activate() -> Result<()> {
+    let world = world(Vec::new(), Vec::new()).await?;
+    let mut config = channel_config();
+    config.routes[0].activation = DiscordActivation::Mention;
+    let ingress = ingress(&world, config, 0)?;
+    // The lanes' queue is full: one message waits in it.
+    let (send, _receive) = mpsc::channel(1);
+    crate::application::queue_or_refuse(
+        &send,
+        &ingress,
+        message("90", "301", "200", "first", Vec::new()),
+    )?;
+    for queued in [
+        // A mention route, not mentioned: ordinary chatter.
+        message("91", "300", "200", "just chatting", Vec::new()),
+        // A channel that is no route.
+        message("92", "999", "200", "hello", Vec::new()),
+        // A message the agent would answer.
+        message("93", "301", "200", "hello", Vec::new()),
+    ] {
+        crate::application::queue_or_refuse(&send, &ingress, queued)?;
+    }
+    for _ in 0..200 {
+        let trace = trace(&world)?;
+        if trace
+            .iter()
+            .any(|entry| entry.contains("/messages/93/reactions/"))
+        {
+            assert!(trace.iter().all(|entry| entry.contains("93")), "{trace:?}");
+            assert!(explanation(&trace, "93")?.contains("too busy"), "{trace:?}");
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    Err(anyhow!("no overload refusal for an activated message"))
+}
+
+#[tokio::test]
+async fn stopping_while_core_captures_a_replay_waits_for_its_outcome() -> Result<()> {
+    let (cdn, log) = serve_cdn(HashMap::new()).await?;
+    let world = world(Vec::new(), Vec::new()).await?;
+    // Core is still capturing both replayed messages; it then accepts the
+    // first and refuses to say what became of the second.
+    script(&world, |core| {
+        core.replayed = HashMap::from([("150".to_owned(), 2), ("151".to_owned(), 2)]);
+        core.refused_status = vec!["151".to_owned()];
+    })?;
+    let mut config = channel_config();
+    config.uncertain_emoji = "❓".to_owned();
+    let ingress = ingress(&world, config, cdn)?;
+    let stopping = ingress.stopping.clone();
+    let (send, receive) = mpsc::channel(lanes::MAX_PENDING);
+    for (id, channel, file) in [("150", "300", "601"), ("151", "301", "602")] {
+        send.send(
+            message(
+                id,
+                channel,
+                "200",
+                "",
+                vec![attachment(cdn, file, "a.bin", 8)],
+            )
+            .into(),
+        )
+        .await?;
+    }
+    let dispatcher = tokio::spawn(lanes::dispatch(ingress, receive));
+    // Stop once core has twice said it is capturing both.
+    let looked_up = |trace: &[String], id: &str| {
+        let status = format!("status {id}");
+        trace.iter().filter(|entry| **entry == status).count()
+    };
+    for _ in 0..2000 {
+        let trace = trace(&world)?;
+        if looked_up(&trace, "150") >= 2 && looked_up(&trace, "151") >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    stopping.cancel();
+    tokio::time::timeout(Duration::from_secs(20), dispatcher).await??;
+    let trace = trace(&world)?;
+    // Each capture's outcome was asked for again, after the stop.
+    for id in ["150", "151"] {
+        assert_eq!(looked_up(&trace, id), 3, "{trace:?}");
+    }
+    // Neither is told to send it again; nothing was fetched or submitted.
+    assert!(explanation(&trace, "150").is_err(), "{trace:?}");
+    assert!(explanation(&trace, "151").is_err(), "{trace:?}");
+    assert!(
+        !trace.iter().any(|entry| entry.starts_with("submit ")),
+        "{trace:?}"
+    );
+    assert!(
+        log.lock()
+            .map_err(|_| anyhow!("poisoned"))?
+            .requests
+            .is_empty(),
+        "downloaded a message core was capturing"
+    );
+    // The accepted one keeps its feedback; the unanswered one is uncertain.
+    let reactions = |id: &str| {
+        trace
+            .iter()
+            .filter(|entry| entry.contains(&format!("/messages/{id}/reactions/")))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert!(reactions("150").is_empty(), "{trace:?}");
+    assert!(
+        reactions("151")
+            .iter()
+            .any(|reaction| reaction.starts_with("PUT") && reaction.contains("%E2%9D%93")),
+        "{trace:?}"
+    );
+    drop(send);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_known_capture_core_will_not_report_on_stays_uncertain() -> Result<()> {
+    let (cdn, log) = serve_cdn(HashMap::new()).await?;
+    let world = world(Vec::new(), Vec::new()).await?;
+    // While the provider runs on, core says it is capturing the replayed
+    // message, then refuses to say what became of it.
+    script(&world, |core| {
+        core.replayed = HashMap::from([("152".to_owned(), 1)]);
+        core.refused_status = vec!["152".to_owned()];
+    })?;
+    let mut config = channel_config();
+    config.uncertain_emoji = "❓".to_owned();
+    run(
+        &world,
+        config,
+        cdn,
+        vec![message(
+            "152",
+            "300",
+            "200",
+            "",
+            vec![attachment(cdn, "603", "a.bin", 8)],
+        )],
+    )
+    .await?;
+    let trace = trace(&world)?;
+    // The capture may still be core's: nothing is fetched or submitted, and
+    // the sender is not asked to send it again.
+    assert!(
+        !trace.iter().any(|entry| entry.starts_with("submit ")),
+        "{trace:?}"
+    );
+    assert!(
+        log.lock()
+            .map_err(|_| anyhow!("poisoned"))?
+            .requests
+            .is_empty(),
+        "downloaded a message core was capturing"
+    );
+    assert!(explanation(&trace, "152").is_err(), "{trace:?}");
+    assert!(
+        trace
+            .iter()
+            .any(|entry| entry.starts_with("PUT")
+                && entry.contains("/messages/152/reactions/%E2%9D%93")),
+        "{trace:?}"
+    );
+    Ok(())
 }
 
 /// Past the preparation deadline, in a paused clock's virtual time.

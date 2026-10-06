@@ -34,6 +34,7 @@ import {
   type InlineImagePolicy,
 } from "./attachments.ts";
 import { ModelSelections } from "./model.ts";
+import { resolved } from "@carillon/runtime/models";
 import { openConversation } from "./namespace.ts";
 import { RuntimeClosed } from "@carillon/runtime/failure";
 import { Serial } from "@carillon/runtime/serial";
@@ -229,15 +230,16 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
     const root = resolve(request.resource_root);
     const manager = openConversation(workspace, sessionDirectory, request);
     // The effective selection is applied to every turn, so a continued session
-    // follows the current choice rather than the model it began with. It is
-    // resolved against the same catalogue the picker reports, so the thinking
-    // level that runs is the one shown.
-    const models = await availablePiModels();
-    const selection = await selections.effective(
-      offeredPiModels(models),
-      runtimeDefault(),
-      request,
-    );
+    // follows the current choice rather than the model it began with. The
+    // choice is taken as the turn starts, before the catalogue is awaited, so
+    // a model update made meanwhile applies to the next turn, not this one.
+    // It is resolved against the same catalogue the picker reports, so the
+    // thinking level that runs is the one shown.
+    const [chosen, models] = await Promise.all([
+      selections.chosen(runtimeDefault(), request),
+      availablePiModels(),
+    ]);
+    const selection = resolved(offeredPiModels(models), chosen);
     const model = piModel(models, selection);
     const thinking = selection.options?.[THINKING_OPTION];
     const runtime = modelRuntime;

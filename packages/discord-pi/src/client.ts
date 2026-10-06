@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { isIP } from "node:net";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 
@@ -39,6 +40,24 @@ const Failure = Type.Object({
   message: Type.String({ maxLength: 2000 }),
 });
 
+/**
+ * The provider's operations endpoint, when `endpoint` is an HTTP loopback
+ * socket address, as the installation registry records providers. The
+ * operator credential is never read for, or sent to, anything else.
+ */
+function operationsEndpoint(endpoint: string): URL | undefined {
+  if (!/^http:\/\/(?:\[[^\]]+\]|[^:/@?#]+):\d+$/u.test(endpoint)) return undefined;
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return undefined;
+  }
+  const host = url.hostname.replace(/^\[|\]$/gu, "");
+  const loopback = (isIP(host) === 4 && host.startsWith("127.")) || host === "::1";
+  return loopback && Number(url.port || "80") !== 0 ? new URL("/v1/operations", url) : undefined;
+}
+
 /** A connection is explicit session data, not process globals or model arguments. */
 export class DiscordClient {
   private readonly context: unknown;
@@ -57,8 +76,8 @@ export class DiscordClient {
         "unavailable",
         "This session has no configured interface connection. Use an installed Discord conversation or supply explicit extension context.",
       );
-    const url = new URL("/v1/operations", context.connection.url);
-    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password)
+    const url = operationsEndpoint(context.connection.url);
+    if (url === undefined)
       throw new DiscordFailure("unavailable", "Invalid configured interface endpoint.");
     let token: string;
     try {

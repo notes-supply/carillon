@@ -33,7 +33,8 @@ barrier: native extensions and Bash have the installing Unix user's authority.
 - [`schemas.ts`](src/schemas.ts): model-facing action-specific schemas, grouped by
   server, messages, channels, threads, roles and members.
 - [`client.ts`](src/client.ts): bounded authenticated provider client. No bot token
-  and no model-supplied endpoint.
+  and no model-supplied endpoint; the operator credential is read for, and sent to,
+  only an HTTP loopback socket address, as the registry records providers.
 - [Rust operations](../../crates/carillon-discord/src/operations.rs): Discord
   API execution, configured-guild validation, mention behavior and failures.
 - [`skill`](skill/SKILL.md): progressive discovery and operating guidance.

@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { Type } from "typebox";
 import { Parse } from "typebox/value";
 import { parse as parseToml } from "smol-toml";
+import { providerAddress } from "./endpoint.ts";
 
 export interface RegisteredProvider {
   readonly id: string;
@@ -59,14 +60,17 @@ export async function loadInstallation(path: string, providerId: string): Promis
   );
   if (runtime === undefined) throw new Error(`runtime provider ${providerId} is not configured`);
   if (!runtime.enabled) throw new Error(`runtime provider ${providerId} is disabled`);
+  const interfaces = parsed.providers.filter(
+    (provider) => provider.role === "interface" && provider.enabled,
+  );
+  // Extensions receive these endpoints with the operator credential.
+  for (const provider of interfaces) providerAddress(provider.url);
   return {
     root,
     resourceRoot: resolve(root, parsed.agent.resource_root),
     workspace: resolve(root, parsed.agent.workspace),
     runtime,
-    interfaces: parsed.providers.filter(
-      (provider) => provider.role === "interface" && provider.enabled,
-    ),
+    interfaces,
     operatorTokenHash: parsed.core.operator_token_hash,
     providerFile: join(root, "providers", `${providerId}.toml`),
   };

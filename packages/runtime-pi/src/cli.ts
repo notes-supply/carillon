@@ -14,7 +14,7 @@ import {
 import { createDeterministicRuntime } from "./testing.ts";
 import { createRuntimeServer } from "@carillon/runtime/http";
 import packageInfo from "../package.json" with { type: "json" };
-import { runtimeListenAddress } from "@carillon/runtime/endpoint";
+import { providerAddress } from "@carillon/runtime/endpoint";
 import {
   loadInstallation,
   loadRuntimeCredential,
@@ -43,7 +43,7 @@ async function main(values: readonly string[]): Promise<void> {
     throw new Error("workspace must be an existing directory");
   if (!(await stat(config.resourceRoot)).isDirectory())
     throw new Error("resource root must be an existing directory");
-  const listenAddress = runtimeListenAddress(config.runtime.url);
+  const listenAddress = providerAddress(config.runtime.url);
   const token = await loadRuntimeCredential(requiredArgument(args, "token-file"), config.runtime);
   const deterministic = args.has("deterministic");
   const stateDirectory = resolve(requiredArgument(args, "state-dir"));
