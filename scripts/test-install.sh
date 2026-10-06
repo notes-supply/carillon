@@ -371,6 +371,17 @@ for offset in 0 1 2; do
   done
 done
 
+# While core serves, the tools install refuses before changing either file.
+TOOLS_HASH=$(cat "$CARILLON_HOME/agents/default/extensions/carillon-discord.js" \
+  "$CARILLON_HOME/agents/default/skills/discord/SKILL.md" | sha256sum)
+if env CARILLON_HOME="$CARILLON_HOME" "$APP/carillon" discord tools install >"$TEST_ROOT/tools.log" 2>&1; then
+  printf '%s\n' "the Discord tools must not install while core is serving" >&2
+  exit 1
+fi
+grep -F 'Carillon core is running' "$TEST_ROOT/tools.log" >/dev/null
+[ "$(cat "$CARILLON_HOME/agents/default/extensions/carillon-discord.js" \
+  "$CARILLON_HOME/agents/default/skills/discord/SKILL.md" | sha256sum)" = "$TOOLS_HASH" ]
+
 grep -F -- '--provider runtime-pi' "$XDG_CONFIG_HOME/systemd/user/carillon-runtime-pi.service" >/dev/null
 # The optional T3 unit is registered with the others but neither wanted by the
 # target nor enabled, so a default Pi installation never activates it.

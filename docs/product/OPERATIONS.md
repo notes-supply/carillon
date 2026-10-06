@@ -235,15 +235,22 @@ The optional [native Pi integration](../../packages/discord-pi/README.md) lets t
 assistant read and manage Discord, independently of slash commands:
 
 ```sh
+carillon stop
 carillon discord tools install
+carillon start
 ```
 
 It copies this release's extension and skill into the configured agent resources.
 It replaces only `extensions/carillon-discord.js` and `skills/discord/SKILL.md`.
-Newly accepted turns capture them; queued turns retain their old resources. It
-needs no gateway restart. Run it again after updating the release to update the
-optional integration, or remove those two files to stop capturing it. The regular
-installer does not silently enable administration tools.
+Core captures resources as it accepts turns, so the install runs only while core
+is stopped: it refuses at once while core serves, and holds core's own lock until
+both files are in place, so core cannot start in between. If it fails, one file may
+already be replaced and the other not: run it again until it succeeds before
+starting core. It is not a transaction a power loss cannot interrupt. Turns core
+accepts after it starts again capture both files; queued turns retain their old
+resources. The Discord gateway needs no restart of its own. Run it again after updating the
+release to update the optional integration, or remove those two files to stop
+capturing it. The regular installer does not silently enable administration tools.
 
 A fresh conversation sees `enable_discord`; detailed tools become model-visible
 on demand. Pi retains activation in that conversation's native transcript.

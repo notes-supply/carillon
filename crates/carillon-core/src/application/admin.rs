@@ -13,7 +13,6 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
-use fs2::FileExt;
 use tar::{Archive, Builder};
 use uuid::Uuid;
 
@@ -22,6 +21,7 @@ use carillon_installation::config::{
     RELEASE_VERSION, attachment_staging, hash_token, new_token, validate_provider_identity,
 };
 use carillon_installation::filesystem::{atomic_write, sync_ancestors, sync_tree};
+use carillon_installation::maintenance::ServiceLock;
 
 use crate::{attachments, db::Database};
 
@@ -46,28 +46,6 @@ const NATIVE_EXTENSION: &str = r#"export default function carillonContext(pi) {
 }
 "#;
 const SKILL: &str = "---\nname: carillon-status\ndescription: Explain Carillon component and continuity status when the operator asks.\n---\n\nReport component identity, resource selection, and delivery certainty plainly.\n";
-
-/// Exclusive lock over an installation's durable state directory. Core holds
-/// one while serving; backup takes it to prove the services are stopped.
-pub struct ServiceLock {
-    _file: fs::File,
-}
-
-impl ServiceLock {
-    pub fn acquire(data_dir: &Path) -> Result<Self> {
-        fs::create_dir_all(data_dir)?;
-        let path = data_dir.join("service.lock");
-        let file = fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&path)?;
-        file.try_lock_exclusive()
-            .with_context(|| format!("Carillon core already owns {}", path.display()))?;
-        Ok(Self { _file: file })
-    }
-}
 
 /// Creates an installation with the bundled providers registered and
 /// credentialed. Provider-owned settings (such as Discord admission) are

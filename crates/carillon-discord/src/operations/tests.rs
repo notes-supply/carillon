@@ -141,6 +141,71 @@ async fn history_has_an_honest_cursor_and_preserves_string_ids() -> anyhow::Resu
     server.finished()
 }
 
+/// A message whose attachments, embed and replied-to message carry
+/// Discord's signed addresses.
+fn attached_message(id: &str) -> Value {
+    let mut message = message_fixture(id);
+    message["attachments"] = json!([{
+        "id": "600", "filename": "photo.png", "size": 10, "content_type": "image/png",
+        "url": "https://cdn.discordapp.com/attachments/2/600/photo.png?ex=1&hm=signed",
+        "proxy_url": "https://media.discordapp.net/attachments/2/600/photo.png?ex=1&hm=signed"
+    }]);
+    message["embeds"] = json!([{
+        "type": "image",
+        "url": "https://cdn.discordapp.com/attachments/2/602/shown.png?ex=1&hm=embedded",
+        "image": {"url": "https://media.discordapp.net/attachments/2/602/shown.png?ex=1&hm=embedded"}
+    }]);
+    let mut referenced = message_fixture("6");
+    referenced["attachments"] = json!([{
+        "id": "601", "filename": "earlier.pdf", "size": 20,
+        "url": "https://cdn.discordapp.com/attachments/2/601/earlier.pdf?ex=1&hm=nested",
+        "proxy_url": "https://media.discordapp.net/attachments/2/601/earlier.pdf?ex=1&hm=nested"
+    }]);
+    message["referenced_message"] = referenced;
+    message
+}
+
+#[tokio::test]
+async fn message_reads_withhold_signed_attachment_addresses() -> anyhow::Result<()> {
+    let server = Mock::new(vec![
+        get("/api/v10/channels/2", channel_fixture("1")),
+        get(
+            "/api/v10/channels/2/messages?limit=1",
+            json!([attached_message("7")]),
+        ),
+        get("/api/v10/channels/2", channel_fixture("1")),
+        get("/api/v10/channels/2/messages/7", attached_message("7")),
+    ])
+    .await?;
+    let listed = server
+        .execute(json!({"action":"messages.list","channel_id":"2","limit":1}))
+        .await?
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let got = server
+        .execute(json!({"action":"messages.get","channel_id":"2","message_id":"7"}))
+        .await?
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    assert_eq!(listed["next_before"], "7");
+    assert_eq!(listed["may_have_more"], true);
+    for (message, whole) in [(&listed["items"][0], &listed), (&got, &got)] {
+        let text = whole.to_string();
+        assert!(!text.contains("hm="), "{text}");
+        assert_eq!(message["id"], "7");
+        assert_eq!(message["attachments"][0]["filename"], "photo.png");
+        assert_eq!(message["attachments"][0]["size"], 10);
+        assert!(message["attachments"][0].get("url").is_none());
+        assert_eq!(
+            message["embeds"][0]["url"],
+            "https://cdn.discordapp.com/attachments/2/602/shown.png"
+        );
+        assert_eq!(
+            message["referenced_message"]["attachments"][0]["filename"],
+            "earlier.pdf"
+        );
+    }
+    server.finished()
+}
+
 #[tokio::test]
 async fn send_disables_mentions_and_failed_writes_are_not_replayed() -> anyhow::Result<()> {
     for status in [

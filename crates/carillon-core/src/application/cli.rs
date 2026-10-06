@@ -21,10 +21,10 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
 
+use carillon_installation::maintenance::ServiceLock;
+
 use super::{
-    admin::{
-        ServiceLock, backup, enable_demo_resources, initialize as init, restore, set_provider,
-    },
+    admin::{backup, enable_demo_resources, initialize as init, restore, set_provider},
     http::{check, serve},
     operations::{
         Action, HeldUnits, Services, logs, operator_get, operator_url, print_health, status,

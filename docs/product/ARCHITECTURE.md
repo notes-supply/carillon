@@ -89,7 +89,9 @@ Pi extension plus skill, not a Wasm capability. A small activation tool enables
 its detailed schemas in the current conversation; native Pi system messages retain
 the loadout. No selection model or separate activation store exists.
 `carillon discord tools install` copies the bundled extension/skill into ordinary
-agent resources. Core captures their bytes with accepted work, as for any resource.
+agent resources, with core stopped: it holds core's service lock throughout, so
+no accepted turn captures one file without the other. Core captures their bytes
+with accepted work, as for any resource.
 
 Core forwards the event's opaque `native` metadata on runtime requests. Discord
 constructs `native.origin` from admitted input and the resolved delivery target;
@@ -101,7 +103,7 @@ activation is an input-context optimization, not an authorization mechanism.
 
 ### Replaceable command module
 
-Discord's slash commands and their interactive controls live in a WebAssembly module that the provider loads at startup and can replace while running. The release ships `carillon_discord_commands.wasm`; an operator may install another. The module defines the commands, handles each interaction, and decides what to show. The provider keeps everything native: the gateway connection, admission of the interaction, every Discord and core call, authority, and deadlines.
+Discord's slash commands and their interactive controls live in a WebAssembly module that the provider loads at startup and can replace while running. The release ships `carillon_discord_commands.wasm`; an operator may install another. The module defines the commands, handles each interaction, and decides what to show. The provider keeps everything native: the gateway connection, admission of the interaction, every Discord and core call, authority, and deadlines. When it stops, it takes no further interaction, and waits for one it has already acknowledged to finish its invocation, native calls included, and to attempt its reply before it exits; Discord may still refuse or lose that reply.
 
 ```text
 carillon CLI -> carillon-discord

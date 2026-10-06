@@ -54,6 +54,7 @@ use tokio::{
     net::TcpListener,
     signal::unix::{SignalKind, signal},
     sync::{Semaphore, mpsc},
+    task::{JoinError, JoinSet},
     time::{Instant, sleep, timeout, timeout_at},
 };
 use tokio_util::sync::CancellationToken;
@@ -274,9 +275,12 @@ async fn connect(
         stopping.clone(),
     ));
     let mut delivering = true;
+    // Interactions are this function's tasks, not the gateway's, so ending
+    // the gateway does not cut short one it already took.
+    let mut interactions = JoinSet::new();
     let outcome = tokio::select! {
         result = axum::serve(listener, router).into_future() => result.map_err(Into::into),
-        result = gateway_loop(state, discord_token, messages, ingress) => {
+        result = gateway_loop(state, discord_token, messages, ingress, &mut interactions) => {
             result.context("Discord gateway stopped")
         },
         result = &mut deliveries => {
@@ -287,12 +291,14 @@ async fn connect(
         interrupted = tokio::signal::ctrl_c() => interrupted.context("handle interruption"),
         _ = terminate.recv() => Ok(()),
     };
-    // No new message or delivery is taken. Preparation not yet handed to
-    // core ends; a submission core may have received is settled, so its
-    // staged files stay until core no longer needs them; a claimed delivery
-    // is sent and acknowledged. Reactions still under way then get a moment
-    // to end before the rest are cancelled.
+    // No new message, interaction or delivery is taken. Preparation not yet
+    // handed to core ends; a submission core may have received is settled,
+    // so its staged files stay until core no longer needs them; an
+    // interaction already acknowledged finishes its invocation and attempts
+    // its reply; a claimed delivery is sent and acknowledged. Reactions still
+    // under way then get a moment to end before the rest are cancelled.
     stopping.cancel();
+    answered(&mut interactions).await;
     let prepared = dispatcher.await;
     let delivered = if delivering {
         deliveries.await.map_err(Into::into).flatten()
@@ -656,57 +662,88 @@ async fn gateway_loop(
     token: String,
     messages: mpsc::Sender<Queued>,
     ingress: Arc<Ingress>,
+    interactions: &mut JoinSet<()>,
 ) -> Result<()> {
     let intents = Intents::GUILDS | Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT;
     let mut shard = Shard::new(ShardId::ONE, token, intents);
     let event_types = EventTypeFlags::MESSAGE_CREATE | EventTypeFlags::INTERACTION_CREATE;
     while let Some(event) = shard.next_event(event_types).await {
-        match event.context("receive Discord gateway event")? {
-            Event::MessageCreate(message) => {
-                if message.author.bot || message.kind == MessageType::ThreadStarterMessage {
-                    continue;
-                }
-                let guild = message.guild_id.map(|id| id.to_string());
-                if admit_identity(
-                    &state.discord,
-                    guild.as_deref(),
-                    &message.author.id.to_string(),
-                )
-                .is_err()
-                {
-                    continue;
-                }
-                let request = IncomingMessage {
-                    event_id: message.id.to_string(),
-                    guild_id: guild,
-                    user_id: message.author.id.to_string(),
-                    channel_id: message.channel_id.to_string(),
-                    parent_channel_id: None,
-                    content: message.content.clone(),
-                    attachments: message
-                        .attachments
-                        .iter()
-                        .map(|attachment| SourceAttachment {
-                            id: attachment.id.to_string(),
-                            filename: attachment.filename.clone(),
-                            size: attachment.size,
-                            content_type: attachment.content_type.clone(),
-                            url: attachment.url.clone(),
-                        })
-                        .collect(),
-                };
-                let native = native_message(&message);
-                queue_or_refuse(&messages, &ingress, QueuedMessage { request, native })?;
-            }
-            Event::InteractionCreate(interaction) => {
-                // Interactions are independent of message order and of each
-                // other; each answers within Discord's own deadline.
-                tokio::spawn(handle_interaction(state.clone(), interaction.0));
-            }
-            _ => {}
-        }
+        let event = event.context("receive Discord gateway event")?;
+        take_event(&state, event, &messages, &ingress, interactions)?;
     }
     bail!("Discord gateway event stream ended")
+}
+
+/// One gateway event: a message goes to the lanes, and an interaction
+/// becomes a task in `interactions`, whose finished tasks are reaped here.
+fn take_event(
+    state: &DiscordState,
+    event: Event,
+    messages: &mpsc::Sender<Queued>,
+    ingress: &Arc<Ingress>,
+    interactions: &mut JoinSet<()>,
+) -> Result<()> {
+    while let Some(finished) = interactions.try_join_next() {
+        reap(finished);
+    }
+    match event {
+        Event::MessageCreate(message) => {
+            if message.author.bot || message.kind == MessageType::ThreadStarterMessage {
+                return Ok(());
+            }
+            let guild = message.guild_id.map(|id| id.to_string());
+            if admit_identity(
+                &state.discord,
+                guild.as_deref(),
+                &message.author.id.to_string(),
+            )
+            .is_err()
+            {
+                return Ok(());
+            }
+            let request = IncomingMessage {
+                event_id: message.id.to_string(),
+                guild_id: guild,
+                user_id: message.author.id.to_string(),
+                channel_id: message.channel_id.to_string(),
+                parent_channel_id: None,
+                content: message.content.clone(),
+                attachments: message
+                    .attachments
+                    .iter()
+                    .map(|attachment| SourceAttachment {
+                        id: attachment.id.to_string(),
+                        filename: attachment.filename.clone(),
+                        size: attachment.size,
+                        content_type: attachment.content_type.clone(),
+                        url: attachment.url.clone(),
+                    })
+                    .collect(),
+            };
+            let native = native_message(&message);
+            queue_or_refuse(messages, ingress, QueuedMessage { request, native })?;
+        }
+        Event::InteractionCreate(interaction) => {
+            // Interactions are independent of message order and of each
+            // other; each answers within Discord's own deadline.
+            interactions.spawn(handle_interaction(state.clone(), interaction.0));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Wait until every interaction already taken has been answered.
+async fn answered(interactions: &mut JoinSet<()>) {
+    while let Some(finished) = interactions.join_next().await {
+        reap(finished);
+    }
+}
+
+fn reap(finished: Result<(), JoinError>) {
+    if let Err(error) = finished {
+        error!(%error, "a Discord interaction task failed");
+    }
 }
 
 /// The message as Discord sent it, for the runtime's native context, without
@@ -714,44 +751,8 @@ async fn gateway_loop(
 /// files are core's captures, not CDN links.
 fn native_message(message: &twilight_model::channel::Message) -> Value {
     let mut native = serde_json::to_value(message).unwrap_or(Value::Null);
-    strip_attachment_addresses(&mut native);
+    crate::operations::strip_attachment_addresses(&mut native);
     native
-}
-
-/// Remove signed addresses from every attachment list, including those of
-/// referenced and forwarded messages nested in the payload, and the signature
-/// of any other attachment address, such as an embed's.
-fn strip_attachment_addresses(value: &mut Value) {
-    match value {
-        Value::Object(object) => {
-            for (key, nested) in object.iter_mut() {
-                if key == "attachments"
-                    && let Value::Array(attachments) = nested
-                {
-                    for attachment in attachments.iter_mut().filter_map(Value::as_object_mut) {
-                        attachment.remove("url");
-                        attachment.remove("proxy_url");
-                    }
-                }
-                strip_attachment_addresses(nested);
-            }
-        }
-        Value::Array(items) => items.iter_mut().for_each(strip_attachment_addresses),
-        Value::String(text) => {
-            if let Ok(mut url) = reqwest::Url::parse(text)
-                && matches!(
-                    url.host_str(),
-                    Some("cdn.discordapp.com" | "media.discordapp.net")
-                )
-                && url.path().starts_with("/attachments/")
-                && url.query().is_some()
-            {
-                url.set_query(None);
-                *text = url.to_string();
-            }
-        }
-        _ => {}
-    }
 }
 
 /// Hands a gateway message to the lanes. One that finds their queue full is

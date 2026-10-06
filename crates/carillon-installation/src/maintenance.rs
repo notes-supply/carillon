@@ -4,7 +4,8 @@
 //! `CARILLON_HOME/.maintenance.lock`. Every installation of an owner shares
 //! the owner's Carillon user units, so whatever reads or changes which
 //! installation they run also takes `.carillon-units.lock` beside them,
-//! always after its installation's lock.
+//! always after its installation's lock. Core holds [`ServiceLock`] over its
+//! state while it serves; what needs core stopped takes it too.
 
 use std::{
     fs,
@@ -94,6 +95,47 @@ impl UnitsLock {
             )
         })?;
         Ok(Self { _file: file })
+    }
+}
+
+/// Exclusive lock over an installation's durable state directory. Core
+/// holds one while serving; backup and the Discord tools installation take
+/// it to prove core is stopped and to keep it from starting meanwhile.
+#[derive(Debug)]
+pub struct ServiceLock {
+    _file: fs::File,
+}
+
+impl ServiceLock {
+    /// The lock file in the state directory `data_dir`.
+    #[must_use]
+    pub fn path(data_dir: &Path) -> PathBuf {
+        data_dir.join("service.lock")
+    }
+
+    /// Take the lock, or report that core owns the state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the lock is held or its file cannot be opened.
+    pub fn acquire(data_dir: &Path) -> Result<Self> {
+        Self::try_acquire(data_dir)?.with_context(|| {
+            format!(
+                "Carillon core already owns {}",
+                Self::path(data_dir).display()
+            )
+        })
+    }
+
+    /// Take the lock, or return `None` while core or another holder has it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the state directory or lock file cannot be
+    /// created, or the lock fails for a reason other than another holder.
+    pub fn try_acquire(data_dir: &Path) -> Result<Option<Self>> {
+        fs::create_dir_all(data_dir).with_context(|| format!("create {}", data_dir.display()))?;
+        Ok(try_lock(&Self::path(data_dir))?.map(|file| Self { _file: file }))
     }
 }
 

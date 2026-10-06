@@ -203,7 +203,7 @@ pub(crate) async fn run() -> Result<()> {
         }
         Command::Tools {
             action: ToolsAction::Install,
-        } => install_tools(&installation()?)?,
+        } => install_tools(&installation()?, &release_library()?)?,
         Command::Commands { provider, action } => {
             manage_commands(installation, provider, action).await?;
         }
@@ -211,18 +211,31 @@ pub(crate) async fn run() -> Result<()> {
     Ok(())
 }
 
-fn install_tools(config: &LoadedConfig) -> Result<()> {
-    use carillon_installation::{
-        filesystem::{publish, sync_ancestors},
-        maintenance::MaintenanceLock,
-    };
-    let _lock = MaintenanceLock::acquire(&config.root)?;
+/// The release's `lib` directory, beside the directory of this program.
+fn release_library() -> Result<PathBuf> {
     let executable = std::env::current_exe()?.canonicalize()?;
-    let lib = executable
+    Ok(executable
         .parent()
         .and_then(Path::parent)
         .context("cannot locate release library")?
-        .join("lib");
+        .join("lib"))
+}
+
+/// Copy the release's tools and skill from `lib` into the agent resources,
+/// with core stopped: core captures resources as it accepts turns, so it
+/// must not see one file without the other.
+fn install_tools(config: &LoadedConfig, lib: &Path) -> Result<()> {
+    use carillon_installation::{
+        filesystem::{publish, sync_ancestors},
+        maintenance::{MaintenanceLock, ServiceLock},
+    };
+    let _maintenance = MaintenanceLock::acquire(&config.root)?;
+    // Core cannot start while this is held, nor serve while it is taken.
+    let Some(_core) = ServiceLock::try_acquire(&config.value.data_dir)? else {
+        bail!(
+            "Carillon core is running; stop it (`carillon stop`), install the Discord tools, then start it again (`carillon start`)"
+        );
+    };
     // Read both before changing resources. The operator explicitly replaces these two files.
     let extension = fs::read(lib.join("carillon-discord-pi.js"))
         .context("release has no bundled Discord Pi tools; use a packaged installation")?;
@@ -230,14 +243,20 @@ fn install_tools(config: &LoadedConfig) -> Result<()> {
     let root = &config.value.agent.resource_root;
     let extensions = root.join("extensions");
     let skills = root.join("skills/discord");
-    fs::create_dir_all(&extensions)?;
-    fs::create_dir_all(&skills)?;
-    sync_ancestors(&extensions)?;
-    sync_ancestors(&skills)?;
-    publish(&extensions.join("carillon-discord.js"), &extension, 0o600)?;
-    publish(&skills.join("SKILL.md"), &skill, 0o600)?;
+    (|| -> Result<()> {
+        fs::create_dir_all(&extensions)?;
+        fs::create_dir_all(&skills)?;
+        sync_ancestors(&extensions)?;
+        sync_ancestors(&skills)?;
+        publish(&extensions.join("carillon-discord.js"), &extension, 0o600)?;
+        publish(&skills.join("SKILL.md"), &skill, 0o600)?;
+        Ok(())
+    })()
+    .context(
+        "the Discord tools may be partly installed: run `carillon discord tools install` again until it succeeds before starting Carillon core",
+    )?;
     println!(
-        "Installed Discord tools and skill in {}. New accepted turns capture them; existing turns keep their resources.",
+        "Installed Discord tools and skill in {}. Start Carillon core (`carillon start`) to serve them: turns it accepts from then on capture them, and turns already accepted keep their resources.",
         root.display()
     );
     Ok(())
@@ -546,12 +565,127 @@ fn report_change(provider: &str, requested: Source, change: &Change) -> Result<(
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, io::Write as _, os::unix::fs::PermissionsExt as _, path::Path};
 
     use anyhow::{Context as _, Result};
-    use carillon_installation::config::{Provider, ProviderRole};
+    use carillon_installation::{
+        config::{LoadedConfig, Provider, ProviderRole},
+        maintenance::ServiceLock,
+    };
 
-    use super::instance;
+    use super::{install_tools, instance};
+
+    /// An installation whose agent resources already hold a file of the
+    /// owner's own, and a release library with the Discord tools.
+    fn tools_fixture(root: &Path) -> Result<(LoadedConfig, std::path::PathBuf)> {
+        let config = crate::config::tests::installation(
+            &root.join("installation"),
+            "discord-private",
+            46_400,
+        )?;
+        let lib = root.join("lib");
+        fs::create_dir_all(&lib)?;
+        fs::write(
+            lib.join("carillon-discord-pi.js"),
+            "export default function tools() {}\n",
+        )?;
+        fs::write(lib.join("carillon-discord-SKILL.md"), "Discord skill\n")?;
+        let extensions = config.value.agent.resource_root.join("extensions");
+        fs::create_dir_all(&extensions)?;
+        fs::write(extensions.join("custom.js"), "the owner's own")?;
+        Ok((config, lib))
+    }
+
+    #[test]
+    fn tools_install_refuses_while_core_serves() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let (config, lib) = tools_fixture(directory.path())?;
+        let resources = &config.value.agent.resource_root;
+        // Core holds its lock while it serves.
+        let serving = ServiceLock::acquire(&config.value.data_dir)?;
+        let refused = install_tools(&config, &lib)
+            .err()
+            .context("installed while core was serving")?;
+        assert!(
+            format!("{refused:#}").contains("Carillon core is running"),
+            "{refused:#}"
+        );
+        assert!(!resources.join("extensions/carillon-discord.js").exists());
+        assert!(!resources.join("skills/discord/SKILL.md").exists());
+        drop(serving);
+        Ok(())
+    }
+
+    #[test]
+    fn tools_install_keeps_core_from_starting_until_both_files_are_in_place() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let (config, lib) = tools_fixture(directory.path())?;
+        let resources = &config.value.agent.resource_root;
+        // The release skill is a FIFO, so the install waits while reading it.
+        let skill = lib.join("carillon-discord-SKILL.md");
+        fs::remove_file(&skill)?;
+        let made = std::process::Command::new("mkfifo").arg(&skill).status()?;
+        assert!(made.success());
+        std::thread::scope(|scope| -> Result<()> {
+            let installing = scope.spawn(|| install_tools(&config, &lib));
+            // Opening the FIFO waits for the install to read it.
+            let mut writer = fs::OpenOptions::new().write(true).open(&skill)?;
+            assert!(
+                ServiceLock::try_acquire(&config.value.data_dir)?.is_none(),
+                "core could start while the tools were being installed"
+            );
+            writer.write_all(b"Discord skill\n")?;
+            drop(writer);
+            installing
+                .join()
+                .map_err(|_| anyhow::anyhow!("install panicked"))?
+        })?;
+        assert_eq!(
+            fs::read_to_string(resources.join("extensions/carillon-discord.js"))?,
+            "export default function tools() {}\n"
+        );
+        assert_eq!(
+            fs::read_to_string(resources.join("skills/discord/SKILL.md"))?,
+            "Discord skill\n"
+        );
+        assert_eq!(
+            fs::read_to_string(resources.join("extensions/custom.js"))?,
+            "the owner's own"
+        );
+        assert!(ServiceLock::try_acquire(&config.value.data_dir)?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_tools_install_says_it_may_be_partial_and_a_retry_completes_it() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let (config, lib) = tools_fixture(directory.path())?;
+        let resources = &config.value.agent.resource_root;
+        // The skill cannot be written, so only the extension can change.
+        let skills = resources.join("skills/discord");
+        fs::create_dir_all(&skills)?;
+        fs::set_permissions(&skills, fs::Permissions::from_mode(0o500))?;
+        let failed = install_tools(&config, &lib)
+            .err()
+            .context("installed into an unwritable directory")?;
+        fs::set_permissions(&skills, fs::Permissions::from_mode(0o700))?;
+        let message = format!("{failed:#}");
+        assert!(message.contains("may be partly installed"), "{message}");
+        assert!(
+            message.contains("before starting Carillon core"),
+            "{message}"
+        );
+        install_tools(&config, &lib)?;
+        assert_eq!(
+            fs::read_to_string(skills.join("SKILL.md"))?,
+            "Discord skill\n"
+        );
+        assert_eq!(
+            fs::read_to_string(resources.join("extensions/custom.js"))?,
+            "the owner's own"
+        );
+        Ok(())
+    }
 
     #[test]
     fn failed_saves_do_not_infer_restart_selection() -> Result<()> {
