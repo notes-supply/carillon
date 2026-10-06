@@ -314,8 +314,8 @@ enum Replayed {
     Absent,
     /// The deadline or the stop came before core said it was capturing it.
     Unfinished,
-    /// Core was capturing it and then would not say what became of it, and
-    /// nothing more is sent.
+    /// Core was capturing it and then would not say what became of it. The
+    /// capture may still be core's, so nothing more is sent.
     Uncertain,
 }
 
@@ -356,11 +356,7 @@ async fn replayed(ingress: &Ingress, event_id: &str, deadline: Instant) -> Repla
         Ok(None) => Replayed::Absent,
         Err(failure) => {
             warn!(error = %failure.message, %event_id, "core refused an event status request");
-            if ingress.stopping.is_cancelled() || Instant::now() >= deadline {
-                Replayed::Uncertain
-            } else {
-                Replayed::Absent
-            }
+            Replayed::Uncertain
         }
     }
 }

@@ -963,6 +963,56 @@ async fn stopping_while_core_captures_a_replay_waits_for_its_outcome() -> Result
     Ok(())
 }
 
+#[tokio::test]
+async fn a_known_capture_core_will_not_report_on_stays_uncertain() -> Result<()> {
+    let (cdn, log) = serve_cdn(HashMap::new()).await?;
+    let world = world(Vec::new(), Vec::new()).await?;
+    // While the provider runs on, core says it is capturing the replayed
+    // message, then refuses to say what became of it.
+    script(&world, |core| {
+        core.replayed = HashMap::from([("152".to_owned(), 1)]);
+        core.refused_status = vec!["152".to_owned()];
+    })?;
+    let mut config = channel_config();
+    config.uncertain_emoji = "❓".to_owned();
+    run(
+        &world,
+        config,
+        cdn,
+        vec![message(
+            "152",
+            "300",
+            "200",
+            "",
+            vec![attachment(cdn, "603", "a.bin", 8)],
+        )],
+    )
+    .await?;
+    let trace = trace(&world)?;
+    // The capture may still be core's: nothing is fetched or submitted, and
+    // the sender is not asked to send it again.
+    assert!(
+        !trace.iter().any(|entry| entry.starts_with("submit ")),
+        "{trace:?}"
+    );
+    assert!(
+        log.lock()
+            .map_err(|_| anyhow!("poisoned"))?
+            .requests
+            .is_empty(),
+        "downloaded a message core was capturing"
+    );
+    assert!(explanation(&trace, "152").is_err(), "{trace:?}");
+    assert!(
+        trace
+            .iter()
+            .any(|entry| entry.starts_with("PUT")
+                && entry.contains("/messages/152/reactions/%E2%9D%93")),
+        "{trace:?}"
+    );
+    Ok(())
+}
+
 /// Past the preparation deadline, in a paused clock's virtual time.
 const PAST_DEADLINE: Duration = Duration::from_mins(45);
 const DEADLINE: Duration = Duration::from_mins(30);
