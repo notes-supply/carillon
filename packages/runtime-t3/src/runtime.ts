@@ -253,7 +253,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
 
   /**
    * A subscription's snapshot that names a thread other than the one asked
-   * for: nothing of it is shown or folded as that thread's.
+   * for: nothing of it is shown as that thread's.
    */
   function anotherThread(): T3Failure {
     return new T3Failure("malformed", "T3 sent the snapshot of another thread");
@@ -376,7 +376,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     // dispatches nothing.
     const follow = followUpOf(request);
     const messageId = follow?.message ?? derivedId("message", request.correlation_id);
-    const watch = watchTurn(messageId, options.workspace, {
+    const watch = watchTurn(binding.threadId, messageId, options.workspace, {
       ...(uncertain.has(binding.threadId) ? { uncertainPredecessor: true } : {}),
       ...(follow === undefined ? {} : { followUp: { after: follow.after } }),
     });
@@ -713,8 +713,6 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       RPC.subscribeThread,
       subscribeThread(threadId, watch.sequence()),
       (item) => {
-        if (Check(ThreadSnapshotSchema, item) && item.projection.thread.id !== threadId)
-          throw anotherThread();
         watch.apply(item);
       },
     );

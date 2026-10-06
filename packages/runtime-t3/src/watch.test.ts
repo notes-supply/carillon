@@ -73,7 +73,7 @@ const event = (sequence: number, type: string, payload: unknown) => ({
 });
 
 it("knows the turn's run by its message, keeps the answer in message order, and ignores other turns", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   expect(watch.synchronized()).toBe(false);
   watch.apply(
     snapshot({
@@ -127,7 +127,7 @@ it("knows the turn's run by its message, keeps the answer in message order, and 
 });
 
 it("retains only the turn's own work from a long history and keeps its identity through a resumed snapshot", () => {
-  const watch = watchTurn("message-500", "/workspace");
+  const watch = watchTurn("thread", "message-500", "/workspace");
   const olderRuns = Array.from({ length: 500 }, (_, index) =>
     run(
       index === 7 ? "running" : "completed",
@@ -196,7 +196,7 @@ it("retains only the turn's own work from a long history and keeps its identity 
 });
 
 it("bounds finished tools to the recent window while counting every call", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(snapshot({ runs: [run("running")] }));
   for (let index = 0; index < 40; index += 1)
     watch.apply(
@@ -250,7 +250,7 @@ it("bounds finished tools to the recent window while counting every call", () =>
 });
 
 it("does not take over background work listed before its run started, but waits for its own", () => {
-  const watch = watchTurn("message-2", "/workspace");
+  const watch = watchTurn("thread", "message-2", "/workspace");
   const thread = (taskIds: string[]) => ({
     id: "provider-thread",
     providerSessionId: "session",
@@ -282,7 +282,7 @@ it("does not take over background work listed before its run started, but waits 
   expect(watch.quiet()).toBe(true);
 
   // Work the turn's own run starts on the same thread is the turn's.
-  const own = watchTurn("message-3", "/workspace");
+  const own = watchTurn("thread", "message-3", "/workspace");
   own.apply(
     snapshot({ runs: [run("completed", "ui", 1)], providerThreads: [thread(["ui-task"])] }),
   );
@@ -300,7 +300,7 @@ it("does not take over background work listed before its run started, but waits 
   expect(own.outcome()).toBeUndefined();
   expect(own.activity().running.map((tool) => tool.detail)).toEqual(["sleep 30 &", "own-task"]);
   // A run first seen already running cannot tell what was listed before it: all of it is its own.
-  const resumed = watchTurn("message-4", "/workspace");
+  const resumed = watchTurn("thread", "message-4", "/workspace");
   resumed.apply(
     snapshot({ runs: [run("completed", "message-4", 1)], providerThreads: [thread(["unknown"])] }),
   );
@@ -308,7 +308,7 @@ it("does not take over background work listed before its run started, but waits 
 });
 
 it("shows a provider handoff T3 records before the run it hands over to", () => {
-  const watch = watchTurn("message-2", "/workspace");
+  const watch = watchTurn("thread", "message-2", "/workspace");
   watch.apply(snapshot({ runs: [run("completed", "earlier", 1)] }));
   const handoff = (status: string) => ({
     id: "handoff",
@@ -332,7 +332,7 @@ it("shows a provider handoff T3 records before the run it hands over to", () => 
 });
 
 it("is not finished while background work, an owed wake or a pending request remains", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(
     snapshot({
       runs: [run("completed")],
@@ -414,7 +414,7 @@ it("is not finished while background work, an owed wake or a pending request rem
 });
 
 it("fails closed when the provider session that owes a wake stops or is detached, saying which", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(
     snapshot({
       runs: [run("completed")],
@@ -443,7 +443,7 @@ it("fails closed when the provider session that owes a wake stops or is detached
   });
   expect(watch.quiet()).toBe(true);
 
-  const detached = watchTurn("message-1", "/workspace");
+  const detached = watchTurn("thread", "message-1", "/workspace");
   detached.apply(
     snapshot({
       runs: [run("completed")],
@@ -474,7 +474,7 @@ it("fails closed when the provider session that owes a wake stops or is detached
 });
 
 it("gates completion on the turn's own open request even when its run is terminal", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(
     snapshot({
       runs: [run("completed")],
@@ -505,7 +505,7 @@ it("gates completion on the turn's own open request even when its run is termina
   expect(watch.quiet()).toBe(true);
   expect(watch.requestOpen()).toBe(true);
   // Another thread's pending request does not block a turn whose run is not waiting.
-  const other = watchTurn("message-1", "/workspace");
+  const other = watchTurn("thread", "message-1", "/workspace");
   other.apply(
     snapshot({
       runs: [run("completed")],
@@ -525,7 +525,7 @@ it("gates completion on the turn's own open request even when its run is termina
 });
 
 it("explains failures with T3's failure text and treats other stops as stopped", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(
     snapshot({
       runs: [run("failed")],
@@ -548,7 +548,7 @@ it("explains failures with T3's failure text and treats other stops as stopped",
       providerSessionId: "session",
       pendingBackgroundTasks: tasks,
     });
-  const stopped = watchTurn("message-1", "/workspace");
+  const stopped = watchTurn("thread", "message-1", "/workspace");
   stopped.apply(snapshot({ runs: [run("running")] }));
   stopped.apply(listed(2, [{ taskId: "t", kind: "command" }]));
   stopped.apply(event(3, "run.updated", run("failed")));
@@ -568,7 +568,7 @@ it("explains failures with T3's failure text and treats other stops as stopped",
 });
 
 it("refuses stream sequences that are not integers before they move the replay cursor", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   expect(() => watch.apply(snapshot({ runs: [run("running")] }, 1.5))).toThrow(
     "T3 sent a thread snapshot this runtime does not understand",
   );
@@ -585,7 +585,7 @@ it("refuses stream sequences that are not integers before they move the replay c
 });
 
 it("refuses a snapshot whose history flag is not a boolean before folding any of it", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(snapshot({ runs: [run("running")] }, 4));
   expect(() =>
     watch.apply({ ...snapshot({ runs: [run("completed")] }, 6), hasMoreHistory: "yes" }),
@@ -596,7 +596,7 @@ it("refuses a snapshot whose history flag is not a boolean before folding any of
 });
 
 it("refuses known kinds it cannot read, ignores unknown kinds and malformed stream items it does not need", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   expect(() =>
     watch.apply({ kind: "snapshot", snapshotSequence: 1, projection: { runs: "no" } }),
   ).toThrow("T3 sent a thread snapshot this runtime does not understand");
@@ -640,7 +640,7 @@ it("refuses a known item whose run it cannot identify, and still ignores runless
     return Object.fromEntries(runId === undefined ? named : [...named, ["runId", runId]]);
   };
   const waiting = () => {
-    const watch = watchTurn("message-1", "/workspace");
+    const watch = watchTurn("thread", "message-1", "/workspace");
     watch.apply(
       snapshot({
         runs: [run("waiting")],
@@ -669,16 +669,61 @@ it("refuses a known item whose run it cannot identify, and still ignores runless
 
 it("refuses a run whose ordinal T3 numbers from one", () => {
   for (const ordinal of [0, -1]) {
-    const shown = watchTurn("message-1", "/workspace");
+    const shown = watchTurn("thread", "message-1", "/workspace");
     expect(() =>
       shown.apply(snapshot({ runs: [run("running", "message-1", ordinal, "run-1")] })),
     ).toThrow("T3 sent a thread snapshot this runtime does not understand");
-    const live = watchTurn("message-1", "/workspace");
+    const live = watchTurn("thread", "message-1", "/workspace");
     live.apply(snapshot({ runs: [] }));
     expect(() =>
       live.apply(event(2, "run.created", run("running", "message-1", ordinal, "run-1"))),
     ).toThrow("T3 sent a run this runtime does not understand");
   }
+});
+
+/** A run of another thread, for the turn's message. */
+const foreignRun = (status: string, id: string) => ({
+  ...run(status, "message-1", 1, id),
+  threadId: "another-thread",
+});
+
+it("refuses another thread's run for the turn's message in the first snapshot", () => {
+  // A snapshot of the turn's thread listing another thread's run folds none
+  // of it: that run's message is no answer of this turn.
+  const initial = watchTurn("thread", "message-1", "/workspace");
+  expect(() =>
+    initial.apply(
+      snapshot({
+        runs: [foreignRun("completed", "run-9")],
+        messages: [
+          {
+            id: "a",
+            runId: "run-9",
+            role: "assistant",
+            text: "Not this turn's.",
+            createdAt: "2026-10-06T08:00:00Z",
+          },
+        ],
+      }),
+    ),
+  ).toThrow("T3 sent run run-9 of another thread");
+  expect(initial.run()).toBeUndefined();
+  expect(initial.outcome()).toBeUndefined();
+  expect(initial.sequence()).toBeUndefined();
+  expect(initial.synchronized()).toBe(false);
+});
+
+it("refuses another thread's run for the turn's message live", () => {
+  // It neither replaces the turn's run nor becomes what a cancel stops, and
+  // the cursor stays before it.
+  const live = watchTurn("thread", "message-1", "/workspace");
+  live.apply(snapshot({ runs: [run("running")] }));
+  expect(() => live.apply(event(2, "run.created", foreignRun("running", "run-9")))).toThrow(
+    "T3 sent run run-9 of another thread",
+  );
+  expect(live.run()?.id).toBe("run-1");
+  expect(live.activeRun()?.id).toBe("run-1");
+  expect(live.sequence()).toBe(1);
 });
 
 it("orders the turn's answer by when T3 made each message, refusing one with no readable time", () => {
@@ -689,7 +734,7 @@ it("orders the turn's answer by when T3 made each message, refusing one with no 
     text,
     createdAt,
   });
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(
     snapshot({
       runs: [run("running")],
@@ -707,7 +752,7 @@ it("orders the turn's answer by when T3 made each message, refusing one with no 
   });
 
   // A message of the turn without a time is refused before it counts.
-  const refused = watchTurn("message-1", "/workspace");
+  const refused = watchTurn("thread", "message-1", "/workspace");
   refused.apply(
     snapshot({
       runs: [run("running")],
@@ -719,7 +764,7 @@ it("orders the turn's answer by when T3 made each message, refusing one with no 
   ).toThrow("T3 sent an assistant message this runtime does not understand");
   expect(refused.activity().headline).toBe("First.");
   // So is one a snapshot lists, which then moves nothing on.
-  const shown = watchTurn("message-1", "/workspace");
+  const shown = watchTurn("thread", "message-1", "/workspace");
   shown.apply(
     snapshot({
       runs: [run("running")],
@@ -750,7 +795,7 @@ it("orders the turn's answer by when T3 made each message, refusing one with no 
 });
 
 it("moves the replay cursor past an event only once it is folded or passed over", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(snapshot({ runs: [run("running")] }));
   // A kind this runtime does not read is passed over.
   watch.apply(event(2, "future.event", { anything: true }));
@@ -782,7 +827,7 @@ it("moves the replay cursor past an event only once it is folded or passed over"
 });
 
 it("still owes the wake after the roster clears, so a cancel in that gap is not quiet", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(
     snapshot({
       runs: [run("completed")],
@@ -815,7 +860,7 @@ it("still owes the wake after the roster clears, so a cancel in that gap is not 
 });
 
 it("retains no provider records before the turn's run exists and only its own afterwards", () => {
-  const watch = watchTurn("message-current", "/workspace");
+  const watch = watchTurn("thread", "message-current", "/workspace");
   const history = Array.from({ length: 500 }, (_, index) => index);
   watch.apply(
     snapshot({
@@ -860,7 +905,7 @@ it("retains no provider records before the turn's run exists and only its own af
 });
 
 it("marks a resumed snapshot that hides how listed work ended as unresolved, not completed", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(
     snapshot({
       runs: [run("running")],
@@ -912,7 +957,7 @@ it("marks a resumed snapshot that hides how listed work ended as unresolved, not
   expect(watch.outcome()).toEqual({ kind: "completed", output: "Started it.\n\nDone." });
 
   // Work that visibly ended inside the running turn owes nothing.
-  const inTurn = watchTurn("message-1", "/workspace");
+  const inTurn = watchTurn("thread", "message-1", "/workspace");
   inTurn.apply(
     snapshot({
       runs: [run("running")],
@@ -946,7 +991,7 @@ it("marks a resumed snapshot that hides how listed work ended as unresolved, not
 });
 
 it("keeps a known request's ownership through a bounded snapshot that omits its item", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(
     snapshot({
       runs: [run("waiting")],
@@ -993,7 +1038,7 @@ it("keeps a known request's ownership through a bounded snapshot that omits its 
 });
 
 it("keeps only the turn's provider thread and session from a snapshot", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(
     snapshot({
       runs: [run("running")],
@@ -1013,7 +1058,7 @@ it("keeps only the turn's provider thread and session from a snapshot", () => {
 });
 
 it("bounds unrelated provider updates and detaches while preserving its own detach", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(snapshot({ runs: [run("running")] }));
   let sequence = 1;
   for (let index = 0; index < 500; index++) {
@@ -1048,7 +1093,7 @@ it("bounds unrelated provider updates and detaches while preserving its own deta
 });
 
 it("owns its provider thread and session through the serving event order, after a long pre-dispatch history", () => {
-  const watch = watchTurn("message-current", "/workspace");
+  const watch = watchTurn("thread", "message-current", "/workspace");
   const history = Array.from({ length: 500 }, (_, index) => index);
   watch.apply(
     snapshot({
@@ -1149,7 +1194,7 @@ it("owns its provider thread and session through the serving event order, after 
 });
 
 it("treats a session record it never saw as unknown, not as detached", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(snapshot({ runs: [], providerThreads: [], providerSessions: [] }));
   // T3 sends the run's provider thread record before the run that names it.
   watch.apply(
@@ -1191,7 +1236,7 @@ it("treats a session record it never saw as unknown, not as detached", () => {
 });
 
 it("adopts a later run only while the turn expects a follow-up", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(snapshot({ runs: [run("running")] }));
   // A predecessor's late wake queues behind the turn's run: not this turn's.
   watch.apply(event(2, "run.created", run("queued", "stale-wake", 2)));
@@ -1208,7 +1253,7 @@ it("adopts a later run only while the turn expects a follow-up", () => {
   expect(watch.outcome()).toEqual({ kind: "completed", output: "Mine." });
   expect(watch.retained().runs).toBe(1);
   // The same later run is the turn's when the turn owes a report.
-  const owing = watchTurn("message-1", "/workspace");
+  const owing = watchTurn("thread", "message-1", "/workspace");
   owing.apply(
     snapshot({
       runs: [run("completed")],
@@ -1227,7 +1272,7 @@ it("adopts a later run only while the turn expects a follow-up", () => {
 });
 
 it("leaves a pending request no item of the turn names unassigned, even while the run waits", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(
     snapshot({
       runs: [run("completed", "older", 1, "run-0"), run("waiting", "message-1", 2, "run-1")],
@@ -1259,7 +1304,7 @@ it("leaves a pending request no item of the turn names unassigned, even while th
 
 it("never adopts a run first seen while its own run was active, even once it owes a wake", () => {
   // The coordinator's fault probe: the successor runs with work listed when an earlier turn's wake queues behind it.
-  const watch = watchTurn("current-message", "/workspace");
+  const watch = watchTurn("thread", "current-message", "/workspace");
   const current = {
     ...run("running", "current-message", 2, "current"),
     providerThreadId: "provider",
@@ -1364,7 +1409,7 @@ it("ends unresolved on a fresh snapshot whose follow-up no fact of the turn acco
       },
     ],
   };
-  const fresh = watchTurn("current-message", "/workspace");
+  const fresh = watchTurn("thread", "current-message", "/workspace");
   fresh.apply(snapshot(projection, 42));
   expect(fresh.outcome()).toEqual({
     kind: "unresolved",
@@ -1373,7 +1418,7 @@ it("ends unresolved on a fresh snapshot whose follow-up no fact of the turn acco
   });
   expect(fresh.quiet()).toBe(true);
   // A fold that had seen the run's listed work adopts the follow-up and answers with its result.
-  const informed = watchTurn("current-message", "/workspace");
+  const informed = watchTurn("thread", "current-message", "/workspace");
   informed.apply(
     snapshot({
       runs: [{ ...root, status: "running" }],
@@ -1397,7 +1442,7 @@ it("ends unresolved on a fresh snapshot whose follow-up no fact of the turn acco
 
 it("ends unresolved on a follow-up after an unconfirmed earlier stop, and completes without it", () => {
   const owedWake = (options: { uncertainPredecessor?: boolean }) => {
-    const watch = watchTurn("current-message", "/workspace", options);
+    const watch = watchTurn("thread", "current-message", "/workspace", options);
     const root = {
       ...run("running", "current-message", 3, "current"),
       providerThreadId: "provider",
@@ -1453,7 +1498,7 @@ it("ends unresolved on a follow-up after an unconfirmed earlier stop, and comple
 });
 
 it("refuses a provider-session detach without a session identity instead of dropping it", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(snapshot({ runs: [run("completed")] }));
   let sequence = 1;
   for (const payload of [{}, { providerSessionId: 7 }, { providerSessionId: "" }, null, "session"])
@@ -1467,7 +1512,7 @@ it("refuses a provider-session detach without a session identity instead of drop
 });
 
 it("is busy only while runs it did not start are active, never judging finished ones", () => {
-  const watch = watchTurn("message-9", "/workspace");
+  const watch = watchTurn("thread", "message-9", "/workspace");
   // A finished earlier run whose provider thread still lists work is not in the
   // way: the message runs now, and that work stays whoever's it is.
   watch.apply(
@@ -1499,20 +1544,20 @@ it("is busy only while runs it did not start are active, never judging finished 
 
 it("refuses a run that names a provider thread T3 never sent, instead of assuming no background work", () => {
   // The turn's own run, completed, with its provider thread record missing from a snapshot.
-  const current = watchTurn("message-1", "/workspace");
+  const current = watchTurn("thread", "message-1", "/workspace");
   expect(() =>
     current.apply(
       snapshot({ runs: [run("completed")], providerThreads: [], providerSessions: [] }),
     ),
   ).toThrow("T3 named provider thread provider-thread for run run-1 without sending its record");
   // A run created without its record having arrived first is the same broken reference.
-  const created = watchTurn("message-1", "/workspace");
+  const created = watchTurn("thread", "message-1", "/workspace");
   created.apply(snapshot({ runs: [], providerThreads: [], providerSessions: [] }));
   expect(() => created.apply(event(2, "run.created", run("running")))).toThrow(
     "T3 named provider thread provider-thread for run run-1 without sending its record",
   );
   // A run T3 has not attached to a provider thread yet has nothing listed.
-  const unattached = watchTurn("message-1", "/workspace");
+  const unattached = watchTurn("thread", "message-1", "/workspace");
   unattached.apply(
     snapshot({
       runs: [{ ...run("completed"), providerThreadId: null }],
@@ -1524,7 +1569,7 @@ it("refuses a run that names a provider thread T3 never sent, instead of assumin
 });
 
 it("serves background task kinds through the shared tool-name normalization", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(
     snapshot({
       runs: [run("running")],
@@ -1556,7 +1601,7 @@ it("serves background task kinds through the shared tool-name normalization", ()
 });
 
 it("keeps the answer text it observed when a bounded snapshot omits an earlier message", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(snapshot({ runs: [run("running")] }));
   watch.apply(
     event(2, "message.updated", {
@@ -1624,7 +1669,7 @@ const reply = (id: string, runId: string, text: string, at: string) =>
   event(0, "message.updated", { id, runId, role: "assistant", text, createdAt: at }).event.payload;
 
 it("answers when its run completes and hands delegated work still owed to a follow-up, in the native order", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(snapshot({ runs: [run("running")] }));
   watch.apply(event(2, "subagent.updated", task("task-1", "running")));
   watch.apply(
@@ -1708,7 +1753,7 @@ it("reports the continuations of a turn as a follow-up, waiting while the work s
     subagents: [task("task-1", "running")],
   };
   // The child still works: nothing to answer yet, and nothing of the thread is the follow-up's own.
-  const watch = watchTurn("message-1", "/workspace", { followUp: { after: 1 } });
+  const watch = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
   watch.apply(snapshot(delegated));
   expect(watch.outcome()).toBeUndefined();
   expect(watch.activity()).toMatchObject({
@@ -1751,7 +1796,7 @@ it("reports the continuations of a turn as a follow-up, waiting while the work s
 });
 
 it("follows a resumed snapshot's continuation by its message link, and fails when the work ends without a report", () => {
-  const watch = watchTurn("message-1", "/workspace", { followUp: { after: 1 } });
+  const watch = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
   watch.apply(
     snapshot({
       runs: [run("completed"), run("completed", "continuation-1", 2)],
@@ -1780,7 +1825,7 @@ it("follows a resumed snapshot's continuation by its message link, and fails whe
   expect(watch.outcome()).toEqual({ kind: "completed", output: "PONG." });
 
   // A child stopped before reporting, with nothing left to deliver.
-  const ended = watchTurn("message-1", "/workspace", { followUp: { after: 1 } });
+  const ended = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
   ended.apply(
     snapshot({
       runs: [run("completed")],
@@ -1794,13 +1839,55 @@ it("follows a resumed snapshot's continuation by its message link, and fails whe
     explanation: "T3's delegated work ended without reporting back to this conversation",
   });
   // A follow-up whose message T3 no longer lists cannot be followed.
-  const lost = watchTurn("message-1", "/workspace", { followUp: { after: 1 } });
+  const lost = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
   lost.apply(snapshot({ runs: [] }));
   expect(lost.outcome()).toMatchObject({ kind: "failed" });
 });
 
+it("refuses a resumed snapshot that omits a follow-up's parent run, keeping what it knew", () => {
+  const delegated = (runs: unknown[]) => ({ runs, subagents: [task("task-1", "running")] });
+  // The follow-up owns no run until T3 starts a continuation: only the parent
+  // run it observed identifies the work it reports.
+  const follow = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
+  follow.apply(snapshot(delegated([run("completed")])));
+  expect(follow.run()?.id).toBe("run-1");
+  expect(follow.outcome()).toBeUndefined();
+  // A snapshot lists runs whole: one that omits the observed parent is
+  // refused before it replaces anything.
+  follow.resubscribing();
+  expect(() =>
+    follow.apply(snapshot(delegated([run("completed", "someone-else", 2)]), 900)),
+  ).toThrow("T3 sent a thread snapshot that omits run run-1 this turn observed");
+  expect(follow.sequence()).toBe(1);
+  expect(follow.synchronized()).toBe(false);
+  // One that lists it resumes the fold, and the continuation T3 starts for
+  // the work is still the follow-up's.
+  follow.apply(snapshot(delegated([run("completed"), run("completed", "someone-else", 2)]), 900));
+  expect(follow.sequence()).toBe(900);
+  follow.apply(
+    event(
+      901,
+      "subagent.updated",
+      task("task-1", "completed", "run-1", { completionDelivery: { state: "claimed" } }),
+    ),
+  );
+  follow.apply(
+    event(902, "run.updated", {
+      ...run("completed"),
+      delegatedCompletion: { disposition: "open", delivery: { messageId: "continuation-1" } },
+    }),
+  );
+  follow.apply(event(903, "run.created", run("running", "continuation-1", 3)));
+  expect(follow.activeRun()?.id).toBe("run-3");
+  follow.apply(
+    event(904, "message.updated", reply("c", "run-3", "Reported.", "2026-10-06T08:00:00Z")),
+  );
+  follow.apply(event(905, "run.updated", run("completed", "continuation-1", 3)));
+  expect(follow.outcome()).toMatchObject({ kind: "completed", output: "Reported." });
+});
+
 it("links a continuation queued behind its active parent, or announced only after it was seen", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(snapshot({ runs: [run("running")] }));
   watch.apply(event(2, "subagent.updated", task("task-1", "running")));
   // A fast child: its continuation is created queued while the parent still runs, and
@@ -1830,7 +1917,7 @@ it("links a continuation queued behind its active parent, or announced only afte
 });
 
 it("marks delegations a resumed snapshot no longer lists unknown, and shows nesting, transfers and each child once", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(
     snapshot({
       runs: [run("running")],
@@ -1917,7 +2004,7 @@ it("marks delegations a resumed snapshot no longer lists unknown, and shows nest
 });
 
 it("keeps confirmed outcomes when a resumed snapshot omits finished children, and only live ones become unknown", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   const delivered = { completionDelivery: { state: "delivered" } };
   watch.apply(
     snapshot({
@@ -1963,7 +2050,7 @@ it("keeps confirmed outcomes when a resumed snapshot omits finished children, an
 });
 
 it("bounds the work it keeps when every child is live, reporting partial coverage and an owed report", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(snapshot({ runs: [run("running")] }));
   for (let index = 0; index < 1000; index += 1)
     watch.apply(event(index + 2, "subagent.updated", task(`child-${String(index)}`, "running")));
@@ -2011,7 +2098,7 @@ it("bounds the work it keeps when every child is live, reporting partial coverag
 });
 
 it("keeps only the turn's continuation links and a bounded window of others, across a large foreign history", () => {
-  const watch = watchTurn("message-current", "/workspace");
+  const watch = watchTurn("thread", "message-current", "/workspace");
   const history = Array.from({ length: 500 }, (_, index) => index);
   watch.apply(
     snapshot({
@@ -2087,7 +2174,7 @@ it("keeps only the turn's continuation links and a bounded window of others, acr
 });
 
 it("resumes a follow-up on a fresh snapshot while T3 still owes the delivery, and links the continuation by its notification", () => {
-  const follow = watchTurn("message-1", "/workspace", { followUp: { after: 1 } });
+  const follow = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
   // After a restart: the parent completed, its child finished, and T3 has
   // claimed the result but not yet started the continuation.
   follow.apply(
@@ -2178,7 +2265,7 @@ const notificationItem = (runId: string, taskIds: readonly string[]) => ({
 });
 
 it("never adopts another message's run because an agent read the result in it (coordinator reproduction)", () => {
-  const follow = watchTurn("message-1", "/workspace", { followUp: { after: 1 } });
+  const follow = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
   follow.apply(
     snapshot({
       runs: [run("completed", "message-1", 1), run("completed", "ui-message", 2)],
@@ -2200,7 +2287,7 @@ it("never adopts another message's run because an agent read the result in it (c
 });
 
 it("never adopts another message's run from a live acknowledgement, even one named before the run appears", () => {
-  const follow = watchTurn("message-1", "/workspace", { followUp: { after: 1 } });
+  const follow = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
   follow.apply(snapshot({ runs: [run("completed")], subagents: [task("child", "running")] }));
   // The acknowledgement names a run the fold has not seen yet.
   follow.apply(
@@ -2223,7 +2310,7 @@ it("never adopts another message's run from a live acknowledgement, even one nam
 });
 
 it("reports a real continuation that read its own result, live and after a restart, without a note", () => {
-  const live = watchTurn("message-1", "/workspace", { followUp: { after: 1 } });
+  const live = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
   live.apply(snapshot({ runs: [run("completed")], subagents: [task("child", "running")] }));
   live.apply(event(2, "run.created", run("running", "continuation", 2)));
   live.apply(event(3, "turn-item.updated", notificationItem("run-2", ["child"])));
@@ -2242,7 +2329,7 @@ it("reports a real continuation that read its own result, live and after a resta
   live.apply(event(6, "run.updated", run("completed", "continuation", 2)));
   expect(live.outcome()).toEqual({ kind: "completed", output: "The child said PONG." });
 
-  const resumed = watchTurn("message-1", "/workspace", { followUp: { after: 1 } });
+  const resumed = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
   resumed.apply(
     snapshot({
       runs: [run("completed", "message-1", 1), run("completed", "continuation", 2)],
@@ -2264,7 +2351,7 @@ it("reports a real continuation that read its own result, live and after a resta
 
 it("keeps a pending announcement owed when a snapshot meets a full set of links (coordinator reproduction), and reports it when it runs", () => {
   const base = { runs: [run("completed", "message-1", 1)] };
-  const overflow = watchTurn("message-1", "/workspace", { followUp: { after: 33 } });
+  const overflow = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 33 } });
   overflow.apply(snapshot(base));
   const links = Array.from({ length: 32 }, (_, index) => ({
     id: `c${String(index + 1)}`,
@@ -2309,7 +2396,7 @@ it("keeps a pending announcement owed when a snapshot meets a full set of links 
 });
 
 it("counts announced continuations beyond the bound as owed and partial when none has run", () => {
-  const watch = watchTurn("message-1", "/workspace", { followUp: { after: 1 } });
+  const watch = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
   watch.apply(snapshot({ runs: [run("completed")] }));
   for (let index = 0; index < 40; index += 1)
     watch.apply(
@@ -2329,7 +2416,7 @@ it("counts announced continuations beyond the bound as owed and partial when non
 
 it("keeps linking live continuations beyond the bound, making room from those that ran, so the report is not left owed", () => {
   for (const linkedBy of ["notification", "message"] as const) {
-    const follow = watchTurn("message-1", "/workspace", { followUp: { after: 1 } });
+    const follow = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
     follow.apply(snapshot({ runs: [run("completed")] }));
     let sequence = 2;
     const delivered = { completionDelivery: { state: "delivered" } };
@@ -2411,7 +2498,7 @@ const answerOf = (id: string, runId: string, text: string) => ({
 });
 
 it("never owns, answers with or waits on a run a person's message opened while its wake is owed (coordinator reproduction)", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(snapshot(backgroundRoot));
   watch.apply(
     event(2, "provider-thread.updated", {
@@ -2451,7 +2538,7 @@ it("never owns, answers with or waits on a run a person's message opened while i
 
 it("tells a person's run from the turn's wake in a resumed snapshot by how T3 opened each", () => {
   const resumed = (projection: Record<string, unknown>) => {
-    const watch = watchTurn("message-1", "/workspace");
+    const watch = watchTurn("thread", "message-1", "/workspace");
     watch.apply(snapshot(backgroundRoot));
     watch.resubscribing();
     watch.apply(
@@ -2500,7 +2587,7 @@ it("tells a person's run from the turn's wake in a resumed snapshot by how T3 op
 });
 
 it("says only that a result was acknowledged when T3 names no run it was read in (coordinator reproduction)", () => {
-  const follow = watchTurn("message-1", "/workspace", { followUp: { after: 1 } });
+  const follow = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
   follow.apply(
     snapshot({
       runs: [run("completed")],
@@ -2517,7 +2604,7 @@ it("says only that a result was acknowledged when T3 names no run it was read in
       "T3 records the result of the delegated work as acknowledged, so no report of its own follows here; T3 shows it.",
   });
   // A named run that is not the report's is still said to be another run.
-  const named = watchTurn("message-1", "/workspace", { followUp: { after: 1 } });
+  const named = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
   named.apply(
     snapshot({
       runs: [run("completed"), run("completed", "ui-message", 2)],
@@ -2567,7 +2654,7 @@ const ownWake = (status: string, ordinal = 4) => ({
 });
 
 it("never adopts another provider's wake while its own work is listed (coordinator reproduction)", () => {
-  const watch = watchTurn("own-message", "/workspace");
+  const watch = watchTurn("thread", "own-message", "/workspace");
   watch.apply(snapshot(twoProviders));
   watch.apply(event(2, "provider-thread.updated", olderProvider([])));
   watch.apply(event(3, "run.created", olderWake("running")));
@@ -2600,7 +2687,7 @@ it("never adopts another provider's wake while its own work is listed (coordinat
 
 it("never adopts another provider's wake from a resumed snapshot", () => {
   const resumed = (projection: Record<string, unknown>) => {
-    const watch = watchTurn("own-message", "/workspace");
+    const watch = watchTurn("thread", "own-message", "/workspace");
     watch.apply(snapshot(twoProviders));
     watch.resubscribing();
     watch.apply(snapshot({ ...twoProviders, ...projection }, 30));
@@ -2634,7 +2721,7 @@ it("never adopts another provider's wake from a resumed snapshot", () => {
 
 it("takes only a notification source T3 defines as a wake, and attributes nothing to a malformed or unknown one", () => {
   const opened = (source: unknown) => {
-    const watch = watchTurn("message-1", "/workspace");
+    const watch = watchTurn("thread", "message-1", "/workspace");
     watch.apply(snapshot(backgroundRoot));
     watch.apply(
       event(2, "provider-thread.updated", {
@@ -2680,7 +2767,7 @@ it("takes only a notification source T3 defines as a wake, and attributes nothin
 });
 
 it("shows each child once, whichever origin T3 gives it, beside its item and roster entry", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(
     snapshot({
       runs: [run("running")],
@@ -2718,7 +2805,7 @@ it("shows each child once, whichever origin T3 gives it, beside its item and ros
 });
 
 it("times calls from T3's own dates, and estimates a stable start only when T3 gives none", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   const undated = (updatedAt: string) =>
     item(
       "command_execution",
@@ -2771,7 +2858,7 @@ it("holds a pending or waiting call, counting and timing it only once T3 shows i
   const at = (time: string) => Date.parse(`2026-10-04T${time}Z`);
   vi.useFakeTimers({ now: at("08:00:00"), toFake: ["Date"] });
   try {
-    const watch = watchTurn("message-1", "/workspace");
+    const watch = watchTurn("thread", "message-1", "/workspace");
     const call = (id: string, status: string, startedAt: string | null = null) =>
       item(
         "command_execution",
@@ -2865,7 +2952,7 @@ it("holds a pending or waiting call, counting and timing it only once T3 shows i
 });
 
 it("keeps the reasoning T3 publishes for the turn's runs as notes, across snapshots, and none of other runs", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   const reasoning = (id: string, runId: string, text: string, status = "completed") =>
     item("reasoning", runId, { id, text }, status);
   watch.apply(
@@ -2899,7 +2986,7 @@ it("keeps the reasoning T3 publishes for the turn's runs as notes, across snapsh
 });
 
 it("says which model, effort and context the turn's run uses, as T3 records them", () => {
-  const watch = watchTurn("message-1", "/workspace");
+  const watch = watchTurn("thread", "message-1", "/workspace");
   const selected = (model: string, options: { id: string; value: string | boolean }[]) => ({
     ...run("running"),
     modelSelection: { instanceId: "claudeAgent", model, options },

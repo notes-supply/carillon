@@ -257,6 +257,12 @@ function system(sent: Sent): string {
     .join("\n");
 }
 
+/** An answer apart from the turn's final report, which cases about files leave aside. */
+const answered = (response: { readonly activity?: unknown }) => ({
+  ...response,
+  activity: undefined,
+});
+
 async function execute(runtime: RuntimeOperations, request: RuntimeTurnRequest) {
   return (await runtime.executeTurn(request)).output;
 }
@@ -452,22 +458,49 @@ it("keeps files sent with commands that open a conversation", async () => {
     [{ name: "report.txt", bytes: Buffer.from("figures\n") }],
     "0190a6e0-0000-7000-8000-0000000000a2",
   );
-  // The conversation's first messages are commands: Pi saves nothing yet.
+  const command = (input: string, files: TurnAttachment[], correlation: string) => ({
+    ...turn(resources, store, input, files, correlation),
+    native: { intent: "command" },
+  });
+  // The conversation's first messages are commands: Pi saves nothing yet, so
+  // each acknowledgment leaves its own files, and the earlier ones core
+  // offered again, for a later turn.
   expect(
-    await execute(runtime, turn(resources, store, "/note hello there", attachments, "command")),
-  ).toBe("");
-  expect(await execute(runtime, turn(resources, store, "/note again", report, "again"))).toBe("");
+    answered(await runtime.executeTurn(command("/note hello there", attachments, "command"))),
+  ).toEqual({
+    correlation_id: "command",
+    output: "`/note` finished.",
+    attachments_left: true,
+  });
+  expect(
+    answered(
+      await runtime.executeTurn({
+        ...command("/note again", report, "again"),
+        unanswered: [{ correlation_id: "command", attachments }],
+      }),
+    ),
+  ).toEqual({
+    correlation_id: "again",
+    output: "`/note` finished.",
+    unanswered_left: true,
+    attachments_left: true,
+  });
   expect(sent).toHaveLength(0);
   const directory = conversationDirectory(join(state, "sessions"), turn(resources, store, ""));
   expect(await readdir(directory).catch(() => [])).toEqual([]);
-  // Those turns got no answer, so core offers their files with the next one.
-  await execute(runtime, {
-    ...turn(resources, store, "describe", attachments, "prompt"),
-    unanswered: [
-      { correlation_id: "command", attachments },
-      { correlation_id: "again", attachments: report },
-    ],
-  });
+  // So core offers their files with the next turn, whose message Pi saves
+  // with every note: nothing is left.
+  expect(
+    answered(
+      await runtime.executeTurn({
+        ...turn(resources, store, "describe", attachments, "prompt"),
+        unanswered: [
+          { correlation_id: "command", attachments },
+          { correlation_id: "again", attachments: report },
+        ],
+      }),
+    ),
+  ).toEqual({ correlation_id: "prompt", output: "described" });
   expect(await observed()).toEqual([
     { command: "hello there" },
     { command: "again" },
@@ -496,6 +529,15 @@ it("keeps files sent with commands that open a conversation", async () => {
   const history = await readFile(join(directory, file ?? ""), "utf8");
   expect(history).toContain('"details":{"turn":"command"}');
   expect(history).toContain('"details":{"turn":"again"}');
+  // In the saved conversation a command's own note is saved at once, so its
+  // acknowledgment leaves nothing.
+  expect(answered(await runtime.executeTurn(command("/note saved", report, "saved")))).toEqual({
+    correlation_id: "saved",
+    output: "`/note` finished.",
+  });
+  expect(await readFile(join(directory, file ?? ""), "utf8")).toContain(
+    '"details":{"turn":"saved"}',
+  );
 });
 
 it("applies the inline policy's count and byte limits and leaves other files alone", async () => {
