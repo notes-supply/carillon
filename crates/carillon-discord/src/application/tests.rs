@@ -921,9 +921,59 @@ async fn an_abandoned_install_completes_while_holding_the_maintenance_lock() -> 
     Ok(())
 }
 
+/// A command module that asks core for the model state through its one
+/// native call, then replies `answered` when core gave the state, or
+/// `failed` when it did not.
+fn calling_model(answered: &str, failed: &str) -> anyhow::Result<Vec<u8>> {
+    let description = describing(&[definition("model")]);
+    let describe_length =
+        serde_json::to_vec(&carillon_discord_commands::contract::Invocation::Describe)?.len();
+    let request =
+        serde_json::to_string(&carillon_discord_commands::contract::HostRequest::ModelState)?;
+    let (answered, failed) = (replying(answered, &[]), replying(failed, &[]));
+    let escape = |text: &str| text.replace('\\', "\\\\").replace('"', "\\\"");
+    let text = format!(
+        r#"(module
+  (import "carillon" "call" (func $call (param i32 i32) (result i32)))
+  (import "carillon" "take" (func $take (param i32 i32)))
+  (memory (export "memory") 1)
+  (global $length (mut i32) (i32.const 0))
+  (global $output (mut i32) (i32.const 0))
+  (data (i32.const 1024) "{}")
+  (data (i32.const 4096) "{}")
+  (data (i32.const 5120) "{}")
+  (data (i32.const 6144) "{}")
+  (func (export "input") (param $length i32) (result i32)
+    (global.set $length (local.get $length))
+    (i32.const 8192))
+  (func (export "invoke") (result i32)
+    (local $reply i32)
+    (if (result i32) (i32.eq (global.get $length) (i32.const {describe_length}))
+      (then (global.set $output (i32.const 1024)) (i32.const {}))
+      (else
+        (local.set $reply (call $call (i32.const 4096) (i32.const {})))
+        (call $take (i32.const 32768) (local.get $reply))
+        ;; {{"ModelState": ...}} or {{"Error": ...}}
+        (if (result i32) (i32.eq (i32.load8_u (i32.const 32770)) (i32.const 77))
+          (then (global.set $output (i32.const 5120)) (i32.const {}))
+          (else (global.set $output (i32.const 6144)) (i32.const {}))))))
+  (func (export "output") (result i32) (global.get $output)))"#,
+        escape(&description),
+        escape(&request),
+        escape(&answered),
+        escape(&failed),
+        description.len(),
+        request.len(),
+        answered.len(),
+        failed.len(),
+    );
+    Ok(wat::parse_str(text)?)
+}
+
 /// The gateway goes, as when the provider stops, after taking an
-/// interaction that Discord has acknowledged: its reply is still sent before
-/// the provider returns.
+/// interaction that Discord has acknowledged and whose native call to core
+/// is still running: the call's result is still part of the reply sent
+/// before the provider returns.
 #[tokio::test]
 async fn an_acknowledged_interaction_is_answered_before_the_provider_returns() -> anyhow::Result<()>
 {
@@ -932,11 +982,10 @@ async fn an_acknowledged_interaction_is_answered_before_the_provider_returns() -
     use twilight_model::gateway::payload::incoming::InteractionCreate;
 
     let directory = tempfile::tempdir()?;
-    // Discord takes the acknowledgement at once, and the reply only when the
-    // test releases it.
-    let (acknowledged, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
-    let replied = Arc::new(AtomicUsize::new(0));
-    let router = Router::new()
+    // Discord takes the acknowledgement and the reply at once.
+    let acknowledged = Arc::new(Notify::new());
+    let replies = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let discord = Router::new()
         .route(
             "/api/v10/interactions/{id}/{token}/callback",
             post({
@@ -950,23 +999,48 @@ async fn an_acknowledged_interaction_is_answered_before_the_provider_returns() -
         .route(
             "/api/v10/webhooks/{application}/{token}/messages/@original",
             patch({
-                let (release, replied) = (release.clone(), replied.clone());
-                move || async move {
-                    release.notified().await;
-                    replied.fetch_add(1, Ordering::SeqCst);
+                let replies = replies.clone();
+                move |Json(reply): Json<Value>| async move {
+                    if let Ok(mut replies) = replies.lock() {
+                        replies.push(reply);
+                    }
                     Json(json!({}))
                 }
             }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let address = listener.local_addr()?;
-    let server = tokio::spawn(async move { axum::serve(listener, router).await });
+    let discord_address = listener.local_addr()?;
+    let discord_server = tokio::spawn(async move { axum::serve(listener, discord).await });
+    // Core answers the module's native call only when the test releases it.
+    let (asked, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    let core = Router::new().route(
+        "/v1/model",
+        get({
+            let (asked, release) = (asked.clone(), release.clone());
+            move || async move {
+                asked.notify_one();
+                release.notified().await;
+                Json(json!({
+                    "available": [],
+                    "agent": {"selection": null, "overridden": false}
+                }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let core_address = listener.local_addr()?;
+    let core_server = tokio::spawn(async move { axum::serve(listener, core).await });
     let mut state = discord_state(
-        core_client("http://127.0.0.1:1".to_owned()),
+        core_client(format!("http://{core_address}")),
         directory.path(),
     )
     .await?;
-    let target = Arc::new(app(&address.to_string(), 2, 100));
+    std::fs::write(
+        directory.path().join("release.wasm"),
+        calling_model("model state received", "the native call failed")?,
+    )?;
+    state.commands = Arc::new(Commands::load(files(directory.path())).await?);
+    let target = Arc::new(app(&discord_address.to_string(), 2, 100));
     state.app = Some(target.clone());
     let ingress = Arc::new(crate::inbound::Ingress {
         core: state.core.clone(),
@@ -1002,20 +1076,28 @@ async fn an_acknowledged_interaction_is_answered_before_the_provider_returns() -
     let (messages, _queue) = tokio::sync::mpsc::channel(1);
     let mut interactions = tokio::task::JoinSet::new();
     super::take_event(&state, event, &messages, &ingress, &mut interactions)?;
-    // No event follows: the gateway is gone.
+    // No event follows: the gateway is gone. Discord has the acknowledgement,
+    // and the module's native call is waiting for core.
     tokio::time::timeout(Duration::from_secs(5), acknowledged.notified()).await?;
+    tokio::time::timeout(Duration::from_secs(5), asked.notified()).await?;
     let answering = super::answered(&mut interactions);
     tokio::pin!(answering);
     assert!(
         tokio::time::timeout(Duration::from_millis(200), &mut answering)
             .await
             .is_err(),
-        "the provider returned while an acknowledged interaction had no reply"
+        "the provider returned while an acknowledged interaction was still running"
     );
     release.notify_one();
-    tokio::time::timeout(Duration::from_secs(5), answering).await?;
-    assert_eq!(replied.load(Ordering::SeqCst), 1);
-    server.abort();
+    tokio::time::timeout(Duration::from_secs(10), answering).await?;
+    let replies = replies
+        .lock()
+        .map_err(|_| anyhow::anyhow!("poisoned"))?
+        .clone();
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert_eq!(replies[0]["content"], "model state received");
+    discord_server.abort();
+    core_server.abort();
     Ok(())
 }
 
