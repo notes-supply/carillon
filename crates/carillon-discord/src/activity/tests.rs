@@ -23,8 +23,12 @@ use carillon_protocol::model::{
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
+    os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, PoisonError},
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
@@ -1700,6 +1704,187 @@ async fn a_card_still_waiting_for_its_permit_when_core_unlists_its_job_shows_the
         .count();
     assert_eq!(cards, 1, "{:#?}", discord.seen());
     assert!(discord.matching(&Method::DELETE, "/channels").is_empty());
+    assert_eq!(recorded(&records)?, json!({}));
+    Ok(())
+}
+
+/// The records' directory, read-only until dropped: saving the records then
+/// fails before anything is published, and the earlier file stays.
+struct ReadOnly<'a>(&'a Path);
+
+impl<'a> ReadOnly<'a> {
+    fn new(directory: &'a Path) -> std::io::Result<Self> {
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o500))?;
+        Ok(Self(directory))
+    }
+}
+
+impl Drop for ReadOnly<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
+/// A running job with a card recorded in its own records directory, the
+/// card's channel 300, and its final answer showing work.
+async fn finishing_job(
+    discord: &Substitute,
+    records: &Path,
+) -> anyhow::Result<(Provider, Delivery)> {
+    let activity = tools(None, &[("bash", "make")], &[]);
+    discord.list(vec![running("job", "300", now() - 60, Some(activity))]);
+    let provider = discord.provider(discord.http(false), config(false), records);
+    discord
+        .wait_for(&Method::POST, "/channels/300/messages", 1)
+        .await?;
+    let card = json!({"channel_id": "300", "message_id": "901"});
+    recorded_soon(&records.to_path_buf(), "job", &card).await?;
+    let mut answer = delivered("job", "job", TurnState::Completed);
+    answer.activity = Some(tools(None, &[], &[("bash", "make", true)]));
+    Ok((provider, answer))
+}
+
+#[tokio::test]
+async fn a_summary_shown_before_its_record_could_be_removed_is_shown_again_after_a_restart()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = directory.path().join("cards");
+    std::fs::create_dir(&store)?;
+    let records = store.join("activity-cards.json");
+    // Discord takes a second to answer the card's final edit.
+    let discord = Substitute::start(Arc::new(|seen, _| {
+        if seen.method == Method::PATCH && seen.content().starts_with("✓ Done") {
+            Reply::Delayed(Duration::from_millis(1_000))
+        } else {
+            Reply::Success
+        }
+    }))
+    .await?;
+    let (mut provider, answer) = finishing_job(&discord, &records).await?;
+    discord.deliver(answer);
+    discord.list(Vec::new());
+    // The final edit reaches Discord; the record can no longer be removed.
+    let finished = discord
+        .wait_for_text(&Method::PATCH, "/channels/300/messages/901", "✓ Done")
+        .await?;
+    let read_only = ReadOnly::new(&store)?;
+    tokio::time::sleep(Duration::from_millis(2_000)).await;
+    provider.stop().await?;
+    drop(read_only);
+    assert_eq!(recorded(&records)?["job"]["message_id"], "901");
+    // The next start reads core, which lists nothing of the job.
+    let before = discord.matching(&Method::PATCH, "/channels/300/").len();
+    let (_outcomes, monitor) = discord.monitor(discord.http(false), config(false), &records);
+    tokio::time::sleep(Duration::from_millis(4_000)).await;
+    // The summary is shown again, never an unknown outcome over it, and the
+    // record goes once it is shown.
+    let shown = discord.matching(&Method::PATCH, "/channels/300/")[before..].to_vec();
+    assert!(!shown.is_empty(), "{:#?}", discord.seen());
+    for edit in &shown {
+        assert_eq!(edit.content(), finished.content());
+    }
+    let cards = discord
+        .matching(&Method::POST, "/channels/300/messages")
+        .into_iter()
+        .filter(|seen| seen.body.get("content").is_none())
+        .count();
+    assert_eq!(cards, 1);
+    assert_eq!(recorded(&records)?, json!({}));
+    monitor.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_summary_that_cannot_be_saved_with_its_record_is_not_shown() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = directory.path().join("cards");
+    std::fs::create_dir(&store)?;
+    let records = store.join("activity-cards.json");
+    let discord = Substitute::start(succeed()).await?;
+    let (mut provider, answer) = finishing_job(&discord, &records).await?;
+    let saved = std::fs::read(&records)?;
+    // The records cannot be saved when the job ends.
+    let read_only = ReadOnly::new(&store)?;
+    discord.deliver(answer);
+    discord.list(Vec::new());
+    discord
+        .wait_for(&Method::POST, "/channels/300/messages", 2)
+        .await?;
+    tokio::time::sleep(Duration::from_millis(2_000)).await;
+    provider.stop().await?;
+    drop(read_only);
+    // No final summary is shown that a later start could not show again;
+    // the record is left as it was for that start.
+    let finals = discord
+        .matching(&Method::PATCH, "/channels/300/")
+        .into_iter()
+        .filter(|seen| seen.content().starts_with("✓ Done"))
+        .count();
+    assert_eq!(finals, 0, "{:#?}", discord.seen());
+    assert_eq!(std::fs::read(&records)?, saved);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_summary_discord_did_not_take_is_shown_by_the_next_start_without_its_job()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = directory.path().join("cards");
+    std::fs::create_dir(&store)?;
+    let records = store.join("activity-cards.json");
+    // Discord fails every final edit until the provider is restarted.
+    let failing = Arc::new(AtomicBool::new(true));
+    let discord = Substitute::start(Arc::new({
+        let failing = failing.clone();
+        move |seen, _| {
+            if seen.method == Method::PATCH
+                && seen.content().starts_with("✓ Done")
+                && failing.load(Ordering::SeqCst)
+            {
+                Reply::Status(500)
+            } else {
+                Reply::Success
+            }
+        }
+    }))
+    .await?;
+    let (mut provider, answer) = finishing_job(&discord, &records).await?;
+    discord.deliver(answer);
+    discord.list(Vec::new());
+    let attempts = discord
+        .wait_for_text(&Method::PATCH, "/channels/300/messages/901", "✓ Done")
+        .await?;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while discord.matching(&Method::PATCH, "/channels/300/").len() < 3 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    provider.stop().await?;
+    // The record keeps the summary Discord did not take.
+    let kept = recorded(&records)?;
+    assert_eq!(
+        kept["job"]["summary"]["description"].as_str(),
+        attempts.body["embeds"][0]["description"].as_str(),
+        "{kept}"
+    );
+    // The next start finishes that card by itself: its job is over, so it is
+    // not followed and waits for no outcome.
+    failing.store(false, Ordering::SeqCst);
+    let cards = super::Cards {
+        http: discord.http(false),
+        config: config(false),
+        records: Arc::new(CardRecords::open(records.clone()).context("records")?),
+        stopping: CancellationToken::new(),
+    };
+    let mut tasks = tokio::task::JoinSet::new();
+    assert!(cards.adopt(&mut tasks).is_empty());
+    tokio::time::timeout(Duration::from_secs(10), tasks.join_next())
+        .await?
+        .context("no replay")??;
+    let last = discord.matching(&Method::PATCH, "/channels/300/messages/901");
+    assert_eq!(last.last().map(Seen::content), Some(attempts.content()));
     assert_eq!(recorded(&records)?, json!({}));
     Ok(())
 }

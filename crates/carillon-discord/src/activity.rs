@@ -35,7 +35,7 @@ use crate::{
     delivery::Sent,
 };
 use anyhow::{Context as _, Result};
-use carillon_installation::filesystem::atomic_write;
+use carillon_installation::filesystem::{PublishError, publish};
 use carillon_protocol::model::{ActiveTurn, Delivery, DeliveryOutcome, TurnActivity, TurnState};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -294,13 +294,17 @@ pub(crate) struct Card {
 /// What a later start must know of a job's card: the card, or that the job
 /// has one nobody can name or follow, whose creation was never confirmed or
 /// which someone deleted, so it gets no other.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 struct Recorded {
     channel_id: Id<ChannelMarker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     message_id: Option<Id<MessageMarker>>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     hosted: bool,
+    /// The summary the card was being finished with: a later start shows it
+    /// again rather than saying the job's outcome is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    summary: Option<Embed>,
 }
 
 impl Recorded {
@@ -309,10 +313,11 @@ impl Recorded {
             channel_id,
             message_id: None,
             hosted: false,
+            summary: None,
         }
     }
 
-    const fn card(self) -> Option<Card> {
+    const fn card(&self) -> Option<Card> {
         match self.message_id {
             Some(message_id) => Some(Card {
                 channel_id: self.channel_id,
@@ -330,6 +335,7 @@ impl From<Card> for Recorded {
             channel_id: card.channel_id,
             message_id: Some(card.message_id),
             hosted: card.hosted,
+            summary: None,
         }
     }
 }
@@ -339,8 +345,8 @@ impl From<Card> for Recorded {
 enum Reservation {
     /// The job has no card: the caller makes it, then records or releases it.
     Free,
-    /// The job's card is recorded.
-    Recorded(Recorded),
+    /// The job's card is recorded: the card, unless nobody can name it.
+    Recorded(Option<Card>),
     /// Another maker is making the job's card now.
     Taken,
 }
@@ -351,6 +357,8 @@ enum Reservation {
 /// in between leaves one card no later start knows of. A creation whose
 /// outcome is unknown, or a card someone deleted, is recorded without a
 /// message until the job settles, so no start makes the job another card.
+/// A card is finished with its summary only once that summary is saved with
+/// its record, so a record a failed removal leaves behind still shows it.
 pub(crate) struct CardRecords {
     path: PathBuf,
     cards: Mutex<BTreeMap<String, Recorded>>,
@@ -395,7 +403,7 @@ impl CardRecords {
     fn reserve(&self, job: &str) -> Reservation {
         let cards = lock(&self.cards);
         if let Some(recorded) = cards.get(job) {
-            return Reservation::Recorded(*recorded);
+            return Reservation::Recorded(recorded.card());
         }
         if lock(&self.reserved).insert(job.to_owned()) {
             Reservation::Free
@@ -411,8 +419,26 @@ impl CardRecords {
 
     fn insert(&self, job: &str, card: impl Into<Recorded>) {
         let card = card.into();
-        self.change(|cards| cards.insert(job.to_owned(), card) != Some(card));
+        self.change(|cards| cards.insert(job.to_owned(), card.clone()).as_ref() != Some(&card));
         self.release(job);
+    }
+
+    /// Saves `summary` with `job`'s recorded card before the card is
+    /// finished with it. True when the card may be finished: the summary is
+    /// saved, synced, or the job has no record a later start would take up.
+    fn checkpoint(&self, job: &str, summary: &Embed) -> bool {
+        let mut cards = lock(&self.cards);
+        let Some(recorded) = cards.get_mut(job) else {
+            return true;
+        };
+        recorded.summary = Some(summary.clone());
+        match self.save(&cards) {
+            Ok(()) => true,
+            Err(error) => {
+                warn!(path = %self.path.display(), %error, "an activity card's summary was not saved");
+                false
+            }
+        }
     }
 
     fn remove(&self, job: &str) {
@@ -446,12 +472,17 @@ impl CardRecords {
         if !change(&mut cards) {
             return;
         }
-        let written = serde_json::to_vec_pretty(&*cards)
-            .map_err(anyhow::Error::from)
-            .and_then(|bytes| Ok(atomic_write(&self.path, &bytes, 0o600)?));
-        if let Err(error) = written {
+        if let Err(error) = self.save(&cards) {
             warn!(path = %self.path.display(), %error, "activity card records were not saved");
         }
+    }
+
+    /// Publishes the records whole: [`PublishError::NotPublished`] leaves the
+    /// earlier file, [`PublishError::Unsynced`] the new one, not durably.
+    fn save(&self, cards: &BTreeMap<String, Recorded>) -> Result<(), PublishError> {
+        let bytes = serde_json::to_vec_pretty(cards)
+            .map_err(|error| PublishError::NotPublished(error.into()))?;
+        publish(&self.path, &bytes, 0o600)
     }
 }
 
@@ -581,8 +612,9 @@ pub(crate) async fn activity_monitor(
         }
         view
     };
-    for (job_id, card) in cards.iter().flat_map(|cards| cards.records.recorded()) {
-        let view = track(&mut tasks, &job_id, Job::default(), Some(card));
+    let adopted = cards.as_ref().map(|cards| cards.adopt(&mut tasks));
+    for (job_id, recorded) in adopted.unwrap_or_default() {
+        let view = track(&mut tasks, &job_id, Job::default(), Some(recorded));
         jobs.insert(job_id, view);
     }
     let mut settled = VecDeque::new();
@@ -742,7 +774,7 @@ async fn show_card(
     mut view: watch::Receiver<Job>,
     old: Option<Recorded>,
 ) {
-    let card = match old {
+    let card = match &old {
         Some(recorded) => recorded.card(),
         None => obtain(&cards, &job_id, &mut view).await,
     };
@@ -785,7 +817,7 @@ async fn obtain(cards: &Cards, job_id: &str, view: &mut watch::Receiver<Job>) ->
             // still bring the answer that carries its summary.
             if !cards.stopping.is_cancelled() {
                 match cards.records.reserve(job_id) {
-                    Reservation::Recorded(recorded) => return recorded.card(),
+                    Reservation::Recorded(card) => return card,
                     // An answer is being given the job's summary: it says which.
                     Reservation::Taken => {}
                     // The job changed meanwhile; an answer may have its summary
@@ -927,11 +959,40 @@ fn until_after(accepted_at: i64, after: Duration) -> Duration {
 }
 
 impl Cards {
+    /// Takes up the cards recorded before this start. One an earlier start
+    /// was finishing belongs to a job that is over: it is finished, as a task
+    /// in `tasks`, with the summary saved for it, and nothing else of its job
+    /// is followed. The rest, whose jobs may go on, are returned.
+    fn adopt(&self, tasks: &mut JoinSet<()>) -> Vec<(String, Recorded)> {
+        let mut going_on = Vec::new();
+        for (job_id, recorded) in self.records.recorded() {
+            match (recorded.card(), recorded.summary.clone()) {
+                (Some(card), Some(summary)) => {
+                    let cards = self.clone();
+                    tasks.spawn(async move { cards.finish(&job_id, card, Some(summary)).await });
+                }
+                _ => going_on.push((job_id, recorded)),
+            }
+        }
+        going_on
+    }
+
     /// Leaves the card showing the job's `summary`. A card that cannot show
     /// it is removed instead of left claiming work, unless it is an answer.
     async fn finish(&self, job_id: &str, card: Card, summary: Option<Embed>) {
         if summary.is_none() && card.hosted {
             self.records.remove(job_id);
+            return;
+        }
+        if let Some(embed) = &summary
+            && !self.records.checkpoint(job_id, embed)
+        {
+            // Shown without its saved record, a later start could say its
+            // outcome is unknown over it.
+            warn!(
+                job_id,
+                "activity card was not finished; the next start goes on with it"
+            );
             return;
         }
         for attempt in 1..=FINAL_ATTEMPTS {
