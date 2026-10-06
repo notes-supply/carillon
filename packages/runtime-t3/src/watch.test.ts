@@ -718,6 +718,29 @@ it("orders the turn's answer by when T3 made each message, refusing one with no 
     refused.apply(event(2, "message.updated", said("z", "Unplaced.", "not a time"))),
   ).toThrow("T3 sent an assistant message this runtime does not understand");
   expect(refused.activity().headline).toBe("First.");
+  // So is one a snapshot lists, which then moves nothing on.
+  const shown = watchTurn("message-1", "/workspace");
+  shown.apply(
+    snapshot({
+      runs: [run("running")],
+      messages: [said("a", "First.", "2026-10-03T10:00:00.000Z")],
+    }),
+  );
+  expect(() =>
+    shown.apply(
+      snapshot(
+        {
+          runs: [run("running")],
+          messages: [
+            said("a", "First.", "2026-10-03T10:00:00.000Z"),
+            said("z", "Unplaced.", "not a time"),
+          ],
+        },
+        2,
+      ),
+    ),
+  ).toThrow("T3 sent an assistant message this runtime does not understand");
+  expect(shown.sequence()).toBe(1);
   // Messages of other runs are not this turn's to judge.
   expect(() =>
     refused.apply(
