@@ -13,6 +13,8 @@
 //! exclusive ownership removes what no committed turn references. The copy
 //! never hardlinks or moves staged files: the interface keeps its staging
 //! until it holds a receipt, and cannot change accepted bytes through it.
+//! Core opens a whole batch before it starts the capture, which then reads
+//! the open files, so an interface removing its staging cannot fail it.
 //!
 //! Read-only files guard against accidental edits, not against the owner.
 
@@ -137,59 +139,24 @@ pub(crate) fn valid_batch(batch: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
-/// Copy the staged batch of `interface` into a new published capture.
-///
-/// Staged files are opened beneath the interface's staging directory without
-/// following any link, and must be regular files of exactly the declared
-/// length. Blocking: run it off the async reactor.
-pub(crate) fn capture(
+/// A staged batch opened for capture: each file with its declared length.
+/// The capture reads these files, not the staged names, which the interface
+/// may remove at any time, as it does when it restarts.
+pub(crate) struct Sources(Vec<(fs::File, u64)>);
+
+/// Open every file of the staged batch of `interface`, beneath the
+/// interface's staging directory and without following any link. Each must
+/// be a regular file of exactly the declared length.
+pub(crate) fn open(
     data_directory: &Path,
     interface: &str,
     staged: &StagedAttachments,
-    cancel: &Cancel,
-) -> Result<Capture, CaptureError> {
+) -> Result<Sources, CaptureError> {
     if !valid_batch(&staged.batch) {
         return Err(CaptureError::Invalid(
             "attachment batch names one staging directory".to_owned(),
         ));
     }
-    let store = store(data_directory);
-    create_store(&store)?;
-    let id = uuid::Uuid::now_v7().to_string();
-    let partial = store.join(format!("{PARTIAL}{id}"));
-    fs::DirBuilder::new().mode(0o700).create(&partial)?;
-    let copied =
-        copy_batch(data_directory, interface, staged, &partial, cancel).and_then(|digests| {
-            // A deadline or shutdown that arrived during the last sync still
-            // stops the capture before anything is published.
-            if cancel.checkpoint() {
-                return Err(CaptureError::Cancelled);
-            }
-            #[cfg(test)]
-            {
-                cancel.publishing.store(true, Ordering::SeqCst);
-                drop(cancel.publication.lock());
-            }
-            publish(&store, &partial, &id).map(|()| digests)
-        });
-    match copied {
-        Ok(digests) => Ok(Capture { id, digests }),
-        Err(error) => {
-            // Unpublished copies are never referenced; a failed removal is
-            // left for reconciliation.
-            let _ = fs::remove_dir_all(&partial);
-            Err(error)
-        }
-    }
-}
-
-fn copy_batch(
-    data_directory: &Path,
-    interface: &str,
-    staged: &StagedAttachments,
-    partial: &Path,
-    cancel: &Cancel,
-) -> Result<Vec<String>, CaptureError> {
     let staging = attachment_staging(Path::new(""), interface);
     let root = rustix::fs::open(
         data_directory,
@@ -197,7 +164,7 @@ fn copy_batch(
         Mode::empty(),
     )
     .map_err(io::Error::from)?;
-    let mut digests = Vec::with_capacity(staged.files.len());
+    let mut sources = Vec::with_capacity(staged.files.len());
     for (ordinal, declared) in staged.files.iter().enumerate() {
         let relative = staging.join(&staged.batch).join(ordinal.to_string());
         // Every component below the data directory is resolved without
@@ -216,7 +183,7 @@ fn copy_batch(
                 io::Error::from(error)
             ))
         })?;
-        let mut source = fs::File::from(source);
+        let source = fs::File::from(source);
         let metadata = source.metadata()?;
         if !metadata.file_type().is_file() {
             return Err(CaptureError::Invalid(format!(
@@ -230,8 +197,56 @@ fn copy_batch(
                 declared.size
             )));
         }
+        sources.push((source, declared.size));
+    }
+    Ok(Sources(sources))
+}
+
+/// Copy opened staged files into a new published capture. Blocking: run it
+/// off the async reactor.
+pub(crate) fn capture(
+    data_directory: &Path,
+    sources: Sources,
+    cancel: &Cancel,
+) -> Result<Capture, CaptureError> {
+    let store = store(data_directory);
+    create_store(&store)?;
+    let id = uuid::Uuid::now_v7().to_string();
+    let partial = store.join(format!("{PARTIAL}{id}"));
+    fs::DirBuilder::new().mode(0o700).create(&partial)?;
+    let copied = copy_batch(sources, &partial, cancel).and_then(|digests| {
+        // A deadline or shutdown that arrived during the last sync still
+        // stops the capture before anything is published.
+        if cancel.checkpoint() {
+            return Err(CaptureError::Cancelled);
+        }
+        #[cfg(test)]
+        {
+            cancel.publishing.store(true, Ordering::SeqCst);
+            drop(cancel.publication.lock());
+        }
+        publish(&store, &partial, &id).map(|()| digests)
+    });
+    match copied {
+        Ok(digests) => Ok(Capture { id, digests }),
+        Err(error) => {
+            // Unpublished copies are never referenced; a failed removal is
+            // left for reconciliation.
+            let _ = fs::remove_dir_all(&partial);
+            Err(error)
+        }
+    }
+}
+
+fn copy_batch(
+    Sources(sources): Sources,
+    partial: &Path,
+    cancel: &Cancel,
+) -> Result<Vec<String>, CaptureError> {
+    let mut digests = Vec::with_capacity(sources.len());
+    for (ordinal, (mut source, size)) in sources.into_iter().enumerate() {
         let destination = partial.join(ordinal.to_string());
-        digests.push(copy_file(&mut source, &destination, declared.size, cancel)?);
+        digests.push(copy_file(&mut source, &destination, size, cancel)?);
     }
     Ok(digests)
 }

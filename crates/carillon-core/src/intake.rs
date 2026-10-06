@@ -8,6 +8,11 @@
 //! work starts. Each capture reserves its bytes against the storage budget
 //! until the database decides whether its turn exists.
 //!
+//! Core opens an event's staged files before it admits the capture, so the
+//! capture holds its input from the start: an interface that removes its
+//! staging, as one does when it restarts, cannot fail a capture already
+//! admitted, only refuse a submission core had not yet admitted.
+//!
 //! While an event's capture runs, other events of its conversation wait:
 //! they are refused as unavailable, so whichever interface instance sends
 //! them retries, and none overtakes the earlier message.
@@ -191,6 +196,9 @@ impl Intake {
                     )
                 })?;
                 let reservation = self.reserve(core, total(staged))?;
+                let sources =
+                    attachments::open(&core.options.data_directory, &interface.id, staged)
+                        .map_err(refusal)?;
                 let (sender, receiver) = watch::channel(None);
                 capturing.insert(
                     key.clone(),
@@ -205,7 +213,7 @@ impl Intake {
                     event: event.clone(),
                     key,
                 };
-                tokio::spawn(run.capture(permit, reservation, sender));
+                tokio::spawn(run.capture(permit, reservation, sources, sender));
                 receiver
             }
         };
@@ -300,6 +308,18 @@ fn late() -> CoreError {
     CoreError::Unavailable("capturing these attachments did not finish in time".into())
 }
 
+/// Core's answer to a capture that failed.
+fn refusal(error: CaptureError) -> CoreError {
+    match error {
+        CaptureError::Invalid(message) => CoreError::InvalidInput(message),
+        CaptureError::Full => CoreError::InsufficientStorage(
+            "the disk filled up while these attachments were being captured".into(),
+        ),
+        CaptureError::Cancelled => late(),
+        CaptureError::Io(error) => CoreError::Storage(error),
+    }
+}
+
 struct Run {
     core: Core,
     interface: SelectedProvider,
@@ -312,6 +332,7 @@ impl Run {
         self,
         permit: OwnedSemaphorePermit,
         reservation: Reservation,
+        sources: attachments::Sources,
         sender: watch::Sender<Outcome>,
     ) {
         // Leaves the in-progress set however this task ends, so shutdown
@@ -320,7 +341,7 @@ impl Run {
             intake: self.core.intake.clone(),
             key: self.key.clone(),
         };
-        let outcome = self.capture_and_commit(permit).await;
+        let outcome = self.capture_and_commit(permit, sources).await;
         // The database has decided: the bytes are now either counted as
         // kept or removed with a losing capture.
         drop(reservation);
@@ -330,24 +351,16 @@ impl Run {
     async fn capture_and_commit(
         &self,
         permit: OwnedSemaphorePermit,
+        sources: attachments::Sources,
     ) -> Result<EventReceipt, CoreError> {
-        let staged = self
-            .event
-            .attachments
-            .clone()
-            .ok_or_else(|| anyhow!("event has no attachments to capture"))?;
         let cancel = self.core.intake.signals.fresh();
         let mut copy = {
-            let (data, interface, cancel) = (
-                self.core.options.data_directory.clone(),
-                self.interface.id.clone(),
-                cancel.clone(),
-            );
+            let (data, cancel) = (self.core.options.data_directory.clone(), cancel.clone());
             tokio::task::spawn_blocking(move || {
                 // The worker is busy until the copy has really returned,
                 // whatever happens to whoever waits for it.
                 let _permit = permit;
-                attachments::capture(&data, &interface, &staged, &cancel)
+                attachments::capture(&data, sources, &cancel)
             })
         };
         let copied = if let Ok(copied) = tokio::time::timeout(CAPTURE_DEADLINE, &mut copy).await {
@@ -356,17 +369,9 @@ impl Run {
             cancel.cancel();
             copy.await
         };
-        let capture = match copied.map_err(|error| CoreError::Storage(error.into()))? {
-            Ok(capture) => capture,
-            Err(CaptureError::Invalid(message)) => return Err(CoreError::InvalidInput(message)),
-            Err(CaptureError::Full) => {
-                return Err(CoreError::InsufficientStorage(
-                    "the disk filled up while these attachments were being captured".into(),
-                ));
-            }
-            Err(CaptureError::Cancelled) => return Err(late()),
-            Err(CaptureError::Io(error)) => return Err(CoreError::Storage(error)),
-        };
+        let capture = copied
+            .map_err(|error| CoreError::Storage(error.into()))?
+            .map_err(refusal)?;
         // A deadline or shutdown that arrived while the copy was publishing
         // makes no new acceptance; the published copy is not referenced.
         if cancel.requested() {
