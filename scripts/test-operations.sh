@@ -59,7 +59,11 @@ stop() {
     # Pause inside the service manager, then record which installation the
     # units named when the stop acted.
     : >"$MANAGER/holding"
-    while [ ! -e "$MANAGER/release" ]; do sleep 0.05; done
+    waited=0
+    while [ ! -e "$MANAGER/release" ] && [ "$waited" -lt 400 ]; do
+      waited=$((waited + 1))
+      sleep 0.05
+    done
     sed -n 's/^Environment="CARILLON_HOME=\(.*\)"$/\1/p' "$units/carillon-core.service" >"$MANAGER/stopped"
   fi
   if [ "${FAKE_STOP:-ok}" = break-installer ]; then
@@ -420,13 +424,16 @@ until [ -e "$MANAGER/holding" ]; do
   [ "$attempt" -lt 200 ] || fail 'the stop never reached the service manager'
   sleep 0.05
 done
-refuse switch-during-stop "$ALTERNATE/app/bin/carillon-register-services"
-grep -F 'another Carillon operation is changing the user units' \
-  "$TEST_ROOT/switch-during-stop.log" >/dev/null
+switched=0
+"$ALTERNATE/app/bin/carillon-register-services" >"$TEST_ROOT/switch-during-stop.log" 2>&1 ||
+  switched=$?
 : >"$MANAGER/release"
 wait "$held"
 [ "$(cat "$MANAGER/stopped")" = "$INSTALLATION" ] ||
   fail "the stop acted on the units of $(cat "$MANAGER/stopped")"
+[ "$switched" -ne 0 ] || fail 'another installation registered over held units'
+grep -F 'another Carillon operation is changing the user units' \
+  "$TEST_ROOT/switch-during-stop.log" >/dev/null
 grep -Fx "Environment=\"CARILLON_HOME=$INSTALLATION\"" \
   "$XDG_CONFIG_HOME/systemd/user/carillon-core.service" >/dev/null
 # A failed operation releases the units too: the deliberate switch, and the
