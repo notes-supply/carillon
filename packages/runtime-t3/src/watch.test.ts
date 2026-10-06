@@ -681,6 +681,51 @@ it("refuses a run whose ordinal T3 numbers from one", () => {
   }
 });
 
+it("orders the turn's answer by when T3 made each message, refusing one with no readable time", () => {
+  const said = (id: string, text: string, createdAt: string) => ({
+    id,
+    runId: "run-1",
+    role: "assistant",
+    text,
+    createdAt,
+  });
+  const watch = watchTurn("message-1", "/workspace");
+  watch.apply(
+    snapshot({
+      runs: [run("running")],
+      messages: [said("a", "First.", "2026-10-03T10:00:00.000Z")],
+    }),
+  );
+  // 10:30 UTC, though its text sorts before both others.
+  watch.apply(event(2, "message.updated", said("b", "Third.", "2026-10-03T09:30:00.000-01:00")));
+  watch.apply(event(3, "message.updated", said("c", "Second.", "2026-10-03T10:15:00.000Z")));
+  expect(watch.activity().headline).toBe("Third.");
+  watch.apply(event(4, "run.updated", run("completed")));
+  expect(watch.outcome()).toEqual({
+    kind: "completed",
+    output: "First.\n\nSecond.\n\nThird.",
+  });
+
+  // A message of the turn without a time is refused before it counts.
+  const refused = watchTurn("message-1", "/workspace");
+  refused.apply(
+    snapshot({
+      runs: [run("running")],
+      messages: [said("a", "First.", "2026-10-03T10:00:00.000Z")],
+    }),
+  );
+  expect(() =>
+    refused.apply(event(2, "message.updated", said("z", "Unplaced.", "not a time"))),
+  ).toThrow("T3 sent an assistant message this runtime does not understand");
+  expect(refused.activity().headline).toBe("First.");
+  // Messages of other runs are not this turn's to judge.
+  expect(() =>
+    refused.apply(
+      event(3, "message.updated", { ...said("y", "Other.", "not a time"), runId: "run-9" }),
+    ),
+  ).not.toThrow();
+});
+
 it("still owes the wake after the roster clears, so a cancel in that gap is not quiet", () => {
   const watch = watchTurn("message-1", "/workspace");
   watch.apply(
