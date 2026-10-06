@@ -35,7 +35,8 @@ use twilight_http::Client as DiscordHttp;
 
 pub(crate) mod lanes;
 
-/// How long a message's files may take from admission until they are
+/// How long preparing a message may take, from resolving its route through
+/// opening its conversation and, for files, transferring them, until it is
 /// submitted. A submission core may have received is then settled by asking
 /// core, however long that takes.
 pub(crate) const PREPARATION_DEADLINE: Duration = Duration::from_mins(30);
@@ -47,7 +48,7 @@ const RETRY: Duration = Duration::from_millis(250);
 /// and reading its answer included; a slower one is tried again.
 const ATTEMPT: Duration = Duration::from_secs(30);
 /// Why a message whose preparation ran out of time was not accepted.
-const LATE: &str = "Carillon could not accept these attachments in time, so this message was not accepted. Please send it again.";
+const LATE: &str = "Carillon could not prepare this message in time, so it was not accepted. Please send it again.";
 /// Why a message still being prepared when the provider stopped was not accepted.
 const STOPPED: &str =
     "Carillon was restarting, so this message was not accepted. Please send it again.";
@@ -131,13 +132,16 @@ impl Ingress {
 }
 
 /// Settle one gateway message: by the time this returns it was accepted,
-/// refused with feedback, or ignored by admission.
+/// refused with feedback, or ignored by admission. Everything before
+/// submission ends by one preparation deadline; a message whose route is not
+/// known by then was never admitted and is dropped silently.
 pub(crate) async fn prepare(ingress: &Ingress, mut inbound: QueuedMessage) {
+    let deadline = Instant::now() + PREPARATION_DEADLINE;
     let discord = &ingress.config;
     let http = &ingress.http;
     let channel = &inbound.request.channel_id;
     let route = ingress
-        .retry(None, "resolve a Discord message route", || {
+        .retry(Some(deadline), "resolve a Discord message route", || {
             discord_parent_channel(http, discord, &ingress.participation, channel)
         })
         .await;
@@ -160,21 +164,23 @@ pub(crate) async fn prepare(ingress: &Ingress, mut inbound: QueuedMessage) {
         return;
     };
     if plan.attachments.is_empty() {
-        prepare_text(ingress, plan).await;
+        prepare_text(ingress, plan, deadline).await;
     } else {
-        prepare_files(ingress, plan).await;
+        prepare_files(ingress, plan, deadline).await;
     }
 }
 
-async fn prepare_text(ingress: &Ingress, plan: MessagePlan) {
+/// Open a text's conversation by `deadline`, then submit it until core
+/// answers: once submitted, core may hold it, so only the stop ends that.
+async fn prepare_text(ingress: &Ingress, plan: MessagePlan, deadline: Instant) {
     let (discord, http) = (&ingress.config, &*ingress.http);
     let source = format!("{}:{}", plan.channel_id, plan.message_id);
-    let stopped = async || {
+    let unfinished = async || {
         explain(http, &source, &ingress.unfinished().0).await;
         terminal_feedback(http, discord, &source, Feedback::Failed).await;
     };
     let opened = ingress
-        .retry(None, "prepare a Discord conversation", || {
+        .retry(Some(deadline), "prepare a Discord conversation", || {
             prepare_conversation(&ingress.participation, &ingress.http, plan.clone())
         })
         .await;
@@ -186,7 +192,7 @@ async fn prepare_text(ingress: &Ingress, plan: MessagePlan) {
             return;
         }
         None => {
-            stopped().await;
+            unfinished().await;
             return;
         }
     };
@@ -195,7 +201,7 @@ async fn prepare_text(ingress: &Ingress, plan: MessagePlan) {
     let Some(receipt) =
         submit_event_with_retry(&ingress.core, &resolved.event, &ingress.stopping).await
     else {
-        stopped().await;
+        unfinished().await;
         return;
     };
     match receipt {
@@ -218,8 +224,8 @@ async fn prepare_text(ingress: &Ingress, plan: MessagePlan) {
 
 /// Download, stage and submit a message with files. While they download the
 /// sender sees typing; the processing reaction appears once they are handed
-/// to core. Everything before submission ends by the preparation deadline.
-async fn prepare_files(ingress: &Ingress, plan: MessagePlan) {
+/// to core. Everything before submission ends by `deadline`.
+async fn prepare_files(ingress: &Ingress, plan: MessagePlan, deadline: Instant) {
     let (discord, http) = (&ingress.config, &*ingress.http);
     let source = format!("{}:{}", plan.channel_id, plan.message_id);
     let refuse = async |refusal: Refusal| {
@@ -230,7 +236,6 @@ async fn prepare_files(ingress: &Ingress, plan: MessagePlan) {
         refuse(refusal).await;
         return;
     }
-    let deadline = Instant::now() + PREPARATION_DEADLINE;
     // A message core already holds or is still capturing, such as one the
     // gateway replayed, is not downloaded again.
     match replayed(ingress, &plan.message_id, deadline).await {
