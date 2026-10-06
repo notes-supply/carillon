@@ -129,11 +129,16 @@ it("knows the turn's run by its message, keeps the answer in message order, and 
 it("retains only the turn's own work from a long history and keeps its identity through a resumed snapshot", () => {
   const watch = watchTurn("message-500", "/workspace");
   const olderRuns = Array.from({ length: 500 }, (_, index) =>
-    run(index === 7 ? "running" : "completed", `message-${String(index)}`, index),
+    run(
+      index === 7 ? "running" : "completed",
+      `message-${String(index)}`,
+      index + 1,
+      `run-${String(index)}`,
+    ),
   );
   watch.apply(
     snapshot({
-      runs: [...olderRuns, run("running", "message-500", 500)],
+      runs: [...olderRuns, run("running", "message-500", 501, "run-500")],
       messages: olderRuns.map((older) => ({
         id: `assistant-${older.id}`,
         runId: older.id,
@@ -558,7 +563,7 @@ it("explains failures with T3's failure text and treats other stops as stopped",
   // Work first listed after the run stopped is another run's, and does not hold it.
   stopped.apply(listed(6, [{ taskId: "late", kind: "command" }]));
   expect(stopped.quiet()).toBe(true);
-  stopped.apply(event(7, "run.created", run("running", "other", 0, "run-9")));
+  stopped.apply(event(7, "run.created", run("running", "other", 2, "run-9")));
   expect(stopped.busy()).toBe(true);
 });
 
@@ -662,6 +667,20 @@ it("refuses a known item whose run it cannot identify, and still ignores runless
   expect(watch.outcome()).toBeUndefined();
 });
 
+it("refuses a run whose ordinal T3 numbers from one", () => {
+  for (const ordinal of [0, -1]) {
+    const shown = watchTurn("message-1", "/workspace");
+    expect(() =>
+      shown.apply(snapshot({ runs: [run("running", "message-1", ordinal, "run-1")] })),
+    ).toThrow("T3 sent a thread snapshot this runtime does not understand");
+    const live = watchTurn("message-1", "/workspace");
+    live.apply(snapshot({ runs: [] }));
+    expect(() =>
+      live.apply(event(2, "run.created", run("running", "message-1", ordinal, "run-1"))),
+    ).toThrow("T3 sent a run this runtime does not understand");
+  }
+});
+
 it("still owes the wake after the roster clears, so a cancel in that gap is not quiet", () => {
   const watch = watchTurn("message-1", "/workspace");
   watch.apply(
@@ -701,7 +720,7 @@ it("retains no provider records before the turn's run exists and only its own af
   watch.apply(
     snapshot({
       runs: history.map((index) => ({
-        ...run("completed", `message-${String(index)}`, index),
+        ...run("completed", `message-${String(index)}`, index + 1, `run-${String(index)}`),
         providerThreadId: `thread-${String(index)}`,
       })),
       providerThreads: history.map((index) => ({
@@ -726,7 +745,7 @@ it("retains no provider records before the turn's run exists and only its own af
   );
   watch.apply(
     event(3, "run.created", {
-      ...run("running", "message-current", 500),
+      ...run("running", "message-current", 501, "run-500"),
       providerThreadId: "thread-9",
     }),
   );
@@ -934,7 +953,7 @@ it("owns its provider thread and session through the serving event order, after 
   watch.apply(
     snapshot({
       runs: history.map((index) => ({
-        ...run("completed", `message-${String(index)}`, index),
+        ...run("completed", `message-${String(index)}`, index + 1, `run-${String(index)}`),
         providerThreadId: `thread-${String(index)}`,
       })),
       providerThreads: history.map((index) => ({
@@ -954,7 +973,7 @@ it("owns its provider thread and session through the serving event order, after 
   );
   watch.apply(
     event(3, "run.created", {
-      ...run("starting", "message-current", 500),
+      ...run("starting", "message-current", 501, "run-500"),
       providerThreadId: "thread-9",
     }),
   );
@@ -965,7 +984,7 @@ it("owns its provider thread and session through the serving event order, after 
   );
   watch.apply(
     event(6, "run.updated", {
-      ...run("running", "message-current", 500),
+      ...run("running", "message-current", 501, "run-500"),
       providerThreadId: "thread-9",
     }),
   );
@@ -982,7 +1001,7 @@ it("owns its provider thread and session through the serving event order, after 
   // The root completes with the roster still listed: the live session owes the report; nothing is detached.
   watch.apply(
     event(8, "run.updated", {
-      ...run("completed", "message-current", 500),
+      ...run("completed", "message-current", 501, "run-500"),
       providerThreadId: "thread-9",
     }),
   );
@@ -1004,7 +1023,10 @@ it("owns its provider thread and session through the serving event order, after 
     }),
   );
   watch.apply(
-    event(11, "run.created", { ...run("running", "wake", 501), providerThreadId: "thread-9" }),
+    event(11, "run.created", {
+      ...run("running", "wake", 502, "run-501"),
+      providerThreadId: "thread-9",
+    }),
   );
   watch.apply(event(12, "turn-item.updated", wakeOpening("run-501")));
   watch.apply(
@@ -1017,7 +1039,10 @@ it("owns its provider thread and session through the serving event order, after 
     }),
   );
   watch.apply(
-    event(14, "run.updated", { ...run("completed", "wake", 501), providerThreadId: "thread-9" }),
+    event(14, "run.updated", {
+      ...run("completed", "wake", 502, "run-501"),
+      providerThreadId: "thread-9",
+    }),
   );
   expect(watch.outcome()).toEqual({ kind: "completed", output: "Done." });
   expect(watch.retained()).toMatchObject({ providerThreads: 1, sessions: 1 });
@@ -1105,7 +1130,7 @@ it("leaves a pending request no item of the turn names unassigned, even while th
   const watch = watchTurn("message-1", "/workspace");
   watch.apply(
     snapshot({
-      runs: [run("completed", "older", 0, "run-0"), run("waiting")],
+      runs: [run("completed", "older", 1, "run-0"), run("waiting", "message-1", 2, "run-1")],
       runtimeRequests: [
         { id: "stale", kind: "tool_approval", status: "pending" },
         { id: "mine", kind: "user_input", status: "pending" },
@@ -1891,7 +1916,7 @@ it("keeps only the turn's continuation links and a bounded window of others, acr
   watch.apply(
     snapshot({
       runs: history.map((index) => ({
-        ...run("completed", `message-${String(index)}`, index),
+        ...run("completed", `message-${String(index)}`, index + 1, `run-${String(index)}`),
         delegatedCompletion: {
           disposition: "open",
           delivery: { messageId: `continuation-${String(index)}` },
@@ -1914,15 +1939,15 @@ it("keeps only the turn's continuation links and a bounded window of others, acr
     providerSessionId: "session",
     pendingBackgroundTasks: taskIds.map((taskId) => ({ taskId, kind: "command" })),
   });
-  watch.apply(event(2, "run.created", run("starting", "message-current", 500)));
-  watch.apply(event(3, "run.updated", run("running", "message-current", 500)));
+  watch.apply(event(2, "run.created", run("starting", "message-current", 501, "run-500")));
+  watch.apply(event(3, "run.updated", run("running", "message-current", 501, "run-500")));
   watch.apply(event(4, "provider-thread.updated", thread(["own"])));
-  watch.apply(event(5, "run.updated", run("completed", "message-current", 500)));
+  watch.apply(event(5, "run.updated", run("completed", "message-current", 501, "run-500")));
   watch.apply(event(6, "provider-thread.updated", thread([])));
   // Another turn's work is reported next: T3 announces its continuation before its run.
   watch.apply(
     event(7, "run.updated", {
-      ...run("completed", "message-499", 499),
+      ...run("completed", "message-499", 500, "run-499"),
       delegatedCompletion: { disposition: "open", delivery: { messageId: "late-report" } },
     }),
   );
