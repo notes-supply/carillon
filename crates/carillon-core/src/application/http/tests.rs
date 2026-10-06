@@ -1280,9 +1280,12 @@ async fn a_claim_waiting_for_the_database_writer_is_not_made_once_stopping() -> 
     // Another connection holds the database writer.
     let writer = rusqlite::Connection::open(state.config.value.data_dir.join("carillon.sqlite3"))?;
     writer.execute_batch("BEGIN IMMEDIATE")?;
-    // The worker reads its runtime credential, after checking whether core
-    // is stopping and with no await before it claims; read from a FIFO, it
-    // waits for the test.
+    // The worker reads its runtime credential after checking whether core is
+    // stopping, with no await before it claims; read from a FIFO, it waits
+    // for the test. Opening the FIFO thus shows the worker is past that
+    // check, and the held writer keeps it from claiming until the test
+    // releases the writer after shutdown has begun. The test does not observe
+    // whether the worker has already reached its wait for the writer.
     let credential = directory.path().join("credentials/test-runtime.token");
     fs::remove_file(&credential)?;
     rustix::fs::mknodat(
@@ -1303,11 +1306,6 @@ async fn a_claim_waiting_for_the_database_writer_is_not_made_once_stopping() -> 
             .await??;
     fifo.write_all(b"test-only")?;
     drop(fifo);
-    // The worker is past its check and goes on to claim, waiting for the
-    // writer. The pause lets it reach that wait, though wherever the stop
-    // lands from here on, no turn may be claimed; only then is the writer
-    // released.
-    tokio::time::sleep(Duration::from_millis(200)).await;
     stopping.cancel();
     writer.execute_batch("ROLLBACK")?;
     tokio::time::timeout(Duration::from_secs(10), worker).await??;
