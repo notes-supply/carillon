@@ -92,8 +92,9 @@ Results leave out Discord's signed attachment addresses: messages read, sent
 or edited keep their attachments' names, sizes and types, including those of
 nested replied-to and forwarded messages, without their `url` and `proxy_url`,
 and an attachment link that stands as a whole value, such as an embed's, loses
-its signature. Text people wrote, including links pasted into it, is returned
-as written.
+its signature, even when it is all of a message's content. Other text people
+wrote, including attachment links pasted among other words, is returned as
+written.
 
 Not all Discord APIs are covered: no DMs, private-thread membership, archived
 thread enumeration, custom emoji management, webhooks, voice, audit logs or bulk
