@@ -269,7 +269,7 @@ async fn stalled_providers_are_reported_within_the_operator_timeout() -> Result<
         provider.id = format!("stalled-{index}");
         provider.url = format!("http://{}", listener.local_addr()?);
         provider.enabled = index != 2;
-        let router = Router::new().route("/health", get(|| std::future::pending::<StatusCode>()));
+        let router = Router::new().route("/health", get(std::future::pending::<StatusCode>));
         services.spawn(async move { axum::serve(listener, router).await });
         providers.push(provider);
     }
