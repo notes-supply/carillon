@@ -381,10 +381,10 @@ async fn complete_invalid_receipt_is_not_retried_forever() -> anyhow::Result<()>
     Ok(())
 }
 
-/// An event core may hold gets its first attempt however the provider
-/// stops, and no attempt after the provider has stopped.
+/// No attempt starts once the provider is stopping, whether or not one was
+/// made before: a caller owed a first attempt makes it itself.
 #[tokio::test]
-async fn a_stopping_provider_starts_no_attempt_after_the_first() -> anyhow::Result<()> {
+async fn a_stopping_provider_starts_no_attempt() -> anyhow::Result<()> {
     // Core cannot take the event: every attempt is answered as unavailable.
     let attempts = Arc::new(AtomicUsize::new(0));
     let counted = attempts.clone();
@@ -409,7 +409,7 @@ async fn a_stopping_provider_starts_no_attempt_after_the_first() -> anyhow::Resu
         native: Value::Null,
         attachments: None,
     };
-    // Handed over after the stop, it is attempted once.
+    // Handed over after the stop, it is not attempted.
     let stopped = CancellationToken::new();
     stopped.cancel();
     let outcome = tokio::time::timeout(
@@ -418,7 +418,7 @@ async fn a_stopping_provider_starts_no_attempt_after_the_first() -> anyhow::Resu
     )
     .await?;
     assert!(outcome.is_none());
-    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(attempts.load(Ordering::SeqCst), 0);
     // Stopped just as its wait to try again ends: no other attempt starts.
     let stopping = CancellationToken::new();
     let submission = tokio::spawn({
@@ -426,13 +426,12 @@ async fn a_stopping_provider_starts_no_attempt_after_the_first() -> anyhow::Resu
         async move { submit_event_with_retry(&core, &stopping, &event).await }
     });
     tokio::time::timeout(Duration::from_secs(2), async {
-        while attempts.load(Ordering::SeqCst) < 2 {
+        while attempts.load(Ordering::SeqCst) < 1 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await?;
-    // It now waits to try again, until a quarter second after its second
-    // attempt. This test's own wait ends earlier, and the runtime's only
+    // It now waits to try again, until a quarter second after its attempt. This test's own wait ends earlier, and the runtime's only
     // thread is then held past both: the runtime ends them together, this
     // one first, so the submission finds its wait over and the stop together.
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -443,7 +442,7 @@ async fn a_stopping_provider_starts_no_attempt_after_the_first() -> anyhow::Resu
     let outcome = tokio::time::timeout(Duration::from_secs(2), submission).await??;
     server.abort();
     assert!(outcome.is_none());
-    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
     Ok(())
 }
 

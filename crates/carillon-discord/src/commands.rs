@@ -226,7 +226,10 @@ const SUBMIT_ATTEMPTS: u32 = 3;
 /// refused submission's reaction is then shown without the answer waiting
 /// for it. An unconfirmed one is left to the conversation's lane, which
 /// submits it again under its own identity until core accepts or refuses
-/// it, as for a message, before the conversation goes on.
+/// it, as for a message, before the conversation goes on. Once the provider
+/// is stopping, neither starts an attempt after the first: the attempt under
+/// way ends, and a command core then has not answered for is left
+/// unconfirmed.
 async fn submit(
     core: &CoreClient,
     submissions: &Submissions,
@@ -294,6 +297,7 @@ async fn submit(
     // waits for it. Core's attempts then run beside the optional wait for the
     // feedback, which never takes time they need.
     let shown = timeout_at(deadline, reactions.admission(&event));
+    let stopping = turn.stopping();
     let attempts = async {
         let retry = Duration::from_millis(500);
         let mut attempt = 1;
@@ -307,16 +311,23 @@ async fn submit(
                 Ok(Err(failure)) => failure.message,
                 Err(_) => "core did not answer in time".to_owned(),
             };
-            if attempt == SUBMIT_ATTEMPTS || Instant::now() + retry >= deadline {
-                warn!(error = %failure, event_id = %event.event_id, "command submission unconfirmed");
-                return Err((
-                    Feedback::Uncertain,
-                    "Carillon did not confirm that it accepted it; if it did, the answer follows in this conversation.",
-                ));
+            if attempt < SUBMIT_ATTEMPTS && Instant::now() + retry < deadline {
+                warn!(error = %failure, event_id = %event.event_id, "waiting to submit a command");
+                attempt += 1;
+                // However the wait ends, a provider stopping by then starts
+                // no other attempt.
+                stopping
+                    .run_until_cancelled(tokio::time::sleep(retry))
+                    .await;
+                if !stopping.is_cancelled() {
+                    continue;
+                }
             }
-            warn!(error = %failure, event_id = %event.event_id, "waiting to submit a command");
-            attempt += 1;
-            tokio::time::sleep(retry).await;
+            warn!(error = %failure, event_id = %event.event_id, "command submission unconfirmed");
+            return Err((
+                Feedback::Uncertain,
+                "Carillon did not confirm that it accepted it; if it did, the answer follows in this conversation.",
+            ));
         }
     };
     let (_, submitted) = tokio::join!(shown, attempts);
@@ -2328,11 +2339,12 @@ pub(crate) mod tests {
     /// does: a request for an event already being accepted waits for that
     /// and is answered as its duplicate, as core's transaction answers.
     /// Other events are accepted at once. `accepted` records the events in
-    /// the order core commits them.
+    /// the order core commits them, and `posts` counts the submissions.
     fn admitting_server(
         admission: Duration,
         accepted: Arc<tokio::sync::Mutex<Vec<String>>>,
         markers: Arc<AtomicUsize>,
+        posts: Arc<AtomicUsize>,
     ) -> Router {
         use axum::{
             Json,
@@ -2368,6 +2380,7 @@ pub(crate) mod tests {
             .route(
                 "/v1/events",
                 post(move |Json(event): Json<ExternalEvent>| {
+                    posts.fetch_add(1, Ordering::SeqCst);
                     let (mut done, first) = {
                         let mut jobs = jobs
                             .lock()
@@ -2560,11 +2573,20 @@ pub(crate) mod tests {
     }
 
     /// Calls of the conversation of [`admitting_server`], whose core takes
-    /// three seconds to accept command 901, and the reply to its submission,
-    /// due one second in.
-    async fn admitting() -> anyhow::Result<(Preparing, Arc<tokio::sync::Mutex<Vec<String>>>)> {
-        unconfirmed(|accepted, markers| admitting_server(Duration::from_secs(3), accepted, markers))
-            .await
+    /// three seconds to accept command 901, the reply to its submission,
+    /// due one second in, and the count of core's submissions.
+    async fn admitting() -> anyhow::Result<(
+        Preparing,
+        Arc<tokio::sync::Mutex<Vec<String>>>,
+        Arc<AtomicUsize>,
+    )> {
+        let posts = Arc::new(AtomicUsize::new(0));
+        let counted = posts.clone();
+        let (preparing, accepted) = unconfirmed(|accepted, markers| {
+            admitting_server(Duration::from_secs(3), accepted, markers, counted)
+        })
+        .await?;
+        Ok((preparing, accepted, posts))
     }
 
     /// Calls of the conversation served by `serve` as core and Discord, and
@@ -2597,7 +2619,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_command_core_is_still_accepting_keeps_its_conversation_until_core_answers()
     -> anyhow::Result<()> {
-        let (preparing, accepted) = admitting().await?;
+        let (preparing, accepted, _) = admitting().await?;
         // The person's next message arrives while core is still accepting
         // the command.
         let mut next = crate::inbound::tests::hello();
@@ -2613,24 +2635,35 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_stopping_provider_waits_for_a_command_core_is_still_accepting() -> anyhow::Result<()>
     {
-        let (preparing, accepted) = admitting().await?;
+        let (preparing, accepted, posts) = admitting().await?;
+        // The lane asks core again at once, and the provider stops while
+        // that attempt waits for core to accept the command.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while posts.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
         preparing.ingress.stopping.cancel();
-        // The lanes settle only once core has accepted the command.
+        // The lanes settle only once core has answered that attempt, and no
+        // other is made.
         let started = std::time::Instant::now();
         assert_eq!(preparing.settled().await?, ["901"]);
         assert!(started.elapsed() >= Duration::from_secs(1));
         assert_eq!(*accepted.lock().await, ["901"]);
+        assert_eq!(posts.load(Ordering::SeqCst), 2);
         Ok(())
     }
 
     /// Core that cannot take command 901, answering every attempt as
-    /// unavailable, and accepts other events at once, beside a Discord that
-    /// answers at once. `trace` records core's requests and Discord's
-    /// reactions.
+    /// unavailable after `answer`, and accepts other events at once, beside
+    /// a Discord that answers at once. `trace` records core's requests and
+    /// Discord's reactions.
     fn unavailable_server(
         trace: Arc<tokio::sync::Mutex<Vec<String>>>,
         accepted: Arc<tokio::sync::Mutex<Vec<String>>>,
         markers: Arc<AtomicUsize>,
+        answer: Duration,
     ) -> Router {
         use axum::{
             Json,
@@ -2657,6 +2690,7 @@ pub(crate) mod tests {
                         .await
                         .push(format!("event {}", event.event_id));
                     if event.event_id == "901" {
+                        tokio::time::sleep(answer).await;
                         return StatusCode::SERVICE_UNAVAILABLE.into_response();
                     }
                     accepted.lock().await.push(event.event_id.clone());
@@ -2684,8 +2718,10 @@ pub(crate) mod tests {
     -> anyhow::Result<()> {
         let trace = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let served = trace.clone();
-        let (preparing, _) =
-            unconfirmed(|accepted, markers| unavailable_server(served, accepted, markers)).await?;
+        let (preparing, _) = unconfirmed(|accepted, markers| {
+            unavailable_server(served, accepted, markers, Duration::ZERO)
+        })
+        .await?;
         let attempts = async || {
             trace
                 .lock()
@@ -2727,6 +2763,111 @@ pub(crate) mod tests {
                 &format!("PUT {marker}/%E2%9A%A0%EF%B8%8F/@me"),
             ]
         );
+        Ok(())
+    }
+
+    /// A Run click's command in conversation 300 while core cannot take it,
+    /// core taking `answer` to say so for each attempt. Once core has
+    /// received the command's first attempt, message 402 arrives behind it,
+    /// and the provider stops `after` that. Returns the reply and, in order, core's
+    /// requests and Discord's reactions.
+    async fn stopped_while_submitting(
+        answer: Duration,
+        after: Duration,
+    ) -> anyhow::Result<(carillon_discord_commands::contract::HostReply, Vec<String>)> {
+        let trace = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (accepted, markers) = (
+            Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        let router = unavailable_server(trace.clone(), accepted.clone(), markers.clone(), answer);
+        let (calls, preparing) = conversation(router, accepted, markers).await?;
+        let submit = submit_request()?;
+        let reply = tokio::spawn(async move { calls.answer(&submit, calls_until()).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !trace.lock().await.contains(&"event 901".to_owned()) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        // The command holds its conversation's turn; the message waits.
+        let mut next = crate::inbound::tests::hello();
+        next.request.event_id = "402".to_owned();
+        preparing.send.send(next.into()).await?;
+        tokio::time::sleep(after).await;
+        let started = std::time::Instant::now();
+        let (accepted, cancelled) = preparing.stopped(crate::delivery::PROMPT_FEEDBACK).await?;
+        assert!(
+            started.elapsed() < answer + Duration::from_secs(1),
+            "the stop took {:?}",
+            started.elapsed()
+        );
+        assert!(accepted.is_empty());
+        assert_eq!(cancelled, 0);
+        let reply = tokio::time::timeout(Duration::from_secs(2), reply).await??;
+        let trace = trace.lock().await.clone();
+        Ok((reply, trace))
+    }
+
+    /// What a command core never confirmed shows once the provider stopped:
+    /// the reply says it may have been accepted, core got one attempt, the
+    /// message behind it was never prepared, and the marker shows the
+    /// uncertain reaction.
+    fn assert_unconfirmed(
+        reply: &carillon_discord_commands::contract::HostReply,
+        trace: &[String],
+    ) {
+        use carillon_discord_commands::contract::HostReply;
+        assert_eq!(
+            *reply,
+            HostReply::Error("Carillon did not confirm that it accepted it; if it did, the answer follows in this conversation.".to_owned())
+        );
+        assert_eq!(
+            trace
+                .iter()
+                .filter(|request| *request == "event 901")
+                .count(),
+            1,
+            "{trace:?}"
+        );
+        assert!(
+            !trace.iter().any(|request| request.ends_with("402")),
+            "{trace:?}"
+        );
+        let marker = "/api/v10/channels/300/messages/901/reactions";
+        assert_eq!(
+            trace
+                .iter()
+                .filter(|request| request.contains("/reactions/"))
+                .collect::<Vec<_>>(),
+            [
+                &format!("PUT {marker}/%F0%9F%91%80/@me"),
+                &format!("DELETE {marker}/%F0%9F%91%80/@me"),
+                &format!("PUT {marker}/%E2%9A%A0%EF%B8%8F/@me"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_command_stopped_while_waiting_to_try_again_makes_no_other_attempt()
+    -> anyhow::Result<()> {
+        // Core says at once that it cannot take the command; the provider
+        // stops while the submission waits to try again.
+        let (reply, trace) =
+            stopped_while_submitting(Duration::ZERO, Duration::from_millis(100)).await?;
+        assert_unconfirmed(&reply, &trace);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_command_stopped_while_core_answers_its_attempt_makes_no_other() -> anyhow::Result<()>
+    {
+        // The provider stops while core takes half a second to say it
+        // cannot take the command: that attempt ends, and none follows.
+        let (reply, trace) =
+            stopped_while_submitting(Duration::from_millis(500), Duration::from_millis(100))
+                .await?;
+        assert_unconfirmed(&reply, &trace);
         Ok(())
     }
 

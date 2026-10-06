@@ -383,25 +383,24 @@ fn refusal(failure: &InterfaceError) -> Refusal {
     )
 }
 
-/// Submit `event` until core accepts or refuses it. The first attempt is
-/// made even when the provider is `stopping`, as core may already be
-/// accepting an event handed to it, and runs to its end within the client's
-/// own bound. No attempt follows it once the provider is stopping: `None`
-/// then, as core has not answered.
+/// Submit `event` until core accepts or refuses it. No attempt starts once
+/// the provider is `stopping`, whether or not this call made one: `None`
+/// then, as core has not answered. An attempt under way runs to its end,
+/// within the client's own bound.
 pub(crate) async fn submit_event_with_retry(
     core: &CoreClient,
     stopping: &CancellationToken,
     event: &ExternalEvent,
 ) -> Option<Result<EventReceipt, InterfaceError>> {
     loop {
+        // However the wait before it ended, a stop by then starts no attempt.
+        if stopping.is_cancelled() {
+            return None;
+        }
         match core.submit_event(event).await {
             Err(failure) if failure.is_transient() => {
                 warn!(error = %failure.message, event_id = %event.event_id, "waiting to submit Discord event");
-                // However the wait ends, a stop by then ends the submission.
                 stopping.run_until_cancelled(sleep(RETRY)).await;
-                if stopping.is_cancelled() {
-                    return None;
-                }
             }
             outcome => return Some(outcome),
         }

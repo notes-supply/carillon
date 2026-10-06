@@ -22,10 +22,10 @@
 //!
 //! When the provider stops, waiting messages are dropped, as a crash would
 //! drop them, and running ones end their preparation or settle what they
-//! handed to core before the dispatcher returns. A command core has not
-//! answered for gets one attempt, the one under way or its first, and no
-//! other: one core still does not confirm is left unconfirmed rather than
-//! holding the stop.
+//! handed to core before the dispatcher returns. Once it is stopping, a
+//! command's submission, from its first attempt to the lane's settlement,
+//! starts no attempt beyond its first: one core has not confirmed when the
+//! attempt under way ends is left unconfirmed rather than holding the stop.
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
@@ -37,6 +37,7 @@ use tokio::{
     sync::{Semaphore, mpsc, oneshot},
     task::JoinSet,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use super::{Ingress, QueuedMessage, prepare, submit_event_with_retry};
@@ -79,12 +80,20 @@ pub(crate) struct Submission {
 /// once it is dropped, or once the event handed to [`Turn::settle`] is.
 pub(crate) struct Turn {
     unsettled: oneshot::Sender<ExternalEvent>,
+    stopping: CancellationToken,
 }
 
 impl Turn {
-    /// Leaves `event`, which core may still be accepting, to the lane: the
-    /// conversation goes on only once core has accepted or refused it, and
-    /// a stopping provider leaves it unconfirmed if core still has not.
+    /// Cancelled when the provider stops: the submission then starts no
+    /// attempt after its first.
+    pub(crate) const fn stopping(&self) -> &CancellationToken {
+        &self.stopping
+    }
+
+    /// Leaves `event`, which core may still be accepting after the
+    /// submission's own attempts, to the lane: the conversation goes on only
+    /// once core has accepted or refused it, and a stopping provider leaves
+    /// it unconfirmed if core still has not.
     pub(crate) fn settle(self, event: ExternalEvent) {
         let _ = self.unsettled.send(event);
     }
@@ -217,7 +226,10 @@ fn start(
             // takes, as for a submission that stopped waiting, is dropped
             // here, and the lane goes on at once.
             let (unsettled, handed) = oneshot::channel();
-            let turn = Turn { unsettled };
+            let turn = Turn {
+                unsettled,
+                stopping: ingress.stopping.clone(),
+            };
             if let Some(waiting) = head.turn.take() {
                 let _ = waiting.send(turn);
             }
@@ -236,9 +248,10 @@ fn start(
 /// Settles a command core may still be accepting, as an ambiguous
 /// submission of a message is settled: the same event again until core
 /// answers. An acceptance is shown by its delivery, and a refusal on the
-/// command's marker, beside the lane. A stopping provider gets one attempt,
-/// the one under way or the first, but no other, so a command core then has
-/// not answered for is left unconfirmed, and its marker says so.
+/// command's marker, beside the lane. The submission already made its first
+/// attempt, so once the provider is stopping only an attempt under way here
+/// ends, and none starts: a command core then has not answered for is left
+/// unconfirmed, and its marker says so.
 async fn settle(ingress: &Ingress, event: &ExternalEvent) {
     let target = event.feedback_target_id.clone();
     match submit_event_with_retry(&ingress.core, &ingress.stopping, event).await {
