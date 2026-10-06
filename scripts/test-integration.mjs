@@ -1630,13 +1630,6 @@ async function testAttachments() {
   const body = await response.text();
   assert.equal(response.status, 200, body);
   const receipt = JSON.parse(body);
-  const status = await fetch(`http://127.0.0.1:${String(basePort)}/v1/events/attachments-1`, {
-    headers: {
-      authorization: `Bearer ${await credentialValue("discord-private")}`,
-      "x-carillon-provider": "discord-private",
-    },
-  });
-  assert.deepEqual(await status.json(), { status: "accepted", ...receipt, duplicate: true });
   // The interface's staging is its own; accepted files no longer need it.
   await rm(incoming, { recursive: true });
   const inspection = await waitForTurn(receipt.turn_id, "completed", "pending");
@@ -1644,6 +1637,20 @@ async function testAttachments() {
   assert.match(inspection.output, /attachment notes\.txt 5 bytes intact/u);
   assert.equal(inspection.attachments.length, 2);
   assert.match(inspection.attachments[0].path, /^[0-9a-f-]{36}\/0$/u);
+  // Asked about the event again, core names the same accepted turn, in the
+  // state it has now reached.
+  const status = await fetch(`http://127.0.0.1:${String(basePort)}/v1/events/attachments-1`, {
+    headers: {
+      authorization: `Bearer ${await credentialValue("discord-private")}`,
+      "x-carillon-provider": "discord-private",
+    },
+  });
+  assert.deepEqual(await status.json(), {
+    status: "accepted",
+    ...receipt,
+    state: "completed",
+    duplicate: true,
+  });
   const delivery = await waitForDeliveryClaim("attachments-check");
   assert.equal(delivery.turn_id, receipt.turn_id);
   await acknowledgeDelivery(delivery.id, "attachments-check");
