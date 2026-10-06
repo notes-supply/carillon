@@ -102,6 +102,141 @@
         "items": [],
         "partial": false
       }
+    },
+    {
+      "phase": "model",
+      "headline": "Both research tasks are done; summarising.",
+      "running": [
+        {
+          "tool": "bash",
+          "detail": "cargo test -p carillon-core",
+          "started_at": 1790000060,
+          "estimated": true
+        }
+      ],
+      "recent": [
+        {
+          "tool": "read",
+          "detail": "crates/carillon-core/src/db.rs",
+          "ok": true,
+          "duration_ms": 120
+        },
+        {
+          "tool": "edit",
+          "detail": "crates/carillon-core/src/engine.rs",
+          "ok": false
+        }
+      ],
+      "tool_calls": 3,
+      "work": {
+        "items": [
+          {
+            "id": "node:child:2",
+            "kind": "delegation",
+            "label": "Check the release notes",
+            "state": "running",
+            "actor": "claude-haiku-4-5",
+            "started_at": 1790000030
+          },
+          {
+            "id": "node:child:1",
+            "kind": "delegation",
+            "label": "Read the storage code",
+            "state": "succeeded",
+            "actor": "claude-sonnet-5",
+            "started_at": 1790000000,
+            "duration_ms": 95000
+          }
+        ],
+        "partial": false
+      },
+      "notes": [
+        "The schema change needs a column for the origin, so observations can name the turn their work began with.",
+        "Checking whether the delivery query can derive the continuation from the observation's event identity."
+      ],
+      "agent": {
+        "model": "claude-sonnet-5",
+        "effort": "high",
+        "context": {
+          "used": 45000,
+          "window": 200000
+        }
+      }
+    },
+    {
+      "phase": "tools",
+      "running": [],
+      "recent": [
+        {
+          "tool": "bash",
+          "detail": "ls",
+          "ok": true,
+          "duration_ms": 40
+        }
+      ],
+      "tool_calls": 1,
+      "notes": ["Listing the workspace before choosing a file."],
+      "agent": {
+        "model": "claude-opus-5-5",
+        "effort": "medium",
+        "context": {
+          "used": 12000
+        }
+      }
+    },
+    {
+      "phase": "model",
+      "running": [
+        {
+          "tool": "bash",
+          "detail": "make release",
+          "started_at": 1790000100
+        }
+      ],
+      "recent": [],
+      "tool_calls": 31,
+      "work": {
+        "items": [
+          {
+            "id": "node:child:7",
+            "kind": "delegation",
+            "label": "Audit the release notes",
+            "state": "running",
+            "started_at": 1790000050
+          }
+        ],
+        "partial": false,
+        "omitted": 9
+      },
+      "partial": true
+    },
+    {
+      "phase": "tools",
+      "running": [],
+      "recent": [],
+      "tool_calls": 1,
+      "work": {
+        "items": [
+          {
+            "id": "extension:child:1",
+            "kind": "delegation",
+            "label": "Summarise the log",
+            "state": "running",
+            "started_at": 1790000200,
+            "estimated": true
+          },
+          {
+            "id": "extension:child:0",
+            "kind": "delegation",
+            "label": "Read the log",
+            "state": "succeeded",
+            "started_at": 1790000100,
+            "estimated": true,
+            "duration_ms": 61000
+          }
+        ],
+        "partial": false
+      }
     }
   ],
   "invalid_activities": [
@@ -342,6 +477,108 @@
       "recent": [],
       "tool_calls": 0,
       "work": null
+    },
+    {
+      "phase": "model",
+      "running": [],
+      "recent": [],
+      "tool_calls": 0,
+      "notes": [
+        "note 0",
+        "note 1",
+        "note 2",
+        "note 3",
+        "note 4",
+        "note 5",
+        "note 6",
+        "note 7",
+        "note 8"
+      ]
+    },
+    {
+      "phase": "model",
+      "running": [],
+      "recent": [],
+      "tool_calls": 0,
+      "notes": [""]
+    },
+    {
+      "phase": "model",
+      "running": [],
+      "recent": [],
+      "tool_calls": 0,
+      "notes": [
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      ]
+    },
+    {
+      "phase": "model",
+      "running": [],
+      "recent": [
+        {
+          "tool": "bash",
+          "ok": true,
+          "duration_ms": -1
+        }
+      ],
+      "tool_calls": 0
+    },
+    {
+      "phase": "model",
+      "running": [
+        {
+          "tool": "bash",
+          "started_at": 1790000000,
+          "estimated": "yes"
+        }
+      ],
+      "recent": [],
+      "tool_calls": 0
+    },
+    {
+      "phase": "model",
+      "running": [],
+      "recent": [],
+      "tool_calls": 0,
+      "agent": {
+        "context": {
+          "used": -5
+        }
+      }
+    },
+    {
+      "phase": "model",
+      "running": [],
+      "recent": [],
+      "tool_calls": 0,
+      "agent": {
+        "model": ""
+      }
+    },
+    {
+      "phase": "model",
+      "running": [],
+      "recent": [],
+      "tool_calls": 0,
+      "partial": "yes"
+    },
+    {
+      "phase": "model",
+      "running": [],
+      "recent": [],
+      "tool_calls": 0,
+      "work": {
+        "items": [
+          {
+            "id": "x",
+            "kind": "task",
+            "label": "x",
+            "state": "running",
+            "estimated": "yes"
+          }
+        ],
+        "partial": false
+      }
     }
   ]
 }

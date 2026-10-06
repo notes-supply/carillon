@@ -105,12 +105,16 @@ export const RunningToolSchema = Type.Object({
   detail: Type.Optional(Type.String({ minLength: 1 })),
   /** Unix seconds. */
   started_at: Type.Integer(),
+  /** `started_at` is when the runtime first saw the call: the engine gave no start of its own. */
+  estimated: Type.Optional(Type.Boolean()),
 });
 export type RunningTool = Static<typeof RunningToolSchema>;
 export const FinishedToolSchema = Type.Object({
   tool: Type.String({ minLength: 1 }),
   detail: Type.Optional(Type.String({ minLength: 1 })),
   ok: Type.Boolean(),
+  /** How long the call ran, when the engine reported its start and end. */
+  duration_ms: Type.Optional(Type.Integer({ minimum: 0 })),
 });
 export type FinishedTool = Static<typeof FinishedToolSchema>;
 /** The most work items one snapshot lists. */
@@ -147,6 +151,10 @@ export const WorkItemSchema = Type.Object({
   actor: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
   /** Unix seconds. */
   started_at: Type.Optional(Type.Integer()),
+  /** `started_at` is when the runtime first saw the work running: the engine gave no start of its own. */
+  estimated: Type.Optional(Type.Boolean()),
+  /** How long finished work ran, when the engine reported its start and end. */
+  duration_ms: Type.Optional(Type.Integer({ minimum: 0 })),
 });
 export type WorkItem = Static<typeof WorkItemSchema>;
 /**
@@ -160,6 +168,29 @@ export const WorkSummarySchema = Type.Object({
   omitted: Type.Optional(Type.Integer({ minimum: 1 })),
 });
 export type WorkSummary = Static<typeof WorkSummarySchema>;
+/** The most reasoning notes one snapshot carries. */
+export const NOTE_LIMIT = 8;
+/** The longest note, in UTF-16 code units. */
+export const NOTE_LENGTH = 500;
+/** The most bytes a turn's final report takes, serialized as JSON. */
+export const ACTIVITY_REPORT_LIMIT = 16 * 1024;
+/** How much of its context window an agent's conversation fills, as the engine last estimated it. */
+export const ContextUseSchema = Type.Object({
+  /** Tokens the conversation occupies. */
+  used: Type.Integer({ minimum: 0 }),
+  /** The window's size, when the engine says. */
+  window: Type.Optional(Type.Integer({ minimum: 0 })),
+});
+export type ContextUse = Static<typeof ContextUseSchema>;
+/** What a native engine reports about an agent; each part is absent when the engine does not say. */
+export const AgentInfoSchema = Type.Object({
+  /** The model, as the engine names it. */
+  model: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
+  /** The reasoning effort or thinking level, as the engine names it. */
+  effort: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
+  context: Type.Optional(ContextUseSchema),
+});
+export type AgentInfo = Static<typeof AgentInfoSchema>;
 export const TurnActivitySchema = Type.Object({
   phase: ActivityPhaseSchema,
   /** The model's own latest public commentary, when it wrote any. */
@@ -171,6 +202,22 @@ export const TurnActivitySchema = Type.Object({
   tool_calls: Type.Integer({ minimum: 0 }),
   /** Delegated and transferred work, when the runtime observes any. */
   work: Type.Optional(WorkSummarySchema),
+  /**
+   * What the native provider published about its reasoning, as bounded
+   * excerpts, oldest first: never the answer, and never reasoning the
+   * provider did not expose.
+   */
+  notes: Type.Optional(
+    Type.Array(Type.String({ minLength: 1, maxLength: NOTE_LENGTH }), { maxItems: NOTE_LIMIT }),
+  ),
+  /** What the native engine reports about the agent running the turn. */
+  agent: Type.Optional(AgentInfoSchema),
+  /**
+   * Part of this report was left out to keep it within
+   * {@link ACTIVITY_REPORT_LIMIT}: what it shows is still what the runtime
+   * observed, but not all of it.
+   */
+  partial: Type.Optional(Type.Boolean()),
 });
 export type TurnActivity = Static<typeof TurnActivitySchema>;
 

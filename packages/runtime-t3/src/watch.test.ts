@@ -2513,3 +2513,164 @@ it("takes only a notification source T3 defines as a wake, and attributes nothin
     });
   }
 });
+
+it("shows each child once, whichever origin T3 gives it, beside its item and roster entry", () => {
+  const watch = watchTurn("message-1", "/workspace");
+  watch.apply(
+    snapshot({
+      runs: [run("running")],
+      providerThreads: [
+        {
+          id: "provider-thread",
+          providerSessionId: "session",
+          pendingBackgroundTasks: [
+            { taskId: "bg-native", kind: "subagent", childThreadId: "thread:native" },
+          ],
+        },
+      ],
+      subagents: [
+        // The provider's own child, with its tool item and its roster entry.
+        task("native", "running", "run-1", { origin: "provider_native", title: "Explore" }),
+        // T3's own delegated task, with its tool item.
+        task("owned", "running", "run-1", { title: "Research" }),
+      ],
+      turnItems: [
+        item("subagent", "run-1", { id: "item-native", subagentId: "native" }, "running"),
+        item("subagent", "run-1", { id: "item-owned", subagentId: "owned" }, "running"),
+      ],
+    }),
+  );
+  const activity = watch.activity();
+  expect(activity.running).toEqual([]);
+  // Each child once, as its delegation, beside the report T3's own task owes.
+  expect(activity.work?.items.map((work) => [work.id, work.kind, work.label])).toEqual([
+    ["native", "delegation", "Explore"],
+    ["owned", "delegation", "Research"],
+    ["report:message-1", "task", "report back to this conversation"],
+  ]);
+  // Both items still count as the parent's calls.
+  expect(activity.tool_calls).toBe(2);
+});
+
+it("times calls from T3's own dates, and estimates a stable start only when T3 gives none", () => {
+  const watch = watchTurn("message-1", "/workspace");
+  const undated = (updatedAt: string) =>
+    item(
+      "command_execution",
+      "run-1",
+      { id: "undated", input: "make", startedAt: null, updatedAt },
+      "running",
+    );
+  watch.apply(
+    snapshot({
+      runs: [run("running")],
+      turnItems: [
+        undated("2026-10-04T08:00:05Z"),
+        item("command_execution", "run-1", { id: "dated", input: "ls" }, "running"),
+        item("file_search", "run-1", {
+          id: "done",
+          pattern: "fn main",
+          startedAt: "2026-10-04T08:00:00Z",
+          completedAt: "2026-10-04T08:02:15.500Z",
+        }),
+      ],
+    }),
+  );
+  const first = watch.activity();
+  const estimate = first.running.find((call) => call.detail === "make");
+  expect(estimate?.estimated).toBe(true);
+  // T3's own start is used as given, and never marked as an estimate.
+  expect(first.running.find((call) => call.detail === "ls")).toEqual({
+    tool: "bash",
+    detail: "ls",
+    started_at: Date.parse("2026-10-04T08:00:00Z") / 1000,
+  });
+  expect(first.recent).toEqual([
+    { tool: "grep", detail: '"fn main"', ok: true, duration_ms: 135_500 },
+  ]);
+  // Later updates and a resumed snapshot do not move the estimated start.
+  watch.apply(event(2, "turn-item.updated", undated("2026-10-04T08:09:00Z")));
+  watch.resubscribing();
+  watch.apply(
+    snapshot({ runs: [run("running")], turnItems: [undated("2026-10-04T08:10:00Z")] }, 3),
+  );
+  expect(watch.activity().running.find((call) => call.detail === "make")).toEqual(estimate);
+  // A call that ends without both dates has no duration.
+  watch.apply(
+    event(4, "turn-item.updated", { ...undated("2026-10-04T08:11:00Z"), status: "completed" }),
+  );
+  expect(watch.activity().recent.at(-1)).toEqual({ tool: "bash", detail: "make", ok: true });
+});
+
+it("keeps the reasoning T3 publishes for the turn's runs as notes, across snapshots, and none of other runs", () => {
+  const watch = watchTurn("message-1", "/workspace");
+  const reasoning = (id: string, runId: string, text: string, status = "completed") =>
+    item("reasoning", runId, { id, text }, status);
+  watch.apply(
+    snapshot({
+      runs: [run("running"), run("running", "message-0", 0, "run-0")],
+      turnItems: [
+        reasoning("thought-1", "run-1", "First, read the storage code.", "running"),
+        reasoning("other", "run-0", "Another message's reasoning."),
+      ],
+    }),
+  );
+  expect(watch.activity().notes).toEqual(["First, read the storage code."]);
+  // Streamed text replaces its own note in place; a new item adds one.
+  watch.apply(
+    event(
+      2,
+      "turn-item.updated",
+      reasoning("thought-1", "run-1", "First, read the storage code\nand its tests."),
+    ),
+  );
+  watch.apply(
+    event(3, "turn-item.updated", reasoning("thought-2", "run-1", "Then compare the views.")),
+  );
+  const notes = ["First, read the storage code and its tests.", "Then compare the views."];
+  expect(watch.activity().notes).toEqual(notes);
+  // A bounded resumed snapshot that leaves them out does not forget them.
+  watch.resubscribing();
+  watch.apply(snapshot({ runs: [run("running")] }, 9));
+  expect(watch.activity().notes).toEqual(notes);
+  expect(watch.outcome()).toBeUndefined();
+});
+
+it("says which model, effort and context the turn's run uses, as T3 records them", () => {
+  const watch = watchTurn("message-1", "/workspace");
+  const selected = (model: string, options: { id: string; value: string | boolean }[]) => ({
+    ...run("running"),
+    modelSelection: { instanceId: "claudeAgent", model, options },
+  });
+  watch.apply(
+    snapshot({
+      runs: [
+        selected("claude-sonnet-5", [
+          { id: "effort", value: "high" },
+          { id: "fastMode", value: false },
+        ]),
+      ],
+      providerThreads: [
+        {
+          id: "provider-thread",
+          providerSessionId: "session",
+          contextUsage: { usedTokens: 45_000, maxTokens: 200_000 },
+        },
+      ],
+    }),
+  );
+  expect(watch.activity().agent).toEqual({
+    model: "claude-sonnet-5",
+    effort: "high",
+    context: { used: 45_000, window: 200_000 },
+  });
+  // Codex names its effort differently; a run without usage reports none.
+  watch.apply(
+    event(2, "provider-thread.updated", { id: "provider-thread", providerSessionId: "session" }),
+  );
+  watch.apply(
+    event(3, "run.updated", selected("gpt-6", [{ id: "reasoningEffort", value: "xhigh" }])),
+  );
+  expect(watch.activity().agent).toEqual({ model: "gpt-6", effort: "xhigh" });
+  expect(Check(TurnActivitySchema, watch.activity())).toBe(true);
+});

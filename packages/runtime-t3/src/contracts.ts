@@ -35,6 +35,18 @@ export const RunStatusSchema = Type.Union([
 ]);
 export type RunStatus = Static<typeof RunStatusSchema>;
 
+/** A native model selection: a provider instance's model, with option values by ID. */
+export const NativeSelectionSchema = Type.Object({
+  instanceId: Id,
+  model: Id,
+  options: Type.Optional(
+    Type.Array(
+      Type.Object({ id: Id, value: Type.Union([Type.String({ minLength: 1 }), Type.Boolean()]) }),
+    ),
+  ),
+});
+export type NativeSelection = Static<typeof NativeSelectionSchema>;
+
 export const RunSchema = Type.Object({
   id: Id,
   threadId: Id,
@@ -42,6 +54,8 @@ export const RunSchema = Type.Object({
   userMessageId: Id,
   providerThreadId: Nullable(Id),
   status: RunStatusSchema,
+  /** The selection the run runs with, which a later change of the thread's does not alter. */
+  modelSelection: Type.Optional(NativeSelectionSchema),
   /**
    * The results of tasks this run delegated: T3 names the message of the
    * continuation it offers next (`delivery`), before it starts that run.
@@ -81,6 +95,16 @@ export const ProviderThreadSchema = Type.Object({
   id: Id,
   providerSessionId: Nullable(Id),
   pendingBackgroundTasks: Type.Optional(Type.Array(BackgroundTaskSchema)),
+  /** The provider's latest report of how much of the context window the conversation fills. */
+  contextUsage: Type.Optional(
+    Type.Union([
+      Type.Object({
+        usedTokens: Type.Integer({ minimum: 0 }),
+        maxTokens: Type.Optional(Type.Integer({ minimum: 1 })),
+      }),
+      Type.Null(),
+    ]),
+  ),
 });
 export type ProviderThread = Static<typeof ProviderThreadSchema>;
 
@@ -134,6 +158,7 @@ export const SubagentSchema = Type.Object({
   model: Nullable(Type.String()),
   childThreadId: Nullable(Id),
   startedAt: Nullable(Type.String()),
+  completedAt: Type.Optional(Nullable(Type.String())),
   /** Whether T3 offers the parent a continuation with the result. */
   completionWake: Type.Optional(Type.String()),
   /**
@@ -253,6 +278,8 @@ export const TurnItemSchemas = {
     retry: Type.Optional(Type.Unknown()),
   }),
   compaction: Type.Object({ ...itemBase, type: Type.Literal("compaction") }),
+  /** Reasoning the provider published for display, such as Claude's summarised thinking. */
+  reasoning: Type.Object({ ...itemBase, type: Type.Literal("reasoning"), text: Type.String() }),
 } as const;
 
 export const TurnItemSchema = Type.Union([
@@ -266,6 +293,7 @@ export const TurnItemSchema = Type.Union([
   TurnItemSchemas.approval_request,
   TurnItemSchemas.error,
   TurnItemSchemas.compaction,
+  TurnItemSchemas.reasoning,
 ]);
 export type TurnItem = Static<typeof TurnItemSchema>;
 export type TurnItemOf<K extends TurnItem["type"]> = Extract<TurnItem, { type: K }>;
@@ -309,18 +337,6 @@ export const UserMessageOpeningSchema = Type.Object({
 });
 
 /** A thread snapshot. Timeline items are checked one by one as they are folded. */
-/** A native model selection: a provider instance's model, with option values by ID. */
-export const NativeSelectionSchema = Type.Object({
-  instanceId: Id,
-  model: Id,
-  options: Type.Optional(
-    Type.Array(
-      Type.Object({ id: Id, value: Type.Union([Type.String({ minLength: 1 }), Type.Boolean()]) }),
-    ),
-  ),
-});
-export type NativeSelection = Static<typeof NativeSelectionSchema>;
-
 export const ProjectionSchema = Type.Object({
   /** The thread's own record; its selection is what every run of the thread uses. */
   thread: Type.Object({ id: Id, modelSelection: NativeSelectionSchema }),

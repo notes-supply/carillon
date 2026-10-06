@@ -10,7 +10,13 @@ import {
   type ModelQuery,
   type ModelUpdate,
 } from "@carillon/protocol";
-import { diagnostic, displayableExplanation, ExplainedFailure, RuntimeClosed } from "./failure.ts";
+import {
+  diagnostic,
+  displayableExplanation,
+  ExplainedFailure,
+  reportOf,
+  RuntimeClosed,
+} from "./failure.ts";
 import type { RuntimeOperations, TurnRequest } from "./operations.ts";
 
 interface RuntimeServerOptions {
@@ -40,11 +46,13 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
       }
       if (!explained || failure.status >= 500) logFailure(request, failure);
       const explanation = explained ? displayableExplanation(failure.message) : undefined;
-      writeJson(
-        response,
-        explained ? failure.status : 500,
-        explanation === undefined ? {} : { error: explanation },
-      );
+      // A failed turn's report is bounded display data, not diagnostic
+      // text: it goes whether or not any explanation can be shown.
+      const activity = reportOf(failure);
+      writeJson(response, explained ? failure.status : 500, {
+        ...(explanation === undefined ? {} : { error: explanation }),
+        ...(activity === undefined ? {} : { activity }),
+      });
     });
   });
   async function route(request: IncomingMessage, response: ServerResponse): Promise<void> {

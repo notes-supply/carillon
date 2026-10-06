@@ -15,7 +15,8 @@ use axum::{
     response::{IntoResponse as _, Response},
 };
 use carillon_protocol::model::{
-    ActiveTurn, ActivityPhase, DeliveryOutcome, FinishedTool, RunningTool, TurnActivity, TurnState,
+    ActiveTurn, ActivityPhase, Delivery, DeliveryOutcome, FinishedTool, Origin, RunningTool,
+    TurnActivity, TurnState, WorkItem, WorkKind, WorkState, WorkSummary,
 };
 use serde_json::{Value, json};
 use std::{
@@ -39,8 +40,21 @@ impl Seen {
         self.method == method && self.path == path
     }
 
-    fn content(&self) -> &str {
-        self.body["content"].as_str().unwrap_or_default()
+    /// What the message shows: its card's description and each field under
+    /// its name, or its text when it has no card.
+    fn content(&self) -> String {
+        let Some(embed) = self.body["embeds"].get(0) else {
+            return self.body["content"].as_str().unwrap_or_default().to_owned();
+        };
+        let mut parts = vec![embed["description"].as_str().unwrap_or_default().to_owned()];
+        for field in embed["fields"].as_array().into_iter().flatten() {
+            parts.push(format!(
+                "{}:\n{}",
+                field["name"].as_str().unwrap_or_default(),
+                field["value"].as_str().unwrap_or_default()
+            ));
+        }
+        parts.join("\n")
     }
 }
 
@@ -154,6 +168,34 @@ impl Substitute {
         .with_context(|| format!("expected {count} {method} {prefix}: {:#?}", self.seen()))
     }
 
+    /// Waits until a request to `prefix` shows `text`, returning it.
+    async fn wait_for_text(
+        &self,
+        method: &Method,
+        prefix: &str,
+        text: &str,
+    ) -> anyhow::Result<Seen> {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if let Some(seen) = self
+                    .matching(method, prefix)
+                    .into_iter()
+                    .find(|seen| seen.content().contains(text))
+                {
+                    return seen;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .with_context(|| {
+            format!(
+                "expected {method} {prefix} showing {text}: {:#?}",
+                self.seen()
+            )
+        })
+    }
+
     fn http(&self, limiter: bool) -> Arc<twilight_http::Client> {
         let builder = twilight_http::Client::builder()
             .token("test-only".to_owned())
@@ -202,7 +244,8 @@ fn answer(request: &Seen, reply: Reply, creates: usize) -> Response {
             "id": id,
             "channel_id": request.path.split('/').nth(2).unwrap_or("300"),
             "author": {"id": "201", "username": "carillon", "discriminator": "0"},
-            "content": request.body["content"],
+            // A card has no text: Discord answers with an empty one.
+            "content": request.body["content"].as_str().unwrap_or_default(),
             "attachments": [],
             "embeds": [],
             "mention_everyone": false,
@@ -275,8 +318,20 @@ fn now() -> i64 {
         .unwrap_or_default()
 }
 
+/// A running message turn, the origin of its own job.
 fn running(
     turn_id: &str,
+    channel: &str,
+    accepted_at: i64,
+    activity: Option<TurnActivity>,
+) -> ActiveTurn {
+    continuing(turn_id, turn_id, channel, accepted_at, activity)
+}
+
+/// A running turn of the job `origin` began, such as an observation.
+fn continuing(
+    turn_id: &str,
+    origin: &str,
     channel: &str,
     accepted_at: i64,
     activity: Option<TurnActivity>,
@@ -286,6 +341,10 @@ fn running(
         state: TurnState::Running,
         target_id: channel.to_owned(),
         accepted_at,
+        origin: Origin {
+            turn_id: origin.to_owned(),
+            accepted_at,
+        },
         activity,
     }
 }
@@ -308,6 +367,7 @@ fn tools(
                 tool: (*tool).to_owned(),
                 detail: Some((*detail).to_owned()),
                 started_at: 1_790_000_000,
+                estimated: false,
             })
             .collect(),
         recent: recent
@@ -316,11 +376,35 @@ fn tools(
                 tool: (*tool).to_owned(),
                 detail: Some((*detail).to_owned()),
                 ok: *ok,
+                duration_ms: None,
             })
             .collect(),
         tool_calls: u32::try_from(running.len() + recent.len()).unwrap_or_default(),
         work: None,
+        notes: Vec::new(),
+        agent: None,
+        partial: false,
     }
+}
+
+/// `activity` with one delegated child in `state`.
+fn delegating(mut activity: TurnActivity, state: WorkState) -> TurnActivity {
+    activity.work = Some(WorkSummary {
+        items: vec![WorkItem {
+            id: "child".to_owned(),
+            kind: WorkKind::Delegation,
+            label: "research".to_owned(),
+            state,
+            parent: None,
+            actor: None,
+            started_at: None,
+            estimated: false,
+            duration_ms: (state == WorkState::Succeeded).then_some(61_000),
+        }],
+        partial: false,
+        omitted: None,
+    });
+    activity
 }
 
 fn config(typing: bool) -> DiscordConfig {
@@ -329,19 +413,47 @@ fn config(typing: bool) -> DiscordConfig {
     config
 }
 
+/// The delivery of a turn of the job `origin`, finished now.
+fn delivered(turn_id: &str, origin: &str, turn_state: TurnState) -> Delivery {
+    Delivery {
+        turn_state,
+        id: 1,
+        turn_id: turn_id.to_owned(),
+        target_id: "300".to_owned(),
+        feedback_target_id: "300:400".to_owned(),
+        content: "answer".to_owned(),
+        origin: Origin {
+            turn_id: origin.to_owned(),
+            accepted_at: now() - 60,
+        },
+        finished_at: now(),
+        activity: None,
+        continued_by: None,
+    }
+}
+
+fn report(
+    outcomes: &mpsc::UnboundedSender<Outcome>,
+    delivery: Delivery,
+    outcome: DeliveryOutcome,
+) -> anyhow::Result<()> {
+    outcomes
+        .send(Outcome {
+            delivery,
+            result: outcome,
+            hosted: None,
+        })
+        .map_err(|_| anyhow::anyhow!("monitor stopped"))
+}
+
+/// The last outcome of a message turn's job, without a report.
 fn settle(
     outcomes: &mpsc::UnboundedSender<Outcome>,
     turn_id: &str,
     turn_state: TurnState,
     delivery: DeliveryOutcome,
 ) -> anyhow::Result<()> {
-    outcomes
-        .send(Outcome {
-            turn_id: turn_id.to_owned(),
-            turn_state,
-            delivery,
-        })
-        .map_err(|_| anyhow::anyhow!("monitor stopped"))
+    report(outcomes, delivered(turn_id, turn_id, turn_state), delivery)
 }
 
 fn recorded(path: &PathBuf) -> anyhow::Result<Value> {
@@ -360,8 +472,23 @@ async fn recorded_soon(path: &PathBuf, turn: &str, card: &Value) -> anyhow::Resu
     Ok(())
 }
 
+/// Cards with configured custom and empty markers.
+fn with_markers() -> anyhow::Result<DiscordConfig> {
+    let mut configured = config(false);
+    configured.activity_markers = toml::from_str(
+        r#"
+working = "<a:working:123>"
+running = "<:tool:456>"
+succeeded = "✔"
+failed = ""
+finishing = "◇"
+"#,
+    )?;
+    Ok(configured)
+}
+
 #[tokio::test]
-async fn a_slow_turn_gets_one_delayed_card_that_follows_it_and_is_removed_after_delivery()
+async fn a_slow_turn_gets_one_delayed_card_that_follows_it_and_is_kept_as_its_summary()
 -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let records = directory.path().join("activity-cards.json");
@@ -378,16 +505,7 @@ async fn a_slow_turn_gets_one_delayed_card_that_follows_it_and_is_removed_after_
     ]);
     let started = Instant::now();
     // Exercise configured inline presentation through the real outbound requests.
-    let mut configured = config(false);
-    configured.activity_markers = toml::from_str(
-        r#"
-working = "<a:working:123>"
-running = "<:tool:456>"
-succeeded = "✔"
-failed = ""
-finishing = "◇"
-"#,
-    )?;
+    let configured = with_markers()?;
     let (outcomes, monitor) = discord.monitor(discord.http(false), configured, &records);
     // A turn that ends before the appearance delay never shows a card.
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -407,7 +525,11 @@ finishing = "◇"
     assert!(text.starts_with(&format!(
         "<a:working:123> Working · started <t:{accepted}:R>"
     )));
-    assert!(text.contains("> @everyone: checking <@200>'s tests"));
+    // What the model wrote cannot mention, format or link anything.
+    assert!(
+        text.contains(r"> \@everyone\: checking \<\@200\>'s tests"),
+        "{text}"
+    );
     assert!(
         text.contains("<:tool:456> bash `cargo test -p carillon-discord …` · <t:1790000000:R>")
     );
@@ -454,13 +576,21 @@ finishing = "◇"
     assert!(!text.contains("cargo build"));
 
     settle(&outcomes, "slow", completed, delivered)?;
-    let deleted = discord
-        .wait_for(&Method::DELETE, "/channels/300/messages/901", 1)
+    // The card stays, as the job's summary: what it did, and how long it took.
+    let kept = discord
+        .wait_for(&Method::PATCH, "/channels/300/messages/901", 3)
         .await?;
+    let text = kept[2].content();
+    assert!(
+        text.starts_with("✔ Done · answered ") && text.contains("after the request"),
+        "{text}"
+    );
+    assert!(text.contains("✔ read `src/lib.rs`") && !text.contains("cargo build"));
     tokio::time::sleep(Duration::from_millis(3_500)).await;
     let seen = discord.seen();
     assert!(
-        seen.iter().all(|request| request.at <= deleted[0].at),
+        seen.iter()
+            .all(|request| request.at <= kept[2].at && request.method != Method::DELETE),
         "{seen:#?}"
     );
     assert_eq!(discord.matching(&Method::POST, "/channels").len(), 1);
@@ -526,7 +656,7 @@ async fn ended_turns_keep_an_honest_card_and_stale_reads_cannot_revive_them() ->
         finals
             .iter()
             .find(|seen| seen.path.starts_with(&format!("/channels/{channel}/")))
-            .map(|seen| seen.content().to_owned())
+            .map(Seen::content)
             .unwrap_or_default()
     };
     assert!(text("300").contains("reply may not have been delivered"));
@@ -636,82 +766,74 @@ async fn uncertain_or_refused_cards_are_never_created_or_edited_again() -> anyho
 }
 
 #[tokio::test]
-async fn a_restart_removes_recorded_cards_before_any_replacement_and_keeps_uncleared_ones()
--> anyhow::Result<()> {
+async fn a_restart_goes_on_with_recorded_cards_and_says_what_it_does_not_know() -> anyhow::Result<()>
+{
     let directory = tempfile::tempdir()?;
     let records = directory.path().join("activity-cards.json");
     std::fs::write(
         &records,
         serde_json::to_vec(&json!({
-            "replaced": {"channel_id": "300", "message_id": "555"},
-            "finished": {"channel_id": "301", "message_id": "556"},
-            "unanswered": {"channel_id": "302", "message_id": "557"},
-            "forbidden": {"channel_id": "303", "message_id": "558"},
+            "running": {"channel_id": "300", "message_id": "555"},
+            "ended": {"channel_id": "301", "message_id": "556"},
+            "unnamed": {"channel_id": "302"},
+            "answered": {"channel_id": "303", "message_id": "557", "hosted": true},
         }))?,
     )?;
-    let discord = Substitute::start(Arc::new(|seen, _| match seen.path.as_str() {
-        "/channels/301/messages/556" => Reply::Status(404),
-        "/channels/302/messages/557" => Reply::Status(500),
-        "/channels/303/messages/558" => Reply::Status(403),
-        _ => Reply::Success,
-    }))
-    .await?;
+    let discord = Substitute::start(succeed()).await?;
     let long_ago = now() - 60;
-    let activity = Some(tools(None, &[("bash", "sleep 60")], &[]));
-    discord.list(
-        [
-            ("replaced", "300"),
-            ("unanswered", "302"),
-            ("forbidden", "303"),
-        ]
-        .iter()
-        .map(|(turn, channel)| running(turn, channel, long_ago, activity.clone()))
-        .collect(),
+    discord.list(vec![running(
+        "running",
+        "300",
+        long_ago,
+        Some(tools(None, &[("bash", "sleep 60")], &[])),
+    )]);
+    let (outcomes, monitor) = discord.monitor(discord.http(false), config(false), &records);
+    // A job still running is shown on its card as it was, never on another.
+    let live = discord
+        .wait_for(&Method::PATCH, "/channels/300/messages/555", 1)
+        .await?;
+    assert!(live[0].content().contains("↳ bash `sleep 60`"));
+    // A job nothing is heard of says so, rather than claiming work.
+    let unknown = discord
+        .wait_for(&Method::PATCH, "/channels/301/messages/556", 1)
+        .await?;
+    assert!(
+        unknown[0]
+            .content()
+            .starts_with("⚠️ Carillon restarted while this was in progress")
     );
-    let (_outcomes, monitor) = discord.monitor(discord.http(false), config(false), &records);
-    let replacement = discord
-        .wait_for(&Method::POST, "/channels/300/messages", 1)
+    let answer = discord
+        .wait_for(&Method::PATCH, "/channels/303/messages/557", 1)
         .await?;
-    let removed = discord
-        .wait_for(&Method::DELETE, "/channels/300/messages/555", 1)
+    assert!(
+        answer[0].body.get("content").is_none(),
+        "an answer's text is left alone"
+    );
+    // Its final report survives the restart, in the delivery that brings it.
+    let mut ended = delivered("ended", "ended", TurnState::Completed);
+    ended.activity = Some(tools(None, &[], &[("read", "notes.md", true)]));
+    report(&outcomes, ended, DeliveryOutcome::Delivered)?;
+    let summary = discord
+        .wait_for(&Method::PATCH, "/channels/301/messages/556", 2)
         .await?;
-    assert!(removed[0].at < replacement[0].at);
-    discord
-        .wait_for(&Method::DELETE, "/channels/302/messages/557", 3)
-        .await?;
+    let text = summary[1].content();
+    assert!(
+        text.starts_with("✓ Done · answered 1m 0s after the request"),
+        "{text}"
+    );
+    assert!(text.contains("✓ read `notes.md`"));
     tokio::time::sleep(Duration::from_millis(3_500)).await;
-    assert_eq!(
-        discord
-            .matching(&Method::DELETE, "/channels/301/messages/556")
-            .len(),
-        1
+    // Nothing recorded was removed or replaced.
+    let seen = discord.seen();
+    assert!(
+        seen.iter().all(|request| request.method == Method::PATCH),
+        "{seen:#?}"
     );
-    assert_eq!(
-        discord
-            .matching(&Method::DELETE, "/channels/302/messages/557")
-            .len(),
-        3
-    );
-    assert_eq!(
-        discord
-            .matching(&Method::DELETE, "/channels/303/messages/558")
-            .len(),
-        1
-    );
-    // A card whose removal was not established is never replaced.
-    for channel in ["301", "302", "303"] {
-        assert!(
-            discord
-                .matching(&Method::POST, &format!("/channels/{channel}"))
-                .is_empty()
-        );
-    }
     assert_eq!(
         recorded(&records)?,
         json!({
-            "replaced": {"channel_id": "300", "message_id": "901"},
-            "unanswered": {"channel_id": "302", "message_id": "557"},
-            "forbidden": {"channel_id": "303", "message_id": "558"},
+            "running": {"channel_id": "300", "message_id": "555"},
+            "answered": {"channel_id": "303", "message_id": "557", "hosted": true},
         })
     );
     monitor.abort();
@@ -866,11 +988,17 @@ async fn progress_stuck_behind_the_limiter_yields_to_outcomes_and_answers() -> a
 
     // An answer to the same channel, on its own route, is not held by that edit.
     let started = Instant::now();
-    crate::delivery::send_discord_message(&http, twilight_model::id::Id::new(300), "the answer")
-        .await?;
+    crate::delivery::send_discord_message(
+        &http,
+        twilight_model::id::Id::new(300),
+        "the answer",
+        None,
+    )
+    .await?;
     assert!(started.elapsed() < Duration::from_secs(1));
 
-    // Both outcomes are acted on promptly: the waiting edit is dropped unsent.
+    // Both outcomes are acted on promptly: the waiting edit is dropped
+    // unsent, and the other card shows its summary at once.
     settle(
         &outcomes,
         "blocked",
@@ -884,14 +1012,13 @@ async fn progress_stuck_behind_the_limiter_yields_to_outcomes_and_answers() -> a
         DeliveryOutcome::Delivered,
     )?;
     let settled = Instant::now();
-    let blocked = discord
-        .wait_for(&Method::DELETE, "/channels/300/", 1)
-        .await?;
     let other = discord
-        .wait_for(&Method::DELETE, "/channels/301/", 1)
+        .wait_for_text(&Method::PATCH, "/channels/301/", "✓ Done")
         .await?;
-    assert!(blocked[0].at - settled < Duration::from_secs(1));
-    assert!(other[0].at - settled < Duration::from_secs(1));
+    assert!(other.at - settled < Duration::from_secs(1));
+    // The blocked card's summary waits for its own bucket; the progress
+    // edit that waited there was never sent.
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
     assert_eq!(discord.matching(&Method::PATCH, "/channels/300/").len(), 1);
     monitor.abort();
     Ok(())
@@ -913,10 +1040,11 @@ async fn an_answer_waits_for_progress_only_in_a_bucket_discord_shares() -> anyho
         let http = discord.http(true);
         let channel = twilight_model::id::Id::new(300);
         // Twilight learns a route's bucket from its first response.
-        crate::delivery::send_discord_message(&http, channel, "first answer").await?;
+        crate::delivery::send_discord_message(&http, channel, "first answer", None).await?;
         let card = super::Card {
             channel_id: channel,
             message_id: twilight_model::id::Id::new(901),
+            hosted: false,
         };
         let cards = super::Cards {
             http: http.clone(),
@@ -925,12 +1053,21 @@ async fn an_answer_waits_for_progress_only_in_a_bucket_discord_shares() -> anyho
                 CardRecords::open(directory.path().join("cards.json")).context("records")?,
             ),
         };
+        let progress = super::render::card(
+            &super::render::Shown {
+                status: super::render::Status::Finishing,
+                requested_at: None,
+                reports: Vec::new(),
+                live: None,
+            },
+            &cards.config.activity_markers,
+        );
         assert_eq!(
-            cards.edit(card, "progress", None).await,
+            cards.edit(card, &progress, None).await,
             super::Call::Done(())
         );
         let started = Instant::now();
-        crate::delivery::send_discord_message(&http, channel, "second answer").await?;
+        crate::delivery::send_discord_message(&http, channel, "second answer", None).await?;
         let waited = started.elapsed();
         if shared {
             assert!(waited >= Duration::from_millis(1_500), "{waited:?}");
@@ -1041,9 +1178,11 @@ async fn a_finishing_card_that_failed_to_update_is_retried_until_it_stops_showin
         TurnState::Completed,
         DeliveryOutcome::Delivered,
     )?;
-    discord
-        .wait_for(&Method::DELETE, "/channels/300/messages/901", 1)
+    let kept = discord
+        .wait_for(&Method::PATCH, "/channels/300/messages/901", 3)
         .await?;
+    assert!(kept[2].content().starts_with("✓ Done"));
+    assert!(discord.matching(&Method::DELETE, "/channels").is_empty());
     monitor.abort();
     Ok(())
 }
@@ -1146,5 +1285,165 @@ async fn unreadable_card_records_turn_cards_off_but_keep_typing_and_the_evidence
         std::fs::read_to_string(&unreadable)?,
         r#"{"turn": {"channel_id": "300", "message_id": "555"}}"#
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_job_keeps_one_card_while_its_answer_arrives_and_its_follow_up_reports()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let records = directory.path().join("activity-cards.json");
+    let discord = Substitute::start(succeed()).await?;
+    let long_ago = now() - 60;
+    let working = delegating(tools(None, &[("bash", "make")], &[]), WorkState::Running);
+    discord.list(vec![running("parent", "300", long_ago, Some(working))]);
+    let (outcomes, monitor) = discord.monitor(discord.http(false), config(false), &records);
+    discord
+        .wait_for(&Method::POST, "/channels/300/messages", 1)
+        .await?;
+    // The parent answers while its child still runs; core queued the report.
+    let mut answered = delivered("parent", "parent", TurnState::Completed);
+    let made = tools(None, &[], &[("bash", "make", true)]);
+    answered.activity = Some(delegating(made, WorkState::Running));
+    answered.continued_by = Some("report".to_owned());
+    report(&outcomes, answered, DeliveryOutcome::Delivered)?;
+    discord.list(Vec::new());
+    // The answer is not the job's end: the card goes on, showing the child.
+    let going = discord
+        .wait_for_text(
+            &Method::PATCH,
+            "/channels/300/messages/901",
+            "Answered · delegated work goes on",
+        )
+        .await?;
+    assert!(
+        going
+            .content()
+            .contains("↳ delegation `research` · running")
+    );
+    assert!(going.content().contains("✓ bash `make`"));
+    // The follow-up reports the child's end on the same card.
+    let reporting = delegating(tools(Some("Reporting."), &[], &[]), WorkState::Succeeded);
+    discord.list(vec![continuing(
+        "report",
+        "parent",
+        "300",
+        now(),
+        Some(reporting),
+    )]);
+    let child = discord
+        .wait_for_text(
+            &Method::PATCH,
+            "/channels/300/messages/901",
+            "✓ delegation `research` · done · 1m 1s",
+        )
+        .await?;
+    assert!(
+        child
+            .content()
+            .starts_with("⏳ Working · Waiting for the model · started ")
+    );
+    let mut reported = delivered("report", "parent", TurnState::Completed);
+    reported.activity = Some(delegating(
+        tools(None, &[], &[("read", "findings.md", true)]),
+        WorkState::Succeeded,
+    ));
+    report(&outcomes, reported, DeliveryOutcome::Delivered)?;
+    discord.list(Vec::new());
+    let done = discord
+        .wait_for_text(
+            &Method::PATCH,
+            "/channels/300/messages/901",
+            "✓ Done · answered",
+        )
+        .await?;
+    // The summary keeps the whole job: the parent's call, the follow-up's, the child.
+    for part in [
+        "✓ bash `make`",
+        "✓ read `findings.md`",
+        "✓ delegation `research` · done",
+    ] {
+        assert!(done.content().contains(part), "{}", done.content());
+    }
+    tokio::time::sleep(Duration::from_millis(3_500)).await;
+    assert_eq!(discord.matching(&Method::POST, "/channels").len(), 1);
+    assert!(discord.matching(&Method::DELETE, "/channels").is_empty());
+    assert_eq!(recorded(&records)?, json!({}));
+    monitor.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_late_answer_or_stale_read_never_takes_a_job_back() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let records = directory.path().join("activity-cards.json");
+    let discord = Substitute::start(succeed()).await?;
+    let long_ago = now() - 60;
+    discord.list(vec![running(
+        "parent",
+        "300",
+        long_ago,
+        Some(delegating(
+            tools(None, &[("bash", "make")], &[]),
+            WorkState::Running,
+        )),
+    )]);
+    let (outcomes, monitor) = discord.monitor(discord.http(false), config(false), &records);
+    discord
+        .wait_for(&Method::POST, "/channels/300/messages", 1)
+        .await?;
+    // Core already runs the follow-up before the parent's answer is delivered.
+    let follow_up = || {
+        continuing(
+            "report",
+            "parent",
+            "300",
+            long_ago,
+            Some(delegating(
+                tools(Some("Reporting."), &[], &[]),
+                WorkState::Succeeded,
+            )),
+        )
+    };
+    discord.list(vec![follow_up()]);
+    discord
+        .wait_for_text(&Method::PATCH, "/channels/300/messages/901", "> Reporting.")
+        .await?;
+    // Core cannot be read meanwhile: only the job itself decides what shows.
+    *lock(&discord.active) = None;
+    let mut late = delivered("parent", "parent", TurnState::Completed);
+    late.activity = Some(delegating(tools(None, &[], &[]), WorkState::Running));
+    late.continued_by = Some("report".to_owned());
+    report(&outcomes, late, DeliveryOutcome::Delivered)?;
+    tokio::time::sleep(Duration::from_millis(4_000)).await;
+    // The late answer neither ends the job nor takes back what the follow-up shows.
+    for edit in discord.matching(&Method::PATCH, "/channels/300/messages/901") {
+        let text = edit.content();
+        assert!(
+            !text.contains("Answered") && !text.contains("Done"),
+            "{text}"
+        );
+        assert!(!text.contains("delegation `research` · running"), "{text}");
+    }
+    report(
+        &outcomes,
+        delivered("report", "parent", TurnState::Completed),
+        DeliveryOutcome::Delivered,
+    )?;
+    let done = discord
+        .wait_for_text(&Method::PATCH, "/channels/300/messages/901", "✓ Done")
+        .await?;
+    // A read taken before the follow-up's delivery cannot revive it.
+    discord.list(vec![follow_up()]);
+    tokio::time::sleep(Duration::from_millis(4_000)).await;
+    let edits = discord.matching(&Method::PATCH, "/channels/300/messages/901");
+    assert_eq!(edits.last().map(Seen::content), Some(done.content()));
+    assert_eq!(
+        discord
+            .matching(&Method::POST, "/channels/300/messages")
+            .len(),
+        1
+    );
+    monitor.abort();
     Ok(())
 }

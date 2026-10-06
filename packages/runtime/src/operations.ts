@@ -36,6 +36,11 @@ export interface TurnResponse {
    * engine as written may: core offers them again with a later turn.
    */
   readonly unanswered_left?: boolean;
+  /**
+   * The turn's final report of what it did, taken before the runtime
+   * discards its executing state, bounded by the shared `finalReport`.
+   */
+  readonly activity?: TurnActivity;
 }
 
 export interface RuntimeOperations {

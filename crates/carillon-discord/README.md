@@ -33,12 +33,15 @@ retain the actual Wasm path rather than substituting this direct native call.
   outcomes under way (one beyond them is not shown, and that is logged), until the
   connection stops: it then gets two seconds to end, and the rest, like any outcome still
   awaited, is cancelled; nothing is sent after that.
-- [`activity`](src/activity.rs) shows temporary activity cards and typing while turns
-  run. It reads core's activity list, receives each turn's outcome from the delivery
-  loop, and records only the channel and message of cards it created, so a restart
-  can remove them before showing a replacement. Every Discord call is bounded,
-  including rate-limiter waits and Twilight's 429 retries.
-  Its ordinary [`render` module](src/activity/render.rs) owns pure card text rendering,
+- [`activity`](src/activity.rs) shows one work card per job (a message's turn and
+  the observations core names by its origin) and types while its turns run. It reads
+  core's activity list, receives each turn's outcome and final report from the
+  delivery loop, keeps the card as the job's summary when the job ends, and records
+  only the channel and message of unfinished jobs' cards, so a restart goes on with
+  them. A job that ended without a card but showed work gets its summary on its
+  answer, which the delivery loop sends; one reservation per job keeps it to one card.
+  Every Discord call is bounded, including rate-limiter waits and Twilight's 429
+  retries. Its ordinary [`render` module](src/activity/render.rs) owns pure card embed rendering,
   using the concrete activity markers from [`config`](src/config.rs). Markers have
   configurable defaults, independently of reactions; see [activity card settings](../../docs/product/OPERATIONS.md#activity-cards).
 - [`commands`](src/commands.rs) hosts replaceable command generations, registers

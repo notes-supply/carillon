@@ -8,9 +8,9 @@ use crate::{
 use anyhow::{Context as _, Result, anyhow};
 use carillon_installation::config::AttachmentLimits;
 use carillon_protocol::model::{
-    ActiveTurn, Delivery, DeliveryAck, DeliveryReconciliation, EventReceipt, EventStatus,
-    ExternalEvent, ModelQuery, RuntimeTurnRequest, RuntimeTurnResponse, SelectedProvider,
-    StateCounts, TurnInspection, TurnSummary, UnansweredTurn,
+    ACTIVITY_REPORT_LIMIT, ActiveTurn, Delivery, DeliveryAck, DeliveryReconciliation, EventReceipt,
+    EventStatus, ExternalEvent, ModelQuery, RuntimeTurnRequest, RuntimeTurnResponse,
+    SelectedProvider, StateCounts, TurnActivity, TurnInspection, TurnSummary, UnansweredTurn,
 };
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::watch;
@@ -394,7 +394,7 @@ impl Core {
                     Unusable::Altered(message) => (message.clone(), ALTERED_ATTACHMENT),
                     Unusable::Unreadable(error) => (format!("{error:#}"), UNREADABLE_ATTACHMENT),
                 };
-                self.interrupt(turn, message.clone(), Some(explanation.to_owned()))
+                self.interrupt(turn, message.clone(), Some(explanation.to_owned()), None)
                     .await
                     .with_context(|| format!("record unrunnable turn {}", turn.turn_id))?;
                 warn!(turn_id = %turn.turn_id, error = %message, "captured attachment is not usable; turn not run");
@@ -420,8 +420,9 @@ impl Core {
         let outcome = async {
             let request = self.runtime_request(turn, unanswered);
             let correlation_id = request.correlation_id.clone();
-            let response = submit(request).await?;
+            let mut response = submit(request).await?;
             validate_response(&correlation_id, &response)?;
+            response.activity = kept_report(&turn.turn_id, response.activity.take());
             let answered = (response.follow_up.is_some(), response.unanswered_left);
             let claimed = turn.clone();
             self.blocking(move |core| core.database.complete_turn(&claimed, &response))
@@ -434,7 +435,7 @@ impl Core {
         // `running`, which blocks only its conversation and is never claimed
         // again; startup recovery then records it as interrupted, or asks an
         // observation again.
-        let (error, explanation) = match outcome {
+        let (error, explanation, activity) = match outcome {
             Ok((follow_up, unanswered_left)) => {
                 if follow_up {
                     self.wake(Lane::Observations);
@@ -461,14 +462,29 @@ impl Core {
                 return self.requeue(turn, &failure).await;
             }
             Err(TurnFailure::Uncertain(failure) | TurnFailure::Unanswered(failure)) => {
-                (failure.to_string(), None)
+                (failure.to_string(), None, None)
             }
-            Err(TurnFailure::Explained(explanation)) => (
-                format!("runtime reported failure: {explanation}"),
-                Some(explanation),
-            ),
+            Err(TurnFailure::Reported(reported)) => {
+                let Reported {
+                    status,
+                    explanation,
+                    activity,
+                } = *reported;
+                (
+                    explanation.as_ref().map_or_else(
+                        || {
+                            format!(
+                                "runtime provider failed the turn with {status} and no explanation"
+                            )
+                        },
+                        |explanation| format!("runtime reported failure: {explanation}"),
+                    ),
+                    explanation,
+                    kept_report(&turn.turn_id, activity),
+                )
+            }
         };
-        self.interrupt(turn, error.clone(), explanation)
+        self.interrupt(turn, error.clone(), explanation, activity)
             .await
             .with_context(|| format!("record failure of turn {}", turn.turn_id))?;
         warn!(turn_id = %turn.turn_id, observation, %error, "turn did not complete");
@@ -481,11 +497,12 @@ impl Core {
         turn: &ClaimedTurn,
         error: String,
         explanation: Option<String>,
+        activity: Option<TurnActivity>,
     ) -> Result<()> {
         let turn = turn.clone();
         self.blocking(move |core| {
             core.database
-                .interrupt_turn(&turn, &error, explanation.as_deref())
+                .interrupt_turn(&turn, &error, explanation.as_deref(), activity.as_ref())
         })
         .await
     }
@@ -707,10 +724,35 @@ pub enum TurnFailure {
     Unanswered(anyhow::Error),
     /// Model work may have run; it must not be automatically replayed.
     Uncertain(anyhow::Error),
-    /// The runtime reported that the turn failed, explaining why in words
-    /// phrased for the conversation and safe to display. As with `Uncertain`,
+    /// The runtime answered that the turn failed. As with `Uncertain`,
     /// model work may have run and is not automatically replayed.
-    Explained(String),
+    Reported(Box<Reported>),
+}
+
+/// What a runtime answered when it failed a turn.
+#[derive(Debug)]
+pub struct Reported {
+    /// The status it answered with.
+    pub status: u16,
+    /// Why, in words phrased for the conversation and safe to display, when
+    /// the runtime gave such an explanation.
+    pub explanation: Option<String>,
+    /// The runtime's final report of what the turn did, when it gave one.
+    pub activity: Option<TurnActivity>,
+}
+
+/// A runtime's final report as core keeps it: one larger than
+/// [`ACTIVITY_REPORT_LIMIT`] is not kept, since display never fails a turn.
+fn kept_report(turn_id: &str, activity: Option<TurnActivity>) -> Option<TurnActivity> {
+    let bytes = serde_json::to_vec(activity.as_ref()?).ok()?.len();
+    if bytes > ACTIVITY_REPORT_LIMIT {
+        warn!(
+            turn_id,
+            bytes, "a runtime's final report is over its limit and is not kept"
+        );
+        return None;
+    }
+    activity
 }
 
 pub(crate) fn validate_response(

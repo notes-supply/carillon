@@ -13,7 +13,7 @@ use axum::{
     routing::{any, get, post},
 };
 use carillon_protocol::model::{
-    Delivery, DeliveryOutcome, DeliveryReconciliation, ExternalEvent, TurnState,
+    Delivery, DeliveryOutcome, DeliveryReconciliation, ExternalEvent, Origin, TurnState,
 };
 use serde_json::json;
 use std::{
@@ -23,6 +23,25 @@ use std::{
     },
     time::Duration,
 };
+
+/// The answer of turn `turn-{id}`, a message turn of its own job, to channel 300.
+fn answer(id: i64, turn_state: TurnState) -> Delivery {
+    Delivery {
+        turn_state,
+        id,
+        turn_id: format!("turn-{id}"),
+        target_id: "300".to_owned(),
+        feedback_target_id: "300:400".to_owned(),
+        content: format!("answer {id}"),
+        origin: Origin {
+            turn_id: format!("turn-{id}"),
+            accepted_at: 1_790_000_000,
+        },
+        finished_at: 1_790_000_012,
+        activity: None,
+        continued_by: None,
+    }
+}
 
 /// Message `message` in channel 300, as admission hands it to core.
 fn event(message: &str) -> ExternalEvent {
@@ -130,7 +149,13 @@ async fn ambiguous_claim_failures_reconcile_before_polling_again() -> anyhow::Re
     let (outcomes, _) = tokio::sync::mpsc::unbounded_channel();
     let outcome = tokio::time::timeout(
         Duration::from_secs(5),
-        delivery_loop(core, Reactions::new(http.clone(), config), http, outcomes),
+        delivery_loop(
+            core,
+            Reactions::new(http.clone(), config),
+            http,
+            None,
+            outcomes,
+        ),
     )
     .await;
     server.abort();
@@ -175,6 +200,7 @@ async fn empty_discord_delivery_is_not_successful() -> anyhow::Result<()> {
         &twilight_http::Client::new("unused".to_owned()),
         twilight_model::id::Id::new(1),
         " \n ",
+        None,
     )
     .await
     .err()
@@ -293,21 +319,17 @@ fn delivering_core(
 async fn deliveries_reach_discord_verbatim_without_notifying_anyone() -> anyhow::Result<()> {
     // Mention syntax a provider explanation or model output might contain.
     let notice = "That turn was interrupted: Codex error: @everyone <@200> <@&7> The usage limit has been reached\nSend another message to continue in this conversation. Actions already taken may have had effects.";
-    let answer = format!("{}\n\n@here {}", "a".repeat(1_990), "b".repeat(30));
+    let long = format!("{}\n\n@here {}", "a".repeat(1_990), "b".repeat(30));
     let delivery = |id: i64, turn_state, content: &str| Delivery {
-        turn_state,
-        id,
-        turn_id: format!("turn-{id}"),
-        target_id: "300".to_owned(),
-        feedback_target_id: "300:400".to_owned(),
         content: content.to_owned(),
+        ..answer(id, turn_state)
     };
     let messages = Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let acks = Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let app = delivering_core(
         vec![
             delivery(1, TurnState::Interrupted, notice),
-            delivery(2, TurnState::Completed, &answer),
+            delivery(2, TurnState::Completed, &long),
         ],
         messages.clone(),
         acks.clone(),
@@ -328,6 +350,7 @@ async fn deliveries_reach_discord_verbatim_without_notifying_anyone() -> anyhow:
                 discord_config(DiscordActivation::Always, DiscordConversation::Channel),
             ),
             http,
+            None,
             outcomes,
         ),
     )
@@ -348,7 +371,7 @@ async fn deliveries_reach_discord_verbatim_without_notifying_anyone() -> anyhow:
     // The notice is one message, exactly as core composed it; the long answer
     // is split at the platform limit.
     assert_eq!(contents[0], notice);
-    assert_eq!(contents[1..].join("\n\n"), answer);
+    assert_eq!(contents[1..].join("\n\n"), long);
     assert_eq!(contents.len(), 3);
     assert!(
         contents
@@ -364,7 +387,13 @@ async fn deliveries_reach_discord_verbatim_without_notifying_anyone() -> anyhow:
     assert_eq!(acks[0]["native_ref"], "901");
     // Each outcome is reported after its acknowledgement, for activity cards.
     let reported = std::iter::from_fn(|| observed.try_recv().ok())
-        .map(|outcome| (outcome.turn_id, outcome.turn_state, outcome.delivery))
+        .map(|outcome| {
+            (
+                outcome.delivery.turn_id,
+                outcome.delivery.turn_state,
+                outcome.result,
+            )
+        })
         .collect::<Vec<_>>();
     assert!(matches!(
         reported.as_slice(),
@@ -379,12 +408,9 @@ async fn deliveries_reach_discord_verbatim_without_notifying_anyone() -> anyhow:
 #[tokio::test]
 async fn slow_reactions_never_hold_up_deliveries_and_stay_bounded() -> anyhow::Result<()> {
     let delivery = |id: i64| Delivery {
-        turn_state: TurnState::Completed,
-        id,
-        turn_id: format!("turn-{id}"),
-        target_id: "300".to_owned(),
         feedback_target_id: format!("300:{}", 1_000 + id),
         content: format!("answer {id}"),
+        ..answer(id, TurnState::Completed)
     };
     let burst = OUTCOMES + 2;
     let messages = Arc::new(tokio::sync::Mutex::new(Vec::new()));
@@ -413,6 +439,7 @@ async fn slow_reactions_never_hold_up_deliveries_and_stay_bounded() -> anyhow::R
             core_client(format!("http://{address}")),
             reactions.clone(),
             http,
+            None,
             outcomes,
         ),
     )
@@ -598,6 +625,107 @@ async fn a_stopping_provider_ends_its_reactions_within_the_grace() -> anyhow::Re
             format!("DELETE 406 {processing}"),
             format!("PUT 402 {delivered}"),
         ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_answer_carries_its_jobs_summary_when_no_card_shows_its_work() -> anyhow::Result<()> {
+    use crate::activity::{CardRecords, Summaries};
+    let directory = tempfile::tempdir()?;
+    let records = directory.path().join("activity-cards.json");
+    // The fourth turn's job already has a card.
+    std::fs::write(
+        &records,
+        serde_json::to_vec(&json!({"turn-4": {"channel_id": "300", "message_id": "777"}}))?,
+    )?;
+    let config = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
+    let summaries = Summaries::new(CardRecords::open(records.clone()).map(Arc::new), &config);
+    let worked = |work: serde_json::Value| -> anyhow::Result<_> {
+        let mut report = json!({
+            "phase": "model",
+            "running": [],
+            "recent": [{"tool": "bash", "detail": "make", "ok": true, "duration_ms": 1_200}],
+            "tool_calls": 1,
+        });
+        if !work.is_null() {
+            report["work"] = work;
+        }
+        Ok(Some(serde_json::from_value(report)?))
+    };
+    let mut quick = answer(2, TurnState::Completed);
+    quick.activity = worked(json!(null))?;
+    let mut delegated = answer(3, TurnState::Completed);
+    delegated.activity = worked(json!({
+        "items": [{"id": "child", "kind": "delegation", "label": "research", "state": "running"}],
+        "partial": false,
+    }))?;
+    delegated.continued_by = Some("turn-3-report".to_owned());
+    let mut carded = answer(4, TurnState::Completed);
+    carded.activity = worked(json!(null))?;
+    let messages = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let app = delivering_core(
+        vec![answer(1, TurnState::Completed), quick, delegated, carded],
+        messages.clone(),
+        Arc::default(),
+        Duration::ZERO,
+        Arc::default(),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let http = discord_client(address);
+    let (outcomes, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        delivery_loop(
+            core_client(format!("http://{address}")),
+            Reactions::new(http.clone(), config),
+            http,
+            summaries,
+            outcomes,
+        ),
+    )
+    .await;
+    server.abort();
+    assert!(outcome?.is_err_and(|failure| failure.to_string().contains("delivery claim rejected")));
+    let messages = messages.lock().await;
+    let summary = |index: usize| {
+        messages[index]["embeds"][0]["description"]
+            .as_str()
+            .map(str::to_owned)
+    };
+    // An answer alone needs no card.
+    assert_eq!(summary(0), None);
+    // Quick work's summary rides on its answer, and nothing records it: it is final.
+    assert_eq!(
+        summary(1).as_deref(),
+        Some("✓ Done · answered 12s after the request")
+    );
+    assert_eq!(
+        messages[1]["embeds"][0]["fields"][0]["value"],
+        "✓ bash `make` · 1s"
+    );
+    assert_eq!(messages[1]["content"], "answer 2");
+    // Work that goes on makes the answer its job's card.
+    assert!(
+        summary(2).is_some_and(|text| text.starts_with("⏳ Answered · delegated work goes on")),
+        "{:?}",
+        summary(2)
+    );
+    // A job that has a card already gets no second one.
+    assert_eq!(summary(3), None);
+    let hosted = std::iter::from_fn(|| observed.try_recv().ok())
+        .map(|outcome| outcome.hosted.map(|card| card.message_id.get()))
+        .collect::<Vec<_>>();
+    assert_eq!(hosted, [None, Some(902), Some(903), None]);
+    let recorded: serde_json::Value = serde_json::from_slice(&std::fs::read(&records)?)?;
+    assert_eq!(
+        recorded,
+        json!({
+            "turn-3": {"channel_id": "300", "message_id": "903", "hosted": true},
+            "turn-4": {"channel_id": "300", "message_id": "777"},
+        })
     );
     Ok(())
 }

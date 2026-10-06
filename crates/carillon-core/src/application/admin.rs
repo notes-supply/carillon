@@ -1201,6 +1201,7 @@ mod tests {
                 output: "read it".to_owned(),
                 follow_up: None,
                 unanswered_left: false,
+                activity: None,
                 correlation_id: request.correlation_id,
             })
         })
@@ -1255,6 +1256,7 @@ mod tests {
                     output: "read it".to_owned(),
                     follow_up: None,
                     unanswered_left: false,
+                    activity: None,
                     correlation_id: request.correlation_id,
                 })
             })

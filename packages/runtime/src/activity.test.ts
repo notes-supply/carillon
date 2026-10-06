@@ -1,6 +1,6 @@
-import type { WorkItem } from "@carillon/protocol";
+import { ACTIVITY_REPORT_LIMIT, NOTE_LENGTH, type WorkItem } from "@carillon/protocol";
 import { expect, it } from "vitest";
-import { commandHeader, describe, summarizeWork } from "./activity.ts";
+import { commandHeader, describe, finalReport, keepNote, summarizeWork } from "./activity.ts";
 
 it.each([
   ["cargo test -p carillon-discord --all-targets", "cargo test -p carillon-discord --all-targets"],
@@ -164,4 +164,108 @@ it("orders work live first and counts what the snapshot leaves out exactly", () 
   const summary = summarizeWork(many, true);
   expect(summary.items).toHaveLength(16);
   expect(summary).toMatchObject({ partial: true, omitted: 4 });
+});
+
+it("keeps the latest notes by native identity, updated in place and bounded", () => {
+  const notes = new Map<string, string>();
+  for (let index = 1; index <= 9; index += 1)
+    keepNote(notes, `item-${String(index)}`, `thought ${String(index)}`);
+  expect([...notes.keys()]).toEqual(
+    [2, 3, 4, 5, 6, 7, 8, 9].map((index) => `item-${String(index)}`),
+  );
+  // Streamed text replaces its own note without moving it.
+  keepNote(notes, "item-2", "thought 2,\nnow longer");
+  expect([...notes.entries()][0]).toEqual(["item-2", "thought 2, now longer"]);
+  // Redacted, one line, cut at the limit from the beginning; nothing for blank text.
+  keepNote(notes, "item-9", `Using token=sk-${"a".repeat(40)} then ${"word ".repeat(200)}`);
+  const long = notes.get("item-9") ?? "";
+  expect(long).toMatch(/^Using token=\[redacted\] then word/u);
+  expect(long.length).toBeLessThanOrEqual(NOTE_LENGTH);
+  expect(long.endsWith("…")).toBe(true);
+  keepNote(notes, "item-10", " \n ");
+  expect(notes.has("item-10")).toBe(false);
+});
+
+it("bounds a final report's serialized size, dropping notes, then finished work, then old calls", () => {
+  const small = {
+    phase: "model" as const,
+    running: [],
+    recent: [{ tool: "read", detail: "a.txt", ok: true }],
+    tool_calls: 1,
+    notes: ["short"],
+  };
+  // A report within the limit is unchanged, and not partial.
+  expect(finalReport(small)).toEqual(small);
+  // Three bytes a character: the counts are bounded, but not the bytes.
+  const wide = (length: number) => "語".repeat(length);
+  const item = (index: number, state: WorkItem["state"]): WorkItem => ({
+    id: `node:${String(index)}`,
+    kind: "delegation",
+    label: wide(200),
+    state,
+    actor: wide(100),
+  });
+  const big = {
+    phase: "tools" as const,
+    headline: wide(100),
+    running: [{ tool: "bash", detail: "make", started_at: 1 }],
+    recent: Array.from({ length: 5 }, (_, index) => ({
+      tool: "read",
+      detail: `${wide(100)}${String(index)}`,
+      ok: true,
+    })),
+    tool_calls: 40,
+    notes: Array.from({ length: 8 }, () => wide(500)),
+    work: summarizeWork(
+      Array.from({ length: 16 }, (_, index) => item(index, index < 2 ? "running" : "succeeded")),
+      false,
+    ),
+  };
+  const report = finalReport(big);
+  expect(Buffer.byteLength(JSON.stringify(report))).toBeLessThanOrEqual(ACTIVITY_REPORT_LIMIT);
+  // It says it is partial. The notes went first, then finished work, counted
+  // exactly; live work, every call and the counts stayed.
+  expect(report.partial).toBe(true);
+  expect(report.notes).toBeUndefined();
+  expect(report.recent).toEqual(big.recent);
+  expect(report.running).toEqual(big.running);
+  expect(report.headline).toBe(big.headline);
+  expect(report.tool_calls).toBe(40);
+  const kept = report.work?.items ?? [];
+  expect(kept.slice(0, 2).map((work) => work.state)).toEqual(["running", "running"]);
+  expect(report.work?.omitted).toBeGreaterThan(0);
+  expect(kept.length + (report.work?.omitted ?? 0)).toBe(16);
+});
+
+it("keeps live work and running calls longest when only they are left to trim", () => {
+  const wide = "語".repeat(200);
+  const live: WorkItem[] = Array.from({ length: 16 }, (_, index) => ({
+    id: `node:live:${String(index)}`,
+    kind: "delegation",
+    label: wide,
+    state: "running",
+    actor: wide,
+  }));
+  const report = finalReport({
+    phase: "tools",
+    headline: wide,
+    running: Array.from({ length: 8 }, (_, index) => ({
+      tool: "bash",
+      detail: `${wide}${String(index)}`.slice(0, 120),
+      started_at: index,
+    })),
+    recent: [{ tool: "read", detail: wide.slice(0, 120), ok: true }],
+    tool_calls: 9,
+    notes: [wide],
+    work: summarizeWork(live, false),
+  });
+  expect(Buffer.byteLength(JSON.stringify(report))).toBeLessThanOrEqual(ACTIVITY_REPORT_LIMIT);
+  expect(report.partial).toBe(true);
+  // Finished calls and the headline went before any live work; every
+  // running call stayed, and the live work left out is counted.
+  expect(report.recent).toEqual([]);
+  expect(report.headline).toBeUndefined();
+  expect(report.running).toHaveLength(8);
+  expect((report.work?.items.length ?? 0) + (report.work?.omitted ?? 0)).toBe(16);
+  expect(report.work?.items.length).toBeGreaterThan(0);
 });

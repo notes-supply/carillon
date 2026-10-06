@@ -13,7 +13,7 @@ use crate::{
 
 use crate::{
     InterfaceError,
-    activity::{CardRecords, activity_monitor},
+    activity::{CardRecords, Summaries, activity_monitor},
     client::CoreClient,
     commands::{
         Change, ChangeError, CommandFiles, Commands, DiscordApp, InteractionCalls, MODULE_LIMIT,
@@ -253,11 +253,15 @@ async fn connect(
     let mut terminate = signal(SignalKind::terminate()).context("handle termination")?;
     let router = discord_router(state.clone(), false);
     let (outcomes, observed) = mpsc::unbounded_channel();
+    // The monitor and the answers share the cards' records, so a job never
+    // gets both a card and a summary on its answer.
+    let cards = cards.map(Arc::new);
+    let summaries = Summaries::new(cards.clone(), &state.discord);
     let monitor = activity_monitor(
         state.core.clone(),
         http.clone(),
         state.discord.clone(),
-        cards.map(Arc::new),
+        cards,
         observed,
     );
     let outcome = tokio::select! {
@@ -265,7 +269,7 @@ async fn connect(
         result = gateway_loop(state, discord_token, messages) => {
             result.context("Discord gateway stopped")
         },
-        result = delivery_loop(delivery_state.core, reactions.clone(), http, outcomes) => {
+        result = delivery_loop(delivery_state.core, reactions.clone(), http, summaries, outcomes) => {
             result.context("Discord delivery worker stopped")
         },
         () = monitor => Err(anyhow::anyhow!("Discord activity monitor stopped")),

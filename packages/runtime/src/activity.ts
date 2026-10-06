@@ -6,7 +6,15 @@
  * passes the same best-effort credential redaction as diagnostics before it
  * is cut to length, so no caller ever receives raw tool arguments.
  */
-import { WORK_ITEM_LIMIT, type WorkItem, type WorkSummary } from "@carillon/protocol";
+import {
+  ACTIVITY_REPORT_LIMIT,
+  NOTE_LENGTH,
+  NOTE_LIMIT,
+  WORK_ITEM_LIMIT,
+  type TurnActivity,
+  type WorkItem,
+  type WorkSummary,
+} from "@carillon/protocol";
 import { isAbsolute, relative, resolve } from "node:path";
 import { bounded, redactCredentials } from "./failure.ts";
 
@@ -186,4 +194,69 @@ export function summarizeWork(items: readonly WorkItem[], partial: boolean): Wor
     partial,
     ...(omitted > 0 ? { omitted } : {}),
   };
+}
+
+/**
+ * Keeps reasoning text the engine published as the note of its native
+ * identity `id`: redacted, on one line and bounded, from its beginning. A
+ * note already kept is updated in place, so streamed text never reorders
+ * the notes; beyond {@link NOTE_LIMIT}, the oldest go.
+ */
+export function keepNote(notes: Map<string, string>, id: string, text: string): void {
+  const note = displayed(text, NOTE_LENGTH);
+  if (note === undefined) return;
+  notes.set(id, note);
+  for (const oldest of notes.keys()) {
+    if (notes.size <= NOTE_LIMIT) break;
+    notes.delete(oldest);
+  }
+}
+
+/**
+ * A turn's final report within {@link ACTIVITY_REPORT_LIMIT}, which bounds
+ * its serialized size whatever its text holds. Every part is already bounded
+ * in count; when their text still adds up past the limit, parts go in order
+ * until it fits, so live state stays longest: the oldest notes, finished work,
+ * the oldest finished calls, the headline, then live work and the latest
+ * running calls. Work that goes is counted as omitted, and a report that
+ * lost anything says it is `partial`.
+ */
+export function finalReport(activity: TurnActivity): TurnActivity {
+  const { notes = [], work, recent, running, headline, partial = false, ...rest } = activity;
+  let [kept, items, omitted, calls, live, line, cut] = [
+    notes,
+    work?.items ?? [],
+    work?.omitted ?? 0,
+    recent,
+    running,
+    headline,
+    partial,
+  ];
+  const compose = (): TurnActivity => ({
+    ...rest,
+    ...(line === undefined ? {} : { headline: line }),
+    running: live,
+    recent: calls,
+    ...(work === undefined
+      ? {}
+      : { work: { items, partial: work.partial, ...(omitted > 0 ? { omitted } : {}) } }),
+    ...(kept.length > 0 ? { notes: kept } : {}),
+    ...(cut ? { partial: true } : {}),
+  });
+  let report = compose();
+  while (Buffer.byteLength(JSON.stringify(report)) > ACTIVITY_REPORT_LIMIT) {
+    const last = items.at(-1);
+    if (kept.length > 0) kept = kept.slice(1);
+    else if (last !== undefined && !LIVE_WORK.has(last.state))
+      [items, omitted] = [items.slice(0, -1), omitted + 1];
+    else if (calls.length > 0) calls = calls.slice(1);
+    else if (line !== undefined) line = undefined;
+    else if (items.length > 0) [items, omitted] = [items.slice(0, -1), omitted + 1];
+    else if (live.length > 0) live = live.slice(0, -1);
+    // The phase, the counts and the agent's bounded names always fit.
+    else break;
+    cut = true;
+    report = compose();
+  }
+  return report;
 }

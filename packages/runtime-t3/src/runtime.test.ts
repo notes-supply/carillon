@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { RuntimeOperations } from "@carillon/runtime/operations";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { reportOf } from "@carillon/runtime/failure";
 import { derivedId, type Run } from "./contracts.ts";
 import { startFakeT3, type FakeT3 } from "./fake.ts";
 import { createT3Runtime } from "./runtime.ts";
@@ -116,11 +117,16 @@ const activity = () => runtime.activity("turn-1", "discord-private");
 const until = (condition: () => boolean) => fake.waitFor(condition);
 const roster = () => thread().providerThread.pendingBackgroundTasks ?? [];
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+/** An answer apart from the turn's final report, which cases about the answer leave aside. */
+const answered = (response: { readonly activity?: unknown }) => ({
+  ...response,
+  activity: undefined,
+});
 
 it("keeps a conversation's turns in one T3 thread and sends the person's text as written", async () => {
   const first = runtime.executeTurn(turn("turn-1", "Remember carillon."));
   answer(await started("turn-1"), "Noted.");
-  expect(await first).toEqual({ correlation_id: "turn-1", output: "Noted." });
+  expect(answered(await first)).toEqual({ correlation_id: "turn-1", output: "Noted." });
 
   const second = runtime.executeTurn(turn("turn-2", "Which word?"));
   answer(await started("turn-2"), "Carillon.");
@@ -455,22 +461,44 @@ it("describes the running turn to its own interface, bounded and redacted, from 
   });
   fake.finishTool(threadId, read, "failed");
   // Kinds this runtime does not consume are ignored, not retained.
-  fake.tool(threadId, run.id, { type: "reasoning", text: "private thoughts", status: "completed" });
+  fake.tool(threadId, run.id, { type: "todo_list", steps: [], explanation: "private plan" });
+  // Reasoning T3 published for display becomes a note, apart from the answer.
+  fake.tool(threadId, run.id, {
+    type: "reasoning",
+    text: "Reading the system file\nfirst, to see the agent's instructions.",
+    status: "completed",
+  });
   fake.assistant(threadId, run.id, "Looking at the file.\nThen more.");
   await until(() => activity()?.tool_calls === 2 && activity()?.headline !== undefined);
-  expect(activity()).toEqual({
+  const described = activity();
+  expect(described).toEqual({
     phase: "model",
     headline: "Looking at the file.",
     running: [],
     recent: [
-      { tool: "bash", detail: "cargo test -p carillon-core …", ok: true },
-      { tool: "Read", detail: "SYSTEM.md", ok: false },
+      {
+        tool: "bash",
+        detail: "cargo test -p carillon-core …",
+        ok: true,
+        duration_ms: described?.recent[0]?.duration_ms,
+      },
+      {
+        tool: "Read",
+        detail: "SYSTEM.md",
+        ok: false,
+        duration_ms: described?.recent[1]?.duration_ms,
+      },
     ],
     tool_calls: 2,
+    notes: ["Reading the system file first, to see the agent's instructions."],
+    // The run's own selection: the model and Claude's effort option.
+    agent: { model: "claude-sonnet-5", effort: "low" },
   });
+  // T3 dated both ends of each call.
+  expect(described?.recent.every((call) => typeof call.duration_ms === "number")).toBe(true);
   expect(runtime.activity("turn-1", "other-interface")).toBeUndefined();
   expect(JSON.stringify(activity())).not.toContain("hunter2");
-  expect(JSON.stringify(activity())).not.toContain("private thoughts");
+  expect(JSON.stringify(activity())).not.toContain("private plan");
   answer(run, "Done.");
   await result;
   expect(activity()).toBeUndefined();
@@ -1639,11 +1667,17 @@ it("answers when the parent run completes and delivers the delegated report in a
   );
   answer(parent, "DELEGATED");
   const reply = await first;
-  expect(reply).toEqual({
+  expect(answered(reply)).toEqual({
     correlation_id: "turn-1",
     output: "DELEGATED",
     follow_up: { message: derivedId("message", "turn-1"), after: 1 },
   });
+  // The answer's report still shows the child working, as T3 last confirmed
+  // it, and the report it owes this conversation.
+  expect(reply.activity?.work?.items).toMatchObject([
+    { id: child.id, kind: "delegation", label: "pong child", state: "running" },
+    { kind: "task", label: "report back to this conversation", state: "queued" },
+  ]);
 
   // Core queues the follow-up turn with the cursor; it dispatches nothing and waits.
   const followUp = runtime.executeTurn(turn("turn-1-report", "", { follow_up: reply.follow_up }));
@@ -1655,7 +1689,10 @@ it("answers when the parent run completes and delivers the delegated report in a
   const continuation = fake.finishDelegation(threadId, child.id);
   fake.assistant(threadId, continuation.id, "PONG reported.");
   fake.complete(threadId, continuation.id);
-  expect(await followUp).toEqual({ correlation_id: "turn-1-report", output: "PONG reported." });
+  expect(answered(await followUp)).toEqual({
+    correlation_id: "turn-1-report",
+    output: "PONG reported.",
+  });
   expect(dispatches()).toHaveLength(1);
   expect(fake.interrupts).toEqual([]);
 });
@@ -1699,7 +1736,11 @@ it("runs the conversation's next message while a follow-up turn still observes d
   const continuation = fake.finishDelegation(threadId, child.id);
   fake.assistant(threadId, continuation.id, "Child done.");
   fake.complete(threadId, continuation.id);
-  expect(await followUp).toEqual({ correlation_id: "turn-1-report", output: "Child done." });
+  const report = await followUp;
+  expect(answered(report)).toEqual({ correlation_id: "turn-1-report", output: "Child done." });
+  // The follow-up's report shows how the child ended, with T3's own timing.
+  expect(report.activity?.work?.items[0]).toMatchObject({ id: child.id, state: "succeeded" });
+  expect(typeof report.activity?.work?.items[0]?.duration_ms).toBe("number");
   expect(dispatches()).toHaveLength(2);
   expect(fake.interrupts).toEqual([]);
 });
@@ -1718,7 +1759,7 @@ it("says where a child's result went when T3 delivers it into the next message's
   expect(fake.finishDelegation(threadId, child.id).id).toBe(own.id);
   answer(own, "Nothing else; the child said PONG.");
   expect((await next).output).toBe("Nothing else; the child said PONG.");
-  expect(await followUp).toEqual({
+  expect(answered(await followUp)).toEqual({
     correlation_id: "turn-1-report",
     output:
       "T3 gave the result of the delegated work to the agent during a later message's run in this conversation, not in a report of its own; T3 shows it.",
@@ -1827,14 +1868,14 @@ it("sends a command invocation verbatim, leaving the earlier files' notes for a 
   );
   answer(await started("turn-1"), "Compacted.");
   // The answer says the files were left, so core offers them again.
-  expect(await command).toEqual({
+  expect(answered(await command)).toEqual({
     correlation_id: "turn-1",
     output: "Compacted.",
     unanswered_left: true,
   });
   const prose = runtime.executeTurn(turn("turn-2", "hello", { unanswered: earlier }));
   answer(await started("turn-2"), "hi");
-  expect(await prose).toEqual({ correlation_id: "turn-2", output: "hi" });
+  expect(answered(await prose)).toEqual({ correlation_id: "turn-2", output: "hi" });
   expect(userTexts()).toEqual([
     "/compact keep the decisions",
     "hello\n\n[Carillon: 1 file(s) attached to earlier messages are not available to this runtime: a.png]",
@@ -1845,7 +1886,10 @@ it("sends a command invocation verbatim, leaving the earlier files' notes for a 
   const silent = runtime.executeTurn(turn("turn-3", "/compact", { native: { intent: "command" } }));
   fake.complete(threadId, (await started("turn-3")).id);
   // Offered no earlier files, it leaves none.
-  expect(await silent).toEqual({ correlation_id: "turn-3", output: "`/compact` finished." });
+  expect(answered(await silent)).toEqual({
+    correlation_id: "turn-3",
+    output: "`/compact` finished.",
+  });
   const failed = runtime.executeTurn(
     turn("turn-4", "/review main", { native: { intent: "command" } }),
   );
@@ -1976,4 +2020,23 @@ it("refuses a snapshot of another thread, whether read once or followed through 
     message: "T3 answered in a form this runtime does not understand.",
   });
   expect(fake.received.filter((command) => command.type === "message.dispatch")).toHaveLength(1);
+});
+
+it("keeps a failed turn's report with its failure, taken before the turn's entry goes", async () => {
+  const result = runtime.executeTurn(turn("turn-1", "build it"));
+  const run = await started("turn-1");
+  const make = fake.tool(threadId, run.id, { type: "command_execution", input: "make release" });
+  fake.finishTool(threadId, make, "failed");
+  fake.fail(threadId, run.id, "The build broke.");
+  const failure = await result.then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  expect(failure).toMatchObject({ status: 502, message: "The build broke." });
+  expect(reportOf(failure)).toMatchObject({
+    tool_calls: 1,
+    recent: [{ tool: "bash", detail: "make release", ok: false }],
+    agent: { model: "claude-sonnet-5", effort: "low" },
+  });
+  expect(runtime.activity("turn-1", "discord-private")).toBeUndefined();
 });

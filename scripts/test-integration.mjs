@@ -333,7 +333,8 @@ try {
         model_picker: "selections reach the runtime, persist, and never wait for a running turn",
         provider_failure:
           "explained once without replay, pages and credentials withheld, conversation continues",
-        activity: "a slow native command is visible to its interface before the answer",
+        activity:
+          "a slow native command is visible to its interface before the answer, whose delivery carries the final report",
         attachments:
           "staged files captured by core, linked staging refused, files reach the runtime by relative path and survive backup",
       },
@@ -987,8 +988,10 @@ async function testProviderFailure() {
 
 /**
  * Native Pi runs a real, deliberately slow `bash` call. While it runs, core's
- * interface-authenticated activity view shows the command; afterwards the
- * turn is gone from the view and the answer is delivered as before.
+ * interface-authenticated activity view shows the command, as work its own
+ * message began; afterwards the turn is gone from the view, and the answer's
+ * ordinary delivery carries the final report Pi's runtime took before it
+ * forgot the turn.
  */
 async function testActivityVisibility() {
   const privateState = join(installation, "pi");
@@ -1071,6 +1074,11 @@ async function testActivityVisibility() {
     );
     assert.equal(running.activity.headline, "Waiting for the release marker.");
     assert.equal(running.activity.phase, "tools");
+    assert.deepEqual(running.origin, {
+      turn_id: running.turn_id,
+      accepted_at: running.accepted_at,
+    });
+    assert.equal(running.activity.agent?.model, "activity-model");
     for (const authorization of [null, `Bearer ${await credentialValue("operator")}`])
       assert.equal((await activeTurns(authorization)).status, 403);
 
@@ -1079,6 +1087,19 @@ async function testActivityVisibility() {
     assert.equal(receipt.turn_id, running.turn_id);
     assert.equal(delivery.turn_state, "completed");
     assert.match(delivery.content, /The marker appeared\.$/u);
+    // The answer carries the turn's final report, through core's own delivery.
+    assert.deepEqual(delivery.origin, running.origin);
+    assert.ok(delivery.finished_at >= delivery.origin.accepted_at);
+    assert.equal(delivery.continued_by, undefined);
+    assert.equal(delivery.activity.tool_calls, 1);
+    assert.deepEqual(delivery.activity.running, []);
+    assert.deepEqual(
+      delivery.activity.recent.map(({ tool, detail, ok }) => ({ tool, detail, ok })),
+      [{ tool: "bash", detail: command, ok: true }],
+    );
+    assert.equal(typeof delivery.activity.recent[0].duration_ms, "number");
+    assert.equal(delivery.activity.agent?.model, "activity-model");
+    assert.ok(!delivery.content.includes(command), "the report stays out of the answer");
     const after = await activeTurns(`Bearer ${await credentialValue("discord-private")}`);
     assert.deepEqual(after.body, []);
     assert.equal(requests, 2);

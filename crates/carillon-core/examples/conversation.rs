@@ -75,6 +75,7 @@ async fn conversation() -> Result<()> {
                 output: format!("{} — {captured}", request.input),
                 follow_up: None,
                 unanswered_left: false,
+                activity: None,
             })
         })
         .await?;

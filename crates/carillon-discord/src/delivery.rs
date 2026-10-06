@@ -1,6 +1,6 @@
 //! Native delivery and feedback. Core remains the owner of delivery claims/outcomes.
 use crate::{
-    activity::Outcome,
+    activity::{Card, Outcome, Summaries},
     client::CoreClient,
     config::{DiscordConfig, DiscordEmoji},
 };
@@ -19,7 +19,7 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::warn;
 use twilight_http::{Client as DiscordHttp, request::channel::reaction::RequestReactionType};
 use twilight_model::{
-    channel::message::AllowedMentions,
+    channel::message::{AllowedMentions, Embed},
     id::{
         Id,
         marker::{ChannelMarker, EmojiMarker, MessageMarker},
@@ -345,11 +345,14 @@ pub(crate) async fn trigger_typing(http: &DiscordHttp, config: &DiscordConfig, t
 }
 
 /// Claims, sends and acknowledges deliveries. Each recorded outcome is
-/// reported to `outcomes` without waiting for whoever receives it.
+/// reported to `outcomes` without waiting for whoever receives it. With
+/// `summaries`, an answer whose job shows work but has no card carries the
+/// job's summary, and is its card from then on.
 pub(crate) async fn delivery_loop(
     core: CoreClient,
     reactions: Reactions,
     http: Arc<DiscordHttp>,
+    summaries: Option<Summaries>,
     outcomes: mpsc::UnboundedSender<Outcome>,
 ) -> Result<()> {
     loop {
@@ -368,7 +371,28 @@ pub(crate) async fn delivery_loop(
             }
             Err(failure) => bail!("delivery claim rejected: {}", failure.message),
         };
-        let (outcome, native_ref, shown) = attempt_delivery(&http, &delivery).await;
+        let summary = summaries
+            .as_ref()
+            .and_then(|summaries| summaries.reserve(&delivery));
+        let (outcome, sent, shown) = attempt_delivery(&http, &delivery, summary.as_ref()).await;
+        let native_ref = sent.as_ref().map(|(_, messages)| {
+            messages
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        });
+        // The summary rides on the answer's last message.
+        let hosted = summary.and(sent).and_then(|(channel_id, messages)| {
+            messages.last().map(|&message_id| Card {
+                channel_id,
+                message_id,
+                hosted: true,
+            })
+        });
+        if let Some(summaries) = &summaries {
+            summaries.sent(&delivery, hosted);
+        }
         // The Discord outcome is known at this point. Abandoning the
         // acknowledgement would let a restart downgrade it to uncertain, so
         // transient core failures are waited out while the claim is held.
@@ -389,15 +413,15 @@ pub(crate) async fn delivery_loop(
                 Err(failure) => bail!("delivery acknowledgement rejected: {}", failure.message),
             }
         }
-        // Nobody may be listening: activity cards can be disabled.
-        let _ = outcomes.send(Outcome {
-            turn_id: delivery.turn_id.clone(),
-            turn_state: delivery.turn_state,
-            delivery: outcome,
-        });
         // The reactions run beside delivery, so a reaction Discord is slow
         // to take never holds up the next answer.
-        reactions.show_outcome(delivery.feedback_target_id, shown);
+        reactions.show_outcome(delivery.feedback_target_id.clone(), shown);
+        // Nobody may be listening: activity cards can be disabled.
+        let _ = outcomes.send(Outcome {
+            delivery,
+            result: outcome,
+            hosted,
+        });
     }
 }
 
@@ -422,10 +446,14 @@ async fn reconcile_after_claim_failure(core: &CoreClient, reactions: &Reactions)
     }
 }
 
+/// What was sent: the channel and the messages, in order.
+type Sent = (Id<ChannelMarker>, Vec<Id<MessageMarker>>);
+
 async fn attempt_delivery(
     http: &DiscordHttp,
     delivery: &Delivery,
-) -> (DeliveryOutcome, Option<String>, Feedback) {
+    summary: Option<&Embed>,
+) -> (DeliveryOutcome, Option<Sent>, Feedback) {
     let channel = match delivery.target_id.parse::<Id<ChannelMarker>>() {
         Ok(channel) => channel,
         Err(failure) => {
@@ -433,10 +461,10 @@ async fn attempt_delivery(
             return (DeliveryOutcome::Uncertain, None, Feedback::Uncertain);
         }
     };
-    match send_discord_message(http, channel, &delivery.content).await {
-        Ok(native_ref) => (
+    match send_discord_message(http, channel, &delivery.content, summary).await {
+        Ok(messages) => (
             DeliveryOutcome::Delivered,
-            Some(native_ref),
+            Some((channel, messages)),
             if delivery.turn_state == carillon_protocol::model::TurnState::Completed {
                 Feedback::Delivered
             } else {
@@ -450,11 +478,14 @@ async fn attempt_delivery(
     }
 }
 
+/// Sends `content` in as many messages as it takes, the last carrying
+/// `summary` when there is one, and returns the messages in order.
 pub(crate) async fn send_discord_message(
     http: &DiscordHttp,
     channel_id: Id<ChannelMarker>,
     content: &str,
-) -> Result<String> {
+    summary: Option<&Embed>,
+) -> Result<Vec<Id<MessageMarker>>> {
     let chunks = discord_chunks(content);
     if chunks.is_empty() {
         bail!("Discord delivery content is empty");
@@ -462,16 +493,22 @@ pub(crate) async fn send_discord_message(
     // Delivered text is the agent's and the runtime's, not the user's: it
     // must not notify anyone, whatever mention syntax it contains.
     let silent = AllowedMentions::default();
+    let summary = summary.map(|summary| [summary.clone()]);
+    let last = chunks.len() - 1;
     let mut ids = Vec::with_capacity(chunks.len());
-    for chunk in chunks {
-        let message = http
+    for (index, chunk) in chunks.iter().enumerate() {
+        let mut request = http
             .create_message(channel_id)
             .allowed_mentions(Some(&silent))
-            .content(&chunk)
-            .await?;
-        ids.push(message.model().await?.id.to_string());
+            .content(chunk);
+        if index == last
+            && let Some(embeds) = &summary
+        {
+            request = request.embeds(embeds);
+        }
+        ids.push(request.await?.model().await?.id);
     }
-    Ok(ids.join(","))
+    Ok(ids)
 }
 
 pub(crate) fn discord_chunks(content: &str) -> Vec<String> {

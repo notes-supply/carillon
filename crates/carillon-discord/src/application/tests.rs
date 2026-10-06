@@ -1048,6 +1048,13 @@ async fn simulated_core(staging: PathBuf) -> anyhow::Result<(std::net::SocketAdd
                             target_id: event.delivery_target_id.clone(),
                             feedback_target_id: event.feedback_target_id.clone(),
                             content: "answer".to_owned(),
+                            origin: carillon_protocol::model::Origin {
+                                turn_id: format!("turn-{}", event.event_id),
+                                accepted_at: 1_790_000_000,
+                            },
+                            finished_at: 1_790_000_001,
+                            activity: None,
+                            continued_by: None,
                         });
                         core.capture(&submitted, event.clone());
                     }

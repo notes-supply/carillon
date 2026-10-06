@@ -1,3 +1,5 @@
+import type { TurnActivity } from "@carillon/protocol";
+
 /**
  * What the runtime tells callers when work fails, and what it keeps in its own log.
  *
@@ -21,6 +23,24 @@ export class ExplainedFailure extends Error {
     super(message);
     this.status = status;
   }
+}
+
+/** Final reports of failed turns, by the failure each turn ended with. */
+const reports = new WeakMap<object, TurnActivity>();
+
+/**
+ * Keeps a failed turn's final report with the failure it ended with, whatever
+ * that failure is. The failure itself is unchanged, so how its status,
+ * explanation and diagnostics are handled is too; the HTTP adapter sends the
+ * report apart from them, so withholding unsafe text never withholds it.
+ */
+export function withReport(failure: unknown, activity: TurnActivity): void {
+  if (typeof failure === "object" && failure !== null) reports.set(failure, activity);
+}
+
+/** The final report a failed turn left with `failure`, if any. */
+export function reportOf(failure: unknown): TurnActivity | undefined {
+  return typeof failure === "object" && failure !== null ? reports.get(failure) : undefined;
 }
 
 /**
