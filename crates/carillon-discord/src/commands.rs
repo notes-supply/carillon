@@ -213,8 +213,8 @@ const SUBMIT_ATTEMPTS: u32 = 3;
 /// event's identity and feedback target; core then accepts the event like
 /// any message, and the answer is delivered to the conversation. A marker
 /// Discord does not confirm in time may still have been posted, but without
-/// its ID there is no event: the command is not sent, and the marker's
-/// wording claims nothing ran.
+/// its ID there is no event: the command is not sent to core, and the
+/// marker's wording claims nothing ran.
 ///
 /// The submission first waits for its turn in the conversation's lane, after
 /// the messages before it. It returns by `deadline`, the end of its
@@ -286,7 +286,8 @@ async fn submit(
     .unwrap_or_else(|_| Err("Discord did not answer in time".to_owned()))
     .map_err(|error| {
         warn!(%error, "command marker message was not confirmed");
-        "Discord did not confirm the message that carries it, so it was not sent.".to_owned()
+        "Discord did not confirm the marker message, so the command was not sent to Carillon."
+            .to_owned()
     })?;
     let event = submitted_event(
         agent_id,
@@ -2621,7 +2622,7 @@ pub(crate) mod tests {
         assert_eq!(
             reply,
             HostReply::Error(
-                "Discord did not confirm the message that carries it, so it was not sent."
+                "Discord did not confirm the marker message, so the command was not sent to Carillon."
                     .to_owned()
             )
         );

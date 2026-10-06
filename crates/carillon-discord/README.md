@@ -58,8 +58,9 @@ retain the actual Wasm path rather than substituting this direct native call.
   typing, which never holds them back; core's silence is reported as a possible
   acceptance, never as not sent, and a refusal's reaction is shown without the answer
   waiting for it. A marker Discord does not confirm in time may still have been posted,
-  but without its ID nothing reaches core: the command is reported as not sent, and the
-  marker's wording ("asked to run") claims nothing ran.
+  but without its ID nothing reaches core: the reply says the marker was not confirmed and
+  the command was not sent to Carillon, and the marker's wording ("asked to run") claims
+  nothing ran.
 - [`inbound`](src/inbound.rs) settles one admitted message: it asks core whether it
   already holds the message, such as a replayed one, and if not prepares the native
   conversation, emits feedback (admission waits at most two seconds for it) and retries
