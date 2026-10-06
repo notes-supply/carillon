@@ -32,6 +32,7 @@ use tokio::{
     task::JoinHandle,
     time::Instant,
 };
+use tokio_util::sync::CancellationToken;
 
 /// A request the substitute received.
 #[derive(Clone, Debug)]
@@ -77,6 +78,8 @@ enum Reply {
     Limited(u32),
     /// Discord performed the request, but its answer was lost.
     Lost,
+    /// Success, answered this much later.
+    Delayed(Duration),
 }
 
 type Script = Arc<dyn Fn(&Seen, usize) -> Reply + Send + Sync>;
@@ -139,7 +142,11 @@ impl Substitute {
                         .count();
                     (earlier, creates)
                 };
-                answer(&request, script(&request, earlier), creates)
+                let reply = script(&request, earlier);
+                if let Reply::Delayed(after) = reply {
+                    tokio::time::sleep(after).await;
+                }
+                answer(&request, reply, creates)
             }
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -258,12 +265,13 @@ impl Substitute {
             config,
             CardRecords::open(records.to_path_buf()).map(Arc::new),
             observed,
+            CancellationToken::new(),
         );
         (outcomes, tokio::spawn(monitor))
     }
 
-    /// The monitor beside the delivery loop, sharing the card records as
-    /// the provider does. Deliveries add no reactions.
+    /// The monitor beside the delivery loop, sharing the card records and
+    /// the stop as the provider does. Deliveries add no reactions.
     fn provider(
         &self,
         http: Arc<twilight_http::Client>,
@@ -274,26 +282,39 @@ impl Substitute {
         let core = core_client(format!("http://{}", self.address));
         let records = CardRecords::open(records.to_path_buf()).map(Arc::new);
         let (outcomes, observed) = mpsc::unbounded_channel();
+        let stopping = CancellationToken::new();
         let delivering = delivery_loop(
             core.clone(),
             Reactions::new(http.clone(), config.clone()),
             http.clone(),
             Summaries::new(records.clone(), &config),
             outcomes,
-            tokio_util::sync::CancellationToken::new(),
+            stopping.clone(),
         );
-        let monitor = activity_monitor(core, http, config, records, observed);
+        let monitor = activity_monitor(core, http, config, records, observed, stopping.clone());
         Provider {
             monitor: tokio::spawn(monitor),
             delivering: tokio::spawn(delivering),
+            stopping,
         }
     }
 }
 
-/// The provider's monitor and delivery loop, stopped when dropped.
+/// The provider's monitor and delivery loop, aborted when dropped.
 struct Provider {
     monitor: JoinHandle<()>,
     delivering: JoinHandle<anyhow::Result<()>>,
+    stopping: CancellationToken,
+}
+
+impl Provider {
+    /// Stops as the provider's connection does: the deliveries end first,
+    /// then the monitor that takes their outcomes.
+    async fn stop(&mut self) -> anyhow::Result<()> {
+        self.stopping.cancel();
+        (&mut self.delivering).await??;
+        Ok((&mut self.monitor).await?)
+    }
 }
 
 impl Drop for Provider {
@@ -342,7 +363,7 @@ fn answer(request: &Seen, reply: Reply, creates: usize) -> Response {
         _ => StatusCode::NO_CONTENT.into_response(),
     };
     match reply {
-        Reply::Success => success(),
+        Reply::Success | Reply::Delayed(_) => success(),
         Reply::Bucket(bucket, remaining, reset_after) => {
             let mut response = success();
             limit_headers(response.headers_mut(), bucket, remaining, reset_after);
@@ -1137,6 +1158,7 @@ async fn an_answer_waits_for_progress_only_in_a_bucket_discord_shares() -> anyho
             records: Arc::new(
                 CardRecords::open(directory.path().join("cards.json")).context("records")?,
             ),
+            stopping: CancellationToken::new(),
         };
         let progress = super::render::card(
             &super::render::Shown {
@@ -1299,6 +1321,119 @@ async fn a_quick_answers_summary_stays_its_jobs_one_card_while_core_records_it_s
     assert!(discord.matching(&Method::DELETE, "/channels").is_empty());
     // A job whose answer ended it never needed a record.
     assert!(!records.exists());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stopping_provider_finishes_the_card_its_last_answer_settles() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let records = directory.path().join("activity-cards.json");
+    // Discord is slow to finish the answered job's card.
+    let discord = Substitute::start(Arc::new(|seen, _| {
+        if seen.method == Method::PATCH && seen.path.starts_with("/channels/300/") {
+            Reply::Delayed(Duration::from_millis(1_500))
+        } else {
+            Reply::Success
+        }
+    }))
+    .await?;
+    let long_ago = now() - 60;
+    let job = |channel: &str, detail: &str| {
+        let activity = tools(None, &[("bash", detail)], &[]);
+        running(channel, channel, long_ago, Some(activity))
+    };
+    // Two jobs have cards: one is answered as the provider stops, one goes on.
+    discord.list(vec![job("300", "make"), job("301", "make")]);
+    let mut provider = discord.provider(discord.http(false), config(false), &records);
+    for channel in ["300", "301"] {
+        let created = format!("/channels/{channel}/messages");
+        discord.wait_for(&Method::POST, &created, 1).await?;
+    }
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !recorded(&records)
+            .is_ok_and(|cards| cards.as_object().is_some_and(|cards| cards.len() == 2))
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await?;
+    // Core is slow to record the answer, which goes out plainly: its job has a card.
+    let recording = discord.hold_recording().await;
+    let mut answer = delivered("300", "300", TurnState::Completed);
+    let report = [("bash", "make", true), ("read", "notes.md", true)];
+    answer.activity = Some(tools(None, &[], &report));
+    discord.deliver(answer);
+    let sent = discord
+        .wait_for(&Method::POST, "/channels/300/messages", 2)
+        .await?;
+    assert!(sent[1].body.get("embeds").is_none());
+    // The provider stops; what core lists from now on is not shown.
+    provider.stopping.cancel();
+    discord.list(vec![job("301", "make check"), job("302", "make")]);
+    let started = Instant::now();
+    let (stopped, ()) = tokio::join!(
+        tokio::time::timeout(Duration::from_secs(20), provider.stop()),
+        async {
+            tokio::time::sleep(Duration::from_millis(3_500)).await;
+            drop(recording);
+        }
+    );
+    stopped??;
+    assert!(started.elapsed() < Duration::from_secs(10));
+    // Before the monitor returned, the answered job's card showed its
+    // summary, and its record went with it.
+    let finished = discord.matching(&Method::PATCH, "/channels/300/messages/");
+    let summary = finished.last().map(Seen::content).unwrap_or_default();
+    assert!(summary.starts_with("✓ Done · answered"), "{summary}");
+    assert!(summary.contains("✓ read `notes.md`"), "{summary}");
+    assert!(discord.matching(&Method::POST, "/channels/302/").is_empty());
+    assert!(
+        discord
+            .matching(&Method::PATCH, "/channels/301/")
+            .is_empty()
+    );
+    assert!(discord.matching(&Method::DELETE, "/channels").is_empty());
+    // The job that goes on keeps its card for the next start.
+    let left = recorded(&records)?;
+    assert!(left.get("300").is_none(), "{left}");
+    assert!(left["301"]["message_id"].is_string(), "{left}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stopping_provider_makes_no_new_card_but_takes_an_answer_card() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let discord = Substitute::start(succeed()).await?;
+    let stopping = CancellationToken::new();
+    stopping.cancel();
+    let cards = super::Cards {
+        http: discord.http(false),
+        config: config(false),
+        records: Arc::new(
+            CardRecords::open(directory.path().join("cards.json")).context("records")?,
+        ),
+        stopping,
+    };
+    // A job read before the stop, long past its card's appearance.
+    let activity = tools(None, &[("bash", "make")], &[]);
+    let turn = running("job", "300", now() - 60, Some(activity));
+    let (view, mut watched) = tokio::sync::watch::channel(super::Job {
+        state: super::State::Active(Box::new(turn)),
+        ..super::Job::default()
+    });
+    let obtaining = tokio::spawn(async move { super::obtain(&cards, "job", &mut watched).await });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(discord.seen().is_empty(), "{:#?}", discord.seen());
+    // Its outcome still brings the answer that carries its summary.
+    let answer = super::Card {
+        channel_id: twilight_model::id::Id::new(300),
+        message_id: twilight_model::id::Id::new(777),
+        hosted: true,
+    };
+    view.send_modify(|job| job.hosted = Some(answer));
+    let obtained = tokio::time::timeout(Duration::from_secs(5), obtaining).await??;
+    assert_eq!(obtained, Some(answer));
+    assert!(discord.seen().is_empty());
     Ok(())
 }
 

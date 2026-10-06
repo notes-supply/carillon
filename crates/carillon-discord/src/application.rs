@@ -266,13 +266,17 @@ async fn connect(
     // gets both a card and a summary on its answer.
     let cards = cards.map(Arc::new);
     let summaries = Summaries::new(cards.clone(), &state.discord);
-    let monitor = activity_monitor(
+    // The monitor takes every outcome the deliveries report, through the
+    // last a stop lets them finish, and then finishes the cards those settle.
+    let mut monitoring = tokio::spawn(activity_monitor(
         state.core.clone(),
         http.clone(),
         state.discord.clone(),
         cards,
         observed,
-    );
+        stopping.clone(),
+    ));
+    let mut watching = true;
     // Deliveries outlast whatever ends the provider: a claimed one is still
     // sent and its outcome recorded.
     let mut deliveries = tokio::spawn(delivery_loop(
@@ -296,7 +300,10 @@ async fn connect(
             delivering = false;
             result.map_err(Into::into).flatten().context("Discord delivery worker stopped")
         },
-        () = monitor => Err(anyhow::anyhow!("Discord activity monitor stopped")),
+        _ = &mut monitoring => {
+            watching = false;
+            Err(anyhow::anyhow!("Discord activity monitor stopped"))
+        },
         interrupted = tokio::signal::ctrl_c() => interrupted.context("handle interruption"),
         _ = terminate.recv() => Ok(()),
     };
@@ -304,8 +311,9 @@ async fn connect(
     // handed to core ends; a submission core may have received is settled,
     // so its staged files stay until core no longer needs them; an
     // interaction already acknowledged finishes its invocation and attempts
-    // its reply; a claimed delivery is sent and acknowledged. Reactions still
-    // under way then get a moment to end before the rest are cancelled.
+    // its reply; a claimed delivery is sent and acknowledged, and the card its
+    // outcome settles shows its summary. Reactions still under way then get
+    // a moment to end before the rest are cancelled.
     stopping.cancel();
     answered(&mut interactions).await;
     let prepared = dispatcher.await;
@@ -314,9 +322,12 @@ async fn connect(
     } else {
         Ok(())
     };
+    // Its outcomes now closed, the monitor ends within its bound.
+    let watched = if watching { monitoring.await } else { Ok(()) };
     reactions.stop(PROMPT_FEEDBACK).await;
     prepared.context("Discord message preparation failed")?;
     delivered.context("Discord delivery worker stopped")?;
+    watched.context("Discord activity monitor failed")?;
     outcome
 }
 

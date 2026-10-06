@@ -7,7 +7,10 @@
 //! snapshot; the delivery loop says how each turn ended once its answer or
 //! notice is acknowledged, with the runtime's final report and the
 //! observation that continues the job, if any. The monitor owns only the
-//! mapping from jobs to per-job tasks. Each job's card and typing are
+//! mapping from jobs to per-job tasks. When the provider stops it reads,
+//! types and makes cards no more, but takes the outcomes of the deliveries
+//! still finishing, and gives the cards they settle a bounded moment to show
+//! their summaries before it returns. Each job's card and typing are
 //! separate tasks watching the latest [`Job`], so one card's slow or
 //! rate-limited Discord call never delays another job, and nothing here is
 //! awaited by delivery.
@@ -51,6 +54,7 @@ use tokio::{
     task::JoinSet,
     time::{Instant, MissedTickBehavior, interval, sleep, timeout, timeout_at},
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 use twilight_http::{
     Client as DiscordHttp,
@@ -85,6 +89,10 @@ const EXCHANGE_LIMIT: Duration = Duration::from_secs(12);
 /// Attempts to finish a card before leaving it to the next start.
 const FINAL_ATTEMPTS: u32 = 3;
 const RETRY_DELAY: Duration = Duration::from_secs(2);
+/// How long a stopping provider gives the cards its last outcomes settled to
+/// show their summaries: one final edit's whole bound. A card still
+/// unfinished then is left to the next start.
+const FINAL_DRAIN: Duration = CARD_WAIT.saturating_add(EXCHANGE_LIMIT);
 /// Recently settled turns, so a read taken before a settle cannot show a
 /// finished turn again. Turn IDs are never reused.
 const SETTLED_MEMORY: usize = 256;
@@ -184,6 +192,12 @@ impl Job {
                 finished_at: delivery.finished_at,
             },
         };
+    }
+
+    /// Core's latest read lists `turn` of the job, queued or running.
+    fn listed(&mut self, turn: ActiveTurn) {
+        self.requested_at = Some(turn.origin.accepted_at);
+        self.state = State::Active(Box::new(turn));
     }
 
     /// Core's latest read does not list the job's turn: one shown running is
@@ -522,32 +536,39 @@ struct Cards {
     http: Arc<DiscordHttp>,
     config: DiscordConfig,
     records: Arc<CardRecords>,
+    /// The provider is stopping: no new card is made.
+    stopping: CancellationToken,
 }
 
 /// Follows this provider's jobs until `outcomes` closes. Cards recorded
 /// before this start are taken up again. Without readable `records` there
-/// are no cards, only typing.
+/// are no cards, only typing. Once `stopping`, nothing more is read, typed
+/// or made a card, but outcomes are still taken until `outcomes` closes:
+/// then the cards of jobs they settled get up to [`FINAL_DRAIN`] to show
+/// their summaries, and every other card stays recorded for the next start.
 pub(crate) async fn activity_monitor(
     core: CoreClient,
     http: Arc<DiscordHttp>,
     config: DiscordConfig,
     records: Option<Arc<CardRecords>>,
     mut outcomes: mpsc::UnboundedReceiver<Outcome>,
+    stopping: CancellationToken,
 ) {
     let typing = config.typing.then(|| http.clone());
     let cards = records.map(|records| Cards {
         http,
         config,
         records,
+        stopping: stopping.clone(),
     });
     let mut tasks = JoinSet::new();
     let (reads_sender, mut reads) = mpsc::channel(1);
-    tasks.spawn(poll_core(core, reads_sender));
+    let polling = tasks.spawn(poll_core(core, reads_sender, stopping.clone()));
     let mut jobs = HashMap::new();
     let track = |tasks: &mut JoinSet<()>, job_id: &str, job: Job, old: Option<Recorded>| {
         let (view, watched) = watch::channel(job);
         if let Some(http) = &typing {
-            tasks.spawn(keep_typing(http.clone(), watched.clone()));
+            tasks.spawn(keep_typing(http.clone(), watched.clone(), stopping.clone()));
         }
         if let Some(cards) = &cards {
             tasks.spawn(show_card(cards.clone(), job_id.to_owned(), watched, old));
@@ -564,7 +585,7 @@ pub(crate) async fn activity_monitor(
         tokio::select! {
             biased;
             outcome = outcomes.recv() => {
-                let Some(Outcome { delivery, result, hosted }) = outcome else { return };
+                let Some(Outcome { delivery, result, hosted }) = outcome else { break };
                 if settled.len() == SETTLED_MEMORY {
                     settled.pop_front();
                 }
@@ -587,7 +608,8 @@ pub(crate) async fn activity_monitor(
                     cards.records.settle(&delivery.origin.turn_id, hosted.is_some());
                 }
             }
-            Some(read) = reads.recv() => {
+            // A read taken before the provider stopped is not shown after.
+            Some(read) = reads.recv(), if !stopping.is_cancelled() => {
                 let active = match read {
                     Ok(active) => active,
                     // Unknown is not empty: every card keeps what it shows.
@@ -606,19 +628,12 @@ pub(crate) async fn activity_monitor(
                         continue;
                     }
                     let job_id = turn.origin.turn_id.clone();
-                    let requested_at = turn.origin.accepted_at;
                     listed.insert(job_id.clone());
                     if let Some(view) = jobs.get(&job_id) {
-                        view.send_modify(|job| {
-                            job.requested_at = Some(requested_at);
-                            job.state = State::Active(Box::new(turn));
-                        });
+                        view.send_modify(|job| job.listed(turn));
                     } else {
-                        let job = Job {
-                            state: State::Active(Box::new(turn)),
-                            requested_at: Some(requested_at),
-                            ..Job::default()
-                        };
+                        let mut job = Job::default();
+                        job.listed(turn);
                         let view = track(&mut tasks, &job_id, job, None);
                         jobs.insert(job_id, view);
                     }
@@ -638,26 +653,51 @@ pub(crate) async fn activity_monitor(
             }
         }
     }
+    polling.abort();
+    drop(jobs);
+    finish_cards(tasks).await;
 }
 
+/// Gives a job's tasks, once every outcome is in, up to [`FINAL_DRAIN`] to
+/// end: the cards of jobs that settled show their summaries, and the tasks
+/// of jobs still open, without their views, end at once and leave their
+/// cards recorded for the next start.
+async fn finish_cards(mut tasks: JoinSet<()>) {
+    let finished = timeout(FINAL_DRAIN, async {
+        while tasks.join_next().await.is_some() {}
+    });
+    if finished.await.is_err() {
+        warn!("activity cards still finishing at stop are left to the next start");
+    }
+}
+
+/// Reads core's active turns every interval until the provider stops.
 async fn poll_core(
     core: CoreClient,
     reads: mpsc::Sender<Result<Vec<ActiveTurn>, crate::InterfaceError>>,
+    stopping: CancellationToken,
 ) {
     let mut ticks = interval(POLL_INTERVAL);
     ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    loop {
-        ticks.tick().await;
-        if reads.send(core.active_turns().await).await.is_err() {
+    while stopping.run_until_cancelled(ticks.tick()).await.is_some() {
+        let Some(read) = stopping.run_until_cancelled(core.active_turns()).await else {
+            return;
+        };
+        if reads.send(read).await.is_err() {
             return;
         }
     }
 }
 
-/// Types in a job's channel while one of its turns runs, until it ends.
-async fn keep_typing(http: Arc<DiscordHttp>, mut view: watch::Receiver<Job>) {
+/// Types in a job's channel while one of its turns runs, until it ends or
+/// the provider stops.
+async fn keep_typing(
+    http: Arc<DiscordHttp>,
+    mut view: watch::Receiver<Job>,
+    stopping: CancellationToken,
+) {
     let mut typed: Option<Instant> = None;
-    loop {
+    while !stopping.is_cancelled() {
         let channel = match &view.borrow_and_update().state {
             State::Active(turn) if turn.state == TurnState::Running => turn.target_id.parse().ok(),
             State::Settled { .. } => return,
@@ -674,7 +714,8 @@ async fn keep_typing(http: Arc<DiscordHttp>, mut view: watch::Receiver<Job>) {
                 warn!(status, "Discord refused a typing indicator");
             }
         }
-        if let Ok(Err(_)) = timeout(TYPING_REFRESH, view.changed()).await {
+        let waited = timeout(TYPING_REFRESH, view.changed());
+        if let Some(Ok(Err(_))) = stopping.run_until_cancelled(waited).await {
             return;
         }
     }
@@ -731,43 +772,47 @@ async fn obtain(cards: &Cards, job_id: &str, view: &mut watch::Receiver<Job>) ->
                 Ok(Err(_)) => return None,
                 Err(_) => {}
             }
-            match cards.records.reserve(job_id) {
-                Reservation::Recorded(recorded) => return recorded.card(),
-                // An answer is being given the job's summary: it says which.
-                Reservation::Taken => {}
-                // The job changed meanwhile; an answer may have its summary
-                // and have handed its reservation back.
-                Reservation::Free if view.has_changed().unwrap_or(true) => {
-                    cards.records.release(job_id);
-                    continue;
-                }
-                Reservation::Free => {
-                    let embed = job.embed(None, false, &cards.config.activity_markers);
-                    match cards.create(channel, &embed, view).await {
-                        Call::Done(message_id) => {
-                            let card = Card {
-                                channel_id: channel,
-                                message_id,
-                                hosted: false,
-                            };
-                            cards.records.insert(job_id, card);
-                            return Some(card);
-                        }
-                        Call::NotSent => cards.records.release(job_id),
-                        Call::Refused(status) => {
-                            cards.records.release(job_id);
-                            warn!(job_id, status, "Discord refused this job's activity card");
-                            return None;
-                        }
-                        Call::Unknown => {
-                            // Discord may hold a card this task cannot name:
-                            // the job gets no other, even after a restart.
-                            cards.records.insert(job_id, Recorded::unnamed(channel));
-                            warn!(
-                                job_id,
-                                "an activity card of unknown identity may be in Discord; the job gets no other"
-                            );
-                            return None;
+            // A stopping provider makes no new card; the job's outcome may
+            // still bring the answer that carries its summary.
+            if !cards.stopping.is_cancelled() {
+                match cards.records.reserve(job_id) {
+                    Reservation::Recorded(recorded) => return recorded.card(),
+                    // An answer is being given the job's summary: it says which.
+                    Reservation::Taken => {}
+                    // The job changed meanwhile; an answer may have its summary
+                    // and have handed its reservation back.
+                    Reservation::Free if view.has_changed().unwrap_or(true) => {
+                        cards.records.release(job_id);
+                        continue;
+                    }
+                    Reservation::Free => {
+                        let embed = job.embed(None, false, &cards.config.activity_markers);
+                        match cards.create(channel, &embed, view).await {
+                            Call::Done(message_id) => {
+                                let card = Card {
+                                    channel_id: channel,
+                                    message_id,
+                                    hosted: false,
+                                };
+                                cards.records.insert(job_id, card);
+                                return Some(card);
+                            }
+                            Call::NotSent => cards.records.release(job_id),
+                            Call::Refused(status) => {
+                                cards.records.release(job_id);
+                                warn!(job_id, status, "Discord refused this job's activity card");
+                                return None;
+                            }
+                            Call::Unknown => {
+                                // Discord may hold a card this task cannot name:
+                                // the job gets no other, even after a restart.
+                                cards.records.insert(job_id, Recorded::unnamed(channel));
+                                warn!(
+                                    job_id,
+                                    "an activity card of unknown identity may be in Discord; the job gets no other"
+                                );
+                                return None;
+                            }
                         }
                     }
                 }
