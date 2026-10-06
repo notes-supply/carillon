@@ -49,6 +49,30 @@ if "$RELEASE/bin/carillon-runtime-t3" >"$TEST_ROOT_T3_OUT" 2>&1; then
   exit 1
 fi
 grep -F -- '--config is required' "$TEST_ROOT_T3_OUT" >/dev/null
+# Disabled in its registry, it exits successfully before reading its
+# credential, settings or state, or reaching T3, so its unit is not restarted.
+T3_DISABLED=$(mktemp -d)
+mkdir "$T3_DISABLED/agent" "$T3_DISABLED/workspace"
+T3_HASH=$(printf synthetic | sha256sum | cut -d' ' -f1)
+printf '%s\n' \
+  'data_dir = "state"' \
+  '[core]' \
+  "operator_token_hash = \"$T3_HASH\"" \
+  '[agent]' \
+  'resource_root = "agent"' \
+  'workspace = "workspace"' \
+  '[[providers]]' \
+  'id = "runtime-t3"' \
+  'role = "runtime"' \
+  'version = "0.0.0"' \
+  'url = "http://127.0.0.1:1"' \
+  "token_hash = \"$T3_HASH\"" \
+  'enabled = false' >"$T3_DISABLED/carillon.toml"
+"$RELEASE/bin/carillon-runtime-t3" --config "$T3_DISABLED/carillon.toml" --provider runtime-t3 \
+  --token-file "$T3_DISABLED/missing.token" --state-dir "$T3_DISABLED/state" >"$TEST_ROOT_T3_OUT" 2>&1
+grep -F 'runtime provider runtime-t3 is disabled; not serving' "$TEST_ROOT_T3_OUT" >/dev/null
+[ ! -e "$T3_DISABLED/state" ]
+rm -rf -- "$T3_DISABLED"
 rm -f "$TEST_ROOT_T3_OUT"
 
 node "$ROOT/scripts/test-codemode.mjs" "$RELEASE"
