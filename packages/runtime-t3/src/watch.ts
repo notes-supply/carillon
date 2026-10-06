@@ -403,7 +403,11 @@ export function watchTurn(
   const listeners = new Set<() => void>();
   /** When each background task was first seen, since T3 does not date them. */
   const backgroundSince = new Map<string, number>();
-  /** When each running call T3 gave no start for was first seen, kept across snapshots. */
+  /**
+   * When the fold first saw each call running, kept across snapshots and
+   * waits: the start of a call T3 gives none for, and the evidence that a
+   * held call ran.
+   */
   const firstSeen = new Map<string, number>();
   /** The reasoning T3 published for the turn's runs, by item, kept across snapshots. */
   const notes = new Map<string, string>();
@@ -713,7 +717,8 @@ export function watchTurn(
       case "dynamic_tool":
       case "subagent":
         // Only a running call is executing: one pending or waiting is held,
-        // and counted and timed once T3 shows it running or finished.
+        // and counted and timed once T3 shows it running or finished. A held
+        // call the fold saw running stays counted, even after a snapshot.
         if (item.status === "running") {
           counted.add(item.id);
           held.delete(item.id);
@@ -724,6 +729,7 @@ export function watchTurn(
         running.delete(item.id);
         if (HELD_CALL.has(item.status)) {
           held.add(item.id);
+          if (firstSeen.has(item.id)) counted.add(item.id);
           return;
         }
         held.delete(item.id);

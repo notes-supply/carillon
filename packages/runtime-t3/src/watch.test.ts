@@ -2655,23 +2655,38 @@ it("holds a pending or waiting call, counting and timing it only once T3 shows i
     watch.apply(event(5, "turn-item.updated", call("make", "waiting")));
     watch.apply(event(6, "turn-item.updated", { ...call("ls", "completed"), startedAt: null }));
     expect(watch.activity()).toMatchObject({ phase: "waiting", running: [], tool_calls: 2 });
-    vi.setSystemTime(at("08:03:00"));
-    watch.apply(event(7, "turn-item.updated", call("make", "running")));
-    expect(watch.activity().running).toEqual([estimated]);
+    // A snapshot resumed while it waits keeps it counted; a call it lists
+    // that never ran is held uncounted.
+    const ls = { ...call("ls", "completed"), startedAt: null };
+    vi.setSystemTime(at("08:02:30"));
     watch.resubscribing();
     watch.apply(
       snapshot(
         {
           runs: [run("running")],
-          turnItems: [call("make", "running"), { ...call("ls", "completed"), startedAt: null }],
+          turnItems: [call("make", "waiting"), ls, call("lint", "pending")],
         },
-        8,
+        7,
       ),
     );
-    expect(watch.activity().running).toEqual([estimated]);
-    watch.apply(event(9, "turn-item.updated", call("make", "completed")));
+    expect(watch.activity()).toMatchObject({ phase: "waiting", running: [], tool_calls: 2 });
+    vi.setSystemTime(at("08:03:00"));
+    watch.apply(event(8, "turn-item.updated", call("make", "running")));
+    expect(watch.activity()).toMatchObject({ running: [estimated], tool_calls: 2 });
+    watch.resubscribing();
+    watch.apply(
+      snapshot(
+        {
+          runs: [run("running")],
+          turnItems: [call("make", "running"), ls, call("lint", "pending")],
+        },
+        9,
+      ),
+    );
+    expect(watch.activity()).toMatchObject({ running: [estimated], tool_calls: 2 });
+    watch.apply(event(10, "turn-item.updated", call("make", "completed")));
     expect(watch.activity()).toMatchObject({
-      phase: "model",
+      phase: "waiting",
       running: [],
       recent: [
         { tool: "bash", detail: "ls", ok: true },
