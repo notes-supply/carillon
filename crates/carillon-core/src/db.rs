@@ -558,7 +558,8 @@ impl Database {
     /// Commits a successful runtime response: completed output and the
     /// delivery intent, atomically. A response with a follow-up cursor also
     /// queues, in the same transaction, the observation that will carry the
-    /// report of the work this turn left running: same conversation, target
+    /// report of the work this turn left running, under the event identity
+    /// [`FOLLOW_UP_EVENT_PREFIX`] and the turn's ID: same conversation, target
     /// and runtime, carrying the cursor and nothing an interface sent. It
     /// does not hold back the conversation's later messages.
     pub fn complete_turn(&self, turn: &ClaimedTurn, response: &RuntimeTurnResponse) -> Result<()> {
@@ -580,7 +581,7 @@ impl Database {
                      target_id, feedback_target_id, input, native_json, follow_up_json,
                      runtime_id, provider_snapshot_json, resource_snapshot_id, state,
                      accepted_at)
-                 SELECT ?2, interface_id, 'follow-up:' || id, agent_id, audience_id, user_id,
+                 SELECT ?2, interface_id, ?5 || id, agent_id, audience_id, user_id,
                      target_id, feedback_target_id, '', '{}', ?3, runtime_id,
                      provider_snapshot_json, resource_snapshot_id, 'queued', ?4
                  FROM turns WHERE id = ?1",
@@ -589,6 +590,7 @@ impl Database {
                     uuid::Uuid::now_v7().to_string(),
                     serde_json::to_string(cursor)?,
                     now,
+                    FOLLOW_UP_EVENT_PREFIX,
                 ],
             )?;
         }
@@ -950,6 +952,10 @@ impl Database {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 }
+
+/// How the event identities of core's own follow-up observations begin.
+/// Interfaces may not use them: their events are refused at admission.
+pub(crate) const FOLLOW_UP_EVENT_PREFIX: &str = "follow-up:";
 
 /// Every read-then-write sequence starts an immediate transaction so writers
 /// serialize up front under the busy timeout instead of failing later on a
