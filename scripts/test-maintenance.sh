@@ -157,7 +157,8 @@ for scenario in existing:app-stage existing:app-before existing:app-after existi
         [ ! -e "$UNIT_DIR/carillon.target" ]
         systemd-analyze verify "$UNIT_DIR"/carillon-*.service
       fi ;;
-    *) diff -r --no-dereference "$HOME/units-before" "$UNIT_DIR" ;;
+    # Registration leaves the owner's shared units lock, as locks persist.
+    *) diff -r --no-dereference --exclude=.carillon-units.lock "$HOME/units-before" "$UNIT_DIR" ;;
   esac
   # No failure reaches enable/start; the substituted manager rejects any start.
   [ ! -e "$MANAGER_TRACE" ]
