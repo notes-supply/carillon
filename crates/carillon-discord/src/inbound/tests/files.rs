@@ -46,6 +46,10 @@ struct Core {
     /// many status lookups after the first submission still find them
     /// capturing before they are accepted.
     received: HashMap<String, usize>,
+    /// Event IDs whose next status lookup core never answers.
+    stalled: Vec<String>,
+    /// Event IDs whose status lookups core fails.
+    unanswered: Vec<String>,
     /// Whether Discord fails every thread creation, as during an outage.
     threads_fail: bool,
     submissions: Vec<ExternalEvent>,
@@ -91,6 +95,9 @@ async fn world(answers: Vec<Answer>, known: Vec<String>) -> Result<World> {
             "/v1/events/{event_id}",
             get(
                 |State(core): State<Shared>, AxumPath(event_id): AxumPath<String>| async move {
+                    if stall(&core, &event_id) {
+                        std::future::pending::<()>().await;
+                    }
                     status(&core, &event_id)
                 },
             ),
@@ -172,6 +179,19 @@ fn receipt(event_id: &str, duplicate: bool) -> EventReceipt {
     }
 }
 
+/// Whether this status lookup of `event_id` is one core never answers.
+fn stall(core: &Shared, event_id: &str) -> bool {
+    let Ok(mut core) = core.lock() else {
+        return false;
+    };
+    let Some(index) = core.stalled.iter().position(|stalled| stalled == event_id) else {
+        return false;
+    };
+    core.stalled.remove(index);
+    core.trace.push(format!("stalled status {event_id}"));
+    true
+}
+
 fn status(core: &Shared, event_id: &str) -> Response {
     let Ok(mut core) = core.lock() else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -179,6 +199,13 @@ fn status(core: &Shared, event_id: &str) -> Response {
     let entry = format!("status {event_id}");
     core.trace.push(entry.clone());
     core.times.push((entry, Instant::now()));
+    if core
+        .unanswered
+        .iter()
+        .any(|unanswered| unanswered == event_id)
+    {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
     let submitted = core
         .submissions
         .iter()
@@ -1156,6 +1183,81 @@ async fn stopping_settles_text_submissions_and_tells_senders_what_core_lacks() -
     // The waiting message is dropped, as before.
     assert!(
         !trace.iter().any(|entry| entry == "submit 132"),
+        "{trace:?}"
+    );
+    drop(send);
+    Ok(())
+}
+
+#[tokio::test]
+async fn stopping_during_the_replay_lookup_settles_text_by_cores_answer() -> Result<()> {
+    let (cdn, _) = serve_cdn(HashMap::new()).await?;
+    // Core already holds the first text; it does not hold the second; it
+    // cannot say for the third. Each one's replay lookup never answers.
+    let world = world(Vec::new(), vec!["140".to_owned()]).await?;
+    script(&world, |core| {
+        core.stalled = vec!["140".to_owned(), "141".to_owned(), "142".to_owned()];
+        core.unanswered = vec!["142".to_owned()];
+    })?;
+    let mut config = channel_config();
+    config.failed_emoji = "❌".to_owned();
+    config.uncertain_emoji = "❓".to_owned();
+    let mut third = config.routes[0].clone();
+    "302".clone_into(&mut third.channel_id);
+    config.routes.push(third);
+    let ingress = ingress(&world, config, cdn)?;
+    let (stopping, reactions) = (ingress.stopping.clone(), ingress.reactions.clone());
+    let (send, receive) = mpsc::channel(lanes::MAX_PENDING);
+    for (id, channel) in [("140", "300"), ("141", "301"), ("142", "302")] {
+        send.send(message(id, channel, "200", "hello", Vec::new()).into())
+            .await?;
+    }
+    let dispatcher = tokio::spawn(lanes::dispatch(ingress, receive));
+    for _ in 0..2000 {
+        let trace = trace(&world)?;
+        if ["140", "141", "142"]
+            .iter()
+            .all(|id| trace.contains(&format!("stalled status {id}")))
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    stopping.cancel();
+    tokio::time::timeout(Duration::from_secs(20), dispatcher).await??;
+    // The settlements are feedback, ended with the connection's reactions.
+    assert_eq!(reactions.stop(Duration::from_secs(5)).await, 0);
+    let trace = trace(&world)?;
+    // Nothing is submitted once the provider stops.
+    assert!(
+        !trace.iter().any(|entry| entry.starts_with("submit ")),
+        "{trace:?}"
+    );
+    let reactions = |id: &str| {
+        trace
+            .iter()
+            .filter(|entry| entry.contains(&format!("/messages/{id}/reactions/")))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    // The held message keeps its first admission's feedback alone.
+    assert!(explanation(&trace, "140").is_err(), "{trace:?}");
+    assert!(reactions("140").is_empty(), "{trace:?}");
+    // The sender of the one core does not hold is told.
+    let stopped = explanation(&trace, "141")?;
+    assert!(stopped.contains("restarting"), "{stopped}");
+    assert!(
+        reactions("141")
+            .iter()
+            .any(|reaction| reaction.starts_with("PUT") && reaction.contains("%E2%9D%8C")),
+        "{trace:?}"
+    );
+    // The one core cannot answer for stays uncertain, never "not accepted".
+    assert!(explanation(&trace, "142").is_err(), "{trace:?}");
+    assert!(
+        reactions("142")
+            .iter()
+            .any(|reaction| reaction.starts_with("PUT") && reaction.contains("%E2%9D%93")),
         "{trace:?}"
     );
     drop(send);

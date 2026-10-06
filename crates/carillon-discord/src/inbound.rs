@@ -167,13 +167,26 @@ async fn prepare_text(ingress: &Ingress, plan: MessagePlan) {
         reactions.outcome(&source, Feedback::Failed).await;
     };
     // A message core already holds, such as one the gateway replayed, is
-    // not admitted again: its feedback belongs to its first admission.
+    // not admitted again: its feedback belongs to its first admission. A
+    // stop ends the lookup and starts no submission; core's answer then
+    // decides the feedback, which the reactions own like any other.
     match ingress
         .until(None, known_receipt(&ingress.core, &plan.message_id))
         .await
     {
         Some(None) => {}
-        Some(Some(_)) | None => return,
+        Some(Some(_)) => return,
+        None => {
+            reactions.spawn(settle_stopped_text(
+                ingress.core.clone(),
+                reactions.clone(),
+                ingress.http.clone(),
+                plan.message_id,
+                source,
+                ingress.unfinished(),
+            ));
+            return;
+        }
     }
     let opened = ingress
         .retry(None, "prepare a Discord conversation", || {
@@ -216,6 +229,31 @@ async fn prepare_text(ingress: &Ingress, plan: MessagePlan) {
         reactions
             .outcome(&resolved.event.feedback_target_id, Feedback::Failed)
             .await;
+    }
+}
+
+/// Feedback for a text stopped before core said whether it holds it: none
+/// when core holds it, as its first admission's feedback stands; the
+/// explanation and failure when core does not; uncertain when core cannot
+/// say.
+async fn settle_stopped_text(
+    core: CoreClient,
+    reactions: Reactions,
+    http: Arc<DiscordHttp>,
+    event_id: String,
+    source: String,
+    refusal: Refusal,
+) {
+    match core.event_status(&event_id).await {
+        Ok(EventStatus::Accepted(_) | EventStatus::Capturing) => {}
+        Ok(EventStatus::Unknown) => {
+            explain(&http, &source, &refusal.0).await;
+            reactions.outcome(&source, Feedback::Failed).await;
+        }
+        Err(failure) => {
+            warn!(error = %failure.message, %event_id, "Discord stopped before core said whether it holds a message");
+            reactions.outcome(&source, Feedback::Uncertain).await;
+        }
     }
 }
 

@@ -765,11 +765,13 @@ async fn a_message_stopped_before_core_says_whether_it_holds_it_gets_no_feedback
     tokio::time::timeout(Duration::from_secs(1), preparing)
         .await
         .context("preparation waited out core after the stop")??;
-    assert_eq!(ingress.reactions.stop(Duration::from_secs(1)).await, 0);
+    // Core's answer would decide the feedback, as a task of the reactions,
+    // but core does not answer within their grace: the task is cut, and
+    // nothing is shown or submitted.
+    assert_eq!(ingress.reactions.stop(Duration::from_secs(1)).await, 1);
     server.abort();
-    // Neither feedback nor a submission: the message was never admitted.
     let requests = std::iter::from_fn(|| observed.try_recv().ok()).collect::<Vec<_>>();
-    assert_eq!(requests, ["GET /v1/events/400"]);
+    assert_eq!(requests, ["GET /v1/events/400", "GET /v1/events/400"]);
     Ok(())
 }
 
