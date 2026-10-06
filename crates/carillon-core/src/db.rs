@@ -40,6 +40,7 @@ use rusqlite::{
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 
 use carillon_protocol::model::{
     ActiveTurn, Delivery, DeliveryOutcome, DeliveryState, EventReceipt, ExternalEvent,
@@ -403,10 +404,19 @@ impl Database {
     /// Claims the oldest eligible queued turn for a runtime and marks it
     /// running. A turn is eligible only when its conversation has no earlier
     /// queued or running turn, which serializes each conversation FIFO.
-    /// Interrupted turns are terminal and never hold later messages.
-    pub fn claim_turn(&self, runtime_id: &str) -> Result<Option<ClaimedTurn>> {
+    /// Interrupted turns are terminal and never hold later messages. Once
+    /// `stopping` is cancelled none is claimed, even by a caller that was
+    /// waiting for the database writer when it was.
+    pub fn claim_turn(
+        &self,
+        runtime_id: &str,
+        stopping: &CancellationToken,
+    ) -> Result<Option<ClaimedTurn>> {
         let mut connection = self.connect()?;
         let transaction = write_transaction(&mut connection)?;
+        if stopping.is_cancelled() {
+            return Ok(None);
+        }
         let turn = transaction
             .query_row(
                 "SELECT id, interface_id, agent_id, audience_id, runtime_id,
@@ -996,6 +1006,7 @@ mod tests {
     use carillon_protocol::model::{
         DeliveryOutcome, DeliveryState, EventReceipt, ExternalEvent, RuntimeTurnResponse, TurnState,
     };
+    use tokio_util::sync::CancellationToken;
 
     fn event(id: &str, audience: &str) -> ExternalEvent {
         ExternalEvent {
@@ -1028,7 +1039,9 @@ mod tests {
         let database = Database::create(&directory.path().join("state.sqlite3"))?;
         accept(&database, "one", "conversation")?;
         let next = accept(&database, "two", "conversation")?;
-        let turn = database.claim_turn("runtime")?.context("missing turn")?;
+        let turn = database
+            .claim_turn("runtime", &CancellationToken::new())?
+            .context("missing turn")?;
         database.interrupt_turn(&turn, "runtime disconnected", None)?;
         let claim = database
             .claim_delivery("discord", "live")?
@@ -1036,12 +1049,16 @@ mod tests {
         assert_eq!(claim.turn_state, TurnState::Interrupted);
         assert_eq!(
             database
-                .claim_turn("runtime")?
+                .claim_turn("runtime", &CancellationToken::new())?
                 .context("next message blocked")?
                 .turn_id,
             next.turn_id
         );
-        assert!(database.claim_turn("runtime")?.is_none());
+        assert!(
+            database
+                .claim_turn("runtime", &CancellationToken::new())?
+                .is_none()
+        );
         assert!(database.acknowledge_delivery(
             "discord",
             claim.id,
@@ -1162,7 +1179,7 @@ mod tests {
         assert_eq!(first.state, TurnState::Queued);
 
         let turn = database
-            .claim_turn("runtime")?
+            .claim_turn("runtime", &CancellationToken::new())?
             .context("turn was not queued")?;
         database.complete_turn(
             &turn,
@@ -1187,7 +1204,7 @@ mod tests {
         let database = Database::create(&directory.path().join("state.sqlite3"))?;
         accept(&database, "one", "conversation")?;
         let first = database
-            .claim_turn("runtime")?
+            .claim_turn("runtime", &CancellationToken::new())?
             .context("first turn missing")?;
         database.complete_turn(
             &first,
@@ -1198,7 +1215,7 @@ mod tests {
         )?;
         accept(&database, "two", "conversation")?;
         let second = database
-            .claim_turn("runtime")?
+            .claim_turn("runtime", &CancellationToken::new())?
             .context("second turn missing")?;
         // Delivery insertion follows the turn update. Fail at that last write,
         // using real SQLite transaction semantics.
@@ -1265,11 +1282,19 @@ mod tests {
             let recent = database.recent_turns(None, 10)?;
             assert_eq!(recent[0].event_id, "two");
             assert_eq!(recent[1].event_id, "one");
-            let first = database.claim_turn("runtime")?.context("first missing")?;
+            let first = database
+                .claim_turn("runtime", &CancellationToken::new())?
+                .context("first missing")?;
             assert_eq!(first.turn_id, "z-first");
-            assert!(database.claim_turn("runtime")?.is_none());
+            assert!(
+                database
+                    .claim_turn("runtime", &CancellationToken::new())?
+                    .is_none()
+            );
             database.interrupt_turn(&first, "interrupted", None)?;
-            let second = database.claim_turn("runtime")?.context("second missing")?;
+            let second = database
+                .claim_turn("runtime", &CancellationToken::new())?
+                .context("second missing")?;
             assert_eq!(second.turn_id, "a-second");
         }
         Ok(())
@@ -1280,14 +1305,23 @@ mod tests {
         let directory = tempdir()?;
         let database = Database::create(&directory.path().join("state.sqlite3"))?;
         accept(&database, "one", "conversation")?;
-        database.claim_turn("runtime")?.context("missing turn")?;
+        database
+            .claim_turn("runtime", &CancellationToken::new())?
+            .context("missing turn")?;
         assert_eq!(database.recover_running_turns()?, 1);
         assert_eq!(database.recover_running_turns()?, 0);
-        assert!(database.claim_turn("runtime")?.is_none());
+        assert!(
+            database
+                .claim_turn("runtime", &CancellationToken::new())?
+                .is_none()
+        );
         assert_eq!(database.turn_counts()?.interrupted, 1);
         let next = accept(&database, "two", "conversation")?;
         assert_eq!(
-            database.claim_turn("runtime")?.context("blocked")?.turn_id,
+            database
+                .claim_turn("runtime", &CancellationToken::new())?
+                .context("blocked")?
+                .turn_id,
             next.turn_id
         );
         Ok(())
@@ -1302,7 +1336,7 @@ mod tests {
 
         for output in ["first reply", "second reply"] {
             let turn = database
-                .claim_turn("runtime")?
+                .claim_turn("runtime", &CancellationToken::new())?
                 .context("turn was not queued")?;
             database.complete_turn(
                 &turn,
@@ -1365,7 +1399,7 @@ mod tests {
         for (event, output) in [("older", "older reply"), ("wanted", "wanted reply")] {
             accept(&database, event, output)?;
             let turn = database
-                .claim_turn("runtime")?
+                .claim_turn("runtime", &CancellationToken::new())?
                 .context("turn was not queued")?;
             database.complete_turn(
                 &turn,
@@ -1412,7 +1446,7 @@ mod tests {
 
         accept(&database, "uncertain", "one")?;
         let uncertain = database
-            .claim_turn("runtime")?
+            .claim_turn("runtime", &CancellationToken::new())?
             .context("uncertain turn was not queued")?;
         database.interrupt_turn(&uncertain, "ambiguous", None)?;
         assert!(
@@ -1424,7 +1458,7 @@ mod tests {
 
         accept(&database, "requeued", "two")?;
         let requeued = database
-            .claim_turn("runtime")?
+            .claim_turn("runtime", &CancellationToken::new())?
             .context("requeued turn was not queued")?;
         database.requeue_turn(&requeued)?;
         assert!(database.requeue_turn(&requeued).is_err());
@@ -1435,7 +1469,7 @@ mod tests {
         );
 
         let requeued = database
-            .claim_turn("runtime")?
+            .claim_turn("runtime", &CancellationToken::new())?
             .context("requeued turn could not be claimed again")?;
         let response = RuntimeTurnResponse {
             correlation_id: requeued.turn_id.clone(),

@@ -13,6 +13,7 @@ use carillon_protocol::model::{
     StateCounts, TurnInspection, TurnSummary, UnansweredTurn,
 };
 use std::{path::PathBuf, sync::Arc};
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 /// Runtime identity and availability, without credentials or a transport implementation.
@@ -268,17 +269,19 @@ impl Core {
 
     /// Claim and execute one eligible turn through a caller-supplied runtime operation.
     /// The application must verify local transport prerequisites (such as credentials) before this call.
+    /// Once `stopping` is cancelled no turn is claimed; one already claimed runs to its outcome.
     /// # Errors
     /// Returns registry or storage errors. A failed outcome commit leaves the turn running for recovery.
     pub async fn execute_next(
         &self,
         runtime_id: &str,
+        stopping: &CancellationToken,
         submit: impl AsyncFnOnce(RuntimeTurnRequest) -> Result<RuntimeTurnResponse, TurnFailure>,
     ) -> Result<WorkerStep> {
         if !self.runtime(runtime_id)?.enabled {
             return Ok(WorkerStep::Backoff);
         }
-        let Some(turn) = self.database.claim_turn(runtime_id)? else {
+        let Some(turn) = self.database.claim_turn(runtime_id, stopping)? else {
             return Ok(WorkerStep::Idle);
         };
         if let Err(unusable) = self.check_attachments(&turn).await {

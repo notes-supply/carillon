@@ -541,6 +541,7 @@ mod tests {
     use flate2::{Compression, write::GzEncoder};
     use tar::{Builder, Header};
     use tempfile::tempdir;
+    use tokio_util::sync::CancellationToken;
 
     use carillon_installation::config::{Config, LoadedConfig, ProviderRole, RELEASE_VERSION};
 
@@ -1049,7 +1050,10 @@ mod tests {
                     None,
                 )?;
                 let expected_state = if uncertain {
-                    assert!(db.claim_turn("runtime-pi")?.is_some());
+                    assert!(
+                        db.claim_turn("runtime-pi", &CancellationToken::new())?
+                            .is_some()
+                    );
                     assert_eq!(db.recover_running_turns()?, 1);
                     TurnState::Interrupted
                 } else {
@@ -1194,7 +1198,7 @@ mod tests {
                 .await?;
             turns.push(receipt.turn_id);
         }
-        core.execute_next("runtime-pi", async |request| {
+        core.execute_next("runtime-pi", &CancellationToken::new(), async |request| {
             Ok(RuntimeTurnResponse {
                 output: "read it".to_owned(),
                 correlation_id: request.correlation_id,
@@ -1238,7 +1242,7 @@ mod tests {
         let restored = LoadedConfig::load(&restore(&archive, &relocated)?)?;
         let restored_core = installed_core(&restored)?;
         restored_core
-            .execute_next("runtime-pi", async |request| {
+            .execute_next("runtime-pi", &CancellationToken::new(), async |request| {
                 assert_eq!(request.correlation_id, turns[1]);
                 let root = std::path::Path::new(&request.attachment_root);
                 assert!(root.starts_with(&relocated), "{}", root.display());

@@ -94,7 +94,13 @@ async fn run_next_turn(
         RuntimeTurnRequest,
     ) -> Result<RuntimeTurnResponse, TurnFailure>,
 ) -> Result<WorkerStep> {
-    super::run_next_turn(&configured(state), runtime_id, submit).await
+    super::run_next_turn(
+        &configured(state),
+        runtime_id,
+        &CancellationToken::new(),
+        submit,
+    )
+    .await
 }
 
 async fn accept(state: &AppState, id: &str, audience: &str) -> Result<EventReceipt> {
@@ -562,7 +568,7 @@ async fn occupied_listener_leaves_accepted_and_running_work_untouched() -> Resul
     state
         .core
         .database
-        .claim_turn("test-runtime")?
+        .claim_turn("test-runtime", &CancellationToken::new())?
         .context("missing running turn")?;
     let queued = accept(&state, "queued", "other").await?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -1013,7 +1019,7 @@ async fn startup_drains_queued_nondefault_runtime_without_replaying_running_work
     state
         .core
         .database
-        .claim_turn("test-runtime")?
+        .claim_turn("test-runtime", &CancellationToken::new())?
         .context("missing claim")?;
     let blocked = accept(&state, "successor", "blocked").await?;
     let queued = accept(&state, "queued", "old-conversation").await?;
@@ -1247,6 +1253,75 @@ async fn a_stopping_worker_settles_its_turn_and_claims_no_other() -> Result<()> 
     // The held turn settled; the queued one waits for the next start.
     assert_eq!(state_of(&held.turn_id)?, TurnState::Completed);
     assert_eq!(state_of(&queued.turn_id)?, TurnState::Queued);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_claim_waiting_for_the_database_writer_is_not_made_once_stopping() -> Result<()> {
+    use std::io::Write as _;
+
+    let directory = tempdir()?;
+    let mut state = installation(directory.path())?;
+    let queued = accept(&state, "queued", "first").await?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route(
+        "/v1/turns",
+        post({
+            let calls = calls.clone();
+            move |Json(request): Json<Value>| async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Json(json!({"output": "answered", "correlation_id": request["correlation_id"]}))
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    state.config.value.providers[1].url = format!("http://{}", listener.local_addr()?);
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    // Another connection holds the database writer.
+    let writer = rusqlite::Connection::open(state.config.value.data_dir.join("carillon.sqlite3"))?;
+    writer.execute_batch("BEGIN IMMEDIATE")?;
+    // The worker reads its runtime credential, after checking whether core
+    // is stopping and with no await before it claims; read from a FIFO, it
+    // waits for the test.
+    let credential = directory.path().join("credentials/test-runtime.token");
+    fs::remove_file(&credential)?;
+    rustix::fs::mknodat(
+        rustix::fs::CWD,
+        &credential,
+        rustix::fs::FileType::Fifo,
+        rustix::fs::Mode::from_raw_mode(0o600),
+        0,
+    )?;
+    let stopping = CancellationToken::new();
+    let worker = tokio::spawn(runtime_worker(
+        configured(&state),
+        "test-runtime".to_owned(),
+        stopping.clone(),
+    ));
+    let mut fifo =
+        tokio::task::spawn_blocking(move || fs::OpenOptions::new().write(true).open(credential))
+            .await??;
+    fifo.write_all(b"test-only")?;
+    drop(fifo);
+    // The worker is past its check and goes on to claim, waiting for the
+    // writer. The pause lets it reach that wait, though wherever the stop
+    // lands from here on, no turn may be claimed; only then is the writer
+    // released.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    stopping.cancel();
+    writer.execute_batch("ROLLBACK")?;
+    tokio::time::timeout(Duration::from_secs(10), worker).await??;
+    server.abort();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "a turn was sent after stopping began"
+    );
+    let turn = state
+        .core
+        .inspect_turn(&queued.turn_id)?
+        .context("missing turn")?;
+    assert_eq!(turn.state, TurnState::Queued);
     Ok(())
 }
 
@@ -1560,7 +1635,7 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
     let turn = state
         .core
         .database
-        .claim_turn("test-runtime")?
+        .claim_turn("test-runtime", &CancellationToken::new())?
         .context("missing claim")?;
     let mut runtime = state
         .config

@@ -62,19 +62,23 @@ async fn conversation() -> Result<()> {
     );
     std::fs::write(resources.join("SYSTEM.md"), "Changed after acceptance")?;
     let step = core
-        .execute_next("echo", async |request| {
-            // Opaque interface data is captured on acceptance, not supplied by a duplicate.
-            assert_eq!(request.native, event.native);
-            // This deterministic test runtime is deliberately not Pi. The snapshot is real.
-            let captured = std::fs::read_to_string(
-                std::path::Path::new(&request.resource_root).join("SYSTEM.md"),
-            )
-            .map_err(|error| carillon_core::TurnFailure::Uncertain(error.into()))?;
-            Ok(RuntimeTurnResponse {
-                correlation_id: request.correlation_id,
-                output: format!("{} — {captured}", request.input),
-            })
-        })
+        .execute_next(
+            "echo",
+            &tokio_util::sync::CancellationToken::new(),
+            async |request| {
+                // Opaque interface data is captured on acceptance, not supplied by a duplicate.
+                assert_eq!(request.native, event.native);
+                // This deterministic test runtime is deliberately not Pi. The snapshot is real.
+                let captured = std::fs::read_to_string(
+                    std::path::Path::new(&request.resource_root).join("SYSTEM.md"),
+                )
+                .map_err(|error| carillon_core::TurnFailure::Uncertain(error.into()))?;
+                Ok(RuntimeTurnResponse {
+                    correlation_id: request.correlation_id,
+                    output: format!("{} — {captured}", request.input),
+                })
+            },
+        )
         .await?;
     ensure!(step == WorkerStep::Advanced, "no turn executed");
     let delivery = core

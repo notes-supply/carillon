@@ -417,9 +417,14 @@ async fn runtime_activity(
 /// claimed runs to its outcome; none is claimed after the cancellation.
 async fn runtime_worker(state: AppState, runtime_id: String, stopping: CancellationToken) {
     while !stopping.is_cancelled() {
-        let delay = match run_next_turn(&state, &runtime_id, async |runtime, token, request| {
-            call_runtime(&state.client, runtime, token, request).await
-        })
+        let delay = match run_next_turn(
+            &state,
+            &runtime_id,
+            &stopping,
+            async |runtime, token, request| {
+                call_runtime(&state.client, runtime, token, request).await
+            },
+        )
         .await
         {
             Ok(WorkerStep::Advanced) => continue,
@@ -441,6 +446,7 @@ async fn runtime_worker(state: AppState, runtime_id: String, stopping: Cancellat
 async fn run_next_turn(
     state: &AppState,
     runtime_id: &str,
+    stopping: &CancellationToken,
     submit: impl AsyncFnOnce(
         &Provider,
         &str,
@@ -454,7 +460,7 @@ async fn run_next_turn(
     let token = runtime_token(&state.config, runtime)?;
     state
         .core
-        .execute_next(runtime_id, async |request| {
+        .execute_next(runtime_id, stopping, async |request| {
             submit(runtime, &token, request).await
         })
         .await
