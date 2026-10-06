@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
+import { once } from "node:events";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -662,6 +664,42 @@ it("reuses its uploads when a dispatch is retried, and dispatches nothing when a
   const next = runtime.executeTurn(turn("turn-4", "text only"));
   answer(await started("turn-4"), "Fine.");
   expect((await next).output).toBe("Fine.");
+});
+
+it("never follows T3's upload redirect to another origin", async () => {
+  const attachments = await captured([{ name: "photo.png", bytes: PNG }]);
+  // Another origin, which records whatever reaches it.
+  const reached: string[] = [];
+  const elsewhere = createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(chunk));
+    request.on("end", () => {
+      reached.push(`${String(request.method)} ${String(Buffer.concat(chunks).length)} bytes`);
+      response.writeHead(500);
+      response.end();
+    });
+  });
+  elsewhere.listen(0, "127.0.0.1");
+  await once(elsewhere, "listening");
+  const address = elsewhere.address();
+  if (address === null || typeof address === "string") throw new Error("no listening port");
+  const { port } = address;
+  // T3's own upload route answers with a redirect there.
+  fake.uploadRedirect = `http://127.0.0.1:${String(port)}/collect`;
+  const failure: unknown = await runtime
+    .executeTurn(turn("turn-1", "look", { attachments }))
+    .then(
+      () => undefined,
+      (error: unknown) => error,
+    )
+    .finally(() => elsewhere.close());
+  // No image byte reached the other origin, and the turn failed as T3 refused it.
+  expect(reached).toEqual([]);
+  expect(failure).toMatchObject({
+    status: 502,
+    message: "T3 did not accept the attached image photo.png (HTTP 307).",
+  });
+  expect(dispatches()).toHaveLength(0);
 });
 
 it("names earlier files it cannot provide", async () => {
