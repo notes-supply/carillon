@@ -970,6 +970,34 @@ fn calling_model(answered: &str, failed: &str) -> anyhow::Result<Vec<u8>> {
     Ok(wat::parse_str(text)?)
 }
 
+/// A gateway `/model` command from an allowed user in route channel 300.
+fn model_command() -> anyhow::Result<twilight_gateway::Event> {
+    use twilight_model::gateway::payload::incoming::InteractionCreate;
+
+    let command = json!({
+        "id": "1",
+        "application_id": "2",
+        "authorizing_integration_owners": {},
+        "token": "t",
+        "version": 1,
+        "type": 2,
+        "guild_id": "100",
+        "channel": {"id": "300", "type": 0},
+        "member": {
+            "user": {"id": "200", "username": "u", "discriminator": "0", "avatar": null},
+            "roles": [],
+            "joined_at": null,
+            "deaf": false,
+            "mute": false,
+            "flags": 0
+        },
+        "data": {"id": "3", "name": "model", "type": 1}
+    });
+    Ok(twilight_gateway::Event::InteractionCreate(Box::new(
+        InteractionCreate(serde_json::from_value(command)?),
+    )))
+}
+
 /// The gateway goes, as when the provider stops, after taking an
 /// interaction that Discord has acknowledged and whose native call to core
 /// is still running: the call's result is still part of the reply sent
@@ -979,7 +1007,6 @@ async fn an_acknowledged_interaction_is_answered_before_the_provider_returns() -
 {
     use axum::routing::patch;
     use tokio::sync::Notify;
-    use twilight_model::gateway::payload::incoming::InteractionCreate;
 
     let directory = tempfile::tempdir()?;
     // Discord takes the acknowledgement and the reply at once.
@@ -1051,28 +1078,7 @@ async fn an_acknowledged_interaction_is_answered_before_the_provider_returns() -
         refusals: Arc::new(tokio::sync::Semaphore::new(crate::inbound::lanes::REFUSALS)),
         stopping: tokio_util::sync::CancellationToken::new(),
     });
-    let command = json!({
-        "id": "1",
-        "application_id": "2",
-        "authorizing_integration_owners": {},
-        "token": "t",
-        "version": 1,
-        "type": 2,
-        "guild_id": "100",
-        "channel": {"id": "300", "type": 0},
-        "member": {
-            "user": {"id": "200", "username": "u", "discriminator": "0", "avatar": null},
-            "roles": [],
-            "joined_at": null,
-            "deaf": false,
-            "mute": false,
-            "flags": 0
-        },
-        "data": {"id": "3", "name": "model", "type": 1}
-    });
-    let event = twilight_gateway::Event::InteractionCreate(Box::new(InteractionCreate(
-        serde_json::from_value(command)?,
-    )));
+    let event = model_command()?;
     let (messages, _queue) = tokio::sync::mpsc::channel(1);
     let mut interactions = tokio::task::JoinSet::new();
     super::take_event(&state, event, &messages, &ingress, &mut interactions)?;
