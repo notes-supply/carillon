@@ -108,7 +108,7 @@ Running the same command again finishes the change in either case, including reg
 
 `carillon update` keeps an installed module and has the new release check it before any service stops; an update whose provider cannot serve it is refused. Run `carillon discord commands reset` before such an update, then install a module built for the new release. A provider refuses to start with an installed module it cannot use and names the file; remove that file (the provider then serves the release's module), or replace it with a working module.
 
-Each bundled provider reports its own build version, not the `providers[].version` expectation in configuration. Core's status reports the observed version with `version_mismatch` when the provider ID and role match but its version differs. Unreachable or wrong-identity providers are `unavailable`, with the configured identity and expected version instead. Core asks every enabled provider at once and gives each two seconds to answer, so however many providers stall, the report keeps within the operator's five-second request.
+Each bundled provider reports its own build version, not the `providers[].version` expectation in configuration. Core's status reports the observed version with `version_mismatch` when the provider ID and role match but its version differs. Unreachable or wrong-identity providers are `unavailable`, with the configured identity and expected version instead. Core asks every enabled provider at once and gives each two seconds to answer, so stalled providers add one such timeout to a report rather than one each.
 
 ### Activity cards
 
