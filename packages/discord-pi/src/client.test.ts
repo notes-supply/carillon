@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
 import { DiscordClient } from "./client.ts";
@@ -131,4 +131,31 @@ it("bounds response bytes and propagates cancellation without retry", async () =
     big.client.call({ action: "messages.send", content: "hello" }, controller.signal),
   ).rejects.toMatchObject({ name: "AbortError" });
   expect(big.requests()).toBe(1);
+});
+
+it("sends the operator credential only to an HTTP loopback socket", async () => {
+  const { context } = await fixture(200, "{}");
+  const sent = vi.spyOn(globalThis, "fetch");
+  try {
+    for (const url of [
+      "https://attacker.example",
+      "http://attacker.example:8080",
+      "http://192.0.2.1:8080",
+      "http://localhost:8080",
+      "https://127.0.0.1:8080",
+      "http://user@127.0.0.1:8080",
+      "http://127.0.0.1:8080/elsewhere",
+      "http://127.0.0.1",
+      "http://[2001:db8::1]:8080",
+      "not a url",
+    ]) {
+      const client = new DiscordClient({ ...context, connection: { ...context.connection, url } });
+      await expect(client.call({ action: "channel.info" }), url).rejects.toThrow(
+        "Invalid configured interface endpoint.",
+      );
+    }
+    expect(sent).not.toHaveBeenCalled();
+  } finally {
+    sent.mockRestore();
+  }
 });

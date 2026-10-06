@@ -1138,6 +1138,16 @@ async function testRuntimeStartupRefusals(turnId) {
       await assert.rejects(stat(sessions), { code: "ENOENT" });
     }
     await rm(runtimeSettings);
+    // An interface endpoint off the loopback socket rule is refused before
+    // Pi starts, even while the running core holds the earlier registry:
+    // extensions would receive it with the operator credential.
+    const interfaceUrl = `url = "http://127.0.0.1:${String(basePort + 1)}"`;
+    const remote = original.replace(interfaceUrl, 'url = "http://192.0.2.1:8080"');
+    assert.notEqual(remote, original);
+    await writeFile(configPath(), remote);
+    assertStartupRefused("runtime", /provider URL must use an HTTP loopback socket address/u);
+    await assert.rejects(stat(sessions), { code: "ENOENT" });
+    await writeFile(configPath(), original);
     run("--home", installation, "provider", "runtime-pi", "disable");
     assertStartupRefused("runtime", /runtime provider runtime-pi is disabled/u);
     await assert.rejects(stat(sessions), { code: "ENOENT" });

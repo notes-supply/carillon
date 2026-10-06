@@ -14,7 +14,7 @@ import {
 } from "./attachments.ts";
 import { createDeterministicRuntime } from "./testing.ts";
 import { createRuntimeServer } from "./http.ts";
-import { runtimeListenAddress } from "./endpoint.ts";
+import { providerAddress } from "./endpoint.ts";
 
 interface RuntimeProviderConfig {
   readonly id: string;
@@ -72,7 +72,7 @@ async function main(values: readonly string[]): Promise<void> {
     throw new Error("workspace must be an existing directory");
   if (!(await stat(config.resourceRoot)).isDirectory())
     throw new Error("resource root must be an existing directory");
-  const listenAddress = runtimeListenAddress(config.runtime.url);
+  const listenAddress = providerAddress(config.runtime.url);
   const token = (await readFile(requiredArgument(args, "token-file"), "utf8")).trim();
   if (
     token.length === 0 ||
@@ -152,14 +152,17 @@ async function loadConfig(path: string, providerId: string): Promise<Config> {
   );
   if (runtime === undefined) throw new Error(`runtime provider ${providerId} is not configured`);
   if (!runtime.enabled) throw new Error(`runtime provider ${providerId} is disabled`);
+  const interfaces = parsed.providers.filter(
+    (provider) => provider.role === "interface" && provider.enabled,
+  );
+  // Extensions receive these endpoints with the operator credential.
+  for (const provider of interfaces) providerAddress(provider.url);
   return {
     root,
     resourceRoot: resolve(root, parsed.agent.resource_root),
     workspace: resolve(root, parsed.agent.workspace),
     runtime,
-    interfaces: parsed.providers.filter(
-      (provider) => provider.role === "interface" && provider.enabled,
-    ),
+    interfaces,
     operatorTokenHash: parsed.core.operator_token_hash,
     inlineImages: await loadInlineImages(join(root, "providers", `${providerId}.toml`)),
   };
