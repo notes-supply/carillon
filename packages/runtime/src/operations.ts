@@ -36,6 +36,12 @@ export interface TurnResponse {
    * engine as written may: core offers them again with a later turn.
    */
   readonly unanswered_left?: boolean;
+  /**
+   * The answer left this turn's own files out of the native conversation, as
+   * a command passed to the engine as written may when it cannot carry them:
+   * core offers them again with a later turn.
+   */
+  readonly attachments_left?: boolean;
 }
 
 export interface RuntimeOperations {

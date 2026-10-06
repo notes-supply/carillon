@@ -1270,6 +1270,7 @@ mod tests {
                 output: "reply".to_owned(),
                 follow_up: None,
                 unanswered_left: false,
+                attachments_left: false,
             },
         )?;
         assert_eq!(
@@ -1411,6 +1412,7 @@ mod tests {
                 output: "delegated".to_owned(),
                 follow_up: Some(cursor.clone()),
                 unanswered_left: false,
+                attachments_left: false,
             },
         )?;
         let answer = database
@@ -1435,6 +1437,7 @@ mod tests {
                 output: output.to_owned(),
                 follow_up: None,
                 unanswered_left: false,
+                attachments_left: false,
             },
         )
     }
@@ -1454,6 +1457,7 @@ mod tests {
                 output: "first reply".to_owned(),
                 follow_up: None,
                 unanswered_left: false,
+                attachments_left: false,
             },
         )?;
         accept(&database, "two", "conversation")?;
@@ -1471,6 +1475,7 @@ mod tests {
             output: "second reply".to_owned(),
             follow_up: None,
             unanswered_left: false,
+            attachments_left: false,
         };
         let failure = database
             .complete_turn(&second, &response)
@@ -1590,6 +1595,7 @@ mod tests {
                     output: output.to_owned(),
                     follow_up: None,
                     unanswered_left: false,
+                    attachments_left: false,
                 },
             )?;
         }
@@ -1655,6 +1661,7 @@ mod tests {
                     output: output.to_owned(),
                     follow_up: None,
                     unanswered_left: false,
+                    attachments_left: false,
                 },
             )?;
             turns.push(turn.turn_id);
@@ -1725,6 +1732,7 @@ mod tests {
             output: "done".to_owned(),
             follow_up: None,
             unanswered_left: false,
+            attachments_left: false,
         };
         database.complete_turn(&requeued, &response)?;
         assert!(database.complete_turn(&requeued, &response).is_err());

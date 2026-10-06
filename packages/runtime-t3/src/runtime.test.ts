@@ -1903,6 +1903,37 @@ it("does not call a missing report older than the window when only T3's byte bud
   ).rejects.toMatchObject({ status: 502, message: "T3 finished the run without an answer." });
 });
 
+it("leaves a command's own files it cannot send for a later turn, still sending its images", async () => {
+  const [notes, photo] = await captured([
+    { name: "notes.txt", bytes: Buffer.from("plain text") },
+    { name: "photo.png", bytes: PNG },
+  ]);
+  if (notes === undefined || photo === undefined) throw new Error("no capture");
+  // A command with a file T3 cannot receive runs as written, with the image
+  // it could upload, and says it left its own files.
+  const mixed = runtime.executeTurn(
+    turn("turn-1", "/compact", { native: { intent: "command" }, attachments: [notes, photo] }),
+  );
+  answer(await started("turn-1"), "Compacted.");
+  expect(await mixed).toEqual({
+    correlation_id: "turn-1",
+    output: "Compacted.",
+    attachments_left: true,
+  });
+  expect(userTexts()[0]).toBe("/compact");
+  expect(imageDispatches()[0]).toMatchObject([{ name: "photo.png" }]);
+  // Every own file sent as an image leaves nothing.
+  const images = runtime.executeTurn(
+    turn("turn-2", "/compact", { native: { intent: "command" }, attachments: [photo] }),
+  );
+  answer(await started("turn-2"), "Again.");
+  expect(await images).toEqual({ correlation_id: "turn-2", output: "Again." });
+  // Prose names its own unavailable file, so it leaves none.
+  const prose = runtime.executeTurn(turn("turn-3", "read it", { attachments: [notes] }));
+  answer(await started("turn-3"), "Read.");
+  expect(await prose).toEqual({ correlation_id: "turn-3", output: "Read." });
+});
+
 it("sends a command invocation verbatim, leaving the earlier files' notes for a later turn", async () => {
   const earlier = [{ correlation_id: "turn-0", attachments: [attachment] }];
   const command = runtime.executeTurn(

@@ -102,6 +102,8 @@ const DEFAULT_SETTLE_MS = 30_000;
 interface Progress {
   dispatched: boolean;
   stop?: Stop;
+  /** Whether every file of the turn's own reached T3 as an uploaded image, once dispatched. */
+  ownFilesSent?: boolean;
 }
 
 /** How a cancelled or blocked turn's native work ended, as T3 confirmed it. */
@@ -407,6 +409,13 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
             ...(turnIntent(request.native) === "command" && (request.unanswered ?? []).length > 0
               ? { unanswered_left: true }
               : {}),
+            // Nor its own files it could not send as images, which prose would
+            // name; not knowing, as for a turn read back, counts as leaving them.
+            ...(turnIntent(request.native) === "command" &&
+            (request.attachments ?? []).length > 0 &&
+            progress.ownFilesSent !== true
+              ? { attachments_left: true }
+              : {}),
           };
         }
         case "failed":
@@ -610,6 +619,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
             timeoutMs,
           );
           text ??= compose(request, prepared.unavailable);
+          progress.ownFilesSent = prepared.unavailable.length === 0;
           // Nothing of this turn has reached T3 yet, so a caller that
           // aborted meanwhile is honoured before anything is sent. Work
           // already running on the thread, whoever started it, is never

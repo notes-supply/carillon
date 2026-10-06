@@ -427,7 +427,11 @@ impl Core {
             let correlation_id = request.correlation_id.clone();
             let response = submit(request).await?;
             validate_response(&correlation_id, &response)?;
-            let answered = (response.follow_up.is_some(), response.unanswered_left);
+            let answered = (
+                response.follow_up.is_some(),
+                response.unanswered_left,
+                response.attachments_left,
+            );
             let claimed = turn.clone();
             self.blocking(move |core| core.database.complete_turn(&claimed, &response))
                 .await
@@ -440,17 +444,20 @@ impl Core {
         // again; startup recovery then records it as interrupted, or asks an
         // observation again.
         let (error, explanation) = match outcome {
-            Ok((follow_up, unanswered_left)) => {
+            Ok((follow_up, unanswered_left, attachments_left)) => {
                 if follow_up {
                     self.wake(Lane::Observations);
                 }
                 // An answered turn's conversation was saved with everything
-                // it carried: its own files, and the earlier ones unless its
-                // runtime left them for a later turn. Should recording that
+                // it carried: its own files and the earlier ones, unless its
+                // runtime left either for a later turn. Should recording that
                 // fail, the files are offered again and the runtime skips
                 // those it holds.
                 if unanswered_left {
                     carried.truncate(1);
+                }
+                if attachments_left {
+                    carried.retain(|carried| *carried != turn.turn_id);
                 }
                 if !carried.is_empty()
                     && let Err(error) = self

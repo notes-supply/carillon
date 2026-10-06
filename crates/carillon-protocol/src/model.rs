@@ -244,6 +244,12 @@ pub struct RuntimeTurnResponse {
     /// turn rather than counting them carried.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unanswered_left: bool,
+    /// The answer left this turn's own files out of the runtime's
+    /// conversation, as a command passed to its engine as written may when
+    /// it cannot carry them: core does not count them carried, and offers
+    /// them again with a later turn.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub attachments_left: bool,
 }
 
 /// The neutral key of a turn's `native` metadata through which an

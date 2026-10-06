@@ -78,6 +78,7 @@ async fn conversation() -> Result<()> {
                 output: format!("{} — {captured}", request.input),
                 follow_up: None,
                 unanswered_left: false,
+                attachments_left: false,
             })
         })
         .await?;
