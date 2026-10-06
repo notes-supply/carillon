@@ -57,6 +57,13 @@ is_managed_app "$APP" || {
   exit 1
 }
 
+# Every installation of this owner shares the user units. Hold their lock
+# from the ownership check through their removal, after this installation's.
+(umask 077 && mkdir -p -- "$UNIT_DIR" && : >>"$UNIT_DIR/.carillon-units.lock")
+UNIT_DIR=$(realpath -e -- "$UNIT_DIR")
+exec 8>>"$UNIT_DIR/.carillon-units.lock"
+flock -n 8 || { echo "another Carillon operation is changing the user units in $UNIT_DIR" >&2; exit 1; }
+
 # The user units may run another installation of the same owner; leave them
 # (and its services) alone. The registration script writes this exact line.
 unit_escape() {

@@ -54,6 +54,14 @@ start() {
   fi
 }
 stop() {
+  [ "${FAKE_STOP:-ok}" != fail ] || exit 1
+  if [ "${FAKE_STOP:-ok}" = hold ]; then
+    # Pause inside the service manager, then record which installation the
+    # units named when the stop acted.
+    : >"$MANAGER/holding"
+    while [ ! -e "$MANAGER/release" ]; do sleep 0.05; done
+    sed -n 's/^Environment="CARILLON_HOME=\(.*\)"$/\1/p' "$units/carillon-core.service" >"$MANAGER/stopped"
+  fi
   if [ "${FAKE_STOP:-ok}" = break-installer ]; then
     # Make the already checked installer unrunnable once services are down.
     root=$(sed -n 's/^Environment="CARILLON_HOME=\(.*\)"$/\1/p' "$units/carillon-core.service")
@@ -399,6 +407,36 @@ refuse default-status carillon status
 carillon start >/dev/null
 carillon stop >/dev/null
 printf 'alternate installation passed: entry point kept, unit ownership enforced\n'
+
+# While one installation acts on the shared units, another cannot register
+# over them, so the action stays with the installation that checked them.
+carillon start >/dev/null
+rm -f "$MANAGER/holding" "$MANAGER/release" "$MANAGER/stopped"
+FAKE_STOP=hold carillon stop >"$TEST_ROOT/held-stop.log" 2>&1 &
+held=$!
+attempt=0
+until [ -e "$MANAGER/holding" ]; do
+  attempt=$((attempt + 1))
+  [ "$attempt" -lt 200 ] || fail 'the stop never reached the service manager'
+  sleep 0.05
+done
+refuse switch-during-stop "$ALTERNATE/app/bin/carillon-register-services"
+grep -F 'another Carillon operation is changing the user units' \
+  "$TEST_ROOT/switch-during-stop.log" >/dev/null
+: >"$MANAGER/release"
+wait "$held"
+[ "$(cat "$MANAGER/stopped")" = "$INSTALLATION" ] ||
+  fail "the stop acted on the units of $(cat "$MANAGER/stopped")"
+grep -Fx "Environment=\"CARILLON_HOME=$INSTALLATION\"" \
+  "$XDG_CONFIG_HOME/systemd/user/carillon-core.service" >/dev/null
+# A failed operation releases the units too: the deliberate switch, and the
+# switch back, then succeed.
+refuse failed-stop env FAKE_STOP=fail carillon stop
+"$ALTERNATE/app/bin/carillon-register-services" >/dev/null
+grep -Fx "Environment=\"CARILLON_HOME=$ALTERNATE\"" \
+  "$XDG_CONFIG_HOME/systemd/user/carillon-core.service" >/dev/null
+"$INSTALLATION/app/bin/carillon-register-services" >/dev/null
+printf 'unit ownership passed: no registration over held units, released after failure\n'
 
 # Existing unrelated executables are never replaced; stale Carillon links are.
 for existing in unrelated stale; do
