@@ -139,6 +139,8 @@ async function send(
       method: "POST",
       headers: { authorization: `Bearer ${endpoint.token}`, "content-type": mimeType },
       body: bytes,
+      // A redirect would repeat the bytes wherever it points: it is refused below.
+      redirect: "manual",
       signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
     });
   } catch (failure) {

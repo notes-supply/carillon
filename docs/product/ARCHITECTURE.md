@@ -17,7 +17,7 @@ The Rust core (`carillon-core`, the `carillon` executable) owns:
 - configured agent, interface, and runtime identities;
 - accepted external events and duplicate suppression, including immutable copies of the files they carry;
 - conversation continuity and runtime selection;
-- the queued, running, completed, and interrupted turn states, including the observation it queues itself when a runtime's answer says native work it started will report later (the turn stores the runtime's opaque cursor in a column of its own, and its runtime request carries it as `follow_up`; an interface's `native` data cannot make a turn an observation);
+- the queued, running, completed, and interrupted turn states, including the observation it queues itself when a runtime's answer says native work it started will report later (the turn stores the runtime's opaque cursor in a column of its own, and its runtime request carries it as `follow_up`; an interface's `native` data cannot make a turn an observation, and core refuses an interface's event whose identity starts `follow-up:`, the prefix of its observations' own);
 - delivery intents and their outcomes;
 - relaying model-selection calls from an interface to the runtime that owns the conversation; and
 - inspection, backup, and restore operations.

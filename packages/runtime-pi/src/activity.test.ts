@@ -394,6 +394,20 @@ export default function (pi) {
   }
 });
 
+it("says the work report is partial once it forgets finished work to make room", () => {
+  const tracker = trackActivity("/workspace");
+  const report = (id: string, state: string) =>
+    tracker.report({ id, kind: "delegation", label: `child ${id}`, state });
+  report("done", "succeeded");
+  for (let index = 1; index < 16; index += 1) report(`c${String(index)}`, "running");
+  expect(tracker.snapshot().work).toMatchObject({ partial: false });
+  // The finished item gives way to a new one: the report no longer covers it.
+  report("late", "running");
+  const work = tracker.snapshot().work;
+  expect(work?.items.map((item) => item.id)).not.toContain("done");
+  expect(work).toMatchObject({ partial: true });
+});
+
 it("keeps at most the snapshot limit of reported work, never dropping live work for more", () => {
   const tracker = trackActivity("/workspace");
   const report = (id: string, state: string) =>

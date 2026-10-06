@@ -622,6 +622,46 @@ it("refuses known kinds it cannot read, ignores unknown kinds and malformed stre
   expect(watch.retained().counted).toBe(0);
 });
 
+it("refuses a known item whose run it cannot identify, and still ignores runless and other runs' items", () => {
+  const request = (runId: unknown): Record<string, unknown> => {
+    const named = Object.entries(
+      item(
+        "user_input_request",
+        "run-1",
+        { requestId: "mine", questions: [{ header: "Scope", question: "Which file?" }] },
+        "waiting",
+      ),
+    ).filter(([key]) => key !== "runId");
+    return Object.fromEntries(runId === undefined ? named : [...named, ["runId", runId]]);
+  };
+  const waiting = () => {
+    const watch = watchTurn("message-1", "/workspace");
+    watch.apply(
+      snapshot({
+        runs: [run("waiting")],
+        runtimeRequests: [{ id: "mine", kind: "user_input", status: "pending" }],
+      }),
+    );
+    return watch;
+  };
+  // The run waits on this request; an item that names no readable run
+  // must not be passed over as another run's.
+  for (const runId of [undefined, 7, ""]) {
+    const watch = waiting();
+    expect(() => watch.apply(event(2, "turn-item.updated", request(runId)))).toThrow(
+      "T3 sent a user_input_request item this runtime does not understand",
+    );
+  }
+  const watch = waiting();
+  expect(() => watch.apply(event(2, "turn-item.updated", request(null)))).not.toThrow();
+  expect(() =>
+    watch.apply(
+      event(3, "turn-item.updated", { ...request("another-run"), questions: "unreadable" }),
+    ),
+  ).not.toThrow();
+  expect(watch.outcome()).toBeUndefined();
+});
+
 it("still owes the wake after the roster clears, so a cancel in that gap is not quiet", () => {
   const watch = watchTurn("message-1", "/workspace");
   watch.apply(

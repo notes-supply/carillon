@@ -714,6 +714,15 @@ impl Core {
                     .to_owned(),
             ));
         }
+        if event
+            .event_id
+            .starts_with(crate::db::FOLLOW_UP_EVENT_PREFIX)
+        {
+            return Err(CoreError::InvalidInput(format!(
+                "event identities starting {} are reserved for core",
+                crate::db::FOLLOW_UP_EVENT_PREFIX
+            )));
+        }
         if event.agent_id != self.options.agent_id {
             return Err(CoreError::InvalidInput("unknown agent".to_owned()));
         }

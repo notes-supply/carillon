@@ -106,6 +106,8 @@ export interface FakeT3 {
   uploadUrl: (attachmentId: string) => string;
   /** What the upload route answers a complete upload with. */
   uploadStatus: number;
+  /** Where the upload route redirects a complete upload, if anywhere. */
+  uploadRedirect: string | undefined;
   /** What protocol discovery announces. */
   protocolVersion: number;
   /** The provider instances `server.getConfig` and `server.refreshProviders` list, as T3 describes them. */
@@ -318,6 +320,11 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
       const chunks: Buffer[] = [];
       request.on("data", (chunk: Buffer) => chunks.push(chunk));
       request.on("end", () => {
+        if (fake.uploadRedirect !== undefined) {
+          response.writeHead(307, { location: fake.uploadRedirect });
+          response.end();
+          return;
+        }
         if (fake.uploadStatus === 204) granted.bytes = Buffer.concat(chunks);
         response.writeHead(fake.uploadStatus);
         response.end();
@@ -376,6 +383,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
     uploads,
     uploadUrl: (attachmentId) => `/api/attachments/upload/${attachmentId}.signed`,
     uploadStatus: 204,
+    uploadRedirect: undefined,
     protocolVersion: ORCHESTRATION_PROTOCOL,
     providers: [...FAKE_PROVIDERS],
     dropAnswer: () => false,
