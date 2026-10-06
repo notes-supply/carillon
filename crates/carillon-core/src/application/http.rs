@@ -574,16 +574,35 @@ async fn status(
     }))
 }
 
+/// Core's health, then each provider's in registry order. Enabled providers
+/// are asked at once, so the report takes one health timeout at most however
+/// many cannot answer.
 async fn provider_health(client: &Client, config: &LoadedConfig) -> Vec<Health> {
-    let mut reports = vec![core_health()];
-    for provider in &config.value.providers {
-        if !provider.enabled {
-            reports.push(provider_status(provider, "disabled"));
-            continue;
+    let providers = &config.value.providers;
+    let mut probes = tokio::task::JoinSet::new();
+    for (index, provider) in providers.iter().enumerate() {
+        if provider.enabled {
+            let (client, provider) = (client.clone(), provider.clone());
+            probes.spawn(async move { (index, fetch_health(&client, &provider).await) });
         }
-        reports.push(fetch_health(client, provider).await);
     }
-    reports
+    let mut reports = providers
+        .iter()
+        .map(|provider| {
+            let status = if provider.enabled {
+                "unavailable"
+            } else {
+                "disabled"
+            };
+            provider_status(provider, status)
+        })
+        .collect::<Vec<_>>();
+    while let Some(probe) = probes.join_next().await {
+        if let Ok((index, health)) = probe {
+            reports[index] = health;
+        }
+    }
+    std::iter::once(core_health()).chain(reports).collect()
 }
 
 async fn fetch_health(client: &Client, provider: &Provider) -> Health {
