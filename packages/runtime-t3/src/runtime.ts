@@ -261,14 +261,12 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
 
   /**
    * The thread's current record, read from the first item of a fresh
-   * subscription; undefined when T3 has no such thread.
+   * subscription; undefined when T3 has no such thread. The deadline is
+   * armed once the subscription exists, so one that fails as it is set up
+   * leaves nothing behind and rejects with its own failure.
    */
   function readThread(connection: T3Connection, threadId: string): Promise<Projection | undefined> {
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        stream.end();
-        reject(new T3Failure("timeout", "T3 did not send the thread snapshot in time"));
-      }, timeoutMs);
       const stream = connection.subscribe(
         RPC.subscribeThread,
         subscribeThread(threadId, undefined),
@@ -286,6 +284,10 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
           else resolve(item.projection);
         },
       );
+      const timer = setTimeout(() => {
+        stream.end();
+        reject(new T3Failure("timeout", "T3 did not send the thread snapshot in time"));
+      }, timeoutMs);
       stream.done.then(
         () => {
           clearTimeout(timer);

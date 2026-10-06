@@ -11,6 +11,7 @@ import { reportOf } from "@carillon/runtime/failure";
 import { derivedId, type Run } from "./contracts.ts";
 import { startFakeT3, type FakeT3 } from "./fake.ts";
 import { createT3Runtime } from "./runtime.ts";
+import { connectT3, type Connect } from "./t3.ts";
 
 const PROJECT = "project-1";
 const selection = {
@@ -44,12 +45,15 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-function build(overrides: { url?: string; token?: string; reconnectDelayMs?: number } = {}) {
+function build(
+  overrides: { url?: string; token?: string; reconnectDelayMs?: number; connect?: Connect } = {},
+) {
   return createT3Runtime({
     endpoint: { url: overrides.url ?? fake.url, token: overrides.token ?? fake.token },
     projectId: PROJECT,
     selection,
     workspace: resources,
+    ...(overrides.connect === undefined ? {} : { connect: overrides.connect }),
     reconnect: { attempts: 5, delayMs: overrides.reconnectDelayMs ?? 50 },
     settleMs: 500,
     timeoutMs: 2_000,
@@ -2156,4 +2160,44 @@ it("keeps a failed turn's report with its failure, taken before the turn's entry
     agent: { model: "claude-sonnet-5", effort: "low" },
   });
   expect(runtime.activity("turn-1", "discord-private")).toBeUndefined();
+});
+
+it("leaves no snapshot deadline behind when a thread read cannot subscribe", async () => {
+  // A transport whose subscription fails as it is set up; its calls reach T3.
+  const real = await connectT3({ url: fake.url, token: fake.token });
+  const failure = new Error("the transport could not send the subscription");
+  const refusing = build({
+    connect: () =>
+      Promise.resolve({
+        call: (tag, payload) => real.call(tag, payload),
+        subscribe: () => {
+          throw failure;
+        },
+        closed: real.closed,
+        close: () => undefined,
+      }),
+  });
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    // The model read fails with the subscription's own failure, and nothing
+    // of it is left to fire once the read's deadline has passed.
+    await expect(refusing.modelState(conversation)).rejects.toBe(failure);
+    expect.soft(vi.getTimerCount()).toBe(0);
+    expect.soft(() => vi.advanceTimersByTime(2_000)).not.toThrow();
+  } finally {
+    vi.useRealTimers();
+    await refusing.close();
+    real.close();
+  }
+});
+
+it("still bounds a thread read whose snapshot never arrives", async () => {
+  const reply = runtime.executeTurn(turn("turn-1", "hi"));
+  answer(await started("turn-1"), "Hello.");
+  await reply;
+  fake.holdSnapshot = true;
+  await expect(runtime.modelState(conversation)).rejects.toMatchObject({
+    status: 502,
+    message: "Lost contact with T3: T3 did not send the thread snapshot in time.",
+  });
 });
