@@ -170,8 +170,9 @@ pub(crate) async fn prepare(ingress: &Ingress, mut inbound: QueuedMessage) {
     }
 }
 
-/// Open a text's conversation by `deadline`, then submit it until core
-/// answers: once submitted, core may hold it, so only the stop ends that.
+/// Open a text's conversation and start submitting it by `deadline`, then
+/// submit it until core answers: once submitted, core may hold it, so only
+/// the stop ends that.
 async fn prepare_text(ingress: &Ingress, plan: MessagePlan, deadline: Instant) {
     let (discord, http) = (&ingress.config, &*ingress.http);
     let source = format!("{}:{}", plan.channel_id, plan.message_id);
@@ -198,6 +199,11 @@ async fn prepare_text(ingress: &Ingress, plan: MessagePlan, deadline: Instant) {
     };
     processing_feedback(http, discord, &resolved.event.feedback_target_id).await;
     trigger_typing(http, discord, &resolved.event.delivery_target_id).await;
+    // Feedback can outlast the window; a text it closed on is not submitted.
+    if Instant::now() >= deadline {
+        unfinished().await;
+        return;
+    }
     let Some(receipt) =
         submit_event_with_retry(&ingress.core, &resolved.event, &ingress.stopping).await
     else {

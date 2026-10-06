@@ -1570,3 +1570,51 @@ async fn a_message_s_preparation_window_includes_resolving_its_route() -> Result
     );
     Ok(())
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_text_whose_window_closes_during_its_feedback_is_never_submitted() -> Result<()> {
+    // Discord never answers the processing reaction; the request gives up
+    // only at Twilight's own timeout.
+    let (port, log) = serve_cdn(HashMap::from([(
+        "/api/v10/channels/300/messages/150/reactions/%F0%9F%91%80/@me".to_owned(),
+        Serve::Slow(Duration::from_secs(3600), Vec::new()),
+    )]))
+    .await?;
+    let world = world(Vec::new(), Vec::new()).await?;
+    let mut ingress = ingress(&world, channel_config(), port)?;
+    Arc::get_mut(&mut ingress).context("shared ingress")?.http = discord_at(port);
+    let queued = message("150", "300", "200", "hello", Vec::new());
+    let plan = crate::conversations::admit_message(
+        &ingress.config,
+        &ingress.participation,
+        queued.request,
+        queued.native,
+    )?
+    .context("not admitted")?;
+    // The text's conversation opens with a few seconds of its window left.
+    let started = Instant::now();
+    crate::inbound::prepare_text(&ingress, plan, started + Duration::from_secs(5)).await;
+    let requests = log
+        .lock()
+        .map_err(|_| anyhow!("poisoned"))?
+        .requests
+        .clone();
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.contains("/reactions/%F0%9F%91%80")),
+        "{requests:?}"
+    );
+    assert!(started.elapsed() > Duration::from_secs(5));
+    // The window closed during the feedback: the text was never submitted,
+    // so core is not asked about it either, and its sender is told.
+    let trace = trace(&world)?;
+    assert!(trace.is_empty(), "{trace:?}");
+    assert!(
+        requests
+            .iter()
+            .any(|request| request == "/api/v10/channels/300/messages"),
+        "{requests:?}"
+    );
+    Ok(())
+}
