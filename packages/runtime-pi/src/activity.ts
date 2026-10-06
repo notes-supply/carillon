@@ -143,12 +143,11 @@ export function trackActivity(workspace: string): ActivityTracker {
       if (!Check(WorkReportSchema, fact)) return;
       const known = work.get(fact.id);
       if (known === undefined && work.size >= WORK_ITEM_LIMIT) {
-        // Make room only by forgetting finished work, oldest first.
+        // Make room only by forgetting finished work, oldest first; either
+        // way the report no longer covers all the work it saw.
+        partialWork = true;
         const finished = [...work.values()].find((item) => FINISHED_WORK.has(item.state));
-        if (finished === undefined) {
-          partialWork = true;
-          return;
-        }
+        if (finished === undefined) return;
         work.delete(finished.id);
       }
       const actor = fact.actor === undefined ? undefined : toolName(fact.actor);
