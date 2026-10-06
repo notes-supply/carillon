@@ -694,6 +694,27 @@ impl Database {
 
     /// Claims the oldest pending delivery for an interface instance.
     pub fn claim_delivery(&self, interface_id: &str, owner: &str) -> Result<Option<Delivery>> {
+        self.claim_next_delivery(interface_id, owner, None)
+    }
+
+    /// Claims the pending delivery of one turn for an interface instance.
+    pub fn claim_turn_delivery(
+        &self,
+        interface_id: &str,
+        owner: &str,
+        turn_id: &str,
+    ) -> Result<Option<Delivery>> {
+        self.claim_next_delivery(interface_id, owner, Some(turn_id))
+    }
+
+    /// A delivery the instance already holds comes first, then the oldest
+    /// pending one, of `turn_id` when given.
+    fn claim_next_delivery(
+        &self,
+        interface_id: &str,
+        owner: &str,
+        turn_id: Option<&str>,
+    ) -> Result<Option<Delivery>> {
         let mut connection = self.connect()?;
         let transaction = write_transaction(&mut connection)?;
         let delivery = transaction
@@ -703,8 +724,9 @@ impl Database {
                  FROM deliveries
                  WHERE interface_id = ?1 AND state IN ('pending', 'delivering')
                    AND (state = 'pending' OR claim_owner = ?2)
+                   AND (?3 IS NULL OR turn_id = ?3)
                  ORDER BY CASE state WHEN 'delivering' THEN 0 ELSE 1 END, id LIMIT 1",
-                params![interface_id, owner],
+                params![interface_id, owner, turn_id],
                 |row| {
                     Ok(Delivery {
                         id: row.get(0)?,
@@ -1563,6 +1585,56 @@ mod tests {
             .claim_delivery("discord", "instance")?
             .context("second delivery missing")?;
         assert_ne!(second.id, first.id);
+        Ok(())
+    }
+
+    #[test]
+    fn a_turns_delivery_is_claimed_without_touching_older_ones() -> Result<()> {
+        let directory = tempdir()?;
+        let database = Database::create(&directory.path().join("state.sqlite3"))?;
+        let mut turns = Vec::new();
+        for (event, output) in [("older", "older reply"), ("wanted", "wanted reply")] {
+            accept(&database, event, output)?;
+            let turn = database
+                .claim("runtime", Lane::Messages)?
+                .context("turn was not queued")?;
+            database.complete_turn(
+                &turn,
+                &RuntimeTurnResponse {
+                    correlation_id: turn.turn_id.clone(),
+                    output: output.to_owned(),
+                    follow_up: None,
+                    unanswered_left: false,
+                },
+            )?;
+            turns.push(turn.turn_id);
+        }
+        let wanted = database
+            .claim_turn_delivery("discord", "instance", &turns[1])?
+            .context("wanted delivery missing")?;
+        assert_eq!(wanted.turn_id, turns[1]);
+        // Held by this instance, it is claimed again until acknowledged.
+        let again = database
+            .claim_turn_delivery("discord", "instance", &turns[1])?
+            .context("held delivery missing")?;
+        assert_eq!(again.id, wanted.id);
+        database.acknowledge_delivery(
+            "discord",
+            wanted.id,
+            "instance",
+            DeliveryOutcome::Delivered,
+            Some("message"),
+        )?;
+        assert!(
+            database
+                .claim_turn_delivery("discord", "instance", &turns[1])?
+                .is_none()
+        );
+        // The older turn's delivery was never claimed: it is still the next.
+        let older = database
+            .claim_delivery("discord", "other-instance")?
+            .context("older delivery missing")?;
+        assert_eq!(older.turn_id, turns[0]);
         Ok(())
     }
 

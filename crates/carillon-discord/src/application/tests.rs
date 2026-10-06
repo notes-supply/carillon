@@ -990,7 +990,9 @@ fn native_messages_keep_attachment_metadata_without_signed_addresses() -> anyhow
 struct SimulatedCore {
     events: Vec<carillon_protocol::model::ExternalEvent>,
     staged: Vec<Vec<Vec<u8>>>,
-    pending: Option<carillon_protocol::model::Delivery>,
+    /// Unacknowledged deliveries, oldest first, each with whether this
+    /// provider instance holds its claim.
+    deliveries: Vec<(carillon_protocol::model::Delivery, bool)>,
     /// Events core is still capturing, for this many more status lookups.
     capturing: HashMap<String, (usize, carillon_protocol::model::ExternalEvent)>,
     /// An event whose next submission core receives but whose answer is lost.
@@ -1013,16 +1015,53 @@ impl SimulatedCore {
         self.staged.push(staged);
         self.events.push(event);
     }
+
+    /// Claim as core does: this instance's own claim first, then the oldest
+    /// pending delivery, of `turn` if one is named.
+    fn claim(&mut self, turn: Option<&String>) -> Option<carillon_protocol::model::Delivery> {
+        let wanted = |held: bool| {
+            move |(delivery, claimed): &(carillon_protocol::model::Delivery, bool)| {
+                *claimed == held && turn.is_none_or(|turn| *turn == delivery.turn_id)
+            }
+        };
+        let next = self
+            .deliveries
+            .iter()
+            .position(wanted(true))
+            .or_else(|| self.deliveries.iter().position(wanted(false)))?;
+        self.deliveries[next].1 = true;
+        Some(self.deliveries[next].0.clone())
+    }
+
+    /// Offer the answer to `event`'s turn for delivery.
+    fn answer(&mut self, event: &carillon_protocol::model::ExternalEvent) {
+        self.deliveries.push((
+            carillon_protocol::model::Delivery {
+                turn_state: carillon_protocol::model::TurnState::Completed,
+                id: i64::try_from(self.events.len()).unwrap_or(i64::MAX),
+                turn_id: format!("turn-{}", event.event_id),
+                target_id: event.delivery_target_id.clone(),
+                feedback_target_id: event.feedback_target_id.clone(),
+                content: "answer".to_owned(),
+            },
+            false,
+        ));
+    }
 }
 
 async fn simulated_core(staging: PathBuf) -> anyhow::Result<(std::net::SocketAddr, SharedCore)> {
-    use axum::extract::{Path as AxumPath, State};
-    use carillon_protocol::model::{Delivery, EventReceipt, EventStatus, ExternalEvent, TurnState};
+    use axum::extract::{Path as AxumPath, Query, State};
+    use carillon_protocol::model::{EventReceipt, EventStatus, ExternalEvent, TurnState};
     let shared = SharedCore::default();
+    // A turn core already held has finished.
     let receipt = |event_id: &str, duplicate| EventReceipt {
         event_id: event_id.to_owned(),
         turn_id: format!("turn-{event_id}"),
-        state: TurnState::Queued,
+        state: if duplicate {
+            TurnState::Completed
+        } else {
+            TurnState::Queued
+        },
         duplicate,
     };
     let (submitted, looked_up) = (staging.clone(), staging);
@@ -1041,15 +1080,8 @@ async fn simulated_core(staging: PathBuf) -> anyhow::Result<(std::net::SocketAdd
                     }
                     let duplicate = core.events.iter().any(|seen| seen.event_id == event.event_id);
                     if !duplicate {
-                        core.pending = Some(Delivery {
-                            turn_state: TurnState::Completed,
-                            id: 1,
-                            turn_id: format!("turn-{}", event.event_id),
-                            target_id: event.delivery_target_id.clone(),
-                            feedback_target_id: event.feedback_target_id.clone(),
-                            content: "answer".to_owned(),
-                        });
                         core.capture(&submitted, event.clone());
+                        core.answer(&event);
                     }
                     Json(receipt(&event.event_id, duplicate)).into_response()
                 },
@@ -1083,13 +1115,26 @@ async fn simulated_core(staging: PathBuf) -> anyhow::Result<(std::net::SocketAdd
         )
         .route(
             "/v1/deliveries",
-            get(|State(core): State<SharedCore>| async move {
-                Json(core.lock().ok().and_then(|mut core| core.pending.take()))
-            }),
+            get(
+                |State(core): State<SharedCore>,
+                 Query(claim): Query<HashMap<String, String>>| async move {
+                    let Ok(mut core) = core.lock() else {
+                        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    };
+                    Json(core.claim(claim.get("turn_id"))).into_response()
+                },
+            ),
         )
         .route(
             "/v1/deliveries/{id}/ack",
-            post(|| async { StatusCode::NO_CONTENT }),
+            post(
+                |State(core): State<SharedCore>, AxumPath(id): AxumPath<i64>| async move {
+                    if let Ok(mut core) = core.lock() {
+                        core.deliveries.retain(|(delivery, _)| delivery.id != id);
+                    }
+                    StatusCode::NO_CONTENT
+                },
+            ),
         )
         .with_state(shared.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -1105,16 +1150,27 @@ async fn simulate(
     user: &str,
     files: &[crate::conversations::SourceAttachment],
 ) -> anyhow::Result<(StatusCode, Value)> {
-    let message = json!({
-        "event_id": id, "guild_id": "100", "user_id": user, "channel_id": "300",
-        "content": "", "attachments": files,
-    });
+    simulate_message(
+        state,
+        &json!({
+            "event_id": id, "guild_id": "100", "user_id": user, "channel_id": "300",
+            "content": "", "attachments": files,
+        }),
+    )
+    .await
+}
+
+/// Send `message` through deterministic simulation.
+async fn simulate_message(
+    state: &DiscordState,
+    message: &Value,
+) -> anyhow::Result<(StatusCode, Value)> {
     let request = Request::builder()
         .method(Method::POST)
         .uri("/v1/simulate")
         .header("authorization", "Bearer token")
         .header("content-type", "application/json")
-        .body(Body::from(serde_json::to_vec(&message)?))?;
+        .body(Body::from(serde_json::to_vec(message)?))?;
     let response = discord_router(state.clone(), true).oneshot(request).await?;
     let status = response.status();
     let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
@@ -1232,5 +1288,66 @@ async fn simulation_admits_then_downloads_files_under_the_provider_policy() -> a
         Some("6")
     );
     assert_eq!(core.staged.last(), Some(&vec![vec![7; 32]]));
+    Ok(())
+}
+
+#[tokio::test]
+async fn simulation_settles_its_own_turns_delivery_and_no_other() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (core_address, core) = simulated_core(directory.path().join("staging")).await?;
+    let state = discord_state(
+        core_client(format!("http://{core_address}")),
+        directory.path(),
+    )
+    .await?;
+    // Earlier simulations of these were accepted, but their turns finished
+    // only after the requests stopped waiting: both answers are pending, the
+    // abandoned one oldest.
+    {
+        let mut core = core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
+        for id in ["abandoned", "late"] {
+            let event = carillon_protocol::model::ExternalEvent {
+                event_id: id.to_owned(),
+                agent_id: "default".to_owned(),
+                user_id: "200".to_owned(),
+                audience_id: "discord:channel:300".to_owned(),
+                delivery_target_id: "300".to_owned(),
+                feedback_target_id: format!("300:{id}"),
+                content: String::new(),
+                native: Value::Null,
+                attachments: None,
+            };
+            core.events.push(event.clone());
+            core.answer(&event);
+        }
+    }
+    let text = |id: &str| {
+        json!({
+            "event_id": id, "guild_id": "100", "user_id": "200", "channel_id": "300",
+            "content": "hello", "attachments": [],
+        })
+    };
+    // Sending one again delivers its answer, once.
+    let (status, body) = simulate_message(&state, &text("late")).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["receipt"]["duplicate"], true);
+    assert_eq!(body["delivery"]["turn_id"], "turn-late");
+    let (status, body) = simulate_message(&state, &text("late")).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["delivery"], Value::Null);
+    // A new message gets its own answer, not a stale one.
+    let (status, body) = simulate_message(&state, &text("next")).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["delivery"]["turn_id"], "turn-next");
+    // Nobody claimed the abandoned turn's answer.
+    let core = core.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
+    assert!(
+        matches!(
+            core.deliveries.as_slice(),
+            [(delivery, false)] if delivery.turn_id == "turn-abandoned"
+        ),
+        "{:?}",
+        core.deliveries
+    );
     Ok(())
 }

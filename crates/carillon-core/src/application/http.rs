@@ -529,15 +529,24 @@ async fn call_runtime(
         .await
 }
 
+#[derive(Deserialize)]
+struct ClaimQuery {
+    turn_id: Option<String>,
+}
+
 async fn claim_delivery(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<ClaimQuery>,
 ) -> Result<Json<Option<Delivery>>, ApiError> {
     let interface = interface_provider(&headers, &state.config)?.id.clone();
     let owner = interface_instance(&headers)?.to_owned();
     let claimed = state
         .core
-        .blocking(move |core| core.claim_delivery(&interface, &owner))
+        .blocking(move |core| match query.turn_id {
+            Some(turn) => core.claim_turn_delivery(&interface, &owner, &turn),
+            None => core.claim_delivery(&interface, &owner),
+        })
         .await?;
     Ok(Json(claimed))
 }

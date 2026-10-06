@@ -160,8 +160,12 @@ pub(crate) async fn prepare(ingress: &Ingress, mut inbound: QueuedMessage) {
 }
 
 async fn prepare_text(ingress: &Ingress, plan: MessagePlan) {
-    let reactions = &ingress.reactions;
+    let (reactions, http) = (&ingress.reactions, &*ingress.http);
     let source = format!("{}:{}", plan.channel_id, plan.message_id);
+    let stopped = async || {
+        explain(http, &source, &ingress.unfinished().0).await;
+        reactions.outcome(&source, Feedback::Failed).await;
+    };
     // A message core already holds, such as one the gateway replayed, is
     // not admitted again: its feedback belongs to its first admission.
     match ingress
@@ -183,19 +187,26 @@ async fn prepare_text(ingress: &Ingress, plan: MessagePlan) {
             reactions.outcome(&source, Feedback::Failed).await;
             return;
         }
-        None => return,
+        None => {
+            stopped().await;
+            return;
+        }
     };
     reactions.admission(&resolved.event).await;
-    // Accepting text is a single step in core; a submission cut short by
-    // the provider stopping either happened or did not.
-    let Some(receipt) = ingress
-        .until(
-            None,
-            submit_event_with_retry(&ingress.core, &ingress.stopping, &resolved.event),
-        )
-        .await
-        .flatten()
-    else {
+    // Unless the provider has already stopped, submission makes an attempt
+    // core may receive. A stop cuts none short; when core has not answered
+    // by then, it is asked whether it holds the event, as for files.
+    let attempted = !ingress.stopping.is_cancelled();
+    let receipt =
+        match submit_event_with_retry(&ingress.core, &ingress.stopping, &resolved.event).await {
+            Some(receipt) => Some(receipt),
+            None if attempted => known_receipt(&ingress.core, &resolved.event.event_id)
+                .await
+                .map(Ok),
+            None => None,
+        };
+    let Some(receipt) = receipt else {
+        stopped().await;
         return;
     };
     // Accepted, even as a duplicate of its own earlier attempt, the message
