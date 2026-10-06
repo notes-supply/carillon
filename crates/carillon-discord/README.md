@@ -43,9 +43,11 @@ retain the actual Wasm path rather than substituting this direct native call.
   card, and an answer that ended its job keeps it until the monitor has that outcome. A
   card someone deleted, or one whose creation Discord did not confirm, on an answer or
   not, is recorded without a message until the job settles, so the job gets no other.
-  When the provider stops, the monitor reads, types and makes cards no more, but takes
-  the outcomes of the deliveries the stop lets finish, and gives the cards they settle
-  one final edit's bound to show their summaries before connect returns.
+  When the provider stops, the monitor reads, types and makes cards no more, and sends
+  no typing, new card or progress edit still waiting for a rate-limit permit, though it
+  still awaits one that may have left. It takes the outcomes of the deliveries the stop
+  lets finish, and gives the cards they settle one final edit's bound to show their
+  summaries before connect returns.
   Every Discord call is bounded, including rate-limiter waits and Twilight's 429
   retries. Its ordinary [`render` module](src/activity/render.rs) owns pure card embed rendering,
   using the concrete activity markers from [`config`](src/config.rs). Markers have

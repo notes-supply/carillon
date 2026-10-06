@@ -33,6 +33,7 @@ use tokio::{
     time::Instant,
 };
 use tokio_util::sync::CancellationToken;
+use twilight_model::id::Id;
 
 /// A request the substitute received.
 #[derive(Clone, Debug)]
@@ -1434,6 +1435,91 @@ async fn a_stopping_provider_makes_no_new_card_but_takes_an_answer_card() -> any
     let obtained = tokio::time::timeout(Duration::from_secs(5), obtaining).await??;
     assert_eq!(obtained, Some(answer));
     assert!(discord.seen().is_empty());
+    Ok(())
+}
+
+/// Uses the rate limiter.
+#[tokio::test]
+async fn a_stopping_provider_sends_no_waiting_progress_but_finishes_and_awaits_what_left()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    // Each route has one request to spend, then its permit returns two
+    // seconds later; a card made in channel 301 is answered after a second.
+    let discord = Substitute::start(Arc::new(|seen, earlier| {
+        match (&seen.method, seen.path.as_str()) {
+            (&Method::POST, "/channels/301/messages") => Reply::Delayed(Duration::from_secs(1)),
+            (&Method::POST, _) if earlier == 0 => Reply::Bucket("creates", 0, 2),
+            (&Method::PATCH, _) if earlier == 0 => Reply::Bucket("edits", 0, 2),
+            _ => Reply::Success,
+        }
+    }))
+    .await?;
+    let stopping = CancellationToken::new();
+    let cards = super::Cards {
+        http: discord.http(true),
+        config: config(false),
+        records: Arc::new(
+            CardRecords::open(directory.path().join("cards.json")).context("records")?,
+        ),
+        stopping: stopping.clone(),
+    };
+    // A running job, which nothing will settle while the provider stops.
+    let activity = tools(None, &[("bash", "make")], &[]);
+    let turn = running("job", "300", now() - 60, Some(activity));
+    let (_view, watched) = tokio::sync::watch::channel(super::Job {
+        state: super::State::Active(Box::new(turn)),
+        ..super::Job::default()
+    });
+    let embed = watched
+        .borrow()
+        .embed(None, false, &cards.config.activity_markers);
+    let (channel, other) = (Id::new(300), Id::new(301));
+    let card = super::Card {
+        channel_id: channel,
+        message_id: Id::new(777),
+        hosted: false,
+    };
+    assert!(matches!(
+        cards.create(channel, &embed, &watched).await,
+        super::Call::Done(_)
+    ));
+    assert_eq!(cards.edit(card, &embed, None).await, super::Call::Done(()));
+    // A new card and progress now wait for permits; a card in channel 301 is under way.
+    let spawn_create = |channel| {
+        let (cards, embed, watched) = (cards.clone(), embed.clone(), watched.clone());
+        tokio::spawn(async move { cards.create(channel, &embed, &watched).await })
+    };
+    let (waiting, under_way) = (spawn_create(channel), spawn_create(other));
+    let progress = {
+        let (cards, embed) = (cards.clone(), embed.clone());
+        let wanted = super::not_settled(&watched, &stopping);
+        tokio::spawn(async move { cards.edit(card, &embed, Some(wanted)).await })
+    };
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    stopping.cancel();
+    // What waited is not sent, at once; what left is still answered.
+    let stopped = Instant::now();
+    assert_eq!(waiting.await?, super::Call::NotSent);
+    assert_eq!(progress.await?, super::Call::NotSent);
+    assert!(stopped.elapsed() < Duration::from_millis(500));
+    assert!(matches!(under_way.await?, super::Call::Done(_)));
+    // A card's final edit still waits for its permit and is sent.
+    assert_eq!(cards.edit(card, &embed, None).await, super::Call::Done(()));
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    let creates = discord.matching(&Method::POST, "/channels/300/messages");
+    let edits = discord.matching(&Method::PATCH, "/channels/300/messages/777");
+    assert_eq!(
+        (creates.len(), edits.len()),
+        (1, 2),
+        "{:#?}",
+        discord.seen()
+    );
+    assert_eq!(
+        discord
+            .matching(&Method::POST, "/channels/301/messages")
+            .len(),
+        1
+    );
     Ok(())
 }
 

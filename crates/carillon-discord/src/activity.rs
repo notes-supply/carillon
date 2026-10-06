@@ -708,8 +708,13 @@ async fn keep_typing(
         {
             typed = Some(Instant::now());
             let request = http.create_typing_trigger(channel).into_future();
-            if let Call::Refused(status) =
-                bounded(request, PROGRESS_WAIT, Some(still_active(&view)), done).await
+            if let Call::Refused(status) = bounded(
+                request,
+                PROGRESS_WAIT,
+                Some(still_active(&view, &stopping)),
+                done,
+            )
+            .await
             {
                 warn!(status, "Discord refused a typing indicator");
             }
@@ -881,7 +886,10 @@ async fn follow(
         if !editable || shown.as_ref() == Some(&embed) {
             continue;
         }
-        match cards.edit(card, &embed, Some(not_settled(view))).await {
+        match cards
+            .edit(card, &embed, Some(not_settled(view, &cards.stopping)))
+            .await
+        {
             Call::Done(()) => shown = Some(embed),
             // The next read brings the latest again.
             Call::NotSent | Call::Unknown => {}
@@ -962,7 +970,7 @@ impl Cards {
         bounded(
             request,
             CARD_WAIT,
-            Some(still_active(view)),
+            Some(still_active(view, &self.stopping)),
             async |response| Ok(response.model().await?.id),
         )
         .await
@@ -1007,23 +1015,27 @@ enum Call<T> {
     Unknown,
 }
 
-/// While a request waits for the rate limiter, the job must still want it.
+/// While a request waits for the rate limiter, the job must still want it
+/// and the provider must not be stopping.
 struct Wanted {
     view: watch::Receiver<Job>,
     holds: fn(&Job) -> bool,
+    stopping: CancellationToken,
 }
 
-fn still_active(view: &watch::Receiver<Job>) -> Wanted {
+fn still_active(view: &watch::Receiver<Job>, stopping: &CancellationToken) -> Wanted {
     Wanted {
         view: view.clone(),
         holds: Job::is_active,
+        stopping: stopping.clone(),
     }
 }
 
-fn not_settled(view: &watch::Receiver<Job>) -> Wanted {
+fn not_settled(view: &watch::Receiver<Job>, stopping: &CancellationToken) -> Wanted {
     Wanted {
         view: view.clone(),
         holds: |job| !job.is_settled(),
+        stopping: stopping.clone(),
     }
 }
 
@@ -1049,12 +1061,12 @@ async fn bounded<T: Unpin, U>(
     let marked = sent.clone();
     let check = wanted
         .as_ref()
-        .map(|wanted| (wanted.view.clone(), wanted.holds));
+        .map(|wanted| (wanted.view.clone(), wanted.holds, wanted.stopping.clone()));
     let preflight = request.set_pre_flight(move || {
         let proceed = Instant::now() < deadline
-            && check
-                .as_ref()
-                .is_none_or(|(view, holds)| holds(&view.borrow()));
+            && check.as_ref().is_none_or(|(view, holds, stopping)| {
+                !stopping.is_cancelled() && holds(&view.borrow())
+            });
         // Only a passed check sends; a refused one proves nothing was sent.
         if proceed {
             marked.store(true, Ordering::SeqCst);
@@ -1107,8 +1119,15 @@ async fn bounded<T: Unpin, U>(
 
 async fn unwanted(wanted: Option<Wanted>) {
     match wanted {
-        Some(Wanted { mut view, holds }) => {
-            let _ = view.wait_for(|view| !holds(view)).await;
+        Some(Wanted {
+            mut view,
+            holds,
+            stopping,
+        }) => {
+            tokio::select! {
+                _ = view.wait_for(|view| !holds(view)) => {}
+                () = stopping.cancelled() => {}
+            }
         }
         None => pending().await,
     }
