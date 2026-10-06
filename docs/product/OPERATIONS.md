@@ -209,7 +209,7 @@ free_space_mib = 2048     # space a capture must leave free on the disk
 concurrent_captures = 2   # further submissions are refused as busy and retried
 ```
 
-When kept files would exceed `storage_mib`, or a capture would leave less than `free_space_mib` free, new files are refused; accepted files are never removed to make room. Files still being copied count in full against both, because some filesystems, such as Btrfs, still show written bytes as free until they commit; on filesystems that count them at once, a message near the floor can be refused while another is copied even though both would just fit. `free_space_mib` counts the disk as a whole, so set it to what this host can actually spare. The Pi runtime, in `providers/runtime-pi.toml` (the file is optional):
+When kept files would exceed `storage_mib`, or reported free space minus running reservations and the new capture would fall below `free_space_mib`, new files are refused; accepted files are never removed to make room. Files still being copied count in full against both, because some filesystems, such as Btrfs, still show written bytes as free until they commit; on filesystems that count them at once, a message near the floor can be refused while another is copied even though both would just fit. The storage budget counts kept bytes exactly. The free-space floor is a best-effort check against the filesystem's reported availability: after a completed capture releases its reservation, that figure may still lag its writes, and other disk users can also consume space. `free_space_mib` counts the disk as a whole, so set it to what this host can actually spare. The Pi runtime, in `providers/runtime-pi.toml` (the file is optional):
 
 ```toml
 [inline_images]

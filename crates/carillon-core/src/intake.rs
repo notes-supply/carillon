@@ -229,10 +229,11 @@ impl Intake {
     }
 
     /// Reserve bytes against the budget and the free-space floor. Captures
-    /// in progress count in full against both, so concurrent reservations
-    /// cannot oversell either. Counting only what a capture has yet to write
-    /// would oversell the floor where measured free space lags writes, as on
-    /// Btrfs until a transaction commits.
+    /// in progress count in full against both. Counting only what a capture
+    /// has yet to write would under-reserve where reported free space lags
+    /// writes, as on Btrfs until a transaction commits. The budget counts kept
+    /// bytes exactly; the floor uses reported availability and may still lag
+    /// a completed capture after its reservation is released.
     fn reserve(&self, core: &Core, bytes: u64) -> Result<Reservation, CoreError> {
         let mut reserved = lock(&self.reserved);
         let kept = core.database.captured_bytes()?;
