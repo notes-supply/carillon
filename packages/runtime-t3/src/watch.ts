@@ -42,7 +42,6 @@ import {
   ThreadSnapshotSchema,
   TurnItemSchema,
   TurnItemSchemas,
-  UserMessageOpeningSchema,
   WakeNotificationSchema,
   type BackgroundTask,
   type ContextTransfer,
@@ -1645,14 +1644,24 @@ function withDetail(detail: string | undefined): { detail?: string } {
   return detail === undefined ? {} : { detail };
 }
 
-/** The run a message or notification item belongs to, and how that item would open it. */
+/**
+ * The run a message or notification item belongs to, and how that item would
+ * open it; undefined for an item of no run or of another kind. Such an item
+ * naming its run any other way cannot be passed over: its run would wait for
+ * its opening.
+ */
 function openingOf(payload: unknown): readonly [string, Opening] | undefined {
-  if (Check(UserMessageOpeningSchema, payload)) return [payload.runId, "message"];
-  if (Check(DelegatedNotificationSchema, payload)) return [payload.runId, "delegated"];
-  if (Check(WakeNotificationSchema, payload)) return [payload.runId, "wake"];
-  if (!isRecord(payload) || payload["type"] !== "notification") return undefined;
+  if (!isRecord(payload)) return undefined;
+  const type = payload["type"];
+  if (type !== "user_message" && type !== "notification") return undefined;
   const run = payload["runId"];
-  return typeof run === "string" && run.length > 0 ? [run, "unknown"] : undefined;
+  if (run === null) return undefined;
+  if (typeof run !== "string" || run.length === 0)
+    throw new T3Failure("malformed", `T3 sent a ${type} item this runtime does not understand`);
+  if (type === "user_message") return [run, "message"];
+  if (Check(DelegatedNotificationSchema, payload)) return [run, "delegated"];
+  if (Check(WakeNotificationSchema, payload)) return [run, "wake"];
+  return [run, "unknown"];
 }
 
 /** When T3 made a message, as an instant: its time may be written with any offset. */

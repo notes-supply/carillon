@@ -2264,6 +2264,64 @@ const notificationItem = (runId: string, taskIds: readonly string[]) => ({
   summary: "Delegated task finished",
 });
 
+it("refuses an opening item whose run it cannot identify before moving past it", () => {
+  // The turn's run completed owing a wake: the run after it waits for its opening.
+  const owing = () => {
+    const watch = watchTurn("thread", "message-1", "/workspace");
+    watch.apply(
+      snapshot({
+        runs: [run("completed")],
+        providerThreads: [
+          {
+            id: "provider-thread",
+            providerSessionId: "session",
+            pendingBackgroundTasks: [{ taskId: "t", kind: "monitor" }],
+          },
+        ],
+      }),
+    );
+    watch.apply(
+      event(2, "provider-thread.updated", {
+        id: "provider-thread",
+        providerSessionId: "session",
+        pendingBackgroundTasks: [],
+      }),
+    );
+    watch.apply(event(3, "run.created", run("running", "wake", 2)));
+    return watch;
+  };
+  const naming = (opening: Record<string, unknown>, runId: unknown): Record<string, unknown> => {
+    const named = Object.entries(opening).filter(([key]) => key !== "runId");
+    return Object.fromEntries(runId === undefined ? named : [...named, ["runId", runId]]);
+  };
+  for (const opening of [wakeOpening("run-2"), userMessageItem("run-2")])
+    for (const runId of [undefined, 7, ""]) {
+      const watch = owing();
+      expect(() => watch.apply(event(4, "turn-item.updated", naming(opening, runId)))).toThrow(
+        `T3 sent a ${opening.type} item this runtime does not understand`,
+      );
+      expect(watch.sequence()).toBe(3);
+    }
+  // T3 may leave such an item runless, and items of kinds this runtime does
+  // not read are passed over; the wake's own opening still opens it.
+  const watch = owing();
+  watch.apply(event(4, "turn-item.updated", naming(wakeOpening("run-2"), null)));
+  watch.apply(event(5, "turn-item.updated", naming(userMessageItem("run-2"), null)));
+  watch.apply(event(6, "turn-item.updated", { ...item("future_kind", "run-2", {}), runId: 7 }));
+  expect(watch.sequence()).toBe(6);
+  expect(watch.activeRun()).toBeUndefined();
+  watch.apply(event(7, "turn-item.updated", wakeOpening("run-2")));
+  expect(watch.activeRun()?.id).toBe("run-2");
+  // A notification from a source this runtime does not know opens the run
+  // without attributing it.
+  const unknown = owing();
+  unknown.apply(
+    event(4, "turn-item.updated", { ...wakeOpening("run-2"), source: { kind: "future_source" } }),
+  );
+  expect(unknown.sequence()).toBe(4);
+  expect(unknown.activeRun()).toBeUndefined();
+});
+
 it("never adopts another message's run because an agent read the result in it (coordinator reproduction)", () => {
   const follow = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
   follow.apply(
