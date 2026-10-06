@@ -209,9 +209,12 @@ const MARKER_LIMIT: Duration = Duration::from_secs(4);
 const SUBMIT_ATTEMPTS: u32 = 3;
 
 /// Sends text to the conversation as the invoking person's: a silent marker
-/// message in the conversation shows what was sent and by whom, and is the
+/// message in the conversation shows what was asked and by whom, and is the
 /// event's identity and feedback target; core then accepts the event like
-/// any message, and the answer is delivered to the conversation.
+/// any message, and the answer is delivered to the conversation. A marker
+/// Discord does not confirm in time may still have been posted, but without
+/// its ID there is no event: the command is not sent to core, and the
+/// marker's wording claims nothing ran.
 ///
 /// The submission first waits for its turn in the conversation's lane, after
 /// the messages before it. It returns by `deadline`, the end of its
@@ -272,7 +275,7 @@ async fn submit(
     let marker = timeout_at(deadline.min(Instant::now() + MARKER_LIMIT), async {
         http.create_message(channel)
             .allowed_mentions(Some(&silent))
-            .content(&format!("<@{}> ran `{shown}`", origin.user_id))
+            .content(&format!("<@{}> asked to run `{shown}`", origin.user_id))
             .await
             .map_err(|error| error.to_string())?
             .model()
@@ -282,8 +285,9 @@ async fn submit(
     .await
     .unwrap_or_else(|_| Err("Discord did not answer in time".to_owned()))
     .map_err(|error| {
-        warn!(%error, "command marker message could not be posted");
-        "Discord did not accept the message that carries it, so it was not sent.".to_owned()
+        warn!(%error, "command marker message was not confirmed");
+        "Discord did not confirm the marker message, so the command was not sent to Carillon."
+            .to_owned()
     })?;
     let event = submitted_event(
         agent_id,
@@ -1854,7 +1858,7 @@ pub(crate) mod tests {
         // submitted.
         assert_eq!(
             trace[0],
-            "message <@200> ran `/compact keep ˋthisˋ` mentions {\"parse\":[]}"
+            "message <@200> asked to run `/compact keep ˋthisˋ` mentions {\"parse\":[]}"
         );
         assert!(trace[1..3].iter().any(|request| {
             request.starts_with("PUT /api/v10/channels/400/messages/901/reactions/")
@@ -2019,7 +2023,7 @@ pub(crate) mod tests {
         // The marker, then the feedback that was asked for, with admission
         // beside it.
         let trace = trace.lock().await;
-        assert!(trace[0].starts_with("message <@200> ran"));
+        assert!(trace[0].starts_with("message <@200> asked to run"));
         let after = &trace[1..4];
         assert!(after.iter().any(|request| request.contains("/reactions/")));
         assert!(after.iter().any(|request| request.ends_with("/typing")));
@@ -2152,7 +2156,7 @@ pub(crate) mod tests {
         server.abort();
         let trace = trace.lock().await;
         assert!(
-            trace[0].starts_with("message <@200> ran `/compact keep decisions`"),
+            trace[0].starts_with("message <@200> asked to run `/compact keep decisions`"),
             "{trace:?}"
         );
         assert!(trace.contains(&"event 901".to_owned()), "{trace:?}");
@@ -2205,7 +2209,7 @@ pub(crate) mod tests {
         server.abort();
         let trace = trace.lock().await;
         assert!(
-            trace[0].starts_with("message <@200> ran `/compact keep decisions`"),
+            trace[0].starts_with("message <@200> asked to run `/compact keep decisions`"),
             "{trace:?}"
         );
         assert!(
@@ -2535,6 +2539,104 @@ pub(crate) mod tests {
         // The message was accepted; nothing of the command was posted or sent.
         assert_eq!(preparing.settled().await?, ["400"]);
         assert_eq!(markers.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    /// Core accepting every event at once, and Discord that records each
+    /// marker it is asked to post, counts it, and never answers.
+    fn unanswered_marker_server(
+        accepted: Arc<tokio::sync::Mutex<Vec<String>>>,
+        markers: Arc<AtomicUsize>,
+        posted: Arc<tokio::sync::Mutex<Vec<String>>>,
+    ) -> Router {
+        use axum::{
+            Json,
+            routing::{get, post},
+        };
+        use carillon_protocol::model::{EventReceipt, EventStatus, ExternalEvent, TurnState};
+        Router::new()
+            .route(
+                "/v1/events/{event_id}",
+                get(|| async { Json(EventStatus::Unknown) }),
+            )
+            .route(
+                "/v1/events",
+                post(move |Json(event): Json<ExternalEvent>| {
+                    let accepted = accepted.clone();
+                    async move {
+                        accepted.lock().await.push(event.event_id.clone());
+                        Json(EventReceipt {
+                            event_id: event.event_id,
+                            turn_id: "turn".to_owned(),
+                            duplicate: false,
+                            state: TurnState::Queued,
+                        })
+                    }
+                }),
+            )
+            .route(
+                "/api/v10/channels/{channel}/messages",
+                post(move |Json(body): Json<Value>| {
+                    let (markers, posted) = (markers.clone(), posted.clone());
+                    async move {
+                        markers.fetch_add(1, Ordering::SeqCst);
+                        posted
+                            .lock()
+                            .await
+                            .push(body["content"].as_str().unwrap_or_default().to_owned());
+                        std::future::pending::<StatusCode>().await
+                    }
+                }),
+            )
+            .fallback(|| async { StatusCode::NO_CONTENT })
+    }
+
+    #[tokio::test]
+    async fn a_command_whose_marker_discord_does_not_confirm_is_not_sent_and_its_conversation_goes_on()
+    -> anyhow::Result<()> {
+        use carillon_discord_commands::contract::HostReply;
+        let (accepted, markers, posted) = (
+            Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        );
+        let router = unanswered_marker_server(accepted.clone(), markers.clone(), posted.clone());
+        let (calls, preparing) = conversation(router, accepted.clone(), markers).await?;
+        let started = std::time::Instant::now();
+        let submit = submit_request()?;
+        let answering = tokio::spawn(async move { calls.answer(&submit, calls_until()).await });
+        // The person's next message arrives while Discord holds the marker's
+        // answer: it waits behind the command.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        preparing
+            .send
+            .send(crate::inbound::tests::hello().into())
+            .await?;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(accepted.lock().await.is_empty());
+        let reply = answering.await?;
+        let elapsed = started.elapsed();
+        // Discord may have posted the marker, but without its answer the
+        // command has no identity: nothing of it reaches core, and the reply
+        // claims no more than that.
+        assert_eq!(
+            reply,
+            HostReply::Error(
+                "Discord did not confirm the marker message, so the command was not sent to Carillon."
+                    .to_owned()
+            )
+        );
+        assert!(
+            elapsed >= super::MARKER_LIMIT && elapsed < super::DEADLINE,
+            "answered after {elapsed:?}"
+        );
+        // The marker asks; it never says the command ran.
+        assert_eq!(
+            *posted.lock().await,
+            ["<@200> asked to run `/compact keep decisions`"]
+        );
+        // The conversation goes on with the message, and only the message.
+        assert_eq!(preparing.settled().await?, ["400"]);
         Ok(())
     }
 

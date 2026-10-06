@@ -46,7 +46,6 @@ import {
   ThreadSnapshotSchema,
   TurnItemSchema,
   TurnItemSchemas,
-  UserMessageOpeningSchema,
   WakeNotificationSchema,
   type BackgroundTask,
   type ContextTransfer,
@@ -117,12 +116,14 @@ export interface TurnWatch {
   activeRun(): Run | undefined;
   /** The thread's latest run, the one T3 settles background work through. */
   latestRun(): Run | undefined;
-  /**
-   * Whether runs this turn does not own still occupy the thread: a new
-   * message waits behind them, and the provider session they share is not
-   * the turn's alone to stop.
-   */
+  /** Whether runs this turn does not own still occupy the thread: a new message waits behind them. */
   busy(): boolean;
+  /**
+   * Whether the provider session is not the turn's alone to stop: a run this
+   * turn does not own is active, or background work another run started is
+   * still listed.
+   */
+  sessionShared(): boolean;
   /** Whether the thread has any message yet. */
   empty(): boolean;
   outcome(): Outcome | undefined;
@@ -1244,6 +1245,10 @@ export function watchTurn(
     for (const id of otherTasks) if (!listedNow.has(id)) otherTasks.delete(id);
   }
 
+  function busy(): boolean {
+    return earlier.size > 0 || laterOthers().some(isActive);
+  }
+
   function quiet(): boolean {
     return (
       active() === undefined &&
@@ -1458,7 +1463,8 @@ export function watchTurn(
     run: () => anchor,
     activeRun: active,
     latestRun: () => last,
-    busy: () => earlier.size > 0 || laterOthers().some(isActive),
+    busy,
+    sessionShared: () => busy() || otherTasks.size > 0,
     empty: () => !hasMessages,
     quiet,
     providerSession() {
@@ -1727,14 +1733,24 @@ function withDetail(detail: string | undefined): { detail?: string } {
   return detail === undefined ? {} : { detail };
 }
 
-/** The run a message or notification item belongs to, and how that item would open it. */
+/**
+ * The run a message or notification item belongs to, and how that item would
+ * open it; undefined for an item of no run or of another kind. Such an item
+ * naming its run any other way cannot be passed over: its run would wait for
+ * its opening.
+ */
 function openingOf(payload: unknown): readonly [string, Opening] | undefined {
-  if (Check(UserMessageOpeningSchema, payload)) return [payload.runId, "message"];
-  if (Check(DelegatedNotificationSchema, payload)) return [payload.runId, "delegated"];
-  if (Check(WakeNotificationSchema, payload)) return [payload.runId, "wake"];
-  if (!isRecord(payload) || payload["type"] !== "notification") return undefined;
+  if (!isRecord(payload)) return undefined;
+  const type = payload["type"];
+  if (type !== "user_message" && type !== "notification") return undefined;
   const run = payload["runId"];
-  return typeof run === "string" && run.length > 0 ? [run, "unknown"] : undefined;
+  if (run === null) return undefined;
+  if (typeof run !== "string" || run.length === 0)
+    throw new T3Failure("malformed", `T3 sent a ${type} item this runtime does not understand`);
+  if (type === "user_message") return [run, "message"];
+  if (Check(DelegatedNotificationSchema, payload)) return [run, "delegated"];
+  if (Check(WakeNotificationSchema, payload)) return [run, "wake"];
+  return [run, "unknown"];
 }
 
 /** When T3 made a message, as an instant: its time may be written with any offset. */

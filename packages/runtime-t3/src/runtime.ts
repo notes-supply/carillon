@@ -860,10 +860,11 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     const session = watch.providerSession();
     if (!accepted && watch.activeRun() === undefined && session !== undefined) {
       // The session is shared by every run on the thread: while a run this
-      // turn does not own is active, detaching it would stop that run too.
-      if (watch.busy()) {
+      // turn does not own is active, or background work another run started
+      // is listed, detaching it would stop that work too.
+      if (watch.sessionShared()) {
         log(
-          `thread ${binding.threadId}: another run is active, so provider session ${session} is not detached; the stop is unconfirmed and the next turn interrupts any run it finds active`,
+          `thread ${binding.threadId}: another run's work is active, so provider session ${session} is not detached; the stop is unconfirmed and the next turn interrupts any run it finds active`,
         );
         return { quiet: false, requestOpen: watch.requestOpen() };
       }

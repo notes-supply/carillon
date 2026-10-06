@@ -331,12 +331,6 @@ export const WakeNotificationSchema = Type.Object({
   }),
 });
 
-/** The item a run a person's message started begins with. */
-export const UserMessageOpeningSchema = Type.Object({
-  type: Type.Literal("user_message"),
-  runId: Id,
-});
-
 /** A thread snapshot. Timeline items are checked one by one as they are folded. */
 export const ProjectionSchema = Type.Object({
   /** The thread's own record; its selection is what every run of the thread uses. */
