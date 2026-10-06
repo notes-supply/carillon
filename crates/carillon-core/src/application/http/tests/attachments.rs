@@ -358,6 +358,73 @@ async fn limits_and_storage_budget_refuse_before_copying_and_release_reservation
     clippy::await_holding_lock,
     reason = "the held lock is what stalls the blocking copy"
 )]
+async fn an_interface_clearing_its_staging_never_fails_an_admitted_capture() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    let files: [(&str, &[u8]); 3] = [("a", b"first"), ("b", b"second"), ("c", b"third")];
+    // A restarting interface's cleanup overtakes core while it opens a
+    // batch: the first file is there, the later ones are gone. Core refuses
+    // the submission without admitting it, and holds and keeps nothing.
+    let overtaken = stage(&state, "overtaken", &files)?;
+    for ordinal in ["1", "2"] {
+        fs::remove_file(staging(&state).join("overtaken").join(ordinal))?;
+    }
+    let refusal = submit(&state, event("overtaken", "", overtaken))
+        .await
+        .err()
+        .context("a batch missing files was admitted")?;
+    assert_eq!(refusal.status, StatusCode::BAD_REQUEST);
+    assert!(matches!(
+        status(&state, "overtaken").await?,
+        EventStatus::Unknown
+    ));
+    assert!(captures(&state)?.is_empty());
+    assert_eq!(state.core.intake.workers.available_permits(), 2);
+    assert_eq!(
+        *state
+            .core
+            .intake
+            .reserved
+            .lock()
+            .map_err(|_| anyhow!("poisoned"))?,
+        0
+    );
+
+    // Once core reports a capture, it reads the files it opened, whatever
+    // becomes of the staging.
+    let staged = stage(&state, "admitted", &files)?;
+    let held = state
+        .core
+        .intake
+        .signals
+        .stall
+        .lock()
+        .map_err(|_| anyhow!("poisoned"))?;
+    let submission = {
+        let (state, event) = (state.clone(), event("admitted", "", staged));
+        tokio::spawn(async move { submit(&state, event).await })
+    };
+    wait_for_capture(&state, "admitted").await?;
+    fs::remove_dir_all(staging(&state))?;
+    drop(held);
+    let receipt = submission.await?.map_err(|error| anyhow!(error.message))?;
+    let inspection = state
+        .core
+        .inspect_turn(&receipt.turn_id)?
+        .context("missing turn")?;
+    let root = state.config.value.data_dir.join("attachments");
+    assert_eq!(inspection.attachments.len(), files.len());
+    for (attachment, (_, bytes)) in inspection.attachments.iter().zip(files) {
+        assert_eq!(fs::read(root.join(&attachment.path))?, bytes);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[expect(
+    clippy::await_holding_lock,
+    reason = "the held lock is what stalls the blocking copy"
+)]
 async fn an_abandoned_submission_keeps_its_capture_and_worker_until_the_copy_settles() -> Result<()>
 {
     let directory = tempdir()?;

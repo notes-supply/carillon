@@ -9,7 +9,17 @@ use std::{
 use anyhow::{Context as _, Result};
 use carillon_protocol::model::{StagedAttachments, StagedFile};
 
-use super::{Cancel, CaptureError, CapturedFile, capture, check, reconcile, store, validate_store};
+use super::{Cancel, CaptureError, CapturedFile, check, reconcile, store, validate_store};
+
+/// Open the staged batch of `interface` and capture it.
+fn capture(
+    data: &Path,
+    interface: &str,
+    staged: &StagedAttachments,
+    cancel: &Cancel,
+) -> Result<super::Capture, CaptureError> {
+    super::capture(data, super::open(data, interface, staged)?, cancel)
+}
 
 fn staging(data: &Path) -> PathBuf {
     data.join("components/interface/incoming")

@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use carillon_installation::config::{
     AgentConfig, AttachmentLimits, Config, CoreConfig, LoadedConfig, Provider, ProviderRole,
-    RELEASE_VERSION, hash_token, new_token, validate_provider_identity,
+    RELEASE_VERSION, attachment_staging, hash_token, new_token, validate_provider_identity,
 };
 use carillon_installation::filesystem::{atomic_write, sync_ancestors, sync_tree};
 
@@ -308,10 +308,14 @@ pub fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
     )?;
     validate_installation(config)?;
     // Interfaces' attachment staging is disposable scratch, never archived.
-    let components = data
-        .canonicalize()
-        .context("resolve backup data_dir")?
-        .join("components");
+    let data = data.canonicalize().context("resolve backup data_dir")?;
+    let scratch = config
+        .value
+        .providers
+        .iter()
+        .filter(|provider| provider.role == ProviderRole::Interface)
+        .map(|provider| attachment_staging(&data, &provider.id))
+        .collect::<Vec<_>>();
     let staging = parent.join(format!(
         ".{}.backup-{}",
         name.to_string_lossy(),
@@ -328,7 +332,7 @@ pub fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
         // Keep the writer inside restore's regular-file/directory format even
         // when installed binaries or provider files have filesystem holes.
         archive.sparse(false);
-        append_directory(&mut archive, &root, &root, &components)?;
+        append_directory(&mut archive, &root, &root, &scratch)?;
         archive.finish()?;
         let encoder = archive.into_inner()?;
         let mut writer = encoder.finish()?;
@@ -480,21 +484,18 @@ fn ensure_stopped(config: &LoadedConfig) -> Result<ServiceLock> {
     Ok(lock)
 }
 
-/// Archive `directory` below `root`, leaving out each component's `incoming`
-/// staging under `components`.
+/// Archive `directory` below `root`, leaving out the `scratch` directories.
 fn append_directory<W: std::io::Write>(
     archive: &mut Builder<W>,
     root: &Path,
     directory: &Path,
-    components: &Path,
+    scratch: &[PathBuf],
 ) -> Result<()> {
     let mut entries = fs::read_dir(directory)?.collect::<Result<Vec<_>, _>>()?;
     entries.sort_by_key(fs::DirEntry::file_name);
     for entry in entries {
         let path = entry.path();
-        if entry.file_name() == "incoming"
-            && path.parent().and_then(Path::parent) == Some(components)
-        {
+        if scratch.contains(&path) {
             continue;
         }
         let relative = path.strip_prefix(root)?;
@@ -507,7 +508,7 @@ fn append_directory<W: std::io::Write>(
         }
         if file_type.is_dir() {
             archive.append_dir(relative, &path)?;
-            append_directory(archive, root, &path, components)?;
+            append_directory(archive, root, &path, scratch)?;
         } else if file_type.is_file() {
             archive.append_path_with_name(&path, relative)?;
         } else {
@@ -900,7 +901,7 @@ mod tests {
     fn archive_test_tree(root: &Path, destination: &Path) -> Result<()> {
         let encoder = GzEncoder::new(fs::File::create(destination)?, Compression::default());
         let mut archive = Builder::new(encoder);
-        super::append_directory(&mut archive, root, root, Path::new("/nonexistent"))?;
+        super::append_directory(&mut archive, root, root, &[])?;
         archive.into_inner()?.finish()?;
         Ok(())
     }
@@ -1328,6 +1329,10 @@ mod tests {
         for (name, content) in fixtures {
             fs::write(native.join(name), content)?;
         }
+        // Only interfaces stage attachments: a runtime's own `incoming` is state.
+        let incoming = root.join("state/components/other-runtime/incoming");
+        fs::create_dir_all(&incoming)?;
+        fs::write(incoming.join("queue"), "durable runtime queue")?;
         let destination = directory.path().join("backup.tar.gz");
         backup(&LoadedConfig::load(&config_path)?, &destination)?;
         fs::remove_dir_all(&root)?;
@@ -1339,6 +1344,10 @@ mod tests {
                 content
             );
         }
+        assert_eq!(
+            fs::read_to_string(target.join("state/components/other-runtime/incoming/queue"))?,
+            "durable runtime queue"
+        );
         assert!(!target.join("pi").exists());
         Ok(())
     }
