@@ -22,6 +22,7 @@ import type {
   ModelUpdate,
   ModelState,
 } from "@carillon/protocol";
+import { existsSync } from "node:fs";
 import { mkdir, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { trackActivity, type ActivityTracker } from "./activity.ts";
@@ -295,9 +296,17 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
         // extension's, is acknowledged; a failed one, and any message the
         // model answered with nothing, still has no answer.
         const silent = answer === undefined && !seen.failure;
+        // Notes Pi has not saved, such as those of a command that opened the
+        // conversation, are left for core to offer again with a later turn.
+        const unsaved = !saved(session.sessionManager);
+        const earlierLeft =
+          unsaved && notes.some((pending) => pending.details.turn !== request.correlation_id);
+        const ownLeft = unsaved && attachments.note !== undefined;
         return {
           correlation_id: request.correlation_id,
           output: silent ? (commandFinished(request) ?? output) : output,
+          ...(earlierLeft ? { unanswered_left: true } : {}),
+          ...(ownLeft ? { attachments_left: true } : {}),
         };
       } finally {
         unwatch();
@@ -317,9 +326,9 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
    * Prompt with the turn's images, its attachment notes travelling with the
    * message after any compaction. A command or input an extension handles
    * consumes the prompt without a message; the notes are then kept on their
-   * own. Pi saves them once the conversation has a message; until then, core
-   * offers the files again with later turns. Returns the prompt's own
-   * answer, as `promptSession` does.
+   * own. Pi saves them once the conversation has a message; until then, the
+   * turn leaves them, and core offers the files again with later turns.
+   * Returns the prompt's own answer, as `promptSession` does.
    */
   async function promptWithNotes(
     session: AgentSession,
@@ -338,6 +347,12 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
           if (!noted(session.sessionManager, pending.details.turn))
             await session.sendCustomMessage(pending);
     }
+  }
+
+  /** Whether Pi has written the conversation's file, which it does once there is a message. */
+  function saved(manager: SessionManager): boolean {
+    const file = manager.getSessionFile();
+    return file !== undefined && existsSync(file);
   }
 
   function noted(manager: SessionManager, turn: string): boolean {
