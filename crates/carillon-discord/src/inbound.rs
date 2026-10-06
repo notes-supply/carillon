@@ -233,17 +233,15 @@ async fn prepare_files(ingress: &Ingress, plan: MessagePlan) {
     let deadline = Instant::now() + PREPARATION_DEADLINE;
     // A message core already holds or is still capturing, such as one the
     // gateway replayed, is not downloaded again.
-    match ingress
-        .until(
-            Some(deadline),
-            known_receipt(&ingress.core, &plan.message_id),
-        )
-        .await
-    {
-        Some(Some(_)) => return,
-        Some(None) => {}
-        None => {
+    match replayed(ingress, &plan.message_id, deadline).await {
+        Replayed::Held => return,
+        Replayed::Absent => {}
+        Replayed::Unfinished => {
             refuse(ingress.unfinished()).await;
+            return;
+        }
+        Replayed::Uncertain => {
+            terminal_feedback(http, discord, &source, Feedback::Uncertain).await;
             return;
         }
     }
@@ -308,21 +306,91 @@ async fn keep_typing(http: Arc<DiscordHttp>, config: DiscordConfig, channel: Str
     }
 }
 
+/// What core says of a message before its files are downloaded.
+enum Replayed {
+    /// Core accepted it: its feedback stands.
+    Held,
+    /// Core does not hold it; the files are downloaded.
+    Absent,
+    /// The deadline or the stop came before core said it was capturing it.
+    Unfinished,
+    /// Core was capturing it and then would not say what became of it, and
+    /// nothing more is sent.
+    Uncertain,
+}
+
+/// Ask core about `event_id`. The deadline and the stop end the lookup only
+/// until core says it is capturing the message: core owns that capture, and
+/// its outcome then settles the message.
+async fn replayed(ingress: &Ingress, event_id: &str, deadline: Instant) -> Replayed {
+    loop {
+        let Some(status) = ingress
+            .until(Some(deadline), ingress.core.event_status(event_id))
+            .await
+        else {
+            return Replayed::Unfinished;
+        };
+        match status {
+            Ok(EventStatus::Accepted(_)) => return Replayed::Held,
+            Ok(EventStatus::Unknown) => return Replayed::Absent,
+            Ok(EventStatus::Capturing) => break,
+            Err(failure) if failure.is_transient() => {
+                warn!(error = %failure.message, %event_id, "waiting to ask core about a Discord event");
+                if ingress
+                    .until(Some(deadline), sleep(Duration::from_secs(2)))
+                    .await
+                    .is_none()
+                {
+                    return Replayed::Unfinished;
+                }
+            }
+            Err(failure) => {
+                warn!(error = %failure.message, %event_id, "core refused an event status request");
+                return Replayed::Absent;
+            }
+        }
+    }
+    match settled(&ingress.core, event_id).await {
+        Ok(Some(_)) => Replayed::Held,
+        // The capture ended without an acceptance.
+        Ok(None) => Replayed::Absent,
+        Err(failure) => {
+            warn!(error = %failure.message, %event_id, "core refused an event status request");
+            if ingress.stopping.is_cancelled() || Instant::now() >= deadline {
+                Replayed::Uncertain
+            } else {
+                Replayed::Absent
+            }
+        }
+    }
+}
+
 /// The receipt of an event core already accepted. A capture still running
 /// is waited for; an unreachable core is waited out, as for any submission.
 pub(crate) async fn known_receipt(core: &CoreClient, event_id: &str) -> Option<EventReceipt> {
+    settled(core, event_id).await.unwrap_or_else(|failure| {
+        warn!(error = %failure.message, %event_id, "core refused an event status request");
+        None
+    })
+}
+
+/// What core settles for one of this provider's events: its receipt once
+/// accepted, `None` when core does not hold it. A capture still running is
+/// waited for, and an unreachable core is waited out; a refusal to answer
+/// is returned.
+async fn settled(
+    core: &CoreClient,
+    event_id: &str,
+) -> Result<Option<EventReceipt>, InterfaceError> {
     loop {
         match core.event_status(event_id).await {
-            Ok(EventStatus::Accepted(receipt)) => return Some(receipt),
-            Ok(EventStatus::Unknown) => return None,
+            Ok(EventStatus::Accepted(receipt)) => return Ok(Some(receipt)),
+            Ok(EventStatus::Unknown) => return Ok(None),
             Ok(EventStatus::Capturing) => {}
             Err(failure) if failure.is_transient() => {
                 warn!(error = %failure.message, %event_id, "waiting to ask core about a Discord event");
             }
-            Err(failure) => {
-                warn!(error = %failure.message, %event_id, "core refused an event status request");
-                return None;
-            }
+            Err(failure) => return Err(failure),
         }
         sleep(Duration::from_secs(2)).await;
     }

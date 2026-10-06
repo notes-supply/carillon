@@ -46,6 +46,11 @@ struct Core {
     /// many status lookups after the first submission still find them
     /// capturing before they are accepted.
     received: HashMap<String, usize>,
+    /// Events core is already capturing, as for a replayed message, with how
+    /// many more status lookups find them capturing before it accepts them.
+    replayed: HashMap<String, usize>,
+    /// Event IDs whose status lookups core refuses once their capture ends.
+    refused_status: Vec<String>,
     /// Whether Discord fails every thread creation, as during an outage.
     threads_fail: bool,
     submissions: Vec<ExternalEvent>,
@@ -179,6 +184,20 @@ fn status(core: &Shared, event_id: &str) -> Response {
     let entry = format!("status {event_id}");
     core.trace.push(entry.clone());
     core.times.push((entry, Instant::now()));
+    if let Some(remaining) = core.replayed.get_mut(event_id) {
+        if *remaining > 0 {
+            *remaining -= 1;
+            return Json(EventStatus::Capturing).into_response();
+        }
+        if core
+            .refused_status
+            .iter()
+            .any(|refused| refused == event_id)
+        {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+        core.known.push(event_id.to_owned());
+    }
     let submitted = core
         .submissions
         .iter()
@@ -864,6 +883,84 @@ async fn a_full_gateway_queue_refuses_only_messages_admission_would_activate() -
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     Err(anyhow!("no overload refusal for an activated message"))
+}
+
+#[tokio::test]
+async fn stopping_while_core_captures_a_replay_waits_for_its_outcome() -> Result<()> {
+    let (cdn, log) = serve_cdn(HashMap::new()).await?;
+    let world = world(Vec::new(), Vec::new()).await?;
+    // Core is still capturing both replayed messages; it then accepts the
+    // first and refuses to say what became of the second.
+    script(&world, |core| {
+        core.replayed = HashMap::from([("150".to_owned(), 2), ("151".to_owned(), 2)]);
+        core.refused_status = vec!["151".to_owned()];
+    })?;
+    let mut config = channel_config();
+    config.uncertain_emoji = "❓".to_owned();
+    let ingress = ingress(&world, config, cdn)?;
+    let stopping = ingress.stopping.clone();
+    let (send, receive) = mpsc::channel(lanes::MAX_PENDING);
+    for (id, channel, file) in [("150", "300", "601"), ("151", "301", "602")] {
+        send.send(message(
+            id,
+            channel,
+            "200",
+            "",
+            vec![attachment(cdn, file, "a.bin", 8)],
+        ))
+        .await?;
+    }
+    let dispatcher = tokio::spawn(lanes::dispatch(ingress, receive));
+    // Stop once core has twice said it is capturing both.
+    let looked_up = |trace: &[String], id: &str| {
+        let status = format!("status {id}");
+        trace.iter().filter(|entry| **entry == status).count()
+    };
+    for _ in 0..2000 {
+        let trace = trace(&world)?;
+        if looked_up(&trace, "150") >= 2 && looked_up(&trace, "151") >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    stopping.cancel();
+    tokio::time::timeout(Duration::from_secs(20), dispatcher).await??;
+    let trace = trace(&world)?;
+    // Each capture's outcome was asked for again, after the stop.
+    for id in ["150", "151"] {
+        assert_eq!(looked_up(&trace, id), 3, "{trace:?}");
+    }
+    // Neither is told to send it again; nothing was fetched or submitted.
+    assert!(explanation(&trace, "150").is_err(), "{trace:?}");
+    assert!(explanation(&trace, "151").is_err(), "{trace:?}");
+    assert!(
+        !trace.iter().any(|entry| entry.starts_with("submit ")),
+        "{trace:?}"
+    );
+    assert!(
+        log.lock()
+            .map_err(|_| anyhow!("poisoned"))?
+            .requests
+            .is_empty(),
+        "downloaded a message core was capturing"
+    );
+    // The accepted one keeps its feedback; the unanswered one is uncertain.
+    let reactions = |id: &str| {
+        trace
+            .iter()
+            .filter(|entry| entry.contains(&format!("/messages/{id}/reactions/")))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert!(reactions("150").is_empty(), "{trace:?}");
+    assert!(
+        reactions("151")
+            .iter()
+            .any(|reaction| reaction.starts_with("PUT") && reaction.contains("%E2%9D%93")),
+        "{trace:?}"
+    );
+    drop(send);
+    Ok(())
 }
 
 /// Past the preparation deadline, in a paused clock's virtual time.
