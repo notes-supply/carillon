@@ -921,6 +921,104 @@ async fn an_abandoned_install_completes_while_holding_the_maintenance_lock() -> 
     Ok(())
 }
 
+/// The gateway goes, as when the provider stops, after taking an
+/// interaction that Discord has acknowledged: its reply is still sent before
+/// the provider returns.
+#[tokio::test]
+async fn an_acknowledged_interaction_is_answered_before_the_provider_returns() -> anyhow::Result<()>
+{
+    use axum::routing::patch;
+    use tokio::sync::Notify;
+    use twilight_model::gateway::payload::incoming::InteractionCreate;
+
+    let directory = tempfile::tempdir()?;
+    // Discord takes the acknowledgement at once, and the reply only when the
+    // test releases it.
+    let (acknowledged, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    let replied = Arc::new(AtomicUsize::new(0));
+    let router = Router::new()
+        .route(
+            "/api/v10/interactions/{id}/{token}/callback",
+            post({
+                let acknowledged = acknowledged.clone();
+                move || async move {
+                    acknowledged.notify_one();
+                    StatusCode::NO_CONTENT
+                }
+            }),
+        )
+        .route(
+            "/api/v10/webhooks/{application}/{token}/messages/@original",
+            patch({
+                let (release, replied) = (release.clone(), replied.clone());
+                move || async move {
+                    release.notified().await;
+                    replied.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({}))
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move { axum::serve(listener, router).await });
+    let mut state = discord_state(
+        core_client("http://127.0.0.1:1".to_owned()),
+        directory.path(),
+    )
+    .await?;
+    let target = Arc::new(app(&address.to_string(), 2, 100));
+    state.app = Some(target.clone());
+    let ingress = Arc::new(crate::inbound::Ingress {
+        core: state.core.clone(),
+        config: state.discord.clone(),
+        participation: state.participation.clone(),
+        http: target.http.clone(),
+        downloads: state.downloads.clone(),
+        refusals: Arc::new(tokio::sync::Semaphore::new(crate::inbound::lanes::REFUSALS)),
+        stopping: tokio_util::sync::CancellationToken::new(),
+    });
+    let command = json!({
+        "id": "1",
+        "application_id": "2",
+        "authorizing_integration_owners": {},
+        "token": "t",
+        "version": 1,
+        "type": 2,
+        "guild_id": "100",
+        "channel": {"id": "300", "type": 0},
+        "member": {
+            "user": {"id": "200", "username": "u", "discriminator": "0", "avatar": null},
+            "roles": [],
+            "joined_at": null,
+            "deaf": false,
+            "mute": false,
+            "flags": 0
+        },
+        "data": {"id": "3", "name": "model", "type": 1}
+    });
+    let event = twilight_gateway::Event::InteractionCreate(Box::new(InteractionCreate(
+        serde_json::from_value(command)?,
+    )));
+    let (messages, _queue) = tokio::sync::mpsc::channel(1);
+    let mut interactions = tokio::task::JoinSet::new();
+    super::take_event(&state, event, &messages, &ingress, &mut interactions)?;
+    // No event follows: the gateway is gone.
+    tokio::time::timeout(Duration::from_secs(5), acknowledged.notified()).await?;
+    let answering = super::answered(&mut interactions);
+    tokio::pin!(answering);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut answering)
+            .await
+            .is_err(),
+        "the provider returned while an acknowledged interaction had no reply"
+    );
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), answering).await?;
+    assert_eq!(replied.load(Ordering::SeqCst), 1);
+    server.abort();
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_full_message_queue_refuses_instead_of_holding_the_gateway() -> anyhow::Result<()> {
     let (sender, mut receiver) = tokio::sync::mpsc::channel(1);

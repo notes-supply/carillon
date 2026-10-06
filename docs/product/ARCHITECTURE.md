@@ -92,7 +92,7 @@ activation is an input-context optimization, not an authorization mechanism.
 
 ### Replaceable command module
 
-Discord's slash commands and their interactive controls live in a WebAssembly module that the provider loads at startup and can replace while running. The release ships `carillon_discord_commands.wasm`; an operator may install another. The module defines the commands, handles each interaction, and decides what to show. The provider keeps everything native: the gateway connection, admission of the interaction, every Discord and core call, authority, and deadlines.
+Discord's slash commands and their interactive controls live in a WebAssembly module that the provider loads at startup and can replace while running. The release ships `carillon_discord_commands.wasm`; an operator may install another. The module defines the commands, handles each interaction, and decides what to show. The provider keeps everything native: the gateway connection, admission of the interaction, every Discord and core call, authority, and deadlines. When it stops, it takes no further interaction, and one it has already acknowledged still gets its reply before it exits.
 
 ```text
 carillon CLI -> carillon-discord
