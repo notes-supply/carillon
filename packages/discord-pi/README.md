@@ -83,6 +83,9 @@ up to ten explicit local files, 4 MiB combined. File reads happen in the extensi
 not via arbitrary provider filesystem paths. `files` become bounded wire
 `attachments` containing filenames and base64 bytes. The provider uses Twilight's
 multipart API. Mentions are disabled except explicitly listed user/role IDs.
+Results never carry Discord's signed attachment addresses: messages read,
+sent or edited keep their attachments' names, sizes and types, including those
+of replied-to and forwarded messages, without the reusable links.
 
 Not all Discord APIs are covered: no DMs, private-thread membership, archived
 thread enumeration, custom emoji management, webhooks, voice, audit logs or bulk

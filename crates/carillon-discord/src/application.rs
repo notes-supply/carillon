@@ -736,44 +736,8 @@ fn reap(finished: Result<(), JoinError>) {
 /// files are core's captures, not CDN links.
 fn native_message(message: &twilight_model::channel::Message) -> Value {
     let mut native = serde_json::to_value(message).unwrap_or(Value::Null);
-    strip_attachment_addresses(&mut native);
+    crate::operations::strip_attachment_addresses(&mut native);
     native
-}
-
-/// Remove signed addresses from every attachment list, including those of
-/// referenced and forwarded messages nested in the payload, and the signature
-/// of any other attachment address, such as an embed's.
-fn strip_attachment_addresses(value: &mut Value) {
-    match value {
-        Value::Object(object) => {
-            for (key, nested) in object.iter_mut() {
-                if key == "attachments"
-                    && let Value::Array(attachments) = nested
-                {
-                    for attachment in attachments.iter_mut().filter_map(Value::as_object_mut) {
-                        attachment.remove("url");
-                        attachment.remove("proxy_url");
-                    }
-                }
-                strip_attachment_addresses(nested);
-            }
-        }
-        Value::Array(items) => items.iter_mut().for_each(strip_attachment_addresses),
-        Value::String(text) => {
-            if let Ok(mut url) = reqwest::Url::parse(text)
-                && matches!(
-                    url.host_str(),
-                    Some("cdn.discordapp.com" | "media.discordapp.net")
-                )
-                && url.path().starts_with("/attachments/")
-                && url.query().is_some()
-            {
-                url.set_query(None);
-                *text = url.to_string();
-            }
-        }
-        _ => {}
-    }
 }
 
 /// Hands a gateway message to the lanes. One that finds their queue full is

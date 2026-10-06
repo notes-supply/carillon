@@ -302,6 +302,11 @@ impl Operation {
         let result = tokio::time::timeout(Duration::from_secs(30), self.run(http, guild))
             .await
             .unwrap_or_else(|_| Err(OperationError::uncertain()));
+        // The result goes to the model, which gets no signed attachment address.
+        let result = result.map(|mut value| {
+            strip_attachment_addresses(&mut value);
+            value
+        });
         result.map_err(|mut error| {
             if !mutates && error.outcome == "uncertain" {
                 error.outcome = "unavailable";
@@ -856,6 +861,43 @@ fn uploads(input: Vec<Upload>) -> Result<Vec<Attachment>, OperationError> {
             Ok(Attachment::from_bytes(upload.filename, bytes, index as u64))
         })
         .collect()
+}
+
+/// Remove signed addresses from every attachment list, including those of
+/// referenced and forwarded messages nested in the payload, and the signature
+/// of any other attachment address, such as an embed's. Whatever reaches a
+/// model, a gateway message or an operation's result, passes through here.
+pub(crate) fn strip_attachment_addresses(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            for (key, nested) in object.iter_mut() {
+                if key == "attachments"
+                    && let Value::Array(attachments) = nested
+                {
+                    for attachment in attachments.iter_mut().filter_map(Value::as_object_mut) {
+                        attachment.remove("url");
+                        attachment.remove("proxy_url");
+                    }
+                }
+                strip_attachment_addresses(nested);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(strip_attachment_addresses),
+        Value::String(text) => {
+            if let Ok(mut url) = reqwest::Url::parse(text)
+                && matches!(
+                    url.host_str(),
+                    Some("cdn.discordapp.com" | "media.discordapp.net")
+                )
+                && url.path().starts_with("/attachments/")
+                && url.query().is_some()
+            {
+                url.set_query(None);
+                *text = url.to_string();
+            }
+        }
+        _ => {}
+    }
 }
 
 async fn decoded<T: DeserializeOwned + Serialize + Unpin>(
