@@ -118,6 +118,35 @@ fn deterministic_options<'a>(token_file: &'a Path, module: &'a Path) -> ServeOpt
 }
 
 #[tokio::test]
+async fn a_disabled_provider_ends_before_credentials_state_or_core() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    // Its address is taken, core does not answer and its credential is
+    // missing: a disabled provider needs none of them.
+    let occupant = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let (mut config, _, module) = served_installation(
+        &directory.path().join("installation"),
+        "127.0.0.1:1".parse()?,
+        occupant.local_addr()?,
+    )?;
+    config
+        .value
+        .providers
+        .iter_mut()
+        .find(|provider| provider.id == "discord-private")
+        .context("missing interface")?
+        .enabled = false;
+    let state = crate::config::state_directory(&config, "discord-private");
+    let missing = directory.path().join("missing.token");
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        super::serve(config, deterministic_options(&missing, &module)),
+    )
+    .await??;
+    assert!(!state.exists(), "a disabled provider created its state");
+    Ok(())
+}
+
+#[tokio::test]
 async fn startup_reconciliation_refuses_permanent_errors_and_recovers_transient_errors()
 -> anyhow::Result<()> {
     for status in [

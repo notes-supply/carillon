@@ -15,10 +15,14 @@ import { connectT3 } from "./t3.ts";
 
 async function main(values: readonly string[]): Promise<void> {
   const args = parseArguments(values);
-  const installation = await loadInstallation(
-    requiredArgument(args, "config"),
-    requiredArgument(args, "provider"),
-  );
+  const providerId = requiredArgument(args, "provider");
+  const installation = await loadInstallation(requiredArgument(args, "config"), providerId);
+  // Disabled on purpose, the runtime ends successfully, so its service is not
+  // restarted, before it reads any credential, settings or state, or reaches T3.
+  if (installation === "disabled") {
+    process.stdout.write(`runtime provider ${providerId} is disabled; not serving\n`);
+    return;
+  }
   if (!(await stat(installation.workspace)).isDirectory())
     throw new Error("workspace must be an existing directory");
   const listenAddress = providerAddress(installation.runtime.url);

@@ -34,10 +34,14 @@ const ProviderFileSchema = Type.Object(
 
 async function main(values: readonly string[]): Promise<void> {
   const args = parseArguments(values, ["deterministic"]);
-  const config = await loadInstallation(
-    requiredArgument(args, "config"),
-    requiredArgument(args, "provider"),
-  );
+  const providerId = requiredArgument(args, "provider");
+  const config = await loadInstallation(requiredArgument(args, "config"), providerId);
+  // Disabled on purpose, the runtime ends successfully, so its service is not
+  // restarted, before it reads its credential or creates any state.
+  if (config === "disabled") {
+    process.stdout.write(`runtime provider ${providerId} is disabled; not serving\n`);
+    return;
+  }
   const inlineImages = await loadInlineImages(config.providerFile);
   if (!(await stat(config.workspace)).isDirectory())
     throw new Error("workspace must be an existing directory");

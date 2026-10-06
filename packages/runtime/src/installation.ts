@@ -44,8 +44,14 @@ const FileConfigSchema = Type.Object({
   providers: Type.Array(ProviderSchema),
 });
 
-/** The registry as it concerns the named, enabled runtime provider. */
-export async function loadInstallation(path: string, providerId: string): Promise<Installation> {
+/**
+ * The registry as it concerns the named runtime provider, or `"disabled"`
+ * when the operator disabled it: the runtime then serves nothing.
+ */
+export async function loadInstallation(
+  path: string,
+  providerId: string,
+): Promise<Installation | "disabled"> {
   Parse(ProviderIdentitySchema, providerId);
   const configPath = await realpath(path);
   const root = resolve(configPath, "..");
@@ -59,7 +65,7 @@ export async function loadInstallation(path: string, providerId: string): Promis
     (provider) => provider.id === providerId && provider.role === "runtime",
   );
   if (runtime === undefined) throw new Error(`runtime provider ${providerId} is not configured`);
-  if (!runtime.enabled) throw new Error(`runtime provider ${providerId} is disabled`);
+  if (!runtime.enabled) return "disabled";
   const interfaces = parsed.providers.filter(
     (provider) => provider.role === "interface" && provider.enabled,
   );

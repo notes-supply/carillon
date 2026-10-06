@@ -117,8 +117,11 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
     let provider = config
         .provider(options.provider_id, ProviderRole::Interface)?
         .clone();
+    // Disabled on purpose, the provider ends successfully, so its service is
+    // not restarted, before it reads credentials or touches any state.
     if !provider.enabled {
-        bail!("Discord interface provider is disabled");
+        info!(provider = %provider.id, "Discord interface provider is disabled; not serving");
+        return Ok(());
     }
     let discord = DiscordConfig::load(&config, &provider.id)?;
     let token = read_token_file(options.token_file)?;

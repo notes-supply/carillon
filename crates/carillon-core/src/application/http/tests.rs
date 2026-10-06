@@ -95,7 +95,14 @@ async fn run_next_turn(
         RuntimeTurnRequest,
     ) -> Result<RuntimeTurnResponse, TurnFailure>,
 ) -> Result<WorkerStep> {
-    super::run_next(&configured(state), runtime_id, Lane::Messages, submit).await
+    super::run_next(
+        &configured(state),
+        runtime_id,
+        Lane::Messages,
+        &CancellationToken::new(),
+        submit,
+    )
+    .await
 }
 
 async fn run_next_observation(
@@ -107,7 +114,14 @@ async fn run_next_observation(
         RuntimeTurnRequest,
     ) -> Result<RuntimeTurnResponse, TurnFailure>,
 ) -> Result<WorkerStep> {
-    super::run_next(&configured(state), runtime_id, Lane::Observations, submit).await
+    super::run_next(
+        &configured(state),
+        runtime_id,
+        Lane::Observations,
+        &CancellationToken::new(),
+        submit,
+    )
+    .await
 }
 
 async fn accept(state: &AppState, id: &str, audience: &str) -> Result<EventReceipt> {
@@ -277,6 +291,69 @@ async fn status_probes_public_health_without_provider_credentials() -> Result<()
             "public health leaked a credential"
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn stalled_providers_are_reported_within_the_operator_timeout() -> Result<()> {
+    let directory = tempdir()?;
+    let mut state = installation(directory.path())?;
+    fs::write(
+        directory.path().join("credentials/operator.token"),
+        "test-operator",
+    )?;
+    // Four enabled providers accept a health request and never answer it;
+    // a disabled one sits among them. Keep slow fixtures away from backup's
+    // 127.0.0.1 probes.
+    let mut services = tokio::task::JoinSet::new();
+    let mut providers = Vec::new();
+    for index in 0..5 {
+        let listener = TcpListener::bind("127.0.0.2:0").await?;
+        let mut provider = state.config.value.providers[index % 2].clone();
+        provider.id = format!("stalled-{index}");
+        provider.url = format!("http://{}", listener.local_addr()?);
+        provider.enabled = index != 2;
+        let router = Router::new().route("/health", get(std::future::pending::<StatusCode>));
+        services.spawn(async move { axum::serve(listener, router).await });
+        providers.push(provider);
+    }
+    state.config.value.providers = providers;
+    let listener = TcpListener::bind("127.0.0.2:0").await?;
+    state.config.value.core.listen = listener.local_addr()?;
+    let config = state.config.clone();
+    let router = Router::new()
+        .route("/v1/status", get(status))
+        .with_state(state);
+    services.spawn(async move { axum::serve(listener, router).await });
+
+    // The operator's status request, bounded at five seconds, gets the
+    // report, in registry order, each provider judged by its own timeout.
+    let report = crate::application::operations::status(&config).await?;
+    let shown = report
+        .providers
+        .iter()
+        .map(|health| (health.id.as_str(), health.status.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        shown,
+        [
+            ("core", "ready"),
+            ("stalled-0", "unavailable"),
+            ("stalled-1", "unavailable"),
+            ("stalled-2", "disabled"),
+            ("stalled-3", "unavailable"),
+            ("stalled-4", "unavailable"),
+        ]
+    );
+    // Readiness names the providers that did not answer.
+    let waited = crate::application::operations::wait_until_healthy(&config, Duration::ZERO)
+        .await
+        .err()
+        .context("stalled providers were healthy")?;
+    assert!(
+        format!("{waited:#}").contains("unavailable: stalled-0, stalled-1, stalled-3, stalled-4"),
+        "{waited:#}"
+    );
     Ok(())
 }
 
@@ -580,7 +657,7 @@ async fn occupied_listener_leaves_accepted_and_running_work_untouched() -> Resul
     state
         .core
         .database
-        .claim("test-runtime", Lane::Messages)?
+        .claim("test-runtime", Lane::Messages, &CancellationToken::new())?
         .context("missing running turn")?;
     let queued = accept(&state, "queued", "other").await?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -1070,6 +1147,7 @@ async fn concurrent_workers_progress_other_conversations_and_keep_each_in_order(
             &worker,
             "test-runtime",
             Lane::Messages,
+            &CancellationToken::new(),
             async move |_, _, request| {
                 let _ = started.send(request.correlation_id.clone());
                 let _ = held.await;
@@ -1306,7 +1384,7 @@ async fn startup_drains_queued_nondefault_runtime_without_replaying_running_work
     state
         .core
         .database
-        .claim("test-runtime", Lane::Messages)?
+        .claim("test-runtime", Lane::Messages, &CancellationToken::new())?
         .context("missing claim")?;
     let blocked = accept(&state, "successor", "blocked").await?;
     let queued = accept(&state, "queued", "old-conversation").await?;
@@ -1541,6 +1619,75 @@ async fn a_stopping_worker_settles_its_turn_and_claims_no_other() -> Result<()> 
     // The held turn settled; the queued one waits for the next start.
     assert_eq!(state_of(&held.turn_id)?, TurnState::Completed);
     assert_eq!(state_of(&queued.turn_id)?, TurnState::Queued);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_claim_waiting_for_the_database_writer_is_not_made_once_stopping() -> Result<()> {
+    use std::io::Write as _;
+
+    let directory = tempdir()?;
+    let mut state = installation(directory.path())?;
+    let queued = accept(&state, "queued", "first").await?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().route(
+        "/v1/turns",
+        post({
+            let calls = calls.clone();
+            move |Json(request): Json<Value>| async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Json(json!({"output": "answered", "correlation_id": request["correlation_id"]}))
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    state.config.value.providers[1].url = format!("http://{}", listener.local_addr()?);
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    // Another connection holds the database writer.
+    let writer = rusqlite::Connection::open(state.config.value.data_dir.join("carillon.sqlite3"))?;
+    writer.execute_batch("BEGIN IMMEDIATE")?;
+    // The worker reads its runtime credential after checking whether core is
+    // stopping, and checks nothing more before its storage work claims; read
+    // from a FIFO, it waits for the test. Opening the FIFO thus shows the
+    // worker is past that check, and the held writer keeps the claim from
+    // being made until the test releases the writer after shutdown has
+    // begun. The test does not observe whether that storage work has already
+    // reached its wait for the writer.
+    let credential = directory.path().join("credentials/test-runtime.token");
+    fs::remove_file(&credential)?;
+    rustix::fs::mknodat(
+        rustix::fs::CWD,
+        &credential,
+        rustix::fs::FileType::Fifo,
+        rustix::fs::Mode::from_raw_mode(0o600),
+        0,
+    )?;
+    let stopping = CancellationToken::new();
+    let worker = tokio::spawn(runtime_worker(
+        configured(&state),
+        "test-runtime".to_owned(),
+        Lane::Messages,
+        stopping.clone(),
+    ));
+    let mut fifo =
+        tokio::task::spawn_blocking(move || fs::OpenOptions::new().write(true).open(credential))
+            .await??;
+    fifo.write_all(b"test-only")?;
+    drop(fifo);
+    stopping.cancel();
+    writer.execute_batch("ROLLBACK")?;
+    tokio::time::timeout(Duration::from_secs(10), worker).await??;
+    server.abort();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "a turn was sent after stopping began"
+    );
+    let turn = state
+        .core
+        .inspect_turn(&queued.turn_id)?
+        .context("missing turn")?;
+    assert_eq!(turn.state, TurnState::Queued);
     Ok(())
 }
 
@@ -1856,7 +2003,7 @@ async fn a_closing_runtime_gives_no_answer_rather_than_a_failure() -> Result<()>
     let turn = state
         .core
         .database
-        .claim("test-runtime", Lane::Messages)?
+        .claim("test-runtime", Lane::Messages, &CancellationToken::new())?
         .context("turn missing")?;
     let mut runtime = state
         .config
@@ -1888,7 +2035,7 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
     let turn = state
         .core
         .database
-        .claim("test-runtime", Lane::Messages)?
+        .claim("test-runtime", Lane::Messages, &CancellationToken::new())?
         .context("missing claim")?;
     let mut runtime = state
         .config
@@ -2547,7 +2694,8 @@ async fn shutdown_waits_for_storage_work_a_stopped_caller_started() -> Result<()
         core.blocking(move |core| {
             let _ = started.send(());
             std::thread::sleep(Duration::from_millis(300));
-            core.database.claim("test-runtime", Lane::Messages)
+            core.database
+                .claim("test-runtime", Lane::Messages, &CancellationToken::new())
         })
         .await
     });
@@ -2570,7 +2718,7 @@ async fn a_turn_takes_as_long_as_its_runtime_and_ends_when_its_caller_stops() ->
     let turn = state
         .core
         .database
-        .claim("test-runtime", Lane::Messages)?
+        .claim("test-runtime", Lane::Messages, &CancellationToken::new())?
         .context("missing claim")?;
     let mut runtime = state
         .config

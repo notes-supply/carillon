@@ -1468,13 +1468,7 @@ async fn a_conversation_attempt_stalled_in_discords_answer_is_bounded() -> Resul
     let mut config = discord_config(DiscordActivation::Always, DiscordConversation::Thread);
     config.typing = false;
     let mut ingress = ingress(&world, config, port)?;
-    Arc::get_mut(&mut ingress).context("shared ingress")?.http = Arc::new(
-        twilight_http::Client::builder()
-            .token("test-only".to_owned())
-            .proxy(format!("127.0.0.1:{port}"), true)
-            .ratelimiter(None)
-            .build(),
-    );
+    Arc::get_mut(&mut ingress).context("shared ingress")?.http = discord_at(port);
     let (send, receive) = mpsc::channel(1);
     send.send(
         message(
@@ -1517,4 +1511,239 @@ async fn a_conversation_attempt_stalled_in_discords_answer_is_bounded() -> Resul
             .any(|entry| entry.starts_with("submit"))
     );
     released(&world).await
+}
+
+/// A Discord API client reaching the stand-in on `port`.
+fn discord_at(port: u16) -> Arc<twilight_http::Client> {
+    Arc::new(
+        twilight_http::Client::builder()
+            .token("test-only".to_owned())
+            .proxy(format!("127.0.0.1:{port}"), true)
+            .ratelimiter(None)
+            .build(),
+    )
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_route_discord_never_resolves_releases_its_lane_silently() -> Result<()> {
+    // Discord never finishes saying which channel a thread the provider has
+    // not seen belongs to, so its message is never admitted.
+    let (port, log) = serve_cdn(HashMap::from([(
+        "/api/v10/channels/89".to_owned(),
+        Serve::Stall,
+    )]))
+    .await?;
+    let world = world(Vec::new(), Vec::new()).await?;
+    let mut ingress = ingress(&world, channel_config(), port)?;
+    Arc::get_mut(&mut ingress).context("shared ingress")?.http = discord_at(port);
+    let (send, receive) = mpsc::channel(1);
+    send.send(message("189", "89", "200", "hello", Vec::new()).into())
+        .await?;
+    drop(send);
+    let started = Instant::now();
+    // The window closes, and the lane and pending slot it held are released.
+    tokio::time::timeout(PAST_DEADLINE, lanes::dispatch(ingress, receive)).await?;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed > Duration::from_mins(29) && elapsed < Duration::from_mins(31),
+        "{elapsed:?}"
+    );
+    let requests = log
+        .lock()
+        .map_err(|_| anyhow!("poisoned"))?
+        .requests
+        .clone();
+    // Each lookup was cut off and tried again; nothing was said about a
+    // message that was never admitted.
+    assert!(requests.len() > 1, "{requests:?}");
+    assert!(
+        requests
+            .iter()
+            .all(|request| request == "/api/v10/channels/89"),
+        "{requests:?}"
+    );
+    assert!(trace(&world)?.is_empty());
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_text_whose_conversation_never_opens_is_refused_in_time() -> Result<()> {
+    let world = world(Vec::new(), Vec::new()).await?;
+    // Discord keeps failing to create the text's thread.
+    script(&world, |core| core.threads_fail = true)?;
+    let mut config = discord_config(DiscordActivation::Always, DiscordConversation::Thread);
+    config.typing = false;
+    let started = Instant::now();
+    run_for(
+        &world,
+        config,
+        1,
+        vec![message("87", "300", "200", "hello", Vec::new())],
+        PAST_DEADLINE,
+    )
+    .await?;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed > Duration::from_mins(29) && elapsed < Duration::from_mins(31),
+        "{elapsed:?}"
+    );
+    let trace = trace(&world)?;
+    assert!(position(&trace, "thread 87").is_ok());
+    assert!(
+        !trace.iter().any(|entry| entry.starts_with("submit")),
+        "{trace:?}"
+    );
+    // Its sender is told, in words that fit a text.
+    let explained = explanation(&trace, "87")?;
+    assert!(
+        explained.contains("in time") && !explained.contains("attachments"),
+        "{explained}"
+    );
+    position(
+        &trace,
+        "PUT /api/v10/channels/300/messages/87/reactions/%E2%9D%8C",
+    )?;
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_message_s_preparation_window_includes_resolving_its_route() -> Result<()> {
+    // Discord never finishes saying which route a thread the provider has
+    // not seen belongs to; the route is only known once the provider
+    // records the thread, a while after preparation began.
+    let route = Duration::from_secs(8);
+    let (port, log) = serve_cdn(HashMap::from([
+        ("/api/v10/channels/88".to_owned(), Serve::Stall),
+        (
+            "/attachments/300/601/a.bin".to_owned(),
+            Serve::Bytes(vec![1; 8]),
+        ),
+    ]))
+    .await?;
+    let world = world(Vec::new(), Vec::new()).await?;
+    let mut config = discord_config(DiscordActivation::Always, DiscordConversation::Thread);
+    config.typing = false;
+    let slots = config.attachments.concurrent_messages as usize;
+    let mut ingress = ingress(&world, config, port)?;
+    Arc::get_mut(&mut ingress).context("shared ingress")?.http = discord_at(port);
+    let (downloads, participation) = (ingress.downloads.clone(), ingress.participation.clone());
+    // Every transfer slot is busy, so the message's files wait for one.
+    let mut busy = Vec::new();
+    for _ in 0..slots {
+        busy.push(downloads.active().await);
+    }
+    let (send, receive) = mpsc::channel(1);
+    send.send(
+        message(
+            "188",
+            "88",
+            "200",
+            "",
+            vec![attachment(port, "601", "a.bin", 8)],
+        )
+        .into(),
+    )
+    .await?;
+    drop(send);
+    let started = Instant::now();
+    let dispatcher = tokio::spawn(lanes::dispatch(ingress, receive));
+    tokio::time::sleep_until(started + route).await;
+    participation.adopt("88", "300")?;
+    // The slots free up after a window opened when preparation began has
+    // closed, though before one opened at admission would have.
+    tokio::time::sleep_until(started + DEADLINE + route / 2).await;
+    drop(busy);
+    let mut free = Vec::new();
+    for _ in 0..slots {
+        if let Ok(slot) = tokio::time::timeout(Duration::ZERO, downloads.active()).await {
+            free.push(slot);
+        }
+    }
+    assert_eq!(free.len(), slots, "the files still waited for a slot");
+    drop(free);
+    tokio::time::timeout(PAST_DEADLINE, dispatcher).await??;
+    // The message was admitted and its files were being prepared; none
+    // were fetched or submitted.
+    let trace = trace(&world)?;
+    position(&trace, "status 188")?;
+    assert!(
+        !trace.iter().any(|entry| entry.starts_with("submit")),
+        "{trace:?}"
+    );
+    let requests = log
+        .lock()
+        .map_err(|_| anyhow!("poisoned"))?
+        .requests
+        .clone();
+    assert!(
+        requests
+            .iter()
+            .any(|request| request == "/api/v10/channels/88"),
+        "{requests:?}"
+    );
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.starts_with("/attachments/")),
+        "{requests:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_text_whose_window_closes_during_its_feedback_is_never_submitted() -> Result<()> {
+    // Discord answers the processing reaction only after admission has
+    // stopped waiting for it.
+    let (port, log) = serve_cdn(HashMap::from([(
+        "/api/v10/channels/300/messages/150/reactions/%F0%9F%91%80/@me".to_owned(),
+        Serve::Slow(Duration::from_secs(3), Vec::new()),
+    )]))
+    .await?;
+    let world = world(Vec::new(), Vec::new()).await?;
+    let config = channel_config();
+    let mut ingress = ingress(&world, config.clone(), port)?;
+    let discord = discord_at(port);
+    let shared = Arc::get_mut(&mut ingress).context("shared ingress")?;
+    shared.http = discord.clone();
+    shared.reactions = crate::delivery::Reactions::new(discord, config);
+    let queued = message("150", "300", "200", "hello", Vec::new());
+    let plan = crate::conversations::admit_message(
+        &ingress.config,
+        &ingress.participation,
+        queued.request,
+        queued.native,
+    )?
+    .context("not admitted")?;
+    // The text's conversation opens with less of its window left than
+    // admission waits for its feedback. Real time: the replay lookup must
+    // not let paused time jump past the window before the conversation opens.
+    let started = Instant::now();
+    crate::inbound::prepare_text(&ingress, plan, started + Duration::from_secs(1)).await;
+    ingress.reactions.stop(Duration::from_secs(5)).await;
+    let requests = log
+        .lock()
+        .map_err(|_| anyhow!("poisoned"))?
+        .requests
+        .clone();
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.contains("/reactions/%F0%9F%91%80")),
+        "{requests:?}"
+    );
+    assert!(started.elapsed() > Duration::from_secs(1));
+    // The window closed during the feedback: core was asked whether it holds
+    // the text, but the text was never submitted, and its sender is told.
+    let trace = trace(&world)?;
+    assert!(
+        !trace.iter().any(|entry| entry.starts_with("submit")),
+        "{trace:?}"
+    );
+    assert!(
+        requests
+            .iter()
+            .any(|request| request == "/api/v10/channels/300/messages"),
+        "{requests:?}"
+    );
+    Ok(())
 }

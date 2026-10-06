@@ -78,7 +78,7 @@ systemctl --user restart carillon-discord.service
 systemctl --user restart carillon-runtime-pi.service
 ```
 
-Core is restarted separately. Registry and provider configuration are static until restart.
+Core is restarted separately. Registry and provider configuration are static until restart. A bundled provider disabled in the registry (`carillon provider ID disable`) still starts with its unit, but exits successfully at once without serving or reading its credential, so the unit is not restarted; status shows it as `disabled`. The T3 runtime does the same when its enabled unit starts while the registry disables it.
 
 ### Discord commands
 
@@ -112,7 +112,7 @@ Running the same command again finishes the change in either case, including reg
 
 `carillon update` keeps an installed module and has the new release check it before any service stops; an update whose provider cannot serve it is refused. Run `carillon discord commands reset` before such an update, then install a module built for the new release. A provider refuses to start with an installed module it cannot use and names the file; remove that file (the provider then serves the release's module), or replace it with a working module.
 
-Each bundled provider reports its own build version, not the `providers[].version` expectation in configuration. Core's status reports the observed version with `version_mismatch` when the provider ID and role match but its version differs. Unreachable or wrong-identity providers are `unavailable`, with the configured identity and expected version instead.
+Each bundled provider reports its own build version, not the `providers[].version` expectation in configuration. Core's status reports the observed version with `version_mismatch` when the provider ID and role match but its version differs. Unreachable or wrong-identity providers are `unavailable`, with the configured identity and expected version instead. Core asks every enabled provider at once and gives each two seconds to answer, so stalled providers add one such timeout to a report rather than one each.
 
 ### Activity cards
 
@@ -225,7 +225,7 @@ max_megapixels = 40       # checked from the image header, before Pi decodes it
 
 Decoding an image takes memory in the runtime while Pi resizes it: about 0.7 GiB at peak for a 38-megapixel PNG on the reference host. Lower `max_megapixels` on hosts with little memory to spare.
 
-Fixed deadlines bound the work: a download that receives nothing for a minute fails, preparing one message's files until they are handed to core may take 30 minutes, and core cancels a capture after 5 minutes. A copy that is cancelled, even while it is being published, or interrupted by a crash, never becomes part of an accepted turn; core removes such copies, and complete copies no turn references, when it starts. No new submission starts after the preparation deadline; when core's answer to a submission is lost, Discord asks core whether the message was accepted, waiting while core is still copying, rather than assuming it was not.
+Fixed deadlines bound the work: a download that receives nothing for a minute fails, preparing one message, from resolving its route and opening its conversation until it is handed to core with any files, may take 30 minutes (a message whose thread Discord has not identified by then is dropped without a reply), and core cancels a capture after 5 minutes. A copy that is cancelled, even while it is being published, or interrupted by a crash, never becomes part of an accepted turn; core removes such copies, and complete copies no turn references, when it starts. No submission starts after the preparation deadline, and a text submitted before it is retried until core answers; when core's answer to a submission is lost, Discord asks core whether the message was accepted, waiting while core is still copying, rather than assuming it was not.
 
 `carillon backup` carries kept files and checks every recorded file against its length and digest before archiving, and `restore` checks them again before publishing. Backup first removes abandoned and unreferenced copies, as core startup would, and leaves interface download staging out of the archive.
 

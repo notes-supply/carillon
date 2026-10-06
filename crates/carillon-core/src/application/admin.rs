@@ -543,6 +543,7 @@ mod tests {
     use flate2::{Compression, write::GzEncoder};
     use tar::{Builder, Header};
     use tempfile::tempdir;
+    use tokio_util::sync::CancellationToken;
 
     use carillon_installation::config::{Config, LoadedConfig, ProviderRole, RELEASE_VERSION};
 
@@ -1059,7 +1060,10 @@ mod tests {
                     None,
                 )?;
                 let expected_state = if uncertain {
-                    assert!(db.claim("runtime-pi", Lane::Messages)?.is_some());
+                    assert!(
+                        db.claim("runtime-pi", Lane::Messages, &CancellationToken::new())?
+                            .is_some()
+                    );
                     assert_eq!(db.recover_running_turns()?, 1);
                     TurnState::Interrupted
                 } else {
@@ -1204,14 +1208,19 @@ mod tests {
                 .await?;
             turns.push(receipt.turn_id);
         }
-        core.run_next("runtime-pi", Lane::Messages, async |request| {
-            Ok(RuntimeTurnResponse {
-                output: "read it".to_owned(),
-                follow_up: None,
-                unanswered_left: false,
-                correlation_id: request.correlation_id,
-            })
-        })
+        core.run_next(
+            "runtime-pi",
+            Lane::Messages,
+            &CancellationToken::new(),
+            async |request| {
+                Ok(RuntimeTurnResponse {
+                    output: "read it".to_owned(),
+                    follow_up: None,
+                    unanswered_left: false,
+                    correlation_id: request.correlation_id,
+                })
+            },
+        )
         .await?;
         // Scratch the archive must not carry: interface staging still in
         // place, an abandoned copy and a published capture never committed.
@@ -1250,22 +1259,27 @@ mod tests {
         let restored = LoadedConfig::load(&restore(&archive, &relocated)?)?;
         let restored_core = installed_core(&restored)?;
         restored_core
-            .run_next("runtime-pi", Lane::Messages, async |request| {
-                assert_eq!(request.correlation_id, turns[1]);
-                let root = std::path::Path::new(&request.attachment_root);
-                assert!(root.starts_with(&relocated), "{}", root.display());
-                assert_eq!(
-                    fs::read(root.join(&request.attachments[0].path))
-                        .map_err(|error| crate::TurnFailure::Uncertain(error.into()))?,
-                    b"queued file"
-                );
-                Ok(RuntimeTurnResponse {
-                    output: "read it".to_owned(),
-                    follow_up: None,
-                    unanswered_left: false,
-                    correlation_id: request.correlation_id,
-                })
-            })
+            .run_next(
+                "runtime-pi",
+                Lane::Messages,
+                &CancellationToken::new(),
+                async |request| {
+                    assert_eq!(request.correlation_id, turns[1]);
+                    let root = std::path::Path::new(&request.attachment_root);
+                    assert!(root.starts_with(&relocated), "{}", root.display());
+                    assert_eq!(
+                        fs::read(root.join(&request.attachments[0].path))
+                            .map_err(|error| crate::TurnFailure::Uncertain(error.into()))?,
+                        b"queued file"
+                    );
+                    Ok(RuntimeTurnResponse {
+                        output: "read it".to_owned(),
+                        follow_up: None,
+                        unanswered_left: false,
+                        correlation_id: request.correlation_id,
+                    })
+                },
+            )
             .await?;
 
         // Damaged archives are refused before publication.

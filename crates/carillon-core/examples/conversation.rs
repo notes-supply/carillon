@@ -5,6 +5,7 @@ use carillon_installation::config::AttachmentLimits;
 use carillon_protocol::model::{
     DeliveryAck, DeliveryOutcome, ExternalEvent, RuntimeTurnResponse, SelectedProvider, TurnState,
 };
+use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -61,8 +62,10 @@ async fn conversation() -> Result<()> {
         "duplicate acceptance changed the turn"
     );
     std::fs::write(resources.join("SYSTEM.md"), "Changed after acceptance")?;
+    // This example never stops; a service cancels the token as it shuts down.
+    let stopping = CancellationToken::new();
     let step = core
-        .run_next("echo", Lane::Messages, async |request| {
+        .run_next("echo", Lane::Messages, &stopping, async |request| {
             // Opaque interface data is captured on acceptance, not supplied by a duplicate.
             assert_eq!(request.native, event.native);
             // This deterministic test runtime is deliberately not Pi. The snapshot is real.

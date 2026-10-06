@@ -9,7 +9,11 @@ afterEach(async () => {
   await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true })));
 });
 
-async function registry(interfaceUrl: string, interfaceEnabled = true): Promise<string> {
+async function registry(
+  interfaceUrl: string,
+  interfaceEnabled = true,
+  runtimeEnabled = true,
+): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "carillon-installation-"));
   directories.push(root);
   const hash = "0".repeat(64);
@@ -19,7 +23,7 @@ async function registry(interfaceUrl: string, interfaceEnabled = true): Promise<
     join(root, "carillon.toml"),
     [
       `data_dir = "data"\n[core]\noperator_token_hash = "${hash}"\n[agent]\nresource_root = "agent"\nworkspace = "workspace"\n`,
-      provider("runtime-t3", "runtime", "http://127.0.0.1:3101", true),
+      provider("runtime-t3", "runtime", "http://127.0.0.1:3101", runtimeEnabled),
       provider("discord", "interface", interfaceUrl, interfaceEnabled),
     ].join("\n"),
   );
@@ -28,6 +32,7 @@ async function registry(interfaceUrl: string, interfaceEnabled = true): Promise<
 
 it("hands extensions only loopback interface endpoints, for every runtime", async () => {
   const loaded = await loadInstallation(await registry("http://127.0.0.1:3102"), "runtime-t3");
+  if (loaded === "disabled") throw new Error("an enabled runtime was reported disabled");
   expect(loaded.interfaces.map((provider) => provider.url)).toEqual(["http://127.0.0.1:3102"]);
   await expect(
     loadInstallation(await registry("http://192.0.2.1:8080"), "runtime-t3"),
@@ -37,5 +42,16 @@ it("hands extensions only loopback interface endpoints, for every runtime", asyn
     await registry("http://192.0.2.1:8080", false),
     "runtime-t3",
   );
+  if (disabled === "disabled") throw new Error("an enabled runtime was reported disabled");
   expect(disabled.interfaces).toEqual([]);
+});
+
+it("reports a disabled runtime instead of loading it, for every runtime", async () => {
+  await expect(
+    loadInstallation(await registry("http://127.0.0.1:3102", true, false), "runtime-t3"),
+  ).resolves.toBe("disabled");
+  // A runtime missing from the registry is still an error.
+  await expect(
+    loadInstallation(await registry("http://127.0.0.1:3102"), "runtime-other"),
+  ).rejects.toThrow(/runtime provider runtime-other is not configured/u);
 });
