@@ -1149,6 +1149,32 @@ it("neither interrupts nor detaches the session of a person's run when cancelled
   expect(thread().runs.find((candidate) => candidate.id === person.id)?.status).toBe("running");
 });
 
+it("detaches no session while a person's completed run still lists its own background work", async () => {
+  const controller = new AbortController();
+  const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
+  void result.catch(() => undefined);
+  const run = await started("turn-1");
+  fake.background(threadId, [{ taskId: "task-1", kind: "command" }]);
+  fake.complete(threadId, run.id);
+  await until(() => activity()?.phase === "tools");
+  fake.background(threadId, []);
+  // While the turn's wake is owed, a person's run in T3's own UI starts
+  // background work of its own and completes, leaving that work listed.
+  const person = fake.message(threadId, "Run this in the background.");
+  fake.background(threadId, [{ taskId: "ui-task", kind: "command" }]);
+  fake.complete(threadId, person.id);
+  // The fold hears of it before Carillon cancels.
+  await sleep(200);
+  controller.abort();
+  await expect(result).rejects.toThrow();
+  // T3 refuses to interrupt the turn's completed run, and the session the
+  // person's work runs in is not detached under it.
+  expect(fake.interrupts).toEqual([]);
+  expect(fake.detached).toEqual([]);
+  expect(thread().sessionDetached).toBe(false);
+  expect(roster()).toEqual([{ taskId: "ui-task", kind: "command" }]);
+});
+
 /**
  * The turn's run leaves its own work listed while an older provider's
  * process, on its own provider thread, finishes a task and wakes.

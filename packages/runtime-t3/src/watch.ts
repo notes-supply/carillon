@@ -111,12 +111,14 @@ export interface TurnWatch {
   activeRun(): Run | undefined;
   /** The thread's latest run, the one T3 settles background work through. */
   latestRun(): Run | undefined;
-  /**
-   * Whether runs this turn does not own still occupy the thread: a new
-   * message waits behind them, and the provider session they share is not
-   * the turn's alone to stop.
-   */
+  /** Whether runs this turn does not own still occupy the thread: a new message waits behind them. */
   busy(): boolean;
+  /**
+   * Whether the provider session is not the turn's alone to stop: a run this
+   * turn does not own is active, or background work another run started is
+   * still listed.
+   */
+  sessionShared(): boolean;
   /** Whether the thread has any message yet. */
   empty(): boolean;
   outcome(): Outcome | undefined;
@@ -1175,6 +1177,10 @@ export function watchTurn(
     for (const id of otherTasks) if (!listedNow.has(id)) otherTasks.delete(id);
   }
 
+  function busy(): boolean {
+    return earlier.size > 0 || laterOthers().some(isActive);
+  }
+
   function quiet(): boolean {
     return (
       active() === undefined &&
@@ -1389,7 +1395,8 @@ export function watchTurn(
     run: () => anchor,
     activeRun: active,
     latestRun: () => last,
-    busy: () => earlier.size > 0 || laterOthers().some(isActive),
+    busy,
+    sessionShared: () => busy() || otherTasks.size > 0,
     empty: () => !hasMessages,
     quiet,
     providerSession() {

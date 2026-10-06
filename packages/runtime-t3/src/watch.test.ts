@@ -2322,6 +2322,34 @@ it("refuses an opening item whose run it cannot identify before moving past it",
   expect(unknown.activeRun()).toBeUndefined();
 });
 
+it("shares the provider session while another run's background work is listed, not only while it runs", () => {
+  const roster = (sequence: number, tasks: readonly string[]) =>
+    event(sequence, "provider-thread.updated", {
+      id: "provider-thread",
+      providerSessionId: "session",
+      pendingBackgroundTasks: tasks.map((taskId) => ({ taskId, kind: "command" })),
+    });
+  const watch = watchTurn("thread", "message-1", "/workspace");
+  watch.apply(snapshot({ runs: [run("running")] }));
+  watch.apply(roster(2, ["own-task"]));
+  watch.apply(event(3, "run.updated", run("completed")));
+  // The roster empties while the turn's wake is owed.
+  watch.apply(roster(4, []));
+  expect(watch.sessionShared()).toBe(false);
+  // A person's run starts work of its own and completes, leaving it listed.
+  watch.apply(event(5, "run.created", run("running", "ui-message", 2)));
+  watch.apply(event(6, "turn-item.updated", userMessageItem("run-2")));
+  expect(watch.sessionShared()).toBe(true);
+  watch.apply(roster(7, ["ui-task"]));
+  watch.apply(event(8, "run.updated", run("completed", "ui-message", 2)));
+  // Nothing occupies the thread for a new message, yet the session is shared.
+  expect(watch.busy()).toBe(false);
+  expect(watch.sessionShared()).toBe(true);
+  // Once T3 no longer lists that work, the session is the turn's alone again.
+  watch.apply(roster(9, []));
+  expect(watch.sessionShared()).toBe(false);
+});
+
 it("never adopts another message's run because an agent read the result in it (coordinator reproduction)", () => {
   const follow = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
   follow.apply(
