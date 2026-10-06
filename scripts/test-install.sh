@@ -44,7 +44,7 @@ grep -F carillon-runtime-t3 "$RELEASE/systemd/carillon.target" >/dev/null && {
 }
 # The T3 executable is standalone: it starts without a source checkout and
 # fails closed on its arguments before touching anything.
-if "$RELEASE/bin/carillon-runtime-t3" >"$TEST_ROOT_T3_OUT" 2>&1; then
+if "$RELEASE/bin/carillon-runtime-t3" --provider runtime-t3 >"$TEST_ROOT_T3_OUT" 2>&1; then
   printf '%s\n' "carillon-runtime-t3 must refuse to start without --config" >&2
   exit 1
 fi
