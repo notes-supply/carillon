@@ -1298,9 +1298,10 @@ export function watchTurn(
               "malformed",
               "T3 sent a thread event this runtime does not understand",
             );
-          // A resumed subscription may replay events already folded.
+          // A resumed subscription may replay events already folded. The
+          // cursor moves past an event only once it is folded or passed over,
+          // never past one refused.
           if (lastSequence !== undefined && sequence <= lastSequence) return;
-          lastSequence = sequence;
           const payload = event["payload"];
           switch (event["type"]) {
             case "run.created":
@@ -1346,8 +1347,10 @@ export function watchTurn(
               foldItem(payload);
               break;
             default:
+              lastSequence = sequence;
               return;
           }
+          lastSequence = sequence;
           classifyWork(executingBefore || ownRunExecuting());
           break;
         }

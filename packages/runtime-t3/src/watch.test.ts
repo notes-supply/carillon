@@ -749,6 +749,38 @@ it("orders the turn's answer by when T3 made each message, refusing one with no 
   ).not.toThrow();
 });
 
+it("moves the replay cursor past an event only once it is folded or passed over", () => {
+  const watch = watchTurn("message-1", "/workspace");
+  watch.apply(snapshot({ runs: [run("running")] }));
+  // A kind this runtime does not read is passed over.
+  watch.apply(event(2, "future.event", { anything: true }));
+  expect(watch.sequence()).toBe(2);
+  // Another run's message is not this turn's to judge, even without a readable time.
+  watch.apply(
+    event(3, "message.updated", {
+      id: "o",
+      runId: "run-9",
+      role: "assistant",
+      text: "Other.",
+      createdAt: "not a time",
+    }),
+  );
+  expect(watch.sequence()).toBe(3);
+  // The turn's own message without one is refused, and the cursor stays.
+  expect(() =>
+    watch.apply(
+      event(4, "message.updated", {
+        id: "z",
+        runId: "run-1",
+        role: "assistant",
+        text: "Unplaced.",
+        createdAt: "not a time",
+      }),
+    ),
+  ).toThrow("T3 sent an assistant message this runtime does not understand");
+  expect(watch.sequence()).toBe(3);
+});
+
 it("still owes the wake after the roster clears, so a cancel in that gap is not quiet", () => {
   const watch = watchTurn("message-1", "/workspace");
   watch.apply(
