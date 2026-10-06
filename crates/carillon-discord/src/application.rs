@@ -751,10 +751,6 @@ fn strip_attachment_addresses(value: &mut Value) {
     }
 }
 
-/// Hands a message to the worker without waiting for room. The gateway must
-/// keep reading so heartbeats and interactions go on while the worker is
-/// retrying; a message that finds the queue full is returned refused, and
-/// the person who sent it is told it failed rather than left waiting.
 /// Hands a gateway message to the lanes. One that finds their queue full is
 /// refused as overload, as one beyond a lane's bound is: only a message
 /// admission would activate is answered, within the shared refusal bound.
@@ -769,6 +765,9 @@ pub(crate) fn queue_or_refuse(
     Ok(())
 }
 
+/// Hands a message to the lanes without waiting for room. The gateway must
+/// keep reading so heartbeats and interactions go on while the lanes are
+/// busy; a message that finds the queue full is returned refused.
 fn queue_message(
     messages: &mpsc::Sender<Queued>,
     inbound: QueuedMessage,
