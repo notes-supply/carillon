@@ -557,6 +557,11 @@ mod tests {
         initialize(root, workspace, base_port)
     }
 
+    /// A base port for backups that must find their services stopped, away
+    /// from 44800-44842, where the install, maintenance and operations tests
+    /// run real services by default.
+    const OFFLINE_BACKUP_PORT: u16 = 45_400;
+
     #[test]
     fn configuration_edits_preserve_unrelated_temporary_siblings() -> Result<()> {
         let directory = tempdir()?;
@@ -922,7 +927,8 @@ mod tests {
         ] {
             let directory = tempdir()?;
             let source = directory.path().join("source");
-            let config_path = initialize_test_installation(&source, directory.path(), 44_800)?;
+            let config_path =
+                initialize_test_installation(&source, directory.path(), OFFLINE_BACKUP_PORT)?;
             let valid = directory.path().join("valid.tar.gz");
             backup(&LoadedConfig::load(&config_path)?, &valid)?;
             let database = source.join("state/carillon.sqlite3");
@@ -1027,7 +1033,8 @@ mod tests {
             for damage in ["missing", "content", "executable", "address", "malformed"] {
                 let directory = tempdir()?;
                 let source = directory.path().join("source");
-                let config_path = initialize_test_installation(&source, directory.path(), 44_800)?;
+                let config_path =
+                    initialize_test_installation(&source, directory.path(), OFFLINE_BACKUP_PORT)?;
                 let config = LoadedConfig::load(&config_path)?;
                 let store = config.value.data_dir.join("resource-snapshots");
                 let snapshot = resources::materialize(&config.value.agent.resource_root, &store)?;
