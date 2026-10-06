@@ -4,12 +4,13 @@
   "private": true,
   "type": "module",
   "exports": "./src/index.ts",
-  "bin": {
-    "carillon-runtime-pi": "./src/index.ts"
-  },
+  "bin": "./src/cli.ts",
   "dependencies": {
-    "@earendil-works/pi-ai": "0.84.4",
-    "@earendil-works/pi-coding-agent": "0.84.4",
+    "@carillon/protocol": "workspace:*",
+    "@earendil-works/pi-ai": "1.0.0",
+    "@earendil-works/pi-coding-agent": "1.0.0",
+    "image-size": "2.0.4",
+    "proper-lockfile": "4.1.2",
     "smol-toml": "1.6.0",
     "typebox": "1.0.65",
     "ws": "8.21.3"

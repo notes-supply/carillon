@@ -8,7 +8,12 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { createPiExecutionSession } from "./session.ts";
+import {
+  ExplainedFailure,
+  openConversation,
+  createPiExecutionSession,
+  promptSession,
+} from "@carillon/runtime-pi";
 
 const model: Model<"openai-responses"> = {
   id: "observer-model",
@@ -164,7 +169,7 @@ export default function observer(pi) {
           parameters,
           undefined,
           undefined,
-          session.extensionRunner.createContext(),
+          session.extensionRunner.createToolContext("authority-test", undefined),
         );
       };
       await executeTool("write", { path: "workspace.txt", content: "created in workspace\n" });
@@ -249,3 +254,201 @@ export default function observer(pi) {
     await rm(workspace, { recursive: true, force: true });
   }
 });
+
+it.each([false, true])(
+  "cancels a native tool and accepts a new message in the same session (established=%s)",
+  async (established) => {
+    const root = await mkdtemp(join(tmpdir(), "carillon-cancel-pi-"));
+    const attempts = join(root, "attempts");
+    const finished = join(root, "finished");
+    const key = { interface_id: "discord", agent_id: "default", audience_id: "conversation" };
+    const baseRuntime = await ModelRuntime.create({
+      allowModelNetwork: false,
+      refreshOnCreate: false,
+      modelsPath: null,
+    });
+    let calls = 0;
+    const runtime = new Proxy(baseRuntime, {
+      get(target, property): unknown {
+        if (property === "getAuth") return () => Promise.resolve({ auth: { apiKey: "test-only" } });
+        if (property === "hasConfiguredAuth") return () => true;
+        if (property === "streamSimple")
+          return (...args: Parameters<ModelRuntime["streamSimple"]>) => {
+            if (args[2]?.signal?.aborted === true) {
+              const stream = createAssistantMessageEventStream();
+              queueMicrotask(() =>
+                stream.push({
+                  type: "error",
+                  reason: "aborted",
+                  error: {
+                    ...assistantMessage,
+                    stopReason: "aborted",
+                    content: [],
+                    errorMessage: "aborted",
+                  },
+                }),
+              );
+              return stream;
+            }
+            calls += 1;
+            const message: AssistantMessage =
+              calls === 1
+                ? {
+                    ...assistantMessage,
+                    stopReason: "toolUse",
+                    content: [
+                      {
+                        type: "toolCall",
+                        id: "bounded-side-effect",
+                        name: "bash",
+                        arguments: {
+                          command: `printf 'attempt\n' >> '${attempts}'; sleep 30; printf 'finished' > '${finished}'`,
+                        },
+                      },
+                    ],
+                  }
+                : assistantMessage;
+            const stream = createAssistantMessageEventStream();
+            queueMicrotask(() =>
+              stream.push({
+                type: "done",
+                reason: message.stopReason === "toolUse" ? "toolUse" : "stop",
+                message,
+              }),
+            );
+            return stream;
+          };
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    try {
+      const manager = openConversation(root, join(root, "sessions"), key);
+      if (established) {
+        manager.appendMessage({ role: "user", content: "earlier message", timestamp: 1 });
+        manager.appendMessage(assistantMessage);
+      }
+      const { session } = await createPiExecutionSession({
+        resourceRoot: root,
+        workspace: root,
+        manager,
+        modelRuntime: runtime,
+        model,
+      });
+      const controller = new AbortController();
+      try {
+        const running = promptSession(session, "run the bounded test", controller.signal);
+        const rejected = expect(running).rejects.toThrow();
+        await expect
+          .poll(() => readFile(attempts, "utf8").catch(() => ""), { timeout: 5_000 })
+          .toBe("attempt\n");
+        controller.abort();
+        await rejected;
+        expect(session.isIdle).toBe(true);
+      } finally {
+        await session.abort();
+        session.dispose();
+      }
+      const reopened = openConversation(root, join(root, "sessions"), key);
+      expect(reopened.getSessionFile()).toBe(manager.getSessionFile());
+      const { session: next } = await createPiExecutionSession({
+        resourceRoot: root,
+        workspace: root,
+        manager: reopened,
+        modelRuntime: runtime,
+        model,
+      });
+      try {
+        await promptSession(next, "new direction", new AbortController().signal);
+        expect(next.messages.filter((message) => message.role === "user")).toHaveLength(
+          established ? 3 : 2,
+        );
+        expect(calls).toBe(2);
+        expect(await readFile(attempts, "utf8")).toBe("attempt\n");
+        await expect(readFile(finished)).rejects.toThrow();
+      } finally {
+        next.dispose();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+  15_000,
+);
+
+it.each([
+  '403: {"error":{"message":"The usage limit has been reached","type":"usage_limit"}}',
+  "403: <html><body>Forbidden by gateway</body></html>",
+])(
+  "reports a failed provider call as Pi's explanation, once, and continues: %j",
+  async (errorMessage) => {
+    const root = await mkdtemp(join(tmpdir(), "carillon-failed-pi-"));
+    const key = { interface_id: "discord", agent_id: "default", audience_id: "conversation" };
+    const baseRuntime = await ModelRuntime.create({
+      allowModelNetwork: false,
+      refreshOnCreate: false,
+      modelsPath: null,
+    });
+    let calls = 0;
+    const runtime = new Proxy(baseRuntime, {
+      get(target, property): unknown {
+        if (property === "getAuth") return () => Promise.resolve({ auth: { apiKey: "test-only" } });
+        if (property === "hasConfiguredAuth") return () => true;
+        if (property === "streamSimple")
+          return () => {
+            calls += 1;
+            const stream = createAssistantMessageEventStream();
+            queueMicrotask(() => {
+              if (calls === 1)
+                stream.push({
+                  type: "error",
+                  reason: "error",
+                  error: { ...assistantMessage, stopReason: "error", content: [], errorMessage },
+                });
+              else stream.push({ type: "done", reason: "stop", message: assistantMessage });
+            });
+            return stream;
+          };
+        const value: unknown = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const open = async () =>
+      (
+        await createPiExecutionSession({
+          resourceRoot: root,
+          workspace: root,
+          manager: openConversation(root, join(root, "sessions"), key),
+          modelRuntime: runtime,
+          model,
+        })
+      ).session;
+    try {
+      const session = await open();
+      try {
+        const failure: unknown = await promptSession(
+          session,
+          "use the provider",
+          new AbortController().signal,
+        ).catch((thrown: unknown) => thrown);
+        // What of it may be shown is decided where it leaves the runtime.
+        expect(failure).toBeInstanceOf(ExplainedFailure);
+        expect(failure).toMatchObject({ message: errorMessage, status: 502 });
+        expect(calls).toBe(1);
+      } finally {
+        session.dispose();
+      }
+      // The failure is recorded in the native session, which continues normally.
+      const next = await open();
+      try {
+        await promptSession(next, "try again", new AbortController().signal);
+        expect(calls).toBe(2);
+        expect(next.messages.filter((message) => message.role === "user")).toHaveLength(2);
+      } finally {
+        next.dispose();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);

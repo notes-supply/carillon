@@ -2,15 +2,17 @@
 
 Solve the actual product problem with the smallest coherent design.
 
-Understand the existing code, tests, and relevant documentation before changing them. They describe decisions and current behavior, not unchangeable law. Change architecture when doing so materially simplifies the system, corrects ownership, or removes a false assumption.
+Understand the existing code, tests, and documentation. They are evidence, not immutable requirements; change the architecture when that simplifies the system or corrects ownership. [Current architecture](docs/product/ARCHITECTURE.md) describes what is implemented today.
 
-Prefer one authoritative owner for each fact. Put behavior and state where they can be expressed most directly, and move ownership when the existing boundary is wrong.
+Give each fact one authoritative owner. Prefer direct behavior and state over mirrored models and unnecessary boundaries.
 
-Use mature runtime, platform, and library facilities when they fit. Replace or bypass them when they do not; do not reproduce them merely for uniformity.
-
-Build abstractions from concrete current requirements. Prefer ordinary data, direct control flow, deletion, and replaceable boundaries over generalized frameworks, mirrored state, compatibility layers, and new moving parts.
+Use mature runtime, platform, and library facilities where they fit; do not reproduce them merely for uniformity. Build abstractions from concrete needs. Prefer ordinary data, direct control flow, deletion, and replaceable boundaries over generalized frameworks, compatibility layers, and new moving parts.
 
 Carillon is the installing user's general-purpose agent. Preserve that user's native operating-system authority and Pi's native tool and extension semantics; do not add a parallel permission system. Keep authenticated remote ingress fail-closed before runtime work.
+
+Provider-authored emotes and adornments should be configurable defaults in that provider's configuration. Keep this scope narrow: prose, punctuation and safety deadlines do not each need a user setting.
+
+## Code and verification
 
 Write idiomatic Rust and TypeScript. If it looks like a Python developer wrote it, it is bad Rust or TypeScript.
 
@@ -18,8 +20,6 @@ In Rust, use ownership, structs, and enums to express the design. Shared ownersh
 
 In TypeScript, preserve useful library types, validate unknown input at its boundary, and prefer discriminated unions and ordinary functions over wrappers and repeated casts.
 
-Test observable behavior, state transitions, failure boundaries, and recovery. Avoid tests coupled only to source shape or implementation trivia. A passing test is not authority to preserve a bug or an obsolete requirement: name the current contract, distinguish test fixtures and bundled defaults from product guarantees, and update tests with an intentional contract change. Do not weaken a safety invariant just to make a change pass.
+Test observable behavior, state transitions, failure boundaries, and recovery rather than implementation trivia. Passing tests do not justify preserving a bug or obsolete requirement. Update tests with intentional contract changes, without weakening safety merely to make them pass. Verification tasks are described in [README.md](README.md#development).
 
-Use the tasks in `mise.toml` for verification. During iteration, run affected tests; run `check` before submitting code changes. Run `test:integration` for service communication, startup, routing, or recovery changes. Run `test:install` for packaging, installer, service-unit, or owner-environment changes, and before a release; it builds the package itself. Run `test:persistence` for filesystem publication/barrier changes and before a release; it selects the extended Linux syscall fault-injection suite separately from ordinary integration and install tests. Do not rebuild and install the package after every small edit by default.
-
-Before finishing, read the complete net diff as a maintainer. Remove displaced code, obsolete tests and state, speculative fallbacks, and architecture that the new design has made unnecessary.
+Carillon is an early beta. Prefer clean cutovers to compatibility scaffolding. Update code, tests, and documentation together, removing what the new design displaces.

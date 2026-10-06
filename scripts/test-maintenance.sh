@@ -102,8 +102,7 @@ for scenario in existing:app-stage existing:app-before existing:app-after existi
     for unit in "$UNIT_DIR"/carillon*; do printf '%s\n' '# previous-unit' >>"$unit"; done
     chmod 0640 "$UNIT_DIR/carillon-core.service"
   else
-    "$RELEASE/bin/carillon" init --root "$CARILLON_HOME" --workspace "$HOME/workspace" \
-      --guild-id 100 --bot-user-id 201 --user-id 200 --route 300:always:channel \
+    "$RELEASE/bin/carillon" --home "$CARILLON_HOME" init --workspace "$HOME/workspace" \
       --base-port "${CARILLON_TEST_BASE_PORT:-44800}" >/dev/null
   fi
   printf '%s\n' test-bot-token >"$CARILLON_HOME/credentials/discord-bot.token"
@@ -158,7 +157,8 @@ for scenario in existing:app-stage existing:app-before existing:app-after existi
         [ ! -e "$UNIT_DIR/carillon.target" ]
         systemd-analyze verify "$UNIT_DIR"/carillon-*.service
       fi ;;
-    *) diff -r --no-dereference "$HOME/units-before" "$UNIT_DIR" ;;
+    # Registration leaves the owner's shared units lock, as locks persist.
+    *) diff -r --no-dereference --exclude=.carillon-units.lock "$HOME/units-before" "$UNIT_DIR" ;;
   esac
   # No failure reaches enable/start; the substituted manager rejects any start.
   [ ! -e "$MANAGER_TRACE" ]

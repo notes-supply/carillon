@@ -1,0 +1,11 @@
+{
+  "name": "@carillon/discord-pi",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "1.0.0",
+    "typebox": "1.0.65"
+  }
+}

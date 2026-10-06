@@ -1,22 +1,13 @@
-#![forbid(unsafe_code)]
-//! Durable product state and composition for Carillon.
-
-mod admin;
-mod cli;
-mod config;
-mod core;
+//! Durable conversation operations, independently usable with SQLite.
+//! See `examples/conversation.rs` for an HTTP-free caller.
+pub mod application;
+mod attachments;
 mod db;
-mod discord;
-mod filesystem;
-mod model;
+mod engine;
+mod intake;
 mod resources;
+mod runtime_client;
 
-/// Runs the Carillon operator command.
-///
-/// # Errors
-///
-/// Returns an error when configuration, durable storage, a component, or an
-/// operator-requested action fails.
-pub async fn run() -> anyhow::Result<()> {
-    cli::run().await
-}
+pub use attachments::Reconciled;
+pub use engine::{Core, CoreError, CoreOptions, RuntimeProvider, TurnFailure, WorkerStep};
+pub use runtime_client::RuntimeClient;

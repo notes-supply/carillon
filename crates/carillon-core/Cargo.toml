@@ -1,43 +1,46 @@
 [package]
 name = "carillon-core"
-version = "0.0.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-publish = false
+publish.workspace = true
 
 [[bin]]
 name = "carillon"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1.0.100"
-axum = "0.8.8"
-clap = { version = "4.5.60", features = ["derive"] }
-emojis = "0.8.2"
+thiserror.workspace = true
+anyhow.workspace = true
+axum.workspace = true
+carillon-protocol = { path = "../carillon-protocol" }
+carillon-installation = { path = "../carillon-installation" }
+clap.workspace = true
 flate2 = "1.1.9"
-fs2 = "0.4.3"
-hex = "0.4.3"
-http = "1.4.0"
-reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls"] }
-rusqlite = { version = "0.38.0", features = ["bundled"] }
-rustix = { version = "1.1.4", features = ["fs"] }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
-sha2 = "0.10.9"
+hex.workspace = true
+http.workspace = true
+reqwest.workspace = true
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+rustix = { version = "1.1.4", features = ["fs", "process"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 tar = "0.4.44"
-tempfile = "3.27.0"
-tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "signal", "time"] }
-toml = "1.0.3"
-tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
-twilight-gateway = "0.17.1"
-twilight-http = "0.17.1"
-twilight-model = "0.17.1"
-uuid = { version = "1.21.0", features = ["serde", "v7"] }
+tempfile.workspace = true
+tokio.workspace = true
+tokio-util = "0.7.19"
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
-tokio = { version = "1.49.0", features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util"] }
 tower = { version = "0.5.2", features = ["util"] }
 
 [lints]
 workspace = true
+
+[[example]]
+name = "conversation"
+test = true

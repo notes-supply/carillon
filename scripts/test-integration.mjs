@@ -1,57 +1,69 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
+import { constants } from "node:fs";
 import {
   chmod,
   lstat,
   mkdir,
   mkdtemp,
-  readFile,
+  open,
   readdir,
+  readFile,
   rename,
   rm,
   stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 // This fixture uses the bundled providers and simulated model responses.
 // Counters/activation markers below are test output, not a required reply format.
+const basePort = await availableBasePort();
 const root = await mkdtemp(join(tmpdir(), "carillon-integration-"));
 const restoredRoot = await mkdtemp(join(tmpdir(), "carillon-restored-"));
 const workspace = await mkdtemp(join(tmpdir(), "carillon-workspace-"));
 const backup = join(tmpdir(), `carillon-backup-${crypto.randomUUID()}.tar.gz`);
 const binary = resolve(process.env.CARILLON_CORE_BINARY ?? "target/debug/carillon");
-const runtimeEntry = resolve("packages/runtime-pi/src/index.ts");
+const commandsModule = resolve(
+  process.env.CARILLON_COMMANDS_MODULE ??
+    "target/wasm32-unknown-unknown/wasm/carillon_discord_commands.wasm",
+);
+const runtimeEntry = resolve("packages/runtime-pi/src/cli.ts");
 const packagedRuntime = process.env.CARILLON_RUNTIME_BINARY;
-const basePort = 45_000 + (process.pid % 10_000);
 let installation = root;
 let runtimeHost = "127.0.0.1";
 let runtimeConfigPath;
 const services = new Map();
 
 try {
-  run(
-    "init",
-    "--root",
-    installation,
-    "--workspace",
-    workspace,
-    "--guild-id",
-    "100",
-    "--bot-user-id",
-    "201",
-    "--user-id",
-    "200",
-    "--route",
-    "300:always:channel",
-    "--route",
-    "301:mention:thread",
-    "--route",
-    "302:always:thread",
-    "--base-port",
-    String(basePort),
+  run("--home", installation, "init", "--workspace", workspace, "--base-port", String(basePort));
+  // Attachment captures here must not depend on the host's free space. The
+  // setting survives core's own rewrite of the registry, which also puts it
+  // in canonical form for the byte comparisons below.
+  await writeFile(configPath(), "\n[core.attachments]\nfree_space_mib = 0\n", { flag: "a" });
+  run("--home", installation, "provider", "runtime-pi", "enable");
+  const rewritten = await readFile(configPath(), "utf8");
+  assert.match(rewritten, /^\[core\.attachments\]$/mu);
+  assert.match(rewritten, /^free_space_mib = 0$/mu);
+  // Channel 305 is reserved for the model picker so its turns do not disturb
+  // the response counters of the conversations below.
+  assert.match(
+    configureDiscord(
+      installation,
+      "100",
+      "201",
+      "200",
+      "300:always:channel",
+      "301:mention:thread",
+      "302:always:thread",
+      "305:always:channel",
+    ),
+    /providers\/discord-private\.toml$/u,
+    "configure must print the provider-owned file it wrote",
   );
   await testConfigurationRefusals();
   await testConfigurationSymlinkUpdates();
@@ -76,7 +88,7 @@ try {
       "simulation must authenticate before participation or runtime work",
     );
   }
-  assert.deepEqual(JSON.parse(run("recent", "--config", configPath())), []);
+  assert.deepEqual(JSON.parse(run("--home", installation, "recent")), []);
   await assert.rejects(
     readFile(join(installation, "state/components/discord-private/participation.json")),
     { code: "ENOENT" },
@@ -94,7 +106,7 @@ try {
   );
   assert.equal(deniedRoute.status, 403, "unconfigured channels must fail closed");
   for (const eventId of ["denied", "denied-user", "denied-dm", "denied-route"]) {
-    const turns = JSON.parse(run("recent", "--config", configPath(), "--event-id", eventId));
+    const turns = JSON.parse(run("--home", installation, "recent", "--event-id", eventId));
     assert.deepEqual(turns, [], "rejected ingress must not create accepted work");
   }
   const ignoredMention = await requestSimulation(
@@ -106,6 +118,7 @@ try {
   assert.equal(first.receipt.state, "queued");
   assert.match(first.delivery.content, /Local provider response 1/u);
   assert.match(first.delivery.content, /native extension inactive; skill inactive/u);
+  assert.match(first.delivery.content, /model local\/echo\.$/u, "turns run on the runtime default");
   assert.deepEqual(first.feedback, ["processing", "delivered"]);
 
   const duplicate = await simulate("event-1", "hello");
@@ -119,7 +132,7 @@ try {
     "operator diagnostics must require authentication",
   );
 
-  run("enable-demo-resources", "--config", configPath());
+  run("--home", installation, "enable-demo-resources");
   const additions = await simulate("event-2", "use the additions");
   assert.match(additions.delivery.content, /Local provider response 2/u);
   assert.match(additions.delivery.content, /native extension active; skill active/u);
@@ -132,11 +145,9 @@ try {
   const afterRuntimeRestart = await simulate("event-4", "continue after runtime restart");
   assert.match(afterRuntimeRestart.delivery.content, /Local provider response 4/u);
 
-  const firstInspection = JSON.parse(
-    run("inspect", "--config", configPath(), first.receipt.turn_id),
-  );
+  const firstInspection = JSON.parse(run("--home", installation, "inspect", first.receipt.turn_id));
   const laterInspection = JSON.parse(
-    run("inspect", "--config", configPath(), additions.receipt.turn_id),
+    run("--home", installation, "inspect", additions.receipt.turn_id),
   );
   assert.equal(firstInspection.audience_id, laterInspection.audience_id);
   assert.equal(laterInspection.state, "completed");
@@ -187,18 +198,18 @@ try {
   const claimed = await waitForDeliveryClaim("crashed-discord");
   assert.equal(claimed.turn_id, abandoned.turn_id);
   await start("discord");
-  const abandonedInspection = JSON.parse(
-    run("inspect", "--config", configPath(), abandoned.turn_id),
-  );
+  const abandonedInspection = JSON.parse(run("--home", installation, "inspect", abandoned.turn_id));
   assert.equal(abandonedInspection.delivery_state, "uncertain");
 
+  const attachmentTurn = await testAttachments();
+
   const recent = JSON.parse(
-    run("recent", "--config", configPath(), "--event-id", "event-4", "--limit", "5"),
+    run("--home", installation, "recent", "--event-id", "event-4", "--limit", "5"),
   );
   assert.equal(recent.length, 1);
   assert.equal(recent[0].turn_id, afterRuntimeRestart.receipt.turn_id);
 
-  const status = JSON.parse(run("status", "--config", configPath()));
+  const status = JSON.parse(run("--home", installation, "status"));
   assert.ok(status.providers.every((provider) => provider.status === "ready"));
   assert.equal(status.deliveries.uncertain, 1);
 
@@ -233,7 +244,7 @@ try {
   );
   assert.notEqual(ipv6Config, priorConfig);
   await writeFile(configPath(), ipv6Config);
-  run("backup", "--config", configPath(), "--output", backup);
+  run("--home", installation, "backup", "--output", backup);
   await rm(restoredRoot, { recursive: true, force: true });
   run("restore", "--input", backup, "--target", restoredRoot);
   // Prove restoration uses archived runtime state, not the original directory.
@@ -244,31 +255,44 @@ try {
     "private runtime state fixture",
     "restore must include private runtime state, not just core and session records",
   );
-  // The external workspace is deliberately not in the archive. Pi must refuse
-  // startup if it disappears, before binding or touching native session state.
-  await start("core");
-  await rename(workspace, `${workspace}-saved`);
-  const sessions = join(installation, "agents/default/sessions");
-  await rename(sessions, `${sessions}-saved`);
+  // Startup-refusal checks inspect the same queued turn repeatedly. Keep core
+  // from claiming it at all: an offline runtime alone still permits transient
+  // `running` states and makes shutdown race the worker's requeue.
+  const restoredRuntimeCredential = credential("runtime-pi");
+  await writeFile(restoredRuntimeCredential, "");
   try {
-    for (const missing of [true, false]) {
-      if (!missing) await writeFile(workspace, "not a directory");
-      assertStartupRefused("runtime", missing ? /ENOENT/u : /existing directory/u);
-      await assert.rejects(stat(sessions), { code: "ENOENT" });
-      const inspection = JSON.parse(run("inspect", "--config", configPath(), queued.turn_id));
-      assert.equal(inspection.state, "queued");
+    // The external workspace is deliberately not in the archive. Pi must refuse
+    // startup if it disappears, before binding or touching native session state.
+    await start("core");
+    await rename(workspace, `${workspace}-saved`);
+    const sessions = join(installation, "agents/default/sessions");
+    await rename(sessions, `${sessions}-saved`);
+    try {
+      for (const missing of [true, false]) {
+        if (!missing) await writeFile(workspace, "not a directory");
+        assertStartupRefused("runtime", missing ? /ENOENT/u : /existing directory/u);
+        await assert.rejects(stat(sessions), { code: "ENOENT" });
+        // Dispatch is paused, so startup refusals must leave accepted work queued.
+        assert.equal(
+          JSON.parse(run("--home", installation, "inspect", queued.turn_id)).state,
+          "queued",
+        );
+      }
+    } finally {
+      await rm(workspace, { force: true });
+      await rename(`${workspace}-saved`, workspace);
+      await rm(sessions, { recursive: true, force: true });
+      await rename(`${sessions}-saved`, sessions);
+      await stop("core");
     }
+    await testResourceStateSeparation(queued.turn_id);
+    await testMissingResourceRoot(queued.turn_id);
+    await testRuntimeStartupRefusals(queued.turn_id);
   } finally {
-    await rm(workspace, { force: true });
-    await rename(`${workspace}-saved`, workspace);
-    await rm(sessions, { recursive: true, force: true });
-    await rename(`${sessions}-saved`, sessions);
     await stop("core");
+    await writeFile(restoredRuntimeCredential, runtimeToken);
   }
-  await testResourceStateSeparation(queued.turn_id);
   await testPiModelReadiness();
-  await testMissingResourceRoot(queued.turn_id);
-  await testRuntimeStartupRefusals(queued.turn_id);
   // Both services must interpret relative paths from the canonical config file,
   // not from the directory holding an operator's convenient symlink.
   runtimeConfigPath = join(workspace, "config-link.toml");
@@ -281,8 +305,18 @@ try {
   await acknowledgeDelivery(resumedDelivery.id, "resumed-discord");
   const resumed = await waitForTurn(queued.turn_id, "completed", "delivered");
   assert.equal(resumed.delivery_state, "delivered");
+  // The restored installation carries the captured files and resolves them
+  // under its own root.
+  const restoredAttachments = JSON.parse(run("--home", installation, "inspect", attachmentTurn));
+  for (const attachment of restoredAttachments.attachments) {
+    const captured = await stat(join(installation, "state/attachments", attachment.path));
+    assert.equal(captured.size, attachment.size);
+  }
   const restored = await simulate("event-5", "continue after restore");
   assert.match(restored.delivery.content, /Local provider response 7/u);
+  await testModelPicker();
+  await testProviderFailure();
+  await testActivityVisibility();
 
   process.stdout.write(
     `${JSON.stringify(
@@ -296,6 +330,12 @@ try {
         diagnostics: "authenticated and queryable",
         runtime_outage: "queued and resumed",
         backup_restore: "continued",
+        model_picker: "selections reach the runtime, persist, and never wait for a running turn",
+        provider_failure:
+          "explained once without replay, pages and credentials withheld, conversation continues",
+        activity: "a slow native command is visible to its interface before the answer",
+        attachments:
+          "staged files captured by core, linked staging refused, files reach the runtime by relative path and survive backup",
       },
       null,
       2,
@@ -313,6 +353,39 @@ function configPath() {
   return join(installation, "carillon.toml");
 }
 
+function providerConfigPath() {
+  return join(installation, "providers", "discord-private.toml");
+}
+
+function configureDiscord(home, guildId, botUserId, userId, ...routes) {
+  return run(
+    "--home",
+    home,
+    "discord",
+    "configure",
+    "--provider",
+    "discord-private",
+    "--guild-id",
+    guildId,
+    "--bot-user-id",
+    botUserId,
+    "--user-id",
+    userId,
+    ...routes.flatMap((route) => ["--route", route]),
+  );
+}
+
+/** A provider disabled on purpose exits successfully, serving nothing. */
+function assertDisabledExit(name, expected) {
+  const [program, args] = serviceArguments(name);
+  const result = spawnSync(program, args, { encoding: "utf8", timeout: 10_000 });
+  assert.ifError(result.error);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, `${name} must exit successfully when disabled: ${result.stderr}`);
+  assert.doesNotMatch(result.stdout, /ready/u, `${name} must not serve when disabled`);
+  assert.match(`${result.stdout}${result.stderr}`, expected);
+}
+
 function assertStartupRefused(name, expected, extraArgs = [], options = {}) {
   const [program, args] = serviceArguments(name, options);
   const result = spawnSync(program, [...args, ...extraArgs], {
@@ -325,6 +398,318 @@ function assertStartupRefused(name, expected, extraArgs = [], options = {}) {
   assert.equal(result.signal, null);
   assert.notEqual(result.status, 0, `${name} must refuse startup`);
   assert.match(result.stderr, expected);
+}
+
+async function testModelPicker() {
+  const conversation = "discord-100-305";
+  const shown = await interact("305", null, "command", "model");
+  assert.match(shown.content, /^\*\*Model settings\*\*\n/u);
+  assert.match(
+    shown.content,
+    /This conversation: Local echo \(`local\/echo`\) \(follows the agent default\)/u,
+  );
+  assert.match(shown.content, /Agent default: Local echo \(`local\/echo`\) \(runtime default\)/u);
+  assert.deepEqual(customIds(shown), [
+    providerControl(shown, "conversation"),
+    "model:model:conversation",
+    "model:scope:conversation",
+  ]);
+  assert.equal(selectedLabel(shown, providerControl(shown, "conversation")), "local");
+  assert.deepEqual(buttons(shown), [
+    "model:scope:conversation",
+    "model:scope:agent",
+    "model:default:conversation",
+  ]);
+  // Only the browsed provider's models are offered. Identities remain opaque.
+  assert.deepEqual(
+    options(shown, providerControl(shown, "conversation")).map((option) => option.label),
+    ["local", "substitute"],
+  );
+  assert.deepEqual(
+    options(shown, "model:model:conversation").map((option) => option.description),
+    ["local/echo", "local/reasoner"],
+  );
+  assert.ok(
+    options(shown, "model:model:conversation").every((option) =>
+      /^[0-9a-f]{16}$/u.test(option.value),
+    ),
+  );
+  assert.equal(selectedLabel(shown, "model:model:conversation"), "Local echo");
+  assert.equal(control(shown, "model:default:conversation").disabled, true);
+  // Outside a conversation only the agent default is offered.
+  const outside = await interact("301", null, "command", "model");
+  assert.match(outside.content, /Use `\/model` inside a conversation to set a model for it\./u);
+  assert.deepEqual(customIds(outside), [
+    providerControl(outside, "agent"),
+    "model:model:agent",
+    "model:default:agent",
+  ]);
+
+  // Browsing another provider cannot apply a model or disturb inheritance.
+  const provider = providerControl(shown, "conversation");
+  const browsed = await interact("305", null, "component", provider, [
+    value(shown, provider, "substitute"),
+  ]);
+  assert.equal(selectedLabel(browsed, providerControl(browsed, "conversation")), "substitute");
+  assert.deepEqual(
+    options(browsed, "model:model:conversation").map((option) => option.description),
+    ["substitute/fixed"],
+  );
+  assert.match(browsed.content, /This conversation: Local echo/u);
+  assert.match(browsed.content, /follows the agent default/u);
+  assert.match(browsed.content, /Agent default: Local echo/u);
+  const stillActive = await simulateRoute("model-browse", "305", null, "which model");
+  assert.match(stillActive.delivery.content, /model local\/echo\.$/u);
+  const reopened = await interact("305", null, "command", "model");
+  assert.equal(selectedLabel(reopened, providerControl(reopened, "conversation")), "local");
+
+  // Choosing a model shows the settings it will run with, defaults included,
+  // and a turn runs with exactly those.
+  const chosen = await interact("305", null, "component", "model:model:conversation", [
+    value(shown, "model:model:conversation", "local/reasoner"),
+  ]);
+  assert.match(
+    chosen.content,
+    /This conversation: Local reasoner \(`local\/reasoner`\), Thinking: medium \(set for this conversation\)/u,
+  );
+  const thinking = customIds(chosen).find((id) => id.startsWith("model:option:conversation:"));
+  assert.ok(thinking, "the reasoner's thinking setting is offered");
+  assert.deepEqual(
+    options(chosen, thinking).map((option) => option.label),
+    ["off", "low", "medium", "high"],
+  );
+  assert.equal(selectedLabel(chosen, thinking), "medium");
+  const defaulted = await simulateRoute("model-0", "305", null, "which model");
+  assert.equal(defaulted.conversation_id, conversation);
+  assert.match(defaulted.delivery.content, /model local\/reasoner \(thinking=medium\)\.$/u);
+
+  const reasoner =
+    /Local reasoner \(`local\/reasoner`\), Thinking: high \(set for this conversation\)/u;
+  const tuned = await interact("305", null, "component", thinking, [
+    value(chosen, thinking, "high"),
+  ]);
+  assert.match(tuned.content, reasoner);
+  assert.equal(selectedLabel(tuned, thinking), "high");
+  assert.equal(control(tuned, "model:default:conversation").disabled, false);
+  const overridden = await simulateRoute("model-1", "305", null, "which model");
+  assert.match(overridden.delivery.content, /model local\/reasoner \(thinking=high\)\.$/u);
+  // A control left over from an earlier catalogue is reported, not misapplied.
+  const staleSetting = await interact("305", null, "component", thinking, ["0000000000000000"]);
+  assert.match(staleSetting.content, /That setting is no longer available/u);
+  assert.match(staleSetting.content, reasoner);
+  const staleModel = await interact("305", null, "component", "model:model:conversation", [
+    "0000000000000000",
+  ]);
+  assert.match(staleModel.content, /That model is no longer available/u);
+  assert.match(staleModel.content, reasoner);
+
+  // Core must relay the runtime's atomic precondition, not discard it.
+  const staleWrite = await fetch(`http://127.0.0.1:${String(basePort)}/v1/model`, {
+    method: "PUT",
+    headers: {
+      authorization: `Bearer ${await credentialValue("discord-private")}`,
+      "x-carillon-provider": "discord-private",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      agent_id: "default",
+      audience_id: conversation,
+      scope: "conversation",
+      selection: { provider: "local", model: "echo", options: {} },
+      expected: { provider: "local", model: "reasoner", options: { thinking: "medium" } },
+    }),
+  });
+  assert.equal(staleWrite.status, 409, await staleWrite.text());
+  const unchanged = await interact("305", null, "command", "model");
+  assert.match(unchanged.content, reasoner);
+
+  // The agent default reaches conversations without a choice of their own.
+  const agentScope = await interact("305", null, "component", "model:scope:agent");
+  assert.match(agentScope.content, /Changing the agent selection:/u);
+  assert.deepEqual(customIds(agentScope), [
+    providerControl(agentScope, "agent"),
+    "model:model:agent",
+    "model:scope:conversation",
+  ]);
+  const agentProvider = providerControl(agentScope, "agent");
+  const agentBrowse = await interact("305", null, "component", agentProvider, [
+    value(agentScope, agentProvider, "substitute"),
+  ]);
+  assert.match(agentBrowse.content, reasoner);
+  assert.match(agentBrowse.content, /Agent default: Local echo/u);
+  const agentSet = await interact("305", null, "component", "model:model:agent", [
+    value(agentBrowse, "model:model:agent", "substitute/fixed"),
+  ]);
+  assert.match(
+    agentSet.content,
+    /Agent default: Substitute fixed \(`substitute\/fixed`\) \(set for this agent\)/u,
+  );
+  assert.match(agentSet.content, reasoner);
+  const elsewhere = await simulateRoute("model-2", "406", "302", "which model");
+  assert.notEqual(elsewhere.conversation_id, conversation);
+  assert.match(elsewhere.delivery.content, /model substitute\/fixed\.$/u);
+  const kept = await simulateRoute("model-3", "305", null, "which model");
+  assert.match(kept.delivery.content, /model local\/reasoner \(thinking=high\)\.$/u);
+
+  // Selections live in the runtime's ledger, not in a process.
+  await restart("runtime");
+  const persisted = await interact("305", null, "command", "model");
+  assert.match(persisted.content, reasoner);
+  assert.match(
+    persisted.content,
+    /Agent default: Substitute fixed \(`substitute\/fixed`\) \(set for this agent\)/u,
+  );
+
+  // Each scope returns to its default separately.
+  const followsAgent = await interact("305", null, "component", "model:default:conversation");
+  assert.match(
+    followsAgent.content,
+    /This conversation: Substitute fixed \(`substitute\/fixed`\) \(follows the agent default\)/u,
+  );
+  const runtimeDefault = await interact("305", null, "component", "model:default:agent");
+  assert.match(
+    runtimeDefault.content,
+    /Agent default: Local echo \(`local\/echo`\) \(runtime default\)/u,
+  );
+  assert.match(
+    runtimeDefault.content,
+    /This conversation: Local echo \(`local\/echo`\) \(follows the agent default\)/u,
+  );
+  const reset = await simulateRoute("model-4", "305", null, "which model");
+  assert.match(reset.delivery.content, /model local\/echo\.$/u);
+
+  // A change made while a turn runs is confirmed at once; the running turn
+  // keeps the selection it started with and the next turn picks up the change.
+  const held = await holdTurn("held-turn");
+  const during = await interact("305", null, "component", "model:model:agent", [
+    value(shown, "model:model:conversation", "local/reasoner"),
+  ]);
+  assert.match(
+    during.content,
+    /Agent default: Local reasoner \(`local\/reasoner`\), Thinking: medium \(set for this agent\)/u,
+  );
+  assert.match(
+    (await interact("305", null, "command", "model")).content,
+    /Agent default: Local reasoner \(`local\/reasoner`\), Thinking: medium \(set for this agent\)/u,
+  );
+  const released = await held.release();
+  assert.match(released.output, /model local\/echo\.$/u, "the running turn keeps its selection");
+  const next = await simulateRoute("model-5", "305", null, "which model");
+  assert.match(next.delivery.content, /model local\/reasoner \(thinking=medium\)\.$/u);
+  await interact("305", null, "component", "model:default:agent");
+
+  // Interactions are admitted like messages and never reach the module otherwise.
+  for (const [changes, message] of [
+    [{ guild_id: "999" }, "other guilds must fail closed"],
+    [{ guild_id: null }, "direct messages must fail closed"],
+    [{ user_id: "999" }, "users outside the allowlist must fail closed"],
+    [{ channel_id: "399" }, "unconfigured channels must fail closed"],
+  ]) {
+    const response = await requestInteraction({
+      ...interaction("305", null, "command", "model", []),
+      ...changes,
+    });
+    assert.equal(response.status, 403, message);
+  }
+  const unauthenticated = await fetch(`http://127.0.0.1:${String(basePort + 1)}/v1/interactions`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${await credentialValue("operator")}`,
+    },
+    body: JSON.stringify(interaction("305", null, "command", "model", [])),
+  });
+  assert.equal(unauthenticated.status, 403, "interactions require the provider credential");
+  await testCommandModuleOperations();
+}
+
+/**
+ * The operator replaces the running command module and returns to the
+ * release's; every installed module keeps serving through the same Wasm host.
+ */
+async function testCommandModuleOperations() {
+  const commands = (...args) => run("--home", installation, "discord", "commands", ...args);
+  assert.equal(commands(), "discord-private serves the release command module: /model.");
+  assert.match(commands("check", commandsModule), /is a usable command module .*: \/model\.$/u);
+  assert.equal(
+    commands("install", commandsModule),
+    "discord-private now serves the installed command module: /model.",
+  );
+  assert.match((await interact("305", null, "command", "model")).content, /Agent default:/u);
+  // Repeating an install finishes its save; it serves the same module.
+  assert.equal(
+    commands("install", commandsModule),
+    "discord-private was already serving the installed command module: /model.",
+  );
+  const broken = join(workspace, "broken-commands.wasm");
+  await writeFile(broken, "\0asm broken");
+  for (const args of [
+    ["check", broken],
+    ["install", broken],
+  ]) {
+    const refused = spawnSync(binary, ["--home", installation, "discord", "commands", ...args], {
+      encoding: "utf8",
+    });
+    assert.notEqual(refused.status, 0, `${args[0]} accepted a broken module`);
+    assert.match(refused.stderr, /^error: .*not a usable command module/u);
+    if (args[0] === "install") {
+      assert.match(refused.stderr, /Still serving the installed command module: \/model\.$/mu);
+    }
+  }
+  await rm(broken);
+  assert.equal(commands(), "discord-private serves the installed command module: /model.");
+  assert.equal(commands("reset"), "discord-private now serves the release command module: /model.");
+  assert.match((await interact("305", null, "command", "model")).content, /Agent default:/u);
+}
+
+/**
+ * Starts a deterministic turn directly on the runtime and holds it at a
+ * resource read: the extension file is a pipe that yields nothing until
+ * `release` writes to it.
+ */
+async function holdTurn(correlationId) {
+  const fixture = join(workspace, `resources-${correlationId}`);
+  await mkdir(join(fixture, "extensions"), { recursive: true });
+  const pipe = join(fixture, "extensions", "carillon-context.js");
+  execFileSync("mkfifo", [pipe]);
+  const response = fetch(`http://${runtimeHost}:${String(basePort + 2)}/v1/turns`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${await credentialValue("runtime-pi")}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      correlation_id: correlationId,
+      interface_id: "discord-private",
+      agent_id: "default",
+      audience_id: `discord-100-${correlationId}`,
+      input: "held",
+      resource_root: fixture,
+      attachment_root: fixture,
+    }),
+  });
+  response.catch(() => undefined);
+  // The pipe accepts a writer once the runtime has opened it to read.
+  let writer;
+  for (let attempt = 0; writer === undefined && attempt < 400; attempt += 1) {
+    try {
+      writer = await open(pipe, constants.O_WRONLY | constants.O_NONBLOCK);
+    } catch (failure) {
+      if (failure.code !== "ENXIO") throw failure;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    }
+  }
+  assert.ok(writer, "the held turn did not reach its resource read");
+  return {
+    async release() {
+      await writer.write("held");
+      await writer.close();
+      const settled = await response;
+      const body = await settled.text();
+      assert.equal(settled.status, 200, body);
+      return JSON.parse(body);
+    },
+  };
 }
 
 async function testResourceStateSeparation(turnId) {
@@ -370,7 +755,7 @@ async function testResourceStateSeparation(turnId) {
       original.replace('data_dir = "state"', 'data_dir = "agents/default/core-state"'),
     );
     await start("core");
-    assert.equal(JSON.parse(run("inspect", "--config", configPath(), turnId)).state, "queued");
+    assert.equal(JSON.parse(run("--home", installation, "inspect", turnId)).state, "queued");
   } finally {
     await stop("core");
     await writeFile(configPath(), original);
@@ -439,13 +824,262 @@ async function testPiModelReadiness() {
   }
 }
 
+/**
+ * Native Pi against a local model endpoint that fails twice, then answers: a
+ * provider's explanation reaches the conversation, a raw page does not, and
+ * neither failure is replayed or blocks the next message.
+ */
+async function testProviderFailure() {
+  const privateState = join(installation, "pi");
+  const sessions = join(installation, "agents/default/sessions");
+  const key = `sk-proj-${"Ab1".repeat(20)}`;
+  const failures = [
+    {
+      type: "application/json",
+      body: JSON.stringify({
+        error: {
+          message: `The usage limit has been reached for @everyone and <@200> (request ${key}). See https://example.invalid/limits`,
+          type: "usage_limit",
+        },
+      }),
+    },
+    {
+      type: "text/html",
+      body: `<html><body>Gateway refused ${key}</body></html>`,
+    },
+    {
+      type: "application/json",
+      body: JSON.stringify({ error: { message: "Authentication failed: password=short-secret" } }),
+    },
+  ];
+  let requests = 0;
+  const provider = createServer((request, response) => {
+    request.resume();
+    const failure = failures[requests];
+    requests += 1;
+    if (failure !== undefined) {
+      response.writeHead(403, { "content-type": failure.type });
+      response.end(failure.body);
+      return;
+    }
+    const chunk = (delta, finish) =>
+      `data: ${JSON.stringify({
+        id: "recovered",
+        object: "chat.completion.chunk",
+        created: 0,
+        model: "failure-model",
+        choices: [{ index: 0, delta, finish_reason: finish }],
+      })}\n\n`;
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(
+      `${chunk({ role: "assistant", content: "Recovered after the provider failures." }, null)}${chunk({}, "stop")}data: [DONE]\n\n`,
+    );
+  });
+  provider.listen(0, "127.0.0.1");
+  await once(provider, "listening");
+  await stop("runtime");
+  await rename(privateState, `${privateState}-saved`);
+  await rename(sessions, `${sessions}-saved`);
+  await mkdir(privateState);
+  const log = [];
+  try {
+    await writeFile(
+      join(privateState, "settings.json"),
+      JSON.stringify({ defaultProvider: "failure-fixture", defaultModel: "failure-model" }),
+    );
+    await writeFile(
+      join(privateState, "models.json"),
+      JSON.stringify({
+        providers: {
+          "failure-fixture": {
+            baseUrl: `http://127.0.0.1:${String(provider.address().port)}/v1`,
+            api: "openai-completions",
+            apiKey: "test-only",
+            models: [{ id: "failure-model" }],
+          },
+        },
+      }),
+    );
+    await start("runtime", { nativePi: true, env: { ...process.env, PI_OFFLINE: "1" }, log });
+
+    const explained = await simulate("provider-failure-explained", "use the provider");
+    assert.equal(explained.delivery.turn_state, "interrupted");
+    const [reason, next] = explained.delivery.content.split("\n");
+    assert.match(
+      reason,
+      /^That turn was interrupted: .*The usage limit has been reached for @everyone and <@200> \(request \[redacted\]\)\. See \[link\]$/u,
+    );
+    assert.equal(
+      next,
+      "Send another message to continue in this conversation. Actions already taken may have had effects.",
+    );
+    const inspection = JSON.parse(
+      run("--home", installation, "inspect", explained.receipt.turn_id),
+    );
+    assert.equal(inspection.state, "interrupted");
+    assert.equal(
+      inspection.error,
+      `runtime reported failure: ${reason.split(": ").slice(1).join(": ")}`,
+    );
+
+    // A raw page, and an explanation carrying a credential, show the generic notice.
+    const withheld = [];
+    for (const attempt of ["page", "credential"]) {
+      const { delivery } = await simulate(`provider-failure-${attempt}`, `try the ${attempt}`);
+      assert.equal(delivery.turn_state, "interrupted");
+      assert.equal(
+        delivery.content,
+        "That turn was interrupted. Send another message to continue in this conversation. Actions already taken may have had effects.",
+      );
+      withheld.push(delivery.content);
+    }
+
+    const recovered = await simulate("provider-recovered", "continue");
+    assert.equal(recovered.delivery.turn_state, "completed");
+    assert.equal(recovered.delivery.content, "Recovered after the provider failures.");
+    assert.equal(requests, 4, "failed turns must not be retried or replayed");
+    const diagnostics = log.join("");
+    assert.match(diagnostics, /POST \/v1\/turns failed: .*The usage limit has been reached/u);
+    assert.match(diagnostics, /POST \/v1\/turns failed: .*Gateway refused \[redacted\]/u);
+    assert.match(diagnostics, /POST \/v1\/turns failed: .*password=\[redacted\]/u);
+    for (const text of [explained.delivery.content, ...withheld, diagnostics])
+      for (const secret of [key, "short-secret"])
+        assert.ok(!text.includes(secret), "credentials must not be displayed or logged");
+  } finally {
+    await stop("runtime");
+    provider.close();
+    await rm(privateState, { recursive: true, force: true });
+    await rm(sessions, { recursive: true, force: true });
+    await rename(`${privateState}-saved`, privateState);
+    await rename(`${sessions}-saved`, sessions);
+  }
+}
+
+/**
+ * Native Pi runs a real, deliberately slow `bash` call. While it runs, core's
+ * interface-authenticated activity view shows the command; afterwards the
+ * turn is gone from the view and the answer is delivered as before.
+ */
+async function testActivityVisibility() {
+  const privateState = join(installation, "pi");
+  const sessions = join(installation, "agents/default/sessions");
+  const marker = "activity-release";
+  const command = `until [ -e ${marker} ]; do sleep 0.1; done; echo released`;
+  let requests = 0;
+  const provider = createServer((request, response) => {
+    request.resume();
+    requests += 1;
+    const chunk = (delta, finish) =>
+      `data: ${JSON.stringify({
+        id: `activity-${String(requests)}`,
+        object: "chat.completion.chunk",
+        created: 0,
+        model: "activity-model",
+        choices: [{ index: 0, delta, finish_reason: finish }],
+      })}\n\n`;
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(
+      requests === 1
+        ? `${chunk(
+            {
+              role: "assistant",
+              content: "Waiting for the release marker.",
+              tool_calls: [
+                {
+                  index: 0,
+                  id: "call_slow",
+                  type: "function",
+                  function: { name: "bash", arguments: JSON.stringify({ command }) },
+                },
+              ],
+            },
+            null,
+          )}${chunk({}, "tool_calls")}data: [DONE]\n\n`
+        : `${chunk({ role: "assistant", content: "The marker appeared." }, null)}${chunk({}, "stop")}data: [DONE]\n\n`,
+    );
+  });
+  provider.listen(0, "127.0.0.1");
+  await once(provider, "listening");
+  await stop("runtime");
+  await rename(privateState, `${privateState}-saved`);
+  await rename(sessions, `${sessions}-saved`);
+  await mkdir(privateState);
+  try {
+    await writeFile(
+      join(privateState, "settings.json"),
+      JSON.stringify({ defaultProvider: "activity-fixture", defaultModel: "activity-model" }),
+    );
+    await writeFile(
+      join(privateState, "models.json"),
+      JSON.stringify({
+        providers: {
+          "activity-fixture": {
+            baseUrl: `http://127.0.0.1:${String(provider.address().port)}/v1`,
+            api: "openai-completions",
+            apiKey: "test-only",
+            models: [{ id: "activity-model" }],
+          },
+        },
+      }),
+    );
+    await start("runtime", { nativePi: true, env: { ...process.env, PI_OFFLINE: "1" } });
+    const answered = simulate("activity-slow", "wait for the marker");
+    answered.catch(() => undefined);
+    let running;
+    for (let attempt = 0; running === undefined && attempt < 200; attempt += 1) {
+      const turns = await activeTurns(`Bearer ${await credentialValue("discord-private")}`);
+      assert.equal(turns.status, 200);
+      running = turns.body.find((turn) => turn.activity?.running.length > 0);
+      if (running === undefined) await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    }
+    assert.ok(running, "the running command never became visible");
+    assert.equal(running.state, "running");
+    assert.equal(running.target_id, "300");
+    assert.deepEqual(
+      running.activity.running.map(({ tool, detail }) => ({ tool, detail })),
+      [{ tool: "bash", detail: command }],
+    );
+    assert.equal(running.activity.headline, "Waiting for the release marker.");
+    assert.equal(running.activity.phase, "tools");
+    for (const authorization of [null, `Bearer ${await credentialValue("operator")}`])
+      assert.equal((await activeTurns(authorization)).status, 403);
+
+    await writeFile(join(workspace, marker), "");
+    const { receipt, delivery } = await answered;
+    assert.equal(receipt.turn_id, running.turn_id);
+    assert.equal(delivery.turn_state, "completed");
+    assert.match(delivery.content, /The marker appeared\.$/u);
+    const after = await activeTurns(`Bearer ${await credentialValue("discord-private")}`);
+    assert.deepEqual(after.body, []);
+    assert.equal(requests, 2);
+  } finally {
+    await stop("runtime");
+    provider.close();
+    await rm(join(workspace, marker), { force: true });
+    await rm(privateState, { recursive: true, force: true });
+    await rm(sessions, { recursive: true, force: true });
+    await rename(`${privateState}-saved`, privateState);
+    await rename(`${sessions}-saved`, sessions);
+  }
+}
+
+async function activeTurns(authorization) {
+  const response = await fetch(`http://127.0.0.1:${String(basePort)}/v1/activity`, {
+    headers: {
+      "x-carillon-provider": "discord-private",
+      ...(authorization === null ? {} : { authorization }),
+    },
+  });
+  return { status: response.status, body: await response.json() };
+}
+
 async function testMissingResourceRoot(turnId) {
   const resources = join(installation, "agents/default");
   const privateState = join(installation, "pi");
   await rename(resources, `${resources}-saved`);
   await rename(privateState, `${privateState}-saved`);
   await start("core");
-  const before = JSON.parse(run("recent", "--config", configPath()));
+  const before = JSON.parse(run("--home", installation, "recent"));
   try {
     for (const missing of [true, false]) {
       if (!missing) await writeFile(resources, "not a directory");
@@ -453,7 +1087,7 @@ async function testMissingResourceRoot(turnId) {
       if (missing) await assert.rejects(stat(resources), { code: "ENOENT" });
       else assert.equal(await readFile(resources, "utf8"), "not a directory");
       await assert.rejects(stat(privateState), { code: "ENOENT" });
-      assert.equal(JSON.parse(run("inspect", "--config", configPath(), turnId)).state, "queued");
+      assert.equal(JSON.parse(run("--home", installation, "inspect", turnId)).state, "queued");
       const response = await fetch(`http://127.0.0.1:${String(basePort)}/v1/events`, {
         method: "POST",
         headers: {
@@ -472,7 +1106,7 @@ async function testMissingResourceRoot(turnId) {
         }),
       });
       assert.equal(response.status, 500, await response.text());
-      assert.deepEqual(JSON.parse(run("recent", "--config", configPath())), before);
+      assert.deepEqual(JSON.parse(run("--home", installation, "recent")), before);
     }
   } finally {
     await stop("core");
@@ -501,13 +1135,48 @@ async function testRuntimeStartupRefusals(turnId) {
       ]);
       await assert.rejects(stat(sessions), { code: "ENOENT" });
       await assert.rejects(stat(privateState), { code: "ENOENT" });
-      assert.equal(JSON.parse(run("inspect", "--config", configPath(), turnId)).state, "queued");
+      assert.equal(JSON.parse(run("--home", installation, "inspect", turnId)).state, "queued");
     }
-    run("provider", "--config", configPath(), "runtime-pi", "disable");
-    assertStartupRefused("runtime", /runtime provider runtime-pi is disabled/u);
+    // The runtime's own settings are checked, not silently ignored.
+    const runtimeSettings = join(installation, "providers/runtime-pi.toml");
+    for (const [settings, expected] of [
+      ["[inline_images]\nmax_megapixel = 10\n", /runtime-pi\.toml/u],
+      ["[inline_images]\nmax_image_mib = 1.5\n", /runtime-pi\.toml/u],
+      ["[inline_images]\nmax_image_mib = 8\nmax_total_mib = 4\n", /max_total_mib/u],
+    ]) {
+      await writeFile(runtimeSettings, settings);
+      assertStartupRefused("runtime", expected);
+      await assert.rejects(stat(sessions), { code: "ENOENT" });
+    }
+    await rm(runtimeSettings);
+    // An interface endpoint off the loopback socket rule is refused before
+    // Pi starts, even while the running core holds the earlier registry:
+    // extensions would receive it with the operator credential.
+    const interfaceUrl = `url = "http://127.0.0.1:${String(basePort + 1)}"`;
+    const remote = original.replace(interfaceUrl, 'url = "http://192.0.2.1:8080"');
+    assert.notEqual(remote, original);
+    await writeFile(configPath(), remote);
+    assertStartupRefused("runtime", /provider URL must use an HTTP loopback socket address/u);
+    await assert.rejects(stat(sessions), { code: "ENOENT" });
+    await writeFile(configPath(), original);
+    run("--home", installation, "provider", "runtime-pi", "disable");
+    // Disabled on purpose, the runtime exits successfully before reading its
+    // credential or creating state, so its service is not restarted; a
+    // malformed registry is still refused.
+    const disabled = await readFile(configPath(), "utf8");
+    const token = credential("runtime-pi");
+    await rename(token, `${token}-saved`);
+    try {
+      assertDisabledExit("runtime", /runtime provider runtime-pi is disabled/u);
+      await writeFile(configPath(), disabled.replaceAll('"runtime-pi"', '"operator"'));
+      assertStartupRefused("runtime", /provider ID operator is reserved/u);
+    } finally {
+      await rename(`${token}-saved`, token);
+      await writeFile(configPath(), disabled);
+    }
     await assert.rejects(stat(sessions), { code: "ENOENT" });
     await assert.rejects(stat(privateState), { code: "ENOENT" });
-    assert.equal(JSON.parse(run("inspect", "--config", configPath(), turnId)).state, "queued");
+    assert.equal(JSON.parse(run("--home", installation, "inspect", turnId)).state, "queued");
   } finally {
     await stop("core");
     await writeFile(configPath(), original);
@@ -544,7 +1213,7 @@ async function testProviderVersions() {
       assert.equal(health.id, id);
       assert.equal(health.version, version, `${id} must report its build-owned version`);
     }
-    const status = JSON.parse(run("status", "--config", configPath()));
+    const status = JSON.parse(run("--home", installation, "status"));
     for (const [id, version] of expected) {
       const provider = status.providers.find((report) => report.id === id);
       assert.equal(provider.version, version);
@@ -557,7 +1226,7 @@ async function testProviderVersions() {
   // Repair the operator expectation and restart, without changing binaries.
   await startAll();
   assert.ok(
-    JSON.parse(run("status", "--config", configPath())).providers.every(
+    JSON.parse(run("--home", installation, "status")).providers.every(
       (provider) => provider.status === "ready",
     ),
   );
@@ -566,17 +1235,19 @@ async function testProviderVersions() {
 
 async function testConfigurationSymlinkUpdates() {
   const original = await readFile(configPath(), "utf8");
+  const originalDiscord = await readFile(providerConfigPath(), "utf8");
   const previousMode = (await stat(configPath())).mode & 0o777;
-  const link = join(workspace, "admin-config.toml");
-  await symlink(configPath(), link);
+  // An operator's convenient link to the installation is an ordinary --home.
+  const link = join(workspace, "admin-home");
+  await symlink(installation, link);
   const linkInode = (await lstat(link)).ino;
   await chmod(configPath(), 0o640);
   const assertUpdated = async () => {
-    assert.equal((await lstat(link)).ino, linkInode, "CLI must retain the configuration symlink");
+    assert.equal((await lstat(link)).ino, linkInode, "CLI must retain the installation symlink");
     assert.ok((await lstat(link)).isSymbolicLink());
     assert.equal((await stat(configPath())).mode & 0o777, 0o640);
     const canonical = await readFile(configPath(), "utf8");
-    assert.equal(await readFile(link, "utf8"), canonical);
+    assert.equal(await readFile(join(link, "carillon.toml"), "utf8"), canonical);
     assert.match(
       canonical,
       /^data_dir = "state"$/mu,
@@ -585,50 +1256,29 @@ async function testConfigurationSymlinkUpdates() {
   };
   try {
     for (const enabled of [false, true]) {
-      run("provider", "--config", link, "runtime-pi", enabled ? "enable" : "disable");
+      run("--home", link, "provider", "runtime-pi", enabled ? "enable" : "disable");
       await assertUpdated();
       await start("core");
-      const status = JSON.parse(run("status", "--config", configPath()));
+      const status = JSON.parse(run("--home", installation, "status"));
       assert.equal(
         status.providers.find((provider) => provider.id === "runtime-pi").status,
         enabled ? "unavailable" : "disabled",
       );
       await stop("core");
     }
-    run(
-      "configure-discord",
-      "--config",
-      link,
-      "--guild-id",
-      "101",
-      "--bot-user-id",
-      "202",
-      "--user-id",
-      "203",
-      "--route",
-      "304:mention:thread",
-    );
+    // Provider settings live in the provider's own file; the registry is untouched.
+    configureDiscord(link, "101", "202", "203", "304:mention:thread");
     await assertUpdated();
-    const beforeRefusal = await readFile(configPath(), "utf8");
+    assert.equal(await readFile(configPath(), "utf8"), original);
+    const configured = await readFile(providerConfigPath(), "utf8");
+    assert.match(configured, /^guild_id = "101"$/mu);
+    assert.equal((await stat(providerConfigPath())).mode & 0o777, 0o600);
     assert.throws(
-      () =>
-        run(
-          "configure-discord",
-          "--config",
-          link,
-          "--guild-id",
-          "invalid",
-          "--bot-user-id",
-          "202",
-          "--user-id",
-          "203",
-          "--route",
-          "304:mention:thread",
-        ),
+      () => configureDiscord(link, "invalid", "202", "203", "304:mention:thread"),
       /snowflake/u,
     );
     await assertUpdated();
-    assert.equal(await readFile(configPath(), "utf8"), beforeRefusal);
+    assert.equal(await readFile(providerConfigPath(), "utf8"), configured);
     // Readiness through the canonical path must observe what the symlink command wrote.
     await startAll();
     const denied = await requestSimulation(
@@ -639,11 +1289,12 @@ async function testConfigurationSymlinkUpdates() {
       event("symlink-new-route", "101", "203", "304", null, "no mention"),
     );
     assert.equal(ignored.status, 204);
-    assert.deepEqual(JSON.parse(run("recent", "--config", configPath())), []);
+    assert.deepEqual(JSON.parse(run("--home", installation, "recent")), []);
   } finally {
     await stopAll();
     await rm(link, { force: true });
     await writeFile(configPath(), original);
+    await writeFile(providerConfigPath(), originalDiscord);
     await chmod(configPath(), previousMode);
   }
 }
@@ -657,6 +1308,60 @@ async function testConfigurationRefusals() {
   const database = join(installation, "state/carillon.sqlite3");
   const previousDatabase = await readFile(database);
   try {
+    // The provider serves nothing without its own settings or its command module.
+    await rename(providerConfigPath(), `${providerConfigPath()}-saved`);
+    try {
+      assertStartupRefused("discord", /read Discord configuration/u);
+    } finally {
+      await rename(`${providerConfigPath()}-saved`, providerConfigPath());
+    }
+    // Disabled on purpose, the provider exits successfully before reading its
+    // credential or settings, so its service is not restarted; a malformed
+    // registry is still refused.
+    run("--home", installation, "provider", "discord-private", "disable");
+    const withoutDiscord = await readFile(configPath(), "utf8");
+    const token = credential("discord-private");
+    await rename(token, `${token}-saved`);
+    await rename(providerConfigPath(), `${providerConfigPath()}-saved`);
+    try {
+      assertDisabledExit("discord", /Discord interface provider is disabled/u);
+      await writeFile(configPath(), withoutDiscord.replaceAll('"discord-private"', '"operator"'));
+      assertStartupRefused("discord", /provider ID operator is reserved/u);
+      assert.deepEqual(await readFile(database), previousDatabase);
+    } finally {
+      await rename(`${token}-saved`, token);
+      await rename(`${providerConfigPath()}-saved`, providerConfigPath());
+      await writeFile(configPath(), original);
+    }
+    // Invalid inline presentation fails before the provider starts any work.
+    const discordSettings = await readFile(providerConfigPath(), "utf8");
+    try {
+      const invalidMarker = discordSettings.replace(/^working = .*$/mu, 'working = "@everyone"');
+      assert.notEqual(invalidMarker, discordSettings);
+      await writeFile(providerConfigPath(), invalidMarker);
+      assertStartupRefused("discord", /activity_markers\.working/u);
+      assert.deepEqual(await readFile(database), previousDatabase);
+    } finally {
+      await writeFile(providerConfigPath(), discordSettings);
+    }
+    const brokenModule = join(workspace, "broken.wasm");
+    await writeFile(brokenModule, "\0asm broken");
+    assertStartupRefused("discord", /read release command module/u, [], {
+      commands: join(workspace, "missing.wasm"),
+    });
+    assertStartupRefused("discord", /release command module .* is unusable/u, [], {
+      commands: brokenModule,
+    });
+    // An unusable installed module refuses startup, naming the file to remove,
+    // even though the release's module is usable.
+    const installed = join(installation, "state/components/discord-private/command-module.wasm");
+    await mkdir(join(installed, ".."), { recursive: true });
+    await rename(brokenModule, installed);
+    assertStartupRefused(
+      "discord",
+      /installed command module .*command-module\.wasm is unusable; remove it/u,
+    );
+    await rm(installed);
     for (const id of ["runtime-pi", "discord-private"]) {
       // Matching hashes must not turn a provider credential into operator identity;
       // differing hashes must not leave an impossible-to-authenticate provider.
@@ -743,9 +1448,9 @@ async function testConfigurationRefusals() {
       .replace("enabled = true", "enabled = false");
     await writeFile(configPath(), disabled);
     await start("core");
-    assert.deepEqual(JSON.parse(run("recent", "--config", configPath())), []);
+    assert.deepEqual(JSON.parse(run("--home", installation, "recent")), []);
     assert.throws(
-      () => run("provider", "--config", configPath(), "discord-private", "enable"),
+      () => run("--home", installation, "provider", "discord-private", "enable"),
       collision,
     );
     assert.equal(await readFile(configPath(), "utf8"), disabled);
@@ -800,6 +1505,177 @@ async function simulateRoute(eventId, channelId, parentChannelId, content) {
   const body = await response.text();
   assert.equal(response.status, 200, body);
   return JSON.parse(body);
+}
+
+function interaction(channelId, parentChannelId, kind, name, values) {
+  return {
+    guild_id: "100",
+    user_id: "200",
+    channel_id: channelId,
+    parent_channel_id: parentChannelId,
+    kind,
+    name,
+    values,
+    options: {},
+  };
+}
+
+async function requestInteraction(source) {
+  return fetch(`http://127.0.0.1:${String(basePort + 1)}/v1/interactions`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${await credentialValue("discord-private")}`,
+    },
+    body: JSON.stringify(source),
+  });
+}
+
+/** Runs a slash command or component interaction and returns the reply. */
+async function interact(channelId, parentChannelId, kind, name, values = []) {
+  const response = await requestInteraction(
+    interaction(channelId, parentChannelId, kind, name, values),
+  );
+  const body = await response.text();
+  assert.equal(response.status, 200, body);
+  return JSON.parse(body);
+}
+
+/** The first control of each action row. */
+function customIds(reply) {
+  return reply.components.map((row) => row.components[0].custom_id);
+}
+
+/** The buttons of the last action row. */
+function buttons(reply) {
+  return reply.components.at(-1).components.map((component) => component.custom_id);
+}
+
+function control(reply, customId) {
+  const found = reply.components
+    .flatMap((row) => row.components)
+    .find((component) => component.custom_id === customId);
+  assert.ok(found, `${customId} is present`);
+  return found;
+}
+
+function options(reply, customId) {
+  return control(reply, customId).options;
+}
+
+function providerControl(reply, scope) {
+  const id = customIds(reply).find((id) => id.startsWith(`model:provider:${scope}:`));
+  assert.ok(id, "provider menu is present");
+  return id;
+}
+
+function selectedLabel(reply, customId) {
+  return options(reply, customId).find((option) => option.default)?.label;
+}
+
+/** The select value standing for the option labelled or described `text`. */
+function value(reply, customId, text) {
+  const option = options(reply, customId).find(
+    (candidate) => candidate.label === text || candidate.description === text,
+  );
+  assert.ok(option, `${customId} offers ${text}`);
+  return option.value;
+}
+
+/** Files staged as the Discord provider stages them, captured through core. */
+async function testAttachments() {
+  // Simulation fetches an admitted message's files only from Discord's CDN:
+  // the built provider refuses anything else before a request is made.
+  const local = await requestSimulation({
+    ...event("attachments-local", "100", "200", "300", null, ""),
+    attachments: [
+      {
+        id: "601",
+        filename: "local.png",
+        size: 4,
+        url: `http://127.0.0.1:${String(basePort)}/attachments/300/601/local.png`,
+      },
+    ],
+  });
+  const refusal = await local.text();
+  assert.equal(local.status, 422, refusal);
+  assert.match(refusal, /not a Discord attachment/u);
+  const incoming = join(installation, "state/components/discord-private/incoming");
+  const report = Buffer.from("%PDF-1.7 integration bytes");
+  await mkdir(join(incoming, "batch"), { recursive: true });
+  await writeFile(join(incoming, "batch", "0"), report);
+  await writeFile(join(incoming, "batch", "1"), "notes");
+  // Staging that links elsewhere is refused before anything is copied.
+  await mkdir(join(incoming, "linked"));
+  await symlink(credential("operator"), join(incoming, "linked", "0"));
+  const operatorToken = await stat(credential("operator"));
+  const linked = await postCoreEvent("attachments-linked", "", {
+    batch: "linked",
+    files: [{ name: "token", size: operatorToken.size }],
+  });
+  assert.equal(linked.status, 400, await linked.text());
+  const store = join(installation, "state/attachments");
+  assert.deepEqual(
+    await readdir(store).catch(() => []),
+    [],
+    "a refused capture left a copy behind",
+  );
+  const response = await postCoreEvent("attachments-1", "", {
+    batch: "batch",
+    files: [
+      { name: "report.pdf", size: report.length, content_type: "application/pdf" },
+      { name: "notes.txt", size: 5 },
+    ],
+  });
+  const body = await response.text();
+  assert.equal(response.status, 200, body);
+  const receipt = JSON.parse(body);
+  // The interface's staging is its own; accepted files no longer need it.
+  await rm(incoming, { recursive: true });
+  const inspection = await waitForTurn(receipt.turn_id, "completed", "pending");
+  assert.match(inspection.output, /attachment report\.pdf 26 bytes intact/u);
+  assert.match(inspection.output, /attachment notes\.txt 5 bytes intact/u);
+  assert.equal(inspection.attachments.length, 2);
+  assert.match(inspection.attachments[0].path, /^[0-9a-f-]{36}\/0$/u);
+  // Asked about the event again, core names the same accepted turn, in the
+  // state it has now reached.
+  const status = await fetch(`http://127.0.0.1:${String(basePort)}/v1/events/attachments-1`, {
+    headers: {
+      authorization: `Bearer ${await credentialValue("discord-private")}`,
+      "x-carillon-provider": "discord-private",
+    },
+  });
+  assert.deepEqual(await status.json(), {
+    status: "accepted",
+    ...receipt,
+    state: "completed",
+    duplicate: true,
+  });
+  const delivery = await waitForDeliveryClaim("attachments-check");
+  assert.equal(delivery.turn_id, receipt.turn_id);
+  await acknowledgeDelivery(delivery.id, "attachments-check");
+  return receipt.turn_id;
+}
+
+async function postCoreEvent(eventId, content, attachments) {
+  return await fetch(`http://127.0.0.1:${String(basePort)}/v1/events`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${await credentialValue("discord-private")}`,
+      "x-carillon-provider": "discord-private",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      event_id: eventId,
+      agent_id: "default",
+      user_id: "200",
+      audience_id: "discord-100-306",
+      delivery_target_id: "306",
+      feedback_target_id: `306:${eventId}`,
+      content,
+      attachments,
+    }),
+  });
 }
 
 async function submitCoreEvent(eventId, content) {
@@ -864,7 +1740,7 @@ async function acknowledgeDelivery(id, instance) {
 async function waitForTurn(turnId, state, deliveryState = null) {
   let inspection;
   for (let attempt = 0; attempt < 200; attempt += 1) {
-    inspection = JSON.parse(run("inspect", "--config", configPath(), turnId));
+    inspection = JSON.parse(run("--home", installation, "inspect", turnId));
     if (
       inspection.state === state &&
       (deliveryState === null || inspection.delivery_state === deliveryState)
@@ -878,7 +1754,7 @@ async function waitForTurn(turnId, state, deliveryState = null) {
   );
 }
 
-function serviceArguments(name, { nativePi = false } = {}) {
+function serviceArguments(name, { nativePi = false, commands = commandsModule } = {}) {
   if (name === "core") return [binary, ["core", "--config", configPath()]];
   if (name === "runtime") {
     const args = [
@@ -900,13 +1776,44 @@ function serviceArguments(name, { nativePi = false } = {}) {
     binary,
     [
       "discord",
+      "serve",
       "--config",
       configPath(),
+      "--provider",
+      "discord-private",
       "--token-file",
       credential("discord-private"),
+      "--commands",
+      commands,
       "--deterministic",
     ],
   ];
+}
+
+// init assigns three consecutive ports. Probe the whole range rather than
+// deriving it from a PID that can collide with an unrelated host service.
+async function availableBasePort() {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const listeners = [];
+    try {
+      const first = createServer().listen(0, "127.0.0.1");
+      listeners.push(first);
+      await once(first, "listening");
+      const { port } = first.address();
+      if (port > 65_533) continue;
+      for (const offset of [1, 2]) {
+        const next = createServer().listen(port + offset, "127.0.0.1");
+        listeners.push(next);
+        await once(next, "listening");
+      }
+      return port;
+    } catch (error) {
+      if (error.code !== "EADDRINUSE") throw error;
+    } finally {
+      await Promise.all(listeners.map((server) => new Promise((resolve) => server.close(resolve))));
+    }
+  }
+  throw new Error("could not find three available integration service ports");
 }
 
 function servicePort(name) {
@@ -915,7 +1822,11 @@ function servicePort(name) {
 
 async function start(name, options = {}) {
   const [program, args] = serviceArguments(name, options);
-  const child = spawn(program, args, { stdio: "ignore", env: options.env });
+  const child = spawn(program, args, {
+    stdio: ["ignore", "ignore", options.log === undefined ? "inherit" : "pipe"],
+    env: options.env,
+  });
+  child.stderr?.setEncoding("utf8").on("data", (text) => options.log.push(text));
   services.set(name, child);
   await waitForHealth(servicePort(name), name === "runtime" ? runtimeHost : "127.0.0.1");
 }

@@ -71,8 +71,29 @@ pub fn materialize(source: &Path, store: &Path) -> Result<String> {
                 fs::set_permissions(&path, fs::Permissions::from_mode(0o440 | file.executable))?;
             }
             set_snapshot_directory_permissions(&temporary)?;
-            crate::filesystem::sync_tree(&temporary)?;
-            fs::rename(&temporary, &destination)?;
+            carillon_installation::filesystem::sync_tree(&temporary)?;
+            match fs::rename(&temporary, &destination) {
+                Ok(()) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::DirectoryNotEmpty
+                    ) =>
+                {
+                    // Another admission published the same content while we captured it.
+                    // Never hide a damaged winner or an unrelated publication failure.
+                    if !fs::symlink_metadata(&destination)?.is_dir()
+                        || selected_resource_files(&destination)? != files
+                    {
+                        bail!(
+                            "resource snapshot {} does not match its content address",
+                            destination.display()
+                        );
+                    }
+                    fs::remove_dir_all(&temporary)?;
+                }
+                Err(error) => return Err(error.into()),
+            }
             Ok(())
         })();
         if let Err(error) = result {
@@ -229,6 +250,40 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{materialize, root};
+
+    #[test]
+    fn concurrent_publication_reuses_the_winner_and_removes_staging() -> anyhow::Result<()> {
+        let source = tempdir()?;
+        let parent = tempdir()?;
+        fs::write(source.path().join("SYSTEM.md"), vec![b'x'; 4 * 1024 * 1024])?;
+        let store = parent.path().join("snapshots");
+        let barrier = std::sync::Barrier::new(8);
+        let ids = std::thread::scope(|scope| -> anyhow::Result<Vec<String>> {
+            let tasks: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        materialize(source.path(), &store)
+                    })
+                })
+                .collect();
+            tasks
+                .into_iter()
+                .map(|task| {
+                    task.join()
+                        .map_err(|_| anyhow::anyhow!("capture thread panicked"))?
+                })
+                .collect()
+        })?;
+        assert!(ids.iter().all(|id| id == &ids[0]));
+        assert_eq!(fs::read_dir(&store)?.count(), 1);
+        super::validate(&ids[0], &store)?;
+        let captured = store.join(&ids[0]).join("SYSTEM.md");
+        fs::set_permissions(&captured, fs::Permissions::from_mode(0o600))?;
+        fs::write(captured, "damaged")?;
+        assert!(materialize(source.path(), &store).is_err());
+        Ok(())
+    }
 
     #[test]
     fn snapshots_refuse_unsupported_entries_instead_of_omitting_them() -> anyhow::Result<()> {

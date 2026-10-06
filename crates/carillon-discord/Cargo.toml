@@ -1,0 +1,50 @@
+[package]
+name = "carillon-discord"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "carillon-discord"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+base64 = "0.22.1"
+carillon-discord-commands = { path = "../carillon-discord-commands" }
+carillon-protocol = { path = "../carillon-protocol" }
+carillon-installation = { path = "../carillon-installation" }
+carillon-wasm = { path = "../carillon-wasm" }
+clap.workspace = true
+emojis = "0.8.2"
+hex.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util"] }
+tokio-util = "0.7.19"
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+twilight-gateway = "0.17.1"
+twilight-http = "0.17.1"
+twilight-model.workspace = true
+twilight-validate = "0.17.0"
+unicode-general-category = "1.1.0"
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+tower = { version = "0.5.2", features = ["util"] }
+wat = "1.254.0"
+
+[lints]
+workspace = true
+
+[[example]]
+name = "model_picker"
+test = true

@@ -1,0 +1,226 @@
+[
+  {
+    "operation": {
+      "action": "server.info"
+    },
+    "mutates": false
+  },
+  {
+    "operation": {
+      "action": "channels.list"
+    },
+    "mutates": false
+  },
+  {
+    "operation": {
+      "action": "channels.get",
+      "channel_id": "2"
+    },
+    "mutates": false
+  },
+  {
+    "operation": {
+      "action": "channels.create",
+      "name": "project",
+      "kind": "text",
+      "parent_id": "4"
+    },
+    "mutates": true
+  },
+  {
+    "operation": {
+      "action": "channels.update",
+      "channel_id": "2",
+      "topic": "Plan"
+    },
+    "mutates": true
+  },
+  {
+    "operation": {
+      "action": "channels.delete",
+      "channel_id": "2"
+    },
+    "mutates": true
+  },
+  {
+    "operation": {
+      "action": "channels.overwrite",
+      "channel_id": "2",
+      "target_id": "1",
+      "kind": "role",
+      "allow": "0",
+      "deny": "1024"
+    },
+    "mutates": true
+  },
+  {
+    "operation": {
+      "action": "channels.remove_overwrite",
+      "channel_id": "2",
+      "target_id": "1",
+      "kind": "role"
+    },
+    "mutates": true
+  },
+  {
+    "operation": {
+      "action": "threads.list"
+    },
+    "mutates": false
+  },
+  {
+    "operation": {
+      "action": "threads.create",
+      "channel_id": "2",
+      "name": "Discuss",
+      "message_id": "5"
+    },
+    "mutates": true
+  },
+  {
+    "operation": {
+      "action": "threads.update",
+      "channel_id": "3",
+      "archived": false
+    },
+    "mutates": true
+  },
+  {
+    "operation": {
+      "action": "messages.list",
+      "channel_id": "2",
+      "limit": 1,
+      "before": "5"
+    },
+    "mutates": false
+  },
+  {
+    "operation": {
+      "action": "messages.get",
+      "channel_id": "2",
+      "message_id": "5"
+    },
+    "mutates": false
+  },
+  {
+    "operation": {
+      "action": "messages.send",
+      "channel_id": "2",
+      "content": "hello",
+      "mention_users": ["6"]
+    },
+    "mutates": true
+  },
+  {
+    "operation": {
+      "action": "messages.edit",
+      "channel_id": "2",
+      "message_id": "5",
+      "content": "edited"
+    },
+    "mutates": true
+  },
+  {
+    "operation": {
+      "action": "messages.delete",
+      "channel_id": "2",
+      "message_id": "5"
+    },
+    "mutates": true
+  },
+  {
+    "operation": {
+      "action": "messages.pin",
+      "channel_id": "2",
+      "message_id": "5",
+      "pinned": true
+    },
+    "mutates": true
+  },
+  {
+    "operation": {
+      "action": "messages.react",
+      "channel_id": "2",
+      "message_id": "5",
+      "emoji": "👍",
+      "add": true
+    },
+    "mutates": true
+  },
+  {
+    "operation": {
+      "action": "roles.list"
+    },
+    "mutates": false
+  },
+  {
+    "operation": {
+      "action": "roles.create",
+      "name": "project",
+      "permissions": "1024"
+    },
+    "mutates": true
+  },
+  {
+    "operation": {
+      "action": "roles.update",
+      "role_id": "7",
+      "color": 42
+    },
+    "mutates": true
+  },
+  {
+    "operation": {
+      "action": "roles.delete",
+      "role_id": "7"
+    },
+    "mutates": true
+  },
+  {
+    "operation": {
+      "action": "members.get",
+      "user_id": "6"
+    },
+    "mutates": false
+  },
+  {
+    "operation": {
+      "action": "members.list",
+      "after": "6",
+      "limit": 2
+    },
+    "mutates": false
+  },
+  {
+    "operation": {
+      "action": "members.role",
+      "user_id": "6",
+      "role_id": "7",
+      "add": true
+    },
+    "mutates": true
+  },
+  {
+    "operation": {
+      "action": "members.timeout",
+      "user_id": "6",
+      "until": null
+    },
+    "mutates": true
+  },
+  {
+    "operation": {
+      "action": "members.kick",
+      "user_id": "6"
+    },
+    "mutates": true
+  },
+  {
+    "operation": {
+      "action": "members.ban",
+      "user_id": "6",
+      "banned": true
+    },
+    "mutates": true
+  }
+]

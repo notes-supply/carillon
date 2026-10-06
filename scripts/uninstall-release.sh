@@ -19,6 +19,28 @@ case "$UNIT_DIR" in /*) ;; *) echo "XDG_CONFIG_HOME must be an absolute path" >&
 APP="$CARILLON_HOME/app"
 APP_MARKER=.carillon-managed
 APP_MARKER_VALUE=carillon-managed-application-v1
+ENTRY=$HOME/.local/bin/carillon
+
+# Serialize with updates and reinstallation of the same installation.
+if [ -d "$CARILLON_HOME" ]; then
+  exec 9>>"$CARILLON_HOME/.maintenance.lock"
+  flock -n 9 || { echo "another Carillon maintenance operation is running for $CARILLON_HOME" >&2; exit 1; }
+fi
+
+# Every installation of this owner shares the user units. Hold their lock,
+# after this installation's, through every service-manager call below,
+# including the reload that finishes an already removed application.
+(umask 077 && mkdir -p -- "$UNIT_DIR" && : >>"$UNIT_DIR/.carillon-units.lock")
+UNIT_DIR=$(realpath -e -- "$UNIT_DIR")
+exec 8>>"$UNIT_DIR/.carillon-units.lock"
+flock -n 8 || { echo "another Carillon operation is changing the user units in $UNIT_DIR" >&2; exit 1; }
+
+# Remove the owner's PATH entry point only when it runs this installation.
+remove_entry_point() {
+  if [ -L "$ENTRY" ] && [ "$(readlink -- "$ENTRY")" = "$APP/bin/carillon" ]; then
+    rm -f -- "$ENTRY"
+  fi
+}
 
 is_managed_app() {
   candidate=$1
@@ -33,6 +55,7 @@ is_managed_app "$APP" || {
   # A crash after the final marker unlink leaves only an empty directory (or no
   # directory). Without the marker, never recurse or remove service definitions.
   if [ ! -L "$APP" ] && { [ ! -e "$APP" ] || rmdir -- "$APP" 2>/dev/null; }; then
+    remove_entry_point
     sync -f -- "$CARILLON_HOME"
     systemctl --user daemon-reload
     printf '%s\n' "Application files already removed. Data remains at $CARILLON_HOME."
@@ -42,7 +65,20 @@ is_managed_app "$APP" || {
   exit 1
 }
 
-if ! systemctl --user disable --now carillon.target; then
+# The user units may run another installation of the same owner; leave them
+# (and its services) alone. The registration script writes this exact line.
+unit_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/%/%%/g'
+}
+OWN_UNITS=1
+if [ -f "$UNIT_DIR/carillon-core.service" ] &&
+  ! grep -Fqx "Environment=\"CARILLON_HOME=$(unit_escape "$CARILLON_HOME")\"" "$UNIT_DIR/carillon-core.service"
+then
+  OWN_UNITS=0
+  echo "Carillon's user units run another installation; leaving them registered."
+fi
+
+if [ "$OWN_UNITS" -eq 1 ] && ! systemctl --user disable --now carillon.target; then
   # An interrupted uninstall can already have removed the definitions. Only
   # confirmed absence/inactivity permits cleanup; manager/stop failures do not.
   # Definitions may be gone while the manager still caches the old unit.
@@ -52,15 +88,18 @@ if ! systemctl --user disable --now carillon.target; then
     active_state=$(systemctl --user show --property=ActiveState --value carillon.target) &&
     [ "$active_state" = inactive ] || exit 1
 fi
-for unit in \
-  carillon.target \
-  carillon-core.service \
-  carillon-runtime-pi.service \
-  carillon-discord.service
-do
-  rm -f "$UNIT_DIR/$unit"
-done
-[ ! -d "$UNIT_DIR" ] || sync -f -- "$UNIT_DIR"
+if [ "$OWN_UNITS" -eq 1 ]; then
+  for unit in \
+    carillon.target \
+    carillon-core.service \
+    carillon-runtime-pi.service \
+    carillon-discord.service
+  do
+    rm -f "$UNIT_DIR/$unit"
+  done
+  [ ! -d "$UNIT_DIR" ] || sync -f -- "$UNIT_DIR"
+fi
+remove_entry_point
 is_managed_app "$APP" || {
   echo "refusing to remove application path after ownership changed: $APP" >&2
   exit 1

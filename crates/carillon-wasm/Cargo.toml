@@ -1,0 +1,18 @@
+[package]
+name = "carillon-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tokio = { workspace = true, features = ["time"] }
+wasmtime = { version = "48.0.4", default-features = false, features = ["anyhow", "async", "cranelift", "runtime"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wat = "1.254.0"
+
+[lints]
+workspace = true

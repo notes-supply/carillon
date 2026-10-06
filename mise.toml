@@ -1,5 +1,5 @@
 [tools]
-rust = { version = "1.98.0", profile = "minimal", components = ["clippy", "rustfmt"] }
+rust = { version = "1.98.0", profile = "minimal", components = ["clippy", "rustfmt"], targets = ["wasm32-unknown-unknown"] }
 node = "26.8.1"
 bun = "1.4.0"
 pnpm = "12.0.0"
@@ -32,16 +32,29 @@ run = [
   "pnpm run check",
 ]
 
+[tasks."build:commands"]
+description = "Build the Discord command module for the Wasm sandbox"
+run = "cargo build --locked --profile wasm -p carillon-discord-commands --target wasm32-unknown-unknown"
+
+[tasks."example:core"]
+description = "Run a durable conversation with temporary SQLite and an in-process test runtime"
+run = "cargo run -p carillon-core --example conversation"
+
+[tasks."example:pi"]
+description = "Run a native Pi conversation directly (requires configured credentials)"
+depends = ["install"]
+run = "bun packages/runtime-pi/examples/session.ts"
+
 [tasks."test:integration"]
 description = "Test local core, Discord, and Pi services together"
-depends = ["install"]
-run = "cargo build --locked --bin carillon && node scripts/test-integration.mjs"
+depends = ["install", "build:commands"]
+run = "cargo build --locked --bin carillon --bin carillon-discord && node scripts/test-integration.mjs"
 
 [tasks."test:persistence"]
 description = "Run Linux syscall fault-injection tests against packaged binaries"
 depends = ["package"]
 run = """
-version=$(bun -e 'import manifest from "./crates/carillon-core/Cargo.toml"; console.log(manifest.package.version)')
+version=$(bun -e 'import manifest from "./Cargo.toml"; console.log(manifest.workspace.package.version)')
 release="target/package/carillon-$version"
 node scripts/test-filesystem.mjs init "$release"
 node scripts/test-filesystem.mjs resources "$release/bin/carillon"
@@ -56,3 +69,7 @@ run = "scripts/package-release.sh"
 description = "Build and test the release installation in a temporary home"
 depends = ["package"]
 run = "scripts/test-install.sh"
+
+[tasks."example:discord"]
+description = "Run Discord admission and model presentation without a gateway"
+run = "cargo run -p carillon-discord --example model_picker"

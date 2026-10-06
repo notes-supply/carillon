@@ -1,0 +1,94 @@
+{
+  "activities": [
+    {
+      "phase": "tools",
+      "headline": "Running the crate's tests first.",
+      "running": [
+        {
+          "tool": "bash",
+          "detail": "cargo test -p carillon-discord --all-targets",
+          "started_at": 1790000000
+        }
+      ],
+      "recent": [
+        {
+          "tool": "read",
+          "detail": "crates/carillon-discord/src/delivery.rs",
+          "ok": true
+        },
+        {
+          "tool": "grep",
+          "detail": "\"fn delivery_loop\" in crates",
+          "ok": false
+        }
+      ],
+      "tool_calls": 7
+    },
+    {
+      "phase": "starting",
+      "running": [],
+      "recent": [],
+      "tool_calls": 0
+    },
+    {
+      "phase": "model",
+      "running": [],
+      "recent": [
+        {
+          "tool": "enable_discord",
+          "ok": true
+        }
+      ],
+      "tool_calls": 1
+    }
+  ],
+  "invalid_activities": [
+    {
+      "phase": "thinking",
+      "running": [],
+      "recent": [],
+      "tool_calls": 0
+    },
+    {
+      "phase": "model",
+      "headline": null,
+      "running": [],
+      "recent": [],
+      "tool_calls": 0
+    },
+    {
+      "phase": "model",
+      "running": [],
+      "recent": [],
+      "tool_calls": -1
+    },
+    {
+      "phase": "tools",
+      "running": [
+        {
+          "tool": "bash",
+          "detail": null,
+          "started_at": 1
+        }
+      ],
+      "recent": [],
+      "tool_calls": 1
+    },
+    {
+      "phase": "tools",
+      "running": [
+        {
+          "tool": "",
+          "started_at": 1
+        }
+      ],
+      "recent": [],
+      "tool_calls": 1
+    },
+    {
+      "phase": "model",
+      "running": [],
+      "tool_calls": 0
+    }
+  ]
+}
