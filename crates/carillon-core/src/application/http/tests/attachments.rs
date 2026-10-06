@@ -827,6 +827,78 @@ async fn files_an_answered_command_left_are_offered_again_until_a_turn_carries_t
     Ok(())
 }
 
+/// What `receipt`'s turn holds, as core offers it to a later turn.
+fn held(state: &AppState, receipt: &EventReceipt) -> Result<UnansweredTurn> {
+    Ok(UnansweredTurn {
+        correlation_id: receipt.turn_id.clone(),
+        attachments: state
+            .core
+            .inspect_turn(&receipt.turn_id)?
+            .context("turn")?
+            .attachments,
+    })
+}
+
+#[tokio::test]
+async fn files_a_command_left_of_its_own_are_offered_to_later_prose() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    // A command with its own file runs as written, without that file.
+    let staged = stage(&state, "command", &[("notes.txt", b"plain notes")])?;
+    let command = submit(&state, event("command", "/compact", staged))
+        .await
+        .map_err(|error| anyhow!(error.message))?;
+    let answered = serde_json::json!({
+        "output": "`/compact` finished.",
+        "attachments_left": true,
+    });
+    assert!(offered_answering(&state, answered).await?.is_empty());
+    // The next message is offered the command's file, and its answer carries it.
+    accept(&state, "prose", "files").await?;
+    assert_eq!(
+        offered(&state, "the notes are plain").await?,
+        vec![held(&state, &command)?]
+    );
+    accept(&state, "later", "files").await?;
+    assert!(offered(&state, "another answer").await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_command_that_left_earlier_and_own_files_leaves_both_for_later_prose() -> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    // A message with a file is interrupted before it is answered.
+    let staged = stage(&state, "photo", &[("photo.png", b"pixels")])?;
+    let photo = submit(&state, event("photo", "look", staged))
+        .await
+        .map_err(|error| anyhow!(error.message))?;
+    assert!(offered(&state, "").await?.is_empty());
+    // A command with a file of its own leaves that file and the earlier one.
+    let staged = stage(&state, "command", &[("notes.txt", b"plain notes")])?;
+    let command = submit(&state, event("command", "/compact", staged))
+        .await
+        .map_err(|error| anyhow!(error.message))?;
+    let answered = serde_json::json!({
+        "output": "`/compact` finished.",
+        "unanswered_left": true,
+        "attachments_left": true,
+    });
+    assert_eq!(
+        offered_answering(&state, answered).await?,
+        vec![held(&state, &photo)?]
+    );
+    // The next message is offered both, oldest first.
+    accept(&state, "prose", "files").await?;
+    assert_eq!(
+        offered(&state, "both are read").await?,
+        vec![held(&state, &photo)?, held(&state, &command)?]
+    );
+    accept(&state, "later", "files").await?;
+    assert!(offered(&state, "another answer").await?.is_empty());
+    Ok(())
+}
+
 #[tokio::test]
 async fn every_file_of_initial_commands_is_offered_until_an_answered_turn_carries_it() -> Result<()>
 {

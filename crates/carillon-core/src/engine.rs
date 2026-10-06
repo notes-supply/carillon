@@ -428,7 +428,11 @@ impl Core {
             let mut response = submit(request).await?;
             validate_response(&correlation_id, &response)?;
             response.activity = kept_report(&turn.turn_id, response.activity.take());
-            let answered = (response.follow_up.is_some(), response.unanswered_left);
+            let answered = (
+                response.follow_up.is_some(),
+                response.unanswered_left,
+                response.attachments_left,
+            );
             let claimed = turn.clone();
             self.blocking(move |core| core.database.complete_turn(&claimed, &response))
                 .await
@@ -441,17 +445,20 @@ impl Core {
         // again; startup recovery then records it as interrupted, or asks an
         // observation again.
         let (error, explanation, activity) = match outcome {
-            Ok((follow_up, unanswered_left)) => {
+            Ok((follow_up, unanswered_left, attachments_left)) => {
                 if follow_up {
                     self.wake(Lane::Observations);
                 }
                 // An answered turn's conversation was saved with everything
-                // it carried: its own files, and the earlier ones unless its
-                // runtime left them for a later turn. Should recording that
+                // it carried: its own files and the earlier ones, unless its
+                // runtime left either for a later turn. Should recording that
                 // fail, the files are offered again and the runtime skips
                 // those it holds.
                 if unanswered_left {
                     carried.truncate(1);
+                }
+                if attachments_left {
+                    carried.retain(|carried| *carried != turn.turn_id);
                 }
                 if !carried.is_empty()
                     && let Err(error) = self
@@ -470,23 +477,13 @@ impl Core {
                 (failure.to_string(), None, None)
             }
             Err(TurnFailure::Reported(reported)) => {
+                let error = reported.diagnostic();
                 let Reported {
-                    status,
                     explanation,
                     activity,
+                    ..
                 } = *reported;
-                (
-                    explanation.as_ref().map_or_else(
-                        || {
-                            format!(
-                                "runtime provider failed the turn with {status} and no explanation"
-                            )
-                        },
-                        |explanation| format!("runtime reported failure: {explanation}"),
-                    ),
-                    explanation,
-                    kept_report(&turn.turn_id, activity),
-                )
+                (error, explanation, kept_report(&turn.turn_id, activity))
             }
         };
         self.interrupt(turn, error.clone(), explanation, activity)
@@ -765,6 +762,21 @@ pub struct Reported {
     pub explanation: Option<String>,
     /// The runtime's final report of what the turn did, when it gave one.
     pub activity: Option<TurnActivity>,
+}
+
+impl Reported {
+    /// The operator's diagnostic of the failure.
+    fn diagnostic(&self) -> String {
+        self.explanation.as_ref().map_or_else(
+            || {
+                format!(
+                    "runtime provider failed the turn with {} and no explanation",
+                    self.status
+                )
+            },
+            |explanation| format!("runtime reported failure: {explanation}"),
+        )
+    }
 }
 
 /// A runtime's final report as core keeps it: one larger than

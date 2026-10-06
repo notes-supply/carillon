@@ -1196,6 +1196,7 @@ mod tests {
                     follow_up: None,
                     unanswered_left: false,
                     activity: None,
+                    attachments_left: false,
                     correlation_id: request.correlation_id,
                 })
             },
@@ -1256,6 +1257,7 @@ mod tests {
                         follow_up: None,
                         unanswered_left: false,
                         activity: None,
+                        attachments_left: false,
                         correlation_id: request.correlation_id,
                     })
                 },

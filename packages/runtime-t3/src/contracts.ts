@@ -50,7 +50,8 @@ export type NativeSelection = Static<typeof NativeSelectionSchema>;
 export const RunSchema = Type.Object({
   id: Id,
   threadId: Id,
-  ordinal: Type.Integer(),
+  /** T3 numbers a thread's runs from one. */
+  ordinal: Type.Integer({ minimum: 1 }),
   userMessageId: Id,
   providerThreadId: Nullable(Id),
   status: RunStatusSchema,

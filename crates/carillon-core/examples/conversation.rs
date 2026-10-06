@@ -1,9 +1,10 @@
 //! A complete durable conversation with no HTTP, Discord or model account.
 use anyhow::{Context as _, Result, ensure};
-use carillon_core::{Core, CoreOptions, Lane, RuntimeProvider, WorkerStep};
+use carillon_core::{Core, CoreOptions, Lane, RuntimeProvider, TurnFailure, WorkerStep};
 use carillon_installation::config::AttachmentLimits;
 use carillon_protocol::model::{
-    DeliveryAck, DeliveryOutcome, ExternalEvent, RuntimeTurnResponse, SelectedProvider, TurnState,
+    DeliveryAck, DeliveryOutcome, ExternalEvent, RuntimeTurnRequest, RuntimeTurnResponse,
+    SelectedProvider, TurnState,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -68,18 +69,7 @@ async fn conversation() -> Result<()> {
         .run_next("echo", Lane::Messages, &stopping, async |request| {
             // Opaque interface data is captured on acceptance, not supplied by a duplicate.
             assert_eq!(request.native, event.native);
-            // This deterministic test runtime is deliberately not Pi. The snapshot is real.
-            let captured = std::fs::read_to_string(
-                std::path::Path::new(&request.resource_root).join("SYSTEM.md"),
-            )
-            .map_err(|error| carillon_core::TurnFailure::Uncertain(error.into()))?;
-            Ok(RuntimeTurnResponse {
-                correlation_id: request.correlation_id,
-                output: format!("{} — {captured}", request.input),
-                follow_up: None,
-                unanswered_left: false,
-                activity: None,
-            })
+            echo(&request)
         })
         .await?;
     ensure!(step == WorkerStep::Advanced, "no turn executed");
@@ -115,6 +105,22 @@ async fn conversation() -> Result<()> {
         serde_json::json!({"state":"completed", "delivery":"delivered", "output":delivery.content})
     );
     Ok(())
+}
+
+/// This deterministic test runtime is deliberately not Pi: it answers with
+/// the input and the instructions of the turn's resource snapshot, which is real.
+fn echo(request: &RuntimeTurnRequest) -> Result<RuntimeTurnResponse, TurnFailure> {
+    let captured =
+        std::fs::read_to_string(std::path::Path::new(&request.resource_root).join("SYSTEM.md"))
+            .map_err(|error| TurnFailure::Uncertain(error.into()))?;
+    Ok(RuntimeTurnResponse {
+        correlation_id: request.correlation_id.clone(),
+        output: format!("{} — {captured}", request.input),
+        follow_up: None,
+        unanswered_left: false,
+        attachments_left: false,
+        activity: None,
+    })
 }
 
 #[tokio::test]

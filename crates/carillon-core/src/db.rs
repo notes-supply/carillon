@@ -1320,6 +1320,7 @@ mod tests {
                 follow_up: None,
                 unanswered_left: false,
                 activity: None,
+                attachments_left: false,
             },
         )?;
         assert_eq!(
@@ -1462,6 +1463,7 @@ mod tests {
                 follow_up: Some(cursor.clone()),
                 unanswered_left: false,
                 activity: None,
+                attachments_left: false,
             },
         )?;
         let answer = database
@@ -1487,6 +1489,7 @@ mod tests {
                 follow_up: None,
                 unanswered_left: false,
                 activity: None,
+                attachments_left: false,
             },
         )
     }
@@ -1518,6 +1521,7 @@ mod tests {
                     output: format!("answer of {}", turn.turn_id),
                     follow_up,
                     unanswered_left: false,
+                    attachments_left: false,
                     activity: Some(report(calls)?),
                 },
             )
@@ -1616,6 +1620,7 @@ mod tests {
                 follow_up: None,
                 unanswered_left: false,
                 activity: None,
+                attachments_left: false,
             },
         )?;
         accept(&database, "two", "conversation")?;
@@ -1634,6 +1639,7 @@ mod tests {
             follow_up: None,
             unanswered_left: false,
             activity: None,
+            attachments_left: false,
         };
         let failure = database
             .complete_turn(&second, &response)
@@ -1754,6 +1760,7 @@ mod tests {
                     follow_up: None,
                     unanswered_left: false,
                     activity: None,
+                    attachments_left: false,
                 },
             )?;
         }
@@ -1820,6 +1827,7 @@ mod tests {
                     follow_up: None,
                     unanswered_left: false,
                     activity: None,
+                    attachments_left: false,
                 },
             )?;
             turns.push(turn.turn_id);
@@ -1891,6 +1899,7 @@ mod tests {
             follow_up: None,
             unanswered_left: false,
             activity: None,
+            attachments_left: false,
         };
         database.complete_turn(&requeued, &response)?;
         assert!(database.complete_turn(&requeued, &response).is_err());

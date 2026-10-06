@@ -676,11 +676,18 @@ export function watchTurn(
       link(message.id, message.delegatedCompletion.parentRunId);
     if (message.role !== "assistant" || message.runId === null || !turnRuns.has(message.runId))
       return;
+    // The turn's answer is ordered by when T3 made each message: one whose
+    // time cannot be read cannot be placed.
+    if (Number.isNaN(madeAt(message)))
+      throw new T3Failure(
+        "malformed",
+        "T3 sent an assistant message this runtime does not understand",
+      );
     assistant.set(message.id, message);
     if (
       latestAssistant === undefined ||
       latestAssistant.id === message.id ||
-      message.createdAt >= latestAssistant.createdAt
+      madeAt(message) >= madeAt(latestAssistant)
     )
       latestAssistant = message;
   }
@@ -1006,7 +1013,7 @@ export function watchTurn(
 
   function answer(): string {
     return [...assistant.values()]
-      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+      .sort((left, right) => madeAt(left) - madeAt(right))
       .map((message) => message.text.trim())
       .filter((text) => text.length > 0)
       .join("\n\n");
@@ -1359,9 +1366,10 @@ export function watchTurn(
               "malformed",
               "T3 sent a thread event this runtime does not understand",
             );
-          // A resumed subscription may replay events already folded.
+          // A resumed subscription may replay events already folded. The
+          // cursor moves past an event only once it is folded or passed over,
+          // never past one refused.
           if (lastSequence !== undefined && sequence <= lastSequence) return;
-          lastSequence = sequence;
           const payload = event["payload"];
           switch (event["type"]) {
             case "run.created":
@@ -1407,8 +1415,10 @@ export function watchTurn(
               foldItem(payload);
               break;
             default:
+              lastSequence = sequence;
               return;
           }
+          lastSequence = sequence;
           classifyWork(executingBefore || ownRunExecuting());
           break;
         }
@@ -1711,6 +1721,11 @@ function openingOf(payload: unknown): readonly [string, Opening] | undefined {
   if (!isRecord(payload) || payload["type"] !== "notification") return undefined;
   const run = payload["runId"];
   return typeof run === "string" && run.length > 0 ? [run, "unknown"] : undefined;
+}
+
+/** When T3 made a message, as an instant: its time may be written with any offset. */
+function madeAt(message: Message): number {
+  return Date.parse(message.createdAt);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
