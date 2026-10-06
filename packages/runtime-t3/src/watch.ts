@@ -257,6 +257,7 @@ export interface WatchOptions {
 }
 
 export function watchTurn(
+  threadId: string,
   messageId: string,
   workspace: string,
   options: WatchOptions = {},
@@ -1189,6 +1190,9 @@ export function watchTurn(
               "T3 sent a thread snapshot this runtime does not understand",
             );
           const { projection, snapshotSequence: sequence, hasMoreHistory } = item;
+          // Nothing of another thread is folded as this turn's.
+          if (projection.thread.id !== threadId)
+            throw new T3Failure("malformed", "T3 sent the snapshot of another thread");
           // A snapshot lists the thread's runs whole: one that omits a run
           // this turn already observed is broken, and is refused before it
           // replaces anything the fold knows.
