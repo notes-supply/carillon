@@ -17,7 +17,12 @@ import {
   type ModelState,
   type ModelUpdate,
 } from "@carillon/protocol";
-import { diagnostic, ExplainedFailure, RuntimeClosed } from "@carillon/runtime/failure";
+import {
+  diagnostic,
+  ExplainedFailure,
+  redactCredentials,
+  RuntimeClosed,
+} from "@carillon/runtime/failure";
 import { validated } from "@carillon/runtime/models";
 import {
   commandFinished,
@@ -842,7 +847,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       } catch (failure) {
         if (!(failure instanceof T3Failure) || failure.kind !== "rejected") throw failure;
         log(
-          `thread ${binding.threadId}: session detach not accepted (${failure.detail ?? failure.message})`,
+          `thread ${binding.threadId}: session detach not accepted (${redactCredentials(failure.detail ?? failure.message)})`,
         );
       }
       return { quiet: false, requestOpen: watch.requestOpen() };
@@ -872,7 +877,9 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       return true;
     } catch (failure) {
       if (!(failure instanceof T3Failure) || failure.kind !== "rejected") throw failure;
-      log(`run ${runId}: queued-run cancel not accepted (${failure.detail ?? failure.message})`);
+      log(
+        `run ${runId}: queued-run cancel not accepted (${redactCredentials(failure.detail ?? failure.message)})`,
+      );
       return false;
     }
   }
@@ -889,7 +896,9 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       return true;
     } catch (failure) {
       if (!(failure instanceof T3Failure) || failure.kind !== "rejected") throw failure;
-      log(`run ${runId}: interrupt not accepted (${failure.detail ?? failure.message})`);
+      log(
+        `run ${runId}: interrupt not accepted (${redactCredentials(failure.detail ?? failure.message)})`,
+      );
       return false;
     }
   }

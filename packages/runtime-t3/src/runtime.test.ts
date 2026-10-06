@@ -925,6 +925,54 @@ it("stops the native run when the runtime closes mid-turn", async () => {
   expect(runOf("turn-1")?.status).toBe("interrupted");
 });
 
+/** A refusal whose nested detail carries credentials and a signed address. */
+const LEAKY =
+  "Authorization: Bearer sk-live-0123456789abcdefghijklmnop; retry at https://t3.example/run?token=abcdef0123456789abcdef&sig=feedfacecafebeef password=hunter2-hunter2";
+const LEAKED = [
+  "sk-live-0123456789abcdefghijklmnop",
+  "abcdef0123456789abcdef",
+  "feedfacecafebeef",
+  "hunter2-hunter2",
+];
+
+function refusalLogged(fragment: string): string {
+  const line = vi
+    .mocked(console.log)
+    .mock.calls.map((call) => String(call[0]))
+    .find((logged) => logged.includes(fragment));
+  if (line === undefined) throw new Error(`nothing logged ${fragment}`);
+  return line;
+}
+
+it("logs T3's refusal of an interrupt without the credentials its detail carries", async () => {
+  fake.reject = (command) => (command.type === "run.interrupt" ? LEAKY : undefined);
+  const result = runtime.executeTurn(turn("turn-1", "work"));
+  await started("turn-1");
+  await runtime.close();
+  await expect(result).rejects.toThrow("T3 runtime is closed");
+  const line = refusalLogged("interrupt not accepted");
+  for (const leaked of LEAKED) expect(line).not.toContain(leaked);
+  expect(line).toContain("[redacted]");
+});
+
+it("logs T3's refusal to withdraw a queued run without the credentials its detail carries", async () => {
+  const first = runtime.executeTurn(turn("turn-1", "hello"));
+  answer(await started("turn-1"), "hi");
+  await first;
+  const person = fake.wake(threadId, "a message typed in the T3 UI");
+  fake.request(threadId, person.id, "tool_approval");
+  fake.reject = (command) => (command.type === "queued-run.cancel" ? LEAKY : undefined);
+  const controller = new AbortController();
+  const queued = runtime.executeTurn(turn("turn-2", "from Discord"), controller.signal);
+  expect((await started("turn-2")).status).toBe("queued");
+  await until(() => runtime.activity("turn-2", "discord-private")?.phase === "queued");
+  controller.abort(new Error("core disconnected"));
+  await expect(queued).rejects.toThrow("core disconnected");
+  const line = refusalLogged("queued-run cancel not accepted");
+  for (const leaked of LEAKED) expect(line).not.toContain(leaked);
+  expect(line).toContain("[redacted]");
+});
+
 it("requests a session detach when cancelled after the roster cleared, before the wake, and reports the stop as unconfirmed", async () => {
   const controller = new AbortController();
   const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
