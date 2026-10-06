@@ -206,7 +206,10 @@ fn status_line(shown: &Shown<'_>, markers: &ActivityMarkers) -> String {
 
 /// What the job's turns did together. Calls are counted across them; the
 /// latest finished calls, notes and agent are shown; work is one row per
-/// native identity, as the latest report of it says.
+/// native identity, as the latest report of it says. A report's count of
+/// work it left out is exact for that report alone: when several reports
+/// have work and any left some out, that work may repeat or show in another
+/// report, so it is said to be not fully observed rather than counted.
 struct Merged<'a> {
     calls: u64,
     recent: Vec<&'a FinishedTool>,
@@ -232,6 +235,7 @@ impl<'a> Merged<'a> {
             partial: false,
         };
         let mut positions = HashMap::new();
+        let (mut summaries, mut omitting) = (0_u32, false);
         for report in all {
             merged.calls += u64::from(report.tool_calls);
             merged.recent.extend(&report.recent);
@@ -239,8 +243,10 @@ impl<'a> Merged<'a> {
             merged.agent = report.agent.as_ref().or(merged.agent);
             merged.partial |= report.partial;
             if let Some(work) = &report.work {
+                summaries += 1;
                 merged.work_partial |= work.partial;
                 merged.work_omitted = work.omitted.map_or(0, |omitted| u64::from(omitted.get()));
+                omitting |= merged.work_omitted > 0;
                 for item in &work.items {
                     if let Some(&index) = positions.get(item.id.as_str()) {
                         merged.work[index] = item;
@@ -250,6 +256,10 @@ impl<'a> Merged<'a> {
                     }
                 }
             }
+        }
+        if summaries > 1 && omitting {
+            merged.work_omitted = 0;
+            merged.work_partial = true;
         }
         // Live work first, then work whose state is unknown, then finished.
         merged.work.sort_by_key(|item| match item.state {

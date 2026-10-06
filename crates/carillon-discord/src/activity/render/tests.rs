@@ -495,6 +495,86 @@ fn work_items_render_generic_bounded_rows_without_provider_knowledge() {
 }
 
 #[test]
+fn work_a_jobs_reports_left_uncounted_is_said_to_be_unobserved_not_totalled() {
+    let markers = ActivityMarkers::default();
+    let report = |items: &[(&str, WorkState)], omitted: u32| {
+        let mut report = tools();
+        report.running.clear();
+        report.work = Some(WorkSummary {
+            items: items
+                .iter()
+                .map(|(id, state)| work(id, WorkKind::Delegation, id, *state))
+                .collect(),
+            partial: false,
+            omitted: NonZeroU32::new(omitted),
+        });
+        report
+    };
+    let work_of = |earlier: &TurnActivity, latest: &TurnActivity| {
+        let embed = card(&live(latest, vec![earlier]), &markers);
+        field(&embed, "Work").map(|work| work.lines().map(str::to_owned).collect::<Vec<_>>())
+    };
+    let unobserved = "⚠️ … additional work not fully observed";
+    let (running, done) = (WorkState::Running, WorkState::Succeeded);
+    // Work an earlier report left uncounted is not forgotten by a later
+    // report that omits nothing, nor counted by it.
+    let earlier = report(&[("a", running)], 3);
+    assert_eq!(
+        work_of(&earlier, &report(&[("b", done)], 0)),
+        Some(vec![
+            "↳ delegation `a` · running".to_owned(),
+            "✓ delegation `b` · done".to_owned(),
+            unobserved.to_owned(),
+        ])
+    );
+    // Reports that each omit some work make no sum or maximum of it: the
+    // hidden work may be the same, or shown by another report.
+    assert_eq!(
+        work_of(&report(&[("a", running)], 2), &report(&[("a", done)], 2)),
+        Some(vec![
+            "✓ delegation `a` · done".to_owned(),
+            unobserved.to_owned()
+        ])
+    );
+    let recovered = work_of(
+        &report(&[("a", running)], 1),
+        &report(&[("a", done), ("b", done)], 0),
+    );
+    assert_eq!(
+        recovered,
+        Some(vec![
+            "✓ delegation `a` · done".to_owned(),
+            "✓ delegation `b` · done".to_owned(),
+            unobserved.to_owned(),
+        ])
+    );
+    // Known work beyond the shown rows is still counted exactly.
+    let first = [
+        ("g0", done),
+        ("g1", done),
+        ("g2", done),
+        ("g3", done),
+        ("g4", done),
+    ];
+    let second = [("h0", done), ("h1", done), ("h2", done)];
+    let lines = work_of(&report(&first, 2), &report(&second, 0)).unwrap_or_default();
+    assert_eq!(
+        lines[6..],
+        ["⏳ … and 2 more".to_owned(), unobserved.to_owned()]
+    );
+    // One report's own count is exact, beside reports with no work at all.
+    let mut workless = tools();
+    workless.work = None;
+    assert_eq!(
+        work_of(&workless, &report(&[("a", running)], 5)),
+        Some(vec![
+            "↳ delegation `a` · running".to_owned(),
+            "⏳ … and 5 more".to_owned(),
+        ])
+    );
+}
+
+#[test]
 fn markers_are_configured_per_row_and_empty_ones_leave_no_space() {
     let custom = ActivityMarkers {
         working: "<a:working:101>".to_owned(),
