@@ -25,7 +25,10 @@ use axum::http::StatusCode;
 use carillon_protocol::model::{EventReceipt, EventStatus, ExternalEvent};
 use serde_json::Value;
 use std::{future::pending, sync::Arc, time::Duration};
-use tokio::time::{Instant, sleep, sleep_until, timeout};
+use tokio::{
+    sync::Semaphore,
+    time::{Instant, sleep, sleep_until, timeout},
+};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use twilight_http::Client as DiscordHttp;
@@ -62,6 +65,9 @@ pub(crate) struct Ingress {
     pub(crate) participation: Arc<Participation>,
     pub(crate) http: Arc<DiscordHttp>,
     pub(crate) downloads: Arc<Downloads>,
+    /// Overload replies being sent at once, for the lanes and the gateway
+    /// alike; beyond them refusals are only logged.
+    pub(crate) refusals: Arc<Semaphore>,
     /// Cancelled when the provider stops: work not yet handed to core ends,
     /// and a submission core may have received is settled first.
     pub(crate) stopping: CancellationToken,

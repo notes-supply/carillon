@@ -50,7 +50,7 @@ use std::{path::Path, sync::Arc, time::Duration};
 use tokio::{
     net::TcpListener,
     signal::unix::{SignalKind, signal},
-    sync::mpsc,
+    sync::{Semaphore, mpsc},
     time::{Instant, sleep, timeout, timeout_at},
 };
 use tokio_util::sync::CancellationToken;
@@ -233,9 +233,10 @@ async fn connect(
         participation: state.participation.clone(),
         http: http.clone(),
         downloads: state.downloads.clone(),
+        refusals: Arc::new(Semaphore::new(lanes::REFUSALS)),
         stopping: stopping.clone(),
     });
-    let dispatcher = tokio::spawn(lanes::dispatch(ingress, receiver));
+    let dispatcher = tokio::spawn(lanes::dispatch(ingress.clone(), receiver));
     let mut terminate = signal(SignalKind::terminate()).context("handle termination")?;
     let router = discord_router(state.clone(), false);
     let (outcomes, observed) = mpsc::unbounded_channel();
@@ -258,7 +259,7 @@ async fn connect(
     let mut delivering = true;
     let outcome = tokio::select! {
         result = axum::serve(listener, router).into_future() => result.map_err(Into::into),
-        result = gateway_loop(state, discord_token, messages) => {
+        result = gateway_loop(state, discord_token, messages, ingress) => {
             result.context("Discord gateway stopped")
         },
         result = &mut deliveries => {
@@ -636,6 +637,7 @@ async fn gateway_loop(
     state: DiscordState,
     token: String,
     messages: mpsc::Sender<QueuedMessage>,
+    ingress: Arc<Ingress>,
 ) -> Result<()> {
     let intents = Intents::GUILDS | Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT;
     let mut shard = Shard::new(ShardId::ONE, token, intents);
@@ -676,23 +678,7 @@ async fn gateway_loop(
                         .collect(),
                 };
                 let native = native_message(&message);
-                if let Err(refused) = queue_message(&messages, QueuedMessage { request, native })? {
-                    warn!(
-                        channel = %refused.request.channel_id,
-                        message = %refused.request.event_id,
-                        "Discord message refused: the message queue is full"
-                    );
-                    if let Some(app) = state.app.clone() {
-                        let discord = state.discord.clone();
-                        tokio::spawn(async move {
-                            let source = format!(
-                                "{}:{}",
-                                refused.request.channel_id, refused.request.event_id
-                            );
-                            terminal_feedback(&app.http, &discord, &source, Feedback::Failed).await;
-                        });
-                    }
-                }
+                queue_or_refuse(&messages, &ingress, QueuedMessage { request, native })?;
             }
             Event::InteractionCreate(interaction) => {
                 // Interactions are independent of message order and of each
@@ -754,6 +740,20 @@ fn strip_attachment_addresses(value: &mut Value) {
 /// keep reading so heartbeats and interactions go on while the worker is
 /// retrying; a message that finds the queue full is returned refused, and
 /// the person who sent it is told it failed rather than left waiting.
+/// Hands a gateway message to the lanes. One that finds their queue full is
+/// refused as overload, as one beyond a lane's bound is: only a message
+/// admission would activate is answered, within the shared refusal bound.
+pub(crate) fn queue_or_refuse(
+    messages: &mpsc::Sender<QueuedMessage>,
+    ingress: &Arc<Ingress>,
+    inbound: QueuedMessage,
+) -> Result<()> {
+    if let Err(refused) = queue_message(messages, inbound)? {
+        lanes::refuse_overloaded(ingress, refused.request);
+    }
+    Ok(())
+}
+
 fn queue_message(
     messages: &mpsc::Sender<QueuedMessage>,
     inbound: QueuedMessage,

@@ -285,6 +285,7 @@ fn ingress(
         )?),
         http: world.http.clone(),
         config,
+        refusals: Arc::new(tokio::sync::Semaphore::new(lanes::REFUSALS)),
         stopping: tokio_util::sync::CancellationToken::new(),
     }))
 }
@@ -792,9 +793,9 @@ async fn overload_replies_only_to_messages_admission_would_activate() -> Result<
         )?),
         http: world.http.clone(),
         config,
+        refusals: Arc::new(tokio::sync::Semaphore::new(lanes::REFUSALS)),
         stopping: tokio_util::sync::CancellationToken::new(),
     });
-    let refusals = Arc::new(tokio::sync::Semaphore::new(4));
     for ignored in [
         // A mention route, not mentioned.
         message("80", "300", "200", "just chatting", Vec::new()),
@@ -803,11 +804,10 @@ async fn overload_replies_only_to_messages_admission_would_activate() -> Result<
         // Not allowlisted.
         message("82", "301", "999", "hello", Vec::new()),
     ] {
-        lanes::refuse_overloaded(&ingress, &refusals, ignored.request);
+        lanes::refuse_overloaded(&ingress, ignored.request);
     }
     lanes::refuse_overloaded(
         &ingress,
-        &refusals,
         message("83", "301", "200", "hello", Vec::new()).request,
     );
     for _ in 0..200 {
@@ -821,6 +821,44 @@ async fn overload_replies_only_to_messages_admission_would_activate() -> Result<
                 trace.iter().any(|entry| entry.contains("too busy")),
                 "{trace:?}"
             );
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    Err(anyhow!("no overload refusal for an activated message"))
+}
+
+#[tokio::test]
+async fn a_full_gateway_queue_refuses_only_messages_admission_would_activate() -> Result<()> {
+    let world = world(Vec::new(), Vec::new()).await?;
+    let mut config = channel_config();
+    config.routes[0].activation = DiscordActivation::Mention;
+    let ingress = ingress(&world, config, 0)?;
+    // The lanes' queue is full: one message waits in it.
+    let (send, _receive) = mpsc::channel(1);
+    crate::application::queue_or_refuse(
+        &send,
+        &ingress,
+        message("90", "301", "200", "first", Vec::new()),
+    )?;
+    for queued in [
+        // A mention route, not mentioned: ordinary chatter.
+        message("91", "300", "200", "just chatting", Vec::new()),
+        // A channel that is no route.
+        message("92", "999", "200", "hello", Vec::new()),
+        // A message the agent would answer.
+        message("93", "301", "200", "hello", Vec::new()),
+    ] {
+        crate::application::queue_or_refuse(&send, &ingress, queued)?;
+    }
+    for _ in 0..200 {
+        let trace = trace(&world)?;
+        if trace
+            .iter()
+            .any(|entry| entry.contains("/messages/93/reactions/"))
+        {
+            assert!(trace.iter().all(|entry| entry.contains("93")), "{trace:?}");
+            assert!(explanation(&trace, "93")?.contains("too busy"), "{trace:?}");
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(10)).await;

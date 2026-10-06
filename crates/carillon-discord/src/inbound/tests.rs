@@ -39,6 +39,7 @@ pub(crate) fn ingress(
         config,
         participation,
         http,
+        refusals: Arc::new(tokio::sync::Semaphore::new(super::lanes::REFUSALS)),
         stopping: tokio_util::sync::CancellationToken::new(),
     }))
 }
