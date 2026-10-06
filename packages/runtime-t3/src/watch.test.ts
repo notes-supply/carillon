@@ -1844,6 +1844,48 @@ it("follows a resumed snapshot's continuation by its message link, and fails whe
   expect(lost.outcome()).toMatchObject({ kind: "failed" });
 });
 
+it("refuses a resumed snapshot that omits a follow-up's parent run, keeping what it knew", () => {
+  const delegated = (runs: unknown[]) => ({ runs, subagents: [task("task-1", "running")] });
+  // The follow-up owns no run until T3 starts a continuation: only the parent
+  // run it observed identifies the work it reports.
+  const follow = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
+  follow.apply(snapshot(delegated([run("completed")])));
+  expect(follow.run()?.id).toBe("run-1");
+  expect(follow.outcome()).toBeUndefined();
+  // A snapshot lists runs whole: one that omits the observed parent is
+  // refused before it replaces anything.
+  follow.resubscribing();
+  expect(() =>
+    follow.apply(snapshot(delegated([run("completed", "someone-else", 2)]), 900)),
+  ).toThrow("T3 sent a thread snapshot that omits run run-1 this turn observed");
+  expect(follow.sequence()).toBe(1);
+  expect(follow.synchronized()).toBe(false);
+  // One that lists it resumes the fold, and the continuation T3 starts for
+  // the work is still the follow-up's.
+  follow.apply(snapshot(delegated([run("completed"), run("completed", "someone-else", 2)]), 900));
+  expect(follow.sequence()).toBe(900);
+  follow.apply(
+    event(
+      901,
+      "subagent.updated",
+      task("task-1", "completed", "run-1", { completionDelivery: { state: "claimed" } }),
+    ),
+  );
+  follow.apply(
+    event(902, "run.updated", {
+      ...run("completed"),
+      delegatedCompletion: { disposition: "open", delivery: { messageId: "continuation-1" } },
+    }),
+  );
+  follow.apply(event(903, "run.created", run("running", "continuation-1", 3)));
+  expect(follow.activeRun()?.id).toBe("run-3");
+  follow.apply(
+    event(904, "message.updated", reply("c", "run-3", "Reported.", "2026-10-06T08:00:00Z")),
+  );
+  follow.apply(event(905, "run.updated", run("completed", "continuation-1", 3)));
+  expect(follow.outcome()).toMatchObject({ kind: "completed", output: "Reported." });
+});
+
 it("links a continuation queued behind its active parent, or announced only after it was seen", () => {
   const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(snapshot({ runs: [run("running")] }));

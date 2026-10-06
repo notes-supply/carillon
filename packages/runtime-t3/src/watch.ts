@@ -1202,9 +1202,11 @@ export function watchTurn(
             throw new T3Failure("malformed", "T3 sent the snapshot of another thread");
           for (const run of projection.runs) ofThread(run);
           // A snapshot lists the thread's runs whole: one that omits a run
-          // this turn already observed is broken, and is refused before it
-          // replaces anything the fold knows.
-          for (const id of turnRuns.keys())
+          // this turn already observed, its own or a follow-up's parent, is
+          // broken, and is refused before it replaces anything the fold knows.
+          const observed = new Set(turnRuns.keys());
+          if (anchor !== undefined) observed.add(anchor.id);
+          for (const id of observed)
             if (!projection.runs.some((run) => run.id === id))
               throw new T3Failure(
                 "malformed",
