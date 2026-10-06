@@ -686,7 +686,11 @@ export function watchTurn(
     }
     // Only the turn's own items of the kinds this runtime reads are checked and kept.
     if (typeof type !== "string" || !KNOWN_ITEMS.has(type)) return;
-    if (typeof runId !== "string" || !turnRuns.has(runId)) return;
+    // Such an item names its run or none; naming it any other way, it cannot
+    // be passed over as another run's.
+    if (runId !== null && (typeof runId !== "string" || runId.length === 0))
+      throw new T3Failure("malformed", `T3 sent a ${type} item this runtime does not understand`);
+    if (runId === null || !turnRuns.has(runId)) return;
     const item = parsed(TurnItemSchema, payload, `${type} item`);
     if (item.runId === null) return;
     switch (item.type) {
