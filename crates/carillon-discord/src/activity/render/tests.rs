@@ -575,6 +575,51 @@ fn work_a_jobs_reports_left_uncounted_is_said_to_be_unobserved_not_totalled() {
 }
 
 #[test]
+fn an_agent_the_runtime_said_nothing_of_shows_no_agent_section() {
+    let markers = ActivityMarkers::default();
+    let mut activity = tools();
+    activity.work = Some(WorkSummary {
+        items: vec![work("a", WorkKind::Delegation, "child", WorkState::Running)],
+        partial: false,
+        omitted: None,
+    });
+    let agent_of = |agent: AgentInfo| {
+        let mut activity = activity.clone();
+        activity.agent = Some(agent);
+        let embed = card(&live(&activity, Vec::new()), &markers);
+        // Discord's limits, as Twilight checks them, allow either way.
+        valid(&embed);
+        (field(&embed, "Agent").map(str::to_owned), embed)
+    };
+    // Valid metadata with no facts in it shows no section; the rest stays.
+    let (agent, embed) = agent_of(AgentInfo::default());
+    assert!(field(&embed, "Calls").is_some() && field(&embed, "Work").is_some());
+    assert_eq!(agent, None);
+    // Any fact it has is shown, a context of no tokens included.
+    let model = AgentInfo {
+        model: Some("claude-sonnet-5".to_owned()),
+        ..AgentInfo::default()
+    };
+    assert_eq!(agent_of(model).0.as_deref(), Some("claude-sonnet-5"));
+    let effort = AgentInfo {
+        effort: Some("low".to_owned()),
+        ..AgentInfo::default()
+    };
+    assert_eq!(agent_of(effort).0.as_deref(), Some("effort low"));
+    let empty_context = AgentInfo {
+        context: Some(ContextUse {
+            used: 0,
+            window: None,
+        }),
+        ..AgentInfo::default()
+    };
+    assert_eq!(
+        agent_of(empty_context).0.as_deref(),
+        Some("context ≈ 0 tokens")
+    );
+}
+
+#[test]
 fn markers_are_configured_per_row_and_empty_ones_leave_no_space() {
     let custom = ActivityMarkers {
         working: "<a:working:101>".to_owned(),

@@ -122,7 +122,9 @@ pub(super) fn card(shown: &Shown<'_>, markers: &ActivityMarkers) -> Embed {
     );
     field("Calls", call_lines(&merged, shown.live, markers));
     field("Work", work_lines(&merged, markers));
-    field("Agent", merged.agent.map(agent_line).into_iter().collect());
+    // Metadata that states no fact shows no section.
+    let agent = merged.agent.map(agent_line).filter(|line| !line.is_empty());
+    field("Agent", agent.into_iter().collect());
     Embed {
         author: None,
         color: None,
