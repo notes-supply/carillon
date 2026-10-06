@@ -1104,6 +1104,56 @@ async fn stopping_settles_what_core_may_hold_and_drops_the_rest() -> Result<()> 
     Ok(())
 }
 
+#[tokio::test]
+async fn stopping_settles_text_submissions_and_tells_senders_what_core_lacks() -> Result<()> {
+    let (cdn, _) = serve_cdn(HashMap::new()).await?;
+    let world = world(Vec::new(), Vec::new()).await?;
+    // Core answers no submission of either text: it accepted the first all
+    // the same, while the second never reached it.
+    script(&world, |core| {
+        core.unavailable = vec!["130".to_owned(), "131".to_owned()];
+        core.received.insert("130".to_owned(), 0);
+    })?;
+    let ingress = ingress(&world, channel_config(), cdn)?;
+    let stopping = ingress.stopping.clone();
+    let (send, receive) = mpsc::channel(lanes::MAX_PENDING);
+    for queued in [
+        message("130", "300", "200", "accepted", Vec::new()),
+        message("131", "301", "200", "never received", Vec::new()),
+        message("132", "300", "200", "waiting", Vec::new()),
+    ] {
+        send.send(queued).await?;
+    }
+    let dispatcher = tokio::spawn(lanes::dispatch(ingress, receive));
+    for _ in 0..2000 {
+        let trace = trace(&world)?;
+        if ["submit 130", "submit 131"]
+            .iter()
+            .all(|submitted| trace.iter().any(|entry| entry == submitted))
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    stopping.cancel();
+    tokio::time::timeout(Duration::from_secs(20), dispatcher).await??;
+    let trace = trace(&world)?;
+    // Each text handed to core is settled by asking core: the accepted one
+    // is left to its answer, the other's sender is told.
+    position(&trace, "status 130")?;
+    position(&trace, "status 131")?;
+    assert!(explanation(&trace, "130").is_err(), "{trace:?}");
+    let stopped = explanation(&trace, "131")?;
+    assert!(stopped.contains("restarting"), "{stopped}");
+    // The waiting message is dropped, as before.
+    assert!(
+        !trace.iter().any(|entry| entry == "submit 132"),
+        "{trace:?}"
+    );
+    drop(send);
+    Ok(())
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_conversation_attempt_stalled_in_discords_answer_is_bounded() -> Result<()> {
     // Looking up the message's thread, Discord answers but never finishes

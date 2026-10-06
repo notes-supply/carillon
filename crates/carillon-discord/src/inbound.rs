@@ -163,6 +163,10 @@ pub(crate) async fn prepare(ingress: &Ingress, mut inbound: QueuedMessage) {
 async fn prepare_text(ingress: &Ingress, plan: MessagePlan) {
     let (discord, http) = (&ingress.config, &*ingress.http);
     let source = format!("{}:{}", plan.channel_id, plan.message_id);
+    let stopped = async || {
+        explain(http, &source, &ingress.unfinished().0).await;
+        terminal_feedback(http, discord, &source, Feedback::Failed).await;
+    };
     let opened = ingress
         .retry(None, "prepare a Discord conversation", || {
             prepare_conversation(&ingress.participation, &ingress.http, plan.clone())
@@ -175,19 +179,17 @@ async fn prepare_text(ingress: &Ingress, plan: MessagePlan) {
             terminal_feedback(http, discord, &source, Feedback::Failed).await;
             return;
         }
-        None => return,
+        None => {
+            stopped().await;
+            return;
+        }
     };
     processing_feedback(http, discord, &resolved.event.feedback_target_id).await;
     trigger_typing(http, discord, &resolved.event.delivery_target_id).await;
-    // Accepting text is a single step in core; a submission cut short by
-    // the provider stopping either happened or did not.
-    let Some(receipt) = ingress
-        .until(
-            None,
-            submit_event_with_retry(&ingress.core, &resolved.event),
-        )
-        .await
+    let Some(receipt) =
+        submit_event_with_retry(&ingress.core, &resolved.event, &ingress.stopping).await
     else {
+        stopped().await;
         return;
     };
     match receipt {
@@ -383,18 +385,30 @@ fn refusal(failure: &InterfaceError) -> Refusal {
     )
 }
 
+/// Submit an event until core answers, retrying transport failures with the
+/// same event identity. Once the provider stops no attempt starts, and one
+/// already made is settled by asking core: `None` when the provider stopped
+/// and core does not report holding the event.
 pub(crate) async fn submit_event_with_retry(
     core: &CoreClient,
     event: &ExternalEvent,
-) -> Result<EventReceipt, InterfaceError> {
-    loop {
+    stopping: &CancellationToken,
+) -> Option<Result<EventReceipt, InterfaceError>> {
+    let mut submitted = false;
+    while !stopping.is_cancelled() {
+        submitted = true;
         match core.submit_event(event).await {
             Err(failure) if failure.is_transient() => {
                 warn!(error = %failure.message, event_id = %event.event_id, "waiting to submit Discord event");
-                sleep(RETRY).await;
+                let _ = timeout(RETRY, stopping.cancelled()).await;
             }
-            outcome => return outcome,
+            outcome => return Some(outcome),
         }
+    }
+    if submitted {
+        known_receipt(core, &event.event_id).await.map(Ok)
+    } else {
+        None
     }
 }
 

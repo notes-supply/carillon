@@ -20,6 +20,7 @@ use std::{
     },
     time::Duration,
 };
+use tokio_util::sync::CancellationToken;
 
 /// Message preparation with staging under `directory`.
 pub(crate) fn ingress(
@@ -88,9 +89,10 @@ async fn discord_retries_ambiguous_submission_with_the_same_event_id() -> anyhow
 
     let receipt = tokio::time::timeout(
         Duration::from_secs(2),
-        submit_event_with_retry(&core, &event),
+        submit_event_with_retry(&core, &event, &CancellationToken::new()),
     )
     .await?
+    .context("stopped")?
     .map_err(|failure| anyhow!(failure.message))?;
     server.abort();
 
@@ -164,13 +166,15 @@ async fn interrupted_success_receipt_recovers_the_committed_turn() -> anyhow::Re
     });
     let outcome = tokio::time::timeout(
         Duration::from_secs(3),
-        submit_event_with_retry(&core, &event),
+        submit_event_with_retry(&core, &event, &CancellationToken::new()),
     )
     .await;
-    if !matches!(&outcome, Ok(Ok(_))) {
+    if !matches!(&outcome, Ok(Some(Ok(_)))) {
         server.abort();
     }
-    let receipt = outcome?.map_err(|failure| anyhow!(failure.message))?;
+    let receipt = outcome?
+        .context("stopped")?
+        .map_err(|failure| anyhow!(failure.message))?;
     tokio::time::timeout(Duration::from_secs(3), server).await???;
     assert!(receipt.duplicate);
     assert_eq!(receipt.turn_id, "committed");
@@ -318,11 +322,14 @@ async fn complete_invalid_receipt_is_not_retried_forever() -> anyhow::Result<()>
     };
     let outcome = tokio::time::timeout(
         Duration::from_secs(2),
-        submit_event_with_retry(&core, &event),
+        submit_event_with_retry(&core, &event, &CancellationToken::new()),
     )
     .await;
     server.abort();
-    let failure = outcome?.err().context("invalid receipt was accepted")?;
+    let failure = outcome?
+        .context("stopped")?
+        .err()
+        .context("invalid receipt was accepted")?;
     assert!(!failure.is_transient());
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
     Ok(())
