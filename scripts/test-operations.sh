@@ -1,6 +1,10 @@
 #!/bin/sh
 set -eu
 
+# Log assertions below require the normal startup messages, regardless of the
+# invoking shell's logging filter. This affects only the test's child services.
+export RUST_LOG=carillon=info
+
 # Everyday operation of installed releases through the owner's PATH entry point:
 # installation resolution, service control, logs, provider commands, and
 # configuration-preserving updates with their refusals and failures. The user
