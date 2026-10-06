@@ -1134,6 +1134,59 @@ async fn interruption_allows_the_next_message_without_replaying() -> Result<()> 
     Ok(())
 }
 
+#[tokio::test]
+async fn a_stopping_worker_settles_its_turn_and_claims_no_other() -> Result<()> {
+    let directory = tempdir()?;
+    let mut state = installation(directory.path())?;
+    let held = accept(&state, "held", "first").await?;
+    let queued = accept(&state, "queued", "second").await?;
+    // The runtime answers a turn only once released, counting its calls.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (called, release) = (
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(tokio::sync::Notify::new()),
+    );
+    let app = Router::new().route(
+        "/v1/turns",
+        post({
+            let (calls, called, release) = (calls.clone(), called.clone(), release.clone());
+            move |Json(request): Json<Value>| async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                called.notify_one();
+                release.notified().await;
+                Json(json!({"output": "answered", "correlation_id": request["correlation_id"]}))
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    state.config.value.providers[1].url = format!("http://{}", listener.local_addr()?);
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let stopping = CancellationToken::new();
+    let worker = tokio::spawn(runtime_worker(
+        configured(&state),
+        "test-runtime".to_owned(),
+        stopping.clone(),
+    ));
+    tokio::time::timeout(Duration::from_secs(5), called.notified()).await?;
+    // Shutdown begins while the first turn runs.
+    stopping.cancel();
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), worker).await??;
+    server.abort();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let state_of = |turn: &str| -> Result<TurnState> {
+        Ok(state
+            .core
+            .inspect_turn(turn)?
+            .context("missing turn")?
+            .state)
+    };
+    // The held turn settled; the queued one waits for the next start.
+    assert_eq!(state_of(&held.turn_id)?, TurnState::Completed);
+    assert_eq!(state_of(&queued.turn_id)?, TurnState::Queued);
+    Ok(())
+}
+
 /// A runtime serving `/v1/turns` with a fixed failure response, counting calls.
 async fn failing_runtime(
     state: &AppState,

@@ -149,7 +149,7 @@ Pi keeps Carillon's selections in `pi/model-selection.json` beside its private s
 
 1. An interface provider authenticates and admits an external event.
 2. Core durably records the accepted event as a queued turn, capturing the current agent resources and any attached files, then returns a queued receipt.
-3. Core runs a worker for each enabled runtime, including non-default owners of accepted work. Each claims its next eligible turn and marks it running.
+3. Core runs a worker for each enabled runtime, including non-default owners of accepted work. Each claims its next eligible turn and marks it running. Once core begins to stop, its workers claim no further turn, and core waits for a turn already running to settle before it exits.
 4. The runtime attempts execution. Carillon does not guarantee exactly-once model or tool side effects.
 5. On success, core atomically stores completed output and a delivery intent.
 6. The interface provider claims and sends that delivery, then records delivered or uncertain status.

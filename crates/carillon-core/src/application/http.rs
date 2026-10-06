@@ -29,6 +29,7 @@ use reqwest::{Client, RequestBuilder, Url};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::{
@@ -153,6 +154,8 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
         core,
         client: Client::new(),
     };
+    // Cancelled as shutdown begins: workers then claim no further turn.
+    let stopping = CancellationToken::new();
     let mut workers = tokio::task::JoinSet::new();
     for runtime in config
         .value
@@ -160,9 +163,8 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
         .iter()
         .filter(|provider| provider.role == ProviderRole::Runtime && provider.enabled)
     {
-        let runtime_id = runtime.id.clone();
-        let worker = state.clone();
-        workers.spawn(async move { runtime_worker(worker, runtime_id).await });
+        let (runtime_id, worker, stopping) = (runtime.id.clone(), state.clone(), stopping.clone());
+        workers.spawn(async move { runtime_worker(worker, runtime_id, stopping).await });
     }
 
     let router = Router::new()
@@ -180,12 +182,19 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
         .with_state(state.clone());
     info!(listen = %config.value.core.listen, "Carillon core ready");
     let served = axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown(state.core.clone()))
+        .with_graceful_shutdown(shutdown(state.core.clone(), stopping.clone()))
         .await;
     // The caller releases the service lock when this returns, however the
-    // server ended; no copy may still be publishing then.
+    // server ended: no copy may still be publishing then, and no worker may
+    // still hold a turn, which settles rather than being dropped.
+    stopping.cancel();
     state.core.stop_capturing();
     state.core.captures_settled().await;
+    while let Some(worker) = workers.join_next().await {
+        if let Err(error) = worker {
+            error!(%error, "runtime worker ended abnormally");
+        }
+    }
     served?;
     Ok(())
 }
@@ -404,8 +413,10 @@ async fn runtime_activity(
     })
 }
 
-async fn runtime_worker(state: AppState, runtime_id: String) {
-    loop {
+/// Runs a runtime's turns until `stopping` is cancelled. A turn already
+/// claimed runs to its outcome; none is claimed after the cancellation.
+async fn runtime_worker(state: AppState, runtime_id: String, stopping: CancellationToken) {
+    while !stopping.is_cancelled() {
         let delay = match run_next_turn(&state, &runtime_id, async |runtime, token, request| {
             call_runtime(&state.client, runtime, token, request).await
         })
@@ -419,7 +430,9 @@ async fn runtime_worker(state: AppState, runtime_id: String) {
                 Duration::from_secs(1)
             }
         };
-        tokio::time::sleep(delay).await;
+        stopping
+            .run_until_cancelled(tokio::time::sleep(delay))
+            .await;
     }
 }
 
@@ -671,7 +684,7 @@ fn selected_provider(provider: &Provider) -> SelectedProvider {
 }
 
 /// Interrupt or termination, as the service manager stops core.
-async fn shutdown(core: Core) {
+async fn shutdown(core: Core, stopping: CancellationToken) {
     let terminated = async {
         match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
             Ok(mut terminate) => {
@@ -691,6 +704,8 @@ async fn shutdown(core: Core) {
         }
         () = terminated => {}
     }
-    // Waiting submissions then answer promptly; interfaces retry them.
+    // No turn is claimed after this; waiting submissions answer promptly,
+    // and interfaces retry them.
+    stopping.cancel();
     core.stop_capturing();
 }
