@@ -3608,3 +3608,47 @@ it("says which model, effort and context the turn's run uses, as T3 records them
   expect(watch.activity().agent).toEqual({ model: "gpt-6", effort: "xhigh" });
   expect(Check(TurnActivitySchema, watch.activity())).toBe(true);
 });
+
+it("dates a call and background work when the fold first sees them, so reading activity changes nothing", () => {
+  vi.useFakeTimers();
+  try {
+    vi.setSystemTime(new Date("2026-10-04T08:00:00Z"));
+    const watch = watchTurn("thread", "message-1", "/workspace");
+    const listing = (tasks: { taskId: string; kind: string; description?: string }[]) => ({
+      id: "provider-thread",
+      providerSessionId: "session",
+      pendingBackgroundTasks: tasks,
+    });
+    const call = item("command_execution", "run-1", { input: "make", startedAt: null }, "running");
+    watch.apply(snapshot({ runs: [run("running")], turnItems: [call] }));
+    watch.apply(
+      event(
+        2,
+        "provider-thread.updated",
+        listing([{ taskId: "bg", kind: "command", description: "sleep 300" }]),
+      ),
+    );
+    const seenAt = Math.floor(Date.parse("2026-10-04T08:00:00Z") / 1000);
+    // Read a minute later, and again: both show when the fold saw the work.
+    vi.setSystemTime(new Date("2026-10-04T08:01:00Z"));
+    const first = watch.activity();
+    vi.setSystemTime(new Date("2026-10-04T08:02:00Z"));
+    expect(watch.activity()).toEqual(first);
+    expect(first.running).toEqual([
+      { tool: "bash", detail: "make", started_at: seenAt, estimated: true },
+      { tool: "command", detail: "sleep 300", started_at: seenAt, estimated: true },
+    ]);
+    // Work no longer listed is forgotten as it goes: listed again, it is new.
+    watch.apply(event(3, "provider-thread.updated", listing([])));
+    watch.apply(
+      event(
+        4,
+        "provider-thread.updated",
+        listing([{ taskId: "bg", kind: "command", description: "sleep 300" }]),
+      ),
+    );
+    expect(watch.activity().running.at(-1)?.started_at).toBe(seenAt + 120);
+  } finally {
+    vi.useRealTimers();
+  }
+});

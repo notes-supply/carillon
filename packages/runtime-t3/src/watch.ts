@@ -983,28 +983,41 @@ export function watchTurn(
     adoptPending();
   }
 
-  /** The turn's process owes a report in a run that has not appeared, and T3 has not shown it stopped. */
-  function wakeOwed(): boolean {
+  /** Background work of the turn is listed on `run`'s roster, or a native child of it works. */
+  function workListed(run: Run): boolean {
+    return roster(run).length > 0 || nativeWorking();
+  }
+
+  /** `run` completed after listing work: its process owes a report in a run of its own. */
+  function wakeOwedBy(run: Run): boolean {
     return (
-      last?.status === "completed" &&
-      wakeOwedAfter !== undefined &&
-      last.ordinal <= wakeOwedAfter &&
-      !sessionStopped(last)
+      run.status === "completed" && wakeOwedAfter !== undefined && run.ordinal <= wakeOwedAfter
     );
   }
 
   /**
-   * The turn's run completed, its roster is empty, and the subscription did
-   * not witness how the work it once listed ended: delivered inside the run,
-   * or still owed. T3's current state does not distinguish the two.
+   * What the turn's latest run leaves of its background work: work still
+   * `listed`; a `wake` its process owes for work it listed; or a `gap`: the
+   * run completed with nothing listed, and the subscription did not witness
+   * how work it once listed ended, delivered inside the run or still owed,
+   * which T3's current state does not distinguish. Every decision about the
+   * turn's background work starts here.
    */
-  function ambiguous(): boolean {
-    return (
-      last?.status === "completed" &&
-      roster(last).length === 0 &&
-      !(wakeOwedAfter !== undefined && last.ordinal <= wakeOwedAfter) &&
+  function pendingWork(): "listed" | "wake" | "gap" | undefined {
+    if (last === undefined) return undefined;
+    if (workListed(last)) return "listed";
+    if (wakeOwedBy(last)) return "wake";
+    if (
+      last.status === "completed" &&
       (nativeReportsUnknown || (backgroundSeenAt !== undefined && last.ordinal <= backgroundSeenAt))
-    );
+    )
+      return "gap";
+    return undefined;
+  }
+
+  /** The turn's process owes a report in a run that has not appeared, and T3 has not shown it stopped. */
+  function wakeOwed(): boolean {
+    return last !== undefined && wakeOwedBy(last) && !sessionStopped(last);
   }
 
   function sessionOf(
@@ -1298,8 +1311,7 @@ export function watchTurn(
             "[Part of this report is older than the part of the thread Carillon reads; T3 shows all of it.]",
           ]
         : []),
-      ...(roster(latest).length > 0 ||
-      (wakeOwedAfter !== undefined && latest.ordinal <= wakeOwedAfter)
+      ...(roster(latest).length > 0 || wakeOwedBy(latest)
         ? ["[The report started background work in T3; its result will show in T3, not here.]"]
         : []),
     ];
@@ -1329,6 +1341,25 @@ export function watchTurn(
   }
 
   /**
+   * Dates the background work the turn's current run lists when the fold
+   * first sees it, since T3 does not, and forgets what it no longer lists.
+   * A run whose provider thread record has not arrived lists nothing here.
+   */
+  function dateBackground(): void {
+    const run = active() ?? last;
+    const thread =
+      run?.providerThreadId == null ? undefined : providerThreads.get(run.providerThreadId);
+    const tasks = new Set(
+      (thread?.pendingBackgroundTasks ?? [])
+        .filter((task) => !otherTasks.has(task.taskId))
+        .map((task) => task.taskId),
+    );
+    const now = Math.floor(Date.now() / 1000);
+    for (const id of tasks) if (!backgroundSince.has(id)) backgroundSince.set(id, now);
+    for (const id of backgroundSince.keys()) if (!tasks.has(id)) backgroundSince.delete(id);
+  }
+
+  /**
    * Files background work the turn's provider threads list but the fold has
    * not classified yet, and forgets what they no longer list.
    */
@@ -1348,15 +1379,16 @@ export function watchTurn(
     return earlier.size > 0 || laterOthers().some(isActive);
   }
 
+  /**
+   * Nothing of the turn still executes: work still listed is, and a report
+   * owed or a gap not witnessed is too while T3 has not shown the turn's
+   * process stopped.
+   */
   function quiet(): boolean {
-    return (
-      active() === undefined &&
-      roster(last).length === 0 &&
-      !nativeWorking() &&
-      !nativeUnknown() &&
-      !wakeOwed() &&
-      !(ambiguous() && last !== undefined && !sessionStopped(last))
-    );
+    if (active() !== undefined || nativeUnknown()) return false;
+    const pending = pendingWork();
+    if (pending === undefined) return true;
+    return pending !== "listed" && last !== undefined && sessionStopped(last);
   }
 
   return {
@@ -1502,6 +1534,9 @@ export function watchTurn(
               detachedSessions.add(thread.providerSessionId);
           for (const request of projection.runtimeRequests) foldRequest(request);
           for (const payload of projection.turnItems) foldItem(payload);
+          // A call the snapshot no longer shows running or held has no start to keep.
+          for (const id of firstSeen.keys())
+            if (!running.has(id) && !held.has(id)) firstSeen.delete(id);
           for (const message of projection.messages) foldMessage(message);
           // Background work listed now that the fold has not classified was
           // started across the gap: the turn's if one of its runs could have
@@ -1589,11 +1624,12 @@ export function watchTurn(
           return;
       }
       if (last !== undefined) {
-        const listed = roster(last).length > 0 || nativeWorking();
+        const listed = workListed(last);
         if (listed) backgroundSeenAt = last.ordinal;
         else if (isActive(last) && backgroundSeenAt === last.ordinal) backgroundSeenAt = undefined;
         if (listed && last.status === "completed") wakeOwedAfter = last.ordinal;
       }
+      dateBackground();
       for (const listener of listeners) listener();
     },
     resubscribing() {
@@ -1643,42 +1679,44 @@ export function watchTurn(
           // wake: beside the conversation's later messages, no run but a
           // continuation can be attributed to it.
           if (followUp !== undefined) return reported(last);
-          if (roster(last).length > 0 || nativeWorking()) {
-            if (sessionStopped(last))
+          switch (pendingWork()) {
+            case "listed":
+              if (sessionStopped(last))
+                return {
+                  kind: "failed",
+                  explanation:
+                    "T3's native session stopped while it still listed background work, which can no longer report back.",
+                };
+              if (sessionDetached(last))
+                return {
+                  kind: "failed",
+                  explanation:
+                    "T3's native session was detached while it still listed background work; T3 does not confirm whether that work still reports back.",
+                };
+              return undefined;
+            case "wake":
+              if (sessionStopped(last))
+                return {
+                  kind: "failed",
+                  explanation:
+                    "T3's native session stopped before it reported the result of its finished background work.",
+                };
+              if (sessionDetached(last))
+                return {
+                  kind: "failed",
+                  explanation:
+                    "T3's native session was detached before it reported the result of its finished background work; T3 does not confirm whether that result will still arrive.",
+                };
+              return undefined;
+            case "gap":
               return {
-                kind: "failed",
+                kind: "unresolved",
                 explanation:
-                  "T3's native session stopped while it still listed background work, which can no longer report back.",
+                  "Carillon lost its connection to T3 while this turn ran background work, and T3's state does not show whether the result was delivered",
               };
-            if (sessionDetached(last))
-              return {
-                kind: "failed",
-                explanation:
-                  "T3's native session was detached while it still listed background work; T3 does not confirm whether that work still reports back.",
-              };
-            return undefined;
+            case undefined:
+              break;
           }
-          if (wakeOwedAfter !== undefined && last.ordinal <= wakeOwedAfter) {
-            if (sessionStopped(last))
-              return {
-                kind: "failed",
-                explanation:
-                  "T3's native session stopped before it reported the result of its finished background work.",
-              };
-            if (sessionDetached(last))
-              return {
-                kind: "failed",
-                explanation:
-                  "T3's native session was detached before it reported the result of its finished background work; T3 does not confirm whether that result will still arrive.",
-              };
-            return undefined;
-          }
-          if (ambiguous())
-            return {
-              kind: "unresolved",
-              explanation:
-                "Carillon lost its connection to T3 while this turn ran background work, and T3's state does not show whether the result was delivered",
-            };
           // The answer is complete; delegated work it started may still owe
           // the conversation a report, which a follow-up turn delivers.
           return reportOwed()
@@ -1720,23 +1758,16 @@ export function watchTurn(
       const runningTools: RunningTool[] = [...running.values()]
         .filter((item) => !shownAsWork(item))
         .map((item) => ({ ...tool(item), ...started(item) }));
-      for (const id of firstSeen.keys())
-        if (!running.has(id) && !held.has(id)) firstSeen.delete(id);
-      const now = Math.floor(Date.now() / 1000);
       const tasks = roster(run).filter(
         (task) => task.childThreadId === undefined || !childThreads.has(task.childThreadId),
       );
-      for (const task of tasks) {
-        if (!backgroundSince.has(task.taskId)) backgroundSince.set(task.taskId, now);
+      for (const task of tasks)
         runningTools.push({
           tool: toolName(task.kind ?? "background_task"),
           ...withDetail(task.description === undefined ? undefined : displayed(task.description)),
-          started_at: backgroundSince.get(task.taskId) ?? now,
+          started_at: backgroundSince.get(task.taskId) ?? Math.floor(Date.now() / 1000),
           estimated: true,
         });
-      }
-      for (const id of backgroundSince.keys())
-        if (!tasks.some((task) => task.taskId === id)) backgroundSince.delete(id);
       const headline = latestAssistant === undefined ? undefined : commentary(latestAssistant.text);
       const work = workItems();
       const agent = agentOf(run);
