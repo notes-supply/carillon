@@ -1146,7 +1146,7 @@ export function watchTurn(
       });
     }
     const reporting = [...continuationRuns.values()].some(isActive);
-    const reported: WorkItem["state"] | undefined =
+    const reportState: WorkItem["state"] | undefined =
       followUp === undefined || last === undefined
         ? undefined
         : last.status === "failed"
@@ -1154,14 +1154,16 @@ export function watchTurn(
           : ["cancelled", "interrupted", "rolled_back"].includes(last.status)
             ? "cancelled"
             : last.status === "completed" && !reportOwed()
-              ? "succeeded"
+              ? reported(last).kind === "failed"
+                ? "failed"
+                : "succeeded"
               : undefined;
-    if (reporting || (followUp === undefined && reportOwed()) || reported !== undefined)
+    if (reporting || (followUp === undefined && reportOwed()) || reportState !== undefined)
       items.push({
         id: `report:${messageId}`,
         kind: "task",
         label: "report back to this conversation",
-        state: reporting ? "running" : (reported ?? "queued"),
+        state: reporting ? "running" : (reportState ?? "queued"),
       });
     for (const transfer of transfers.values()) {
       const work = TRANSFER_WORK.get(transfer.type);
@@ -1272,6 +1274,7 @@ export function watchTurn(
     return (
       active() === undefined &&
       roster(last).length === 0 &&
+      !nativeWorking() &&
       !wakeOwed() &&
       !(ambiguous() && last !== undefined && !sessionStopped(last))
     );
@@ -1370,6 +1373,20 @@ export function watchTurn(
             (left, right) => Number(settledTask(left)) - Number(settledTask(right)),
           ))
             foldSubagent(task);
+          // A fresh view cannot tell whether a settled native child reported
+          // inside its parent or still owes a provider wake. Reuse the same
+          // fail-closed ambiguity as background work missed across a gap.
+          if (followUp === undefined)
+            for (const task of listed) {
+              const parent = task.runId === null ? undefined : turnRuns.get(task.runId);
+              if (
+                task.origin === "provider_native" &&
+                SETTLED_TASK.has(task.status) &&
+                parent?.status === "completed" &&
+                !before.has(parent.id)
+              )
+                backgroundSeenAt = Math.max(backgroundSeenAt ?? 0, parent.ordinal);
+            }
           for (const transfer of projection.contextTransfers) foldTransfer(transfer);
           for (const thread of projection.providerThreads) foldProviderThread(thread);
           for (const session of projection.providerSessions) foldSession(session);

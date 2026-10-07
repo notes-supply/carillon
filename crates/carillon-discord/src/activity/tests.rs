@@ -861,6 +861,7 @@ async fn a_slow_plain_answers_temporary_card_is_removed_even_with_agent_metadata
         .wait_for(&Method::DELETE, "/channels/300/messages/", 1)
         .await?;
     assert!(discord.matching(&Method::PATCH, "/channels").is_empty());
+    recorded_soon(&records, "plain", &Value::Null).await?;
     assert_eq!(recorded(&records)?, json!({}));
     monitor.abort();
     Ok(())
@@ -1062,6 +1063,57 @@ async fn a_restart_goes_on_with_recorded_cards_and_says_what_it_does_not_know() 
             "answered": {"channel_id": "303", "message_id": "557", "hosted": true},
         })
     );
+    monitor.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_restarted_answer_hosted_card_finishes_even_when_its_report_is_missing()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let records = directory.path().join("activity-cards.json");
+    std::fs::write(
+        &records,
+        serde_json::to_vec(&json!({
+            "parent": {"channel_id": "300", "message_id": "555", "hosted": true},
+        }))?,
+    )?;
+    let discord = Substitute::start(succeed()).await?;
+    discord.list(vec![continuing(
+        "report",
+        "parent",
+        "300",
+        now() - 60,
+        None,
+    )]);
+    let (outcomes, monitor) = discord.monitor(discord.http(false), config(false), &records);
+    discord
+        .wait_for(&Method::PATCH, "/channels/300/messages/555", 1)
+        .await?;
+    report(
+        &outcomes,
+        delivered("report", "parent", TurnState::Completed),
+        DeliveryOutcome::Delivered,
+    )?;
+    discord.list(Vec::new());
+    let final_edit = discord
+        .wait_for_text(
+            &Method::PATCH,
+            "/channels/300/messages/555",
+            "✓ Done · answered",
+        )
+        .await?;
+    let text = final_edit.content();
+    assert!(
+        text.contains("Some of this work may not be shown here."),
+        "{text}"
+    );
+    assert!(
+        final_edit.body.get("content").is_none(),
+        "answer text must be preserved"
+    );
+    recorded_soon(&records, "parent", &Value::Null).await?;
+    assert!(discord.matching(&Method::DELETE, "/channels").is_empty());
     monitor.abort();
     Ok(())
 }

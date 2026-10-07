@@ -118,8 +118,8 @@ impl ActivityMarkers {
             bail!("activity_markers.models must contain at most 32 prefixes");
         }
         for (prefix, marker) in &self.models {
-            if prefix.is_empty() || prefix.len() > 100 {
-                bail!("activity_markers.models prefixes must contain 1–100 UTF-8 bytes");
+            if prefix.is_empty() || prefix.len() > 63 {
+                bail!("activity_markers.models prefixes must contain 1–63 UTF-8 bytes");
             }
             validate_activity_marker(marker).with_context(|| {
                 format!("invalid activity_markers.models marker for {prefix:?}")
@@ -628,6 +628,11 @@ failed = ""
             .insert("gpt-".to_owned(), "<@123>".to_owned());
         assert!(markers.validate().is_err());
         markers.models.remove("gpt-");
+        markers.models.insert("x".repeat(63), "✓".to_owned());
+        assert!(markers.validate().is_ok());
+        markers.models.insert("x".repeat(64), "✓".to_owned());
+        assert!(markers.validate().is_err());
+        markers.models.remove(&"x".repeat(64));
         markers.models.insert(String::new(), "✓".to_owned());
         assert!(markers.validate().is_err());
     }

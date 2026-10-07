@@ -28,7 +28,11 @@ Native Agent children can appear as provider-native subagent records without
 appearing in the provider thread's pending-background roster. A child of the
 turn still running when its parent completes also keeps that native turn open
 through its provider wake; Carillon delivers the parent text and the wake's
-result together. A child that finished inside the parent does not owe a wake.
+result together. A child observed finishing inside the parent does not owe a
+wake. After a runtime restart, a settled native child with a completed parent
+does not prove whether its result was reported inside the parent or still owes
+a wake; that fresh view fails closed as unresolved, not as a successful parent
+answer that silently loses the result.
 This retains the native wake ownership rules below; it does not create a second
 scheduler or treat unrelated child agents as this turn's work.
 

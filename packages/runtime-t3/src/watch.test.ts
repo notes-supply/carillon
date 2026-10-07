@@ -1711,6 +1711,48 @@ it("keeps a native Agent child and its provider wake without a pending-backgroun
   expect(watch.quiet()).toBe(true);
 });
 
+it("does not call a failed parent quiet while its native child is still running", () => {
+  const watch = watchTurn("thread", "message-1", "/workspace");
+  watch.apply(
+    snapshot({
+      runs: [run("failed")],
+      subagents: [task("native", "running", "run-1", { origin: "provider_native" })],
+    }),
+  );
+  expect(watch.outcome()?.kind).toBe("failed");
+  expect(watch.quiet()).toBe(false);
+  watch.apply(
+    event(
+      2,
+      "subagent.updated",
+      task("native", "cancelled", "run-1", { origin: "provider_native" }),
+    ),
+  );
+  expect(watch.quiet()).toBe(true);
+});
+
+it("fails closed when a fresh snapshot cannot tell whether a settled native child still owes a wake", () => {
+  const watch = watchTurn("thread", "message-1", "/workspace");
+  watch.apply(
+    snapshot({
+      runs: [run("completed")],
+      subagents: [task("native", "completed", "run-1", { origin: "provider_native" })],
+      messages: [reply("parent", "run-1", "PARENT ACK", "2026-10-05T11:14:53Z")],
+    }),
+  );
+  expect(watch.outcome()).toMatchObject({ kind: "unresolved" });
+  expect(watch.quiet()).toBe(false);
+  // If the provider publishes its wake before the unresolved turn exits,
+  // its own opening resolves that ambiguity without taking another user's run.
+  watch.apply(event(2, "run.created", run("running", "wake", 2)));
+  watch.apply(event(3, "turn-item.updated", wakeOpening("run-2")));
+  watch.apply(
+    event(4, "message.updated", reply("result", "run-2", "CHILD RESULT", "2026-10-05T11:14:59Z")),
+  );
+  watch.apply(event(5, "run.updated", run("completed", "wake", 2)));
+  expect(watch.outcome()).toEqual({ kind: "completed", output: "PARENT ACK\n\nCHILD RESULT" });
+});
+
 it("does not await native Agent work that finished inside the parent or belongs to another run", () => {
   const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(
@@ -1807,6 +1849,32 @@ it("replaces the report-back row with its confirmed completion in a follow-up re
     kind: "task",
     label: "report back to this conversation",
     state: "succeeded",
+  });
+});
+
+it("marks a report missing from a bounded snapshot as failed, not successfully delivered", () => {
+  const watch = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
+  watch.apply({
+    ...snapshot({
+      runs: [
+        {
+          ...run("completed"),
+          delegatedCompletion: { disposition: "open", delivery: { messageId: "continuation" } },
+        },
+        run("completed", "continuation", 2),
+      ],
+      subagents: [
+        task("child", "completed", "run-1", { completionDelivery: { state: "delivered" } }),
+      ],
+    }),
+    hasMoreHistory: true,
+  });
+  expect(watch.outcome()?.kind).toBe("failed");
+  expect(watch.activity().work?.items).toContainEqual({
+    id: "report:message-1",
+    kind: "task",
+    label: "report back to this conversation",
+    state: "failed",
   });
 });
 

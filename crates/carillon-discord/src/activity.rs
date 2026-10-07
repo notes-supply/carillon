@@ -1014,7 +1014,8 @@ async fn follow(
         }
         next_edit = Instant::now() + EDIT_INTERVAL;
     };
-    let earned = job.earned
+    let earned = card.hosted
+        || job.earned
         || last
             .as_ref()
             .is_some_and(|(_, report)| render::earns_report(report));

@@ -181,7 +181,8 @@ emoji IDs from this bot, not another application's IDs:
 ```
 
 The mapping defaults to empty and allows up to 32 nonempty prefixes of at most
-100 UTF-8 bytes. Emotes follow the same validation as the status markers. List
+63 UTF-8 bytes, within the reported model label's untruncated prefix. Emotes
+follow the same validation as the status markers. List
 and reuse the application's existing emojis when provisioning; upload only
 missing approved assets and verify their API records, CDN transparency and a
 real Discord message before activating the mapping. Never upload at reconnect.
