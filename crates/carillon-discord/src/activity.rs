@@ -361,7 +361,7 @@ impl From<Card> for Recorded {
             channel_id: card.channel_id,
             message_id: Some(card.message_id),
             hosted: card.hosted,
-            earned: card.hosted,
+            earned: false,
             finish: None,
         }
     }
@@ -456,9 +456,11 @@ impl CardRecords {
             let Some(recorded) = cards.get_mut(job) else {
                 return false;
             };
-            let changed = !recorded.earned;
+            if recorded.earned || recorded.hosted {
+                return false;
+            }
             recorded.earned = true;
-            changed
+            true
         });
     }
 

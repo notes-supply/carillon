@@ -1127,7 +1127,7 @@ async fn a_restart_goes_on_with_recorded_cards_and_says_what_it_does_not_know() 
         json!({
             "running": {"channel_id": "300", "message_id": "555"},
             "unnamed": {"channel_id": "302"},
-            "answered": {"channel_id": "303", "message_id": "557", "hosted": true, "earned": true},
+            "answered": {"channel_id": "303", "message_id": "557", "hosted": true},
         })
     );
     monitor.abort();
