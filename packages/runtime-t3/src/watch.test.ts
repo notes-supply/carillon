@@ -1753,6 +1753,42 @@ it("fails closed when a fresh snapshot cannot tell whether a settled native chil
   expect(watch.outcome()).toEqual({ kind: "completed", output: "PARENT ACK\n\nCHILD RESULT" });
 });
 
+it("attributes a native provider wake already present beside its child in the first snapshot", () => {
+  const watch = watchTurn("thread", "message-1", "/workspace");
+  watch.apply(
+    snapshot({
+      runs: [run("completed"), run("completed", "wake", 2)],
+      subagents: [task("native", "completed", "run-1", { origin: "provider_native" })],
+      turnItems: [wakeOpening("run-2")],
+      messages: [
+        reply("parent", "run-1", "PARENT ACK", "2026-10-05T11:14:53Z"),
+        reply("result", "run-2", "CHILD RESULT", "2026-10-05T11:14:59Z"),
+      ],
+    }),
+  );
+  expect(watch.outcome()).toEqual({ kind: "completed", output: "PARENT ACK\n\nCHILD RESULT" });
+  expect(watch.quiet()).toBe(true);
+});
+
+it("ends unresolved rather than waiting forever for a native child omitted by a resumed snapshot", () => {
+  const watch = watchTurn("thread", "message-1", "/workspace");
+  watch.apply(
+    snapshot({
+      runs: [run("running")],
+      subagents: [task("native", "running", "run-1", { origin: "provider_native" })],
+    }),
+  );
+  watch.apply(event(2, "run.updated", run("completed")));
+  expect(watch.outcome()).toBeUndefined();
+  watch.apply(snapshot({ runs: [run("completed")] }, 3));
+  expect(watch.outcome()).toMatchObject({ kind: "unresolved" });
+  expect(watch.quiet()).toBe(false);
+  expect(watch.activity().work).toMatchObject({
+    partial: true,
+    items: [expect.objectContaining({ id: "native", state: "unknown" })],
+  });
+});
+
 it("does not await native Agent work that finished inside the parent or belongs to another run", () => {
   const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(

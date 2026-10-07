@@ -518,6 +518,7 @@ export function watchTurn(
 
   function wake(run: Run): true {
     wakeRuns.add(run.id);
+    if (stray === run.id) stray = undefined;
     return true;
   }
 
@@ -849,8 +850,24 @@ export function watchTurn(
         task.origin === "provider_native" &&
         task.runId !== null &&
         turnRuns.has(task.runId) &&
+        !unconfirmed.has(task.id) &&
         ACTIVE_TASK.has(task.status),
     );
+  }
+
+  /** A native child whose last active state T3 no longer confirms. */
+  function nativeUnknown(): boolean {
+    for (const id of unconfirmed) {
+      const task = delegations.get(id);
+      if (
+        task?.origin === "provider_native" &&
+        task.runId !== null &&
+        turnRuns.has(task.runId) &&
+        ACTIVE_TASK.has(task.status)
+      )
+        return true;
+    }
+    return false;
   }
 
   /** Everything the run's provider thread lists, the turn's or not. */
@@ -1275,6 +1292,7 @@ export function watchTurn(
       active() === undefined &&
       roster(last).length === 0 &&
       !nativeWorking() &&
+      !nativeUnknown() &&
       !wakeOwed() &&
       !(ambiguous() && last !== undefined && !sessionStopped(last))
     );
@@ -1549,6 +1567,12 @@ export function watchTurn(
             "An earlier turn on this conversation was not confirmed stopped, and T3 cannot show whether the run that followed this turn's background work reports this turn's work or the earlier one's",
         };
       if (active() !== undefined) return undefined;
+      if (nativeUnknown())
+        return {
+          kind: "unresolved",
+          explanation:
+            "T3 no longer confirms the state of this turn's native child, so Carillon cannot show whether its work ended or its result was delivered",
+        };
       if (stray !== undefined && last.status === "completed")
         return {
           kind: "unresolved",
