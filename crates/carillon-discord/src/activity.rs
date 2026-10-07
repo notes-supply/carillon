@@ -782,11 +782,11 @@ async fn show_card(
     old: Option<Recorded>,
 ) {
     let card = match &old {
-        Some(recorded) => recorded.card(),
+        Some(recorded) => recorded.card().map(|card| (card, None)),
         None => obtain(&cards, &job_id, &mut view).await,
     };
-    if let Some(card) = card {
-        follow(&cards, &job_id, &mut view, card, old.is_some()).await;
+    if let Some((card, made_from)) = card {
+        follow(&cards, &job_id, &mut view, card, old.is_some(), made_from).await;
     }
     if view.wait_for(Job::is_settled).await.is_ok() {
         cards.records.forget_unnamed(&job_id);
@@ -794,13 +794,18 @@ async fn show_card(
 }
 
 /// The job's card once it is worth one: the answer that carries its
-/// summary, or a card made once the job has run past the appearance delay.
-/// `None` when the job ends first, or it gets no card.
-async fn obtain(cards: &Cards, job_id: &str, view: &mut watch::Receiver<Job>) -> Option<Card> {
+/// summary, or a card made once the job has run past the appearance delay,
+/// with the running turn's snapshot it was made from. `None` when the job
+/// ends first, or it gets no card.
+async fn obtain(
+    cards: &Cards,
+    job_id: &str,
+    view: &mut watch::Receiver<Job>,
+) -> Option<(Card, Option<(String, TurnActivity)>)> {
     loop {
         let job = view.borrow_and_update().clone();
         if let Some(card) = job.hosted {
-            return Some(card);
+            return Some((card, None));
         }
         if job.is_settled() {
             return None;
@@ -824,7 +829,7 @@ async fn obtain(cards: &Cards, job_id: &str, view: &mut watch::Receiver<Job>) ->
             // still bring the answer that carries its summary.
             if !cards.stopping.is_cancelled() {
                 match cards.records.reserve(job_id) {
-                    Reservation::Recorded(card) => return card,
+                    Reservation::Recorded(card) => return card.map(|card| (card, None)),
                     // An answer is being given the job's summary: it says which.
                     Reservation::Taken => {}
                     // The job changed meanwhile; an answer may have its summary
@@ -843,7 +848,11 @@ async fn obtain(cards: &Cards, job_id: &str, view: &mut watch::Receiver<Job>) ->
                                     hosted: false,
                                 };
                                 cards.records.insert(job_id, card);
-                                return Some(card);
+                                let made_from = turn
+                                    .activity
+                                    .clone()
+                                    .map(|snapshot| (turn.turn_id.clone(), snapshot));
+                                return Some((card, made_from));
                             }
                             Call::NotSent => cards.records.release(job_id),
                             Call::Refused(status) => {
@@ -882,16 +891,18 @@ async fn follow(
     view: &mut watch::Receiver<Job>,
     card: Card,
     adopted: bool,
+    made_from: Option<(String, TurnActivity)>,
 ) {
     let markers = &cards.config.activity_markers;
-    // The snapshot the card was made from is the first one it knows.
-    let mut last = match &view.borrow().state {
+    // The snapshot the card was made from is the first one it knows, even
+    // when the job ended while the card was being made.
+    let mut last = made_from.or_else(|| match &view.borrow().state {
         State::Active(turn) => turn
             .activity
             .clone()
             .map(|snapshot| (turn.turn_id.clone(), snapshot)),
         _ => None,
-    };
+    });
     let mut heard = !adopted;
     let mut shown = (!adopted && !card.hosted).then(|| view.borrow().embed(None, false, markers));
     let mut next_edit = Instant::now()

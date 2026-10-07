@@ -797,6 +797,54 @@ async fn ended_turns_keep_an_honest_card_and_stale_reads_cannot_revive_them() ->
 }
 
 #[tokio::test]
+async fn a_card_made_as_its_job_ends_keeps_what_it_showed_in_its_summary() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let records = directory.path().join("activity-cards.json");
+    // Discord answers the card's creation only after the job has ended.
+    let discord = Substitute::start(Arc::new(|seen, _| {
+        if seen.method == Method::POST && seen.path.ends_with("/messages") {
+            Reply::Delayed(Duration::from_millis(500))
+        } else {
+            Reply::Success
+        }
+    }))
+    .await?;
+    let history = tools(
+        None,
+        &[("bash", "make deploy")],
+        &[("read", "Makefile", true)],
+    );
+    discord.list(vec![running("stopped", "301", now() - 60, Some(history))]);
+    let (outcomes, monitor) = discord.monitor(discord.http(false), config(false), &records);
+    let made = discord
+        .wait_for(&Method::POST, "/channels/301/messages", 1)
+        .await?;
+    assert!(made[0].content().contains("✓ read `Makefile`"));
+    // The turn stopped without a report while its card was being made.
+    settle(
+        &outcomes,
+        "stopped",
+        TurnState::Interrupted,
+        DeliveryOutcome::Delivered,
+    )?;
+    let summary = discord
+        .wait_for(&Method::PATCH, "/channels/301/messages/901", 1)
+        .await?[0]
+        .content();
+    assert!(
+        summary.starts_with("⏹️ Stopped before finishing"),
+        "{summary}"
+    );
+    assert!(summary.contains("✓ read `Makefile`"), "{summary}");
+    assert!(!summary.contains("make deploy"), "{summary}");
+    recorded_soon(&records, "stopped", &Value::Null).await?;
+    assert_eq!(recorded(&records)?, json!({}));
+    assert_eq!(discord.matching(&Method::POST, "/channels").len(), 1);
+    monitor.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn uncertain_or_refused_cards_are_never_created_or_edited_again() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let records = directory.path().join("activity-cards.json");
@@ -1438,7 +1486,7 @@ async fn a_stopping_provider_makes_no_new_card_but_takes_an_answer_card() -> any
     };
     view.send_modify(|job| job.hosted = Some(answer));
     let obtained = tokio::time::timeout(Duration::from_secs(5), obtaining).await??;
-    assert_eq!(obtained, Some(answer));
+    assert_eq!(obtained, Some((answer, None)));
     assert!(discord.seen().is_empty());
     Ok(())
 }
