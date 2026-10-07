@@ -2032,6 +2032,52 @@ async fn a_summary_shown_before_its_record_could_be_removed_is_shown_again_after
 }
 
 #[tokio::test]
+async fn a_temporarily_unsavable_removal_is_retried_before_any_discord_call() -> anyhow::Result<()>
+{
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("activity-cards.json");
+    let records = Arc::new(CardRecords::open(path.clone()).context("records")?);
+    let card = super::Card {
+        channel_id: Id::new(300),
+        message_id: Id::new(901),
+        hosted: false,
+    };
+    records.insert("plain", card);
+    let saved = std::fs::read(&path)?;
+    let discord = Substitute::start(succeed()).await?;
+    let cards = super::Cards {
+        http: discord.http(false),
+        config: config(false),
+        records: records.clone(),
+        stopping: CancellationToken::new(),
+    };
+    let read_only = ReadOnly::new(directory.path())?;
+    let finishing = tokio::spawn(async move { cards.finish("plain", card, None).await });
+    // The attempted checkpoint is our barrier: the first publication really
+    // failed before writes are restored, not merely before the task ran.
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while records.recorded()["plain"].finish.is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(std::fs::read(&path)?, saved);
+    assert!(discord.seen().is_empty());
+    drop(read_only);
+    tokio::time::timeout(Duration::from_secs(6), finishing).await??;
+    assert_eq!(recorded(&path)?, json!({}));
+    assert_eq!(
+        discord
+            .matching(&Method::DELETE, "/channels/300/messages/901")
+            .len(),
+        1
+    );
+    assert!(discord.matching(&Method::PATCH, "/channels").is_empty());
+    assert!(discord.matching(&Method::POST, "/channels").is_empty());
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_summary_that_cannot_be_saved_with_its_record_is_not_shown() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let store = directory.path().join("cards");

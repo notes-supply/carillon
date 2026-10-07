@@ -1104,19 +1104,16 @@ impl Cards {
             self.records.remove(job_id);
             return;
         }
-        if !self.records.checkpoint(job_id, summary.as_ref()) {
-            // Shown without its saved record, a later start could say its
-            // outcome is unknown over it.
-            warn!(
-                job_id,
-                "activity card was not finished; the next start goes on with it"
-            );
-            return;
-        }
         for attempt in 1..=FINAL_ATTEMPTS {
-            let call = match &summary {
-                None => self.delete(card).await,
-                Some(embed) => self.edit(card, embed, None).await,
+            let call = if self.records.checkpoint(job_id, summary.as_ref()) {
+                match &summary {
+                    None => self.delete(card).await,
+                    Some(embed) => self.edit(card, embed, None).await,
+                }
+            } else {
+                // Nothing is sent until the action can survive a restart.
+                // A temporary save failure uses the same bounded retry budget.
+                Call::NotSent
             };
             match call {
                 Call::Done(()) | Call::Refused(404) => {

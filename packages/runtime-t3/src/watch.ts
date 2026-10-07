@@ -394,6 +394,8 @@ export function watchTurn(
   let backgroundSeenAt: number | undefined;
   /** A recovered native cohort has no per-child provenance for its provider wakes. */
   let nativeReportsUnknown = false;
+  /** Native children observed settled while their parent could still consume them. */
+  const nativeInsideParent = new Set<string>();
   /**
    * Background work first listed while none of the turn's runs could have
    * been executing: another run's, such as one started in T3's own UI or an
@@ -779,8 +781,17 @@ export function watchTurn(
   /** A child agent of a run the turn holds; others are another conversation's business. */
   function foldSubagent(task: Subagent): void {
     if (task.runId === null || !linkedRun(task.runId)) return;
-    if (retain(delegations, task.id, task, settledTask)) unconfirmed.delete(task.id);
-    else {
+    if (retain(delegations, task.id, task, settledTask)) {
+      unconfirmed.delete(task.id);
+      const parent = turnRuns.get(task.runId);
+      if (
+        task.origin === "provider_native" &&
+        SETTLED_TASK.has(task.status) &&
+        parent !== undefined &&
+        isActive(parent)
+      )
+        nativeInsideParent.add(task.id);
+    } else {
       workOmitted = true;
       if (!settledTask(task)) owedUnknown = true;
     }
@@ -808,6 +819,7 @@ export function watchTurn(
       if (room === undefined) return false;
       records.delete(room[0]);
       unconfirmed.delete(room[0]);
+      nativeInsideParent.delete(room[0]);
       workOmitted = true;
     }
     records.set(id, record);
@@ -1176,7 +1188,7 @@ export function watchTurn(
                 ? "failed"
                 : "succeeded"
               : undefined;
-    if (reporting || (followUp === undefined && reportOwed()) || reportState !== undefined)
+    if (reporting || reportOwed() || reportState !== undefined)
       items.push({
         id: `report:${messageId}`,
         kind: "task",
@@ -1329,6 +1341,8 @@ export function watchTurn(
                 `T3 sent a thread snapshot that omits run ${id} this turn observed`,
               );
           const before = new Map([...turnRuns].map(([id, run]) => [id, run.status]));
+          const nativeWakeOwed = wakeOwed();
+          const ordinalBefore = last?.ordinal;
           reset();
           // A snapshot lists runs, announcements and children whole, so the
           // coverage of the turn's work is decided afresh from it.
@@ -1403,21 +1417,33 @@ export function watchTurn(
           // inside its parent or still owes a provider wake. Reuse the same
           // fail-closed ambiguity as background work missed across a gap.
           if (followUp === undefined) {
+            const previouslyOwed = nativeWakeOwed
+              ? listed.filter(
+                  (task) =>
+                    task.origin === "provider_native" &&
+                    settledChildren.has(task.id) &&
+                    !nativeInsideParent.has(task.id),
+                ).length
+              : 0;
             const native = listed.filter(
               (task) =>
                 task.origin === "provider_native" &&
                 SETTLED_TASK.has(task.status) &&
                 task.runId !== null &&
-                turnRuns.get(task.runId)?.status === "completed",
+                turnRuns.get(task.runId)?.status === "completed" &&
+                !settledChildren.has(task.id),
             );
             for (const task of native) {
-              if (settledChildren.has(task.id)) continue;
               const parent = task.runId === null ? undefined : turnRuns.get(task.runId);
               if (parent === undefined) continue;
-              backgroundSeenAt = Math.max(backgroundSeenAt ?? 0, parent.ordinal);
+              backgroundSeenAt = Math.max(
+                backgroundSeenAt ?? 0,
+                parent.ordinal,
+                ordinalBefore ?? 0,
+              );
               // One unlinked wake cannot prove which of several recovered
               // native results it consumed. Do not silently drop the rest.
-              if (native.length > 1) nativeReportsUnknown = true;
+              if (native.length + previouslyOwed > 1) nativeReportsUnknown = true;
             }
           }
           for (const transfer of projection.contextTransfers) foldTransfer(transfer);

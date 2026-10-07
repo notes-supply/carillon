@@ -38,6 +38,10 @@ identify which child's result they consumed. Those recovered results remain
 unresolved and the work summary is partial, even if unlinked wakes are present;
 counting wakes is not proof that every child reported. Live-observed child
 settlements and wakes retain their existing behavior.
+A child observed settled inside its active parent is excluded from that
+recovered cohort. When a native wake was already owed before reconnection,
+older settled children without individual delivery receipts remain possible
+members of it; an earlier generic wake is not per-child delivery proof.
 This retains the native wake ownership rules below; it does not create a second
 scheduler or treat unrelated child agents as this turn's work.
 
