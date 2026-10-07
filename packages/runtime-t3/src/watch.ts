@@ -1387,6 +1387,11 @@ export function watchTurn(
           );
           const listedIds = new Set(listed.map((task) => task.id));
           for (const id of delegations.keys()) if (!listedIds.has(id)) unconfirmed.add(id);
+          const settledChildren = new Set(
+            [...delegations.values()]
+              .filter((task) => SETTLED_TASK.has(task.status))
+              .map((task) => task.id),
+          );
           for (const task of [...listed].sort(
             (left, right) => Number(settledTask(left)) - Number(settledTask(right)),
           ))
@@ -1401,7 +1406,7 @@ export function watchTurn(
                 task.origin === "provider_native" &&
                 SETTLED_TASK.has(task.status) &&
                 parent?.status === "completed" &&
-                !before.has(parent.id)
+                !settledChildren.has(task.id)
               )
                 backgroundSeenAt = Math.max(backgroundSeenAt ?? 0, parent.ordinal);
             }

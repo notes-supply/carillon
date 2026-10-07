@@ -1753,6 +1753,23 @@ it("fails closed when a fresh snapshot cannot tell whether a settled native chil
   expect(watch.outcome()).toEqual({ kind: "completed", output: "PARENT ACK\n\nCHILD RESULT" });
 });
 
+it("retains native result uncertainty when only its parent was known before reconnecting", () => {
+  const watch = watchTurn("thread", "message-1", "/workspace");
+  watch.apply(snapshot({ runs: [run("running")] }));
+  watch.apply(
+    snapshot(
+      {
+        runs: [run("completed")],
+        subagents: [task("native", "completed", "run-1", { origin: "provider_native" })],
+        messages: [reply("parent", "run-1", "PARENT ACK", "2026-10-05T11:14:53Z")],
+      },
+      2,
+    ),
+  );
+  expect(watch.outcome()).toMatchObject({ kind: "unresolved" });
+  expect(watch.quiet()).toBe(false);
+});
+
 it("attributes a native provider wake already present beside its child in the first snapshot", () => {
   const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(
