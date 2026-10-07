@@ -1171,7 +1171,7 @@ async fn an_answer_waits_for_progress_only_in_a_bucket_discord_shares() -> anyho
                 requested_at: None,
                 reports: Vec::new(),
                 live: None,
-                dropped: false,
+                partial: false,
             },
             &cards.config.activity_markers,
         );
@@ -1557,7 +1557,7 @@ fn a_job_whose_earliest_reports_were_let_go_says_its_summary_is_partial() {
         }
         shown(&job.embed(None, false, &markers))
     };
-    let omitted = "Part of this work's report was left out to keep it short.";
+    let omitted = "Some of this work may not be shown here.";
     // Within the bound, the summary is whole and shows the work.
     let kept = job_of(super::REPORTS_KEPT - 1);
     assert!(kept.starts_with("✓ Done · answered"), "{kept}");
@@ -2222,6 +2222,106 @@ async fn a_job_keeps_one_card_while_its_answer_arrives_and_its_follow_up_reports
     assert_eq!(discord.matching(&Method::POST, "/channels").len(), 1);
     assert!(discord.matching(&Method::DELETE, "/channels").is_empty());
     assert_eq!(recorded(&records)?, json!({}));
+    monitor.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_job_taken_up_after_a_restart_says_its_card_may_not_show_all_its_work()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let records = directory.path().join("activity-cards.json");
+    let discord = Substitute::start(succeed()).await?;
+    let working = delegating(tools(None, &[("bash", "make")], &[]), WorkState::Running);
+    discord.list(vec![running("parent", "300", now() - 60, Some(working))]);
+    let (outcomes, monitor) = discord.monitor(discord.http(false), config(false), &records);
+    discord
+        .wait_for(&Method::POST, "/channels/300/messages", 1)
+        .await?;
+    let card = json!({"channel_id": "300", "message_id": "901"});
+    recorded_soon(&records, "parent", &card).await?;
+    // The parent answers with its call while its child still runs.
+    let mut answered = delivered("parent", "parent", TurnState::Completed);
+    let made = tools(None, &[], &[("bash", "make", true)]);
+    answered.activity = Some(delegating(made, WorkState::Running));
+    answered.continued_by = Some("report".to_owned());
+    report(&outcomes, answered, DeliveryOutcome::Delivered)?;
+    discord.list(Vec::new());
+    discord
+        .wait_for_text(
+            &Method::PATCH,
+            "/channels/300/messages/901",
+            "Answered · delegated work goes on",
+        )
+        .await?;
+    // The provider stops before the follow-up, with the parent's report
+    // only in its memory.
+    monitor.abort();
+    let _ = monitor.await;
+    assert_eq!(recorded(&records)?, json!({"parent": card}));
+    let patched = discord
+        .matching(&Method::PATCH, "/channels/300/messages/901")
+        .len();
+
+    // The next start takes the card up as the follow-up reports.
+    let reporting = delegating(tools(Some("Reporting."), &[], &[]), WorkState::Succeeded);
+    discord.list(vec![continuing(
+        "report",
+        "parent",
+        "300",
+        now(),
+        Some(reporting),
+    )]);
+    let (outcomes, monitor) = discord.monitor(discord.http(false), config(false), &records);
+    let partial = "Some of this work may not be shown here.";
+    let progress = discord
+        .wait_for(&Method::PATCH, "/channels/300/messages/901", patched + 1)
+        .await?[patched]
+        .content();
+    assert!(
+        progress.starts_with("⏳ Working · Waiting for the model · started "),
+        "{progress}"
+    );
+    assert!(
+        progress.contains("✓ delegation `research` · done"),
+        "{progress}"
+    );
+    // It shows what it hears of, says that is not necessarily all, and
+    // invents nothing of what the last start alone knew.
+    assert!(progress.contains(partial), "{progress}");
+    assert!(!progress.contains("bash `make`"), "{progress}");
+    let mut reported = delivered("report", "parent", TurnState::Completed);
+    reported.activity = Some(delegating(
+        tools(None, &[], &[("read", "findings.md", true)]),
+        WorkState::Succeeded,
+    ));
+    report(&outcomes, reported, DeliveryOutcome::Delivered)?;
+    discord.list(Vec::new());
+    let done = discord
+        .wait_for_text(
+            &Method::PATCH,
+            "/channels/300/messages/901",
+            "✓ Done · answered",
+        )
+        .await?
+        .content();
+    for part in [
+        "✓ read `findings.md`",
+        "✓ delegation `research` · done",
+        partial,
+    ] {
+        assert!(done.contains(part), "{done}");
+    }
+    assert!(!done.contains("bash `make`"), "{done}");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while recorded(&records).is_ok_and(|records| records != json!({})) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await?;
+    // One card throughout, kept as the job's summary.
+    assert_eq!(discord.matching(&Method::POST, "/channels").len(), 1);
+    assert!(discord.matching(&Method::DELETE, "/channels").is_empty());
     monitor.abort();
     Ok(())
 }

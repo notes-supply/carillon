@@ -37,8 +37,8 @@ retain the actual Wasm path rather than substituting this direct native call.
   the observations core names by its origin) and types while its turns run. It reads
   core's activity list, receives each turn's outcome and final report from the
   delivery loop, keeps the card as the job's summary when the job ends, and records
-  only the channel and message of unfinished jobs' cards, so a restart goes on with
-  them. A job that ended without a card but showed work, or stopped, gets its summary
+  the channel and message of unfinished jobs' cards, with the final summary a card is
+  being finished with, so a restart goes on with them. A job that ended without a card but showed work, or stopped, gets its summary
   on its answer, which the delivery loop sends; one reservation per job keeps it to one
   card, and an answer that ended its job keeps it until the monitor has that outcome. A
   card someone deleted, or one whose creation Discord did not confirm, on an answer or

@@ -119,9 +119,11 @@ struct Job {
     requested_at: Option<i64>,
     /// What the job's ended turns reported, oldest first.
     ended: Vec<Ended>,
-    /// The report of an ended turn was let go to keep `ended` bounded: what
-    /// the job shows is partial from then on.
-    dropped: bool,
+    /// What the job shows may not be all of its work from now on: the
+    /// report of an ended turn was let go to keep `ended` bounded, or the
+    /// card was taken up after a restart, which lost what the job's earlier
+    /// turns reported.
+    partial: bool,
     /// The answer that carries the job's summary, once one does.
     hosted: Option<Card>,
 }
@@ -180,7 +182,7 @@ impl Job {
                 report: delivery.activity.clone(),
             });
             if self.ended.len() > REPORTS_KEPT {
-                self.dropped |= self.ended.remove(0).report.is_some();
+                self.partial |= self.ended.remove(0).report.is_some();
             }
         }
         self.hosted = hosted.or(self.hosted);
@@ -275,7 +277,7 @@ impl Job {
                 requested_at: self.requested_at,
                 reports,
                 live,
-                dropped: self.dropped,
+                partial: self.partial,
             },
             markers,
         )
@@ -614,7 +616,12 @@ pub(crate) async fn activity_monitor(
     };
     let adopted = cards.as_ref().map(|cards| cards.adopt(&mut tasks));
     for (job_id, recorded) in adopted.unwrap_or_default() {
-        let view = track(&mut tasks, &job_id, Job::default(), Some(recorded));
+        // What the job's earlier turns reported only the last start knew.
+        let job = Job {
+            partial: true,
+            ..Job::default()
+        };
+        let view = track(&mut tasks, &job_id, job, Some(recorded));
         jobs.insert(job_id, view);
     }
     let mut settled = VecDeque::new();

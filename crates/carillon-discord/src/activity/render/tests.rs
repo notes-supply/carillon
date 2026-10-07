@@ -63,7 +63,7 @@ fn live<'a>(activity: &'a TurnActivity, reports: Vec<&'a TurnActivity>) -> Shown
         requested_at: Some(1_790_000_000),
         reports,
         live: Some(activity),
-        dropped: false,
+        partial: false,
     }
 }
 
@@ -156,7 +156,7 @@ fn cards_show_bounded_safe_text() {
         requested_at: Some(1_790_000_000),
         reports: vec![&busy],
         live: None,
-        dropped: false,
+        partial: false,
     };
     let embed = card(&history, &markers);
     assert_eq!(embed.description.as_deref(), Some("⏳ Finishing up"));
@@ -194,7 +194,7 @@ fn status_rows_say_how_the_job_stands() {
                 requested_at: Some(1_790_000_000),
                 reports: Vec::new(),
                 live: None,
-                dropped: false,
+                partial: false,
             },
             &markers,
         )
@@ -663,7 +663,7 @@ fn a_partial_report_says_so() {
         embed
             .description
             .unwrap_or_default()
-            .ends_with("⚠️ Part of this work's report was left out to keep it short.")
+            .ends_with("⚠️ Some of this work may not be shown here.")
     );
 }
 
