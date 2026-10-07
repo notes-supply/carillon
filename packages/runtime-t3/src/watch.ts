@@ -514,8 +514,15 @@ export function watchTurn(
       foreign.add(run.id);
       return false;
     }
-    if (wakeOwedAfter !== undefined && run.ordinal > wakeOwedAfter) return wake(run);
-    if (backgroundSeenAt !== undefined) return wake(run);
+    // Evidence of work is not permission to take every later notification.
+    // A further wake needs work observed at or after the preceding wake.
+    const after = backgroundSeenAt ?? wakeOwedAfter;
+    if (
+      after !== undefined &&
+      run.ordinal > after &&
+      ![...turnRuns.values()].some((prior) => wakeRuns.has(prior.id) && prior.ordinal > after)
+    )
+      return wake(run);
     stray ??= run.id;
     return false;
   }
@@ -1176,18 +1183,25 @@ export function watchTurn(
       });
     }
     const reporting = [...continuationRuns.values()].some(isActive);
+    const unstarted = last === undefined ? withoutRun() : undefined;
     const reportState: WorkItem["state"] | undefined =
-      followUp === undefined || last === undefined
+      followUp === undefined
         ? undefined
-        : last.status === "failed"
-          ? "failed"
-          : ["cancelled", "interrupted", "rolled_back"].includes(last.status)
-            ? "cancelled"
-            : last.status === "completed" && !reportOwed()
-              ? reported(last).kind === "failed"
-                ? "failed"
-                : "succeeded"
-              : undefined;
+        : last === undefined
+          ? unstarted?.kind === "completed"
+            ? "succeeded"
+            : unstarted?.kind === "failed"
+              ? "failed"
+              : undefined
+          : last.status === "failed"
+            ? "failed"
+            : ["cancelled", "interrupted", "rolled_back"].includes(last.status)
+              ? "cancelled"
+              : last.status === "completed" && !reportOwed()
+                ? reported(last).kind === "failed"
+                  ? "failed"
+                  : "succeeded"
+                : undefined;
     if (reporting || reportOwed() || reportState !== undefined)
       items.push({
         id: `report:${messageId}`,
@@ -1231,6 +1245,38 @@ export function watchTurn(
       ...(readElsewhere ? [READ_ELSEWHERE] : []),
       ...(acknowledged ? [ACKNOWLEDGED] : []),
     ];
+  }
+
+  /** The terminal report when T3 supplied no continuation run. */
+  function withoutRun(): Outcome | undefined {
+    if (anchor === undefined) {
+      if (followUp !== undefined && seen)
+        return {
+          kind: "failed",
+          explanation:
+            "T3 no longer lists the message whose delegated work this turn reports, so its report cannot be followed",
+        };
+      return undefined;
+    }
+    // Only a follow-up turn holds no run of its own: it waits for a
+    // continuation as long as the delegated work still owes one.
+    if (followUp === undefined || reportOwed()) return undefined;
+    // T3 gave the result to another run instead of a report of its own:
+    // that run's reply is its own, never repeated here.
+    const notes = elsewhere();
+    if (notes.length > 0) return { kind: "completed", output: notes.join("\n\n") };
+    // T3 says it delivered a result, but the continuation that carries it
+    // is not in the window this runtime reads.
+    const delivered = [...delegations.values()].some((task) =>
+      DELIVERED.has(task.completionDelivery?.state ?? ""),
+    );
+    return {
+      kind: "failed",
+      explanation:
+        delivered && historyOmitted
+          ? OLDER_REPORT
+          : "T3's delegated work ended without reporting back to this conversation",
+    };
   }
 
   /**
@@ -1569,36 +1615,7 @@ export function watchTurn(
     },
     requestOpen: () => ownedPendingRequest() !== undefined,
     outcome() {
-      if (anchor === undefined) {
-        if (followUp !== undefined && seen)
-          return {
-            kind: "failed",
-            explanation:
-              "T3 no longer lists the message whose delegated work this turn reports, so its report cannot be followed",
-          };
-        return undefined;
-      }
-      if (last === undefined) {
-        // Only a follow-up turn holds no run of its own: it waits for a
-        // continuation as long as the delegated work still owes one.
-        if (followUp === undefined || reportOwed()) return undefined;
-        // T3 gave the result to another run instead of a report of its own:
-        // that run's reply is its own, never repeated here.
-        const notes = elsewhere();
-        if (notes.length > 0) return { kind: "completed", output: notes.join("\n\n") };
-        // T3 says it delivered a result, but the continuation that carries it
-        // is not in the window this runtime reads.
-        const delivered = [...delegations.values()].some((task) =>
-          DELIVERED.has(task.completionDelivery?.state ?? ""),
-        );
-        return {
-          kind: "failed",
-          explanation:
-            delivered && historyOmitted
-              ? OLDER_REPORT
-              : "T3's delegated work ended without reporting back to this conversation",
-        };
-      }
+      if (anchor === undefined || last === undefined) return withoutRun();
       const request = ownedPendingRequest();
       if (request !== undefined) return { kind: "blocked", asked: asked(request) };
       if (uncertainFollowUp())

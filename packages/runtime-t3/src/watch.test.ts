@@ -1822,6 +1822,31 @@ it("attributes a native provider wake already present beside its child in the fi
 });
 
 it.each([false, true])(
+  "refuses surplus generic wakes for one recovered native result (resumed: %s)",
+  (resumed) => {
+    const watch = watchTurn("thread", "message-1", "/workspace");
+    if (resumed) watch.apply(snapshot({ runs: [run("running")] }));
+    watch.apply(
+      snapshot(
+        {
+          runs: [run("completed"), run("completed", "wake", 2), run("completed", "surplus", 3)],
+          subagents: [task("native", "completed", "run-1", { origin: "provider_native" })],
+          turnItems: [wakeOpening("run-2"), wakeOpening("run-3")],
+          messages: [
+            reply("parent", "run-1", "PARENT", "2026-10-05T11:14:53Z"),
+            reply("own", "run-2", "OWN RESULT", "2026-10-05T11:14:59Z"),
+            reply("other", "run-3", "FOREIGN RESULT", "2026-10-05T11:15:01Z"),
+          ],
+        },
+        resumed ? 2 : 1,
+      ),
+    );
+    expect(watch.outcome()).toMatchObject({ kind: "unresolved" });
+    expect(watch.latestRun()?.id).toBe("run-2");
+  },
+);
+
+it.each([false, true])(
   "retains only native result uncertainty still owed before a gap (inside: %s)",
   (inside) => {
     const watch = watchTurn("thread", "message-1", "/workspace");
@@ -1990,6 +2015,60 @@ it("replaces the report-back row with its confirmed completion in a follow-up re
     label: "report back to this conversation",
     state: "succeeded",
   });
+});
+
+it.each([true, false])(
+  "settles a report row even without a continuation run (elsewhere: %s)",
+  (elsewhere) => {
+    const watch = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
+    watch.apply(
+      snapshot({
+        runs: [run("completed"), run("completed", "other", 2)],
+        subagents: [
+          task("child", elsewhere ? "completed" : "cancelled", "run-1", {
+            completionDelivery: elsewhere
+              ? { state: "acknowledged", observedByRunId: "run-2" }
+              : { state: "disposed" },
+          }),
+        ],
+      }),
+    );
+    expect(watch.outcome()?.kind).toBe(elsewhere ? "completed" : "failed");
+    expect(watch.activity().work?.items).toContainEqual(
+      expect.objectContaining({
+        id: "report:message-1",
+        state: elsewhere ? "succeeded" : "failed",
+      }),
+    );
+  },
+);
+
+it("warns about native work started by a follow-up even without a provider roster", () => {
+  const watch = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
+  watch.apply(
+    snapshot({
+      runs: [
+        {
+          ...run("completed"),
+          delegatedCompletion: { disposition: "open", delivery: { messageId: "continuation" } },
+        },
+        run("completed", "continuation", 2),
+      ],
+      subagents: [
+        task("child", "completed", "run-1", { completionDelivery: { state: "delivered" } }),
+        task("native", "running", "run-2", { origin: "provider_native" }),
+      ],
+      messages: [reply("report", "run-2", "REPORT", "2026-10-05T11:14:59Z")],
+    }),
+  );
+  expect(watch.outcome()).toEqual({
+    kind: "completed",
+    output:
+      "REPORT\n\n[The report started background work in T3; its result will show in T3, not here.]",
+  });
+  expect(watch.activity().work?.items).toContainEqual(
+    expect.objectContaining({ id: "native", state: "running" }),
+  );
 });
 
 it("marks a report missing from a bounded snapshot as failed, not successfully delivered", () => {
