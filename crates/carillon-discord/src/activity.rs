@@ -21,7 +21,8 @@
 //! card back. A job that earned a summary but has no card gets its summary
 //! on its answer instead, and that answer is its card from then on; until
 //! the job's last outcome reaches the monitor, the answer's claim on the
-//! job's card keeps the monitor from making another.
+//! job's card keeps the monitor from making another. One whose answers
+//! carried none of what it earned gets a card with its summary as it ends.
 //!
 //! Every Discord call is bounded, and its outcome is classified by what it
 //! proves: a job gets at most one card, a card whose creation is unknown or
@@ -94,7 +95,8 @@ const RETRY_DELAY: Duration = Duration::from_secs(2);
 /// unfinished then is left to the next start.
 const FINAL_DRAIN: Duration = CARD_WAIT.saturating_add(EXCHANGE_LIMIT);
 /// Recently settled turns, so a read taken before a settle cannot show a
-/// finished turn again. Turn IDs are never reused.
+/// finished turn again; a read that began before more turns settled is not
+/// used. Turn IDs are never reused.
 const SETTLED_MEMORY: usize = 256;
 /// The reports of a job's ended turns a card keeps, the latest.
 const REPORTS_KEPT: usize = 8;
@@ -120,12 +122,14 @@ struct Job {
     /// What the job's ended turns reported, oldest first.
     ended: Vec<Ended>,
     /// What the job shows may not be all of its work from now on: the
-    /// report of an ended turn was let go to keep `ended` bounded, or the
-    /// card was taken up after a restart, which lost what the job's earlier
-    /// turns reported.
+    /// report of an ended turn was let go to keep `ended` bounded, a turn
+    /// went on without one, or the card was taken up after a restart, which
+    /// lost what the job's earlier turns reported.
     partial: bool,
     /// The answer that carries the job's summary, once one does.
     hosted: Option<Card>,
+    /// Where the job's answers go, once a delivery said.
+    channel: Option<Id<ChannelMarker>>,
 }
 
 #[derive(Clone, Debug)]
@@ -172,6 +176,7 @@ impl Job {
     /// job stays as that turn shows it.
     fn end(&mut self, delivery: &Delivery, outcome: DeliveryOutcome, hosted: Option<Card>) {
         self.requested_at = Some(delivery.origin.accepted_at);
+        self.channel = delivery.target_id.parse().ok().or(self.channel);
         if !self
             .ended
             .iter()
@@ -184,6 +189,9 @@ impl Job {
             if self.ended.len() > REPORTS_KEPT {
                 self.partial |= self.ended.remove(0).report.is_some();
             }
+            // What a turn that goes on without a report did is not known
+            // once a later turn shows its own.
+            self.partial |= delivery.activity.is_none() && delivery.continued_by.is_some();
         }
         self.hosted = hosted.or(self.hosted);
         self.state = match (&self.state, &delivery.continued_by) {
@@ -197,6 +205,22 @@ impl Job {
                 finished_at: delivery.finished_at,
             },
         };
+    }
+
+    /// Whether what the job's turns did earns it a retained summary: its
+    /// last turn stopped before finishing, or a report shows work.
+    fn earns_summary(&self) -> bool {
+        matches!(
+            self.state,
+            State::Settled {
+                turn_state: TurnState::Interrupted,
+                ..
+            }
+        ) || self
+            .ended
+            .iter()
+            .filter_map(|ended| ended.report.as_ref())
+            .any(render::shows_work)
     }
 
     /// Core's latest read lists `turn` of the job, queued or running.
@@ -447,16 +471,6 @@ impl CardRecords {
         self.change(|cards| cards.remove(job).is_some());
     }
 
-    /// Ends what a settled job's records hold back: the reservation of the
-    /// answer that carries its summary, when `hosted`, and a card nobody can
-    /// name.
-    fn settle(&self, job: &str, hosted: bool) {
-        if hosted {
-            self.release(job);
-        }
-        self.forget_unnamed(job);
-    }
-
     /// Forgets a card nobody can name once its job has settled: it can no
     /// longer stand in the way of another, and there is nothing to finish.
     fn forget_unnamed(&self, job: &str) {
@@ -601,8 +615,6 @@ pub(crate) async fn activity_monitor(
         stopping: stopping.clone(),
     });
     let mut tasks = JoinSet::new();
-    let (reads_sender, mut reads) = mpsc::channel(1);
-    let polling = tasks.spawn(poll_core(core, reads_sender, stopping.clone()));
     let mut jobs = HashMap::new();
     let track = |tasks: &mut JoinSet<()>, job_id: &str, job: Job, old: Option<Recorded>| {
         let (view, watched) = watch::channel(job);
@@ -625,82 +637,126 @@ pub(crate) async fn activity_monitor(
         jobs.insert(job_id, view);
     }
     let mut settled = VecDeque::new();
+    // Outcomes taken so far, and when the read in flight began: a read that
+    // began before turns it may list settled and were let go of is not shown.
+    let mut taken = 0_usize;
+    let mut reading = None;
+    let mut began = 0;
+    let mut ticks = interval(POLL_INTERVAL);
+    ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut reachable = true;
     loop {
         tokio::select! {
             biased;
             outcome = outcomes.recv() => {
                 let Some(Outcome { delivery, result, hosted }) = outcome else { break };
+                taken += 1;
                 if settled.len() == SETTLED_MEMORY {
                     settled.pop_front();
                 }
                 settled.push_back(delivery.turn_id.clone());
                 let job_id = delivery.origin.turn_id.clone();
-                if let Some(view) = jobs.get(&job_id) {
+                let followed = if let Some(view) = jobs.get(&job_id) {
                     view.send_modify(|job| job.end(&delivery, result, hosted));
                     if view.borrow().is_settled() {
                         jobs.remove(&job_id);
                     }
+                    true
                 } else if delivery.continued_by.is_some() {
                     // A job no read has shown yet goes on: it is followed from here.
                     let mut job = Job::default();
                     job.end(&delivery, result, hosted);
                     let view = track(&mut tasks, &job_id, job, None);
-                    jobs.insert(job_id, view);
-                }
+                    jobs.insert(job_id.clone(), view);
+                    true
+                } else {
+                    false
+                };
                 // The job has its last outcome, and any answer card with it.
+                // A card nobody can name is forgotten by the job's card task
+                // once it has looked, or here when no task follows the job.
                 if let (None, Some(cards)) = (&delivery.continued_by, &cards) {
-                    cards.records.settle(&delivery.origin.turn_id, hosted.is_some());
+                    if hosted.is_some() {
+                        cards.records.release(&job_id);
+                    }
+                    if !followed {
+                        cards.records.forget_unnamed(&job_id);
+                    }
                 }
             }
+            // Core is read each interval, one read at a time, until the
+            // provider stops.
+            _ = ticks.tick(), if reading.is_none() && !stopping.is_cancelled() => {
+                reading = Some(Box::pin(core.active_turns()));
+                began = taken;
+            }
             // A read taken before the provider stopped is not shown after.
-            Some(read) = reads.recv(), if !stopping.is_cancelled() => {
-                let active = match read {
-                    Ok(active) => active,
-                    // Unknown is not empty: every card keeps what it shows.
-                    Err(failure) => {
-                        if reachable {
-                            warn!(error = %failure.message, "cannot read active turns from core");
-                        }
-                        reachable = false;
-                        continue;
-                    }
-                };
-                reachable = true;
-                let mut listed = HashSet::new();
-                for turn in active {
-                    if settled.contains(&turn.turn_id) {
-                        continue;
-                    }
-                    let job_id = turn.origin.turn_id.clone();
-                    listed.insert(job_id.clone());
-                    if let Some(view) = jobs.get(&job_id) {
-                        view.send_modify(|job| job.listed(turn));
-                    } else {
-                        let mut job = Job::default();
-                        job.listed(turn);
-                        let view = track(&mut tasks, &job_id, job, None);
-                        jobs.insert(job_id, view);
-                    }
+            () = stopping.cancelled(), if reading.is_some() => reading = None,
+            Some(read) = async { Some(reading.as_mut()?.await) } => {
+                reading = None;
+                if taken - began > SETTLED_MEMORY {
+                    continue;
                 }
-                // Every read that still misses a job's turn says so again, so
-                // a card whose edit failed is tried again.
-                for (job_id, view) in &jobs {
-                    if !listed.contains(job_id) {
-                        view.send_modify(Job::unlisted);
-                    }
-                }
-                // A job whose tasks have ended is forgotten; a job stays
-                // tracked while any of its tasks runs, so it never gets a
-                // second card.
-                jobs.retain(|_, view| !view.is_closed());
+                take_read(read, &mut reachable, &settled, &mut jobs, |job_id, job| {
+                    track(&mut tasks, job_id, job, None)
+                });
                 while tasks.try_join_next().is_some() {}
             }
         }
     }
-    polling.abort();
-    drop(jobs);
+    drop((reading, jobs));
     finish_cards(tasks).await;
+}
+
+/// Shows a read of core's active turns on their jobs, following with
+/// `track` a job not followed yet, except turns already `settled`; a
+/// followed job it does not list is finishing. A failed read changes no
+/// job: `reachable` says whether the last one succeeded.
+fn take_read(
+    read: Result<Vec<ActiveTurn>, crate::InterfaceError>,
+    reachable: &mut bool,
+    settled: &VecDeque<String>,
+    jobs: &mut HashMap<String, watch::Sender<Job>>,
+    mut track: impl FnMut(&str, Job) -> watch::Sender<Job>,
+) {
+    let active = match read {
+        Ok(active) => active,
+        // Unknown is not empty: every card keeps what it shows.
+        Err(failure) => {
+            if *reachable {
+                warn!(error = %failure.message, "cannot read active turns from core");
+            }
+            *reachable = false;
+            return;
+        }
+    };
+    *reachable = true;
+    let mut listed = HashSet::new();
+    for turn in active {
+        if settled.contains(&turn.turn_id) {
+            continue;
+        }
+        let job_id = turn.origin.turn_id.clone();
+        listed.insert(job_id.clone());
+        if let Some(view) = jobs.get(&job_id) {
+            view.send_modify(|job| job.listed(turn));
+        } else {
+            let mut job = Job::default();
+            job.listed(turn);
+            let view = track(&job_id, job);
+            jobs.insert(job_id, view);
+        }
+    }
+    // Every read that still misses a job's turn says so again, so a card
+    // whose edit failed is tried again.
+    for (job_id, view) in jobs.iter() {
+        if !listed.contains(job_id) {
+            view.send_modify(Job::unlisted);
+        }
+    }
+    // A job whose tasks have ended is forgotten; a job stays tracked while
+    // any of its tasks runs, so it never gets a second card.
+    jobs.retain(|_, view| !view.is_closed());
 }
 
 /// Gives a job's tasks, once every outcome is in, up to [`FINAL_DRAIN`] to
@@ -713,24 +769,6 @@ async fn finish_cards(mut tasks: JoinSet<()>) {
     });
     if finished.await.is_err() {
         warn!("activity cards still finishing at stop are left to the next start");
-    }
-}
-
-/// Reads core's active turns every interval until the provider stops.
-async fn poll_core(
-    core: CoreClient,
-    reads: mpsc::Sender<Result<Vec<ActiveTurn>, crate::InterfaceError>>,
-    stopping: CancellationToken,
-) {
-    let mut ticks = interval(POLL_INTERVAL);
-    ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    while stopping.run_until_cancelled(ticks.tick()).await.is_some() {
-        let Some(read) = stopping.run_until_cancelled(core.active_turns()).await else {
-            return;
-        };
-        if reads.send(read).await.is_err() {
-            return;
-        }
     }
 }
 
@@ -796,7 +834,8 @@ async fn show_card(
 /// The job's card once it is worth one: the answer that carries its
 /// summary, or a card made once the job has run past the appearance delay,
 /// with the running turn's snapshot it was made from. `None` when the job
-/// ends first, or it gets no card.
+/// ends first, or it gets no card: one that ended first with a summary no
+/// answer carried gets a card showing that summary, and nothing to follow.
 async fn obtain(
     cards: &Cards,
     job_id: &str,
@@ -808,6 +847,28 @@ async fn obtain(
             return Some((card, None));
         }
         if job.is_settled() {
+            if let Some(channel) = job.channel
+                && job.earns_summary()
+                && !cards.stopping.is_cancelled()
+                // A card or answer that may hold its summary, or one someone
+                // deleted, keeps its record until this task has looked.
+                && cards.records.reserve(job_id) == Reservation::Free
+            {
+                let summary = job.embed(None, false, &cards.config.activity_markers);
+                match cards.create(channel, &summary).await {
+                    Call::Refused(status) => {
+                        warn!(job_id, status, "Discord refused this job's summary card");
+                    }
+                    Call::Unknown => {
+                        warn!(
+                            job_id,
+                            "Discord may hold this job's summary card unconfirmed"
+                        );
+                    }
+                    Call::Done(_) | Call::NotSent => {}
+                }
+                cards.records.release(job_id);
+            }
             return None;
         }
         if let State::Active(turn) = &job.state {

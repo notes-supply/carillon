@@ -7,7 +7,7 @@ use crate::{
     client::test_client as core_client,
     config::{DiscordActivation, DiscordConfig, DiscordConversation},
     conversations::tests::discord_config,
-    delivery::{Reactions, delivery_loop},
+    delivery::{Reactions, Sent, delivery_loop},
 };
 use anyhow::Context as _;
 use axum::{
@@ -27,7 +27,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, PoisonError,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -98,6 +98,11 @@ struct Substitute {
     deliveries: Arc<Mutex<VecDeque<Delivery>>>,
     /// Core records no delivery while a case holds this.
     recording: Arc<tokio::sync::Mutex<()>>,
+    /// Reads of core's list begun so far.
+    reads: Arc<AtomicUsize>,
+    /// Core answers no read, with the list it took when asked, while a case
+    /// holds this.
+    reading: Arc<tokio::sync::Mutex<()>>,
     server: JoinHandle<()>,
 }
 
@@ -107,14 +112,22 @@ impl Substitute {
         let active = Arc::new(Mutex::new(Some(Vec::new())));
         let deliveries = Arc::new(Mutex::new(VecDeque::new()));
         let recording = Arc::new(tokio::sync::Mutex::new(()));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let reading = Arc::new(tokio::sync::Mutex::new(()));
         let (recorded, listed) = (seen.clone(), active.clone());
         let (queued, acknowledged) = (deliveries.clone(), recording.clone());
+        let (begun, answering) = (reads.clone(), reading.clone());
         let app = Router::new().fallback(move |method: Method, uri: Uri, body: Bytes| {
             let (seen, active, script) = (recorded.clone(), listed.clone(), script.clone());
             let (deliveries, recording) = (queued.clone(), acknowledged.clone());
+            let (reads, reading) = (begun.clone(), answering.clone());
             async move {
                 if uri.path() == "/v1/activity" {
-                    return match lock(&active).clone() {
+                    // Core takes its list when asked, then answers.
+                    let turns = lock(&active).clone();
+                    reads.fetch_add(1, Ordering::SeqCst);
+                    let _answered = reading.lock().await;
+                    return match turns {
                         Some(turns) => Json(turns).into_response(),
                         None => StatusCode::SERVICE_UNAVAILABLE.into_response(),
                     };
@@ -165,6 +178,8 @@ impl Substitute {
             active,
             deliveries,
             recording,
+            reads,
+            reading,
             server,
         })
     }
@@ -182,6 +197,27 @@ impl Substitute {
     /// slow to record deliveries would.
     async fn hold_recording(&self) -> OwnedMutexGuard<()> {
         self.recording.clone().lock_owned().await
+    }
+
+    /// Holds every read's answer until the guard is dropped, as a core slow
+    /// to describe the turns it listed would.
+    async fn hold_reads(&self) -> OwnedMutexGuard<()> {
+        self.reading.clone().lock_owned().await
+    }
+
+    /// Waits until a read begun after the first `count` has taken core's list.
+    async fn read_taken(&self, count: usize) -> anyhow::Result<()> {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while self.reads.load(Ordering::SeqCst) <= count {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .context("no read of core's list began")
+    }
+
+    fn reads(&self) -> usize {
+        self.reads.load(Ordering::SeqCst)
     }
 
     fn seen(&self) -> Vec<Seen> {
@@ -2445,6 +2481,254 @@ async fn a_late_answer_or_stale_read_never_takes_a_job_back() -> anyhow::Result<
             .len(),
         1
     );
+    monitor.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_turn_that_goes_on_without_a_report_leaves_its_card_saying_it_may_not_show_all_the_work()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let records = directory.path().join("activity-cards.json");
+    let discord = Substitute::start(succeed()).await?;
+    let working = tools(None, &[("bash", "make")], &[]);
+    discord.list(vec![running("parent", "300", now() - 60, Some(working))]);
+    let (outcomes, monitor) = discord.monitor(discord.http(false), config(false), &records);
+    let made = discord
+        .wait_for(&Method::POST, "/channels/300/messages", 1)
+        .await?;
+    assert!(made[0].content().contains("↳ bash `make`"));
+    let card = json!({"channel_id": "300", "message_id": "901"});
+    recorded_soon(&records, "parent", &card).await?;
+    // The parent answers and goes on, but no report of it reached core.
+    let mut answered = delivered("parent", "parent", TurnState::Completed);
+    answered.continued_by = Some("report".to_owned());
+    report(&outcomes, answered, DeliveryOutcome::Delivered)?;
+    let reporting = tools(Some("Reporting."), &[], &[("read", "findings.md", true)]);
+    discord.list(vec![continuing(
+        "report",
+        "parent",
+        "300",
+        now(),
+        Some(reporting),
+    )]);
+    let partial = "Some of this work may not be shown here.";
+    let progress = discord
+        .wait_for_text(&Method::PATCH, "/channels/300/messages/901", "Reporting.")
+        .await?
+        .content();
+    assert!(progress.contains("✓ read `findings.md`"), "{progress}");
+    // The follow-up's work replaces the parent's last snapshot: the card
+    // says it may not show all of the job, and invents nothing of it.
+    assert!(progress.contains(partial), "{progress}");
+    assert!(!progress.contains("bash `make`"), "{progress}");
+    let mut reported = delivered("report", "parent", TurnState::Completed);
+    reported.activity = Some(tools(None, &[], &[("read", "findings.md", true)]));
+    report(&outcomes, reported, DeliveryOutcome::Delivered)?;
+    discord.list(Vec::new());
+    let done = discord
+        .wait_for_text(
+            &Method::PATCH,
+            "/channels/300/messages/901",
+            "✓ Done · answered",
+        )
+        .await?
+        .content();
+    assert!(
+        done.contains("✓ read `findings.md`") && done.contains(partial),
+        "{done}"
+    );
+    assert!(!done.contains("bash `make`"), "{done}");
+    recorded_soon(&records, "parent", &Value::Null).await?;
+    assert_eq!(recorded(&records)?, json!({}));
+    assert_eq!(discord.matching(&Method::POST, "/channels").len(), 1);
+    assert!(discord.matching(&Method::DELETE, "/channels").is_empty());
+    monitor.abort();
+    Ok(())
+}
+
+/// The monitor beside the delivery loop's summary owner, over the records
+/// at `path`. The parent turn's calls earned a summary its answer was to
+/// carry, which went as `sent`; its follow-up ends the job without earning
+/// one. Both outcomes are taken before the job's card task first looks,
+/// after the provider began `stop`ping when that is set. The monitor goes
+/// on while the case holds the outcomes' sender.
+async fn settled_before_its_card_task_looks(
+    path: &Path,
+    sent: Sent,
+    stop: bool,
+) -> anyhow::Result<(Substitute, mpsc::UnboundedSender<Outcome>, JoinHandle<()>)> {
+    let discord = Substitute::start(succeed()).await?;
+    let config = config(false);
+    let records = CardRecords::open(path.to_path_buf()).map(Arc::new);
+    let summaries = Summaries::new(records.clone(), &config).context("cards are off")?;
+    let (outcomes, observed) = mpsc::unbounded_channel();
+    let stopping = CancellationToken::new();
+    let monitor = tokio::spawn(activity_monitor(
+        core_client(format!("http://{}", discord.address)),
+        discord.http(false),
+        config,
+        records,
+        observed,
+        stopping.clone(),
+    ));
+    // Reading core, the monitor has taken up what was recorded before.
+    discord.read_taken(0).await?;
+    let mut parent = delivered("parent", "parent", TurnState::Completed);
+    parent.activity = Some(tools(None, &[], &[("bash", "make", true)]));
+    parent.continued_by = Some("report".to_owned());
+    anyhow::ensure!(summaries.reserve(&parent).is_some(), "no summary earned");
+    anyhow::ensure!(
+        summaries.sent(&parent, &sent).is_none(),
+        "the answer took it"
+    );
+    if stop {
+        stopping.cancel();
+    }
+    report(&outcomes, parent, DeliveryOutcome::Uncertain)?;
+    let mut last = delivered("report", "parent", TurnState::Completed);
+    last.activity = Some(tools(None, &[], &[]));
+    report(&outcomes, last, DeliveryOutcome::Delivered)?;
+    Ok((discord, outcomes, monitor))
+}
+
+/// The records at `path` once they hold nothing, as when none were saved.
+async fn recorded_empty(path: &Path) -> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while path.exists()
+            && !recorded(&path.to_path_buf()).is_ok_and(|records| records == json!({}))
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .context("records still hold a card")
+}
+
+#[tokio::test]
+async fn a_job_settled_before_its_card_task_looks_still_shows_the_summary_it_earned()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("activity-cards.json");
+    let (discord, _outcomes, monitor) =
+        settled_before_its_card_task_looks(&path, Sent::Incomplete, false).await?;
+    let made = discord
+        .wait_for(&Method::POST, "/channels/300/messages", 1)
+        .await?;
+    let summary = made[0].content();
+    assert!(summary.starts_with("✓ Done · answered"), "{summary}");
+    assert!(summary.contains("✓ bash `make`"), "{summary}");
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    // One card, already the job's summary: nothing follows or records it.
+    let seen = discord.seen();
+    assert_eq!(seen.len(), 1, "{seen:#?}");
+    recorded_empty(&path).await?;
+    monitor.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_job_settled_before_its_card_task_looks_gets_no_card_beside_an_unknown_one_or_once_stopping()
+-> anyhow::Result<()> {
+    for (sent, stop) in [
+        (Sent::Unnamed(Id::new(300)), false),
+        (Sent::Incomplete, true),
+    ] {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("activity-cards.json");
+        let (discord, _outcomes, monitor) =
+            settled_before_its_card_task_looks(&path, sent, stop).await?;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+        let seen = discord.seen();
+        assert!(seen.is_empty(), "stop: {stop}: {seen:#?}");
+        // A card nobody can name holds the job back until its card task has
+        // looked, and is forgotten then.
+        recorded_empty(&path).await?;
+        monitor.abort();
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_read_held_while_more_turns_settle_than_are_remembered_brings_none_of_them_back()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let records = directory.path().join("activity-cards.json");
+    let discord = Substitute::start(succeed()).await?;
+    let long_ago = now() - 60;
+    let working = || Some(tools(None, &[("bash", "make")], &[]));
+    discord.list(vec![
+        running("old", "300", long_ago, working()),
+        running("probe", "302", long_ago, working()),
+    ]);
+    let (outcomes, monitor) = discord.monitor(discord.http(false), config(true), &records);
+    for channel in ["300", "302"] {
+        discord
+            .wait_for(&Method::POST, &format!("/channels/{channel}/messages"), 1)
+            .await?;
+        discord
+            .wait_for(&Method::POST, &format!("/channels/{channel}/typing"), 1)
+            .await?;
+    }
+    // A read takes core's list, both turns still on it, and is held.
+    let held = discord.hold_reads().await;
+    discord.read_taken(discord.reads()).await?;
+    settle(
+        &outcomes,
+        "old",
+        TurnState::Completed,
+        DeliveryOutcome::Delivered,
+    )?;
+    for n in 0..300 {
+        let other = format!("other-{n}");
+        settle(
+            &outcomes,
+            &other,
+            TurnState::Completed,
+            DeliveryOutcome::Delivered,
+        )?;
+    }
+    // The probe settles last: once its card shows that, every earlier
+    // outcome has been taken.
+    settle(
+        &outcomes,
+        "probe",
+        TurnState::Completed,
+        DeliveryOutcome::Delivered,
+    )?;
+    for channel in ["300", "302"] {
+        discord
+            .wait_for_text(
+                &Method::PATCH,
+                &format!("/channels/{channel}/messages/"),
+                "✓ Done",
+            )
+            .await?;
+    }
+    recorded_empty(&records).await?;
+    // Core no longer lists them; it lists new work.
+    discord.list(vec![running("new", "301", long_ago, working())]);
+    let released = Instant::now();
+    drop(held);
+    discord
+        .wait_for(&Method::POST, "/channels/301/messages", 1)
+        .await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    // The held read lists the old turn, which settled too long before to be
+    // remembered: no card or typing brings it back.
+    let old = discord.matching(&Method::POST, "/channels/300/");
+    assert_eq!(
+        old.iter()
+            .filter(|seen| seen.path.ends_with("/messages"))
+            .count(),
+        1,
+        "{old:#?}"
+    );
+    assert!(old.iter().all(|seen| seen.at < released), "{old:#?}");
+    // A fresh read still brings new work.
+    let new = json!({"channel_id": "301", "message_id": "903"});
+    recorded_soon(&records, "new", &new).await?;
+    assert_eq!(recorded(&records)?, json!({ "new": new }));
     monitor.abort();
     Ok(())
 }
