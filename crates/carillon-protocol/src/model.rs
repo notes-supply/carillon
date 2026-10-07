@@ -83,7 +83,7 @@ impl FromStr for DeliveryState {
 
 /// The two outcomes an interface may report for a claimed delivery, so an ack
 /// cannot express a non-terminal state.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryOutcome {
     Delivered,
@@ -250,6 +250,29 @@ pub struct RuntimeTurnResponse {
     /// them again with a later turn.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub attachments_left: bool,
+    /// The runtime's final report of what the turn did, taken before its
+    /// executing state was discarded. A report that is not a valid one is
+    /// dropped rather than failing the turn: it is for display.
+    #[serde(
+        default,
+        deserialize_with = "valid_or_none",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub activity: Option<TurnActivity>,
+}
+
+/// The most bytes a turn's final report takes, serialized. A runtime keeps
+/// its report within it; core stores no larger one.
+pub const ACTIVITY_REPORT_LIMIT: usize = 16 * 1024;
+
+/// Display data that is not valid is absent, never an error of what carries it.
+fn valid_or_none<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    Ok(Option::<Value>::deserialize(deserializer)?
+        .and_then(|value| serde_json::from_value(value).ok()))
 }
 
 /// The neutral key of a turn's `native` metadata through which an
@@ -267,6 +290,36 @@ pub struct Delivery {
     pub target_id: String,
     pub feedback_target_id: String,
     pub content: String,
+    /// Where the turn's work began.
+    pub origin: Origin,
+    /// When the turn finished, Unix seconds.
+    pub finished_at: i64,
+    /// The runtime's final report of the turn, when it gave one.
+    #[serde(
+        default,
+        deserialize_with = "crate::models::optional_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub activity: Option<TurnActivity>,
+    /// The observation core queued when the turn finished, to report work
+    /// the turn left running: the work goes on after this delivery.
+    #[serde(
+        default,
+        deserialize_with = "crate::models::optional_nonempty_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub continued_by: Option<String>,
+}
+
+/// Where a turn's work began: the message turn itself, or, for an
+/// observation, the message turn whose delegated work it reports, through
+/// any chain of observations. Core records it when it queues the
+/// observation; nothing infers it from the conversation.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Origin {
+    pub turn_id: String,
+    /// When core accepted that message, Unix seconds.
+    pub accepted_at: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -290,6 +343,8 @@ pub struct ActiveTurn {
     pub target_id: String,
     /// Unix seconds.
     pub accepted_at: i64,
+    /// Where the turn's work began.
+    pub origin: Origin,
     #[serde(deserialize_with = "crate::models::required_nullable")]
     pub activity: Option<TurnActivity>,
 }
@@ -319,6 +374,94 @@ pub struct TurnActivity {
         skip_serializing_if = "Option::is_none"
     )]
     pub work: Option<WorkSummary>,
+    /// What the native provider published about its reasoning, as bounded
+    /// excerpts, oldest first: never the answer, and never reasoning the
+    /// provider did not expose.
+    #[serde(
+        default,
+        deserialize_with = "bounded_notes",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub notes: Vec<String>,
+    /// What the native engine reports about the agent running the turn.
+    #[serde(
+        default,
+        deserialize_with = "crate::models::optional_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub agent: Option<AgentInfo>,
+    /// Part of this report was left out to keep it within
+    /// [`ACTIVITY_REPORT_LIMIT`]: what it shows is still what the runtime
+    /// observed, but not all of it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub partial: bool,
+}
+
+/// The most reasoning notes one snapshot carries.
+pub const NOTE_LIMIT: usize = 8;
+/// The longest note, in UTF-16 code units, as JavaScript counts them.
+pub const NOTE_LENGTH: usize = 500;
+
+fn bounded_notes<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let notes = Vec::<String>::deserialize(deserializer)?;
+    if notes.len() > NOTE_LIMIT {
+        return Err(serde::de::Error::custom(format!(
+            "at most {NOTE_LIMIT} notes are allowed"
+        )));
+    }
+    if notes
+        .iter()
+        .any(|note| note.is_empty() || note.encode_utf16().count() > NOTE_LENGTH)
+    {
+        return Err(serde::de::Error::custom(format!(
+            "a note has 1 to {NOTE_LENGTH} characters"
+        )));
+    }
+    Ok(notes)
+}
+
+/// What a native engine reports about an agent; each part is absent when
+/// the engine does not say.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AgentInfo {
+    /// The model, as the engine names it.
+    #[serde(
+        default,
+        deserialize_with = "crate::models::optional_nonempty_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub model: Option<String>,
+    /// The reasoning effort or thinking level, as the engine names it.
+    #[serde(
+        default,
+        deserialize_with = "crate::models::optional_nonempty_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub effort: Option<String>,
+    /// How much of its context window the agent's conversation fills, as
+    /// the engine last estimated it.
+    #[serde(
+        default,
+        deserialize_with = "crate::models::optional_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub context: Option<ContextUse>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ContextUse {
+    /// Tokens the conversation occupies.
+    pub used: u64,
+    /// The window's size, when the engine says.
+    #[serde(
+        default,
+        deserialize_with = "crate::models::optional_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub window: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -387,6 +530,17 @@ pub struct WorkItem {
         skip_serializing_if = "Option::is_none"
     )]
     pub started_at: Option<i64>,
+    /// `started_at` is when the runtime first saw the work running: the
+    /// engine gave no start of its own.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub estimated: bool,
+    /// How long finished work ran, when the engine reported its start and end.
+    #[serde(
+        default,
+        deserialize_with = "crate::models::optional_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -440,6 +594,10 @@ pub struct RunningTool {
     pub detail: Option<String>,
     /// Unix seconds.
     pub started_at: i64,
+    /// `started_at` is when the runtime first saw the call: the engine gave
+    /// no start of its own.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub estimated: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -453,6 +611,13 @@ pub struct FinishedTool {
     )]
     pub detail: Option<String>,
     pub ok: bool,
+    /// How long the call ran, when the engine reported its start and end.
+    #[serde(
+        default,
+        deserialize_with = "crate::models::optional_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

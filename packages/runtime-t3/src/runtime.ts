@@ -17,11 +17,13 @@ import {
   type ModelState,
   type ModelUpdate,
 } from "@carillon/protocol";
+import { finalReport } from "@carillon/runtime/activity";
 import {
   diagnostic,
   ExplainedFailure,
   redactCredentials,
   RuntimeClosed,
+  withReport,
 } from "@carillon/runtime/failure";
 import { validated } from "@carillon/runtime/models";
 import {
@@ -387,6 +389,18 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     );
     const progress: Progress = { dispatched: false };
     let settled: Outcome | undefined;
+    /**
+     * The turn's final report, from the fold before the turn's entry goes.
+     * Display never fails a turn: a fold that cannot describe itself gives
+     * none.
+     */
+    const report = () => {
+      try {
+        return finalReport(watch.activity());
+      } catch {
+        return undefined;
+      }
+    };
     try {
       const { outcome, stop } = await runTurn(request, binding, watch, signal, progress, follow);
       settled = outcome;
@@ -402,10 +416,12 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
                 : (commandFinished(request) ?? "");
           if (output.trim().length === 0)
             throw new ExplainedFailure(502, "T3 finished the run without an answer.");
+          const activity = report();
           return {
             correlation_id: request.correlation_id,
             output,
             ...(outcome.followUp === undefined ? {} : { follow_up: outcome.followUp }),
+            ...(activity === undefined ? {} : { activity }),
             // A command went as written, without the notes of the earlier
             // files it was offered: core offers them again with a later turn.
             ...(turnIntent(request.native) === "command" && (request.unanswered ?? []).length > 0
@@ -441,6 +457,10 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
           throw new Error(`unknown outcome ${String(exhaustive)}`);
         }
       }
+    } catch (failure) {
+      // The failure keeps what the turn did, whatever its explanation shows.
+      const activity = report();
+      throw activity === undefined ? failure : withReport(failure, activity);
     } finally {
       // The one place that decides: work that may have reached T3 (dispatched
       // now, or read back from a run this turn already had) and left without

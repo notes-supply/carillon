@@ -13,6 +13,7 @@ import { TurnActivitySchema } from "@carillon/protocol";
 import { Check } from "typebox/value";
 import { afterEach, expect, it, vi } from "vitest";
 import { createPiRuntime } from "@carillon/runtime-pi";
+import { ExplainedFailure, reportOf } from "@carillon/runtime/failure";
 import { trackActivity } from "./activity.ts";
 
 afterEach(() => {
@@ -131,7 +132,16 @@ it("reports a real turn's phases, slow and parallel tools, failures and bursts u
     const turn = runtime.executeTurn(request(root, "turn-1"));
     // Model-only work: nothing running and no commentary yet.
     await expect.poll(() => activity()?.phase).toBe("model");
-    expect(activity()).toEqual({ phase: "model", running: [], recent: [], tool_calls: 0 });
+    // The session says which model runs; this one does not reason.
+    expect(activity()).toMatchObject({
+      phase: "model",
+      running: [],
+      recent: [],
+      tool_calls: 0,
+      agent: { model: "fixture" },
+    });
+    expect(activity()?.headline).toBeUndefined();
+    expect(activity()?.agent?.effort).toBeUndefined();
     // Other interfaces and other turns are not described.
     expect(runtime.activity("turn-1", "other-interface")).toBeUndefined();
     expect(runtime.activity("turn-2", "discord-private")).toBeUndefined();
@@ -151,22 +161,38 @@ it("reports a real turn's phases, slow and parallel tools, failures and bursts u
       tool_calls: 13,
     });
     // The failed call was recorded before the burst pushed it out of the recent list.
-    expect(working?.recent).toEqual(
+    expect(working?.recent).toMatchObject(
       Array.from({ length: 5 }, () => ({ tool: "read", detail: "notes.txt", ok: true })),
     );
+    // Pi's own start and end events time each call.
+    expect(working?.recent.every((call) => typeof call.duration_ms === "number")).toBe(true);
     expect(JSON.stringify(working)).not.toContain("notes\\n");
 
     await writeFile(join(root, "one"), "");
     await expect.poll(() => activity()?.running.length).toBe(1);
-    expect(activity()?.recent.at(-1)).toEqual({ tool: "bash", detail: wait("one"), ok: true });
+    expect(activity()?.recent.at(-1)).toMatchObject({
+      tool: "bash",
+      detail: wait("one"),
+      ok: true,
+    });
     await writeFile(join(root, "two"), "");
     // Model work after the tools: nothing is shown as still executing.
     await expect.poll(() => activity()?.running.length).toBe(0);
     expect(activity()?.phase).toBe("model");
 
     finalResponse.resolve(undefined);
-    expect((await turn).output).toContain("All done.");
+    const answered = await turn;
+    expect(answered.output).toContain("All done.");
     expect(activity()).toBeUndefined();
+    // The answer carries the turn's final report, taken before its activity
+    // was removed: every call counted, the latest finished, nothing running.
+    expect(Check(TurnActivitySchema, answered.activity)).toBe(true);
+    expect(answered.activity).toMatchObject({
+      running: [],
+      tool_calls: 13,
+      agent: { model: "fixture" },
+    });
+    expect(answered.activity?.recent.at(-1)).toMatchObject({ tool: "bash", detail: wait("two") });
   } finally {
     firstResponse.resolve(undefined);
     finalResponse.resolve(undefined);
@@ -209,7 +235,9 @@ it("records a failed tool and the call that recovers from it", async () => {
       ],
       tool_calls: 2,
     });
-    expect(snapshots[1]?.recent).toEqual([{ tool: "read", detail: "missing.txt", ok: false }]);
+    expect(snapshots[1]?.recent).toMatchObject([
+      { tool: "read", detail: "missing.txt", ok: false },
+    ]);
     hold.resolve(undefined);
     await turn;
   } finally {
@@ -316,7 +344,8 @@ export default function (pi) {
       .toEqual(["running", "running"]);
     const running = activity();
     expect(Check(TurnActivitySchema, running)).toBe(true);
-    // Start times are the runtime's own clock; everything else is as reported.
+    // Start times are when the runtime first saw the work running, marked as
+    // estimates; everything else is as reported.
     expect(
       running?.work?.items.map((item) => ({ ...item, started_at: typeof item.started_at })),
     ).toEqual([
@@ -327,6 +356,7 @@ export default function (pi) {
         state: "running",
         actor: "pi child",
         started_at: "number",
+        estimated: true,
       },
       {
         id: "helper",
@@ -335,6 +365,7 @@ export default function (pi) {
         state: "running",
         parent: "lead",
         started_at: "number",
+        estimated: true,
       },
     ]);
     expect(running?.work?.partial).toBe(false);
@@ -402,4 +433,175 @@ it("keeps at most the snapshot limit of reported work, never dropping live work 
   ])
     tracker.report(invalid);
   expect(tracker.snapshot().work?.items).toHaveLength(16);
+});
+
+/** A response that thinks before it answers or calls tools, or that fails with Pi's error. */
+function thinking(thought: string, text: string, calls: ToolCall[], failure?: string) {
+  const message = {
+    ...assistant([{ type: "thinking", thinking: thought }, { type: "text", text }, ...calls]),
+    ...(failure === undefined ? {} : { stopReason: "error" as const, errorMessage: failure }),
+  };
+  const stream = createAssistantMessageEventStream();
+  queueMicrotask(() => {
+    stream.push({ type: "start", partial: message });
+    stream.push({ type: "thinking_start", contentIndex: 0, partial: message });
+    const half = Math.floor(thought.length / 2);
+    for (const delta of [thought.slice(0, half), thought.slice(half)])
+      stream.push({ type: "thinking_delta", contentIndex: 0, delta, partial: message });
+    stream.push({ type: "thinking_end", contentIndex: 0, content: thought, partial: message });
+    stream.push({ type: "text_start", contentIndex: 1, partial: message });
+    stream.push({ type: "text_delta", contentIndex: 1, delta: text, partial: message });
+    stream.push({ type: "text_end", contentIndex: 1, content: text, partial: message });
+    if (failure === undefined)
+      stream.push({ type: "done", reason: calls.length > 0 ? "toolUse" : "stop", message });
+    else stream.push({ type: "error", reason: "error", error: message });
+  });
+  return stream;
+}
+
+it("keeps thinking as notes beside the answer, and a failed turn's report with its failure", async () => {
+  const root = await mkdtemp(join(tmpdir(), "carillon-activity-"));
+  await mkdir(join(root, "resources"));
+  await writeFile(join(root, "notes.txt"), "notes\n");
+  const { models, runtime } = await piRuntime(root);
+  const read: ToolCall = {
+    type: "toolCall",
+    id: "read",
+    name: "read",
+    arguments: { path: join(root, "notes.txt") },
+  };
+  const responses = [
+    () => thinking("The notes file\nshould say what to check.", "Reading the notes.", [read]),
+    () => thinking("Nothing else is needed.", "The notes say notes.", []),
+    () => thinking("Reading them again.", "Again.", [read]),
+    () => thinking("Answering.", "", [], "The usage limit has been reached"),
+  ];
+  vi.spyOn(models, "streamSimple").mockImplementation(() => {
+    const next = responses.shift();
+    if (next === undefined) throw new Error("no more responses");
+    return next();
+  });
+  try {
+    const answered = await runtime.executeTurn(request(root, "turn-1"));
+    // Thinking is kept as notes, one per block on one line, and never
+    // becomes the answer.
+    expect(answered.output).toBe("Reading the notes.The notes say notes.");
+    expect(answered.activity?.notes).toEqual([
+      "The notes file should say what to check.",
+      "Nothing else is needed.",
+    ]);
+
+    const failed = await runtime.executeTurn(request(root, "turn-2")).then(
+      () => undefined,
+      (failure: unknown) => failure,
+    );
+    expect(failed).toBeInstanceOf(ExplainedFailure);
+    expect(failed).toMatchObject({ status: 502, message: "The usage limit has been reached" });
+    // The failure keeps the turn's report: what it read, and what it thought.
+    expect(reportOf(failed)).toMatchObject({
+      tool_calls: 1,
+      recent: [{ tool: "read", detail: "notes.txt", ok: true }],
+      notes: ["Reading them again.", "Answering."],
+      agent: { model: "fixture" },
+    });
+  } finally {
+    await runtime.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("keeps a turn's report with a failure that is no error, as an error caused by it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "carillon-activity-"));
+  await mkdir(join(root, "resources"));
+  await writeFile(join(root, "notes.txt"), "notes\n");
+  const { models, runtime } = await piRuntime(root);
+  const read: ToolCall = {
+    type: "toolCall",
+    id: "read",
+    name: "read",
+    arguments: { path: join(root, "notes.txt") },
+  };
+  const controller = new AbortController();
+  const responses = [
+    () => thinking("The notes say what to check.", "Reading the notes.", [read]),
+    () => {
+      // The turn is abandoned once the read is done, for a reason that is no error.
+      controller.abort("core went away");
+      return thinking("Answering.", "Done.", []);
+    },
+  ];
+  vi.spyOn(models, "streamSimple").mockImplementation(() => {
+    const next = responses.shift();
+    if (next === undefined) throw new Error("no more responses");
+    return next();
+  });
+  try {
+    const failed = await runtime.executeTurn(request(root, "turn-1"), controller.signal).then(
+      () => undefined,
+      (failure: unknown) => failure,
+    );
+    expect(failed).toBeInstanceOf(Error);
+    expect(failed).not.toBeInstanceOf(ExplainedFailure);
+    expect(failed).toMatchObject({ cause: "core went away" });
+    expect(reportOf(failed)).toMatchObject({
+      tool_calls: 1,
+      recent: [{ tool: "read", detail: "notes.txt", ok: true }],
+    });
+  } finally {
+    await runtime.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("times calls and reported work on the monotonic clock, keeps a finished duration, and marks observed starts", () => {
+  let wall = 1_790_000_000_000;
+  let monotonic = 500;
+  vi.spyOn(Date, "now").mockImplementation(() => wall);
+  vi.spyOn(performance, "now").mockImplementation(() => monotonic);
+  const activity = trackActivity("/workspace");
+  const fact = { id: "child", kind: "delegation", label: "Summarise the log", state: "running" };
+  activity.report(fact);
+  // Reported work has no start of its own: when it was first reported running is an estimate.
+  expect(activity.snapshot().work?.items[0]).toMatchObject({
+    started_at: 1_790_000_000,
+    estimated: true,
+  });
+  // The wall clock steps back while the work runs; its duration does not.
+  monotonic += 1_000;
+  wall -= 60_000;
+  activity.report({ ...fact, state: "succeeded" });
+  expect(activity.snapshot().work?.items[0]).toMatchObject({
+    state: "succeeded",
+    started_at: 1_790_000_000,
+    duration_ms: 1_000,
+  });
+  // Its end reported again keeps the duration it finished with.
+  monotonic += 7_000;
+  activity.report({ ...fact, state: "succeeded" });
+  expect(activity.snapshot().work?.items[0]?.duration_ms).toBe(1_000);
+
+  // A call's start is Pi's own event, never an estimate, and its duration is monotonic too.
+  activity.observe({
+    type: "tool_execution_start",
+    toolCallId: "call",
+    toolName: "bash",
+    args: { command: "cargo check" },
+  });
+  expect(activity.snapshot().running[0]).toEqual({
+    tool: "bash",
+    detail: "cargo check",
+    started_at: Math.floor(wall / 1000),
+  });
+  wall -= 1_000;
+  monotonic += 250;
+  activity.observe({
+    type: "tool_execution_end",
+    toolCallId: "call",
+    toolName: "bash",
+    isError: false,
+    result: { content: [], details: {} },
+  });
+  expect(activity.snapshot().recent).toEqual([
+    { tool: "bash", detail: "cargo check", ok: true, duration_ms: 250 },
+  ]);
 });

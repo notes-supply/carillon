@@ -1,6 +1,7 @@
+import type { TurnActivity } from "@carillon/protocol";
 import { once } from "node:events";
 import { afterEach, expect, it, vi } from "vitest";
-import { ExplainedFailure, RuntimeClosed } from "./failure.ts";
+import { ExplainedFailure, RuntimeClosed, withReport } from "./failure.ts";
 import { createRuntimeServer } from "./http.ts";
 import type { RuntimeOperations } from "./operations.ts";
 
@@ -19,7 +20,15 @@ async function serve() {
           ? new Error(`extension state at /private/state rejected ${key}`)
           : request.input === "closing"
             ? new RuntimeClosed("runtime is closed")
-            : new ExplainedFailure(502, request.input),
+            : request.input === "reported internal"
+              ? reported(new Error(`state at /private/state rejected ${key}`))
+              : request.input === "reported value"
+                ? reportedValue(`the session's state rejected ${key}`)
+                : request.input === "reported closing"
+                  ? reported(new RuntimeClosed("runtime is closed"))
+                  : request.input.startsWith("reported ")
+                    ? reported(new ExplainedFailure(502, request.input.slice(9)))
+                    : new ExplainedFailure(502, request.input),
       ),
     activity: (correlationId, interfaceId) =>
       correlationId === "turn/1" && interfaceId === "discord-private"
@@ -66,6 +75,26 @@ async function serve() {
     await new Promise((done) => server.close(done));
   };
   return { call, close };
+}
+
+const REPORT: TurnActivity = {
+  phase: "tools",
+  running: [],
+  recent: [{ tool: "bash", detail: "make", ok: false, duration_ms: 1200 }],
+  tool_calls: 1,
+};
+
+/** `failure`, after a turn left its report with it. */
+function reported(failure: Error): Error {
+  withReport(failure, REPORT);
+  return failure;
+}
+
+/** What a runtime throws when a turn that left its report ended with `value`, which is no error. */
+function reportedValue(value: string): Error {
+  const failure = withReport(value, REPORT);
+  if (!(failure instanceof Error)) throw new TypeError("the report was not kept with an error");
+  return failure;
 }
 
 const turn = (input: string) => ({
@@ -179,6 +208,45 @@ it("describes an executing turn only to its own interface, after authentication"
     expect(
       (await call("GET", "/v1/turns/%E0%A4%A/activity?interface_id=discord-private")).status,
     ).toBe(400);
+  } finally {
+    await close();
+  }
+});
+
+it("sends a failed turn's report whether or not its explanation can be shown", async () => {
+  const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const { call, close } = await serve();
+  try {
+    expect(await call("POST", "/v1/turns", turn("reported The build failed."))).toEqual({
+      status: 502,
+      body: { error: "The build failed.", activity: REPORT },
+    });
+    // Unsafe text is withheld; the report is not.
+    expect(
+      await call("POST", "/v1/turns", turn("reported Authentication failed: password=x")),
+    ).toEqual({ status: 502, body: { activity: REPORT } });
+    // An internal failure keeps its status and its diagnostics in the log.
+    expect(await call("POST", "/v1/turns", turn("reported internal"))).toEqual({
+      status: 500,
+      body: { activity: REPORT },
+    });
+    // So does a value that is no error, which has no explanation to show;
+    // its diagnostic is the value's, redacted.
+    expect(await call("POST", "/v1/turns", turn("reported value"))).toEqual({
+      status: 500,
+      body: { activity: REPORT },
+    });
+    expect(log.mock.calls.map((args) => args.join(" "))).toContainEqual(
+      expect.stringMatching(
+        /^POST \/v1\/turns failed: Error: the session's state rejected \[redacted\]\n\s+at /u,
+      ),
+    );
+    // A closing runtime still gives no answer, report or not.
+    expect(await call("POST", "/v1/turns", turn("reported closing"))).toEqual({
+      status: 503,
+      body: {},
+    });
+    expect(JSON.stringify(log.mock.calls)).not.toContain(key);
   } finally {
     await close();
   }

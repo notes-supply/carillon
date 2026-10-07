@@ -12,8 +12,9 @@ use axum::{response::IntoResponse as _, routing::post};
 use tempfile::tempdir;
 
 use super::*;
+use crate::Reported;
 use crate::db::Database;
-use carillon_protocol::model::{DeliveryOutcome, TurnState};
+use carillon_protocol::model::{DeliveryOutcome, TurnActivity, TurnState};
 
 fn installation(root: &Path) -> Result<AppState> {
     use carillon_installation::config::{AgentConfig, Config, CoreConfig, Provider, hash_token};
@@ -151,12 +152,28 @@ async fn accept(state: &AppState, id: &str, audience: &str) -> Result<EventRecei
     Ok(receipt.0)
 }
 
+/// A runtime's final report that counted `calls` calls, as it reads on the wire.
+fn report_value(calls: u32) -> serde_json::Value {
+    json!({
+        "phase": "model",
+        "running": [],
+        "recent": [{"tool": "bash", "detail": "make", "ok": false, "duration_ms": 900}],
+        "tool_calls": calls,
+        "notes": ["Building first."],
+    })
+}
+
+fn report(calls: u32) -> Result<TurnActivity> {
+    Ok(serde_json::from_value(report_value(calls))?)
+}
+
 fn completed(request: RuntimeTurnRequest) -> RuntimeTurnResponse {
     RuntimeTurnResponse {
         correlation_id: request.correlation_id,
         output: format!("reply to {}", request.input),
         follow_up: None,
         unanswered_left: false,
+        activity: None,
         attachments_left: false,
     }
 }
@@ -922,6 +939,7 @@ async fn follow_up_turns_carry_only_the_runtime_cursor_beside_later_messages() -
         Ok(RuntimeTurnResponse {
             follow_up: Some(answered),
             unanswered_left: false,
+            activity: None,
             attachments_left: false,
             ..completed(request)
         })
@@ -974,6 +992,7 @@ async fn follow_up_turns_carry_only_the_runtime_cursor_beside_later_messages() -
             output: "the report".to_owned(),
             follow_up: None,
             unanswered_left: false,
+            activity: None,
             attachments_left: false,
         })
     })
@@ -1026,6 +1045,7 @@ async fn an_observation_the_runtime_fails_without_explanation_ends() -> Result<(
         Ok(RuntimeTurnResponse {
             follow_up: Some(cursor),
             unanswered_left: false,
+            activity: None,
             attachments_left: false,
             ..completed(request)
         })
@@ -1121,6 +1141,7 @@ async fn workers_hear_of_claimable_turns_in_their_own_lane() -> Result<()> {
         Ok(RuntimeTurnResponse {
             follow_up: Some(serde_json::json!({"message": "m", "after": 1})),
             unanswered_left: false,
+            activity: None,
             attachments_left: false,
             ..completed(request)
         })
@@ -1976,6 +1997,7 @@ async fn empty_runtime_output_interrupts_without_empty_delivery_or_replay() -> R
                     .to_owned(),
                     follow_up: None,
                     unanswered_left: false,
+                    activity: None,
                     attachments_left: false,
                 })
             }
@@ -2135,10 +2157,11 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
     let mut request = state.core.runtime_request(&turn, Vec::new());
     request.input = "explained".to_owned();
     let outcome = call_runtime(&state.client, &runtime, "unused", request).await;
-    assert!(
-        matches!(&outcome, Err(TurnFailure::Explained(text)) if text == "The usage limit has been reached"),
-        "{outcome:?}"
-    );
+    let Err(TurnFailure::Reported(reported)) = &outcome else {
+        anyhow::bail!("{outcome:?}");
+    };
+    let explained = (reported.status, reported.explanation.as_deref());
+    assert_eq!(explained, (502, Some("The usage limit has been reached")));
     let response = call_runtime(
         &state.client,
         &runtime,
@@ -2150,7 +2173,7 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
         TurnFailure::Retry(error)
         | TurnFailure::Unanswered(error)
         | TurnFailure::Uncertain(error) => error,
-        TurnFailure::Explained(explanation) => anyhow!(explanation),
+        TurnFailure::Reported(reported) => anyhow!("{reported:?}"),
     })?;
     assert_eq!(response.correlation_id, turn.turn_id);
     server.abort();
@@ -2380,6 +2403,8 @@ async fn activity_lists_only_the_callers_active_turns_with_runtime_snapshots() -
                 "state": "running",
                 "target_id": "test-destination",
                 "accepted_at": body[0]["accepted_at"],
+                // A message turn's work began with itself.
+                "origin": {"turn_id": running.turn_id, "accepted_at": body[0]["accepted_at"]},
                 "activity": {
                     "phase": "tools",
                     "running": [{"tool": "bash", "detail": "cargo test", "started_at": 1}],
@@ -2392,6 +2417,7 @@ async fn activity_lists_only_the_callers_active_turns_with_runtime_snapshots() -
                 "state": "queued",
                 "target_id": "test-destination",
                 "accepted_at": body[1]["accepted_at"],
+                "origin": {"turn_id": queued.turn_id, "accepted_at": body[1]["accepted_at"]},
                 "activity": null,
             },
         ])
@@ -2591,6 +2617,7 @@ async fn a_cut_off_answer_asks_an_observation_again_but_never_replays_an_executa
         Ok(RuntimeTurnResponse {
             follow_up: Some(cursor),
             unanswered_left: false,
+            activity: None,
             attachments_left: false,
             ..completed(request)
         })
@@ -2824,6 +2851,170 @@ async fn a_turn_takes_as_long_as_its_runtime_and_ends_when_its_caller_stops() ->
         .await
         .context("the runtime kept working after its caller stopped")?
         .context("the runtime's request did not end")?;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_turns_final_report_is_kept_with_its_outcome_and_delivered_within_its_bound() -> Result<()>
+{
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    let next_delivery = || -> Result<carillon_protocol::model::Delivery> {
+        let delivery = state
+            .core
+            .database
+            .claim_delivery("test-interface", "instance")?
+            .context("delivery missing")?;
+        state.core.database.acknowledge_delivery(
+            "test-interface",
+            delivery.id,
+            "instance",
+            DeliveryOutcome::Delivered,
+            None,
+        )?;
+        Ok(delivery)
+    };
+    // An answer's report.
+    accept(&state, "answered", "conversation").await?;
+    run_next_turn(&state, "test-runtime", async |_, _, request| {
+        Ok(RuntimeTurnResponse {
+            activity: Some(report(3).map_err(TurnFailure::Uncertain)?),
+            ..completed(request)
+        })
+    })
+    .await?;
+    let answered = next_delivery()?;
+    assert_eq!(answered.turn_state, TurnState::Completed);
+    assert_eq!(answered.activity, Some(report(3)?));
+    // A failed turn's report, though the runtime could show no explanation.
+    accept(&state, "failed", "conversation").await?;
+    run_next_turn(&state, "test-runtime", async |_, _, _| {
+        Err(TurnFailure::Reported(Box::new(Reported {
+            status: 500,
+            explanation: None,
+            activity: Some(report(1).map_err(TurnFailure::Uncertain)?),
+        })))
+    })
+    .await?;
+    let failed = next_delivery()?;
+    assert_eq!(failed.turn_state, TurnState::Interrupted);
+    assert!(failed.content.starts_with("That turn was interrupted."));
+    assert_eq!(failed.activity, Some(report(1)?));
+    let error = state
+        .core
+        .inspect_turn(&failed.turn_id)?
+        .context("failed turn missing")?
+        .error;
+    assert_eq!(
+        error.as_deref(),
+        Some("runtime provider failed the turn with 500 and no explanation")
+    );
+    // A report over its bound is not kept, and costs the turn nothing.
+    accept(&state, "oversized", "conversation").await?;
+    run_next_turn(&state, "test-runtime", async |_, _, request| {
+        let mut activity = report(1).map_err(TurnFailure::Uncertain)?;
+        activity.notes = vec!["語".repeat(500); 8];
+        activity.recent[0].detail = Some("d".repeat(8_000));
+        Ok(RuntimeTurnResponse {
+            activity: Some(activity),
+            ..completed(request)
+        })
+    })
+    .await?;
+    let oversized = next_delivery()?;
+    assert_eq!(oversized.turn_state, TurnState::Completed);
+    assert_eq!(oversized.content, "reply to oversized");
+    assert_eq!(oversized.activity, None);
+    Ok(())
+}
+
+/// A runtime's failure carries the turn's report with its explanation or
+/// without one; a closing runtime's answer is still no answer, report or
+/// not; and an invalid report is dropped without costing an answer.
+#[tokio::test]
+async fn a_failed_turns_report_crosses_the_runtime_boundary_with_or_without_an_explanation()
+-> Result<()> {
+    let directory = tempdir()?;
+    let state = installation(directory.path())?;
+    accept(&state, "one", "conversation").await?;
+    let turn = state
+        .core
+        .database
+        .claim("test-runtime", Lane::Messages, &CancellationToken::new())?
+        .context("missing claim")?;
+    let mut runtime = state
+        .config
+        .provider("test-runtime", ProviderRole::Runtime)?
+        .clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    runtime.url = format!("http://{}", listener.local_addr()?);
+    let app = Router::new().route(
+        "/v1/turns",
+        post(|Json(request): Json<RuntimeTurnRequest>| async move {
+            let failure = |status, body| (status, Json(body)).into_response();
+            match request.input.as_str() {
+                "reported" => failure(
+                    StatusCode::BAD_GATEWAY,
+                    json!({"error": "The build broke.", "activity": report_value(1)}),
+                ),
+                "report only" => failure(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    json!({"activity": report_value(2)}),
+                ),
+                "closing" => failure(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    json!({"activity": report_value(3)}),
+                ),
+                "invalid report" => failure(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    json!({"activity": {"phase": "dreaming"}}),
+                ),
+                _ => Json(json!({
+                    "correlation_id": request.correlation_id,
+                    "output": "reply",
+                    "activity": {"phase": "dreaming"},
+                }))
+                .into_response(),
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let call = async |input: &str| {
+        let mut request = state.core.runtime_request(&turn, Vec::new());
+        request.input = input.to_owned();
+        call_runtime(&state.client, &runtime, "unused", request).await
+    };
+    for (input, status, explanation, calls) in [
+        ("reported", 502, Some("The build broke."), 1),
+        ("report only", 500, None, 2),
+    ] {
+        match call(input).await {
+            Err(TurnFailure::Reported(reported)) => {
+                assert_eq!(reported.status, status, "{input}");
+                assert_eq!(reported.explanation.as_deref(), explanation, "{input}");
+                assert_eq!(reported.activity, Some(report(calls)?), "{input}");
+            }
+            outcome => anyhow::bail!("{input}: {outcome:?}"),
+        }
+    }
+    let closing = call("closing").await;
+    assert!(
+        matches!(closing, Err(TurnFailure::Unanswered(_))),
+        "{closing:?}"
+    );
+    let invalid = call("invalid report").await;
+    assert!(
+        matches!(invalid, Err(TurnFailure::Uncertain(_))),
+        "{invalid:?}"
+    );
+    let answered = call("answered")
+        .await
+        .map_err(|failure| anyhow!("{failure:?}"))?;
+    assert_eq!(
+        (answered.output.as_str(), answered.activity),
+        ("reply", None)
+    );
     server.abort();
     Ok(())
 }

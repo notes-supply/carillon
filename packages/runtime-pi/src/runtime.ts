@@ -15,6 +15,7 @@ import {
   type ModelThinkingLevel,
 } from "@earendil-works/pi-ai";
 import type {
+  AgentInfo,
   AvailableModel,
   CommandCatalog,
   Selection,
@@ -37,7 +38,8 @@ import {
 import { ModelSelections } from "./model.ts";
 import { resolved } from "@carillon/runtime/models";
 import { openConversation } from "./namespace.ts";
-import { RuntimeClosed } from "@carillon/runtime/failure";
+import { finalReport, toolName } from "@carillon/runtime/activity";
+import { RuntimeClosed, withReport } from "@carillon/runtime/failure";
 import { Serial } from "@carillon/runtime/serial";
 import { createPiExecutionSession, promptSession } from "./session.ts";
 import {
@@ -212,12 +214,19 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
     return model;
   }
 
-  /** The turn's activity is visible from before preparation, and removed however it ends. */
+  /**
+   * The turn's activity is visible from before preparation, and removed
+   * however it ends; its final report is taken first, with the answer or
+   * the failure.
+   */
   async function executePi(request: TurnRequest, signal: AbortSignal): Promise<TurnResponse> {
     const activity = trackActivity(workspace);
     executing.set(request.correlation_id, { interfaceId: request.interface_id, activity });
     try {
-      return await runPi(request, signal, activity);
+      const response = await runPi(request, signal, activity);
+      return { ...response, activity: finalReport(activity.snapshot()) };
+    } catch (failure) {
+      throw withReport(failure, finalReport(activity.snapshot()));
     } finally {
       executing.delete(request.correlation_id);
     }
@@ -270,6 +279,11 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
       },
     });
     const { session, extensionsResult } = created;
+    const describeAgent = () => {
+      const agent = piAgent(session);
+      if (agent !== undefined) activity.agent(agent);
+    };
+    describeAgent();
     try {
       assertExtensionsLoaded(extensionsResult.errors);
       let output = "";
@@ -278,6 +292,13 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
       const seen = { failure: false };
       const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
         activity.observe(event);
+        // Context usage changes with each model turn and compaction.
+        if (
+          event.type === "turn_end" ||
+          event.type === "compaction_end" ||
+          event.type === "thinking_level_changed"
+        )
+          describeAgent();
         if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta")
           output += event.assistantMessageEvent.delta;
       });
@@ -298,7 +319,7 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
         const silent = answer === undefined && !seen.failure;
         // Notes Pi has not saved, such as those of a command that opened the
         // conversation, are left for core to offer again with a later turn.
-        const unsaved = !saved(session.sessionManager);
+        const unsaved = notes.length > 0 && !saved(session.sessionManager);
         const earlierLeft =
           unsaved && notes.some((pending) => pending.details.turn !== request.correlation_id);
         const ownLeft = unsaved && attachments.note !== undefined;
@@ -313,6 +334,7 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
         unsubscribe();
       }
     } finally {
+      describeAgent();
       session.dispose();
     }
   }
@@ -367,6 +389,29 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
           "turn" in entry.details &&
           entry.details.turn === turn,
       );
+  }
+
+  /**
+   * What the session says about its agent now: the model it runs, its
+   * thinking level when the model reasons, and its own estimate of how much
+   * of the context window the conversation fills. Display never fails a
+   * turn, so a session that cannot say gives nothing.
+   */
+  function piAgent(session: AgentSession): AgentInfo | undefined {
+    try {
+      const model = session.model;
+      const usage = session.getContextUsage();
+      // Pi has no estimate right after a compaction, before the next response.
+      const context =
+        usage?.tokens == null ? undefined : { used: usage.tokens, window: usage.contextWindow };
+      return {
+        ...(model === undefined ? {} : { model: toolName(model.id) }),
+        ...(model?.reasoning === true ? { effort: session.thinkingLevel } : {}),
+        ...(context === undefined ? {} : { context }),
+      };
+    } catch {
+      return undefined;
+    }
   }
 
   function isThinkingLevel(

@@ -9,12 +9,25 @@
  * their lifecycle explicitly as `carillon:work` facts on the session's event
  * bus (see {@link WORK_CHANNEL}); unsupported extensions keep the ordinary
  * tool view.
+ *
+ * The model's thinking, as Pi streams it, becomes the turn's notes: each
+ * thinking block one bounded note from its beginning, never the answer.
+ *
+ * A call's start is Pi's own event; reported work has no start of its own,
+ * so its start is when it was first reported running, marked as an
+ * estimate. Durations are measured on the monotonic clock, so a wall clock
+ * that steps cannot make them wrong, and work keeps the duration it
+ * finished with, however often its end is reported again.
+ * What the session says about its model, thinking level and context comes
+ * from the runtime through {@link ActivityTracker.agent}.
  */
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import {
+  NOTE_LENGTH,
   WORK_ITEM_LIMIT,
   WorkItemSchema,
   type ActivityPhase,
+  type AgentInfo,
   type FinishedTool,
   type RunningTool,
   type TurnActivity,
@@ -24,6 +37,7 @@ import {
   commentary,
   describe,
   displayed,
+  keepNote,
   summarizeWork,
   toolName,
 } from "@carillon/runtime/activity";
@@ -56,6 +70,8 @@ const RUNNING_CALLS = 8;
 
 export interface ActivityTracker {
   observe(event: AgentSessionEvent): void;
+  /** What the session reports about its agent now. */
+  agent(info: AgentInfo): void;
   /**
    * One fact a participating extension reported on {@link WORK_CHANNEL}.
    * A fact outside the shared vocabulary is ignored, never guessed at.
@@ -76,6 +92,14 @@ export function trackActivity(workspace: string): ActivityTracker {
   const work = new Map<string, WorkItem>();
   /** Some reported work could not be retained. */
   let partialWork = false;
+  /** When each running call and reported work started, on the monotonic clock, for its duration. */
+  const startedMs = new Map<string, number>();
+  const workStartedMs = new Map<string, number>();
+  /** Thinking blocks by message and content index: their streamed text, and their notes. */
+  let messages = 0;
+  const thinking = new Map<string, string>();
+  const notes = new Map<string, string>();
+  let agent: AgentInfo | undefined;
 
   return {
     observe(event) {
@@ -91,14 +115,30 @@ export function trackActivity(workspace: string): ActivityTracker {
         case "compaction_start":
           phase = "compacting";
           break;
-        case "message_update":
-          // Only completed public text: thinking arrives as its own events.
-          if (event.assistantMessageEvent.type === "text_end")
-            headline = commentary(event.assistantMessageEvent.content) ?? headline;
+        case "message_start":
+          messages += 1;
           break;
+        case "message_update": {
+          // Only completed public text; thinking is the notes'.
+          const update = event.assistantMessageEvent;
+          if (update.type === "text_end") headline = commentary(update.content) ?? headline;
+          else if (update.type === "thinking_delta" || update.type === "thinking_end") {
+            const block = `${String(messages)}:${String(update.contentIndex)}`;
+            // A note shows a block's beginning, so only that much is kept while it streams.
+            const text =
+              update.type === "thinking_end"
+                ? update.content
+                : `${thinking.get(block) ?? ""}${update.delta}`.slice(0, 2 * NOTE_LENGTH);
+            if (update.type === "thinking_end") thinking.delete(block);
+            else thinking.set(block, text);
+            keepNote(notes, block, text);
+          }
+          break;
+        }
         case "tool_execution_start": {
           toolCalls += 1;
           const detail = describe(event.toolName, event.args, workspace);
+          startedMs.set(event.toolCallId, performance.now());
           running.set(event.toolCallId, {
             tool: toolName(event.toolName),
             ...(detail === undefined ? {} : { detail }),
@@ -109,11 +149,16 @@ export function trackActivity(workspace: string): ActivityTracker {
         }
         case "tool_execution_end": {
           const started = running.get(event.toolCallId);
+          const startedAt = startedMs.get(event.toolCallId);
           running.delete(event.toolCallId);
+          startedMs.delete(event.toolCallId);
           recent.push({
             tool: started?.tool ?? toolName(event.toolName),
             ...(started?.detail === undefined ? {} : { detail: started.detail }),
             ok: !event.isError,
+            ...(startedAt === undefined
+              ? {}
+              : { duration_ms: Math.round(performance.now() - startedAt) }),
           });
           recent.splice(0, Math.max(0, recent.length - RECENT_CALLS));
           phase = idle();
@@ -125,7 +170,6 @@ export function trackActivity(workspace: string): ActivityTracker {
         case "agent_settled":
         case "turn_start":
         case "turn_end":
-        case "message_start":
         case "message_end":
         case "tool_execution_update":
         case "bash_execution_update":
@@ -139,6 +183,9 @@ export function trackActivity(workspace: string): ActivityTracker {
           break;
       }
     },
+    agent(info) {
+      agent = info;
+    },
     report(fact) {
       if (!Check(WorkReportSchema, fact)) return;
       const known = work.get(fact.id);
@@ -149,10 +196,23 @@ export function trackActivity(workspace: string): ActivityTracker {
         const finished = [...work.values()].find((item) => FINISHED_WORK.has(item.state));
         if (finished === undefined) return;
         work.delete(finished.id);
+        workStartedMs.delete(finished.id);
       }
       const actor = fact.actor === undefined ? undefined : toolName(fact.actor);
+      const elapsed = performance.now();
+      if (fact.state === "running" && !workStartedMs.has(fact.id))
+        workStartedMs.set(fact.id, elapsed);
+      const startedMs = workStartedMs.get(fact.id);
       const startedAt =
         known?.started_at ?? (fact.state === "running" ? Math.floor(Date.now() / 1000) : undefined);
+      // Work keeps the duration it finished with when its end is reported again.
+      const duration = !FINISHED_WORK.has(fact.state)
+        ? undefined
+        : known !== undefined && FINISHED_WORK.has(known.state)
+          ? known.duration_ms
+          : startedMs === undefined
+            ? undefined
+            : Math.round(elapsed - startedMs);
       work.set(fact.id, {
         id: fact.id,
         kind: fact.kind,
@@ -160,7 +220,8 @@ export function trackActivity(workspace: string): ActivityTracker {
         state: fact.state,
         ...(fact.parent === undefined ? {} : { parent: fact.parent }),
         ...(actor === undefined ? {} : { actor }),
-        ...(startedAt === undefined ? {} : { started_at: startedAt }),
+        ...(startedAt === undefined ? {} : { started_at: startedAt, estimated: true }),
+        ...(duration === undefined ? {} : { duration_ms: duration }),
       });
     },
     snapshot() {
@@ -173,6 +234,8 @@ export function trackActivity(workspace: string): ActivityTracker {
         ...(work.size === 0 && !partialWork
           ? {}
           : { work: summarizeWork([...work.values()], partialWork) }),
+        ...(notes.size === 0 ? {} : { notes: [...notes.values()] }),
+        ...(agent === undefined ? {} : { agent }),
       };
     },
   };

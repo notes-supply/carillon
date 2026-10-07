@@ -13,7 +13,7 @@ use crate::{
 
 use crate::{
     InterfaceError,
-    activity::{CardRecords, activity_monitor},
+    activity::{CardRecords, Summaries, activity_monitor, answer_summary},
     client::CoreClient,
     commands::{
         Change, ChangeError, CommandFiles, Commands, DiscordApp, InteractionCalls, MODULE_LIMIT,
@@ -66,7 +66,7 @@ use twilight_model::{
     application::interaction::{
         Interaction as DiscordInteraction, InteractionData, InteractionType,
     },
-    channel::message::{Component, MessageFlags, MessageType, component::SelectMenuType},
+    channel::message::{Component, Embed, MessageFlags, MessageType, component::SelectMenuType},
     http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
     id::Id,
 };
@@ -76,6 +76,10 @@ use twilight_validate::component::{COMPONENT_COUNT, component_v1};
 struct SimulateResponse {
     pub receipt: EventReceipt,
     pub delivery: Option<Delivery>,
+    /// The work summary the delivery's answer carries when its job has no
+    /// card, as the delivery loop gives it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<Embed>,
     pub conversation_id: String,
     pub feedback: Vec<String>,
 }
@@ -258,19 +262,28 @@ async fn connect(
     let mut terminate = signal(SignalKind::terminate()).context("handle termination")?;
     let router = discord_router(state.clone(), false);
     let (outcomes, observed) = mpsc::unbounded_channel();
-    let monitor = activity_monitor(
+    // The monitor and the answers share the cards' records, so a job never
+    // gets both a card and a summary on its answer.
+    let cards = cards.map(Arc::new);
+    let summaries = Summaries::new(cards.clone(), &state.discord);
+    // The monitor takes every outcome the deliveries report, through the
+    // last a stop lets them finish, and then finishes the cards those settle.
+    let mut monitoring = tokio::spawn(activity_monitor(
         state.core.clone(),
         http.clone(),
         state.discord.clone(),
-        cards.map(Arc::new),
+        cards,
         observed,
-    );
+        stopping.clone(),
+    ));
+    let mut watching = true;
     // Deliveries outlast whatever ends the provider: a claimed one is still
     // sent and its outcome recorded.
     let mut deliveries = tokio::spawn(delivery_loop(
         delivery_state.core,
         reactions.clone(),
         http,
+        summaries,
         outcomes,
         stopping.clone(),
     ));
@@ -287,7 +300,10 @@ async fn connect(
             delivering = false;
             result.map_err(Into::into).flatten().context("Discord delivery worker stopped")
         },
-        () = monitor => Err(anyhow::anyhow!("Discord activity monitor stopped")),
+        _ = &mut monitoring => {
+            watching = false;
+            Err(anyhow::anyhow!("Discord activity monitor stopped"))
+        },
         interrupted = tokio::signal::ctrl_c() => interrupted.context("handle interruption"),
         _ = terminate.recv() => Ok(()),
     };
@@ -295,8 +311,9 @@ async fn connect(
     // handed to core ends; a submission core may have received is settled,
     // so its staged files stay until core no longer needs them; an
     // interaction already acknowledged finishes its invocation and attempts
-    // its reply; a claimed delivery is sent and acknowledged. Reactions still
-    // under way then get a moment to end before the rest are cancelled.
+    // its reply; a claimed delivery is sent and acknowledged, and the card its
+    // outcome settles shows its summary. Reactions still under way then get
+    // a moment to end before the rest are cancelled.
     stopping.cancel();
     answered(&mut interactions).await;
     let prepared = dispatcher.await;
@@ -305,9 +322,12 @@ async fn connect(
     } else {
         Ok(())
     };
+    // Its outcomes now closed, the monitor ends within its bound.
+    let watched = if watching { monitoring.await } else { Ok(()) };
     reactions.stop(PROMPT_FEEDBACK).await;
     prepared.context("Discord message preparation failed")?;
     delivered.context("Discord delivery worker stopped")?;
+    watched.context("Discord activity monitor failed")?;
     outcome
 }
 
@@ -590,14 +610,39 @@ async fn simulate(
         drop(staged);
         settled?
     };
-    // Simulation settles its own turn's delivery and no other. A turn still
-    // queued or running is waited for; a finished one, whose simulation may
-    // have stopped waiting before its answer, is settled if still pending.
+    let native_ref = format!("local:{}", resolved.event.event_id);
+    let delivery = settle_own_delivery(&state.core, &receipt, native_ref).await?;
+    if delivery.is_some() && state.discord.reactions {
+        feedback.push("delivered".to_owned());
+    }
+    let summary = delivery
+        .as_ref()
+        .filter(|_| state.discord.activity)
+        .and_then(|delivery| answer_summary(delivery, &state.discord.activity_markers));
+    Ok(Json(SimulateResponse {
+        receipt,
+        delivery,
+        summary,
+        conversation_id: resolved.conversation_id,
+        feedback,
+    })
+    .into_response())
+}
+
+/// Settles the simulated message's own turn's delivery and no other, as the
+/// delivery loop does once Discord has the answer. A turn still queued or
+/// running is waited for; a finished one, whose simulation may have stopped
+/// waiting before its answer, is settled if still pending.
+async fn settle_own_delivery(
+    core: &CoreClient,
+    receipt: &EventReceipt,
+    native_ref: String,
+) -> Result<Option<Delivery>, InterfaceError> {
     let turn = &receipt.turn_id;
     let delivery = if matches!(receipt.state, TurnState::Queued | TurnState::Running) {
         let delivery = timeout(Duration::from_secs(10), async {
             loop {
-                if let Some(delivery) = state.core.claim_turn_delivery(turn).await? {
+                if let Some(delivery) = core.claim_turn_delivery(turn).await? {
                     return Ok::<_, InterfaceError>(delivery);
                 }
                 sleep(Duration::from_millis(25)).await;
@@ -610,28 +655,13 @@ async fn simulate(
         })??;
         Some(delivery)
     } else {
-        state.core.claim_turn_delivery(turn).await?
+        core.claim_turn_delivery(turn).await?
     };
     if let Some(delivery) = &delivery {
-        state
-            .core
-            .acknowledge_delivery(
-                delivery.id,
-                DeliveryOutcome::Delivered,
-                Some(format!("local:{}", resolved.event.event_id)),
-            )
+        core.acknowledge_delivery(delivery.id, DeliveryOutcome::Delivered, Some(native_ref))
             .await?;
-        if state.discord.reactions {
-            feedback.push("delivered".to_owned());
-        }
     }
-    Ok(Json(SimulateResponse {
-        receipt,
-        delivery,
-        conversation_id: resolved.conversation_id,
-        feedback,
-    })
-    .into_response())
+    Ok(delivery)
 }
 
 /// Runs an interaction exactly as the gateway would, returning the reply the

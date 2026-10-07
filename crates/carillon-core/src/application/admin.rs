@@ -538,8 +538,10 @@ mod tests {
 
     /// A base port for backups that must find their services stopped, away
     /// from 44800-44842, where the install, maintenance and operations tests
-    /// run real services by default.
-    const OFFLINE_BACKUP_PORT: u16 = 45_400;
+    /// run real services by default, and below Linux's default ephemeral
+    /// range (32768-60999), from which any socket on the host, including this
+    /// binary's own, may be given a port.
+    const OFFLINE_BACKUP_PORT: u16 = 31_400;
 
     #[test]
     fn configuration_edits_preserve_unrelated_temporary_siblings() -> Result<()> {
@@ -1195,6 +1197,7 @@ mod tests {
                     output: "read it".to_owned(),
                     follow_up: None,
                     unanswered_left: false,
+                    activity: None,
                     attachments_left: false,
                     correlation_id: request.correlation_id,
                 })
@@ -1255,6 +1258,7 @@ mod tests {
                         output: "read it".to_owned(),
                         follow_up: None,
                         unanswered_left: false,
+                        activity: None,
                         attachments_left: false,
                         correlation_id: request.correlation_id,
                     })

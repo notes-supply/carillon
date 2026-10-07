@@ -1,9 +1,14 @@
+import type { TurnActivity } from "@carillon/protocol";
 import { expect, it } from "vitest";
 import {
   diagnostic,
   displayableExplanation,
   EXPLANATION_LIMIT,
+  ExplainedFailure,
   redactCredentials,
+  reportOf,
+  RuntimeClosed,
+  withReport,
 } from "./failure.ts";
 
 const key = `sk-proj-${"Ab1".repeat(20)}`;
@@ -117,4 +122,28 @@ it("logs the stack without credentials or error properties", () => {
   expect(logged).toContain("failure.test.ts");
   for (const secret of [key, "short-secret", "request-header-secret"])
     expect(logged).not.toContain(secret);
+});
+
+it("keeps a report with the failure a turn ended with, and a value that is no error as an error caused by it", () => {
+  const report: TurnActivity = { phase: "tools", running: [], recent: [], tool_calls: 1 };
+  // Objects and functions are the failure itself, with their class and status.
+  const explained = new ExplainedFailure(502, "The build broke.");
+  const closed = new RuntimeClosed("runtime is closed");
+  const thrown = { code: "EPIPE" };
+  const callable = () => undefined;
+  for (const failure of [explained, closed, thrown, callable]) {
+    expect(withReport(failure, report)).toBe(failure);
+    expect(reportOf(failure)).toBe(report);
+  }
+  expect(explained).toMatchObject({ status: 502, message: "The build broke." });
+  // Any other value cannot hold a report: an ordinary error whose cause it is does.
+  for (const value of ["socket closed", 42, undefined, null, Symbol("gone")]) {
+    const carrier = withReport(value, report);
+    expect(carrier).toBeInstanceOf(Error);
+    expect(carrier).not.toBeInstanceOf(ExplainedFailure);
+    expect(carrier).not.toBeInstanceOf(RuntimeClosed);
+    expect(carrier).toMatchObject({ cause: value });
+    expect(reportOf(carrier)).toBe(report);
+    expect(reportOf(value)).toBeUndefined();
+  }
 });

@@ -7,10 +7,14 @@ use serde::Deserialize;
 
 /// A runtime's failure response. Its `error` is phrased for the person using
 /// the interface and safe to display; a runtime omits it when it has nothing
-/// to explain.
-#[derive(Deserialize)]
+/// to explain. Its `activity` is the turn's final report, which a runtime
+/// sends whether or not it explains: an invalid one is dropped.
+#[derive(Default, Deserialize)]
 struct RuntimeFailure {
-    error: String,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    activity: Option<serde_json::Value>,
 }
 
 #[derive(Clone)]
@@ -61,21 +65,26 @@ impl RuntimeClient {
         if !status.is_success() {
             // A runtime's `error` explains the failure for the conversation;
             // its diagnostics stay in the runtime's own log.
-            let explanation = response
-                .json::<RuntimeFailure>()
-                .await
-                .ok()
-                .map(|failure| failure.error)
+            let failure = response.json::<RuntimeFailure>().await.unwrap_or_default();
+            let explanation = failure
+                .error
                 .filter(|explanation| !explanation.trim().is_empty());
-            return Err(match explanation {
-                Some(explanation) => TurnFailure::Explained(explanation),
+            let activity = failure
+                .activity
+                .and_then(|activity| serde_json::from_value(activity).ok());
+            return Err(match (explanation, activity) {
                 // A closing runtime gives no answer; work may still have run.
-                None if status == reqwest::StatusCode::SERVICE_UNAVAILABLE => {
+                (None, _) if status == reqwest::StatusCode::SERVICE_UNAVAILABLE => {
                     TurnFailure::Unanswered(anyhow!("runtime provider closed before answering"))
                 }
-                None => TurnFailure::Uncertain(anyhow!(
+                (None, None) => TurnFailure::Uncertain(anyhow!(
                     "runtime provider failed the turn with {status} and no explanation"
                 )),
+                (explanation, activity) => TurnFailure::Reported(Box::new(crate::Reported {
+                    status: status.as_u16(),
+                    explanation,
+                    activity,
+                })),
             });
         }
         // A body cut off is no answer; a body received whole

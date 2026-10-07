@@ -1,3 +1,5 @@
+import type { TurnActivity } from "@carillon/protocol";
+
 /**
  * What the runtime tells callers when work fails, and what it keeps in its own log.
  *
@@ -21,6 +23,34 @@ export class ExplainedFailure extends Error {
     super(message);
     this.status = status;
   }
+}
+
+/** Final reports of failed turns, by the failure each turn ended with. */
+const reports = new WeakMap<object, TurnActivity>();
+
+/**
+ * Keeps a failed turn's final report with the failure it ended with, and
+ * returns the failure to throw in its place. An object or function is that
+ * failure itself, so how its class, status, explanation and diagnostics are
+ * handled is unchanged; any other value cannot hold a report, and becomes an
+ * ordinary internal `Error` whose `cause` it is. The HTTP adapter sends the
+ * report apart from the explanation, so withholding unsafe text never
+ * withholds it.
+ */
+export function withReport(failure: unknown, activity: TurnActivity): unknown {
+  const carrier = canHold(failure) ? failure : new Error(String(failure), { cause: failure });
+  reports.set(carrier, activity);
+  return carrier;
+}
+
+/** The final report a failed turn left with `failure`, if any. */
+export function reportOf(failure: unknown): TurnActivity | undefined {
+  return canHold(failure) ? reports.get(failure) : undefined;
+}
+
+/** Whether `failure` can hold a report: an object or a function. */
+function canHold(failure: unknown): failure is object {
+  return (typeof failure === "object" && failure !== null) || typeof failure === "function";
 }
 
 /**

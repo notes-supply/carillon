@@ -545,6 +545,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
       const parentIndex = thread.runs.findIndex((run) => run.id === task.runId);
       const parent = thread.runs[parentIndex];
       if (parent === undefined) throw new Error(`unknown parent run ${task.runId}`);
+      const completedAt = new Date().toISOString();
       const notification = (runId: string) =>
         fake.tool(threadId, runId, {
           type: "notification",
@@ -560,11 +561,21 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
       const active = thread.runs.find((run) => ACTIVE.has(run.status));
       if (active !== undefined) {
         notification(active.id);
-        fake.subagent(threadId, { ...task, status, completionDelivery: { state: "delivered" } });
+        fake.subagent(threadId, {
+          ...task,
+          status,
+          completedAt,
+          completionDelivery: { state: "delivered" },
+        });
         return active;
       }
       const messageId = `message:${thread.id}:continuation:${String(thread.runs.length + 1)}`;
-      fake.subagent(threadId, { ...task, status, completionDelivery: { state: "claimed" } });
+      fake.subagent(threadId, {
+        ...task,
+        status,
+        completedAt,
+        completionDelivery: { state: "claimed" },
+      });
       const announcing = {
         ...parent,
         delegatedCompletion: { disposition: "open", delivery: { messageId } },
@@ -593,6 +604,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
       fake.subagent(threadId, {
         ...task,
         status,
+        completedAt,
         completionDelivery: { state: "delivered" },
       });
       const settledParent = {
@@ -967,6 +979,8 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
       // As T3: a queued run takes a provider thread only when it starts.
       providerThreadId: origin.providerThreadId ?? (active ? null : thread.providerThread.id),
       status: active ? "queued" : "running",
+      // As T3: a run keeps the selection it was dispatched with.
+      modelSelection: thread.modelSelection,
     };
     const user: Message = {
       id: messageId,

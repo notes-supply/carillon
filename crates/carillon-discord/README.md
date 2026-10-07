@@ -33,12 +33,23 @@ retain the actual Wasm path rather than substituting this direct native call.
   outcomes under way (one beyond them is not shown, and that is logged), until the
   connection stops: it then gets two seconds to end, and the rest, like any outcome still
   awaited, is cancelled; nothing is sent after that.
-- [`activity`](src/activity.rs) shows temporary activity cards and typing while turns
-  run. It reads core's activity list, receives each turn's outcome from the delivery
-  loop, and records only the channel and message of cards it created, so a restart
-  can remove them before showing a replacement. Every Discord call is bounded,
-  including rate-limiter waits and Twilight's 429 retries.
-  Its ordinary [`render` module](src/activity/render.rs) owns pure card text rendering,
+- [`activity`](src/activity.rs) shows one work card per job (a message's turn and
+  the observations core names by its origin) and types while its turns run. It reads
+  core's activity list, receives each turn's outcome and final report from the
+  delivery loop, keeps the card as the job's summary when the job ends, and records
+  the channel and message of unfinished jobs' cards, with the final summary a card is
+  being finished with, so a restart goes on with them. A job that ended without a card but showed work, or stopped, gets its summary
+  on its answer, which the delivery loop sends; one reservation per job keeps it to one
+  card, and an answer that ended its job keeps it until the monitor has that outcome. A
+  card someone deleted, or one whose creation Discord did not confirm, on an answer or
+  not, is recorded without a message until the job settles, so the job gets no other.
+  When the provider stops, the monitor reads, types and makes cards no more, and sends
+  no typing, new card or progress edit still waiting for a rate-limit permit, though it
+  still awaits one that may have left. It takes the outcomes of the deliveries the stop
+  lets finish, and gives the cards they settle one final edit's bound to show their
+  summaries before connect returns.
+  Every Discord call is bounded, including rate-limiter waits and Twilight's 429
+  retries. Its ordinary [`render` module](src/activity/render.rs) owns pure card embed rendering,
   using the concrete activity markers from [`config`](src/config.rs). Markers have
   configurable defaults, independently of reactions; see [activity card settings](../../docs/product/OPERATIONS.md#activity-cards).
 - [`commands`](src/commands.rs) hosts replaceable command generations, registers
@@ -77,7 +88,7 @@ retain the actual Wasm path rather than substituting this direct native call.
   store and downloads explicitly. Deterministic `/v1/simulate` admits a message the
   same way, stages its files with the same downloads and settles only its own
   turn's delivery, so a repeat settles an answer that arrived after its first request
-  stopped waiting.
+  stopped waiting. It returns the delivery with the work summary its answer would carry.
 - [`operations`](src/operations.rs) owns authenticated assistant actions using the existing
   Discord client, independently of admission and the delivery outbox. The optional
   [Pi extension](../../packages/discord-pi/README.md) exposes them on demand.

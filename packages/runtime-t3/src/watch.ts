@@ -8,10 +8,13 @@
  * dropped as it arrives. A snapshot replaces the fold's view of the thread
  * but keeps the turn's identity, its request items and its background facts
  * (work listed, report owed), which a bounded snapshot cannot restate.
+ * The reasoning T3 publishes for the turn's runs becomes its notes; a call's
+ * start is T3's own, or when the fold first saw it, marked as an estimate.
  * Nothing here talks to the network.
  */
 import type {
   ActivityPhase,
+  AgentInfo,
   FinishedTool,
   RunningTool,
   TurnActivity,
@@ -22,6 +25,7 @@ import {
   commentary,
   describe,
   displayed,
+  keepNote,
   summarizeWork,
   toolName,
 } from "@carillon/runtime/activity";
@@ -80,6 +84,7 @@ export type Outcome =
 
 export interface Retained {
   readonly runs: number;
+  /** Calls under way: running, pending or waiting. */
   readonly running: number;
   readonly recent: number;
   readonly counted: number;
@@ -145,6 +150,8 @@ const BEFORE_PROVIDER: ReadonlySet<RunStatus> = new Set(["preparing", "queued", 
 /** Run statuses before T3 sends the run's opening item. */
 const UNOPENED: ReadonlySet<RunStatus> = new Set(["preparing", "queued"]);
 const RUNNING_ITEM: ReadonlySet<string> = new Set(["pending", "running", "waiting"]);
+/** A call T3 has asked for or holds without showing it executing. */
+const HELD_CALL: ReadonlySet<string> = new Set(["pending", "waiting"]);
 const FINISHED_ITEM: ReadonlySet<string> = new Set([
   "completed",
   "failed",
@@ -176,6 +183,8 @@ const TRANSFER_WORK: ReadonlyMap<string, { kind: WorkItem["kind"]; label: string
   ["merge_back", { kind: "fork", label: "merge back from another thread" }],
 ]);
 const RECENT_CALLS = 5;
+/** Each provider's own option for reasoning effort: Claude's `effort`, Codex's `reasoningEffort`. */
+const EFFORT_OPTIONS: ReadonlySet<string> = new Set(["effort", "reasoningEffort"]);
 /**
  * Child agents (and, separately, transfers) a turn keeps records of. Beyond
  * it, settled records make room; when all are live, coverage is partial and
@@ -339,6 +348,8 @@ export function watchTurn(
   const assistant = new Map<string, Message>();
   let latestAssistant: Message | undefined;
   let running = new Map<string, ToolItem>();
+  /** Calls pending or waiting: neither executing nor finished. */
+  let held = new Set<string>();
   let recent: ToolItem[] = [];
   let counted = new Set<string>();
   const requestItems = new Map<string, RequestItem>();
@@ -394,6 +405,14 @@ export function watchTurn(
   const listeners = new Set<() => void>();
   /** When each background task was first seen, since T3 does not date them. */
   const backgroundSince = new Map<string, number>();
+  /**
+   * When the fold first saw each call running, kept across snapshots and
+   * waits: the start of a call T3 gives none for, and the evidence that a
+   * held call ran.
+   */
+  const firstSeen = new Map<string, number>();
+  /** The reasoning T3 published for the turn's runs, by item, kept across snapshots. */
+  const notes = new Map<string, string>();
 
   /**
    * Forgets everything but the turn's identity, its request items, its
@@ -409,6 +428,7 @@ export function watchTurn(
     unclaimed.clear();
     hasMessages = false;
     running = new Map();
+    held = new Set();
     recent = [];
     counted = new Set();
     pendingRequests = new Map();
@@ -709,15 +729,29 @@ export function watchTurn(
       case "web_search":
       case "dynamic_tool":
       case "subagent":
-        counted.add(item.id);
-        if (RUNNING_ITEM.has(item.status)) running.set(item.id, item);
-        else {
-          running.delete(item.id);
-          if (FINISHED_ITEM.has(item.status)) {
-            recent = recent.filter((finished) => finished.id !== item.id);
-            recent.push(item);
-            if (recent.length > RECENT_CALLS) recent.shift();
-          }
+        // Only a running call is executing: one pending or waiting is held,
+        // and counted and timed once T3 shows it running or finished. A held
+        // call the fold saw running stays counted, even after a snapshot.
+        if (item.status === "running") {
+          counted.add(item.id);
+          held.delete(item.id);
+          running.set(item.id, item);
+          if (!firstSeen.has(item.id)) firstSeen.set(item.id, Math.floor(Date.now() / 1000));
+          return;
+        }
+        running.delete(item.id);
+        if (HELD_CALL.has(item.status)) {
+          held.add(item.id);
+          if (firstSeen.has(item.id)) counted.add(item.id);
+          return;
+        }
+        held.delete(item.id);
+        firstSeen.delete(item.id);
+        if (FINISHED_ITEM.has(item.status)) {
+          counted.add(item.id);
+          recent = recent.filter((finished) => finished.id !== item.id);
+          recent.push(item);
+          if (recent.length > RECENT_CALLS) recent.shift();
         }
         return;
       case "user_input_request":
@@ -732,6 +766,9 @@ export function watchTurn(
       case "compaction":
         if (RUNNING_ITEM.has(item.status)) compacting.add(item.id);
         else compacting.delete(item.id);
+        return;
+      case "reasoning":
+        keepNote(notes, item.id, item.text);
         return;
     }
   }
@@ -1023,6 +1060,36 @@ export function watchTurn(
     return inside.length === 0 || inside.startsWith("..") || isAbsolute(inside) ? path : inside;
   }
 
+  /** A running call's start: T3's own, or when the fold first saw it, marked as an estimate. */
+  function started(item: ToolItem): { started_at: number; estimated?: true } {
+    const native = Date.parse(item.startedAt ?? "");
+    if (!Number.isNaN(native)) return { started_at: Math.floor(native / 1000) };
+    return { started_at: firstSeen.get(item.id) ?? Math.floor(Date.now() / 1000), estimated: true };
+  }
+
+  /** What T3 says about the agent of `run`: its selection, and its provider thread's context. */
+  function agentOf(run: Run | undefined): AgentInfo | undefined {
+    const selection = run?.modelSelection;
+    const usage =
+      run?.providerThreadId == null
+        ? undefined
+        : providerThreads.get(run.providerThreadId)?.contextUsage;
+    const effort = selection?.options?.find((option) => EFFORT_OPTIONS.has(option.id))?.value;
+    const agent: AgentInfo = {
+      ...(selection === undefined ? {} : { model: toolName(selection.model) }),
+      ...(typeof effort === "string" ? { effort: toolName(effort) } : {}),
+      ...(usage == null
+        ? {}
+        : {
+            context: {
+              used: usage.usedTokens,
+              ...(usage.maxTokens === undefined ? {} : { window: usage.maxTokens }),
+            },
+          }),
+    };
+    return Object.keys(agent).length === 0 ? undefined : agent;
+  }
+
   function seconds(stamp: string | null): number {
     const parsed = Date.parse(stamp ?? "");
     return Number.isNaN(parsed) ? Math.floor(Date.now() / 1000) : Math.floor(parsed / 1000);
@@ -1064,6 +1131,7 @@ export function watchTurn(
         ...(delegations.has(task.parentNodeId) ? { parent: task.parentNodeId } : {}),
         ...(actor.length === 0 ? {} : { actor: toolName(actor) }),
         ...(task.startedAt === null ? {} : { started_at: seconds(task.startedAt) }),
+        ...(SETTLED_TASK.has(task.status) ? lasted(task.startedAt, task.completedAt) : {}),
       });
     }
     const reporting = [...continuationRuns.values()].some(
@@ -1533,10 +1601,9 @@ export function watchTurn(
       );
       const runningTools: RunningTool[] = [...running.values()]
         .filter((item) => !shownAsWork(item))
-        .map((item) => ({
-          ...tool(item),
-          started_at: seconds(item.startedAt ?? item.updatedAt),
-        }));
+        .map((item) => ({ ...tool(item), ...started(item) }));
+      for (const id of firstSeen.keys())
+        if (!running.has(id) && !held.has(id)) firstSeen.delete(id);
       const now = Math.floor(Date.now() / 1000);
       const tasks = roster(run).filter(
         (task) => task.childThreadId === undefined || !childThreads.has(task.childThreadId),
@@ -1547,17 +1614,19 @@ export function watchTurn(
           tool: toolName(task.kind ?? "background_task"),
           ...withDetail(task.description === undefined ? undefined : displayed(task.description)),
           started_at: backgroundSince.get(task.taskId) ?? now,
+          estimated: true,
         });
       }
       for (const id of backgroundSince.keys())
         if (!tasks.some((task) => task.taskId === id)) backgroundSince.delete(id);
       const headline = latestAssistant === undefined ? undefined : commentary(latestAssistant.text);
       const work = workItems();
+      const agent = agentOf(run);
       return {
         phase:
           run === undefined && followUp !== undefined
             ? "waiting"
-            : phase(run, compacting.size > 0, retrying.size > 0, runningTools.length),
+            : phase(run, compacting.size > 0, retrying.size > 0, runningTools.length, held.size),
         ...(headline === undefined ? {} : { headline }),
         running: runningTools.slice(0, RUNNING_CALLS),
         recent: recent
@@ -1566,15 +1635,18 @@ export function watchTurn(
             (item): FinishedTool => ({
               ...tool(item),
               ok: item.status === "completed",
+              ...lasted(item.startedAt, item.completedAt),
             }),
           ),
         tool_calls: counted.size,
         ...(work.length === 0 && !partial ? {} : { work: summarizeWork(work, partial) }),
+        ...(notes.size === 0 ? {} : { notes: [...notes.values()] }),
+        ...(agent === undefined ? {} : { agent }),
       };
     },
     retained: () => ({
       runs: turnRuns.size + earlier.size,
-      running: running.size,
+      running: running.size + held.size,
       recent: recent.length,
       counted: counted.size,
       requests: requestItems.size + pendingRequests.size,
@@ -1599,13 +1671,14 @@ function phase(
   compacting: boolean,
   retrying: boolean,
   runningTools: number,
+  heldCalls: number,
 ): ActivityPhase {
   if (run?.status === "queued") return "queued";
   if (run === undefined || BEFORE_PROVIDER.has(run.status)) return "starting";
   if (compacting) return "compacting";
   if (retrying) return "retrying";
   if (runningTools > 0) return "tools";
-  return run.status === "waiting" ? "waiting" : "model";
+  return run.status === "waiting" || heldCalls > 0 ? "waiting" : "model";
 }
 
 const TASK_STATE: Readonly<Record<Subagent["status"], WorkItem["state"]>> = {
@@ -1645,6 +1718,15 @@ function nativeTool(name: string, input: unknown): { tool: string; args: unknown
   if (!isRecord(input) || typeof input["file_path"] !== "string" || "path" in input)
     return { tool, args: input };
   return { tool, args: { ...input, path: input["file_path"] } };
+}
+
+/** How long something ran, when T3 dated both its start and its end. */
+function lasted(
+  start: string | null | undefined,
+  end: string | null | undefined,
+): { duration_ms?: number } {
+  const duration = Date.parse(end ?? "") - Date.parse(start ?? "");
+  return Number.isNaN(duration) || duration < 0 ? {} : { duration_ms: duration };
 }
 
 function withDetail(detail: string | undefined): { detail?: string } {
