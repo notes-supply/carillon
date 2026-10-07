@@ -510,6 +510,49 @@ it("keeps thinking as notes beside the answer, and a failed turn's report with i
   }
 });
 
+it("keeps a turn's report with a failure that is no error, as an error caused by it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "carillon-activity-"));
+  await mkdir(join(root, "resources"));
+  await writeFile(join(root, "notes.txt"), "notes\n");
+  const { models, runtime } = await piRuntime(root);
+  const read: ToolCall = {
+    type: "toolCall",
+    id: "read",
+    name: "read",
+    arguments: { path: join(root, "notes.txt") },
+  };
+  const controller = new AbortController();
+  const responses = [
+    () => thinking("The notes say what to check.", "Reading the notes.", [read]),
+    () => {
+      // The turn is abandoned once the read is done, for a reason that is no error.
+      controller.abort("core went away");
+      return thinking("Answering.", "Done.", []);
+    },
+  ];
+  vi.spyOn(models, "streamSimple").mockImplementation(() => {
+    const next = responses.shift();
+    if (next === undefined) throw new Error("no more responses");
+    return next();
+  });
+  try {
+    const failed = await runtime.executeTurn(request(root, "turn-1"), controller.signal).then(
+      () => undefined,
+      (failure: unknown) => failure,
+    );
+    expect(failed).toBeInstanceOf(Error);
+    expect(failed).not.toBeInstanceOf(ExplainedFailure);
+    expect(failed).toMatchObject({ cause: "core went away" });
+    expect(reportOf(failed)).toMatchObject({
+      tool_calls: 1,
+      recent: [{ tool: "read", detail: "notes.txt", ok: true }],
+    });
+  } finally {
+    await runtime.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 it("times calls and reported work on the monotonic clock, keeps a finished duration, and marks observed starts", () => {
   let wall = 1_790_000_000_000;
   let monotonic = 500;

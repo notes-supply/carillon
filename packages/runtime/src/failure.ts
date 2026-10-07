@@ -29,18 +29,28 @@ export class ExplainedFailure extends Error {
 const reports = new WeakMap<object, TurnActivity>();
 
 /**
- * Keeps a failed turn's final report with the failure it ended with, whatever
- * that failure is. The failure itself is unchanged, so how its status,
- * explanation and diagnostics are handled is too; the HTTP adapter sends the
- * report apart from them, so withholding unsafe text never withholds it.
+ * Keeps a failed turn's final report with the failure it ended with, and
+ * returns the failure to throw in its place. An object or function is that
+ * failure itself, so how its class, status, explanation and diagnostics are
+ * handled is unchanged; any other value cannot hold a report, and becomes an
+ * ordinary internal `Error` whose `cause` it is. The HTTP adapter sends the
+ * report apart from the explanation, so withholding unsafe text never
+ * withholds it.
  */
-export function withReport(failure: unknown, activity: TurnActivity): void {
-  if (typeof failure === "object" && failure !== null) reports.set(failure, activity);
+export function withReport(failure: unknown, activity: TurnActivity): unknown {
+  const carrier = canHold(failure) ? failure : new Error(String(failure), { cause: failure });
+  reports.set(carrier, activity);
+  return carrier;
 }
 
 /** The final report a failed turn left with `failure`, if any. */
 export function reportOf(failure: unknown): TurnActivity | undefined {
-  return typeof failure === "object" && failure !== null ? reports.get(failure) : undefined;
+  return canHold(failure) ? reports.get(failure) : undefined;
+}
+
+/** Whether `failure` can hold a report: an object or a function. */
+function canHold(failure: unknown): failure is object {
+  return (typeof failure === "object" && failure !== null) || typeof failure === "function";
 }
 
 /**

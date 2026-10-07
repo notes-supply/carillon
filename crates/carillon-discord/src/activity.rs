@@ -193,9 +193,11 @@ impl Job {
             if self.ended.len() > REPORTS_KEPT {
                 self.partial |= self.ended.remove(0).report.is_some();
             }
-            // What a turn that goes on without a report did is not known
-            // once a later turn shows its own.
-            self.partial |= delivery.activity.is_none() && delivery.continued_by.is_some();
+            // What a turn without a report did is not known once a later
+            // turn shows its own, nor is an observation's, which no read
+            // may have shown.
+            self.partial |= delivery.activity.is_none()
+                && (delivery.continued_by.is_some() || delivery.turn_id != delivery.origin.turn_id);
         }
         self.hosted = hosted.or(self.hosted);
         self.state = match (&self.state, &delivery.continued_by) {

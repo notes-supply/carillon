@@ -22,9 +22,13 @@ async function serve() {
             ? new RuntimeClosed("runtime is closed")
             : request.input === "reported internal"
               ? reported(new Error(`state at /private/state rejected ${key}`))
-              : request.input.startsWith("reported ")
-                ? reported(new ExplainedFailure(502, request.input.slice(9)))
-                : new ExplainedFailure(502, request.input),
+              : request.input === "reported value"
+                ? reportedValue(`the session's state rejected ${key}`)
+                : request.input === "reported closing"
+                  ? reported(new RuntimeClosed("runtime is closed"))
+                  : request.input.startsWith("reported ")
+                    ? reported(new ExplainedFailure(502, request.input.slice(9)))
+                    : new ExplainedFailure(502, request.input),
       ),
     activity: (correlationId, interfaceId) =>
       correlationId === "turn/1" && interfaceId === "discord-private"
@@ -83,6 +87,13 @@ const REPORT: TurnActivity = {
 /** `failure`, after a turn left its report with it. */
 function reported(failure: Error): Error {
   withReport(failure, REPORT);
+  return failure;
+}
+
+/** What a runtime throws when a turn that left its report ended with `value`, which is no error. */
+function reportedValue(value: string): Error {
+  const failure = withReport(value, REPORT);
+  if (!(failure instanceof Error)) throw new TypeError("the report was not kept with an error");
   return failure;
 }
 
@@ -218,6 +229,22 @@ it("sends a failed turn's report whether or not its explanation can be shown", a
     expect(await call("POST", "/v1/turns", turn("reported internal"))).toEqual({
       status: 500,
       body: { activity: REPORT },
+    });
+    // So does a value that is no error, which has no explanation to show;
+    // its diagnostic is the value's, redacted.
+    expect(await call("POST", "/v1/turns", turn("reported value"))).toEqual({
+      status: 500,
+      body: { activity: REPORT },
+    });
+    expect(log.mock.calls.map((args) => args.join(" "))).toContainEqual(
+      expect.stringMatching(
+        /^POST \/v1\/turns failed: Error: the session's state rejected \[redacted\]\n\s+at /u,
+      ),
+    );
+    // A closing runtime still gives no answer, report or not.
+    expect(await call("POST", "/v1/turns", turn("reported closing"))).toEqual({
+      status: 503,
+      body: {},
     });
     expect(JSON.stringify(log.mock.calls)).not.toContain(key);
   } finally {

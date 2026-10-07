@@ -2188,6 +2188,43 @@ it("keeps a failed turn's report with its failure, taken before the turn's entry
   expect(runtime.activity("turn-1", "discord-private")).toBeUndefined();
 });
 
+it("keeps a failed turn's report with a failure that is no error, as an error caused by it", async () => {
+  // A transport whose message dispatch fails, as an abandoned call does, for
+  // a reason that is no error; its other calls reach T3.
+  const real = await connectT3({ url: fake.url, token: fake.token });
+  const abandoned = () =>
+    Promise.resolve().then(() => {
+      AbortSignal.abort("the socket went away").throwIfAborted();
+    });
+  const failing = build({
+    connect: () =>
+      Promise.resolve({
+        call: (tag, payload) =>
+          typeof payload === "object" &&
+          payload !== null &&
+          "type" in payload &&
+          payload.type === "message.dispatch"
+            ? abandoned()
+            : real.call(tag, payload),
+        subscribe: (tag, payload, onItem) => real.subscribe(tag, payload, onItem),
+        closed: real.closed,
+        close: () => undefined,
+      }),
+  });
+  try {
+    const failure = await failing.executeTurn(turn("turn-1", "build it")).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).toMatchObject({ cause: "the socket went away" });
+    expect(reportOf(failure)).toMatchObject({ tool_calls: 0, recent: [] });
+  } finally {
+    await failing.close();
+    real.close();
+  }
+});
+
 it("leaves no snapshot deadline behind when a thread read cannot subscribe", async () => {
   // A transport whose subscription fails as it is set up; its calls reach T3.
   const real = await connectT3({ url: fake.url, token: fake.token });

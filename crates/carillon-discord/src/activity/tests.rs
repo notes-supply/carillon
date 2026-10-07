@@ -2802,3 +2802,77 @@ async fn a_read_held_while_more_turns_settle_than_are_remembered_brings_none_of_
     monitor.abort();
     Ok(())
 }
+
+#[tokio::test]
+async fn a_final_observation_without_a_report_leaves_its_jobs_summary_saying_it_may_not_show_all_the_work()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let records = directory.path().join("activity-cards.json");
+    let discord = Substitute::start(succeed()).await?;
+    let long_ago = now() - 60;
+    let alone = tools(None, &[("bash", "make")], &[("read", "notes.md", true)]);
+    discord.list(vec![
+        running(
+            "parent",
+            "300",
+            long_ago,
+            Some(tools(None, &[("bash", "make")], &[])),
+        ),
+        running("alone", "301", long_ago, Some(alone)),
+    ]);
+    let (outcomes, monitor) = discord.monitor(discord.http(false), config(false), &records);
+    for channel in ["300", "301"] {
+        discord
+            .wait_for(&Method::POST, &format!("/channels/{channel}/messages"), 1)
+            .await?;
+    }
+    for job in ["parent", "alone"] {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while recorded(&records).map_or(true, |records| records[job].is_null()) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await?;
+    }
+    // The parent reports its call and goes on; no read shows the observation
+    // that then ends the job, and no report of it reached core.
+    let mut answered = delivered("parent", "parent", TurnState::Completed);
+    answered.activity = Some(tools(None, &[], &[("bash", "make", true)]));
+    answered.continued_by = Some("report".to_owned());
+    report(&outcomes, answered, DeliveryOutcome::Delivered)?;
+    discord.list(Vec::new());
+    let observed = delivered("report", "parent", TurnState::Completed);
+    report(&outcomes, observed, DeliveryOutcome::Delivered)?;
+    // A message's own turn without a report keeps what it showed, unqualified.
+    settle(
+        &outcomes,
+        "alone",
+        TurnState::Completed,
+        DeliveryOutcome::Delivered,
+    )?;
+    let partial = "Some of this work may not be shown here.";
+    let parent = discord
+        .wait_for_text(
+            &Method::PATCH,
+            "/channels/300/messages/",
+            "✓ Done · answered",
+        )
+        .await?
+        .content();
+    assert!(parent.contains("✓ bash `make`"), "{parent}");
+    assert!(parent.contains(partial), "{parent}");
+    let alone = discord
+        .wait_for_text(
+            &Method::PATCH,
+            "/channels/301/messages/",
+            "✓ Done · answered",
+        )
+        .await?
+        .content();
+    assert!(alone.contains("✓ read `notes.md`"), "{alone}");
+    assert!(!alone.contains(partial), "{alone}");
+    recorded_empty(&records).await?;
+    assert_eq!(discord.matching(&Method::POST, "/channels").len(), 2);
+    monitor.abort();
+    Ok(())
+}

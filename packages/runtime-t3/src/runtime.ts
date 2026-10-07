@@ -460,8 +460,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     } catch (failure) {
       // The failure keeps what the turn did, whatever its explanation shows.
       const activity = report();
-      if (activity !== undefined) withReport(failure, activity);
-      throw failure;
+      throw activity === undefined ? failure : withReport(failure, activity);
     } finally {
       // The one place that decides: work that may have reached T3 (dispatched
       // now, or read back from a run this turn already had) and left without

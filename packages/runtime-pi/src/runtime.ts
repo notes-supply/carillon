@@ -226,8 +226,7 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
       const response = await runPi(request, signal, activity);
       return { ...response, activity: finalReport(activity.snapshot()) };
     } catch (failure) {
-      withReport(failure, finalReport(activity.snapshot()));
-      throw failure;
+      throw withReport(failure, finalReport(activity.snapshot()));
     } finally {
       executing.delete(request.correlation_id);
     }
