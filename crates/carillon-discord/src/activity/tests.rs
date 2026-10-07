@@ -868,6 +868,73 @@ async fn a_slow_plain_answers_temporary_card_is_removed_even_with_agent_metadata
 }
 
 #[tokio::test]
+async fn a_failed_plain_card_removal_is_retried_after_restart_without_following_its_job()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let records = directory.path().join("activity-cards.json");
+    let failing = Arc::new(AtomicBool::new(true));
+    let discord = Substitute::start(Arc::new({
+        let failing = failing.clone();
+        move |seen, _| {
+            if seen.method == Method::DELETE && failing.load(Ordering::SeqCst) {
+                Reply::Status(500)
+            } else {
+                Reply::Success
+            }
+        }
+    }))
+    .await?;
+    discord.list(vec![running("plain", "300", now() - 60, None)]);
+    let (outcomes, monitor) = discord.monitor(discord.http(false), config(false), &records);
+    discord
+        .wait_for(&Method::POST, "/channels/300/messages", 1)
+        .await?;
+    report(
+        &outcomes,
+        delivered("plain", "plain", TurnState::Completed),
+        DeliveryOutcome::Delivered,
+    )?;
+    discord.list(Vec::new());
+    discord
+        .wait_for(&Method::DELETE, "/channels/300/messages/901", 1)
+        .await?;
+    assert_eq!(
+        recorded(&records)?["plain"]["finish"],
+        json!({"kind": "remove"})
+    );
+    monitor.abort();
+    let _ = monitor.await;
+
+    failing.store(false, Ordering::SeqCst);
+    let cards = super::Cards {
+        http: discord.http(false),
+        config: config(false),
+        records: Arc::new(CardRecords::open(records.clone()).context("records")?),
+        stopping: CancellationToken::new(),
+    };
+    let mut tasks = tokio::task::JoinSet::new();
+    assert!(cards.adopt(&mut tasks).is_empty());
+    tokio::time::timeout(Duration::from_secs(10), tasks.join_next())
+        .await?
+        .context("no removal replay")??;
+    assert_eq!(recorded(&records)?, json!({}));
+    assert_eq!(
+        discord
+            .matching(&Method::DELETE, "/channels/300/messages/901")
+            .len(),
+        2
+    );
+    assert!(discord.matching(&Method::PATCH, "/channels").is_empty());
+    assert_eq!(
+        discord
+            .matching(&Method::POST, "/channels/300/messages")
+            .len(),
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_card_made_as_its_job_ends_keeps_what_it_showed_in_its_summary() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let records = directory.path().join("activity-cards.json");
@@ -1060,7 +1127,7 @@ async fn a_restart_goes_on_with_recorded_cards_and_says_what_it_does_not_know() 
         json!({
             "running": {"channel_id": "300", "message_id": "555"},
             "unnamed": {"channel_id": "302"},
-            "answered": {"channel_id": "303", "message_id": "557", "hosted": true},
+            "answered": {"channel_id": "303", "message_id": "557", "hosted": true, "earned": true},
         })
     );
     monitor.abort();
@@ -2035,7 +2102,7 @@ async fn a_summary_discord_did_not_take_is_shown_by_the_next_start_without_its_j
     // The record keeps the summary Discord did not take.
     let kept = recorded(&records)?;
     assert_eq!(
-        kept["job"]["summary"]["description"].as_str(),
+        kept["job"]["finish"]["summary"]["description"].as_str(),
         attempts.body["embeds"][0]["description"].as_str(),
         "{kept}"
     );
@@ -2428,7 +2495,10 @@ async fn a_job_taken_up_after_a_restart_says_its_card_may_not_show_all_its_work(
     // only in its memory.
     monitor.abort();
     let _ = monitor.await;
-    assert_eq!(recorded(&records)?, json!({"parent": card}));
+    assert_eq!(
+        recorded(&records)?,
+        json!({"parent": {"channel_id": "300", "message_id": "901", "earned": true}})
+    );
     let patched = discord
         .matching(&Method::PATCH, "/channels/300/messages/901")
         .len();
@@ -2492,6 +2562,59 @@ async fn a_job_taken_up_after_a_restart_says_its_card_may_not_show_all_its_work(
     // One card throughout, kept as the job's summary.
     assert_eq!(discord.matching(&Method::POST, "/channels").len(), 1);
     assert!(discord.matching(&Method::DELETE, "/channels").is_empty());
+    monitor.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_earned_non_hosted_summary_survives_restart_and_a_plain_final_report()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let records = directory.path().join("activity-cards.json");
+    let discord = Substitute::start(succeed()).await?;
+    discord.list(vec![running("parent", "300", now() - 60, None)]);
+    let (outcomes, monitor) = discord.monitor(discord.http(false), config(false), &records);
+    discord
+        .wait_for(&Method::POST, "/channels/300/messages", 1)
+        .await?;
+    let mut parent = delivered("parent", "parent", TurnState::Completed);
+    parent.activity = Some(tools(None, &[], &[("bash", "make", true)]));
+    parent.continued_by = Some("report".to_owned());
+    report(&outcomes, parent, DeliveryOutcome::Delivered)?;
+    let card = json!({"channel_id": "300", "message_id": "901", "earned": true});
+    recorded_soon(&records, "parent", &card).await?;
+    monitor.abort();
+    let _ = monitor.await;
+
+    discord.list(vec![continuing("report", "parent", "300", now(), None)]);
+    let (outcomes, monitor) = discord.monitor(discord.http(false), config(false), &records);
+    discord
+        .wait_for(&Method::PATCH, "/channels/300/messages/901", 1)
+        .await?;
+    let mut final_report = delivered("report", "parent", TurnState::Completed);
+    final_report.activity = Some(tools(None, &[], &[]));
+    report(&outcomes, final_report, DeliveryOutcome::Delivered)?;
+    discord.list(Vec::new());
+    let done = discord
+        .wait_for_text(
+            &Method::PATCH,
+            "/channels/300/messages/901",
+            "✓ Done · answered",
+        )
+        .await?;
+    assert!(
+        done.content()
+            .contains("Some of this work may not be shown here.")
+    );
+    assert!(!done.content().contains("bash `make`"));
+    recorded_soon(&records, "parent", &Value::Null).await?;
+    assert!(discord.matching(&Method::DELETE, "/channels").is_empty());
+    assert_eq!(
+        discord
+            .matching(&Method::POST, "/channels/300/messages")
+            .len(),
+        1
+    );
     monitor.abort();
     Ok(())
 }

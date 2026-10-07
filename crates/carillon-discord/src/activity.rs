@@ -317,10 +317,19 @@ struct Recorded {
     message_id: Option<Id<MessageMarker>>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     hosted: bool,
-    /// The summary the card was being finished with: a later start shows it
-    /// again rather than saying the job's outcome is unknown.
+    /// An earlier turn earned a retained summary, even after its report is lost.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    earned: bool,
+    /// The terminal action a later start retries without following the job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    summary: Option<Embed>,
+    finish: Option<Finish>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "summary", rename_all = "snake_case")]
+enum Finish {
+    Retain(Box<Embed>),
+    Remove,
 }
 
 impl Recorded {
@@ -329,7 +338,8 @@ impl Recorded {
             channel_id,
             message_id: None,
             hosted: false,
-            summary: None,
+            earned: false,
+            finish: None,
         }
     }
 
@@ -351,7 +361,8 @@ impl From<Card> for Recorded {
             channel_id: card.channel_id,
             message_id: Some(card.message_id),
             hosted: card.hosted,
-            summary: None,
+            earned: card.hosted,
+            finish: None,
         }
     }
 }
@@ -373,8 +384,8 @@ enum Reservation {
 /// in between leaves one card no later start knows of. A creation whose
 /// outcome is unknown, or a card someone deleted, is recorded without a
 /// message until the job settles, so no start makes the job another card.
-/// A card is finished with its summary only once that summary is saved with
-/// its record, so a record a failed removal leaves behind still shows it.
+/// A card is finished only once its terminal action is saved with its record,
+/// so a failed edit or removal is retried rather than followed as ongoing work.
 pub(crate) struct CardRecords {
     path: PathBuf,
     cards: Mutex<BTreeMap<String, Recorded>>,
@@ -439,19 +450,34 @@ impl CardRecords {
         self.release(job);
     }
 
-    /// Saves `summary` with `job`'s recorded card before the card is
-    /// finished with it. True when the card may be finished: the summary is
+    /// Remembers an earlier turn's earned summary before its report is lost.
+    fn earn(&self, job: &str) {
+        self.change(|cards| {
+            let Some(recorded) = cards.get_mut(job) else {
+                return false;
+            };
+            let changed = !recorded.earned;
+            recorded.earned = true;
+            changed
+        });
+    }
+
+    /// Saves the terminal edit or removal with `job`'s recorded card before
+    /// attempting it. True when the card may be finished: the action is
     /// saved, synced, or the job has no record a later start would take up.
-    fn checkpoint(&self, job: &str, summary: &Embed) -> bool {
+    fn checkpoint(&self, job: &str, summary: Option<&Embed>) -> bool {
         let mut cards = lock(&self.cards);
         let Some(recorded) = cards.get_mut(job) else {
             return true;
         };
-        recorded.summary = Some(summary.clone());
+        recorded.finish = Some(match summary {
+            Some(summary) => Finish::Retain(Box::new(summary.clone())),
+            None => Finish::Remove,
+        });
         match self.save(&cards) {
             Ok(()) => true,
             Err(error) => {
-                warn!(path = %self.path.display(), %error, "an activity card's summary was not saved");
+                warn!(path = %self.path.display(), %error, "an activity card's terminal action was not saved");
                 false
             }
         }
@@ -621,6 +647,7 @@ pub(crate) async fn activity_monitor(
         // What the job's earlier turns reported only the last start knew.
         let job = Job {
             partial: true,
+            earned: recorded.earned || recorded.hosted,
             ..Job::default()
         };
         let view = track(&mut tasks, &job_id, job, Some(recorded));
@@ -965,6 +992,9 @@ async fn follow(
     // Discord may refuse edits (403) yet allow removal.
     let mut editable = true;
     let job = loop {
+        if view.borrow().earned {
+            cards.records.earn(job_id);
+        }
         if !view.borrow().is_settled() {
             if view.changed().await.is_err() && !view.borrow().is_settled() {
                 // The monitor stopped; the record lets the next start go on.
@@ -974,6 +1004,9 @@ async fn follow(
             let _ = timeout_at(next_edit, view.wait_for(Job::is_settled)).await;
         }
         let job = view.borrow_and_update().clone();
+        if job.earned {
+            cards.records.earn(job_id);
+        }
         if let State::Active(turn) = &job.state {
             heard = true;
             if let Some(snapshot) = &turn.activity {
@@ -1034,16 +1067,20 @@ fn until_after(accepted_at: i64, after: Duration) -> Duration {
 
 impl Cards {
     /// Takes up the cards recorded before this start. One an earlier start
-    /// was finishing belongs to a job that is over: it is finished, as a task
-    /// in `tasks`, with the summary saved for it, and nothing else of its job
+    /// was finishing belongs to a job that is over: its terminal action is
+    /// retried, as a task in `tasks`, and nothing else of its job
     /// is followed. The rest, whose jobs may go on, are returned.
     fn adopt(&self, tasks: &mut JoinSet<()>) -> Vec<(String, Recorded)> {
         let mut going_on = Vec::new();
         for (job_id, recorded) in self.records.recorded() {
-            match (recorded.card(), recorded.summary.clone()) {
-                (Some(card), Some(summary)) => {
+            match (recorded.card(), recorded.finish.clone()) {
+                (Some(card), Some(finish)) => {
                     let cards = self.clone();
-                    tasks.spawn(async move { cards.finish(&job_id, card, Some(summary)).await });
+                    let summary = match finish {
+                        Finish::Retain(summary) => Some(*summary),
+                        Finish::Remove => None,
+                    };
+                    tasks.spawn(async move { cards.finish(&job_id, card, summary).await });
                 }
                 _ => going_on.push((job_id, recorded)),
             }
@@ -1058,9 +1095,7 @@ impl Cards {
             self.records.remove(job_id);
             return;
         }
-        if let Some(embed) = &summary
-            && !self.records.checkpoint(job_id, embed)
-        {
+        if !self.records.checkpoint(job_id, summary.as_ref()) {
             // Shown without its saved record, a later start could say its
             // outcome is unknown over it.
             warn!(

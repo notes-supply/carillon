@@ -1931,6 +1931,38 @@ it("marks a report missing from a bounded snapshot as failed, not successfully d
   });
 });
 
+it.each(["", " \n "])(
+  "fails an empty completed report (%j), including its report-back row",
+  (text) => {
+    const watch = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
+    watch.apply(
+      snapshot({
+        runs: [
+          {
+            ...run("completed"),
+            delegatedCompletion: { disposition: "open", delivery: { messageId: "continuation" } },
+          },
+          run("completed", "continuation", 2),
+        ],
+        subagents: [
+          task("child", "completed", "run-1", { completionDelivery: { state: "delivered" } }),
+        ],
+        messages: text.length === 0 ? [] : [reply("empty", "run-2", text, "2026-10-05T11:14:59Z")],
+      }),
+    );
+    expect(watch.outcome()).toEqual({
+      kind: "failed",
+      explanation: "T3 finished the run without an answer.",
+    });
+    expect(watch.activity().work?.items).toContainEqual({
+      id: "report:message-1",
+      kind: "task",
+      label: "report back to this conversation",
+      state: "failed",
+    });
+  },
+);
+
 it("reports a failed continuation as failed rather than retaining a queued report-back row", () => {
   const watch = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
   watch.apply(

@@ -1245,12 +1245,14 @@ export function watchTurn(
         : []),
     ];
     const text = [output, ...notes].filter((part) => part.length > 0).join("\n\n");
-    return reportOwed()
-      ? {
-          kind: "completed",
-          output: text,
-          followUp: { message: messageId, after: latest.ordinal },
-        }
+    if (reportOwed())
+      return {
+        kind: "completed",
+        output: text,
+        followUp: { message: messageId, after: latest.ordinal },
+      };
+    return text.trim().length === 0
+      ? { kind: "failed", explanation: "T3 finished the run without an answer." }
       : { kind: "completed", output: text };
   }
 
