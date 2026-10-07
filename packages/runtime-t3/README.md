@@ -33,6 +33,11 @@ wake. After a runtime restart, a settled native child with a completed parent
 does not prove whether its result was reported inside the parent or still owes
 a wake; that fresh view fails closed as unresolved, not as a successful parent
 answer that silently loses the result.
+When several native children settled across that gap, provider wakes do not
+identify which child's result they consumed. Those recovered results remain
+unresolved and the work summary is partial, even if unlinked wakes are present;
+counting wakes is not proof that every child reported. Live-observed child
+settlements and wakes retain their existing behavior.
 This retains the native wake ownership rules below; it does not create a second
 scheduler or treat unrelated child agents as this turn's work.
 

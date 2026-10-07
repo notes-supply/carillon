@@ -1770,6 +1770,40 @@ it("retains native result uncertainty when only its parent was known before reco
   expect(watch.quiet()).toBe(false);
 });
 
+it.each([false, true])(
+  "keeps recovered native results unresolved when one wake cannot account for two children (resumed: %s)",
+  (resumed) => {
+    const watch = watchTurn("thread", "message-1", "/workspace");
+    if (resumed) watch.apply(snapshot({ runs: [run("running")] }));
+    watch.apply(
+      snapshot(
+        {
+          runs: [run("completed"), run("completed", "wake", 2)],
+          subagents: [
+            task("a", "completed", "run-1", { origin: "provider_native" }),
+            task("b", "completed", "run-1", { origin: "provider_native" }),
+          ],
+          turnItems: [wakeOpening("run-2")],
+          messages: [
+            reply("parent", "run-1", "PARENT", "2026-10-05T11:14:53Z"),
+            reply("first", "run-2", "FIRST RESULT", "2026-10-05T11:14:59Z"),
+          ],
+        },
+        resumed ? 2 : 1,
+      ),
+    );
+    expect(watch.outcome()).toMatchObject({ kind: "unresolved" });
+    expect(watch.quiet()).toBe(false);
+    expect(watch.activity().work?.partial).toBe(true);
+    // A generic second wake still has no child identity; counting runs is
+    // not proof that either child was reported exactly once.
+    watch.apply(event(3, "run.created", run("running", "wake-again", 3)));
+    watch.apply(event(4, "turn-item.updated", wakeOpening("run-3")));
+    watch.apply(event(5, "run.updated", run("completed", "wake-again", 3)));
+    expect(watch.outcome()).toMatchObject({ kind: "unresolved" });
+  },
+);
+
 it("attributes a native provider wake already present beside its child in the first snapshot", () => {
   const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(

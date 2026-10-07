@@ -311,6 +311,7 @@ pub(crate) struct Card {
 /// has one nobody can name or follow, whose creation was never confirmed or
 /// which someone deleted, so it gets no other.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct Recorded {
     channel_id: Id<ChannelMarker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -452,16 +453,22 @@ impl CardRecords {
 
     /// Remembers an earlier turn's earned summary before its report is lost.
     fn earn(&self, job: &str) {
-        self.change(|cards| {
-            let Some(recorded) = cards.get_mut(job) else {
-                return false;
-            };
-            if recorded.earned || recorded.hosted {
-                return false;
+        let mut cards = lock(&self.cards);
+        let Some(recorded) = cards.get_mut(job) else {
+            return;
+        };
+        if recorded.earned || recorded.hosted {
+            return;
+        }
+        recorded.earned = true;
+        if let Err(error) = self.save(&cards) {
+            // Retry publication on the next observation, including when the
+            // new file was published but its directory could not be synced.
+            if let Some(recorded) = cards.get_mut(job) {
+                recorded.earned = false;
             }
-            recorded.earned = true;
-            true
-        });
+            warn!(path = %self.path.display(), %error, "an activity card's earned summary was not saved");
+        }
     }
 
     /// Saves the terminal edit or removal with `job`'s recorded card before

@@ -392,6 +392,8 @@ export function watchTurn(
    * say whether the result was delivered.
    */
   let backgroundSeenAt: number | undefined;
+  /** A recovered native cohort has no per-child provenance for its provider wakes. */
+  let nativeReportsUnknown = false;
   /**
    * Background work first listed while none of the turn's runs could have
    * been executing: another run's, such as one started in T3's own UI or an
@@ -982,8 +984,7 @@ export function watchTurn(
       last?.status === "completed" &&
       roster(last).length === 0 &&
       !(wakeOwedAfter !== undefined && last.ordinal <= wakeOwedAfter) &&
-      backgroundSeenAt !== undefined &&
-      last.ordinal <= backgroundSeenAt
+      (nativeReportsUnknown || (backgroundSeenAt !== undefined && last.ordinal <= backgroundSeenAt))
     );
   }
 
@@ -1401,17 +1402,24 @@ export function watchTurn(
           // A fresh view cannot tell whether a settled native child reported
           // inside its parent or still owes a provider wake. Reuse the same
           // fail-closed ambiguity as background work missed across a gap.
-          if (followUp === undefined)
-            for (const task of listed) {
-              const parent = task.runId === null ? undefined : turnRuns.get(task.runId);
-              if (
+          if (followUp === undefined) {
+            const native = listed.filter(
+              (task) =>
                 task.origin === "provider_native" &&
                 SETTLED_TASK.has(task.status) &&
-                parent?.status === "completed" &&
-                !settledChildren.has(task.id)
-              )
-                backgroundSeenAt = Math.max(backgroundSeenAt ?? 0, parent.ordinal);
+                task.runId !== null &&
+                turnRuns.get(task.runId)?.status === "completed",
+            );
+            for (const task of native) {
+              if (settledChildren.has(task.id)) continue;
+              const parent = task.runId === null ? undefined : turnRuns.get(task.runId);
+              if (parent === undefined) continue;
+              backgroundSeenAt = Math.max(backgroundSeenAt ?? 0, parent.ordinal);
+              // One unlinked wake cannot prove which of several recovered
+              // native results it consumed. Do not silently drop the rest.
+              if (native.length > 1) nativeReportsUnknown = true;
             }
+          }
           for (const transfer of projection.contextTransfers) foldTransfer(transfer);
           for (const thread of projection.providerThreads) foldProviderThread(thread);
           for (const session of projection.providerSessions) foldSession(session);
@@ -1654,7 +1662,7 @@ export function watchTurn(
     },
     activity() {
       const run = active() ?? last;
-      const partial = unconfirmed.size > 0 || workOmitted || owedUnknown;
+      const partial = unconfirmed.size > 0 || workOmitted || owedUnknown || nativeReportsUnknown;
       // A child agent shows once, as its delegation, not also as a tool or a
       // background task of its parent.
       const shownAsWork = (item: ToolItem) =>

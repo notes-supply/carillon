@@ -2335,13 +2335,16 @@ async fn unreadable_card_records_turn_cards_off_but_keep_typing_and_the_evidence
     std::fs::create_dir(&occupied)?;
     let malformed = directory.path().join("malformed.json");
     std::fs::write(&malformed, "{not json")?;
+    let unsupported = directory.path().join("unsupported.json");
+    let old_summary = r#"{"turn": {"channel_id": "300", "message_id": "555", "summary": {"description": "Already finished"}}}"#;
+    std::fs::write(&unsupported, old_summary)?;
     let unreadable = directory.path().join("unreadable.json");
     std::fs::write(
         &unreadable,
         r#"{"turn": {"channel_id": "300", "message_id": "555"}}"#,
     )?;
     std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000))?;
-    let mut faults = vec![occupied.clone(), malformed.clone()];
+    let mut faults = vec![occupied.clone(), malformed.clone(), unsupported.clone()];
     // The owner of the file can read it regardless when running as root.
     if std::fs::read(&unreadable).is_err() {
         faults.push(unreadable.clone());
@@ -2370,6 +2373,7 @@ async fn unreadable_card_records_turn_cards_off_but_keep_typing_and_the_evidence
     }
     assert!(occupied.is_dir());
     assert_eq!(std::fs::read(&malformed)?, b"{not json");
+    assert_eq!(std::fs::read_to_string(&unsupported)?, old_summary);
     std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o600))?;
     assert_eq!(
         std::fs::read_to_string(&unreadable)?,
@@ -2577,10 +2581,26 @@ async fn an_earned_non_hosted_summary_survives_restart_and_a_plain_final_report(
     discord
         .wait_for(&Method::POST, "/channels/300/messages", 1)
         .await?;
+    recorded_soon(
+        &records,
+        "parent",
+        &json!({"channel_id": "300", "message_id": "901"}),
+    )
+    .await?;
+    let read_only = ReadOnly::new(directory.path())?;
     let mut parent = delivered("parent", "parent", TurnState::Completed);
     parent.activity = Some(tools(None, &[], &[("bash", "make", true)]));
     parent.continued_by = Some("report".to_owned());
     report(&outcomes, parent, DeliveryOutcome::Delivered)?;
+    discord
+        .wait_for_text(
+            &Method::PATCH,
+            "/channels/300/messages/901",
+            "Answered · delegated work goes on",
+        )
+        .await?;
+    assert_eq!(recorded(&records)?["parent"]["earned"], Value::Null);
+    drop(read_only);
     let card = json!({"channel_id": "300", "message_id": "901", "earned": true});
     recorded_soon(&records, "parent", &card).await?;
     monitor.abort();
