@@ -1668,6 +1668,175 @@ const task = (
 const reply = (id: string, runId: string, text: string, at: string) =>
   event(0, "message.updated", { id, runId, role: "assistant", text, createdAt: at }).event.payload;
 
+it("keeps a native Agent child and its provider wake without a pending-background roster", () => {
+  const watch = watchTurn("thread", "message-1", "/workspace");
+  watch.apply(snapshot({ runs: [run("running")] }));
+  watch.apply(
+    event(2, "subagent.updated", task("native", "running", "run-1", { origin: "provider_native" })),
+  );
+  watch.apply(
+    event(3, "message.updated", reply("a", "run-1", "PARENT ACK", "2026-10-05T11:14:53Z")),
+  );
+  watch.apply(event(4, "run.updated", run("completed")));
+  // The real producer can expose the Agent node but no roster. Its work
+  // must not be abandoned with the completed parent run.
+  expect(watch.outcome()).toBeUndefined();
+  expect(watch.quiet()).toBe(false);
+  watch.apply(
+    event(
+      5,
+      "subagent.updated",
+      task("native", "completed", "run-1", { origin: "provider_native" }),
+    ),
+  );
+  expect(watch.outcome()).toBeUndefined();
+  // A person's later message, even on the same provider thread, is not the wake.
+  watch.apply(event(6, "run.created", run("running", "other", 2)));
+  watch.apply(event(7, "turn-item.updated", item("user_message", "run-2", { text: "other" })));
+  watch.apply(
+    event(8, "message.updated", reply("other", "run-2", "FOREIGN", "2026-10-05T11:14:54Z")),
+  );
+  watch.apply(event(9, "run.updated", run("completed", "other", 2)));
+  expect(watch.outcome()).toBeUndefined();
+  watch.apply(event(10, "run.created", run("running", "wake", 3)));
+  watch.apply(event(11, "turn-item.updated", wakeOpening("run-3")));
+  watch.apply(
+    event(12, "message.updated", reply("b", "run-3", "CHILD RESULT", "2026-10-05T11:14:59Z")),
+  );
+  watch.apply(event(13, "run.updated", run("completed", "wake", 3)));
+  expect(watch.outcome()).toEqual({ kind: "completed", output: "PARENT ACK\n\nCHILD RESULT" });
+  expect(watch.activity().work?.items).toEqual([
+    expect.objectContaining({ id: "native", state: "succeeded" }),
+  ]);
+  expect(watch.quiet()).toBe(true);
+});
+
+it("does not await native Agent work that finished inside the parent or belongs to another run", () => {
+  const watch = watchTurn("thread", "message-1", "/workspace");
+  watch.apply(
+    snapshot({
+      runs: [run("running")],
+      subagents: [task("foreign", "running", "run-other", { origin: "provider_native" })],
+    }),
+  );
+  watch.apply(
+    event(2, "subagent.updated", task("native", "running", "run-1", { origin: "provider_native" })),
+  );
+  watch.apply(
+    event(
+      3,
+      "subagent.updated",
+      task("native", "completed", "run-1", { origin: "provider_native" }),
+    ),
+  );
+  watch.apply(event(4, "message.updated", reply("a", "run-1", "RESULT", "2026-10-05T11:14:53Z")));
+  watch.apply(event(5, "run.updated", run("completed")));
+  expect(watch.outcome()).toEqual({ kind: "completed", output: "RESULT" });
+  expect(watch.quiet()).toBe(true);
+});
+
+it("keeps other native children after the first child's wake completes", () => {
+  const watch = watchTurn("thread", "message-1", "/workspace");
+  watch.apply(
+    snapshot({
+      runs: [run("running")],
+      subagents: [
+        task("a", "running", "run-1", { origin: "provider_native" }),
+        task("b", "running", "run-1", { origin: "provider_native" }),
+      ],
+    }),
+  );
+  watch.apply(
+    event(2, "message.updated", reply("parent", "run-1", "PARENT", "2026-10-05T11:14:52Z")),
+  );
+  watch.apply(event(3, "run.updated", run("completed")));
+  watch.apply(
+    event(4, "subagent.updated", task("a", "completed", "run-1", { origin: "provider_native" })),
+  );
+  watch.apply(event(5, "run.created", run("running", "wake-a", 2)));
+  watch.apply(event(6, "turn-item.updated", wakeOpening("run-2")));
+  watch.apply(
+    event(7, "message.updated", reply("first", "run-2", "FIRST", "2026-10-05T11:14:53Z")),
+  );
+  watch.apply(event(8, "run.updated", run("completed", "wake-a", 2)));
+  expect(watch.outcome()).toBeUndefined();
+  expect(watch.quiet()).toBe(false);
+  watch.apply(
+    event(9, "subagent.updated", task("b", "completed", "run-1", { origin: "provider_native" })),
+  );
+  watch.apply(event(10, "run.created", run("running", "wake-b", 3)));
+  watch.apply(event(11, "turn-item.updated", wakeOpening("run-3")));
+  watch.apply(
+    event(12, "message.updated", reply("second", "run-3", "SECOND", "2026-10-05T11:14:54Z")),
+  );
+  watch.apply(event(13, "run.updated", run("completed", "wake-b", 3)));
+  expect(watch.outcome()).toEqual({ kind: "completed", output: "PARENT\n\nFIRST\n\nSECOND" });
+  expect(watch.quiet()).toBe(true);
+});
+
+it("replaces the report-back row with its confirmed completion in a follow-up report", () => {
+  const watch = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
+  watch.apply(snapshot({ runs: [run("completed")], subagents: [task("child", "running")] }));
+  watch.apply(
+    event(2, "run.updated", {
+      ...run("completed"),
+      delegatedCompletion: { disposition: "open", delivery: { messageId: "continuation" } },
+    }),
+  );
+  watch.apply(
+    event(
+      3,
+      "subagent.updated",
+      task("child", "completed", "run-1", { completionDelivery: { state: "delivered" } }),
+    ),
+  );
+  watch.apply(event(4, "run.created", run("running", "continuation", 2)));
+  expect(watch.activity().work?.items).toContainEqual({
+    id: "report:message-1",
+    kind: "task",
+    label: "report back to this conversation",
+    state: "running",
+  });
+  watch.apply(
+    event(5, "message.updated", reply("b", "run-2", "CHILD RESULT", "2026-10-05T11:14:59Z")),
+  );
+  watch.apply(event(6, "run.updated", run("completed", "continuation", 2)));
+  expect(watch.outcome()).toEqual({ kind: "completed", output: "CHILD RESULT" });
+  expect(watch.activity().work?.items).toContainEqual({
+    id: "report:message-1",
+    kind: "task",
+    label: "report back to this conversation",
+    state: "succeeded",
+  });
+});
+
+it("reports a failed continuation as failed rather than retaining a queued report-back row", () => {
+  const watch = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
+  watch.apply(
+    snapshot({
+      runs: [run("completed")],
+      subagents: [
+        task("child", "completed", "run-1", { completionDelivery: { state: "claimed" } }),
+      ],
+    }),
+  );
+  watch.apply(
+    event(2, "run.updated", {
+      ...run("completed"),
+      delegatedCompletion: { disposition: "open", delivery: { messageId: "continuation" } },
+    }),
+  );
+  watch.apply(event(3, "run.created", run("running", "continuation", 2)));
+  watch.apply(event(4, "run.updated", run("failed", "continuation", 2)));
+  expect(watch.outcome()?.kind).toBe("failed");
+  expect(watch.activity().work?.items).toContainEqual({
+    id: "report:message-1",
+    kind: "task",
+    label: "report back to this conversation",
+    state: "failed",
+  });
+});
+
 it("answers when its run completes and hands delegated work still owed to a follow-up, in the native order", () => {
   const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(snapshot({ runs: [run("running")] }));

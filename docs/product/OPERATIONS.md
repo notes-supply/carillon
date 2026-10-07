@@ -167,6 +167,25 @@ stopped = ""
 
 Reactions remain independent: the top-level `processing_emoji`, `delivered_emoji`, `failed_emoji` and `uncertain_emoji` fields still accept a Unicode emoji or reaction syntax such as `working:123`. Reaction syntax alone is not valid card-marker syntax. Set these top-level fields outside `[activity_markers]`; disabling reactions with `reactions = false` does not disable card markers. `carillon discord configure` preserves both tuned reactions and activity markers when rewriting admission settings.
 
+Optional brand emotes are explicit model-ID-prefix mappings, applied to the
+reported main model and each child's own reported actor/model, never inherited
+from the parent. The longest matching prefix wins; unmatched models stay plain.
+They do not change status markers or reactions. Use approved application-owned
+emoji IDs from this bot, not another application's IDs:
+
+```toml
+[activity_markers.models]
+"claude-" = "<:claude:123>"
+"gpt-" = "<:openai:456>"
+"gemini-" = "<:gemini:789>"
+```
+
+The mapping defaults to empty and allows up to 32 nonempty prefixes of at most
+100 UTF-8 bytes. Emotes follow the same validation as the status markers. List
+and reuse the application's existing emojis when provisioning; upload only
+missing approved assets and verify their API records, CDN transparency and a
+real Discord message before activating the mapping. Never upload at reconnect.
+
 After editing the file, validate it and use the existing restart workflow:
 
 ```sh

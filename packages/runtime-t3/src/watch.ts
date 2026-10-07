@@ -842,6 +842,17 @@ export function watchTurn(
     return listedWork(run).filter((task) => !otherTasks.has(task.taskId));
   }
 
+  /** Native Agent work can be published without a provider-thread roster. */
+  function nativeWorking(): boolean {
+    return [...delegations.values()].some(
+      (task) =>
+        task.origin === "provider_native" &&
+        task.runId !== null &&
+        turnRuns.has(task.runId) &&
+        ACTIVE_TASK.has(task.status),
+    );
+  }
+
   /** Everything the run's provider thread lists, the turn's or not. */
   function listedWork(run: Run | undefined): readonly BackgroundTask[] {
     if (run?.providerThreadId == null) return [];
@@ -1134,15 +1145,23 @@ export function watchTurn(
         ...(SETTLED_TASK.has(task.status) ? lasted(task.startedAt, task.completedAt) : {}),
       });
     }
-    const reporting = [...continuationRuns.values()].some(
-      (run) => isActive(run) && !turnRuns.has(run.id),
-    );
-    if (reporting || (followUp === undefined && reportOwed()))
+    const reporting = [...continuationRuns.values()].some(isActive);
+    const reported: WorkItem["state"] | undefined =
+      followUp === undefined || last === undefined
+        ? undefined
+        : last.status === "failed"
+          ? "failed"
+          : ["cancelled", "interrupted", "rolled_back"].includes(last.status)
+            ? "cancelled"
+            : last.status === "completed" && !reportOwed()
+              ? "succeeded"
+              : undefined;
+    if (reporting || (followUp === undefined && reportOwed()) || reported !== undefined)
       items.push({
         id: `report:${messageId}`,
         kind: "task",
         label: "report back to this conversation",
-        state: reporting ? "running" : "queued",
+        state: reporting ? "running" : (reported ?? "queued"),
       });
     for (const transfer of transfers.values()) {
       const work = TRANSFER_WORK.get(transfer.type);
@@ -1448,7 +1467,7 @@ export function watchTurn(
           return;
       }
       if (last !== undefined) {
-        const listed = roster(last).length > 0;
+        const listed = roster(last).length > 0 || nativeWorking();
         if (listed) backgroundSeenAt = last.ordinal;
         else if (isActive(last) && backgroundSeenAt === last.ordinal) backgroundSeenAt = undefined;
         if (listed && last.status === "completed") wakeOwedAfter = last.ordinal;
@@ -1525,7 +1544,7 @@ export function watchTurn(
           // wake: beside the conversation's later messages, no run but a
           // continuation can be attributed to it.
           if (followUp !== undefined) return reported(last);
-          if (roster(last).length > 0) {
+          if (roster(last).length > 0 || nativeWorking()) {
             if (sessionStopped(last))
               return {
                 kind: "failed",

@@ -833,6 +833,40 @@ async fn ended_turns_keep_an_honest_card_and_stale_reads_cannot_revive_them() ->
 }
 
 #[tokio::test]
+async fn a_slow_plain_answers_temporary_card_is_removed_even_with_agent_metadata()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let records = directory.path().join("activity-cards.json");
+    let discord = Substitute::start(succeed()).await?;
+    let mut plain = tools(None, &[], &[]);
+    plain.agent = Some(carillon_protocol::model::AgentInfo {
+        model: Some("claude-fable-5-1".to_owned()),
+        effort: Some("high".to_owned()),
+        context: None,
+    });
+    discord.list(vec![running(
+        "plain",
+        "300",
+        now() - 60,
+        Some(plain.clone()),
+    )]);
+    let (outcomes, monitor) = discord.monitor(discord.http(false), config(false), &records);
+    discord
+        .wait_for(&Method::POST, "/channels/300/messages", 1)
+        .await?;
+    let mut answer = delivered("plain", "plain", TurnState::Completed);
+    answer.activity = Some(plain);
+    report(&outcomes, answer, DeliveryOutcome::Delivered)?;
+    discord
+        .wait_for(&Method::DELETE, "/channels/300/messages/", 1)
+        .await?;
+    assert!(discord.matching(&Method::PATCH, "/channels").is_empty());
+    assert_eq!(recorded(&records)?, json!({}));
+    monitor.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_card_made_as_its_job_ends_keeps_what_it_showed_in_its_summary() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let records = directory.path().join("activity-cards.json");

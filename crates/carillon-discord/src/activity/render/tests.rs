@@ -4,7 +4,7 @@ use carillon_protocol::model::{
     ActivityPhase, AgentInfo, ContextUse, Delivery, DeliveryOutcome, FinishedTool, Origin,
     RunningTool, TurnActivity, TurnState, WorkItem, WorkKind, WorkState, WorkSummary,
 };
-use std::num::NonZeroU32;
+use std::{collections::BTreeMap, num::NonZeroU32};
 use twilight_model::channel::message::Embed;
 
 fn running(tool: &str, detail: &str) -> RunningTool {
@@ -630,6 +630,7 @@ fn markers_are_configured_per_row_and_empty_ones_leave_no_space() {
         failed: "<a:error:104>".to_owned(),
         uncertain: "⚠".to_owned(),
         stopped: "■".to_owned(),
+        models: BTreeMap::new(),
     };
     let activity = tools();
     let embed = card(&live(&activity, Vec::new()), &custom);
@@ -646,12 +647,57 @@ fn markers_are_configured_per_row_and_empty_ones_leave_no_space() {
         failed: String::new(),
         uncertain: String::new(),
         stopped: String::new(),
+        models: BTreeMap::new(),
     };
     let embed = card(&live(&activity, Vec::new()), &empty);
     assert_eq!(
         text(&embed),
         "Working · started <t:1790000000:R>\n> Checking tests\nCalls:\nread `README.md`\nmcp??1?\nbash `echo ˋidˋ > x` · <t:1790000000:R>"
     );
+}
+
+#[test]
+fn configured_brand_emotes_match_the_actual_main_and_child_models_without_changing_statuses() {
+    let mut markers = ActivityMarkers::default();
+    markers
+        .models
+        .insert("claude-".to_owned(), "<:claude:101>".to_owned());
+    markers
+        .models
+        .insert("claude-special-".to_owned(), "<:special:102>".to_owned());
+    markers
+        .models
+        .insert("gpt-".to_owned(), "<:openai:103>".to_owned());
+    let mut activity = tools();
+    activity.agent = Some(AgentInfo {
+        model: Some("claude-special-model".to_owned()),
+        effort: None,
+        context: None,
+    });
+    let mut child = work(
+        "child",
+        WorkKind::Delegation,
+        "research",
+        WorkState::Succeeded,
+    );
+    child.actor = Some("gpt-6.1-sol".to_owned());
+    activity.work = Some(WorkSummary {
+        items: vec![child],
+        partial: false,
+        omitted: None,
+    });
+    let shown = text(&card(&live(&activity, Vec::new()), &markers));
+    assert!(shown.starts_with("⏳ Working"));
+    assert!(shown.contains("Agent:\n<:special:102> claude-special-model"));
+    assert!(shown.contains("done · <:openai:103> gpt-6.1-sol"));
+    activity.agent = Some(AgentInfo {
+        model: Some("unknown-model".to_owned()),
+        effort: None,
+        context: None,
+    });
+    let plain = text(&card(&live(&activity, Vec::new()), &markers));
+    assert!(plain.contains("Agent:\nunknown-model"));
+    assert!(!plain.contains("<:special:102>"));
 }
 
 #[test]

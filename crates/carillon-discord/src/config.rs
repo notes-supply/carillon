@@ -2,7 +2,12 @@
 //! `carillon.toml`. Core never reads it; only the provider and its
 //! `configure` command know the schema.
 
-use std::{collections::BTreeSet, fs, path::PathBuf, str::FromStr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::PathBuf,
+    str::FromStr,
+};
 
 use anyhow::{Context as _, Result, bail};
 use carillon_installation::config::{LoadedConfig, ProviderRole, component_directory};
@@ -73,6 +78,9 @@ pub struct ActivityMarkers {
     pub failed: String,
     pub uncertain: String,
     pub stopped: String,
+    /// Optional brand emotes by model-ID prefix; the longest match wins.
+    /// Unmatched models remain plain, rather than guessing their brand.
+    pub models: BTreeMap<String, String>,
 }
 
 impl Default for ActivityMarkers {
@@ -86,6 +94,7 @@ impl Default for ActivityMarkers {
             failed: "✗".to_owned(),
             uncertain: "⚠️".to_owned(),
             stopped: "⏹️".to_owned(),
+            models: BTreeMap::new(),
         }
     }
 }
@@ -104,6 +113,17 @@ impl ActivityMarkers {
         ] {
             validate_activity_marker(value)
                 .with_context(|| format!("invalid Discord activity_markers.{field}"))?;
+        }
+        if self.models.len() > 32 {
+            bail!("activity_markers.models must contain at most 32 prefixes");
+        }
+        for (prefix, marker) in &self.models {
+            if prefix.is_empty() || prefix.len() > 100 {
+                bail!("activity_markers.models prefixes must contain 1–100 UTF-8 bytes");
+            }
+            validate_activity_marker(marker).with_context(|| {
+                format!("invalid activity_markers.models marker for {prefix:?}")
+            })?;
         }
         Ok(())
     }
@@ -435,7 +455,7 @@ fn valid_snowflake(value: &str) -> bool {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::{fs, path::Path, str::FromStr};
+    use std::{collections::BTreeMap, fs, path::Path, str::FromStr};
 
     use anyhow::Context as _;
     use carillon_installation::config::{
@@ -545,6 +565,7 @@ allowed_user_ids = ["200"]
                 failed: "✗".to_owned(),
                 uncertain: "⚠️".to_owned(),
                 stopped: "⏹️".to_owned(),
+                models: BTreeMap::new(),
             }
         );
         Ok(())
@@ -593,6 +614,22 @@ failed = ""
         validate_activity_marker(&"✓".repeat(21))?;
         assert!(validate_activity_marker(&"✓".repeat(22)).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn model_markers_validate_prefixes_and_inline_emotes() {
+        let mut markers = ActivityMarkers::default();
+        markers
+            .models
+            .insert("claude-".to_owned(), "<:claude:123>".to_owned());
+        assert!(markers.validate().is_ok());
+        markers
+            .models
+            .insert("gpt-".to_owned(), "<@123>".to_owned());
+        assert!(markers.validate().is_err());
+        markers.models.remove("gpt-");
+        markers.models.insert(String::new(), "✓".to_owned());
+        assert!(markers.validate().is_err());
     }
 
     #[test]
@@ -744,6 +781,7 @@ stopped = "■"
                 failed: String::new(),
                 uncertain: "？".to_owned(),
                 stopped: "■".to_owned(),
+                models: BTreeMap::new(),
             }
         );
         assert!(

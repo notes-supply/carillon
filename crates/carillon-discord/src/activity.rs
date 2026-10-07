@@ -1014,7 +1014,11 @@ async fn follow(
         }
         next_edit = Instant::now() + EDIT_INTERVAL;
     };
-    let summary = editable.then(|| job.embed(last.as_ref(), !heard, markers));
+    let earned = job.earned
+        || last
+            .as_ref()
+            .is_some_and(|(_, report)| render::earns_report(report));
+    let summary = (editable && earned).then(|| job.embed(last.as_ref(), !heard, markers));
     cards.finish(job_id, card, summary).await;
 }
 

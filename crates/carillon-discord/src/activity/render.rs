@@ -1,7 +1,7 @@
 //! Pure Discord work-card embeds: a job's status, the reasoning its runtime
 //! published, its calls, its delegated work and its agent, within Discord's
 //! embed limits. Monitoring and retention live in the activity lifecycle.
-//! Markers are validated provider configuration, shown on status rows only;
+//! Markers are validated provider configuration, shown on status/model rows;
 //! section names stay plain. Text a model wrote cannot format, mention or
 //! link anything.
 use crate::config::ActivityMarkers;
@@ -64,9 +64,11 @@ pub(super) struct Shown<'a> {
 /// delegated and transferred work). An answer alone needs no card.
 pub(crate) fn earns_summary(delivery: &Delivery) -> bool {
     delivery.turn_state == TurnState::Interrupted
-        || delivery.activity.as_ref().is_some_and(|report| {
-            report.tool_calls > 0 || !report.notes.is_empty() || report.work.is_some()
-        })
+        || delivery.activity.as_ref().is_some_and(earns_report)
+}
+
+pub(super) fn earns_report(report: &TurnActivity) -> bool {
+    report.tool_calls > 0 || !report.notes.is_empty() || report.work.is_some()
 }
 
 /// The summary an answer carries when its job has no card: what the turn
@@ -123,7 +125,10 @@ pub(super) fn card(shown: &Shown<'_>, markers: &ActivityMarkers) -> Embed {
     field("Calls", call_lines(&merged, shown.live, markers));
     field("Work", work_lines(&merged, markers));
     // Metadata that states no fact shows no section.
-    let agent = merged.agent.map(agent_line).filter(|line| !line.is_empty());
+    let agent = merged
+        .agent
+        .map(|agent| agent_line(agent, markers))
+        .filter(|line| !line.is_empty());
     field("Agent", agent.into_iter().collect());
     Embed {
         author: None,
@@ -388,7 +393,7 @@ fn work_line(item: &WorkItem, markers: &ActivityMarkers) -> String {
     let mut text = format!("{kind} `{label}` · {state}");
     if let Some(actor) = &item.actor {
         text.push_str(" · ");
-        text.push_str(&plain(&cut(actor, LABEL_LIMIT)));
+        text.push_str(&model_label(actor, markers));
     }
     if let Some(duration) = item.duration_ms {
         let _ = write!(text, " · {}", compact(duration));
@@ -401,10 +406,10 @@ fn work_line(item: &WorkItem, markers: &ActivityMarkers) -> String {
 }
 
 /// The agent's model, effort and context, as its engine last reported them.
-fn agent_line(agent: &AgentInfo) -> String {
+fn agent_line(agent: &AgentInfo, markers: &ActivityMarkers) -> String {
     let mut parts = Vec::new();
     if let Some(model) = &agent.model {
-        parts.push(plain(&cut(model, LABEL_LIMIT)));
+        parts.push(model_label(model, markers));
     }
     if let Some(effort) = &agent.effort {
         parts.push(format!("effort {}", plain(&cut(effort, LABEL_LIMIT))));
@@ -420,6 +425,17 @@ fn agent_line(agent: &AgentInfo) -> String {
         });
     }
     parts.join(" · ")
+}
+
+/// Branding is an operator's explicit mapping, not inferred provider telemetry.
+fn model_label(model: &str, markers: &ActivityMarkers) -> String {
+    let marker = markers
+        .models
+        .iter()
+        .filter(|(prefix, _)| model.starts_with(prefix.as_str()))
+        .max_by_key(|(prefix, _)| prefix.len())
+        .map_or("", |(_, marker)| marker.as_str());
+    marked(marker, &plain(&cut(model, LABEL_LIMIT)))
 }
 
 /// A native relative start, or an estimated one said as such.
