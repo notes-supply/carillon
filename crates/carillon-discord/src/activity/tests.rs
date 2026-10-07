@@ -2548,13 +2548,16 @@ async fn a_turn_that_goes_on_without_a_report_leaves_its_card_saying_it_may_not_
 }
 
 /// The monitor beside the delivery loop's summary owner, over the records
-/// at `path`. The parent turn's calls earned a summary its answer was to
-/// carry, which went as `sent`; its follow-up ends the job without earning
-/// one. Both outcomes are taken before the job's card task first looks,
-/// after the provider began `stop`ping when that is set. The monitor goes
-/// on while the case holds the outcomes' sender.
+/// at `path`. The parent turn reports `parent`; when that earned a summary,
+/// its answer was to carry it, which went as `sent`. Then `observations`
+/// turns go on without a report, and a last one ends the job without
+/// earning a summary. Every outcome is taken before the job's card task
+/// first looks, after the provider began `stop`ping when that is set. The
+/// monitor goes on while the case holds the outcomes' sender.
 async fn settled_before_its_card_task_looks(
     path: &Path,
+    parent: TurnActivity,
+    observations: usize,
     sent: Sent,
     stop: bool,
 ) -> anyhow::Result<(Substitute, mpsc::UnboundedSender<Outcome>, JoinHandle<()>)> {
@@ -2574,22 +2577,38 @@ async fn settled_before_its_card_task_looks(
     ));
     // Reading core, the monitor has taken up what was recorded before.
     discord.read_taken(0).await?;
-    let mut parent = delivered("parent", "parent", TurnState::Completed);
-    parent.activity = Some(tools(None, &[], &[("bash", "make", true)]));
-    parent.continued_by = Some("report".to_owned());
-    anyhow::ensure!(summaries.reserve(&parent).is_some(), "no summary earned");
-    anyhow::ensure!(
-        summaries.sent(&parent, &sent).is_none(),
-        "the answer took it"
-    );
+    let turn = |n: usize| format!("report-{n}");
+    let mut answered = delivered("parent", "parent", TurnState::Completed);
+    answered.activity = Some(parent);
+    answered.continued_by = Some(turn(1));
+    if super::render::earns_summary(&answered) {
+        anyhow::ensure!(
+            summaries.reserve(&answered).is_some(),
+            "no summary reserved"
+        );
+        anyhow::ensure!(
+            summaries.sent(&answered, &sent).is_none(),
+            "the answer took it"
+        );
+    }
     if stop {
         stopping.cancel();
     }
-    report(&outcomes, parent, DeliveryOutcome::Uncertain)?;
-    let mut last = delivered("report", "parent", TurnState::Completed);
+    report(&outcomes, answered, DeliveryOutcome::Uncertain)?;
+    for n in 1..=observations {
+        let mut observation = delivered(&turn(n), "parent", TurnState::Completed);
+        observation.continued_by = Some(turn(n + 1));
+        report(&outcomes, observation, DeliveryOutcome::Delivered)?;
+    }
+    let mut last = delivered(&turn(observations + 1), "parent", TurnState::Completed);
     last.activity = Some(tools(None, &[], &[]));
     report(&outcomes, last, DeliveryOutcome::Delivered)?;
     Ok((discord, outcomes, monitor))
+}
+
+/// A parent turn's report of the call that earned its job a summary.
+fn made() -> TurnActivity {
+    tools(None, &[], &[("bash", "make", true)])
 }
 
 /// The records at `path` once they hold nothing, as when none were saved.
@@ -2611,7 +2630,7 @@ async fn a_job_settled_before_its_card_task_looks_still_shows_the_summary_it_ear
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("activity-cards.json");
     let (discord, _outcomes, monitor) =
-        settled_before_its_card_task_looks(&path, Sent::Incomplete, false).await?;
+        settled_before_its_card_task_looks(&path, made(), 0, Sent::Incomplete, false).await?;
     let made = discord
         .wait_for(&Method::POST, "/channels/300/messages", 1)
         .await?;
@@ -2637,7 +2656,7 @@ async fn a_job_settled_before_its_card_task_looks_gets_no_card_beside_an_unknown
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("activity-cards.json");
         let (discord, _outcomes, monitor) =
-            settled_before_its_card_task_looks(&path, sent, stop).await?;
+            settled_before_its_card_task_looks(&path, made(), 0, sent, stop).await?;
         tokio::time::sleep(Duration::from_millis(2_000)).await;
         let seen = discord.seen();
         assert!(seen.is_empty(), "stop: {stop}: {seen:#?}");
@@ -2646,6 +2665,57 @@ async fn a_job_settled_before_its_card_task_looks_gets_no_card_beside_an_unknown
         recorded_empty(&path).await?;
         monitor.abort();
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_job_whose_earned_report_was_let_go_before_its_card_task_looks_still_gets_a_partial_summary()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("activity-cards.json");
+    // The parent's earned report is let go behind the job's later turns.
+    let (discord, _outcomes, monitor) = settled_before_its_card_task_looks(
+        &path,
+        made(),
+        super::REPORTS_KEPT,
+        Sent::Incomplete,
+        false,
+    )
+    .await?;
+    let cards = discord
+        .wait_for(&Method::POST, "/channels/300/messages", 1)
+        .await?;
+    let summary = cards[0].content();
+    assert!(summary.starts_with("✓ Done · answered"), "{summary}");
+    // It says it may not show all of the work, and shows none it no longer has.
+    assert!(
+        summary.contains("Some of this work may not be shown here."),
+        "{summary}"
+    );
+    assert!(!summary.contains("bash"), "{summary}");
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    let seen = discord.seen();
+    assert_eq!(seen.len(), 1, "{seen:#?}");
+    recorded_empty(&path).await?;
+    monitor.abort();
+
+    // A job none of whose turns earned a summary still gets no card.
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("activity-cards.json");
+    let answered = tools(None, &[], &[]);
+    let (discord, _outcomes, monitor) = settled_before_its_card_task_looks(
+        &path,
+        answered,
+        super::REPORTS_KEPT,
+        Sent::Incomplete,
+        false,
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_millis(2_000)).await;
+    let seen = discord.seen();
+    assert!(seen.is_empty(), "{seen:#?}");
+    recorded_empty(&path).await?;
+    monitor.abort();
     Ok(())
 }
 

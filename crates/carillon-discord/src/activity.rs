@@ -130,6 +130,9 @@ struct Job {
     hosted: Option<Card>,
     /// Where the job's answers go, once a delivery said.
     channel: Option<Id<ChannelMarker>>,
+    /// One of the job's turns earned it a retained summary, even if its
+    /// report has since been let go.
+    earned: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -177,6 +180,7 @@ impl Job {
     fn end(&mut self, delivery: &Delivery, outcome: DeliveryOutcome, hosted: Option<Card>) {
         self.requested_at = Some(delivery.origin.accepted_at);
         self.channel = delivery.target_id.parse().ok().or(self.channel);
+        self.earned |= render::earns_summary(delivery);
         if !self
             .ended
             .iter()
@@ -205,22 +209,6 @@ impl Job {
                 finished_at: delivery.finished_at,
             },
         };
-    }
-
-    /// Whether what the job's turns did earns it a retained summary: its
-    /// last turn stopped before finishing, or a report shows work.
-    fn earns_summary(&self) -> bool {
-        matches!(
-            self.state,
-            State::Settled {
-                turn_state: TurnState::Interrupted,
-                ..
-            }
-        ) || self
-            .ended
-            .iter()
-            .filter_map(|ended| ended.report.as_ref())
-            .any(render::shows_work)
     }
 
     /// Core's latest read lists `turn` of the job, queued or running.
@@ -848,7 +836,7 @@ async fn obtain(
         }
         if job.is_settled() {
             if let Some(channel) = job.channel
-                && job.earns_summary()
+                && job.earned
                 && !cards.stopping.is_cancelled()
                 // A card or answer that may hold its summary, or one someone
                 // deleted, keeps its record until this task has looked.
