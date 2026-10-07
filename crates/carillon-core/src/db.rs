@@ -22,6 +22,8 @@
 //! - Every turn names its origin: a message turn itself, and an observation
 //!   the origin of the turn that queued it, recorded in the same
 //!   transaction, so a chain of observations keeps the message's identity.
+//!   A job, the turns of one origin, is read by that index, its latest
+//!   turns first, never by following its chain.
 //! - A turn's final report is stored once, with the outcome it describes.
 //! - A delivery row exists exactly when its turn left `running`; completion
 //!   output and the delivery intent commit in one
@@ -49,8 +51,9 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use carillon_protocol::model::{
-    ActiveTurn, Delivery, DeliveryOutcome, DeliveryState, EventReceipt, ExternalEvent, Origin,
-    RuntimeTurnResponse, StateCounts, TurnActivity, TurnInspection, TurnState, TurnSummary,
+    Delivery, DeliveryOutcome, DeliveryState, EventReceipt, ExternalEvent, JOB_READ_LIMIT,
+    JOB_TURN_LIMIT, Job, JobTurn, Origin, RuntimeTurnResponse, StateCounts, TurnActivity,
+    TurnInspection, TurnState, TurnSummary,
 };
 
 use crate::{
@@ -80,6 +83,14 @@ pub struct ClaimedTurn {
     /// The runtime's cursor, on an observation; `None` on a message.
     pub follow_up: Option<Value>,
     pub attachments: Vec<CapturedFile>,
+}
+
+/// A page of an interface's jobs at work, each with the ID of the runtime
+/// that owns it, and where the next page begins when more follow.
+#[derive(Debug)]
+pub struct JobPage {
+    pub jobs: Vec<(String, Job)>,
+    pub next: Option<String>,
 }
 
 /// One earlier turn's captured files.
@@ -284,6 +295,7 @@ impl Database {
             CREATE INDEX IF NOT EXISTS turns_interface_unfinished
                 ON turns(interface_id, acceptance_sequence)
                 WHERE state IN ('queued', 'running');
+            CREATE INDEX IF NOT EXISTS turns_origin ON turns(origin_turn_id, acceptance_sequence);
             CREATE TABLE IF NOT EXISTS deliveries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 turn_id TEXT NOT NULL UNIQUE,
@@ -729,9 +741,8 @@ impl Database {
         Ok(targets)
     }
 
-    /// Claims the oldest pending delivery for an interface instance, with
-    /// what its turn's record says: its outcome, origin and final report,
-    /// and the observation that continues its work, when it queued one.
+    /// Claims the oldest pending delivery for an interface instance, with its
+    /// turn's outcome and origin.
     pub fn claim_delivery(&self, interface_id: &str, owner: &str) -> Result<Option<Delivery>> {
         self.claim_next_delivery(interface_id, owner, None)
     }
@@ -759,9 +770,7 @@ impl Database {
         let delivery = transaction
             .query_row(
                 "SELECT d.id, d.turn_id, d.target_id, d.feedback_target_id, d.content, t.state,
-                        o.id, o.accepted_at, t.finished_at, t.activity_json,
-                        (SELECT n.id FROM turns n
-                         WHERE n.interface_id = t.interface_id AND n.event_id = ?4 || t.id)
+                        o.id, o.accepted_at
                  FROM deliveries d
                  JOIN turns t ON t.id = d.turn_id
                  JOIN turns o ON o.id = t.origin_turn_id
@@ -769,7 +778,7 @@ impl Database {
                    AND (d.state = 'pending' OR d.claim_owner = ?2)
                    AND (?3 IS NULL OR d.turn_id = ?3)
                  ORDER BY CASE d.state WHEN 'delivering' THEN 0 ELSE 1 END, d.id LIMIT 1",
-                params![interface_id, owner, turn_id, FOLLOW_UP_EVENT_PREFIX],
+                params![interface_id, owner, turn_id],
                 |row| {
                     Ok(Delivery {
                         id: row.get(0)?,
@@ -782,9 +791,6 @@ impl Database {
                             turn_id: row.get(6)?,
                             accepted_at: row.get(7)?,
                         },
-                        finished_at: row.get(8)?,
-                        activity: optional_json_column(row, 9)?,
-                        continued_by: row.get(10)?,
                     })
                 },
             )
@@ -900,33 +906,60 @@ impl Database {
         Ok(Some(inspection))
     }
 
-    /// Queued and running turns of one interface in acceptance order, each
-    /// with the runtime that owns it. `activity` is left for the caller.
-    pub fn active_turns(&self, interface_id: &str) -> Result<Vec<(String, ActiveTurn)>> {
-        let connection = self.connect()?;
-        let mut statement = connection.prepare(
-            "SELECT t.runtime_id, t.id, t.state, t.target_id, t.accepted_at, o.id, o.accepted_at
-             FROM turns t JOIN turns o ON o.id = t.origin_turn_id
-             WHERE t.interface_id = ?1 AND t.state IN ('queued', 'running')
-             ORDER BY t.acceptance_sequence",
-        )?;
-        let rows = statement.query_map([interface_id], |row| {
-            Ok((
-                row.get(0)?,
-                ActiveTurn {
-                    turn_id: row.get(1)?,
-                    state: state_column(row, 2)?,
-                    target_id: row.get(3)?,
-                    accepted_at: row.get(4)?,
-                    origin: Origin {
-                        turn_id: row.get(5)?,
-                        accepted_at: row.get(6)?,
-                    },
-                    activity: None,
-                },
-            ))
-        })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    /// A page of one interface's jobs at work, each with the runtime that
+    /// owns it, in the order their turns at work were accepted: at most
+    /// [`JOB_READ_LIMIT`] after the job whose turn at work was `after`, and
+    /// that turn's ID to read the next page from when more follow. A job has
+    /// at most one turn at work, its newest, so every job at work is on one
+    /// page. `None` when `after` is not one of the interface's turns.
+    pub fn jobs_at_work(&self, interface_id: &str, after: Option<&str>) -> Result<Option<JobPage>> {
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let after = match after {
+            None => 0,
+            Some(turn) => match transaction
+                .query_row(
+                    "SELECT acceptance_sequence FROM turns WHERE id = ?1 AND interface_id = ?2",
+                    params![turn, interface_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?
+            {
+                Some(sequence) => sequence,
+                None => return Ok(None),
+            },
+        };
+        let mut at_work = transaction
+            .prepare(
+                "SELECT id, origin_turn_id FROM turns
+                 WHERE interface_id = ?1 AND state IN ('queued', 'running')
+                   AND acceptance_sequence > ?2
+                 ORDER BY acceptance_sequence LIMIT ?3",
+            )?
+            .query_map(
+                params![interface_id, after, i64::try_from(JOB_READ_LIMIT + 1)?],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        let next = (at_work.len() > JOB_READ_LIMIT).then(|| {
+            at_work.truncate(JOB_READ_LIMIT);
+            at_work[JOB_READ_LIMIT - 1].0.clone()
+        });
+        let origins = at_work
+            .into_iter()
+            .map(|(_, origin)| origin)
+            .collect::<Vec<_>>();
+        let jobs = jobs(&transaction, interface_id, &origins)?;
+        Ok(Some(JobPage { jobs, next }))
+    }
+
+    /// The interface's jobs among `named`, by their origin, however they
+    /// stand, in the order named. A name that is not the origin of one of
+    /// the interface's jobs names nothing.
+    pub fn named_jobs(&self, interface_id: &str, named: &[String]) -> Result<Vec<(String, Job)>> {
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        jobs(&transaction, interface_id, named)
     }
 
     pub fn turn_counts(&self) -> Result<StateCounts> {
@@ -1028,6 +1061,75 @@ fn enqueue_delivery(
         ],
     )?;
     Ok(())
+}
+
+/// The latest turns of the interface's jobs that the JSON array `?2` names
+/// by origin, at most `?3` of each, in the order named.
+const JOB_TURNS: &str = "SELECT o.id, o.runtime_id, o.accepted_at, o.target_id,
+        t.id, t.state, t.accepted_at, t.finished_at, t.activity_json, d.state
+    FROM json_each(?2) named
+    JOIN turns o ON o.id = named.value
+    JOIN turns t ON t.id IN (
+      SELECT recent.id FROM turns recent WHERE recent.origin_turn_id = o.id
+      ORDER BY recent.acceptance_sequence DESC LIMIT ?3)
+    LEFT JOIN deliveries d ON d.turn_id = t.id
+    WHERE o.interface_id = ?1 AND o.origin_turn_id = o.id
+    ORDER BY named.key, t.acceptance_sequence";
+
+/// The interface's jobs that `origins` begin, in that order, each with the
+/// runtime that owns it and its [`JOB_TURN_LIMIT`] latest turns: one
+/// statement over the `turns_origin` index reads at most one turn more of
+/// each job than it lists, however long the job.
+fn jobs(
+    transaction: &Transaction<'_>,
+    interface_id: &str,
+    origins: &[String],
+) -> Result<Vec<(String, Job)>> {
+    let mut statement = transaction.prepare(JOB_TURNS)?;
+    let mut rows = statement.query(params![
+        interface_id,
+        serde_json::to_string(origins)?,
+        i64::try_from(JOB_TURN_LIMIT + 1)?,
+    ])?;
+    let mut jobs: Vec<(String, Job)> = Vec::new();
+    while let Some(row) = rows.next()? {
+        let origin: String = row.get(0)?;
+        if jobs
+            .last()
+            .is_none_or(|(_, job)| job.origin.turn_id != origin)
+        {
+            jobs.push((
+                row.get(1)?,
+                Job {
+                    origin: Origin {
+                        turn_id: origin,
+                        accepted_at: row.get(2)?,
+                    },
+                    target_id: row.get(3)?,
+                    turns: Vec::new(),
+                    earlier: false,
+                },
+            ));
+        }
+        if let Some((_, job)) = jobs.last_mut() {
+            job.turns.push(JobTurn {
+                turn_id: row.get(4)?,
+                state: state_column(row, 5)?,
+                accepted_at: row.get(6)?,
+                finished_at: row.get(7)?,
+                activity: optional_json_column(row, 8)?,
+                delivery: optional_state_column(row, 9)?,
+            });
+        }
+    }
+    // The turn read beyond the limit only says that earlier ones exist.
+    for (_, job) in &mut jobs {
+        if job.turns.len() > JOB_TURN_LIMIT {
+            job.turns.remove(0);
+            job.earlier = true;
+        }
+    }
+    Ok(jobs)
 }
 
 /// A turn's final report as stored. The engine keeps it within
@@ -1134,9 +1236,10 @@ mod tests {
 
     use super::{Database, Lane};
     use carillon_protocol::model::{
-        DeliveryOutcome, DeliveryState, EventReceipt, ExternalEvent, RuntimeTurnResponse,
-        TurnActivity, TurnState,
+        Delivery, DeliveryOutcome, DeliveryState, EventReceipt, ExternalEvent, JOB_READ_LIMIT,
+        JOB_TURN_LIMIT, Job, RuntimeTurnResponse, TurnActivity, TurnState,
     };
+    use rusqlite::params;
     use tokio_util::sync::CancellationToken;
 
     fn event(id: &str, audience: &str) -> ExternalEvent {
@@ -1504,15 +1607,70 @@ mod tests {
         }))?)
     }
 
+    /// Every job at work, one page after another, as `(runtime, job)`.
+    fn at_work(database: &Database, interface: &str) -> Result<Vec<(String, Job)>> {
+        let super::JobPage { mut jobs, mut next } = database
+            .jobs_at_work(interface, None)?
+            .context("first page")?;
+        while let Some(after) = next {
+            let page = database
+                .jobs_at_work(interface, Some(&after))?
+                .context("next page")?;
+            assert!(page.jobs.len() <= JOB_READ_LIMIT);
+            jobs.extend(page.jobs);
+            next = page.next;
+        }
+        Ok(jobs)
+    }
+
+    /// The job `named`, or without a name the only one at work.
+    fn job(database: &Database, named: &[&str]) -> Result<Job> {
+        let jobs = if named.is_empty() {
+            at_work(database, "discord")?
+        } else {
+            let named = named
+                .iter()
+                .map(|&name| name.to_owned())
+                .collect::<Vec<_>>();
+            database.named_jobs("discord", &named)?
+        };
+        let [(runtime, job)] = jobs.as_slice() else {
+            bail!("expected one job: {jobs:?}");
+        };
+        assert_eq!(runtime, "runtime");
+        Ok(job.clone())
+    }
+
+    /// Each turn of a job as `(turn, state, delivery, report's calls)`.
+    fn turns(job: &Job) -> Vec<(String, TurnState, Option<DeliveryState>, Option<u32>)> {
+        job.turns
+            .iter()
+            .map(|turn| {
+                (
+                    turn.turn_id.clone(),
+                    turn.state,
+                    turn.delivery,
+                    turn.activity.as_ref().map(|report| report.tool_calls),
+                )
+            })
+            .collect()
+    }
+
     #[test]
-    fn observations_keep_their_work_origin_and_each_delivery_says_what_continues_it() -> Result<()>
-    {
+    fn a_job_is_its_message_and_the_observations_that_continue_it_as_recorded() -> Result<()> {
         let directory = tempdir()?;
         let database = Database::create(&directory.path().join("state.sqlite3"))?;
         accept(&database, "one", "conversation")?;
         let first = database
             .claim("runtime", Lane::Messages, &CancellationToken::new())?
             .context("first turn missing")?;
+        let message = job(&database, &[])?;
+        assert_eq!(message.origin.turn_id, first.turn_id);
+        assert_eq!(message.target_id, "channel");
+        assert_eq!(
+            turns(&message),
+            [(first.turn_id.clone(), TurnState::Running, None, None)]
+        );
         let answer = |turn: &super::ClaimedTurn, follow_up: Option<serde_json::Value>, calls| {
             database.complete_turn(
                 turn,
@@ -1527,63 +1685,86 @@ mod tests {
             )
         };
         answer(&first, Some(json!({"after": 1})), 2)?;
-        // While it waits, the observation is listed as work the message began.
-        let listed = database.active_turns("discord")?;
-        let [(_, observation)] = listed.as_slice() else {
-            bail!("expected the observation only: {listed:?}");
+        // The answer is pending while the observation that continues the
+        // work waits: the job is still at work, and its answer is a fact of
+        // its own.
+        let continued = job(&database, &[])?;
+        let [parent, observation] = continued.turns.as_slice() else {
+            bail!("expected the message and its observation: {continued:?}");
         };
-        assert_eq!(observation.origin.turn_id, first.turn_id);
-        assert!(observation.accepted_at >= observation.origin.accepted_at);
-        // The message's delivery: its report, when it finished, and the
-        // observation that continues its work.
-        let parent = database
-            .claim_delivery("discord", "instance")?
-            .context("parent delivery missing")?;
-        assert_eq!(parent.origin, observation.origin);
-        assert_eq!(parent.activity, Some(report(2)?));
-        assert_eq!(parent.continued_by.as_ref(), Some(&observation.turn_id));
-        assert!(parent.finished_at >= parent.origin.accepted_at);
-        let delivered = |id| {
-            database.acknowledge_delivery(
-                "discord",
-                id,
-                "instance",
-                DeliveryOutcome::Delivered,
-                None,
+        assert_eq!(
+            (parent.state, parent.delivery, observation.state),
+            (
+                TurnState::Completed,
+                Some(DeliveryState::Pending),
+                TurnState::Queued
             )
+        );
+        assert!(parent.finished_at >= Some(continued.origin.accepted_at));
+        assert_eq!(parent.activity, Some(report(2)?));
+        // Sends the next answer, as `outcome` says it went.
+        let send = |outcome| -> Result<Delivery> {
+            let delivery = database
+                .claim_delivery("discord", "instance")?
+                .context("delivery missing")?;
+            database.acknowledge_delivery("discord", delivery.id, "instance", outcome, None)?;
+            Ok(delivery)
         };
-        delivered(parent.id)?;
+        assert_eq!(send(DeliveryOutcome::Delivered)?.origin, continued.origin);
         // A chain of observations keeps the message as its origin.
         let reading = database
             .claim("runtime", Lane::Observations, &CancellationToken::new())?
             .context("observation missing")?;
+        assert_eq!(reading.turn_id, observation.turn_id);
         answer(&reading, Some(json!({"after": 2})), 0)?;
-        let listed = database.active_turns("discord")?;
-        let [(_, chained)] = listed.as_slice() else {
-            bail!("expected the chained observation only: {listed:?}");
-        };
-        assert_eq!(chained.origin.turn_id, first.turn_id);
-        let middle = database
-            .claim_delivery("discord", "instance")?
-            .context("observation delivery missing")?;
         assert_eq!(
-            (middle.turn_id.as_str(), middle.origin.turn_id.as_str()),
-            (reading.turn_id.as_str(), first.turn_id.as_str())
+            send(DeliveryOutcome::Delivered)?.origin.turn_id,
+            first.turn_id
         );
-        assert_eq!(middle.continued_by.as_ref(), Some(&chained.turn_id));
-        delivered(middle.id)?;
-        // The last one ends the work: nothing continues it, and it gave no report.
         let last = database
             .claim("runtime", Lane::Observations, &CancellationToken::new())?
             .context("chained observation missing")?;
         complete(&database, &last, "all reported")?;
-        let end = database
-            .claim_delivery("discord", "instance")?
-            .context("final delivery missing")?;
-        assert_eq!(end.origin.turn_id, first.turn_id);
-        assert_eq!((end.continued_by, end.activity), (None, None));
-        delivered(end.id)?;
-        // An interrupted turn's report is kept with its notice.
+        // Ended, its last answer not yet sent: core no longer lists the job
+        // as at work, and a read naming it shows how it stands.
+        assert!(at_work(&database, "discord")?.is_empty());
+        let ended = job(&database, &[&first.turn_id])?;
+        assert_eq!(
+            turns(&ended),
+            [
+                (
+                    first.turn_id.clone(),
+                    TurnState::Completed,
+                    Some(DeliveryState::Delivered),
+                    Some(2)
+                ),
+                (
+                    reading.turn_id.clone(),
+                    TurnState::Completed,
+                    Some(DeliveryState::Delivered),
+                    Some(0)
+                ),
+                (
+                    last.turn_id.clone(),
+                    TurnState::Completed,
+                    Some(DeliveryState::Pending),
+                    None
+                ),
+            ]
+        );
+        send(DeliveryOutcome::Uncertain)?;
+        let settled = job(&database, &[&first.turn_id])?;
+        assert_eq!(
+            settled.turns.last().and_then(|turn| turn.delivery),
+            Some(DeliveryState::Uncertain)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_interrupted_jobs_report_is_kept_with_its_notice() -> Result<()> {
+        let directory = tempdir()?;
+        let database = Database::create(&directory.path().join("state.sqlite3"))?;
         accept(&database, "two", "conversation")?;
         let failed = database
             .claim("runtime", Lane::Messages, &CancellationToken::new())?
@@ -1599,8 +1780,197 @@ mod tests {
             .context("notice missing")?;
         assert_eq!(notice.turn_state, TurnState::Interrupted);
         assert_eq!(notice.origin.turn_id, failed.turn_id);
-        assert_eq!(notice.activity, Some(report(1)?));
-        assert!(notice.continued_by.is_none());
+        let stopped = job(&database, &[&failed.turn_id])?;
+        assert_eq!(
+            turns(&stopped),
+            [(
+                failed.turn_id.clone(),
+                TurnState::Interrupted,
+                Some(DeliveryState::Delivering),
+                Some(1)
+            )]
+        );
+        Ok(())
+    }
+
+    /// Completes `turn` with a follow-up cursor and returns the observation
+    /// core queued to continue it.
+    fn continue_with_observation(database: &Database, turn: &super::ClaimedTurn) -> Result<String> {
+        database.complete_turn(
+            turn,
+            &RuntimeTurnResponse {
+                correlation_id: turn.turn_id.clone(),
+                output: "delegated".to_owned(),
+                follow_up: Some(json!({"after": turn.turn_id})),
+                unanswered_left: false,
+                activity: None,
+                attachments_left: false,
+            },
+        )?;
+        Ok(database
+            .event_receipt("discord", &format!("follow-up:{}", turn.turn_id))?
+            .context("observation missing")?
+            .turn_id)
+    }
+
+    #[test]
+    fn job_reads_name_only_the_interfaces_own_jobs_and_page_through_all_at_work() -> Result<()> {
+        let directory = tempdir()?;
+        let database = Database::create(&directory.path().join("state.sqlite3"))?;
+        // Messages of one conversation are jobs of their own.
+        let one = accept(&database, "one", "conversation")?;
+        let two = accept(&database, "two", "conversation")?;
+        let listed = at_work(&database, "discord")?;
+        assert_eq!(
+            listed
+                .iter()
+                .map(|(_, job)| job.origin.turn_id.as_str())
+                .collect::<Vec<_>>(),
+            [one.turn_id.as_str(), two.turn_id.as_str()]
+        );
+        // Neither another interface's job, an observation's turn nor an
+        // unknown turn names a job.
+        let other = database.accept_event(
+            "other",
+            "runtime",
+            &event("foreign", "elsewhere"),
+            &json!({}),
+            "snapshot",
+            None,
+        )?;
+        let first = database
+            .claim("runtime", Lane::Messages, &CancellationToken::new())?
+            .context("first turn missing")?;
+        assert_eq!(first.turn_id, one.turn_id);
+        let observation = continue_with_observation(&database, &first)?;
+        let named = [
+            other.turn_id.clone(),
+            observation,
+            "unknown".to_owned(),
+            two.turn_id.clone(),
+        ];
+        let listed = database.named_jobs("discord", &named)?;
+        assert_eq!(
+            listed
+                .iter()
+                .map(|(_, job)| job.origin.turn_id.as_str())
+                .collect::<Vec<_>>(),
+            [two.turn_id.as_str()]
+        );
+        assert_eq!(at_work(&database, "other")?.len(), 1);
+        assert!(
+            database
+                .named_jobs("other", std::slice::from_ref(&one.turn_id))?
+                .is_empty()
+        );
+        // A page cursor is one of the interface's own turns.
+        assert!(
+            database
+                .jobs_at_work("discord", Some(&other.turn_id))?
+                .is_none()
+        );
+        // Every job at work is read, a bounded page at a time, oldest first.
+        let mut accepted = vec![one.turn_id.clone(), two.turn_id.clone()];
+        for index in 0..2 * JOB_READ_LIMIT {
+            accepted.push(
+                accept(
+                    &database,
+                    &format!("many-{index}"),
+                    &format!("many-{index}"),
+                )?
+                .turn_id,
+            );
+        }
+        let page = database
+            .jobs_at_work("discord", None)?
+            .context("first page")?;
+        assert_eq!(page.jobs.len(), JOB_READ_LIMIT);
+        assert!(page.next.is_some());
+        let listed = at_work(&database, "discord")?
+            .into_iter()
+            .map(|(_, job)| job.origin.turn_id)
+            .collect::<Vec<_>>();
+        // The first job's turn at work is now its observation, queued after
+        // the second message was accepted.
+        accepted.swap(0, 1);
+        assert_eq!(listed, accepted);
+        Ok(())
+    }
+
+    #[test]
+    fn a_long_jobs_read_takes_its_latest_turns_by_index_and_says_earlier_ones_exist() -> Result<()>
+    {
+        let directory = tempdir()?;
+        let database = Database::create(&directory.path().join("state.sqlite3"))?;
+        let message = accept(&database, "one", "conversation")?;
+        let mut turn = database
+            .claim("runtime", Lane::Messages, &CancellationToken::new())?
+            .context("message missing")?;
+        let mut chain = vec![turn.turn_id.clone()];
+        for _ in 0..3 * JOB_TURN_LIMIT {
+            chain.push(continue_with_observation(&database, &turn)?);
+            turn = database
+                .claim("runtime", Lane::Observations, &CancellationToken::new())?
+                .context("observation missing")?;
+        }
+        let long = job(&database, &[&message.turn_id])?;
+        assert!(long.earlier);
+        assert_eq!(
+            long.turns
+                .iter()
+                .map(|turn| turn.turn_id.as_str())
+                .collect::<Vec<_>>(),
+            chain[chain.len() - JOB_TURN_LIMIT..]
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            long.turns.last().map(|turn| turn.state),
+            Some(TurnState::Running)
+        );
+        // A job's turns are found through the origin index, never by a scan
+        // of turns or by following the job's chain.
+        let connection = database.connect()?;
+        let mut plan = connection.prepare(&format!("EXPLAIN QUERY PLAN {}", super::JOB_TURNS))?;
+        let steps = plan
+            .query_map(params!["discord", "[]", 9], |row| row.get::<_, String>(3))?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert!(
+            steps.iter().any(|step| step.contains("turns_origin")),
+            "{steps:#?}"
+        );
+        assert!(
+            !steps
+                .iter()
+                .any(|step| step.starts_with("SCAN") && step.contains("turns")),
+            "{steps:#?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_documented_origin_index_cutover_keeps_an_earlier_database_and_its_history() -> Result<()>
+    {
+        // The statement the operations guide gives, as SQLite records it.
+        const CUTOVER: &str =
+            "CREATE INDEX turns_origin ON turns(origin_turn_id, acceptance_sequence);";
+        assert!(include_str!("../../../docs/product/OPERATIONS.md").contains(CUTOVER));
+        let directory = tempdir()?;
+        let path = directory.path().join("state.sqlite3");
+        let database = Database::create(&path)?;
+        let accepted = accept(&database, "one", "conversation")?;
+        // A database an earlier release wrote has no such index, and is refused.
+        let connection = rusqlite::Connection::open(&path)?;
+        connection.execute_batch("DROP INDEX turns_origin")?;
+        assert!(Database::validate_backup(&path).is_err());
+        connection.execute_batch(CUTOVER)?;
+        drop(connection);
+        let reopened = Database::open(&path)?;
+        assert_eq!(
+            job(&reopened, &[&accepted.turn_id])?.origin.turn_id,
+            accepted.turn_id
+        );
         Ok(())
     }
 

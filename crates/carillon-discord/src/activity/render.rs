@@ -1,13 +1,14 @@
 //! Pure Discord work-card embeds: a job's status, the reasoning its runtime
 //! published, its calls, its delegated work and its agent, within Discord's
-//! embed limits. Monitoring and retention live in the activity lifecycle.
+//! embed limits, from what core recorded of the job. Monitoring and
+//! retention live in the activity lifecycle.
 //! Markers are validated provider configuration, shown on status/model rows;
 //! section names stay plain. Text a model wrote cannot format, mention or
 //! link anything.
 use crate::config::ActivityMarkers;
 use carillon_protocol::model::{
-    ActivityPhase, AgentInfo, Delivery, DeliveryOutcome, FinishedTool, TurnActivity, TurnState,
-    WorkItem, WorkKind, WorkState,
+    ActivityPhase, AgentInfo, DeliveryOutcome, DeliveryState, FinishedTool, Job, JobTurn,
+    TurnActivity, TurnState, WorkItem, WorkKind, WorkState,
 };
 use std::{collections::HashMap, fmt::Write as _};
 use twilight_model::channel::message::{Embed, embed::EmbedField};
@@ -23,23 +24,21 @@ const HEADLINE_LIMIT: usize = 100;
 /// What a card says of its job as a whole.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Status {
-    /// A turn of the job waits behind earlier work, since `since`.
+    /// The job's message waits behind earlier work, since `since`.
     Queued { since: i64 },
     /// The job's live turn runs, in its phase when the runtime says.
     Working(Option<ActivityPhase>),
-    /// Core no longer lists the job's turn, and how it ended is not yet known.
+    /// The job's last turn ended, and its answer or notice is not yet sent.
     Finishing,
     /// A turn answered; the observation core queued to continue the work
     /// has not started.
     Continuing,
-    /// The card was recorded before a restart, and nothing since has said
-    /// what became of the job.
-    Restarted,
-    /// The job's last turn ended at `finished_at`.
+    /// The job's last turn ended at `finished_at`, and its answer or notice
+    /// was sent as `delivery` says.
     Ended {
         turn_state: TurnState,
         delivery: DeliveryOutcome,
-        finished_at: i64,
+        finished_at: Option<i64>,
     },
 }
 
@@ -59,37 +58,118 @@ pub(super) struct Shown<'a> {
     pub(super) partial: bool,
 }
 
-/// Whether a turn's end earns a retained summary: it stopped before
-/// finishing, or its report shows work (calls, published reasoning, or
-/// delegated and transferred work). An answer alone needs no card.
-pub(crate) fn earns_summary(delivery: &Delivery) -> bool {
-    delivery.turn_state == TurnState::Interrupted
-        || delivery.activity.as_ref().is_some_and(earns_report)
+/// The latest snapshot a card saw of a job's running turn, by turn.
+pub(super) type Seen = (String, TurnActivity);
+
+fn ended(turn: &JobTurn) -> bool {
+    matches!(turn.state, TurnState::Completed | TurnState::Interrupted)
+}
+
+/// How the job's last turn ended and its answer or notice was sent, once
+/// both are recorded: the job is settled.
+pub(super) fn settled(job: &Job) -> Option<(TurnState, DeliveryOutcome)> {
+    let last = job.turns.last().filter(|turn| ended(turn))?;
+    let delivery = match last.delivery? {
+        DeliveryState::Delivered => DeliveryOutcome::Delivered,
+        DeliveryState::Uncertain => DeliveryOutcome::Uncertain,
+        DeliveryState::Pending | DeliveryState::Delivering => return None,
+    };
+    Some((last.state, delivery))
+}
+
+/// The job's turn queued or running, its newest.
+pub(super) fn at_work(job: &Job) -> Option<&JobTurn> {
+    job.turns
+        .last()
+        .filter(|turn| matches!(turn.state, TurnState::Queued | TurnState::Running))
+}
+
+/// Whether a job earns a retained summary: a turn stopped before finishing,
+/// a report (or the last snapshot `seen` of a turn that gave none) shows
+/// work (calls, published reasoning, or delegated and transferred work), or
+/// its work was continued after an answer. Every turn but a job's last was
+/// continued by an observation, which core queues only when the runtime
+/// said native work the turn started would report later; so a job with
+/// earlier turns than a read lists delegated work too, whatever the reports
+/// left out showed. An answer alone needs no card.
+pub(super) fn earned(job: &Job, seen: Option<&Seen>) -> bool {
+    job.earlier
+        || job.turns.len() > 1
+        || job.turns.iter().any(|turn| {
+            turn.state == TurnState::Interrupted
+                || (ended(turn) && turn.activity.as_ref().is_some_and(earns_report))
+        })
+        || seen.is_some_and(|(_, snapshot)| earns_report(snapshot))
+}
+
+/// The summary a settled job's card keeps, when it earned one.
+pub(crate) fn job_summary(job: &Job, markers: &ActivityMarkers) -> Option<Embed> {
+    earned(job, None).then(|| job_card(job, None, markers))
 }
 
 pub(super) fn earns_report(report: &TurnActivity) -> bool {
     report.tool_calls > 0 || !report.notes.is_empty() || report.work.is_some()
 }
 
-/// The summary an answer carries when its job has no card: what the turn
-/// did, and whether its work goes on.
-pub(crate) fn summary(delivery: &Delivery, markers: &ActivityMarkers) -> Embed {
-    let status = if delivery.continued_by.is_some() {
-        Status::Continuing
-    } else {
-        Status::Ended {
-            turn_state: delivery.turn_state,
-            delivery: DeliveryOutcome::Delivered,
-            finished_at: delivery.finished_at,
+/// The card of a job as core recorded it. `seen` is the latest snapshot the
+/// card saw of a running turn: it stands for the turn's work while a read
+/// has no snapshot of it, and after it ended without a report.
+pub(super) fn job_card(job: &Job, seen: Option<&Seen>, markers: &ActivityMarkers) -> Embed {
+    let working = at_work(job);
+    let live = working
+        .filter(|turn| turn.state == TurnState::Running)
+        .and_then(|turn| turn.activity.as_ref());
+    let status = match (working, settled(job)) {
+        (Some(turn), _)
+            if turn.state == TurnState::Queued && turn.turn_id == job.origin.turn_id =>
+        {
+            Status::Queued {
+                since: turn.accepted_at,
+            }
         }
+        (Some(turn), _) if turn.state == TurnState::Queued => Status::Continuing,
+        (Some(_), _) => Status::Working(
+            live.or(seen.map(|(_, snapshot)| snapshot))
+                .map(|snapshot| snapshot.phase),
+        ),
+        (None, Some((turn_state, delivery))) => Status::Ended {
+            turn_state,
+            delivery,
+            finished_at: job.turns.last().and_then(|turn| turn.finished_at),
+        },
+        (None, None) => Status::Finishing,
     };
+    // The snapshot seen stands for a turn that has no report of its own and
+    // is not shown running now.
+    let history = seen.filter(|(turn_id, _)| {
+        live.is_none()
+            && !job
+                .turns
+                .iter()
+                .any(|turn| &turn.turn_id == turn_id && ended(turn) && turn.activity.is_some())
+    });
+    let reports = job
+        .turns
+        .iter()
+        .filter(|turn| ended(turn))
+        .filter_map(|turn| turn.activity.as_ref())
+        .chain(history.map(|(_, snapshot)| snapshot))
+        .collect();
+    // What a turn without a report did is not known once a later turn shows
+    // its own, nor is an observation's, which no read may have shown.
+    let last = job.turns.len().saturating_sub(1);
+    let unreported = job.turns.iter().enumerate().any(|(index, turn)| {
+        ended(turn)
+            && turn.activity.is_none()
+            && (index < last || turn.turn_id != job.origin.turn_id)
+    });
     card(
         &Shown {
             status,
-            requested_at: Some(delivery.origin.accepted_at),
-            reports: delivery.activity.iter().collect(),
-            live: None,
-            partial: false,
+            requested_at: Some(job.origin.accepted_at),
+            reports,
+            live,
+            partial: job.earlier || unreported,
         },
         markers,
     )
@@ -178,10 +258,6 @@ fn status_line(shown: &Shown<'_>, markers: &ActivityMarkers) -> String {
                 started(shown.requested_at)
             ),
         ),
-        Status::Restarted => marked(
-            &markers.uncertain,
-            "Carillon restarted while this was in progress; how it ends shows here if Carillon learns it.",
-        ),
         Status::Ended {
             turn_state,
             delivery,
@@ -190,7 +266,8 @@ fn status_line(shown: &Shown<'_>, markers: &ActivityMarkers) -> String {
             (TurnState::Completed, DeliveryOutcome::Delivered) => {
                 let took = shown
                     .requested_at
-                    .and_then(|requested| u64::try_from(finished_at - requested).ok())
+                    .zip(finished_at)
+                    .and_then(|(requested, finished)| u64::try_from(finished - requested).ok())
                     .map_or_else(String::new, |seconds| {
                         format!(" · answered {} after the request", compact(seconds * 1000))
                     });

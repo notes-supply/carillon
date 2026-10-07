@@ -13,7 +13,7 @@ use crate::{
 
 use crate::{
     InterfaceError,
-    activity::{CardRecords, Summaries, activity_monitor, answer_summary},
+    activity::{CardRecords, activity_monitor, job_summary},
     client::CoreClient,
     commands::{
         Change, ChangeError, CommandFiles, Commands, DiscordApp, InteractionCalls, MODULE_LIMIT,
@@ -76,10 +76,10 @@ use twilight_validate::component::{COMPONENT_COUNT, component_v1};
 struct SimulateResponse {
     pub receipt: EventReceipt,
     pub delivery: Option<Delivery>,
-    /// The work summary the delivery's answer carries when its job has no
-    /// card, as the delivery loop gives it.
+    /// The card the monitor shows of the message's job, from what core
+    /// recorded of it, when the job earned a summary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary: Option<Embed>,
+    pub card: Option<Embed>,
     pub conversation_id: String,
     pub feedback: Vec<String>,
 }
@@ -261,19 +261,15 @@ async fn connect(
     let dispatcher = tokio::spawn(lanes::dispatch(ingress.clone(), receiver));
     let mut terminate = signal(SignalKind::terminate()).context("handle termination")?;
     let router = discord_router(state.clone(), false);
-    let (outcomes, observed) = mpsc::unbounded_channel();
-    // The monitor and the answers share the cards' records, so a job never
-    // gets both a card and a summary on its answer.
-    let cards = cards.map(Arc::new);
-    let summaries = Summaries::new(cards.clone(), &state.discord);
-    // The monitor takes every outcome the deliveries report, through the
-    // last a stop lets them finish, and then finishes the cards those settle.
+    let (delivering, heard) = mpsc::unbounded_channel();
+    // The monitor hears of every delivery the loop takes up, through the
+    // last a stop lets it finish, and then finishes the cards those settle.
     let mut monitoring = tokio::spawn(activity_monitor(
         state.core.clone(),
         http.clone(),
         state.discord.clone(),
         cards,
-        observed,
+        heard,
         stopping.clone(),
     ));
     let mut watching = true;
@@ -283,8 +279,7 @@ async fn connect(
         delivery_state.core,
         reactions.clone(),
         http,
-        summaries,
-        outcomes,
+        delivering,
         stopping.clone(),
     ));
     let mut delivering = true;
@@ -615,14 +610,20 @@ async fn simulate(
     if delivery.is_some() && state.discord.reactions {
         feedback.push("delivered".to_owned());
     }
-    let summary = delivery
-        .as_ref()
-        .filter(|_| state.discord.activity)
-        .and_then(|delivery| answer_summary(delivery, &state.discord.activity_markers));
+    let card = if delivery.is_some() && state.discord.activity {
+        let job = state
+            .core
+            .named_jobs(std::slice::from_ref(&receipt.turn_id))
+            .await?;
+        job.first()
+            .and_then(|job| job_summary(job, &state.discord.activity_markers))
+    } else {
+        None
+    };
     Ok(Json(SimulateResponse {
         receipt,
         delivery,
-        summary,
+        card,
         conversation_id: resolved.conversation_id,
         feedback,
     })

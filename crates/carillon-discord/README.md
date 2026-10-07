@@ -34,20 +34,22 @@ retain the actual Wasm path rather than substituting this direct native call.
   connection stops: it then gets two seconds to end, and the rest, like any outcome still
   awaited, is cancelled; nothing is sent after that.
 - [`activity`](src/activity.rs) shows one work card per job (a message's turn and
-  the observations core names by its origin) and types while its turns run. It reads
-  core's activity list, receives each turn's outcome and final report from the
-  delivery loop, keeps the card as the job's summary when the job ends, and records
-  the channel and message of unfinished jobs' cards, with the final summary a card is
-  being finished with, so a restart goes on with them. A job that ended without a card but showed work, or stopped, gets its summary
-  on its answer, which the delivery loop sends; one reservation per job keeps it to one
-  card, and an answer that ended its job keeps it until the monitor has that outcome. A
-  card someone deleted, or one whose creation Discord did not confirm, on an answer or
-  not, is recorded without a message until the job settles, so the job gets no other.
-  When the provider stops, the monitor reads, types and makes cards no more, and sends
-  no typing, new card or progress edit still waiting for a rate-limit permit, though it
-  still awaits one that may have left. It takes the outcomes of the deliveries the stop
-  lets finish, and gives the cards they settle one final edit's bound to show their
-  summaries before connect returns.
+  the observations core names by its origin) and types while its turns run. It is
+  the only maker of cards: answers are plain text. It reads what core recorded of
+  its jobs, every page of jobs at work and, by name, the jobs it still follows,
+  and hears from the delivery loop when an answer's job is taken up and when its
+  outcome is recorded. A job's card shows its status and work from core's record,
+  stays as the job's summary when the job earned one, and is removed when it did
+  not; a job that ended before its card appeared gets a card with the summary it
+  earned. It records only what Discord alone knows: a card's message, or that one
+  nobody can name may exist (a creation Discord did not confirm, or a card someone
+  deleted), so the job gets no other card, and a restart goes on with recorded cards
+  from core's record. When the provider stops, the monitor reads, types and makes
+  cards no more, and sends no typing, new card or progress edit still waiting for a
+  rate-limit permit, though it still awaits one that may have left. Once the
+  deliveries the stop lets finish are recorded, it reads its jobs once more and
+  gives the cards they settle one final edit's bound to show their summaries before
+  connect returns.
   Every Discord call is bounded, including rate-limiter waits and Twilight's 429
   retries. Its ordinary [`render` module](src/activity/render.rs) owns pure card embed rendering,
   using the concrete activity markers from [`config`](src/config.rs). Markers have
@@ -88,7 +90,8 @@ retain the actual Wasm path rather than substituting this direct native call.
   store and downloads explicitly. Deterministic `/v1/simulate` admits a message the
   same way, stages its files with the same downloads and settles only its own
   turn's delivery, so a repeat settles an answer that arrived after its first request
-  stopped waiting. It returns the delivery with the work summary its answer would carry.
+  stopped waiting. It returns the delivery with the card the monitor shows of the
+  message's job, from core's record, when the job earned one.
 - [`operations`](src/operations.rs) owns authenticated assistant actions using the existing
   Discord client, independently of admission and the delivery outbox. The optional
   [Pi extension](../../packages/discord-pi/README.md) exposes them on demand.

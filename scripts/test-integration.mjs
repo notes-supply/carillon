@@ -336,9 +336,9 @@ try {
         provider_failure:
           "explained once without replay, pages and credentials withheld, conversation continues",
         activity:
-          "a slow native command is visible to its interface before the answer, whose delivery carries the final report",
+          "a slow native command is visible to its interface before the answer, and core keeps the final report its card shows",
         t3_activity:
-          "T3 runtime reports of a call and of a failure reach core's delivery and the same work summary",
+          "T3 runtime reports of a call and of a failure reach core's record of their jobs and the same work card",
         attachments:
           "staged files captured by core, linked staging refused, files reach the runtime by relative path and survive backup",
       },
@@ -1003,10 +1003,10 @@ async function testProviderFailure() {
 
 /**
  * Native Pi runs a real, deliberately slow `bash` call. While it runs, core's
- * interface-authenticated activity view shows the command, as work its own
- * message began; afterwards the turn is gone from the view, and the answer's
- * ordinary delivery carries the final report Pi's runtime took before it
- * forgot the turn.
+ * interface-authenticated job read shows the command, as work its own
+ * message began; afterwards the job is no longer at work, the answer is
+ * ordinary text, and a read naming the job shows the final report Pi's
+ * runtime took before it forgot the turn, and the Discord provider's card.
  */
 async function testActivityVisibility() {
   const privateState = join(installation, "pi");
@@ -1073,53 +1073,55 @@ async function testActivityVisibility() {
     await start("runtime", { nativePi: true, env: { ...process.env, PI_OFFLINE: "1" } });
     const answered = simulate("activity-slow", "wait for the marker");
     answered.catch(() => undefined);
+    const discord = `Bearer ${await credentialValue("discord-private")}`;
     let running;
     for (let attempt = 0; running === undefined && attempt < 200; attempt += 1) {
-      const turns = await activeTurns(`Bearer ${await credentialValue("discord-private")}`);
-      assert.equal(turns.status, 200);
-      running = turns.body.find((turn) => turn.activity?.running.length > 0);
+      const read = await jobs(discord);
+      assert.equal(read.status, 200);
+      running = read.body.jobs.find((job) => job.turns.at(-1).activity?.running.length > 0);
       if (running === undefined) await new Promise((resolveWait) => setTimeout(resolveWait, 25));
     }
     assert.ok(running, "the running command never became visible");
-    assert.equal(running.state, "running");
+    const [turn] = running.turns;
+    assert.equal(turn.state, "running");
     assert.equal(running.target_id, "300");
     assert.deepEqual(
-      running.activity.running.map(({ tool, detail }) => ({ tool, detail })),
+      turn.activity.running.map(({ tool, detail }) => ({ tool, detail })),
       [{ tool: "bash", detail: command }],
     );
-    assert.equal(running.activity.headline, "Waiting for the release marker.");
-    assert.equal(running.activity.phase, "tools");
-    assert.deepEqual(running.origin, {
-      turn_id: running.turn_id,
-      accepted_at: running.accepted_at,
-    });
-    assert.equal(running.activity.agent?.model, "activity-model");
+    assert.equal(turn.activity.headline, "Waiting for the release marker.");
+    assert.equal(turn.activity.phase, "tools");
+    assert.deepEqual(running.origin, { turn_id: turn.turn_id, accepted_at: turn.accepted_at });
+    assert.equal(turn.activity.agent?.model, "activity-model");
     for (const authorization of [null, `Bearer ${await credentialValue("operator")}`])
-      assert.equal((await activeTurns(authorization)).status, 403);
+      assert.equal((await jobs(authorization)).status, 403);
 
     await writeFile(join(workspace, marker), "");
-    const { receipt, delivery, summary } = await answered;
-    assert.equal(receipt.turn_id, running.turn_id);
+    const { receipt, delivery, card } = await answered;
+    assert.equal(receipt.turn_id, turn.turn_id);
     assert.equal(delivery.turn_state, "completed");
     assert.match(delivery.content, /The marker appeared\.$/u);
-    // The answer carries the turn's final report, through core's own delivery.
     assert.deepEqual(delivery.origin, running.origin);
-    assert.ok(delivery.finished_at >= delivery.origin.accepted_at);
-    assert.equal(delivery.continued_by, undefined);
-    assert.equal(delivery.activity.tool_calls, 1);
-    assert.deepEqual(delivery.activity.running, []);
+    assert.ok(!delivery.content.includes(command), "the report stays out of the answer");
+    // Core keeps the turn's final report with its outcome and its answer's.
+    const ended = await jobs(discord, `?tracked=${turn.turn_id}`);
+    const [settled] = ended.body.jobs.map((job) => job.turns.at(-1));
+    assert.equal(settled.state, "completed");
+    assert.equal(settled.delivery, "delivered");
+    assert.ok(settled.finished_at >= running.origin.accepted_at);
+    assert.equal(settled.activity.tool_calls, 1);
+    assert.deepEqual(settled.activity.running, []);
     assert.deepEqual(
-      delivery.activity.recent.map(({ tool, detail, ok }) => ({ tool, detail, ok })),
+      settled.activity.recent.map(({ tool, detail, ok }) => ({ tool, detail, ok })),
       [{ tool: "bash", detail: command, ok: true }],
     );
-    assert.equal(typeof delivery.activity.recent[0].duration_ms, "number");
-    assert.equal(delivery.activity.agent?.model, "activity-model");
-    assert.ok(!delivery.content.includes(command), "the report stays out of the answer");
-    // The answer's work summary, as the delivery loop renders it.
-    assert.match(embedText(summary), /^✓ Done · answered \S+ after the request\n/u);
-    assert.match(embedText(summary), /✓ bash `until /u);
-    const after = await activeTurns(`Bearer ${await credentialValue("discord-private")}`);
-    assert.deepEqual(after.body, []);
+    assert.equal(typeof settled.activity.recent[0].duration_ms, "number");
+    assert.equal(settled.activity.agent?.model, "activity-model");
+    // The job's card, as the Discord provider shows it from core's record.
+    assert.match(embedText(card), /^✓ Done · answered \S+ after the request\n/u);
+    assert.match(embedText(card), /✓ bash `until /u);
+    const after = await jobs(discord);
+    assert.deepEqual(after.body, { jobs: [] });
     assert.equal(requests, 2);
   } finally {
     await stop("runtime");
@@ -1136,7 +1138,7 @@ async function testActivityVisibility() {
  * The T3 runtime against the fake T3 server: one run calls a tool and
  * answers, another fails before any call. New conversations run on T3 while
  * the registry names it the agent's runtime; both reports reach core's
- * ordinary delivery and the Discord provider's work summary.
+ * record of their jobs and the Discord provider's work cards.
  */
 async function testT3ActivityThroughDelivery() {
   const { startFakeT3 } = await import(
@@ -1209,36 +1211,45 @@ effort = "low"
     fake.finishTool(first.thread, call);
     fake.assistant(first.thread, first.run, "The build passes.");
     fake.complete(first.thread, first.run);
-    const { delivery, summary } = await answered;
+    const { delivery, card } = await answered;
     assert.equal(delivery.turn_state, "completed");
     assert.equal(delivery.content, "The build passes.");
     assert.deepEqual(delivery.origin, {
       turn_id: delivery.turn_id,
       accepted_at: delivery.origin.accepted_at,
     });
-    assert.equal(delivery.activity.tool_calls, 1);
+    const discord = `Bearer ${await credentialValue("discord-private")}`;
+    /** What core recorded of the job `turn` began, its last turn's report. */
+    const reported = async (turnId) => {
+      const read = await jobs(discord, `?tracked=${turnId}`);
+      assert.equal(read.status, 200);
+      return read.body.jobs[0].turns.at(-1).activity;
+    };
+    const report = await reported(delivery.turn_id);
+    assert.equal(report.tool_calls, 1);
     assert.deepEqual(
-      delivery.activity.recent.map(({ tool, detail, ok }) => ({ tool, detail, ok })),
+      report.recent.map(({ tool, detail, ok }) => ({ tool, detail, ok })),
       [{ tool: "bash", detail: "make check", ok: true }],
     );
-    assert.equal(typeof delivery.activity.recent[0].duration_ms, "number");
-    assert.equal(delivery.activity.agent?.model, "claude-sonnet-5");
-    assert.equal(delivery.activity.agent?.effort, "low");
-    assert.match(embedText(summary), /^✓ Done · answered \S+ after the request\n/u);
-    assert.match(embedText(summary), /✓ bash `make check`/u);
+    assert.equal(typeof report.recent[0].duration_ms, "number");
+    assert.equal(report.agent?.model, "claude-sonnet-5");
+    assert.equal(report.agent?.effort, "low");
+    assert.match(embedText(card), /^✓ Done · answered \S+ after the request\n/u);
+    assert.match(embedText(card), /✓ bash `make check`/u);
 
     // A run T3 reports failed before any call ends the turn with core's
-    // notice; the summary says only that it stopped.
+    // notice; the card says only that it stopped.
     const stopped = simulateRoute("t3-failure", "302", null, "check again");
     const second = await opened();
     fake.fail(second.thread, second.run, "The provider is overloaded.");
     const failed = await stopped;
     assert.equal(failed.delivery.turn_state, "interrupted");
     assert.match(failed.delivery.content, /The provider is overloaded\./u);
-    assert.equal(failed.delivery.activity.tool_calls, 0);
-    assert.equal(failed.delivery.activity.agent?.model, "claude-sonnet-5");
-    assert.match(embedText(failed.summary), /^⏹️ Stopped before finishing\./u);
-    assert.doesNotMatch(embedText(failed.summary), /bash/u);
+    const failure = await reported(failed.delivery.turn_id);
+    assert.equal(failure.tool_calls, 0);
+    assert.equal(failure.agent?.model, "claude-sonnet-5");
+    assert.match(embedText(failed.card), /^⏹️ Stopped before finishing\./u);
+    assert.doesNotMatch(embedText(failed.card), /bash/u);
   } finally {
     await stop("runtime-t3");
     await writeFile(configPath(), original);
@@ -1250,17 +1261,18 @@ effort = "low"
   }
 }
 
-/** A work summary's text: its description, then each field under its name. */
+/** A work card's text: its description, then each field under its name. */
 function embedText(embed) {
-  assert.ok(embed, "the answer carries no work summary");
+  assert.ok(embed, "the job has no work card");
   return [
     embed.description,
     ...(embed.fields ?? []).map(({ name, value }) => `${name}:\n${value}`),
   ].join("\n");
 }
 
-async function activeTurns(authorization) {
-  const response = await fetch(`http://127.0.0.1:${String(basePort)}/v1/activity`, {
+/** Core's job read for the Discord provider: jobs at work, or `query`'s. */
+async function jobs(authorization, query = "") {
+  const response = await fetch(`http://127.0.0.1:${String(basePort)}/v1/jobs${query}`, {
     headers: {
       "x-carillon-provider": "discord-private",
       ...(authorization === null ? {} : { authorization }),
