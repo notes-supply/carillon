@@ -1797,10 +1797,15 @@ it("answers when the parent run completes and delivers the delegated report in a
 
   // Core queues the follow-up turn with the cursor; it dispatches nothing and waits.
   const followUp = runtime.executeTurn(turn("turn-1-report", "", { follow_up: reply.follow_up }));
-  await until(() => runtime.activity("turn-1-report", "discord-private")?.work?.items.length === 1);
+  await until(() => runtime.activity("turn-1-report", "discord-private")?.work?.items.length === 2);
   expect(runtime.activity("turn-1-report", "discord-private")?.phase).toBe("waiting");
   expect(runtime.activity("turn-1-report", "discord-private")?.work?.items).toEqual([
     expect.objectContaining({ id: child.id, kind: "delegation", state: "running" }),
+    expect.objectContaining({
+      kind: "task",
+      label: "report back to this conversation",
+      state: "queued",
+    }),
   ]);
   const continuation = fake.finishDelegation(threadId, child.id);
   fake.assistant(threadId, continuation.id, "PONG reported.");
@@ -1842,7 +1847,7 @@ it("runs the conversation's next message while a follow-up turn still observes d
   answer(parent, "DELEGATED");
   const reply = await first;
   const followUp = runtime.executeTurn(turn("turn-1-report", "", { follow_up: reply.follow_up }));
-  await until(() => runtime.activity("turn-1-report", "discord-private")?.work?.items.length === 1);
+  await until(() => runtime.activity("turn-1-report", "discord-private")?.work?.items.length === 2);
   // The next message reaches T3 and is answered while the child still works.
   const next = runtime.executeTurn(turn("turn-2", "anything else?"));
   answer(await started("turn-2"), "Yes.");
@@ -1868,7 +1873,7 @@ it("says where a child's result went when T3 delivers it into the next message's
   answer(parent, "DELEGATED");
   const reply = await first;
   const followUp = runtime.executeTurn(turn("turn-1-report", "", { follow_up: reply.follow_up }));
-  await until(() => runtime.activity("turn-1-report", "discord-private")?.work?.items.length === 1);
+  await until(() => runtime.activity("turn-1-report", "discord-private")?.work?.items.length === 2);
   const next = runtime.executeTurn(turn("turn-2", "anything else?"));
   const own = await started("turn-2");
   // The child finishes while that message runs: T3 delivers the result into it.
