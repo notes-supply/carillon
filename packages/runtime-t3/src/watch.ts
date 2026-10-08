@@ -1166,6 +1166,7 @@ export function watchTurn(
   function parsed<S extends TSchema>(schema: S, payload: unknown, what: string): Static<S> {
     if (!Check(schema, payload))
       throw new T3Failure("malformed", `T3 sent a ${what} this runtime does not understand`);
+    // oxlint-disable-next-line typescript/no-unsafe-return -- Check validates Static<S>; tsgolint resolves this generic TypeBox predicate as any.
     return payload;
   }
 
@@ -1783,13 +1784,11 @@ export function watchTurn(
         running: runningTools.slice(0, RUNNING_CALLS),
         recent: recent
           .filter((item) => !shownAsWork(item))
-          .map(
-            (item): FinishedTool => ({
-              ...tool(item),
-              ok: item.status === "completed",
-              ...lasted(item.startedAt, item.completedAt),
-            }),
-          ),
+          .map((item): FinishedTool => ({
+            ...tool(item),
+            ok: item.status === "completed",
+            ...lasted(item.startedAt, item.completedAt),
+          })),
         tool_calls: counted.size,
         ...(work.length === 0 && !partial ? {} : { work: summarizeWork(work, partial) }),
         ...(notes.size === 0 ? {} : { notes: [...notes.values()] }),

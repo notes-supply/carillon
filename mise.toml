@@ -12,16 +12,20 @@ _.path = ["{{config_root}}/node_modules/.bin"]
 [tasks.install]
 description = "Install JavaScript dependencies from the lockfile"
 run = "pnpm install --frozen-lockfile"
-sources = ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"]
+sources = ["package.json", "packages/*/package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"]
 outputs = ["node_modules/.pnpm/lock.yaml"]
 
 [tasks.format]
-description = "Format first-party Rust and TypeScript files"
-run = ["cargo fmt --all", "pnpm run format"]
+description = "Format Rust, TypeScript, JavaScript and JSON"
+depends = ["install"]
+run = ["cargo fmt --all", "oxfmt '**/*.{ts,mjs,json}'"]
 
 [tasks.check]
 description = "Run static checks and Rust/TypeScript tests"
-depends = ["install"]
+depends = ["check:rust", "check:ts"]
+
+[tasks."check:rust"]
+description = "Check and test the Rust workspace"
 run = [
   "cargo fmt --all -- --check",
   "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
@@ -29,7 +33,16 @@ run = [
   "RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --all-features --no-deps",
   "cargo deny check advisories bans sources",
   "cargo shear",
-  "pnpm run check",
+]
+
+[tasks."check:ts"]
+description = "Check formatting, typed lint, types and TypeScript tests"
+depends = ["install"]
+run = [
+  "oxfmt --check '**/*.{ts,mjs,json}'",
+  "oxlint packages --deny-warnings --report-unused-disable-directives-severity error",
+  "tsc --noEmit",
+  "vitest run",
 ]
 
 [tasks."build:commands"]
