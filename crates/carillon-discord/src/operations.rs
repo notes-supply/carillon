@@ -1,5 +1,6 @@
 //! Agent operations: one guild, the existing Discord client, no participation changes.
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use clap::{ArgAction, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -28,206 +29,300 @@ type MessageId = Id<MessageMarker>;
 type RoleId = Id<RoleMarker>;
 type UserId = Id<UserMarker>;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Subcommand)]
 #[serde(untagged)]
 pub enum Operation {
+    /// Inspect the connected server and bot.
+    #[command(subcommand)]
     Server(Server),
+    /// Read and manage channels and permission overwrites.
+    #[command(subcommand)]
     Channels(Channels),
+    /// Read and manage threads.
+    #[command(subcommand)]
     Threads(Threads),
+    /// Read and manage messages, pins and reactions.
+    #[command(subcommand)]
     Messages(Messages),
+    /// Read and manage server roles.
+    #[command(subcommand)]
     Roles(Roles),
+    /// Read and manage server members.
+    #[command(subcommand)]
     Members(Members),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Subcommand)]
 #[serde(tag = "action", deny_unknown_fields)]
 pub enum Server {
     #[serde(rename = "server.info")]
     Info,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Subcommand)]
 #[serde(tag = "action", deny_unknown_fields)]
 pub enum Channels {
     #[serde(rename = "channels.list")]
     List,
     #[serde(rename = "channels.get")]
-    Get { channel_id: ChannelId },
+    Get {
+        #[arg(long)]
+        channel_id: ChannelId,
+    },
     #[serde(rename = "channels.create")]
     Create {
+        #[arg(long)]
         name: String,
+        #[arg(long)]
         kind: NewChannelKind,
+        #[arg(long)]
         parent_id: Option<ChannelId>,
     },
     #[serde(rename = "channels.update")]
     Update {
+        #[arg(long)]
         channel_id: ChannelId,
+        #[arg(long)]
         name: Option<String>,
+        #[arg(long)]
         topic: Option<String>,
+        #[arg(long)]
         parent_id: Option<ChannelId>,
+        #[arg(long)]
         #[serde(default)]
         remove_parent: bool,
     },
     #[serde(rename = "channels.delete")]
-    Delete { channel_id: ChannelId },
+    Delete {
+        #[arg(long)]
+        channel_id: ChannelId,
+    },
     #[serde(rename = "channels.overwrite")]
     Overwrite {
+        #[arg(long)]
         channel_id: ChannelId,
+        #[arg(long)]
         target_id: Id<twilight_model::id::marker::GenericMarker>,
+        #[arg(long)]
         kind: OverwriteKind,
+        #[arg(long)]
         allow: String,
+        #[arg(long)]
         deny: String,
     },
     #[serde(rename = "channels.remove_overwrite")]
     RemoveOverwrite {
+        #[arg(long)]
         channel_id: ChannelId,
+        #[arg(long)]
         target_id: Id<twilight_model::id::marker::GenericMarker>,
+        #[arg(long)]
         kind: OverwriteKind,
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Subcommand)]
 #[serde(tag = "action", deny_unknown_fields)]
 pub enum Threads {
     #[serde(rename = "threads.list")]
     List,
     #[serde(rename = "threads.create")]
     Create {
+        #[arg(long)]
         channel_id: ChannelId,
+        #[arg(long)]
         name: String,
+        #[arg(long)]
         message_id: Option<MessageId>,
     },
     #[serde(rename = "threads.update")]
     Update {
+        #[arg(long)]
         channel_id: ChannelId,
+        #[arg(long, action = ArgAction::Set, required = true)]
         archived: bool,
+        #[arg(long)]
         locked: Option<bool>,
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Subcommand)]
 #[serde(tag = "action", deny_unknown_fields)]
 pub enum Messages {
     #[serde(rename = "messages.list")]
     List {
+        #[arg(long)]
         channel_id: ChannelId,
+        #[arg(long)]
         before: Option<MessageId>,
+        #[arg(long, default_value_t = page_size())]
         #[serde(default = "page_size")]
         limit: u16,
     },
     #[serde(rename = "messages.get")]
     Get {
+        #[arg(long)]
         channel_id: ChannelId,
+        #[arg(long)]
         message_id: MessageId,
     },
     #[serde(rename = "messages.send")]
     Send {
+        #[arg(long)]
         channel_id: ChannelId,
+        #[arg(long)]
         content: String,
+        #[arg(long)]
         reply_to: Option<MessageId>,
+        #[arg(long)]
         #[serde(default)]
         mention_users: Vec<UserId>,
+        #[arg(long)]
         #[serde(default)]
         mention_roles: Vec<RoleId>,
+        #[arg(skip)]
         #[serde(default)]
         attachments: Vec<Upload>,
     },
     #[serde(rename = "messages.edit")]
     Edit {
+        #[arg(long)]
         channel_id: ChannelId,
+        #[arg(long)]
         message_id: MessageId,
+        #[arg(long)]
         content: String,
     },
     #[serde(rename = "messages.delete")]
     Delete {
+        #[arg(long)]
         channel_id: ChannelId,
+        #[arg(long)]
         message_id: MessageId,
     },
     #[serde(rename = "messages.pin")]
     Pin {
+        #[arg(long)]
         channel_id: ChannelId,
+        #[arg(long)]
         message_id: MessageId,
+        #[arg(long, action = ArgAction::Set, required = true)]
         pinned: bool,
     },
     #[serde(rename = "messages.react")]
     React {
+        #[arg(long)]
         channel_id: ChannelId,
+        #[arg(long)]
         message_id: MessageId,
+        #[arg(long)]
         emoji: String,
+        #[arg(long, action = ArgAction::Set, required = true)]
         add: bool,
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Subcommand)]
 #[serde(tag = "action", deny_unknown_fields)]
 pub enum Roles {
     #[serde(rename = "roles.list")]
     List,
     #[serde(rename = "roles.create")]
     Create {
+        #[arg(long)]
         name: String,
+        #[arg(long)]
         permissions: String,
+        #[arg(long)]
         color: Option<u32>,
+        #[arg(long)]
         #[serde(default)]
         hoist: bool,
     },
     #[serde(rename = "roles.update")]
     Update {
+        #[arg(long)]
         role_id: RoleId,
+        #[arg(long)]
         name: Option<String>,
+        #[arg(long)]
         permissions: Option<String>,
+        #[arg(long)]
         color: Option<u32>,
+        #[arg(long)]
         hoist: Option<bool>,
     },
     #[serde(rename = "roles.delete")]
-    Delete { role_id: RoleId },
+    Delete {
+        #[arg(long)]
+        role_id: RoleId,
+    },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Subcommand)]
 #[serde(tag = "action", deny_unknown_fields)]
 pub enum Members {
     #[serde(rename = "members.get")]
-    Get { user_id: UserId },
+    Get {
+        #[arg(long)]
+        user_id: UserId,
+    },
     #[serde(rename = "members.list")]
     List {
+        #[arg(long)]
         after: Option<UserId>,
+        #[arg(long, default_value_t = page_size())]
         #[serde(default = "page_size")]
         limit: u16,
     },
     #[serde(rename = "members.role")]
     Role {
+        #[arg(long)]
         user_id: UserId,
+        #[arg(long)]
         role_id: RoleId,
+        #[arg(long, action = ArgAction::Set, required = true)]
         add: bool,
     },
     #[serde(rename = "members.timeout")]
     Timeout {
+        #[arg(long)]
         user_id: UserId,
+        /// RFC3339 expiry; omit to remove the timeout.
+        #[arg(long)]
         #[serde(deserialize_with = "Option::deserialize")]
         until: Option<String>,
     },
     #[serde(rename = "members.kick")]
-    Kick { user_id: UserId },
+    Kick {
+        #[arg(long)]
+        user_id: UserId,
+    },
     #[serde(rename = "members.ban")]
-    Ban { user_id: UserId, banned: bool },
+    Ban {
+        #[arg(long)]
+        user_id: UserId,
+        #[arg(long, action = ArgAction::Set, required = true)]
+        banned: bool,
+    },
 }
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Upload {
-    filename: String,
-    data: String,
+    pub(crate) filename: String,
+    pub(crate) data: String,
 }
 
 const fn page_size() -> u16 {
     30
 }
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum NewChannelKind {
     Text,
     Category,
 }
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum OverwriteKind {
     Role,

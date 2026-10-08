@@ -382,6 +382,12 @@ grep -F 'Carillon core is running' "$TEST_ROOT/tools.log" >/dev/null
 [ "$(cat "$CARILLON_HOME/agents/default/extensions/carillon-discord.js" \
   "$CARILLON_HOME/agents/default/skills/discord/SKILL.md" | sha256sum)" = "$TOOLS_HASH" ]
 
+# A running installation can publish a skill into the native T3 workspace.
+env CARILLON_HOME="$CARILLON_HOME" "$APP/carillon" discord tools install --workspace "$WORKSPACE"
+cmp "$CARILLON_HOME/app/lib/carillon-discord-SKILL.md" "$WORKSPACE/.claude/skills/discord/SKILL.md"
+cmp "$WORKSPACE/.claude/skills/discord/SKILL.md" "$WORKSPACE/.agents/skills/discord/SKILL.md"
+env CARILLON_HOME="$CARILLON_HOME" "$APP/carillon" discord call messages pin --help >/dev/null
+
 grep -F -- '--provider runtime-pi' "$XDG_CONFIG_HOME/systemd/user/carillon-runtime-pi.service" >/dev/null
 # The optional T3 unit is registered with the others but neither wanted by the
 # target nor enabled, so a default Pi installation never activates it.

@@ -1,4 +1,4 @@
-# Discord tools for Pi
+# Discord agent access
 
 Optional native Pi extension for Carillon's Discord provider. This is separate
 from the Wasm module that renders slash commands. It does not start a service,
@@ -23,13 +23,34 @@ newly accepted turns. No separate gateway restart is required. Already accepted 
 their captured extension and skill, as with other agent resources. The ordinary
 release installer does not enable these tools.
 
-The skill teaches the assistant to call `enable_discord`. A fresh conversation
+For Pi, the skill teaches the assistant to call `enable_discord`. A fresh conversation
 exposes that small activation tool, not the detailed Discord schemas. Activation
 checks the connection, adds the domain tools without replacing existing tools,
 and takes effect on the next inference within the same turn. Pi's native system
 messages persist the tool loadout. Reopening the same conversation restores it;
 another conversation starts inactive. This is context management, not a security
 barrier: native extensions and Bash have the installing Unix user's authority.
+
+## Local T3 / Claude Code / Codex
+
+With the provider running, use the same API through the installed CLI:
+
+```sh
+carillon discord call --help
+carillon discord call messages list --channel-id CHANNEL_ID --limit 20
+carillon discord tools install --workspace /path/to/workspace
+```
+
+The workspace install writes the common skill to `.claude/skills/discord/SKILL.md`
+and `.agents/skills/discord/SKILL.md`. The native harness discovers and loads it;
+no MCP server or T3 modification is needed. Re-run after updating Carillon.
+The CLI prints JSON, requires explicit target IDs, and loads the operator
+credential itself. It does not expose credentials in model arguments.
+
+If T3 runs as another Unix user, `--invocation 'COMMAND'` records an invocation
+that user is already authorized to execute. It does not change permissions or
+copy credentials. Normal T3 sessions in the workspace can use the same skill;
+only Carillon-admitted turns receive Carillon's per-turn origin metadata.
 
 ## Ownership and construction
 
@@ -84,7 +105,7 @@ and per-target permission overwrites; active thread listing, public/message thre
 creation and archive/lock changes; message history/read/send/reply/edit/delete,
 pins and Unicode reactions; role listing/creation/edit/removal; member lookup and
 pagination, role assignment, timeout, kick and ban/unban. Message sends support
-up to ten explicit local files, 4 MiB combined. File reads happen in the extension,
+up to ten explicit local files, 4 MiB combined. File reads happen in the extension or CLI,
 not via arbitrary provider filesystem paths. `files` become bounded wire
 `attachments` containing filenames and base64 bytes. The provider uses Twilight's
 multipart API. Mentions are disabled except explicitly listed user/role IDs.
