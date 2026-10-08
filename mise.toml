@@ -1,7 +1,7 @@
 [tools]
 rust = { version = "1.98.0", profile = "minimal", components = ["clippy", "rustfmt"], targets = ["wasm32-unknown-unknown"] }
 node = "26.8.1"
-bun = "1.4.0"
+bun = "1.4.2"
 pnpm = "12.0.0"
 "cargo:cargo-deny" = "0.20.2"
 "cargo:cargo-shear" = "1.13.4"
