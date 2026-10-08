@@ -2017,6 +2017,48 @@ it("replaces the report-back row with its confirmed completion in a follow-up re
   });
 });
 
+it.each(["approval_request", "user_input_request"])(
+  "shows a completed follow-up with a pending %s as waiting, not succeeded",
+  (type) => {
+    const watch = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
+    watch.apply(
+      snapshot({
+        runs: [
+          {
+            ...run("completed"),
+            delegatedCompletion: { disposition: "open", delivery: { messageId: "continuation" } },
+          },
+          run("completed", "continuation", 2),
+        ],
+        subagents: [
+          task("child", "completed", "run-1", { completionDelivery: { state: "delivered" } }),
+        ],
+        messages: [reply("report", "run-2", "Needs your answer.", "2026-10-05T11:14:59Z")],
+        runtimeRequests: [{ id: "request-1", kind: "tool_approval", status: "pending" }],
+        turnItems: [
+          item(
+            type,
+            "run-2",
+            type === "approval_request"
+              ? { requestId: "request-1", requestKind: "command" }
+              : {
+                  requestId: "request-1",
+                  questions: [{ id: "choice", header: "Choice", question: "Continue?" }],
+                },
+          ),
+        ],
+      }),
+    );
+    expect(watch.outcome()?.kind).toBe("blocked");
+    expect(watch.activity().work?.items).toContainEqual({
+      id: "report:message-1",
+      kind: "task",
+      label: "report back to this conversation",
+      state: "waiting",
+    });
+  },
+);
+
 it.each([true, false])(
   "settles a report row even without a continuation run (elsewhere: %s)",
   (elsewhere) => {

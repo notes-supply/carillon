@@ -173,6 +173,7 @@ impl Recorded {
                 },
                 shown: None,
                 editable: true,
+                uncertain_edit: false,
             },
             None if self.pending_create => Holding::Nothing,
             None => Holding::Held,
@@ -180,9 +181,10 @@ impl Recorded {
     }
 }
 
-/// Cards of jobs whose summary is not final yet, by job. A card is recorded
-/// only after Discord confirms it: a crash in between leaves one card no
-/// later start knows of. A creation whose outcome is unknown, or a card
+/// Cards of jobs whose summary is not final yet, by job. Creation is
+/// suppressed durably before it can reach Discord; its message identity is
+/// recorded once Discord confirms it. A crash in between leaves a card no
+/// later start can name, but not another creation. An unknown creation, or a card
 /// someone deleted, is recorded without a message until the job settles, so
 /// no start makes the job another card. An unsent summary creation is also
 /// recorded for retry. A record goes once its card shows the job's summary,
@@ -527,6 +529,8 @@ enum Holding {
         card: Card,
         shown: Option<Box<Embed>>,
         editable: bool,
+        /// An earlier write may still land after the final edit.
+        uncertain_edit: bool,
     },
     /// One nobody can name or follow, or one Discord refused to make: the
     /// job gets no other.
@@ -598,6 +602,7 @@ async fn show_card(
                 card,
                 shown,
                 editable,
+                uncertain_edit,
             } if *editable && shown.as_deref() != Some(&embed) => {
                 // Edits wait out the interval; the job's end does not.
                 if Instant::now() < next_edit {
@@ -610,7 +615,12 @@ async fn show_card(
                 match cards.edit(*card, &embed, Some(wanted)).await {
                     Call::Done(()) => *shown = Some(Box::new(embed)),
                     // The next read brings the latest again.
-                    Call::NotSent | Call::Unknown => {}
+                    Call::NotSent => {}
+                    Call::Unknown => {
+                        *editable = false;
+                        *uncertain_edit = true;
+                        warn!(job_id, "activity card edit outcome is unknown");
+                    }
                     Call::Refused(404) => {
                         // Deleted by someone: the job gets no other card,
                         // even after a restart, before it settles.
@@ -657,7 +667,7 @@ impl Cards {
             warn!(job_id, "activity card target is not a Discord channel");
             return Holding::Held;
         };
-        match self.create(channel_id, embed).await {
+        match self.create(job_id, channel_id, embed).await {
             Call::Done(message_id) => {
                 let recorded = Recorded {
                     channel_id,
@@ -672,10 +682,21 @@ impl Cards {
                     },
                     shown: Some(Box::new(embed.clone())),
                     editable: true,
+                    uncertain_edit: false,
                 }
             }
             // Tried again with the job's next change.
-            Call::NotSent => Holding::Nothing,
+            Call::NotSent => {
+                self.records.insert(
+                    job_id,
+                    Recorded {
+                        channel_id,
+                        message_id: None,
+                        pending_create: true,
+                    },
+                );
+                Holding::Nothing
+            }
             Call::Refused(status) => {
                 warn!(job_id, status, "Discord refused this job's activity card");
                 Holding::Held
@@ -683,14 +704,6 @@ impl Cards {
             Call::Unknown => {
                 // Discord may hold a card this task cannot name: the job
                 // gets no other, even after a restart.
-                self.records.insert(
-                    job_id,
-                    Recorded {
-                        channel_id,
-                        message_id: None,
-                        pending_create: false,
-                    },
-                );
                 warn!(
                     job_id,
                     "an activity card of unknown identity may be in Discord; the job gets no other"
@@ -713,8 +726,12 @@ impl Cards {
         summary: Option<Embed>,
         channel: Option<Id<ChannelMarker>>,
     ) {
-        let card = match holding {
-            Holding::Card { card, .. } => card,
+        let (card, uncertain_edit) = match holding {
+            Holding::Card {
+                card,
+                uncertain_edit,
+                ..
+            } => (card, uncertain_edit),
             Holding::Nothing => {
                 if let (Some(summary), Some(channel)) = (summary, channel) {
                     self.create_summary(job_id, channel, &summary).await;
@@ -734,7 +751,18 @@ impl Cards {
                 None => self.delete(card).await,
             };
             match call {
-                Call::Done(()) | Call::Refused(404) => {
+                Call::Done(()) => {
+                    if uncertain_edit && summary.is_some() {
+                        warn!(
+                            job_id,
+                            "an earlier card edit may still arrive; its identity is retained for the next start"
+                        );
+                    } else {
+                        self.records.remove(job_id);
+                    }
+                    return;
+                }
+                Call::Refused(404) => {
                     self.records.remove(job_id);
                     return;
                 }
@@ -762,7 +790,7 @@ impl Cards {
     /// creation suppresses another card; a known unsent one is left for
     /// the next start to finish from core's facts.
     async fn create_summary(&self, job_id: &str, channel_id: Id<ChannelMarker>, summary: &Embed) {
-        let mut recorded = Recorded {
+        let recorded = Recorded {
             channel_id,
             message_id: None,
             pending_create: true,
@@ -772,30 +800,18 @@ impl Cards {
             if self.stopping.is_cancelled() {
                 return;
             }
-            recorded.pending_create = false;
-            if !self.records.insert(job_id, recorded) {
-                recorded.pending_create = true;
-                self.records.insert(job_id, recorded);
-                warn!(
-                    job_id,
-                    "summary creation deferred until its suppression can be saved"
-                );
-                return;
-            }
-            match self.create(channel_id, summary).await {
+            match self.create(job_id, channel_id, summary).await {
                 Call::Done(_) => {
                     self.records.remove(job_id);
                     return;
                 }
                 Call::NotSent => {
-                    recorded.pending_create = true;
                     self.records.insert(job_id, recorded);
                     if attempt < FINAL_ATTEMPTS {
                         sleep(RETRY_DELAY).await;
                     }
                 }
                 Call::Refused(status) => {
-                    recorded.pending_create = true;
                     self.records.insert(job_id, recorded);
                     warn!(
                         job_id,
@@ -820,7 +836,26 @@ impl Cards {
 
     /// Makes a card. It is wanted until the provider stops, however its job
     /// ends meanwhile, so the card then shows the job's end.
-    async fn create(&self, channel: Id<ChannelMarker>, embed: &Embed) -> Call<Id<MessageMarker>> {
+    async fn create(
+        &self,
+        job_id: &str,
+        channel: Id<ChannelMarker>,
+        embed: &Embed,
+    ) -> Call<Id<MessageMarker>> {
+        if !self.records.insert(
+            job_id,
+            Recorded {
+                channel_id: channel,
+                message_id: None,
+                pending_create: false,
+            },
+        ) {
+            warn!(
+                job_id,
+                "card creation deferred until its suppression can be saved"
+            );
+            return Call::NotSent;
+        }
         let silent = AllowedMentions::default();
         let embeds = [embed.clone()];
         let request = self

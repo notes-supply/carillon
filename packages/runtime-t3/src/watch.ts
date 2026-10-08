@@ -1195,26 +1195,29 @@ export function watchTurn(
         ...(SETTLED_TASK.has(task.status) ? lasted(task.startedAt, task.completedAt) : {}),
       });
     }
-    const reporting = [...continuationRuns.values()].some(isActive);
+    const blocked = ownedPendingRequest() !== undefined;
+    const reporting = !blocked && [...continuationRuns.values()].some(isActive);
     const unstarted = last === undefined ? withoutRun() : undefined;
     const reportState: WorkItem["state"] | undefined =
       followUp === undefined
         ? undefined
-        : last === undefined
-          ? unstarted?.kind === "completed"
-            ? "succeeded"
-            : unstarted?.kind === "failed"
+        : blocked
+          ? "waiting"
+          : last === undefined
+            ? unstarted?.kind === "completed"
+              ? "succeeded"
+              : unstarted?.kind === "failed"
+                ? "failed"
+                : undefined
+            : last.status === "failed"
               ? "failed"
-              : undefined
-          : last.status === "failed"
-            ? "failed"
-            : ["cancelled", "interrupted", "rolled_back"].includes(last.status)
-              ? "cancelled"
-              : last.status === "completed" && !reportOwed()
-                ? reported(last).kind === "failed"
-                  ? "failed"
-                  : "succeeded"
-                : undefined;
+              : ["cancelled", "interrupted", "rolled_back"].includes(last.status)
+                ? "cancelled"
+                : last.status === "completed" && !reportOwed()
+                  ? reported(last).kind === "failed"
+                    ? "failed"
+                    : "succeeded"
+                  : undefined;
     if (reporting || reportOwed() || reportState !== undefined)
       items.push({
         id: `report:${messageId}`,

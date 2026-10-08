@@ -1384,12 +1384,13 @@ async fn unknown_refused_or_deleted_cards_are_never_created_again_or_replaced() 
             .len()
             >= 2
     );
-    // A creation that may have happened and a deleted card are remembered
-    // without a message to name, so their jobs get no other card.
+    // Unknown, refused and deleted cards retain their suppression checkpoint,
+    // so their jobs get no other card even after a restart.
     recorded_soon(
         &records,
         &json!({
             "300": {"channel_id": "300"},
+            "301": {"channel_id": "301"},
             "302": {"channel_id": "302"},
             "303": {"channel_id": "303", "message_id": "904"},
         }),
@@ -1606,6 +1607,145 @@ async fn a_refused_final_edit_keeps_the_card_for_the_next_start() -> anyhow::Res
 }
 
 /// A retry must not be sent unless its suppression is durably recorded.
+#[tokio::test]
+async fn a_failed_progress_identity_save_does_not_create_a_second_card_after_restart()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let records = directory.path().join("cards.json");
+    let saved = directory.path().join("saved.json");
+    std::fs::write(&records, b"{}")?;
+    let discord = Substitute::start(Arc::new({
+        let records = records.clone();
+        let saved = saved.clone();
+        move |seen, earlier| {
+            if seen.method == Method::POST && earlier == 0 {
+                assert!(
+                    std::fs::rename(&records, &saved).is_ok(),
+                    "save the pre-creation checkpoint"
+                );
+                assert!(
+                    std::fs::create_dir(&records).is_ok(),
+                    "obstruct the identity publication"
+                );
+            }
+            Reply::Success
+        }
+    }))
+    .await?;
+    let cards = cards(
+        discord.http(false),
+        directory.path(),
+        CancellationToken::new(),
+    )?;
+    let job = running(
+        "work",
+        "300",
+        now() - 60,
+        Some(tools(None, &[("bash", "sleep 15")], &[])),
+    );
+    let embed = super::render::job_card(&job, None, &cards.markers);
+    assert!(matches!(
+        cards.create_progress("work", &job, &embed).await,
+        super::Holding::Card { .. }
+    ));
+    drop(cards);
+    std::fs::remove_dir(&records)?;
+    std::fs::rename(&saved, &records)?;
+    discord.record(vec![job]);
+    let (_delivering, monitor) = discord.monitor(discord.http(false), config(false), &records);
+    // The identity was not saved, so a restart cannot update the first card.
+    // The durable checkpoint nevertheless suppresses a duplicate creation.
+    tokio::time::sleep(Duration::from_millis(3_200)).await;
+    assert_eq!(discord.cards_in("300").len(), 1);
+    assert_eq!(recorded(&records)?, json!({"work": {"channel_id": "300"}}));
+    assert!(discord.matching(&Method::PATCH, "/channels").is_empty());
+    monitor.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_uncertain_progress_edit_keeps_the_identity_to_repair_a_late_overwrite()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let records = directory.path().join("activity-cards.json");
+    let remote = Arc::new(Mutex::new(String::new()));
+    let discord = Substitute::start(Arc::new({
+        let remote = remote.clone();
+        move |seen, _| {
+            if seen.method != Method::PATCH {
+                return Reply::Success;
+            }
+            let content = seen.content();
+            if content.contains("Finishing up") {
+                let remote = remote.clone();
+                // The request reached Discord, but its application and reply
+                // arrive after the client's timeout and the final edit.
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(18)).await;
+                    *lock(&remote) = content;
+                });
+                Reply::Delayed(Duration::from_secs(18))
+            } else {
+                *lock(&remote) = content;
+                Reply::Success
+            }
+        }
+    }))
+    .await?;
+    let accepted = now() - 60;
+    let report = tools(None, &[], &[("bash", "make", true)]);
+    discord.record(vec![running("work", "300", accepted, Some(report.clone()))]);
+    let (delivering, monitor) = discord.monitor(discord.http(false), config(false), &records);
+    discord
+        .wait_for(&Method::POST, "/channels/300/messages", 1)
+        .await?;
+    let finishing = ended(
+        "work",
+        "300",
+        accepted,
+        TurnState::Completed,
+        Some(report),
+        None,
+    );
+    discord.record(vec![finishing.clone()]);
+    discord
+        .wait_for_text(&Method::PATCH, "/channels/300/messages/901", "Finishing up")
+        .await?;
+    discord.record(vec![sent(finishing)]);
+    delivering.send(Delivering::Recorded)?;
+    discord
+        .wait_for_text(&Method::PATCH, "/channels/300/messages/901", "✓ Done")
+        .await?;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while !lock(&remote).contains("Finishing up") {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    // A successful final edit did not fence the earlier uncertain write.
+    // Keep its identity so the next start can repair it from Core's facts.
+    assert_eq!(
+        recorded(&records)?,
+        json!({"work": {"channel_id": "300", "message_id": "901"}})
+    );
+    monitor.abort();
+    let _ = monitor.await;
+    let (_delivering, monitor) = discord.monitor(discord.http(false), config(false), &records);
+    let edits = discord
+        .wait_for(&Method::PATCH, "/channels/300/messages/901", 3)
+        .await?;
+    assert!(
+        edits
+            .last()
+            .is_some_and(|edit| edit.content().starts_with("✓ Done"))
+    );
+    recorded_soon(&records, &json!({})).await?;
+    assert!(lock(&remote).starts_with("✓ Done"));
+    assert_eq!(discord.cards_in("300").len(), 1);
+    monitor.abort();
+    Ok(())
+}
+
 #[tokio::test]
 async fn failed_creation_suppression_sends_no_retryable_summary() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
@@ -2230,16 +2370,19 @@ async fn a_stopping_provider_sends_no_waiting_progress_but_finishes_and_awaits_w
         message_id: Id::new(777),
     };
     assert!(matches!(
-        cards.create(channel, &embed).await,
+        cards.create("initial", channel, &embed).await,
         super::Call::Done(_)
     ));
     assert_eq!(cards.edit(card, &embed, None).await, super::Call::Done(()));
     // A new card and progress now wait for permits; a card in channel 301 is under way.
-    let spawn_create = |channel| {
+    let spawn_create = |job_id, channel| {
         let (cards, embed) = (cards.clone(), embed.clone());
-        tokio::spawn(async move { cards.create(channel, &embed).await })
+        tokio::spawn(async move { cards.create(job_id, channel, &embed).await })
     };
-    let (waiting, under_way) = (spawn_create(channel), spawn_create(other));
+    let (waiting, under_way) = (
+        spawn_create("waiting", channel),
+        spawn_create("under-way", other),
+    );
     let progress = {
         let (cards, embed) = (cards.clone(), embed.clone());
         let wanted = super::job_wanted(&watched, &stopping, |known| !known.is_over());
