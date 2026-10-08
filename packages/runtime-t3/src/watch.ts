@@ -392,6 +392,10 @@ export function watchTurn(
    * say whether the result was delivered.
    */
   let backgroundSeenAt: number | undefined;
+  /** A recovered native cohort has no per-child provenance for its provider wakes. */
+  let nativeReportsUnknown = false;
+  /** Native children observed settled while their parent could still consume them. */
+  const nativeInsideParent = new Set<string>();
   /**
    * Background work first listed while none of the turn's runs could have
    * been executing: another run's, such as one started in T3's own UI or an
@@ -510,14 +514,22 @@ export function watchTurn(
       foreign.add(run.id);
       return false;
     }
-    if (wakeOwedAfter !== undefined && run.ordinal > wakeOwedAfter) return wake(run);
-    if (backgroundSeenAt !== undefined) return wake(run);
+    // Evidence of work is not permission to take every later notification.
+    // A further wake needs work observed at or after the preceding wake.
+    const after = backgroundSeenAt ?? wakeOwedAfter;
+    if (
+      after !== undefined &&
+      run.ordinal > after &&
+      ![...turnRuns.values()].some((prior) => wakeRuns.has(prior.id) && prior.ordinal > after)
+    )
+      return wake(run);
     stray ??= run.id;
     return false;
   }
 
   function wake(run: Run): true {
     wakeRuns.add(run.id);
+    if (stray === run.id) stray = undefined;
     return true;
   }
 
@@ -776,8 +788,17 @@ export function watchTurn(
   /** A child agent of a run the turn holds; others are another conversation's business. */
   function foldSubagent(task: Subagent): void {
     if (task.runId === null || !linkedRun(task.runId)) return;
-    if (retain(delegations, task.id, task, settledTask)) unconfirmed.delete(task.id);
-    else {
+    if (retain(delegations, task.id, task, settledTask)) {
+      unconfirmed.delete(task.id);
+      const parent = turnRuns.get(task.runId);
+      if (
+        task.origin === "provider_native" &&
+        SETTLED_TASK.has(task.status) &&
+        parent !== undefined &&
+        isActive(parent)
+      )
+        nativeInsideParent.add(task.id);
+    } else {
       workOmitted = true;
       if (!settledTask(task)) owedUnknown = true;
     }
@@ -805,6 +826,7 @@ export function watchTurn(
       if (room === undefined) return false;
       records.delete(room[0]);
       unconfirmed.delete(room[0]);
+      nativeInsideParent.delete(room[0]);
       workOmitted = true;
     }
     records.set(id, record);
@@ -840,6 +862,33 @@ export function watchTurn(
    */
   function roster(run: Run | undefined): readonly BackgroundTask[] {
     return listedWork(run).filter((task) => !otherTasks.has(task.taskId));
+  }
+
+  /** Native Agent work can be published without a provider-thread roster. */
+  function nativeWorking(): boolean {
+    return [...delegations.values()].some(
+      (task) =>
+        task.origin === "provider_native" &&
+        task.runId !== null &&
+        turnRuns.has(task.runId) &&
+        !unconfirmed.has(task.id) &&
+        ACTIVE_TASK.has(task.status),
+    );
+  }
+
+  /** A native child whose last active state T3 no longer confirms. */
+  function nativeUnknown(): boolean {
+    for (const id of unconfirmed) {
+      const task = delegations.get(id);
+      if (
+        task?.origin === "provider_native" &&
+        task.runId !== null &&
+        turnRuns.has(task.runId) &&
+        ACTIVE_TASK.has(task.status)
+      )
+        return true;
+    }
+    return false;
   }
 
   /** Everything the run's provider thread lists, the turn's or not. */
@@ -934,29 +983,41 @@ export function watchTurn(
     adoptPending();
   }
 
-  /** The turn's process owes a report in a run that has not appeared, and T3 has not shown it stopped. */
-  function wakeOwed(): boolean {
+  /** Background work of the turn is listed on `run`'s roster, or a native child of it works. */
+  function workListed(run: Run): boolean {
+    return roster(run).length > 0 || nativeWorking();
+  }
+
+  /** `run` completed after listing work: its process owes a report in a run of its own. */
+  function wakeOwedBy(run: Run): boolean {
     return (
-      last?.status === "completed" &&
-      wakeOwedAfter !== undefined &&
-      last.ordinal <= wakeOwedAfter &&
-      !sessionStopped(last)
+      run.status === "completed" && wakeOwedAfter !== undefined && run.ordinal <= wakeOwedAfter
     );
   }
 
   /**
-   * The turn's run completed, its roster is empty, and the subscription did
-   * not witness how the work it once listed ended: delivered inside the run,
-   * or still owed. T3's current state does not distinguish the two.
+   * What the turn's latest run leaves of its background work: work still
+   * `listed`; a `wake` its process owes for work it listed; or a `gap`: the
+   * run completed with nothing listed, and the subscription did not witness
+   * how work it once listed ended, delivered inside the run or still owed,
+   * which T3's current state does not distinguish. Every decision about the
+   * turn's background work starts here.
    */
-  function ambiguous(): boolean {
-    return (
-      last?.status === "completed" &&
-      roster(last).length === 0 &&
-      !(wakeOwedAfter !== undefined && last.ordinal <= wakeOwedAfter) &&
-      backgroundSeenAt !== undefined &&
-      last.ordinal <= backgroundSeenAt
-    );
+  function pendingWork(): "listed" | "wake" | "gap" | undefined {
+    if (last === undefined) return undefined;
+    if (workListed(last)) return "listed";
+    if (wakeOwedBy(last)) return "wake";
+    if (
+      last.status === "completed" &&
+      (nativeReportsUnknown || (backgroundSeenAt !== undefined && last.ordinal <= backgroundSeenAt))
+    )
+      return "gap";
+    return undefined;
+  }
+
+  /** The turn's process owes a report in a run that has not appeared, and T3 has not shown it stopped. */
+  function wakeOwed(): boolean {
+    return last !== undefined && wakeOwedBy(last) && !sessionStopped(last);
   }
 
   function sessionOf(
@@ -1134,15 +1195,35 @@ export function watchTurn(
         ...(SETTLED_TASK.has(task.status) ? lasted(task.startedAt, task.completedAt) : {}),
       });
     }
-    const reporting = [...continuationRuns.values()].some(
-      (run) => isActive(run) && !turnRuns.has(run.id),
-    );
-    if (reporting || (followUp === undefined && reportOwed()))
+    const blocked = ownedPendingRequest() !== undefined;
+    const reporting = !blocked && [...continuationRuns.values()].some(isActive);
+    const unstarted = last === undefined ? withoutRun() : undefined;
+    const reportState: WorkItem["state"] | undefined =
+      followUp === undefined
+        ? undefined
+        : blocked
+          ? "waiting"
+          : last === undefined
+            ? unstarted?.kind === "completed"
+              ? "succeeded"
+              : unstarted?.kind === "failed"
+                ? "failed"
+                : undefined
+            : last.status === "failed"
+              ? "failed"
+              : ["cancelled", "interrupted", "rolled_back"].includes(last.status)
+                ? "cancelled"
+                : last.status === "completed" && !reportOwed()
+                  ? reported(last).kind === "failed"
+                    ? "failed"
+                    : "succeeded"
+                  : undefined;
+    if (reporting || reportOwed() || reportState !== undefined)
       items.push({
         id: `report:${messageId}`,
         kind: "task",
         label: "report back to this conversation",
-        state: reporting ? "running" : "queued",
+        state: reporting ? "running" : (reportState ?? "queued"),
       });
     for (const transfer of transfers.values()) {
       const work = TRANSFER_WORK.get(transfer.type);
@@ -1182,6 +1263,38 @@ export function watchTurn(
     ];
   }
 
+  /** The terminal report when T3 supplied no continuation run. */
+  function withoutRun(): Outcome | undefined {
+    if (anchor === undefined) {
+      if (followUp !== undefined && seen)
+        return {
+          kind: "failed",
+          explanation:
+            "T3 no longer lists the message whose delegated work this turn reports, so its report cannot be followed",
+        };
+      return undefined;
+    }
+    // Only a follow-up turn holds no run of its own: it waits for a
+    // continuation as long as the delegated work still owes one.
+    if (followUp === undefined || reportOwed()) return undefined;
+    // T3 gave the result to another run instead of a report of its own:
+    // that run's reply is its own, never repeated here.
+    const notes = elsewhere();
+    if (notes.length > 0) return { kind: "completed", output: notes.join("\n\n") };
+    // T3 says it delivered a result, but the continuation that carries it
+    // is not in the window this runtime reads.
+    const delivered = [...delegations.values()].some((task) =>
+      DELIVERED.has(task.completionDelivery?.state ?? ""),
+    );
+    return {
+      kind: "failed",
+      explanation:
+        delivered && historyOmitted
+          ? OLDER_REPORT
+          : "T3's delegated work ended without reporting back to this conversation",
+    };
+  }
+
   /**
    * A follow-up turn's outcome once its latest continuation completed: the
    * continuations' text, carrying another cursor while delegated work still
@@ -1201,18 +1314,19 @@ export function watchTurn(
             "[Part of this report is older than the part of the thread Carillon reads; T3 shows all of it.]",
           ]
         : []),
-      ...(roster(latest).length > 0 ||
-      (wakeOwedAfter !== undefined && latest.ordinal <= wakeOwedAfter)
+      ...(roster(latest).length > 0 || wakeOwedBy(latest)
         ? ["[The report started background work in T3; its result will show in T3, not here.]"]
         : []),
     ];
     const text = [output, ...notes].filter((part) => part.length > 0).join("\n\n");
-    return reportOwed()
-      ? {
-          kind: "completed",
-          output: text,
-          followUp: { message: messageId, after: latest.ordinal },
-        }
+    if (reportOwed())
+      return {
+        kind: "completed",
+        output: text,
+        followUp: { message: messageId, after: latest.ordinal },
+      };
+    return text.trim().length === 0
+      ? { kind: "failed", explanation: "T3 finished the run without an answer." }
       : { kind: "completed", output: text };
   }
 
@@ -1227,6 +1341,25 @@ export function watchTurn(
     return [...unclaimed.values(), ...continuationRuns.values()].filter(
       (run) => !turnRuns.has(run.id),
     );
+  }
+
+  /**
+   * Dates the background work the turn's current run lists when the fold
+   * first sees it, since T3 does not, and forgets what it no longer lists.
+   * A run whose provider thread record has not arrived lists nothing here.
+   */
+  function dateBackground(): void {
+    const run = active() ?? last;
+    const thread =
+      run?.providerThreadId == null ? undefined : providerThreads.get(run.providerThreadId);
+    const tasks = new Set(
+      (thread?.pendingBackgroundTasks ?? [])
+        .filter((task) => !otherTasks.has(task.taskId))
+        .map((task) => task.taskId),
+    );
+    const now = Math.floor(Date.now() / 1000);
+    for (const id of tasks) if (!backgroundSince.has(id)) backgroundSince.set(id, now);
+    for (const id of backgroundSince.keys()) if (!tasks.has(id)) backgroundSince.delete(id);
   }
 
   /**
@@ -1249,13 +1382,16 @@ export function watchTurn(
     return earlier.size > 0 || laterOthers().some(isActive);
   }
 
+  /**
+   * Nothing of the turn still executes: work still listed is, and a report
+   * owed or a gap not witnessed is too while T3 has not shown the turn's
+   * process stopped.
+   */
   function quiet(): boolean {
-    return (
-      active() === undefined &&
-      roster(last).length === 0 &&
-      !wakeOwed() &&
-      !(ambiguous() && last !== undefined && !sessionStopped(last))
-    );
+    if (active() !== undefined || nativeUnknown()) return false;
+    const pending = pendingWork();
+    if (pending === undefined) return true;
+    return pending !== "listed" && last !== undefined && sessionStopped(last);
   }
 
   return {
@@ -1286,6 +1422,8 @@ export function watchTurn(
                 `T3 sent a thread snapshot that omits run ${id} this turn observed`,
               );
           const before = new Map([...turnRuns].map(([id, run]) => [id, run.status]));
+          const nativeWakeOwed = wakeOwed();
+          const ordinalBefore = last?.ordinal;
           reset();
           // A snapshot lists runs, announcements and children whole, so the
           // coverage of the turn's work is decided afresh from it.
@@ -1347,10 +1485,48 @@ export function watchTurn(
           );
           const listedIds = new Set(listed.map((task) => task.id));
           for (const id of delegations.keys()) if (!listedIds.has(id)) unconfirmed.add(id);
+          const settledChildren = new Set(
+            [...delegations.values()]
+              .filter((task) => SETTLED_TASK.has(task.status))
+              .map((task) => task.id),
+          );
           for (const task of [...listed].sort(
             (left, right) => Number(settledTask(left)) - Number(settledTask(right)),
           ))
             foldSubagent(task);
+          // A fresh view cannot tell whether a settled native child reported
+          // inside its parent or still owes a provider wake. Reuse the same
+          // fail-closed ambiguity as background work missed across a gap.
+          if (followUp === undefined) {
+            const previouslyOwed = nativeWakeOwed
+              ? listed.filter(
+                  (task) =>
+                    task.origin === "provider_native" &&
+                    settledChildren.has(task.id) &&
+                    !nativeInsideParent.has(task.id),
+                ).length
+              : 0;
+            const native = listed.filter(
+              (task) =>
+                task.origin === "provider_native" &&
+                SETTLED_TASK.has(task.status) &&
+                task.runId !== null &&
+                turnRuns.get(task.runId)?.status === "completed" &&
+                !settledChildren.has(task.id),
+            );
+            for (const task of native) {
+              const parent = task.runId === null ? undefined : turnRuns.get(task.runId);
+              if (parent === undefined) continue;
+              backgroundSeenAt = Math.max(
+                backgroundSeenAt ?? 0,
+                parent.ordinal,
+                ordinalBefore ?? 0,
+              );
+              // One unlinked wake cannot prove which of several recovered
+              // native results it consumed. Do not silently drop the rest.
+              if (native.length + previouslyOwed > 1) nativeReportsUnknown = true;
+            }
+          }
           for (const transfer of projection.contextTransfers) foldTransfer(transfer);
           for (const thread of projection.providerThreads) foldProviderThread(thread);
           for (const session of projection.providerSessions) foldSession(session);
@@ -1361,6 +1537,9 @@ export function watchTurn(
               detachedSessions.add(thread.providerSessionId);
           for (const request of projection.runtimeRequests) foldRequest(request);
           for (const payload of projection.turnItems) foldItem(payload);
+          // A call the snapshot no longer shows running or held has no start to keep.
+          for (const id of firstSeen.keys())
+            if (!running.has(id) && !held.has(id)) firstSeen.delete(id);
           for (const message of projection.messages) foldMessage(message);
           // Background work listed now that the fold has not classified was
           // started across the gap: the turn's if one of its runs could have
@@ -1448,11 +1627,12 @@ export function watchTurn(
           return;
       }
       if (last !== undefined) {
-        const listed = roster(last).length > 0;
+        const listed = workListed(last);
         if (listed) backgroundSeenAt = last.ordinal;
         else if (isActive(last) && backgroundSeenAt === last.ordinal) backgroundSeenAt = undefined;
         if (listed && last.status === "completed") wakeOwedAfter = last.ordinal;
       }
+      dateBackground();
       for (const listener of listeners) listener();
     },
     resubscribing() {
@@ -1474,36 +1654,7 @@ export function watchTurn(
     },
     requestOpen: () => ownedPendingRequest() !== undefined,
     outcome() {
-      if (anchor === undefined) {
-        if (followUp !== undefined && seen)
-          return {
-            kind: "failed",
-            explanation:
-              "T3 no longer lists the message whose delegated work this turn reports, so its report cannot be followed",
-          };
-        return undefined;
-      }
-      if (last === undefined) {
-        // Only a follow-up turn holds no run of its own: it waits for a
-        // continuation as long as the delegated work still owes one.
-        if (followUp === undefined || reportOwed()) return undefined;
-        // T3 gave the result to another run instead of a report of its own:
-        // that run's reply is its own, never repeated here.
-        const notes = elsewhere();
-        if (notes.length > 0) return { kind: "completed", output: notes.join("\n\n") };
-        // T3 says it delivered a result, but the continuation that carries it
-        // is not in the window this runtime reads.
-        const delivered = [...delegations.values()].some((task) =>
-          DELIVERED.has(task.completionDelivery?.state ?? ""),
-        );
-        return {
-          kind: "failed",
-          explanation:
-            delivered && historyOmitted
-              ? OLDER_REPORT
-              : "T3's delegated work ended without reporting back to this conversation",
-        };
-      }
+      if (anchor === undefined || last === undefined) return withoutRun();
       const request = ownedPendingRequest();
       if (request !== undefined) return { kind: "blocked", asked: asked(request) };
       if (uncertainFollowUp())
@@ -1513,6 +1664,12 @@ export function watchTurn(
             "An earlier turn on this conversation was not confirmed stopped, and T3 cannot show whether the run that followed this turn's background work reports this turn's work or the earlier one's",
         };
       if (active() !== undefined) return undefined;
+      if (nativeUnknown())
+        return {
+          kind: "unresolved",
+          explanation:
+            "T3 no longer confirms the state of this turn's native child, so Carillon cannot show whether its work ended or its result was delivered",
+        };
       if (stray !== undefined && last.status === "completed")
         return {
           kind: "unresolved",
@@ -1525,42 +1682,44 @@ export function watchTurn(
           // wake: beside the conversation's later messages, no run but a
           // continuation can be attributed to it.
           if (followUp !== undefined) return reported(last);
-          if (roster(last).length > 0) {
-            if (sessionStopped(last))
+          switch (pendingWork()) {
+            case "listed":
+              if (sessionStopped(last))
+                return {
+                  kind: "failed",
+                  explanation:
+                    "T3's native session stopped while it still listed background work, which can no longer report back.",
+                };
+              if (sessionDetached(last))
+                return {
+                  kind: "failed",
+                  explanation:
+                    "T3's native session was detached while it still listed background work; T3 does not confirm whether that work still reports back.",
+                };
+              return undefined;
+            case "wake":
+              if (sessionStopped(last))
+                return {
+                  kind: "failed",
+                  explanation:
+                    "T3's native session stopped before it reported the result of its finished background work.",
+                };
+              if (sessionDetached(last))
+                return {
+                  kind: "failed",
+                  explanation:
+                    "T3's native session was detached before it reported the result of its finished background work; T3 does not confirm whether that result will still arrive.",
+                };
+              return undefined;
+            case "gap":
               return {
-                kind: "failed",
+                kind: "unresolved",
                 explanation:
-                  "T3's native session stopped while it still listed background work, which can no longer report back.",
+                  "Carillon lost its connection to T3 while this turn ran background work, and T3's state does not show whether the result was delivered",
               };
-            if (sessionDetached(last))
-              return {
-                kind: "failed",
-                explanation:
-                  "T3's native session was detached while it still listed background work; T3 does not confirm whether that work still reports back.",
-              };
-            return undefined;
+            case undefined:
+              break;
           }
-          if (wakeOwedAfter !== undefined && last.ordinal <= wakeOwedAfter) {
-            if (sessionStopped(last))
-              return {
-                kind: "failed",
-                explanation:
-                  "T3's native session stopped before it reported the result of its finished background work.",
-              };
-            if (sessionDetached(last))
-              return {
-                kind: "failed",
-                explanation:
-                  "T3's native session was detached before it reported the result of its finished background work; T3 does not confirm whether that result will still arrive.",
-              };
-            return undefined;
-          }
-          if (ambiguous())
-            return {
-              kind: "unresolved",
-              explanation:
-                "Carillon lost its connection to T3 while this turn ran background work, and T3's state does not show whether the result was delivered",
-            };
           // The answer is complete; delegated work it started may still owe
           // the conversation a report, which a follow-up turn delivers.
           return reportOwed()
@@ -1587,7 +1746,7 @@ export function watchTurn(
     },
     activity() {
       const run = active() ?? last;
-      const partial = unconfirmed.size > 0 || workOmitted || owedUnknown;
+      const partial = unconfirmed.size > 0 || workOmitted || owedUnknown || nativeReportsUnknown;
       // A child agent shows once, as its delegation, not also as a tool or a
       // background task of its parent.
       const shownAsWork = (item: ToolItem) =>
@@ -1602,23 +1761,16 @@ export function watchTurn(
       const runningTools: RunningTool[] = [...running.values()]
         .filter((item) => !shownAsWork(item))
         .map((item) => ({ ...tool(item), ...started(item) }));
-      for (const id of firstSeen.keys())
-        if (!running.has(id) && !held.has(id)) firstSeen.delete(id);
-      const now = Math.floor(Date.now() / 1000);
       const tasks = roster(run).filter(
         (task) => task.childThreadId === undefined || !childThreads.has(task.childThreadId),
       );
-      for (const task of tasks) {
-        if (!backgroundSince.has(task.taskId)) backgroundSince.set(task.taskId, now);
+      for (const task of tasks)
         runningTools.push({
           tool: toolName(task.kind ?? "background_task"),
           ...withDetail(task.description === undefined ? undefined : displayed(task.description)),
-          started_at: backgroundSince.get(task.taskId) ?? now,
+          started_at: backgroundSince.get(task.taskId) ?? Math.floor(Date.now() / 1000),
           estimated: true,
         });
-      }
-      for (const id of backgroundSince.keys())
-        if (!tasks.some((task) => task.taskId === id)) backgroundSince.delete(id);
       const headline = latestAssistant === undefined ? undefined : commentary(latestAssistant.text);
       const work = workItems();
       const agent = agentOf(run);

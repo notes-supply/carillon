@@ -44,7 +44,7 @@ const discordOptions = [
 ];
 const traceOptions = ["-f", "-qq", "-yy", "-s", "4096", "-e", "trace=mkdir,rename,fsync,fdatasync"];
 const run = (...args) => execFileSync(binary, args, { encoding: "utf8", timeout: 30_000 });
-/** Attachment files staged per capture attempt: enough that the capture
+/** Files staged per publication attempt: enough that the publication
  * thread's injected call comes later than any other thread's same call, since
  * strace applies `when=N` to each thread's own count. */
 const STAGED_FILES = 32;
@@ -736,6 +736,13 @@ async function resourceAttempt(name, fault) {
 
   await writeFile(helper, "#!/bin/sh\nprintf durable-helper");
   await chmod(helper, 0o750);
+  // SQLite's startup sync count varies with its schema. Keep the snapshot
+  // worker's injected ordinal beyond it, as attachment capture does below.
+  const references = join(dirname(dirname(helper)), "references");
+  await mkdir(references);
+  for (let index = 0; index < STAGED_FILES; index++) {
+    await writeFile(join(references, `${index}.md`), "durable reference");
+  }
   const config = join(root, "carillon.toml");
   const log = join(scratch, `${name}.trace`);
   const token = (await readFile(join(root, "credentials/discord-private.token"), "utf8")).trim();

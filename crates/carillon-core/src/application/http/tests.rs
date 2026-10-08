@@ -14,7 +14,7 @@ use tempfile::tempdir;
 use super::*;
 use crate::Reported;
 use crate::db::Database;
-use carillon_protocol::model::{DeliveryOutcome, TurnActivity, TurnState};
+use carillon_protocol::model::{DeliveryOutcome, JOB_READ_LIMIT, TurnActivity, TurnState};
 
 fn installation(root: &Path) -> Result<AppState> {
     use carillon_installation::config::{AgentConfig, Config, CoreConfig, Provider, hash_token};
@@ -2231,19 +2231,20 @@ enum Snapshot {
     Hanging,
 }
 
-async fn activity_call(
+async fn jobs_call(
     state: &AppState,
     provider: &str,
     token: Option<&str>,
+    query: &str,
 ) -> Result<(StatusCode, serde_json::Value)> {
     use axum::{body::Body, http::Request};
     use tower::ServiceExt as _;
 
     let router = Router::new()
-        .route("/v1/activity", get(active_turns))
+        .route("/v1/jobs", get(jobs))
         .with_state(configured(state));
     let mut request = Request::builder()
-        .uri("/v1/activity")
+        .uri(format!("/v1/jobs{query}"))
         .header(PROVIDER_HEADER, provider);
     if let Some(token) = token {
         request = request.header(http::header::AUTHORIZATION, format!("Bearer {token}"));
@@ -2254,7 +2255,7 @@ async fn activity_call(
     )
     .await??;
     let status = response.status();
-    let body = axum::body::to_bytes(response.into_body(), 65536).await?;
+    let body = axum::body::to_bytes(response.into_body(), 1 << 20).await?;
     Ok((status, serde_json::from_slice(&body)?))
 }
 
@@ -2372,7 +2373,7 @@ async fn hold_running(
 }
 
 #[tokio::test]
-async fn activity_lists_only_the_callers_active_turns_with_runtime_snapshots() -> Result<()> {
+async fn job_reads_show_only_the_callers_jobs_with_runtime_snapshots() -> Result<()> {
     let directory = tempdir()?;
     let mut state = installation(directory.path())?;
     let mode = Arc::new(std::sync::Mutex::new(Snapshot::Current));
@@ -2383,47 +2384,53 @@ async fn activity_lists_only_the_callers_active_turns_with_runtime_snapshots() -
     let runtime = activity_runtime(mode.clone(), sent);
     services.spawn(async move { axum::serve(listener, runtime).await });
 
-    let finished = accept(&state, "finished", "earlier").await?;
+    // A finished job is not at work.
+    accept(&state, "finished", "earlier").await?;
     run_next_turn(&state, "test-runtime", async |_, _, request| {
-        Ok(completed(request))
+        Ok(RuntimeTurnResponse {
+            activity: Some(report(2).map_err(TurnFailure::Uncertain)?),
+            ..completed(request)
+        })
     })
     .await?;
     let running = accept(&state, "running", "conversation").await?;
     let queued = accept(&state, "queued", "conversation").await?;
-    let foreign = foreign_turn(&mut state, directory.path()).await?;
+    foreign_turn(&mut state, directory.path()).await?;
     let (release, worker) = hold_running(&state, "test-runtime", &running.turn_id).await?;
 
-    let (status, body) = activity_call(&state, "test-interface", Some("test-only")).await?;
+    let (status, body) = jobs_call(&state, "test-interface", Some("test-only"), "").await?;
     assert_eq!(status, StatusCode::OK);
+    let accepted = |index: usize| body["jobs"][index]["origin"]["accepted_at"].clone();
     assert_eq!(
         body,
-        json!([
+        json!({"jobs": [
             {
-                "turn_id": running.turn_id,
-                "state": "running",
+                "origin": {"turn_id": running.turn_id, "accepted_at": accepted(0)},
                 "target_id": "test-destination",
-                "accepted_at": body[0]["accepted_at"],
-                // A message turn's work began with itself.
-                "origin": {"turn_id": running.turn_id, "accepted_at": body[0]["accepted_at"]},
-                "activity": {
-                    "phase": "tools",
-                    "running": [{"tool": "bash", "detail": "cargo test", "started_at": 1}],
-                    "recent": [],
-                    "tool_calls": 1,
-                },
+                "turns": [{
+                    "turn_id": running.turn_id,
+                    "state": "running",
+                    "accepted_at": accepted(0),
+                    "activity": {
+                        "phase": "tools",
+                        "running": [{"tool": "bash", "detail": "cargo test", "started_at": 1}],
+                        "recent": [],
+                        "tool_calls": 1,
+                    },
+                }],
             },
             {
-                "turn_id": queued.turn_id,
-                "state": "queued",
+                "origin": {"turn_id": queued.turn_id, "accepted_at": accepted(1)},
                 "target_id": "test-destination",
-                "accepted_at": body[1]["accepted_at"],
-                "origin": {"turn_id": queued.turn_id, "accepted_at": body[1]["accepted_at"]},
-                "activity": null,
+                "turns": [{
+                    "turn_id": queued.turn_id,
+                    "state": "queued",
+                    "accepted_at": accepted(1),
+                }],
             },
-        ])
+        ]})
     );
-    assert!(body[0]["accepted_at"].as_i64().is_some_and(|time| time > 0));
-    assert_ne!(body[0]["turn_id"], json!(finished.turn_id));
+    assert!(accepted(0).as_i64().is_some_and(|time| time > 0));
     // Only running turns are relayed, with the runtime credential, naming the caller.
     assert_eq!(
         received.try_recv()?,
@@ -2435,22 +2442,18 @@ async fn activity_lists_only_the_callers_active_turns_with_runtime_snapshots() -
     );
     assert!(received.try_recv().is_err());
 
-    // Another interface sees its own work and nothing of this one's.
-    let (_, body) = activity_call(&state, "other-interface", Some("other-only")).await?;
-    assert_eq!(body.as_array().map(Vec::len), Some(1));
-    assert_eq!(body[0]["turn_id"], json!(foreign.turn_id));
-
     // A snapshot the runtime cannot supply is absent, never a shorter list.
     for snapshot in [Snapshot::Missing, Snapshot::Malformed, Snapshot::Hanging] {
         *mode
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot;
         let started = std::time::Instant::now();
-        let (status, body) = activity_call(&state, "test-interface", Some("test-only")).await?;
+        let (status, body) = jobs_call(&state, "test-interface", Some("test-only"), "").await?;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body[0]["state"], "running");
-        assert_eq!(body[0]["activity"], serde_json::Value::Null);
-        assert_eq!(body.as_array().map(Vec::len), Some(2));
+        let turn = &body["jobs"][0]["turns"][0];
+        assert_eq!(turn["state"], "running");
+        assert_eq!(turn.get("activity"), None);
+        assert_eq!(body["jobs"].as_array().map(Vec::len), Some(2));
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 
@@ -2462,20 +2465,85 @@ async fn activity_lists_only_the_callers_active_turns_with_runtime_snapshots() -
         ("test-runtime", Some("test-only")),
         ("unknown", Some("test-only")),
     ] {
-        let (status, _) = activity_call(&state, provider, token).await?;
+        let (status, _) = jobs_call(&state, provider, token, "").await?;
         assert_eq!(status, StatusCode::FORBIDDEN, "{provider} {token:?}");
     }
 
     let _ = release.send(());
     assert_eq!(worker.await??, WorkerStep::Advanced);
-    let (_, body) = activity_call(&state, "test-interface", Some("test-only")).await?;
-    assert_eq!(body.as_array().map(Vec::len), Some(1));
-    assert_eq!(body[0]["turn_id"], json!(queued.turn_id));
+    let (_, body) = jobs_call(&state, "test-interface", Some("test-only"), "").await?;
+    assert_eq!(body["jobs"].as_array().map(Vec::len), Some(1));
+    assert_eq!(body["jobs"][0]["origin"]["turn_id"], json!(queued.turn_id));
     Ok(())
 }
 
 #[tokio::test]
-async fn activity_answers_promptly_when_several_runtimes_cannot_describe_their_turns() -> Result<()>
+async fn job_reads_name_the_callers_finished_jobs_within_their_bound() -> Result<()> {
+    let directory = tempdir()?;
+    let mut state = installation(directory.path())?;
+    let finished = accept(&state, "finished", "earlier").await?;
+    run_next_turn(&state, "test-runtime", async |_, _, request| {
+        Ok(RuntimeTurnResponse {
+            activity: Some(report(2).map_err(TurnFailure::Uncertain)?),
+            ..completed(request)
+        })
+    })
+    .await?;
+    let running = accept(&state, "running", "conversation").await?;
+    let foreign = foreign_turn(&mut state, directory.path()).await?;
+    // A finished job is read by name, with its report and its answer's
+    // state; another interface's job is not.
+    let names = format!("?tracked={},{}", finished.turn_id, foreign.turn_id);
+    let (status, body) = jobs_call(&state, "test-interface", Some("test-only"), &names).await?;
+    assert_eq!(status, StatusCode::OK);
+    let [read] = body["jobs"].as_array().context("jobs")?.as_slice() else {
+        anyhow::bail!("expected the finished job only: {body}");
+    };
+    assert_eq!(read["origin"]["turn_id"], json!(finished.turn_id));
+    let turn = &read["turns"][0];
+    assert_eq!(
+        (
+            &turn["state"],
+            &turn["delivery"],
+            &turn["activity"]["tool_calls"]
+        ),
+        (&json!("completed"), &json!("pending"), &json!(2))
+    );
+    assert!(turn["finished_at"].as_i64().is_some());
+    assert_eq!(body.get("next"), None);
+
+    // Another interface sees its own work and nothing of this one's.
+    let (_, body) = jobs_call(&state, "other-interface", Some("other-only"), "").await?;
+    assert_eq!(body["jobs"].as_array().map(Vec::len), Some(1));
+    assert_eq!(body["jobs"][0]["origin"]["turn_id"], json!(foreign.turn_id));
+    let (status, _) = jobs_call(
+        &state,
+        "test-interface",
+        Some("test-only"),
+        &format!("?after={}", foreign.turn_id),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // A read names a bounded list of jobs, or pages through those at work.
+    let many = (0..=JOB_READ_LIMIT)
+        .map(|index| format!("job-{index}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    for query in [
+        format!("?tracked={many}"),
+        format!("?tracked={},", finished.turn_id),
+        format!("?tracked={}&after={}", finished.turn_id, running.turn_id),
+    ] {
+        let (status, _) = jobs_call(&state, "test-interface", Some("test-only"), &query).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn job_reads_answer_promptly_when_several_runtimes_cannot_describe_their_turns() -> Result<()>
 {
     let directory = tempdir()?;
     let mut state = installation(directory.path())?;
@@ -2512,17 +2580,18 @@ async fn activity_answers_promptly_when_several_runtimes_cannot_describe_their_t
         accepted.push(receipt.turn_id);
     }
     let started = std::time::Instant::now();
-    let (status, body) = activity_call(&state, "test-interface", Some("test-only")).await?;
+    let (status, body) = jobs_call(&state, "test-interface", Some("test-only"), "").await?;
     let elapsed = started.elapsed();
     assert_eq!(status, StatusCode::OK);
-    let listed = body
+    let listed = body["jobs"]
         .as_array()
         .context("list")?
         .iter()
-        .map(|turn| {
+        .map(|job| {
+            let turn = &job["turns"][0];
             (
                 turn["turn_id"].as_str().map(str::to_owned),
-                turn["activity"].clone(),
+                turn.get("activity").cloned().unwrap_or_default(),
             )
         })
         .collect::<Vec<_>>();
@@ -2856,10 +2925,20 @@ async fn a_turn_takes_as_long_as_its_runtime_and_ends_when_its_caller_stops() ->
 }
 
 #[tokio::test]
-async fn a_turns_final_report_is_kept_with_its_outcome_and_delivered_within_its_bound() -> Result<()>
-{
+async fn a_turns_final_report_is_kept_with_its_outcome_and_read_within_its_bound() -> Result<()> {
     let directory = tempdir()?;
     let state = installation(directory.path())?;
+    // The report a read naming the turn's job shows beside its outcome.
+    let reported = |turn_id: &str| -> Result<Option<TurnActivity>> {
+        let jobs = state
+            .core
+            .named_jobs("test-interface", &[turn_id.to_owned()])
+            .map_err(|failure| anyhow!("{failure}"))?;
+        let [(_, job)] = jobs.as_slice() else {
+            anyhow::bail!("expected one job: {jobs:?}");
+        };
+        Ok(job.turns[0].activity.clone())
+    };
     let next_delivery = || -> Result<carillon_protocol::model::Delivery> {
         let delivery = state
             .core
@@ -2886,7 +2965,7 @@ async fn a_turns_final_report_is_kept_with_its_outcome_and_delivered_within_its_
     .await?;
     let answered = next_delivery()?;
     assert_eq!(answered.turn_state, TurnState::Completed);
-    assert_eq!(answered.activity, Some(report(3)?));
+    assert_eq!(reported(&answered.turn_id)?, Some(report(3)?));
     // A failed turn's report, though the runtime could show no explanation.
     accept(&state, "failed", "conversation").await?;
     run_next_turn(&state, "test-runtime", async |_, _, _| {
@@ -2900,7 +2979,7 @@ async fn a_turns_final_report_is_kept_with_its_outcome_and_delivered_within_its_
     let failed = next_delivery()?;
     assert_eq!(failed.turn_state, TurnState::Interrupted);
     assert!(failed.content.starts_with("That turn was interrupted."));
-    assert_eq!(failed.activity, Some(report(1)?));
+    assert_eq!(reported(&failed.turn_id)?, Some(report(1)?));
     let error = state
         .core
         .inspect_turn(&failed.turn_id)?
@@ -2925,7 +3004,7 @@ async fn a_turns_final_report_is_kept_with_its_outcome_and_delivered_within_its_
     let oversized = next_delivery()?;
     assert_eq!(oversized.turn_state, TurnState::Completed);
     assert_eq!(oversized.content, "reply to oversized");
-    assert_eq!(oversized.activity, None);
+    assert_eq!(reported(&oversized.turn_id)?, None);
     Ok(())
 }
 

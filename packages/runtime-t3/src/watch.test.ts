@@ -1668,6 +1668,536 @@ const task = (
 const reply = (id: string, runId: string, text: string, at: string) =>
   event(0, "message.updated", { id, runId, role: "assistant", text, createdAt: at }).event.payload;
 
+it("keeps a native Agent child and its provider wake without a pending-background roster", () => {
+  const watch = watchTurn("thread", "message-1", "/workspace");
+  watch.apply(snapshot({ runs: [run("running")] }));
+  watch.apply(
+    event(2, "subagent.updated", task("native", "running", "run-1", { origin: "provider_native" })),
+  );
+  watch.apply(
+    event(3, "message.updated", reply("a", "run-1", "PARENT ACK", "2026-10-05T11:14:53Z")),
+  );
+  watch.apply(event(4, "run.updated", run("completed")));
+  // The real producer can expose the Agent node but no roster. Its work
+  // must not be abandoned with the completed parent run.
+  expect(watch.outcome()).toBeUndefined();
+  expect(watch.quiet()).toBe(false);
+  watch.apply(
+    event(
+      5,
+      "subagent.updated",
+      task("native", "completed", "run-1", { origin: "provider_native" }),
+    ),
+  );
+  expect(watch.outcome()).toBeUndefined();
+  // A person's later message, even on the same provider thread, is not the wake.
+  watch.apply(event(6, "run.created", run("running", "other", 2)));
+  watch.apply(event(7, "turn-item.updated", item("user_message", "run-2", { text: "other" })));
+  watch.apply(
+    event(8, "message.updated", reply("other", "run-2", "FOREIGN", "2026-10-05T11:14:54Z")),
+  );
+  watch.apply(event(9, "run.updated", run("completed", "other", 2)));
+  expect(watch.outcome()).toBeUndefined();
+  watch.apply(event(10, "run.created", run("running", "wake", 3)));
+  watch.apply(event(11, "turn-item.updated", wakeOpening("run-3")));
+  watch.apply(
+    event(12, "message.updated", reply("b", "run-3", "CHILD RESULT", "2026-10-05T11:14:59Z")),
+  );
+  watch.apply(event(13, "run.updated", run("completed", "wake", 3)));
+  expect(watch.outcome()).toEqual({ kind: "completed", output: "PARENT ACK\n\nCHILD RESULT" });
+  expect(watch.activity().work?.items).toEqual([
+    expect.objectContaining({ id: "native", state: "succeeded" }),
+  ]);
+  expect(watch.quiet()).toBe(true);
+});
+
+it("does not call a failed parent quiet while its native child is still running", () => {
+  const watch = watchTurn("thread", "message-1", "/workspace");
+  watch.apply(
+    snapshot({
+      runs: [run("failed")],
+      subagents: [task("native", "running", "run-1", { origin: "provider_native" })],
+    }),
+  );
+  expect(watch.outcome()?.kind).toBe("failed");
+  expect(watch.quiet()).toBe(false);
+  watch.apply(
+    event(
+      2,
+      "subagent.updated",
+      task("native", "cancelled", "run-1", { origin: "provider_native" }),
+    ),
+  );
+  expect(watch.quiet()).toBe(true);
+});
+
+it("fails closed when a fresh snapshot cannot tell whether a settled native child still owes a wake", () => {
+  const watch = watchTurn("thread", "message-1", "/workspace");
+  watch.apply(
+    snapshot({
+      runs: [run("completed")],
+      subagents: [task("native", "completed", "run-1", { origin: "provider_native" })],
+      messages: [reply("parent", "run-1", "PARENT ACK", "2026-10-05T11:14:53Z")],
+    }),
+  );
+  expect(watch.outcome()).toMatchObject({ kind: "unresolved" });
+  expect(watch.quiet()).toBe(false);
+  // If the provider publishes its wake before the unresolved turn exits,
+  // its own opening resolves that ambiguity without taking another user's run.
+  watch.apply(event(2, "run.created", run("running", "wake", 2)));
+  watch.apply(event(3, "turn-item.updated", wakeOpening("run-2")));
+  watch.apply(
+    event(4, "message.updated", reply("result", "run-2", "CHILD RESULT", "2026-10-05T11:14:59Z")),
+  );
+  watch.apply(event(5, "run.updated", run("completed", "wake", 2)));
+  expect(watch.outcome()).toEqual({ kind: "completed", output: "PARENT ACK\n\nCHILD RESULT" });
+});
+
+it("retains native result uncertainty when only its parent was known before reconnecting", () => {
+  const watch = watchTurn("thread", "message-1", "/workspace");
+  watch.apply(snapshot({ runs: [run("running")] }));
+  watch.apply(
+    snapshot(
+      {
+        runs: [run("completed")],
+        subagents: [task("native", "completed", "run-1", { origin: "provider_native" })],
+        messages: [reply("parent", "run-1", "PARENT ACK", "2026-10-05T11:14:53Z")],
+      },
+      2,
+    ),
+  );
+  expect(watch.outcome()).toMatchObject({ kind: "unresolved" });
+  expect(watch.quiet()).toBe(false);
+});
+
+it.each([false, true])(
+  "keeps recovered native results unresolved when one wake cannot account for two children (resumed: %s)",
+  (resumed) => {
+    const watch = watchTurn("thread", "message-1", "/workspace");
+    if (resumed) watch.apply(snapshot({ runs: [run("running")] }));
+    watch.apply(
+      snapshot(
+        {
+          runs: [run("completed"), run("completed", "wake", 2)],
+          subagents: [
+            task("a", "completed", "run-1", { origin: "provider_native" }),
+            task("b", "completed", "run-1", { origin: "provider_native" }),
+          ],
+          turnItems: [wakeOpening("run-2")],
+          messages: [
+            reply("parent", "run-1", "PARENT", "2026-10-05T11:14:53Z"),
+            reply("first", "run-2", "FIRST RESULT", "2026-10-05T11:14:59Z"),
+          ],
+        },
+        resumed ? 2 : 1,
+      ),
+    );
+    expect(watch.outcome()).toMatchObject({ kind: "unresolved" });
+    expect(watch.quiet()).toBe(false);
+    expect(watch.activity().work?.partial).toBe(true);
+    // A generic second wake still has no child identity; counting runs is
+    // not proof that either child was reported exactly once.
+    watch.apply(event(3, "run.created", run("running", "wake-again", 3)));
+    watch.apply(event(4, "turn-item.updated", wakeOpening("run-3")));
+    watch.apply(event(5, "run.updated", run("completed", "wake-again", 3)));
+    expect(watch.outcome()).toMatchObject({ kind: "unresolved" });
+  },
+);
+
+it("attributes a native provider wake already present beside its child in the first snapshot", () => {
+  const watch = watchTurn("thread", "message-1", "/workspace");
+  watch.apply(
+    snapshot({
+      runs: [run("completed"), run("completed", "wake", 2)],
+      subagents: [task("native", "completed", "run-1", { origin: "provider_native" })],
+      turnItems: [wakeOpening("run-2")],
+      messages: [
+        reply("parent", "run-1", "PARENT ACK", "2026-10-05T11:14:53Z"),
+        reply("result", "run-2", "CHILD RESULT", "2026-10-05T11:14:59Z"),
+      ],
+    }),
+  );
+  expect(watch.outcome()).toEqual({ kind: "completed", output: "PARENT ACK\n\nCHILD RESULT" });
+  expect(watch.quiet()).toBe(true);
+});
+
+it.each([false, true])(
+  "refuses surplus generic wakes for one recovered native result (resumed: %s)",
+  (resumed) => {
+    const watch = watchTurn("thread", "message-1", "/workspace");
+    if (resumed) watch.apply(snapshot({ runs: [run("running")] }));
+    watch.apply(
+      snapshot(
+        {
+          runs: [run("completed"), run("completed", "wake", 2), run("completed", "surplus", 3)],
+          subagents: [task("native", "completed", "run-1", { origin: "provider_native" })],
+          turnItems: [wakeOpening("run-2"), wakeOpening("run-3")],
+          messages: [
+            reply("parent", "run-1", "PARENT", "2026-10-05T11:14:53Z"),
+            reply("own", "run-2", "OWN RESULT", "2026-10-05T11:14:59Z"),
+            reply("other", "run-3", "FOREIGN RESULT", "2026-10-05T11:15:01Z"),
+          ],
+        },
+        resumed ? 2 : 1,
+      ),
+    );
+    expect(watch.outcome()).toMatchObject({ kind: "unresolved" });
+    expect(watch.latestRun()?.id).toBe("run-2");
+  },
+);
+
+it.each([false, true])(
+  "retains only native result uncertainty still owed before a gap (inside: %s)",
+  (inside) => {
+    const watch = watchTurn("thread", "message-1", "/workspace");
+    watch.apply(
+      snapshot({
+        runs: [run("running")],
+        subagents: [
+          task("a", inside ? "completed" : "running", "run-1", { origin: "provider_native" }),
+          ...(inside ? [task("b", "running", "run-1", { origin: "provider_native" })] : []),
+        ],
+      }),
+    );
+    watch.apply(event(2, "run.updated", run("completed")));
+    if (!inside)
+      watch.apply(
+        event(
+          3,
+          "subagent.updated",
+          task("a", "completed", "run-1", { origin: "provider_native" }),
+        ),
+      );
+    watch.apply(
+      snapshot(
+        {
+          runs: [run("completed")],
+          subagents: [
+            task("a", "completed", "run-1", { origin: "provider_native" }),
+            task("b", "completed", "run-1", { origin: "provider_native" }),
+          ],
+          messages: [reply("parent", "run-1", "PARENT", "2026-10-05T11:14:53Z")],
+        },
+        4,
+      ),
+    );
+    expect(watch.outcome()).toBeUndefined();
+    watch.apply(event(5, "run.created", run("running", "wake", 2)));
+    watch.apply(event(6, "turn-item.updated", wakeOpening("run-2")));
+    watch.apply(
+      event(7, "message.updated", reply("result", "run-2", "B RESULT", "2026-10-05T11:14:59Z")),
+    );
+    watch.apply(event(8, "run.updated", run("completed", "wake", 2)));
+    if (inside) {
+      expect(watch.outcome()).toEqual({ kind: "completed", output: "PARENT\n\nB RESULT" });
+      expect(watch.quiet()).toBe(true);
+    } else {
+      // A was still owed, too: one unlinked wake cannot discharge both A and B.
+      expect(watch.outcome()).toMatchObject({ kind: "unresolved" });
+      expect(watch.quiet()).toBe(false);
+    }
+  },
+);
+
+it("ends unresolved rather than waiting forever for a native child omitted by a resumed snapshot", () => {
+  const watch = watchTurn("thread", "message-1", "/workspace");
+  watch.apply(
+    snapshot({
+      runs: [run("running")],
+      subagents: [task("native", "running", "run-1", { origin: "provider_native" })],
+    }),
+  );
+  watch.apply(event(2, "run.updated", run("completed")));
+  expect(watch.outcome()).toBeUndefined();
+  watch.apply(snapshot({ runs: [run("completed")] }, 3));
+  expect(watch.outcome()).toMatchObject({ kind: "unresolved" });
+  expect(watch.quiet()).toBe(false);
+  expect(watch.activity().work).toMatchObject({
+    partial: true,
+    items: [expect.objectContaining({ id: "native", state: "unknown" })],
+  });
+});
+
+it("does not await native Agent work that finished inside the parent or belongs to another run", () => {
+  const watch = watchTurn("thread", "message-1", "/workspace");
+  watch.apply(
+    snapshot({
+      runs: [run("running")],
+      subagents: [task("foreign", "running", "run-other", { origin: "provider_native" })],
+    }),
+  );
+  watch.apply(
+    event(2, "subagent.updated", task("native", "running", "run-1", { origin: "provider_native" })),
+  );
+  watch.apply(
+    event(
+      3,
+      "subagent.updated",
+      task("native", "completed", "run-1", { origin: "provider_native" }),
+    ),
+  );
+  watch.apply(event(4, "message.updated", reply("a", "run-1", "RESULT", "2026-10-05T11:14:53Z")));
+  watch.apply(event(5, "run.updated", run("completed")));
+  expect(watch.outcome()).toEqual({ kind: "completed", output: "RESULT" });
+  expect(watch.quiet()).toBe(true);
+});
+
+it("keeps other native children after the first child's wake completes", () => {
+  const watch = watchTurn("thread", "message-1", "/workspace");
+  watch.apply(
+    snapshot({
+      runs: [run("running")],
+      subagents: [
+        task("a", "running", "run-1", { origin: "provider_native" }),
+        task("b", "running", "run-1", { origin: "provider_native" }),
+      ],
+    }),
+  );
+  watch.apply(
+    event(2, "message.updated", reply("parent", "run-1", "PARENT", "2026-10-05T11:14:52Z")),
+  );
+  watch.apply(event(3, "run.updated", run("completed")));
+  watch.apply(
+    event(4, "subagent.updated", task("a", "completed", "run-1", { origin: "provider_native" })),
+  );
+  watch.apply(event(5, "run.created", run("running", "wake-a", 2)));
+  watch.apply(event(6, "turn-item.updated", wakeOpening("run-2")));
+  watch.apply(
+    event(7, "message.updated", reply("first", "run-2", "FIRST", "2026-10-05T11:14:53Z")),
+  );
+  watch.apply(event(8, "run.updated", run("completed", "wake-a", 2)));
+  expect(watch.outcome()).toBeUndefined();
+  expect(watch.quiet()).toBe(false);
+  watch.apply(
+    event(9, "subagent.updated", task("b", "completed", "run-1", { origin: "provider_native" })),
+  );
+  watch.apply(event(10, "run.created", run("running", "wake-b", 3)));
+  watch.apply(event(11, "turn-item.updated", wakeOpening("run-3")));
+  watch.apply(
+    event(12, "message.updated", reply("second", "run-3", "SECOND", "2026-10-05T11:14:54Z")),
+  );
+  watch.apply(event(13, "run.updated", run("completed", "wake-b", 3)));
+  expect(watch.outcome()).toEqual({ kind: "completed", output: "PARENT\n\nFIRST\n\nSECOND" });
+  expect(watch.quiet()).toBe(true);
+});
+
+it("replaces the report-back row with its confirmed completion in a follow-up report", () => {
+  const watch = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
+  watch.apply(snapshot({ runs: [run("completed")], subagents: [task("child", "running")] }));
+  watch.apply(
+    event(2, "run.updated", {
+      ...run("completed"),
+      delegatedCompletion: { disposition: "open", delivery: { messageId: "continuation" } },
+    }),
+  );
+  watch.apply(
+    event(
+      3,
+      "subagent.updated",
+      task("child", "completed", "run-1", { completionDelivery: { state: "delivered" } }),
+    ),
+  );
+  watch.apply(event(4, "run.created", run("running", "continuation", 2)));
+  expect(watch.activity().work?.items).toContainEqual({
+    id: "report:message-1",
+    kind: "task",
+    label: "report back to this conversation",
+    state: "running",
+  });
+  watch.apply(
+    event(5, "message.updated", reply("b", "run-2", "CHILD RESULT", "2026-10-05T11:14:59Z")),
+  );
+  watch.apply(event(6, "run.updated", run("completed", "continuation", 2)));
+  expect(watch.outcome()).toEqual({ kind: "completed", output: "CHILD RESULT" });
+  expect(watch.activity().work?.items).toContainEqual({
+    id: "report:message-1",
+    kind: "task",
+    label: "report back to this conversation",
+    state: "succeeded",
+  });
+});
+
+it.each(["approval_request", "user_input_request"])(
+  "shows a completed follow-up with a pending %s as waiting, not succeeded",
+  (type) => {
+    const watch = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
+    watch.apply(
+      snapshot({
+        runs: [
+          {
+            ...run("completed"),
+            delegatedCompletion: { disposition: "open", delivery: { messageId: "continuation" } },
+          },
+          run("completed", "continuation", 2),
+        ],
+        subagents: [
+          task("child", "completed", "run-1", { completionDelivery: { state: "delivered" } }),
+        ],
+        messages: [reply("report", "run-2", "Needs your answer.", "2026-10-05T11:14:59Z")],
+        runtimeRequests: [{ id: "request-1", kind: "tool_approval", status: "pending" }],
+        turnItems: [
+          item(
+            type,
+            "run-2",
+            type === "approval_request"
+              ? { requestId: "request-1", requestKind: "command" }
+              : {
+                  requestId: "request-1",
+                  questions: [{ id: "choice", header: "Choice", question: "Continue?" }],
+                },
+          ),
+        ],
+      }),
+    );
+    expect(watch.outcome()?.kind).toBe("blocked");
+    expect(watch.activity().work?.items).toContainEqual({
+      id: "report:message-1",
+      kind: "task",
+      label: "report back to this conversation",
+      state: "waiting",
+    });
+  },
+);
+
+it.each([true, false])(
+  "settles a report row even without a continuation run (elsewhere: %s)",
+  (elsewhere) => {
+    const watch = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
+    watch.apply(
+      snapshot({
+        runs: [run("completed"), run("completed", "other", 2)],
+        subagents: [
+          task("child", elsewhere ? "completed" : "cancelled", "run-1", {
+            completionDelivery: elsewhere
+              ? { state: "acknowledged", observedByRunId: "run-2" }
+              : { state: "disposed" },
+          }),
+        ],
+      }),
+    );
+    expect(watch.outcome()?.kind).toBe(elsewhere ? "completed" : "failed");
+    expect(watch.activity().work?.items).toContainEqual(
+      expect.objectContaining({
+        id: "report:message-1",
+        state: elsewhere ? "succeeded" : "failed",
+      }),
+    );
+  },
+);
+
+it("warns about native work started by a follow-up even without a provider roster", () => {
+  const watch = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
+  watch.apply(
+    snapshot({
+      runs: [
+        {
+          ...run("completed"),
+          delegatedCompletion: { disposition: "open", delivery: { messageId: "continuation" } },
+        },
+        run("completed", "continuation", 2),
+      ],
+      subagents: [
+        task("child", "completed", "run-1", { completionDelivery: { state: "delivered" } }),
+        task("native", "running", "run-2", { origin: "provider_native" }),
+      ],
+      messages: [reply("report", "run-2", "REPORT", "2026-10-05T11:14:59Z")],
+    }),
+  );
+  expect(watch.outcome()).toEqual({
+    kind: "completed",
+    output:
+      "REPORT\n\n[The report started background work in T3; its result will show in T3, not here.]",
+  });
+  expect(watch.activity().work?.items).toContainEqual(
+    expect.objectContaining({ id: "native", state: "running" }),
+  );
+});
+
+it("marks a report missing from a bounded snapshot as failed, not successfully delivered", () => {
+  const watch = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
+  watch.apply({
+    ...snapshot({
+      runs: [
+        {
+          ...run("completed"),
+          delegatedCompletion: { disposition: "open", delivery: { messageId: "continuation" } },
+        },
+        run("completed", "continuation", 2),
+      ],
+      subagents: [
+        task("child", "completed", "run-1", { completionDelivery: { state: "delivered" } }),
+      ],
+    }),
+    hasMoreHistory: true,
+  });
+  expect(watch.outcome()?.kind).toBe("failed");
+  expect(watch.activity().work?.items).toContainEqual({
+    id: "report:message-1",
+    kind: "task",
+    label: "report back to this conversation",
+    state: "failed",
+  });
+});
+
+it.each(["", " \n "])(
+  "fails an empty completed report (%j), including its report-back row",
+  (text) => {
+    const watch = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
+    watch.apply(
+      snapshot({
+        runs: [
+          {
+            ...run("completed"),
+            delegatedCompletion: { disposition: "open", delivery: { messageId: "continuation" } },
+          },
+          run("completed", "continuation", 2),
+        ],
+        subagents: [
+          task("child", "completed", "run-1", { completionDelivery: { state: "delivered" } }),
+        ],
+        messages: text.length === 0 ? [] : [reply("empty", "run-2", text, "2026-10-05T11:14:59Z")],
+      }),
+    );
+    expect(watch.outcome()).toEqual({
+      kind: "failed",
+      explanation: "T3 finished the run without an answer.",
+    });
+    expect(watch.activity().work?.items).toContainEqual({
+      id: "report:message-1",
+      kind: "task",
+      label: "report back to this conversation",
+      state: "failed",
+    });
+  },
+);
+
+it("reports a failed continuation as failed rather than retaining a queued report-back row", () => {
+  const watch = watchTurn("thread", "message-1", "/workspace", { followUp: { after: 1 } });
+  watch.apply(
+    snapshot({
+      runs: [run("completed")],
+      subagents: [
+        task("child", "completed", "run-1", { completionDelivery: { state: "claimed" } }),
+      ],
+    }),
+  );
+  watch.apply(
+    event(2, "run.updated", {
+      ...run("completed"),
+      delegatedCompletion: { disposition: "open", delivery: { messageId: "continuation" } },
+    }),
+  );
+  watch.apply(event(3, "run.created", run("running", "continuation", 2)));
+  watch.apply(event(4, "run.updated", run("failed", "continuation", 2)));
+  expect(watch.outcome()?.kind).toBe("failed");
+  expect(watch.activity().work?.items).toContainEqual({
+    id: "report:message-1",
+    kind: "task",
+    label: "report back to this conversation",
+    state: "failed",
+  });
+});
+
 it("answers when its run completes and hands delegated work still owed to a follow-up, in the native order", () => {
   const watch = watchTurn("thread", "message-1", "/workspace");
   watch.apply(snapshot({ runs: [run("running")] }));
@@ -1758,7 +2288,12 @@ it("reports the continuations of a turn as a follow-up, waiting while the work s
   expect(watch.outcome()).toBeUndefined();
   expect(watch.activity()).toMatchObject({
     phase: "waiting",
-    work: { items: [{ id: "task-1", state: "running" }] },
+    work: {
+      items: [
+        { id: "task-1", state: "running" },
+        { id: "report:message-1", state: "queued" },
+      ],
+    },
   });
   // Another run on the thread is someone else's, never a stray of the follow-up.
   watch.apply(event(2, "run.updated", run("completed", "someone-else", 2)));
@@ -1793,6 +2328,9 @@ it("reports the continuations of a turn as a follow-up, waiting while the work s
     output: "First result in.",
     followUp: { message: "message-1", after: 3 },
   });
+  expect(watch.activity().work?.items).toContainEqual(
+    expect.objectContaining({ id: "report:message-1", state: "queued" }),
+  );
 });
 
 it("follows a resumed snapshot's continuation by its message link, and fails when the work ends without a report", () => {
@@ -2189,7 +2727,10 @@ it("resumes a follow-up on a fresh snapshot while T3 still owes the delivery, an
   expect(follow.activity()).toMatchObject({
     phase: "waiting",
     work: {
-      items: [{ id: "child", state: "succeeded" }],
+      items: [
+        { id: "report:message-1", state: "queued" },
+        { id: "child", state: "succeeded" },
+      ],
     },
   });
   // The continuation starts: its message is not projected and the parent's
@@ -3108,4 +3649,48 @@ it("says which model, effort and context the turn's run uses, as T3 records them
   );
   expect(watch.activity().agent).toEqual({ model: "gpt-6", effort: "xhigh" });
   expect(Check(TurnActivitySchema, watch.activity())).toBe(true);
+});
+
+it("dates a call and background work when the fold first sees them, so reading activity changes nothing", () => {
+  vi.useFakeTimers();
+  try {
+    vi.setSystemTime(new Date("2026-10-04T08:00:00Z"));
+    const watch = watchTurn("thread", "message-1", "/workspace");
+    const listing = (tasks: { taskId: string; kind: string; description?: string }[]) => ({
+      id: "provider-thread",
+      providerSessionId: "session",
+      pendingBackgroundTasks: tasks,
+    });
+    const call = item("command_execution", "run-1", { input: "make", startedAt: null }, "running");
+    watch.apply(snapshot({ runs: [run("running")], turnItems: [call] }));
+    watch.apply(
+      event(
+        2,
+        "provider-thread.updated",
+        listing([{ taskId: "bg", kind: "command", description: "sleep 300" }]),
+      ),
+    );
+    const seenAt = Math.floor(Date.parse("2026-10-04T08:00:00Z") / 1000);
+    // Read a minute later, and again: both show when the fold saw the work.
+    vi.setSystemTime(new Date("2026-10-04T08:01:00Z"));
+    const first = watch.activity();
+    vi.setSystemTime(new Date("2026-10-04T08:02:00Z"));
+    expect(watch.activity()).toEqual(first);
+    expect(first.running).toEqual([
+      { tool: "bash", detail: "make", started_at: seenAt, estimated: true },
+      { tool: "command", detail: "sleep 300", started_at: seenAt, estimated: true },
+    ]);
+    // Work no longer listed is forgotten as it goes: listed again, it is new.
+    watch.apply(event(3, "provider-thread.updated", listing([])));
+    watch.apply(
+      event(
+        4,
+        "provider-thread.updated",
+        listing([{ taskId: "bg", kind: "command", description: "sleep 300" }]),
+      ),
+    );
+    expect(watch.activity().running.at(-1)?.started_at).toBe(seenAt + 120);
+  } finally {
+    vi.useRealTimers();
+  }
 });

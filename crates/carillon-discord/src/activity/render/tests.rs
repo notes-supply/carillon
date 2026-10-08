@@ -1,10 +1,11 @@
-use super::{Shown, Status, card, compact, earns_summary, summary};
+use super::{Shown, Status, card, compact, earned, job_card, job_summary};
 use crate::config::ActivityMarkers;
 use carillon_protocol::model::{
-    ActivityPhase, AgentInfo, ContextUse, Delivery, DeliveryOutcome, FinishedTool, Origin,
-    RunningTool, TurnActivity, TurnState, WorkItem, WorkKind, WorkState, WorkSummary,
+    ActivityPhase, AgentInfo, ContextUse, DeliveryOutcome, DeliveryState, FinishedTool, Job,
+    JobTurn, Origin, RunningTool, TurnActivity, TurnState, WorkItem, WorkKind, WorkState,
+    WorkSummary,
 };
-use std::num::NonZeroU32;
+use std::{collections::BTreeMap, num::NonZeroU32};
 use twilight_model::channel::message::Embed;
 
 fn running(tool: &str, detail: &str) -> RunningTool {
@@ -67,24 +68,37 @@ fn live<'a>(activity: &'a TurnActivity, reports: Vec<&'a TurnActivity>) -> Shown
     }
 }
 
-/// The delivery of a message turn asked for at 1 790 000 000 and finished
-/// 45 seconds later, reporting `activity`.
-fn delivered(turn_state: TurnState, activity: Option<TurnActivity>) -> Delivery {
-    Delivery {
-        turn_state,
-        id: 1,
-        turn_id: "turn".to_owned(),
-        target_id: "300".to_owned(),
-        feedback_target_id: "300:400".to_owned(),
-        content: "answer".to_owned(),
+/// A turn of a job asked for at 1 790 000 000; an ended one finished 45
+/// seconds later, its answer sent.
+fn turn(turn_id: &str, state: TurnState, activity: Option<TurnActivity>) -> JobTurn {
+    let ended = matches!(state, TurnState::Completed | TurnState::Interrupted);
+    JobTurn {
+        turn_id: turn_id.to_owned(),
+        state,
+        accepted_at: 1_790_000_000,
+        finished_at: ended.then_some(1_790_000_045),
+        activity,
+        delivery: ended.then_some(DeliveryState::Delivered),
+    }
+}
+
+/// The job the message turn `turn` began, with `turns` after it.
+fn job(turns: Vec<JobTurn>) -> Job {
+    Job {
         origin: Origin {
             turn_id: "turn".to_owned(),
             accepted_at: 1_790_000_000,
         },
-        finished_at: 1_790_000_045,
-        activity,
-        continued_by: None,
+        target_id: "300".to_owned(),
+        turns,
+        earlier: false,
     }
+}
+
+/// A message turn that ended as `turn_state`, reporting `activity`, its
+/// answer sent.
+fn settled(turn_state: TurnState, activity: Option<TurnActivity>) -> Job {
+    job(vec![turn("turn", turn_state, activity)])
 }
 
 /// The card as text: its description, then each field under its name.
@@ -237,14 +251,10 @@ fn status_rows_say_how_the_job_stands() {
         status(Status::Continuing),
         "⏳ Answered · delegated work goes on · started <t:1790000000:R>"
     );
-    assert_eq!(
-        status(Status::Restarted),
-        "⚠️ Carillon restarted while this was in progress; how it ends shows here if Carillon learns it."
-    );
     let ended = |turn_state, delivery| Status::Ended {
         turn_state,
         delivery,
-        finished_at: 1_790_000_135,
+        finished_at: Some(1_790_000_135),
     };
     // A fixed duration, from the request: it includes any wait in the queue.
     assert_eq!(
@@ -630,6 +640,7 @@ fn markers_are_configured_per_row_and_empty_ones_leave_no_space() {
         failed: "<a:error:104>".to_owned(),
         uncertain: "⚠".to_owned(),
         stopped: "■".to_owned(),
+        models: BTreeMap::new(),
     };
     let activity = tools();
     let embed = card(&live(&activity, Vec::new()), &custom);
@@ -646,12 +657,57 @@ fn markers_are_configured_per_row_and_empty_ones_leave_no_space() {
         failed: String::new(),
         uncertain: String::new(),
         stopped: String::new(),
+        models: BTreeMap::new(),
     };
     let embed = card(&live(&activity, Vec::new()), &empty);
     assert_eq!(
         text(&embed),
         "Working · started <t:1790000000:R>\n> Checking tests\nCalls:\nread `README.md`\nmcp??1?\nbash `echo ˋidˋ > x` · <t:1790000000:R>"
     );
+}
+
+#[test]
+fn configured_brand_emotes_match_the_actual_main_and_child_models_without_changing_statuses() {
+    let mut markers = ActivityMarkers::default();
+    markers
+        .models
+        .insert("claude-".to_owned(), "<:claude:101>".to_owned());
+    markers
+        .models
+        .insert("claude-special-".to_owned(), "<:special:102>".to_owned());
+    markers
+        .models
+        .insert("gpt-".to_owned(), "<:openai:103>".to_owned());
+    let mut activity = tools();
+    activity.agent = Some(AgentInfo {
+        model: Some("claude-special-model".to_owned()),
+        effort: None,
+        context: None,
+    });
+    let mut child = work(
+        "child",
+        WorkKind::Delegation,
+        "research",
+        WorkState::Succeeded,
+    );
+    child.actor = Some("gpt-6.1-sol".to_owned());
+    activity.work = Some(WorkSummary {
+        items: vec![child],
+        partial: false,
+        omitted: None,
+    });
+    let shown = text(&card(&live(&activity, Vec::new()), &markers));
+    assert!(shown.starts_with("⏳ Working"));
+    assert!(shown.contains("Agent:\n<:special:102> claude-special-model"));
+    assert!(shown.contains("done · <:openai:103> gpt-6.1-sol"));
+    activity.agent = Some(AgentInfo {
+        model: Some("unknown-model".to_owned()),
+        effort: None,
+        context: None,
+    });
+    let plain = text(&card(&live(&activity, Vec::new()), &markers));
+    assert!(plain.contains("Agent:\nunknown-model"));
+    assert!(!plain.contains("<:special:102>"));
 }
 
 #[test]
@@ -668,7 +724,7 @@ fn a_partial_report_says_so() {
 }
 
 /// The final reports of either runtime's shape, from the shared wire
-/// fixtures, through an ordinary delivery into the one renderer.
+/// fixtures, as core keeps them with a job, through the one renderer.
 #[test]
 fn every_runtimes_report_renders_as_a_summary_within_discords_limits() -> anyhow::Result<()> {
     #[derive(serde::Deserialize)]
@@ -680,29 +736,31 @@ fn every_runtimes_report_renders_as_a_summary_within_discords_limits() -> anyhow
     ))?;
     let markers = ActivityMarkers::default();
     for activity in fixtures.activities {
-        let delivery = delivered(TurnState::Completed, Some(activity.clone()));
-        let embed = summary(&delivery, &markers);
+        let settled = settled(TurnState::Completed, Some(activity.clone()));
+        let embed = job_card(&settled, None, &markers);
         valid(&embed);
         let shown = text(&embed);
-        if earns_summary(&delivery) {
-            assert!(
-                shown.starts_with("✓ Done · answered 45s after the request"),
-                "{shown}"
-            );
-        }
+        assert!(
+            shown.starts_with("✓ Done · answered 45s after the request"),
+            "{shown}"
+        );
+        assert_eq!(
+            job_summary(&settled, &markers).is_some(),
+            earned(&settled, None)
+        );
         valid(&card(&live(&activity, Vec::new()), &markers));
     }
     Ok(())
 }
 
 #[test]
-fn work_or_a_stop_earns_a_summary() {
+fn work_a_stop_or_work_continued_after_an_answer_earns_a_summary() {
     let mut answer_only = tools();
     answer_only.running.clear();
     answer_only.recent.clear();
     answer_only.tool_calls = 0;
     let earns = |turn_state, report: Option<&TurnActivity>| {
-        earns_summary(&delivered(turn_state, report.cloned()))
+        earned(&settled(turn_state, report.cloned()), None)
     };
     let completed = TurnState::Completed;
     assert!(!earns(completed, None));
@@ -720,12 +778,113 @@ fn work_or_a_stop_earns_a_summary() {
         omitted: None,
     });
     assert!(earns(completed, Some(&delegated)));
+    // What a card saw a turn do counts when the turn gave no report.
+    let plain = settled(completed, None);
+    assert!(earned(&plain, Some(&("turn".to_owned(), tools()))));
     // A turn that stopped earns one whatever it reported, and it shows only the stop.
     assert!(earns(TurnState::Interrupted, None));
     assert!(earns(TurnState::Interrupted, Some(&answer_only)));
-    let stopped = summary(
-        &delivered(TurnState::Interrupted, None),
+    let stopped = job_summary(
+        &settled(TurnState::Interrupted, None),
         &ActivityMarkers::default(),
     );
-    assert_eq!(text(valid(&stopped)), "⏹️ Stopped before finishing.");
+    assert_eq!(
+        stopped.as_ref().map(|embed| text(valid(embed))).as_deref(),
+        Some("⏹️ Stopped before finishing.")
+    );
+    // An answer whose work an observation continued delegated that work.
+    let continued = job(vec![
+        turn("turn", completed, Some(answer_only.clone())),
+        turn("report", completed, Some(answer_only.clone())),
+    ]);
+    assert!(earned(&continued, None));
+}
+
+#[test]
+fn a_long_jobs_summary_keeps_work_its_listed_reports_left_out_and_says_so() {
+    let markers = ActivityMarkers::default();
+    let mut quiet = tools();
+    quiet.running.clear();
+    quiet.recent.clear();
+    quiet.tool_calls = 0;
+    quiet.headline = None;
+    // The work was reported by turns before the latest a read lists; the
+    // listed ones report nothing of it.
+    let mut long = job((0..carillon_protocol::model::JOB_TURN_LIMIT)
+        .map(|index| {
+            turn(
+                &format!("report-{index}"),
+                TurnState::Completed,
+                Some(quiet.clone()),
+            )
+        })
+        .collect());
+    long.earlier = true;
+    assert!(earned(&long, None));
+    let summary = job_summary(&long, &markers).map(|embed| text(valid(&embed)));
+    let summary = summary.unwrap_or_default();
+    assert!(summary.starts_with("✓ Done · answered 45s"), "{summary}");
+    assert!(
+        summary.contains("Some of this work may not be shown here."),
+        "{summary}"
+    );
+}
+
+#[test]
+fn a_cards_status_and_rows_come_from_the_jobs_recorded_turns() {
+    let markers = ActivityMarkers::default();
+    let status = |job: &Job, seen: Option<&super::Seen>| {
+        job_card(job, seen, &markers)
+            .description
+            .unwrap_or_default()
+    };
+    let mut parent = turn("turn", TurnState::Completed, Some(tools()));
+    parent.delivery = Some(DeliveryState::Pending);
+    // A queued message waits behind earlier work; a queued observation
+    // continues work an answer left running.
+    assert!(
+        status(&job(vec![turn("turn", TurnState::Queued, None)]), None)
+            .starts_with("⏳ Waiting for earlier work to finish")
+    );
+    let continuing = job(vec![
+        parent.clone(),
+        turn("report", TurnState::Queued, None),
+    ]);
+    assert!(status(&continuing, None).starts_with("⏳ Answered · delegated work goes on"));
+    // A running turn without a snapshot shows the phase the card last saw.
+    let running = job(vec![turn("turn", TurnState::Running, None)]);
+    let mut model = tools();
+    model.phase = ActivityPhase::Model;
+    assert!(
+        status(&running, Some(&("turn".to_owned(), model)))
+            .starts_with("⏳ Working · Waiting for the model")
+    );
+    // Ended, its answer not yet sent, and then sent or not.
+    let finishing = job(vec![parent.clone()]);
+    assert!(status(&finishing, None).starts_with("⏳ Finishing up"));
+    let mut uncertain = parent.clone();
+    uncertain.delivery = Some(DeliveryState::Uncertain);
+    assert!(
+        status(&job(vec![uncertain]), None)
+            .starts_with("⚠️ Finished, but the reply may not have been delivered.")
+    );
+    // An observation that ended without a report leaves the summary saying
+    // it may not show all the work, and a turn's last snapshot stands for
+    // its missing report.
+    let unreported = job(vec![
+        turn("turn", TurnState::Completed, Some(tools())),
+        turn("report", TurnState::Completed, None),
+    ]);
+    assert!(status(&unreported, None).contains("Some of this work may not be shown here."));
+    let mut snapshot = tools();
+    snapshot.recent = vec![finished("grep", Some("TODO"), true)];
+    let plain = job(vec![turn("turn", TurnState::Completed, None)]);
+    let shown = text(&job_card(
+        &plain,
+        Some(&("turn".to_owned(), snapshot)),
+        &markers,
+    ));
+    assert!(shown.contains("✓ grep `TODO`"), "{shown}");
+    assert!(!shown.contains("echo"), "{shown}");
+    assert!(!shown.contains("may not be shown"), "{shown}");
 }

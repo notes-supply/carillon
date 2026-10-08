@@ -1,16 +1,17 @@
 //! Admission, runtime ownership, execution and delivery over one SQLite authority.
 use crate::{
     attachments::{self, Capture, Reconciled, Unusable},
-    db::{ClaimedTurn, Database, TurnFiles},
+    db::{ClaimedTurn, Database, JobPage, TurnFiles},
     intake::Intake,
     resources,
 };
 use anyhow::{Context as _, Result, anyhow};
 use carillon_installation::config::AttachmentLimits;
 use carillon_protocol::model::{
-    ACTIVITY_REPORT_LIMIT, ActiveTurn, Delivery, DeliveryAck, DeliveryReconciliation, EventReceipt,
-    EventStatus, ExternalEvent, ModelQuery, RuntimeTurnRequest, RuntimeTurnResponse,
-    SelectedProvider, StateCounts, TurnActivity, TurnInspection, TurnSummary, UnansweredTurn,
+    ACTIVITY_REPORT_LIMIT, Delivery, DeliveryAck, DeliveryReconciliation, EventReceipt,
+    EventStatus, ExternalEvent, JOB_READ_LIMIT, Job, ModelQuery, RuntimeTurnRequest,
+    RuntimeTurnResponse, SelectedProvider, StateCounts, TurnActivity, TurnInspection, TurnSummary,
+    UnansweredTurn,
 };
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::watch;
@@ -576,13 +577,36 @@ impl Core {
         Ok(())
     }
 
-    /// Queued and running turns of an authenticated interface, in acceptance
-    /// order, each with the ID of the runtime that owns it. `activity` is
-    /// left empty: snapshots belong to the runtime.
+    /// A page of an authenticated interface's jobs at work, after the job
+    /// whose turn at work was `after`, each with the ID of the runtime that
+    /// owns it, and where the next page begins when more follow. A running
+    /// turn's `activity` is left empty: snapshots belong to the runtime.
     /// # Errors
-    /// Returns storage errors.
-    pub fn active_turns(&self, interface: &str) -> Result<Vec<(String, ActiveTurn)>> {
-        self.database.active_turns(interface)
+    /// Returns a cursor that is not one of the interface's turns as invalid
+    /// input, or storage errors.
+    pub fn jobs_at_work(&self, interface: &str, after: Option<&str>) -> Result<JobPage, CoreError> {
+        self.database
+            .jobs_at_work(interface, after)?
+            .ok_or_else(|| CoreError::InvalidInput("no such page of jobs".to_owned()))
+    }
+
+    /// The jobs of an authenticated interface it names by their origin, at
+    /// most [`JOB_READ_LIMIT`], however they stand, each with the ID of the
+    /// runtime that owns it; a name of nothing the interface began is left
+    /// out.
+    /// # Errors
+    /// Returns too many names as invalid input, or storage errors.
+    pub fn named_jobs(
+        &self,
+        interface: &str,
+        named: &[String],
+    ) -> Result<Vec<(String, Job)>, CoreError> {
+        if named.len() > JOB_READ_LIMIT {
+            return Err(CoreError::InvalidInput(format!(
+                "a job read names at most {JOB_READ_LIMIT} jobs"
+            )));
+        }
+        Ok(self.database.named_jobs(interface, named)?)
     }
 
     /// Inspect a turn, without granting external operator authority.

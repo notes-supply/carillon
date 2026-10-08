@@ -1263,9 +1263,6 @@ impl SimulatedCore {
                     turn_id: format!("turn-{}", event.event_id),
                     accepted_at: 1_790_000_000,
                 },
-                finished_at: 1_790_000_001,
-                activity: None,
-                continued_by: None,
             },
             false,
         ));
@@ -1359,6 +1356,8 @@ async fn simulated_core(staging: PathBuf) -> anyhow::Result<(std::net::SocketAdd
                 },
             ),
         )
+        // This core records no turn's report: no job earns a card.
+        .route("/v1/jobs", get(|| async { Json(json!({"jobs": []})) }))
         .with_state(shared.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;

@@ -20,10 +20,10 @@ use carillon_installation::config::{
     LoadedConfig, Provider, ProviderRole, RELEASE_VERSION, token_matches,
 };
 use carillon_protocol::model::{
-    ActiveTurn, Delivery, DeliveryAck, DeliveryReconciliation, EventReceipt, EventStatus,
-    ExternalEvent, Health, INSTANCE_HEADER, ModelQuery, ModelUpdate, PROVIDER_HEADER,
-    RuntimeModelQuery, RuntimeModelUpdate, RuntimeTurnRequest, RuntimeTurnResponse,
-    SelectedProvider, StatusReport, TurnActivity, TurnInspection, TurnState, TurnSummary,
+    Delivery, DeliveryAck, DeliveryReconciliation, EventReceipt, EventStatus, ExternalEvent,
+    Health, INSTANCE_HEADER, JobPage, ModelQuery, ModelUpdate, PROVIDER_HEADER, RuntimeModelQuery,
+    RuntimeModelUpdate, RuntimeTurnRequest, RuntimeTurnResponse, SelectedProvider, StatusReport,
+    TurnActivity, TurnInspection, TurnState, TurnSummary,
 };
 use reqwest::{Client, RequestBuilder, Url};
 use serde::Deserialize;
@@ -183,7 +183,7 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
         .route("/health", get(health))
         .route("/v1/events", post(accept_event))
         .route("/v1/events/{event_id}", get(event_status))
-        .route("/v1/activity", get(active_turns))
+        .route("/v1/jobs", get(jobs))
         .route("/v1/deliveries", get(claim_delivery))
         .route("/v1/deliveries/reconcile", post(reconcile_delivery_claims))
         .route("/v1/deliveries/{id}/ack", post(acknowledge_delivery))
@@ -379,37 +379,79 @@ async fn relay_model_call(request: RequestBuilder) -> Result<Response, ApiError>
 /// the snapshot, not a slow list.
 const ACTIVITY_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// The caller's queued and running turns, each running turn with its
-/// runtime's latest snapshot when the runtime supplies one. The durable
-/// states come from storage; `activity: null` never means the turn ended.
-/// Runtimes are asked at once, so the list takes one snapshot timeout at
-/// most however many runtimes cannot answer. A runtime runs at most its
-/// configured number of conversations at once, so the requests are bounded
-/// by the configured workers.
-async fn active_turns(
+/// Which jobs a read asks for: those `tracked`, by origin turn IDs separated
+/// by commas, or else a page of those at work, `after` the previous page.
+#[derive(Deserialize)]
+struct JobQuery {
+    tracked: Option<String>,
+    after: Option<String>,
+}
+
+/// The caller's jobs, as core recorded them: a page of those at work, or
+/// those it names, each running turn with its runtime's latest snapshot when
+/// the runtime supplies one. The durable states come from storage; a running
+/// turn without `activity` has not ended. Runtimes are asked at once, so the
+/// read takes one snapshot timeout at most however many runtimes cannot
+/// answer, and a page holds at most
+/// [`JOB_READ_LIMIT`](carillon_protocol::model::JOB_READ_LIMIT) running turns.
+async fn jobs(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<Vec<ActiveTurn>>, ApiError> {
+    Query(query): Query<JobQuery>,
+) -> Result<Json<JobPage>, ApiError> {
     let interface = interface_provider(&headers, &state.config)?;
-    let listed = state.core.active_turns(&interface.id)?;
+    let (listed, next) = match (query.tracked, query.after) {
+        (Some(tracked), None) => {
+            let mut named = Vec::new();
+            for name in tracked.split(',') {
+                if name.is_empty() {
+                    return Err(ApiError::new(
+                        StatusCode::BAD_REQUEST,
+                        "a tracked job is named by its turn ID",
+                    ));
+                }
+                if !named.iter().any(|known| known == name) {
+                    named.push(name.to_owned());
+                }
+            }
+            (state.core.named_jobs(&interface.id, &named)?, None)
+        }
+        (None, after) => {
+            let page = state.core.jobs_at_work(&interface.id, after.as_deref())?;
+            (page.jobs, page.next)
+        }
+        (Some(_), Some(_)) => {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "a job read names jobs or pages through those at work, not both",
+            ));
+        }
+    };
     let mut snapshots = tokio::task::JoinSet::new();
-    for (index, (runtime_id, turn)) in listed.iter().enumerate() {
-        if turn.state == TurnState::Running {
-            let (state, runtime_id) = (state.clone(), runtime_id.clone());
-            let (interface_id, turn_id) = (interface.id.clone(), turn.turn_id.clone());
-            snapshots.spawn(async move {
-                let activity = runtime_activity(&state, &runtime_id, &interface_id, &turn_id);
-                (index, activity.await)
-            });
-        }
+    for (index, (runtime_id, job)) in listed.iter().enumerate() {
+        let Some(turn) = job
+            .turns
+            .last()
+            .filter(|turn| turn.state == TurnState::Running)
+        else {
+            continue;
+        };
+        let (state, runtime_id) = (state.clone(), runtime_id.clone());
+        let (interface_id, turn_id) = (interface.id.clone(), turn.turn_id.clone());
+        snapshots.spawn(async move {
+            let activity = runtime_activity(&state, &runtime_id, &interface_id, &turn_id);
+            (index, activity.await)
+        });
     }
-    let mut turns = listed.into_iter().map(|(_, turn)| turn).collect::<Vec<_>>();
+    let mut jobs = listed.into_iter().map(|(_, job)| job).collect::<Vec<_>>();
     while let Some(snapshot) = snapshots.join_next().await {
-        if let Ok((index, activity)) = snapshot {
-            turns[index].activity = activity;
+        if let Ok((index, activity)) = snapshot
+            && let Some(turn) = jobs[index].turns.last_mut()
+        {
+            turn.activity = activity;
         }
     }
-    Ok(Json(turns))
+    Ok(Json(JobPage { jobs, next }))
 }
 
 async fn runtime_activity(

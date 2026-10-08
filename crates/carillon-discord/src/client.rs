@@ -2,8 +2,8 @@
 use crate::InterfaceError;
 use anyhow::Result;
 use carillon_protocol::model::{
-    ActiveTurn, CommandCatalog, Delivery, DeliveryAck, DeliveryOutcome, DeliveryReconciliation,
-    EventReceipt, EventStatus, ExternalEvent, INSTANCE_HEADER, ModelQuery, ModelUpdate,
+    CommandCatalog, Delivery, DeliveryAck, DeliveryOutcome, DeliveryReconciliation, EventReceipt,
+    EventStatus, ExternalEvent, INSTANCE_HEADER, Job, JobPage, ModelQuery, ModelUpdate,
     PROVIDER_HEADER,
 };
 use carillon_protocol::models::ModelState;
@@ -141,14 +141,38 @@ impl CoreClient {
         core_json(request, "reconcile abandoned delivery claims").await
     }
 
-    /// This provider's queued and running turns, with the runtime's latest
-    /// activity for running ones when it has any.
+    /// A page of this provider's jobs at work, `after` the previous page,
+    /// each running turn with its runtime's latest snapshot when it has one.
     ///
     /// # Errors
     /// Returns core rejection, transport, or malformed-response failures.
-    pub async fn active_turns(&self) -> Result<Vec<ActiveTurn>, InterfaceError> {
-        let request = self.request(Method::GET, self.url("/v1/activity"));
-        core_json(request, "read active turns from core").await
+    pub async fn jobs_at_work(&self, after: Option<&str>) -> Result<JobPage, InterfaceError> {
+        let mut url = Url::parse(&self.url("/v1/jobs"))
+            .map_err(|error| InterfaceError::protocol(error.to_string()))?;
+        if let Some(after) = after {
+            url.query_pairs_mut().append_pair("after", after);
+        }
+        core_json(
+            self.request(Method::GET, url),
+            "read jobs at work from core",
+        )
+        .await
+    }
+
+    /// The jobs this provider names by their origin turn, at most
+    /// [`JOB_READ_LIMIT`](carillon_protocol::model::JOB_READ_LIMIT), however
+    /// they stand; core leaves out a name of nothing this provider began.
+    ///
+    /// # Errors
+    /// Returns core rejection, transport, or malformed-response failures.
+    pub async fn named_jobs(&self, named: &[String]) -> Result<Vec<Job>, InterfaceError> {
+        let mut url = Url::parse(&self.url("/v1/jobs"))
+            .map_err(|error| InterfaceError::protocol(error.to_string()))?;
+        url.query_pairs_mut()
+            .append_pair("tracked", &named.join(","));
+        let page: JobPage =
+            core_json(self.request(Method::GET, url), "read named jobs from core").await?;
+        Ok(page.jobs)
     }
 
     pub(crate) fn authenticates(&self, token: &str) -> bool {

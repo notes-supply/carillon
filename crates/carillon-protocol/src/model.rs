@@ -290,25 +290,8 @@ pub struct Delivery {
     pub target_id: String,
     pub feedback_target_id: String,
     pub content: String,
-    /// Where the turn's work began.
+    /// Where the turn's work began: the job [`Job`] reads describe.
     pub origin: Origin,
-    /// When the turn finished, Unix seconds.
-    pub finished_at: i64,
-    /// The runtime's final report of the turn, when it gave one.
-    #[serde(
-        default,
-        deserialize_with = "crate::models::optional_value",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub activity: Option<TurnActivity>,
-    /// The observation core queued when the turn finished, to report work
-    /// the turn left running: the work goes on after this delivery.
-    #[serde(
-        default,
-        deserialize_with = "crate::models::optional_nonempty_string",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub continued_by: Option<String>,
 }
 
 /// Where a turn's work began: the message turn itself, or, for an
@@ -333,20 +316,73 @@ pub struct DeliveryAck {
     pub outcome: DeliveryOutcome,
 }
 
-/// A queued or running turn of the requesting interface, as core reports it
-/// for display while the turn is in progress. `activity` is the owning
-/// runtime's latest snapshot for a running turn, or `None` when core has none.
+/// The most jobs one read names, and the most jobs at work one page lists.
+pub const JOB_READ_LIMIT: usize = 32;
+/// The most turns a job read lists of one job, the latest.
+pub const JOB_TURN_LIMIT: usize = 8;
+
+/// Jobs an interface read: a page of its jobs at work, or the jobs it named.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct JobPage {
+    pub jobs: Vec<Job>,
+    /// More jobs at work follow: the next page is read after this.
+    #[serde(
+        default,
+        deserialize_with = "crate::models::optional_nonempty_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub next: Option<String>,
+}
+
+/// One job of the requesting interface, as core recorded it: the turn of the
+/// message that began it and the observations core queued, one after
+/// another, to report what that work delegated. Different messages are
+/// different jobs, even in one conversation.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct ActiveTurn {
+pub struct Job {
+    pub origin: Origin,
+    /// Where the job's answers go.
+    pub target_id: String,
+    /// The job's latest turns, oldest first, at most [`JOB_TURN_LIMIT`]: the
+    /// last is the newest, and one queued or running is the job at work.
+    /// Every turn before the last was continued by an observation, which
+    /// core queues only when the turn's runtime said native work it started
+    /// would report later.
+    pub turns: Vec<JobTurn>,
+    /// The job has turns before those listed, each continued in turn.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub earlier: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct JobTurn {
     pub turn_id: String,
     pub state: TurnState,
-    pub target_id: String,
     /// Unix seconds.
     pub accepted_at: i64,
-    /// Where the turn's work began.
-    pub origin: Origin,
-    #[serde(deserialize_with = "crate::models::required_nullable")]
+    /// When the turn ended, Unix seconds.
+    #[serde(
+        default,
+        deserialize_with = "crate::models::optional_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub finished_at: Option<i64>,
+    /// An ended turn's final report, stored with its outcome, or a running
+    /// turn's latest snapshot, when its runtime gives one.
+    #[serde(
+        default,
+        deserialize_with = "crate::models::optional_value",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub activity: Option<TurnActivity>,
+    /// How an ended turn's answer or notice stands. Sending it is separate
+    /// from the turn's outcome.
+    #[serde(
+        default,
+        deserialize_with = "crate::models::optional_value",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub delivery: Option<DeliveryState>,
 }
 
 /// What a runtime is doing in one executing turn. The runtime formats each

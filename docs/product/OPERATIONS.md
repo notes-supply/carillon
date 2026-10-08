@@ -118,7 +118,7 @@ Each bundled provider reports its own build version, not the `providers[].versio
 
 While a message's work runs, Discord shows one card for it in the conversation, two seconds after the message was accepted: whether it is queued or working, the model's latest public commentary, the reasoning the model's provider publishes for display (Pi's thinking, T3's reasoning summaries), the calls running now with how long they have run, the last few finished calls (`✓` or `✗` by default) with their durations and a count of earlier ones, delegated work, and the model, reasoning effort and context use when the runtime reports them. A start the runtime could only observe is shown as "about". Bash calls show the command's first line only, without heredoc or script bodies, substitutions or long quoted arguments; file tools show the path, searches the pattern, and Discord tools the action and IDs it targets. Tool output, file contents and reasoning the provider does not publish are never shown. The card is edited only when its content changes, at most every three seconds, and never notifies anyone. The typing indicator continues while the work runs.
 
-The card stays as the work's summary when it ends: done, with how long after the request the answer came, or stopped before finishing, and a delivery that may not have arrived is stated on the card, including when both apply. When an answer arrives while delegated work goes on, the card says so and keeps showing that work until its report is delivered, on the same card. Work that finishes before its card would appear, but used tools, published reasoning or delegated work, or stopped before finishing, gets its summary on the answer or notice instead; an answer alone gets none. When core is briefly unreachable the card keeps what it last showed.
+The card stays as the work's summary when it ends: done, with how long after the request the answer came, or stopped before finishing, and a delivery that may not have arrived is stated on the card, including when both apply. When an answer arrives while delegated work goes on, the card says so and keeps showing that work until its report is delivered, on the same card. A card that showed only an answer's wait is removed when the answer is sent. Work that finishes before its card would appear, but used tools, published reasoning or delegated work, or stopped before finishing, gets a card with its summary after the answer or notice; an answer alone gets none. Answers and notices are plain text. When core is briefly unreachable the card keeps what it last showed.
 
 Redaction of what cards show is best-effort. Known credential shapes (labelled values, `name=value` assignments, authorization headers, URL user information and queries, values after options such as `--password`, and long opaque tokens) are hidden, but a short secret passed as an ordinary argument can appear. Cards go only to the conversation that started the turn. Turn cards off with `activity = false` in `providers/<id>.toml` and restart the Discord service; cards made before are then left as they are, neither edited nor removed. `typing = false` turns off typing independently.
 
@@ -136,7 +136,7 @@ uncertain = "⚠️"
 stopped = "⏹️"
 ```
 
-`working`, `queued` and `finishing` prefix the card's current status. `running` prefixes running tools, while `succeeded` and `failed` mark recent tool results; `succeeded` also marks work that is done. `uncertain` marks a completed turn whose reply may not have arrived, and a card whose work a restart left unknown; `stopped` marks an interrupted turn, including when its notice may not have arrived.
+`working`, `queued` and `finishing` prefix the card's current status. `running` prefixes running tools, while `succeeded` and `failed` mark recent tool results; `succeeded` also marks work that is done. `uncertain` marks a completed turn whose reply may not have arrived, and work a card may not show all of; `stopped` marks an interrupted turn, including when its notice may not have arrived.
 
 Ordinary Unicode emoji and symbols such as `✓` and `↳` are supported. Custom Discord emotes use message syntax: `<:name:id>` for static emotes and `<a:name:id>` for animated emotes. Use an empty string to omit a marker and its separating space. For example, this partial table overrides three fields and leaves the others at their defaults:
 
@@ -167,6 +167,26 @@ stopped = ""
 
 Reactions remain independent: the top-level `processing_emoji`, `delivered_emoji`, `failed_emoji` and `uncertain_emoji` fields still accept a Unicode emoji or reaction syntax such as `working:123`. Reaction syntax alone is not valid card-marker syntax. Set these top-level fields outside `[activity_markers]`; disabling reactions with `reactions = false` does not disable card markers. `carillon discord configure` preserves both tuned reactions and activity markers when rewriting admission settings.
 
+Optional brand emotes are explicit model-ID-prefix mappings, applied to the
+reported main model and each child's own reported actor/model, never inherited
+from the parent. The longest matching prefix wins; unmatched models stay plain.
+They do not change status markers or reactions. Use approved application-owned
+emoji IDs from this bot, not another application's IDs:
+
+```toml
+[activity_markers.models]
+"claude-" = "<:claude:123>"
+"gpt-" = "<:openai:456>"
+"gemini-" = "<:gemini:789>"
+```
+
+The mapping defaults to empty and allows up to 32 nonempty prefixes of at most
+63 UTF-8 bytes, within the reported model label's untruncated prefix. Emotes
+follow the same validation as the status markers. List
+and reuse the application's existing emojis when provisioning; upload only
+missing approved assets and verify their API records, CDN transparency and a
+real Discord message before activating the mapping. Never upload at reconnect.
+
 After editing the file, validate it and use the existing restart workflow:
 
 ```sh
@@ -177,7 +197,9 @@ carillon status
 
 Use `carillon discord check --provider ID` when several Discord providers are configured. Settings take effect at provider startup; invalid markers fail configuration validation before work starts. Card requests continue to disable all mentions, including with custom markers.
 
-The provider remembers the cards of unfinished work in `<data_dir>/components/<provider>/activity-cards.json` until their summary is final; a card whose final summary was being shown when the record could not be removed shows that summary again after a restart. After a restart it goes on with them instead of making new ones: work still running shows on its card again, and a card whose work Carillon hears nothing more of says it restarted and does not know how the work ended there; a final report still to be delivered is shown on that card when it arrives. Work whose card, or summary on an answer, Discord may have created without confirming it, or whose card someone deleted, gets no other card until it ends. Work answered while the Discord service stops still gets its summary on its card, within about 22 seconds; a card not finished by then is taken up at the next start, which shows its final summary if that was saved with its record and otherwise does not know how that work ended. If the file cannot be read (for example it is malformed or not a readable file), the provider logs `activity cards are off until their records can be read`, starts without cards and leaves the file untouched; typing and delivery continue. Inspect it, delete any stale cards it names by hand, then remove or repair it and restart the Discord service. A card created just before a crash, before it was recorded, is not removed automatically. Progress messages share Discord's rate limits with answers: they are bounded and never block delivery in the provider, but Discord can make an answer wait for its share of a common limit.
+The provider records which Discord message is each unfinished job's card in `<data_dir>/components/<provider>/activity-cards.json`, or, when Discord may have created a card without confirming it or someone deleted it, only that the job has one, so it gets no other until it ends; core keeps everything else of the job. Every card creation is suppressed durably before its POST, then its message identity is saved when Discord confirms it. A creation known not sent is recorded as `pending_create`, so a restart retries it; an in-flight or unknown creation is never repeated. A refused final edit or removal keeps the message identity for retry, rather than deleting an earned card or forgetting one still present. After a restart the provider goes on with the recorded cards from core's record of their jobs instead of making new ones: work still running shows on its card again with what its earlier turns reported, work that ended meanwhile gets its summary or loses its card as it would have, and a card whose work core has no record of is removed. Work answered while the Discord service stops still gets its summary on its card, within about 22 seconds; a card not finished by then is finished at the next start. If the file cannot be read (for example it is malformed, uses an unsupported older record format, or is not a readable file), the provider logs `activity cards are off until their records can be read`, starts without cards and leaves the file untouched; typing and delivery continue. This beta does not migrate card records; settle recorded cards before an update. Inspect an unreadable file, delete any stale cards it names by hand, then remove or repair it and restart the Discord service. A card created just before a crash, before its identity was recorded, is not removed automatically; its durable creation checkpoint suppresses a second card. Progress messages share Discord's rate limits with answers: they are bounded and never block delivery in the provider, but Discord can make an answer wait for its share of a common limit.
+
+After an uncertain progress edit, optional edits stop. The final edit is still attempted, but the message identity stays recorded: an earlier request may still arrive and overwrite the final status. The next start retries the final state from Core. Discord offers no revision fence for such late writes, so a restart cannot guarantee ordering against a request still being applied. Recovery follows saved card records, not all historical answers; a crash after a fast answer is acknowledged but before its first card record is saved can omit that optional summary card. The answer and authoritative work facts remain in Core.
 
 ### Attachments
 
@@ -343,7 +365,18 @@ There is no automatic rollback, migration step or download service. The state ch
 - It covers the registry, the core database's integrity and exact schema, the Discord settings, and an installed command module.
 - It does not cover Pi's state (sessions, authentication, model selections), other provider-native state, credentials, or whether the services will start and stay healthy.
 
-Releases with attachment support record attached files in the core database (`turn_attachments`), releases with delegated-work reports record each observation's cursor in a column of its own, with indexes for claiming unfinished turns, and releases with work summaries record each turn's origin and final report beside its outcome. Their update check refuses a database written by an earlier release, before any service stops ("database schema is not the current Carillon format"); moving such an installation forward is an explicit cutover, taken from a verified backup, not something `update` performs.
+Releases with attachment support record attached files in the core database (`turn_attachments`), releases with delegated-work reports record each observation's cursor in a column of its own, with indexes for claiming unfinished turns, releases with work summaries record each turn's origin and final report beside its outcome, and releases that read whole jobs index turns by origin (`turns_origin`). Their update check refuses a database written by an earlier release, before any service stops ("database schema is not the current Carillon format"); moving such an installation forward is an explicit cutover, taken from a verified backup, not something `update` performs.
+
+The `turns_origin` cutover changes no recorded fact: with the services stopped and a verified backup taken, add the index to the existing database, then run the update:
+
+```sh
+carillon stop
+sqlite3 ~/.carillon/state/carillon.sqlite3 \
+  'CREATE INDEX turns_origin ON turns(origin_turn_id, acceptance_sequence);'
+carillon update /path/to/carillon-VERSION-linux-ARCH.tar.gz
+```
+
+Use the database under the installation's configured `data_dir` when it is not the default.
 
 `carillon update` with an older release runs the same checks, so it refuses a core schema that release does not know. Passing them does not make a downgrade safe for the unchecked state. There is no supported downgrade; restore a backup made before the update instead.
 
