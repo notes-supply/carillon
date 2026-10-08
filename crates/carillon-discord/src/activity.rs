@@ -224,8 +224,13 @@ impl CardRecords {
         lock(&self.cards).clone()
     }
 
-    fn insert(&self, job: &str, card: Recorded) {
-        self.change(|cards| cards.insert(job.to_owned(), card) != Some(card));
+    fn insert(&self, job: &str, card: Recorded) -> bool {
+        // An identical in-memory record need not be durable: the previous
+        // publication may have failed. Every insert confirms it anew.
+        self.change(|cards| {
+            cards.insert(job.to_owned(), card);
+            true
+        })
     }
 
     fn remove(&self, job: &str) {
@@ -235,17 +240,19 @@ impl CardRecords {
     /// Publishes the records whole when `change` changed them. A record that
     /// was not removed on disk is finished again by the next start; one that
     /// was not added leaves a card no later start knows of.
-    fn change(&self, change: impl FnOnce(&mut BTreeMap<String, Recorded>) -> bool) {
+    fn change(&self, change: impl FnOnce(&mut BTreeMap<String, Recorded>) -> bool) -> bool {
         let mut cards = lock(&self.cards);
         if !change(&mut cards) {
-            return;
+            return true;
         }
         let saved = serde_json::to_vec_pretty(&*cards)
             .map_err(|error| PublishError::NotPublished(error.into()))
             .and_then(|bytes| publish(&self.path, &bytes, 0o600));
         if let Err(error) = saved {
             warn!(path = %self.path.display(), %error, "activity card records were not saved");
+            return false;
         }
+        true
     }
 }
 
@@ -766,7 +773,15 @@ impl Cards {
                 return;
             }
             recorded.pending_create = false;
-            self.records.insert(job_id, recorded);
+            if !self.records.insert(job_id, recorded) {
+                recorded.pending_create = true;
+                self.records.insert(job_id, recorded);
+                warn!(
+                    job_id,
+                    "summary creation deferred until its suppression can be saved"
+                );
+                return;
+            }
             match self.create(channel_id, summary).await {
                 Call::Done(_) => {
                     self.records.remove(job_id);

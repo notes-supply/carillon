@@ -1605,6 +1605,56 @@ async fn a_refused_final_edit_keeps_the_card_for_the_next_start() -> anyhow::Res
     Ok(())
 }
 
+/// A retry must not be sent unless its suppression is durably recorded.
+#[tokio::test]
+async fn failed_creation_suppression_sends_no_retryable_summary() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let records = directory.path().join("cards.json");
+    let retry = json!({"fast": {"channel_id": "300", "pending_create": true}});
+    std::fs::write(&records, serde_json::to_vec(&retry)?)?;
+    let discord = Substitute::start(succeed()).await?;
+    let cards = cards(
+        discord.http(false),
+        directory.path(),
+        CancellationToken::new(),
+    )?;
+    // A real publication refusal, independent of the test user's authority.
+    // Preserve the durable retry record, obstruct its replacement, then repair.
+    let saved = directory.path().join("saved.json");
+    std::fs::rename(&records, &saved)?;
+    std::fs::create_dir(&records)?;
+    let job = sent(ended(
+        "fast",
+        "300",
+        now(),
+        TurnState::Completed,
+        Some(tools(None, &[], &[("bash", "make", true)])),
+        None,
+    ));
+    let summary = super::render::job_card(&job, None, &cards.markers);
+    cards
+        .finish(
+            "fast",
+            super::Holding::Nothing,
+            Some(summary),
+            Some(Id::new(300)),
+        )
+        .await;
+    assert!(discord.cards_in("300").is_empty());
+    std::fs::remove_dir(&records)?;
+    std::fs::rename(&saved, &records)?;
+    assert_eq!(recorded(&records)?, retry);
+    discord.record(vec![job]);
+    let (_delivering, monitor) = discord.monitor(discord.http(false), config(false), &records);
+    discord
+        .wait_for_text(&Method::POST, "/channels/300/messages", "✓ Done")
+        .await?;
+    recorded_soon(&records, &json!({})).await?;
+    assert_eq!(discord.cards_in("300").len(), 1);
+    monitor.abort();
+    Ok(())
+}
+
 /// Uses the rate limiter: an exhausted bucket proves no summary was sent.
 #[tokio::test]
 async fn an_unsent_fast_summary_is_retried_after_restart() -> anyhow::Result<()> {
