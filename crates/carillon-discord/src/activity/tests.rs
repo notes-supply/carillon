@@ -1414,14 +1414,18 @@ async fn unknown_refused_or_deleted_cards_are_never_created_again_or_replaced() 
             .collect(),
     );
     delivering.send(Delivering::Recorded)?;
-    // The card Discord will not edit is removed rather than left claiming
-    // work; the others get no card, and every record goes.
+    // Refusing edits does not revoke the earned summary. Its card stays
+    // recorded for retry; unknown and deleted cards get no replacement.
     discord
-        .wait_for(&Method::DELETE, "/channels/303/messages/904", 1)
+        .wait_for(&Method::PATCH, "/channels/303/messages/904", 2)
         .await?;
-    recorded_soon(&records, &json!({})).await?;
+    recorded_soon(
+        &records,
+        &json!({"303": {"channel_id": "303", "message_id": "904"}}),
+    )
+    .await?;
     tokio::time::sleep(Duration::from_millis(1_000)).await;
-    assert_eq!(discord.matching(&Method::DELETE, "/channels").len(), 1);
+    assert!(discord.matching(&Method::DELETE, "/channels").is_empty());
     assert_eq!(
         discord
             .matching(&Method::POST, "/channels/30")
@@ -1437,14 +1441,122 @@ async fn unknown_refused_or_deleted_cards_are_never_created_again_or_replaced() 
 #[tokio::test]
 async fn a_card_left_unfinished_is_finished_by_the_next_start_without_another() -> anyhow::Result<()>
 {
+    for status in [403, 500] {
+        let directory = tempfile::tempdir()?;
+        let records = directory.path().join("activity-cards.json");
+        let failing = Arc::new(AtomicBool::new(true));
+        let discord = Substitute::start(Arc::new({
+            let failing = failing.clone();
+            move |seen, _| {
+                if seen.method == Method::DELETE && failing.load(Ordering::SeqCst) {
+                    Reply::Status(status)
+                } else {
+                    Reply::Success
+                }
+            }
+        }))
+        .await?;
+        let accepted = now() - 60;
+        discord.record(vec![running("plain", "300", accepted, None)]);
+        let (delivering, monitor) = discord.monitor(discord.http(false), config(false), &records);
+        discord
+            .wait_for(&Method::POST, "/channels/300/messages", 1)
+            .await?;
+        discord.record(vec![sent(ended(
+            "plain",
+            "300",
+            accepted,
+            TurnState::Completed,
+            None,
+            None,
+        ))]);
+        delivering.send(Delivering::Recorded)?;
+        // Every removal fails; the card stays recorded.
+        let attempts = if status == 403 { 1 } else { 3 };
+        discord
+            .wait_for(&Method::DELETE, "/channels/300/messages/901", attempts)
+            .await?;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        monitor.abort();
+        let _ = monitor.await;
+        assert_eq!(
+            recorded(&records)?,
+            json!({"plain": {"channel_id": "300", "message_id": "901"}})
+        );
+        // The next start finishes it from what core recorded of its job.
+        failing.store(false, Ordering::SeqCst);
+        let (_delivering, monitor) = discord.monitor(discord.http(false), config(false), &records);
+        discord
+            .wait_for(&Method::DELETE, "/channels/300/messages/901", attempts + 1)
+            .await?;
+        recorded_soon(&records, &json!({})).await?;
+        assert!(discord.matching(&Method::PATCH, "/channels").is_empty());
+        assert_eq!(
+            discord
+                .matching(&Method::POST, "/channels/300/messages")
+                .len(),
+            1
+        );
+        monitor.abort();
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_job_moving_between_pages_has_one_card_owner_with_its_latest_read() -> anyhow::Result<()>
+{
     let directory = tempfile::tempdir()?;
     let records = directory.path().join("activity-cards.json");
-    let failing = Arc::new(AtomicBool::new(true));
+    let discord = Substitute::start(succeed()).await?;
+    let accepted = now() - 60;
+    let job = |origin, channel, detail| {
+        running(
+            origin,
+            channel,
+            accepted,
+            Some(tools(None, &[("bash", detail)], &[])),
+        )
+    };
+    discord.record(vec![
+        job("a", "300", "first"),
+        job("b", "301", "b"),
+        job("c", "302", "c"),
+    ]);
+    let held = discord.hold_reads().await;
+    let (_delivering, monitor) = discord.monitor(discord.http(false), config(false), &records);
+    discord.read_taken(0).await?;
+    // Completing a turn queues its observation at a later acceptance sequence:
+    // the same origin can appear again after the first page's cursor.
+    let mut continued = job("a", "300", "observation");
+    continued.turns[0].turn_id = "a-observation".to_owned();
+    discord.record(vec![job("b", "301", "b"), job("c", "302", "c"), continued]);
+    drop(held);
+    for channel in ["300", "301", "302"] {
+        discord
+            .wait_for(&Method::POST, &format!("/channels/{channel}/messages"), 1)
+            .await?;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let cards = discord.cards_in("300");
+    assert_eq!(cards.len(), 1, "{cards:#?}");
+    assert!(cards[0].content().contains("observation"));
+    monitor.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_refused_final_edit_keeps_the_card_for_the_next_start() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let records = directory.path().join("activity-cards.json");
+    let refusing = Arc::new(AtomicBool::new(true));
     let discord = Substitute::start(Arc::new({
-        let failing = failing.clone();
+        let refusing = refusing.clone();
         move |seen, _| {
-            if seen.method == Method::DELETE && failing.load(Ordering::SeqCst) {
-                Reply::Status(500)
+            if seen.method == Method::PATCH
+                && seen.content().starts_with("✓ Done")
+                && refusing.load(Ordering::SeqCst)
+            {
+                Reply::Status(403)
             } else {
                 Reply::Success
             }
@@ -1452,45 +1564,95 @@ async fn a_card_left_unfinished_is_finished_by_the_next_start_without_another() 
     }))
     .await?;
     let accepted = now() - 60;
-    discord.record(vec![running("plain", "300", accepted, None)]);
+    discord.record(vec![running(
+        "work",
+        "300",
+        accepted,
+        Some(tools(None, &[("bash", "make")], &[])),
+    )]);
     let (delivering, monitor) = discord.monitor(discord.http(false), config(false), &records);
     discord
         .wait_for(&Method::POST, "/channels/300/messages", 1)
         .await?;
     discord.record(vec![sent(ended(
-        "plain",
+        "work",
         "300",
         accepted,
         TurnState::Completed,
-        None,
+        Some(tools(None, &[], &[("bash", "make", true)])),
         None,
     ))]);
     delivering.send(Delivering::Recorded)?;
-    // Every removal fails; the card stays recorded.
     discord
-        .wait_for(&Method::DELETE, "/channels/300/messages/901", 3)
+        .wait_for_text(&Method::PATCH, "/channels/300/messages/901", "✓ Done")
         .await?;
     tokio::time::sleep(Duration::from_millis(500)).await;
     monitor.abort();
     let _ = monitor.await;
+    assert!(discord.matching(&Method::DELETE, "/channels").is_empty());
     assert_eq!(
         recorded(&records)?,
-        json!({"plain": {"channel_id": "300", "message_id": "901"}})
+        json!({"work": {"channel_id": "300", "message_id": "901"}})
     );
-    // The next start finishes it from what core recorded of its job.
-    failing.store(false, Ordering::SeqCst);
+    refusing.store(false, Ordering::SeqCst);
     let (_delivering, monitor) = discord.monitor(discord.http(false), config(false), &records);
     discord
-        .wait_for(&Method::DELETE, "/channels/300/messages/901", 4)
+        .wait_for(&Method::PATCH, "/channels/300/messages/901", 2)
         .await?;
     recorded_soon(&records, &json!({})).await?;
-    assert!(discord.matching(&Method::PATCH, "/channels").is_empty());
+    assert_eq!(discord.cards_in("300").len(), 1);
+    monitor.abort();
+    Ok(())
+}
+
+/// Uses the rate limiter: an exhausted bucket proves no summary was sent.
+#[tokio::test]
+async fn an_unsent_fast_summary_is_retried_after_restart() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let records = directory.path().join("activity-cards.json");
+    let discord = Substitute::start(Arc::new(|_, earlier| {
+        if earlier == 0 {
+            Reply::Bucket("messages", 0, 120)
+        } else {
+            Reply::Success
+        }
+    }))
+    .await?;
+    let http = discord.http(true);
+    crate::delivery::send_discord_message(&http, Id::new(300), "prime the bucket").await?;
+    discord.record(vec![sent(ended(
+        "fast",
+        "300",
+        now(),
+        TurnState::Completed,
+        Some(tools(None, &[], &[("bash", "make", true)])),
+        None,
+    ))]);
+    let (delivering, monitor) = discord.monitor(http, config(false), &records);
+    delivering.send(Delivering::Claimed("fast".to_owned()))?;
+    recorded_soon(&records, &json!({"fast": {"channel_id": "300"}})).await?;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while !recorded(&records).is_ok_and(|value| value["fast"]["pending_create"] == true) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    // Restart between attempts. The record says
+    // only that creation has not been sent, never mirrors the job's outcome.
+    monitor.abort();
+    let _ = monitor.await;
     assert_eq!(
-        discord
-            .matching(&Method::POST, "/channels/300/messages")
-            .len(),
-        1
+        recorded(&records)?,
+        json!({"fast": {"channel_id": "300", "pending_create": true}})
     );
+    assert_eq!(discord.cards_in("300").len(), 0);
+    let (_delivering, monitor) = discord.monitor(discord.http(false), config(false), &records);
+    let summary = discord
+        .wait_for_text(&Method::POST, "/channels/300/messages", "✓ Done")
+        .await?;
+    assert!(summary.content().contains("make"));
+    recorded_soon(&records, &json!({})).await?;
+    assert_eq!(discord.cards_in("300").len(), 1);
     monitor.abort();
     Ok(())
 }

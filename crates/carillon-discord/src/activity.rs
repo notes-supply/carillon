@@ -36,7 +36,7 @@ use carillon_installation::filesystem::{PublishError, publish};
 use carillon_protocol::model::{JOB_READ_LIMIT, Job, TurnState};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, hash_map::Entry},
     fs,
     future::pending,
     path::PathBuf,
@@ -151,23 +151,31 @@ struct Card {
 /// What a later start must know of a job's card, which only Discord knows:
 /// the card, or that the job has one nobody can name or follow, whose
 /// creation was never confirmed or which someone deleted, so it gets no
-/// other.
+/// other. A pending creation is known not to have reached Discord and may
+/// be retried; core supplies the summary, not this record.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct Recorded {
     channel_id: Id<ChannelMarker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     message_id: Option<Id<MessageMarker>>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pending_create: bool,
 }
 
 impl Recorded {
-    const fn card(&self) -> Option<Card> {
+    fn holding(self) -> Holding {
         match self.message_id {
-            Some(message_id) => Some(Card {
-                channel_id: self.channel_id,
-                message_id,
-            }),
-            None => None,
+            Some(message_id) => Holding::Card {
+                card: Card {
+                    channel_id: self.channel_id,
+                    message_id,
+                },
+                shown: None,
+                editable: true,
+            },
+            None if self.pending_create => Holding::Nothing,
+            None => Holding::Held,
         }
     }
 }
@@ -176,8 +184,9 @@ impl Recorded {
 /// only after Discord confirms it: a crash in between leaves one card no
 /// later start knows of. A creation whose outcome is unknown, or a card
 /// someone deleted, is recorded without a message until the job settles, so
-/// no start makes the job another card. A record goes once its card shows
-/// the job's summary, or is gone.
+/// no start makes the job another card. An unsent summary creation is also
+/// recorded for retry. A record goes once its card shows the job's summary,
+/// or is gone.
 pub(crate) struct CardRecords {
     path: PathBuf,
     cards: Mutex<BTreeMap<String, Recorded>>,
@@ -380,19 +389,27 @@ struct Read {
 /// none of the pages listed.
 async fn read(core: CoreClient, named: Vec<String>) -> Result<Read, crate::InterfaceError> {
     let mut jobs = Vec::new();
+    let mut positions = HashMap::new();
     let mut after = None;
     loop {
         let page = core.jobs_at_work(after.as_deref()).await?;
-        jobs.extend(page.jobs);
+        // A continuation accepted between pages can list the same origin
+        // twice. Its latest read wins, with still only one card owner.
+        for job in page.jobs {
+            match positions.entry(job.origin.turn_id.clone()) {
+                Entry::Occupied(position) => jobs[*position.get()] = job,
+                Entry::Vacant(position) => {
+                    position.insert(jobs.len());
+                    jobs.push(job);
+                }
+            }
+        }
         match page.next {
             Some(next) => after = Some(next),
             None => break,
         }
     }
-    let listed = jobs
-        .iter()
-        .map(|job| job.origin.turn_id.clone())
-        .collect::<HashSet<_>>();
+    let listed = positions.into_keys().collect::<HashSet<_>>();
     let mut read = read_named(&core, &named, &listed).await?;
     read.jobs.extend(jobs);
     Ok(read)
@@ -519,15 +536,7 @@ async fn show_card(
     mut view: watch::Receiver<Known>,
     old: Option<Recorded>,
 ) {
-    let mut holding = match old.map(|recorded| recorded.card()) {
-        None => Holding::Nothing,
-        Some(Some(card)) => Holding::Card {
-            card,
-            shown: None,
-            editable: true,
-        },
-        Some(None) => Holding::Held,
-    };
+    let mut holding = old.map_or(Holding::Nothing, Recorded::holding);
     let mut seen: Option<render::Seen> = None;
     let mut next_edit = Instant::now();
     loop {
@@ -603,6 +612,7 @@ async fn show_card(
                             Recorded {
                                 channel_id: card.channel_id,
                                 message_id: None,
+                                pending_create: false,
                             },
                         );
                         warn!(job_id, "activity card was deleted in Discord");
@@ -645,6 +655,7 @@ impl Cards {
                 let recorded = Recorded {
                     channel_id,
                     message_id: Some(message_id),
+                    pending_create: false,
                 };
                 self.records.insert(job_id, recorded);
                 Holding::Card {
@@ -670,6 +681,7 @@ impl Cards {
                     Recorded {
                         channel_id,
                         message_id: None,
+                        pending_create: false,
                     },
                 );
                 warn!(
@@ -682,8 +694,8 @@ impl Cards {
     }
 
     /// Leaves a settled job's card showing its `summary`, or removes it when
-    /// there is none to show or Discord will not edit it. A job that ended
-    /// before it had a card gets a card with the summary it earned in
+    /// there is none to show. A job that ended before it had a card gets
+    /// a card with the summary it earned in
     /// `channel`, unless the provider is stopping. The record goes once
     /// nothing is left to finish; a card Discord did not answer for stays
     /// recorded for the next start.
@@ -691,27 +703,16 @@ impl Cards {
         &self,
         job_id: &str,
         holding: Holding,
-        mut summary: Option<Embed>,
+        summary: Option<Embed>,
         channel: Option<Id<ChannelMarker>>,
     ) {
-        let (card, editable) = match holding {
-            Holding::Card { card, editable, .. } => (card, editable),
+        let card = match holding {
+            Holding::Card { card, .. } => card,
             Holding::Nothing => {
-                if let (Some(summary), Some(channel)) = (summary, channel)
-                    && !self.stopping.is_cancelled()
-                {
-                    match self.create(channel, &summary).await {
-                        Call::Done(_) | Call::NotSent => {}
-                        Call::Refused(status) => {
-                            warn!(job_id, status, "Discord refused this job's summary card");
-                        }
-                        Call::Unknown => {
-                            warn!(
-                                job_id,
-                                "Discord may hold this job's summary card unconfirmed"
-                            );
-                        }
-                    }
+                if let (Some(summary), Some(channel)) = (summary, channel) {
+                    self.create_summary(job_id, channel, &summary).await;
+                } else {
+                    self.records.remove(job_id);
                 }
                 return;
             }
@@ -720,7 +721,6 @@ impl Cards {
                 return;
             }
         };
-        summary = summary.filter(|_| editable);
         for attempt in 1..=FINAL_ATTEMPTS {
             let call = match &summary {
                 Some(embed) => self.edit(card, embed, None).await,
@@ -731,14 +731,12 @@ impl Cards {
                     self.records.remove(job_id);
                     return;
                 }
-                // A card Discord will not edit is removed instead.
-                Call::Refused(status) if summary.is_some() => {
-                    warn!(job_id, status, "activity card can no longer be edited");
-                    summary = None;
-                }
                 Call::Refused(status) => {
-                    warn!(job_id, status, "Discord refused to remove an activity card");
-                    self.records.remove(job_id);
+                    warn!(
+                        job_id,
+                        status,
+                        "Discord refused to finish an activity card; its record is retained"
+                    );
                     return;
                 }
                 Call::NotSent | Call::Unknown if attempt < FINAL_ATTEMPTS => {
@@ -750,6 +748,58 @@ impl Cards {
         warn!(
             job_id,
             "activity card was not finished; the next start goes on with it"
+        );
+    }
+
+    /// Retries only creations proven not sent. An in-flight or unknown
+    /// creation suppresses another card; a known unsent one is left for
+    /// the next start to finish from core's facts.
+    async fn create_summary(&self, job_id: &str, channel_id: Id<ChannelMarker>, summary: &Embed) {
+        let mut recorded = Recorded {
+            channel_id,
+            message_id: None,
+            pending_create: true,
+        };
+        self.records.insert(job_id, recorded);
+        for attempt in 1..=FINAL_ATTEMPTS {
+            if self.stopping.is_cancelled() {
+                return;
+            }
+            recorded.pending_create = false;
+            self.records.insert(job_id, recorded);
+            match self.create(channel_id, summary).await {
+                Call::Done(_) => {
+                    self.records.remove(job_id);
+                    return;
+                }
+                Call::NotSent => {
+                    recorded.pending_create = true;
+                    self.records.insert(job_id, recorded);
+                    if attempt < FINAL_ATTEMPTS {
+                        sleep(RETRY_DELAY).await;
+                    }
+                }
+                Call::Refused(status) => {
+                    recorded.pending_create = true;
+                    self.records.insert(job_id, recorded);
+                    warn!(
+                        job_id,
+                        status, "Discord refused this job's summary card; its retry is retained"
+                    );
+                    return;
+                }
+                Call::Unknown => {
+                    warn!(
+                        job_id,
+                        "Discord may hold this job's summary card unconfirmed"
+                    );
+                    return;
+                }
+            }
+        }
+        warn!(
+            job_id,
+            "summary card was not sent; the next start retries it"
         );
     }
 

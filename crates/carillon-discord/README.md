@@ -41,7 +41,8 @@ retain the actual Wasm path rather than substituting this direct native call.
   outcome is recorded. A job's card shows its status and work from core's record,
   stays as the job's summary when the job earned one, and is removed when it did
   not; a job that ended before its card appeared gets a card with the summary it
-  earned. It records only what Discord alone knows: a card's message, or that one
+  earned. It records only what Discord alone knows: a summary creation known not
+  sent and owed a retry, a card's message, or that one
   nobody can name may exist (a creation Discord did not confirm, or a card someone
   deleted), so the job gets no other card, and a restart goes on with recorded cards
   from core's record. When the provider stops, the monitor reads, types and makes
