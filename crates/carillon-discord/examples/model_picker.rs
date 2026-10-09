@@ -7,7 +7,7 @@ use carillon_discord::{
         prepare_conversation,
     },
 };
-use carillon_discord_commands::{
+use carillon_discord_module::{
     HostCalls,
     contract::{HostReply, HostRequest, InteractionKind, Invocation, Outcome},
     handle,

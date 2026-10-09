@@ -5,7 +5,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use axum::http::StatusCode;
-use carillon_discord_commands::contract::{Intent, Interaction, InteractionKind};
+use carillon_discord_module::contract::{Intent, Interaction, InteractionKind};
 use carillon_installation::filesystem::sync_ancestors;
 use carillon_protocol::model::{ExternalEvent, NATIVE_INTENT};
 use serde::{Deserialize, Serialize};

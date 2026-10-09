@@ -504,7 +504,7 @@ async function testParticipation() {
 }
 
 /**
- * Installing a command module clears the registration record durably before
+ * Installing a Discord module clears the registration record durably before
  * contacting Discord, then saves the module with a synced file and directory.
  * A failure at each boundary must be reported as what it is, and repeating the
  * install must finish the change.
@@ -539,7 +539,7 @@ async function testCommandModule() {
       position > invalidation && line.includes(" fsync(") && line.includes(`<${state}>`),
   );
   const publication = lines.findIndex(
-    (line) => line.includes(" rename(") && line.includes(`, "${state}/command-module.wasm")`),
+    (line) => line.includes(" rename(") && line.includes(`, "${state}/module.wasm")`),
   );
   const firstRegistration = lines.findIndex(
     (line) => line.includes(" rename(") && line.includes(`, "${state}/commands.json")`),
@@ -589,9 +589,9 @@ async function testCommandModule() {
     assert.match(
       injected[0],
       boundary === "file" ? /\/state\/\.tmp[^/>]*>\)/u : /\/state>\)/u,
-      `wrong command module boundary: ${injected[0]}`,
+      `wrong Discord module boundary: ${injected[0]}`,
     );
-    console.log(`command module durability failure passed: ${boundary}`);
+    console.log(`Discord module durability failure passed: ${boundary}`);
   }
 }
 
@@ -657,7 +657,7 @@ async function testCommandDirectory() {
     );
     const publication = observed.findIndex(
       (line, index) =>
-        index > injected && line.includes(" rename(") && line.includes('/command-module.wasm")'),
+        index > injected && line.includes(" rename(") && line.includes('/module.wasm")'),
     );
     assert.ok(publication > injected, "the repeat must publish the module");
     for (const path of ["state", "parent"]) {
@@ -672,7 +672,7 @@ async function testCommandDirectory() {
         `the repeat must sync the ${path} directory again before publishing`,
       );
     }
-    console.log(`command module directory failure passed: ${boundary}`);
+    console.log(`Discord module directory failure passed: ${boundary}`);
   }
 }
 

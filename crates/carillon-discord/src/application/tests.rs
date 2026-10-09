@@ -17,7 +17,7 @@ use axum::{
     response::IntoResponse as _,
     routing::{get, post},
 };
-use carillon_discord_commands::contract::{InteractionKind, Reply};
+use carillon_discord_module::contract::{InteractionKind, Reply};
 use carillon_installation::config::{LoadedConfig, hash_token};
 use carillon_protocol::model::{DeliveryReconciliation, Health};
 use serde_json::{Value, json};
@@ -35,25 +35,25 @@ use crate::{
         tests::{Serve, attachment, serve_cdn},
     },
     client::test_client as core_client,
-    commands::{
-        Commands, MODULE_LIMIT, Source,
+    config::{DiscordActivation, DiscordConversation},
+    module::{
+        MODULE_LIMIT, Module, Source,
         tests::{
             app, definition, describing, files, gated_registration, module, padded,
-            registration_server, replying, variant, write_module,
+            registration_server, replying, showing, variant, write_module,
         },
     },
-    config::{DiscordActivation, DiscordConversation},
 };
 
-/// A command module in `directory` that defines `/model` and answers
+/// A Discord module in `directory` that defines `/model` and answers
 /// every interaction with `reply`.
-async fn stub_commands(directory: &Path, reply: &str) -> anyhow::Result<Arc<Commands>> {
+async fn stub_module(directory: &Path, reply: &str) -> anyhow::Result<Arc<Module>> {
     write_module(
         &directory.join("release.wasm"),
         &describing(&[definition("model")]),
         reply,
     )?;
-    Ok(Arc::new(Commands::load(files(directory)).await?))
+    Ok(Arc::new(Module::load(files(directory)).await?))
 }
 
 async fn discord_state(core: CoreClient, directory: &Path) -> anyhow::Result<DiscordState> {
@@ -72,7 +72,7 @@ async fn discord_state(core: CoreClient, directory: &Path) -> anyhow::Result<Dis
         },
         core,
         participation: Arc::new(Participation::load(directory.join("participation.json"))?),
-        commands: stub_commands(directory, &replying("stub reply", &[])).await?,
+        module: stub_module(directory, &replying("stub reply", &[])).await?,
         app: None,
         reactions: None,
         lanes: None,
@@ -97,7 +97,7 @@ fn served_installation(
         .find(|provider| provider.id == "discord-private")
         .context("missing interface")?
         .url = format!("http://{provider_address}");
-    let module = root.join("commands.wasm");
+    let module = root.join("module.wasm");
     write_module(
         &module,
         &describing(&[definition("model")]),
@@ -112,7 +112,7 @@ fn deterministic_options<'a>(token_file: &'a Path, module: &'a Path) -> ServeOpt
         provider_id: "discord-private",
         token_file,
         discord_token_file: None,
-        commands: module,
+        module,
         deterministic: true,
     }
 }
@@ -258,7 +258,7 @@ async fn occupied_listener_fails_before_touching_delivery_claims() -> anyhow::Re
                     provider_id: "discord-private",
                     token_file: &token_file,
                     discord_token_file: Some(&discord_token_file),
-                    commands: &module,
+                    module: &module,
                     deterministic,
                 },
             ),
@@ -526,7 +526,7 @@ async fn interact(
 
 #[test]
 fn oversized_reply_content_is_rejected_before_the_discord_edit() {
-    let mut reply = carillon_discord_commands::contract::Reply {
+    let mut reply = carillon_discord_module::contract::Reply {
         content: "🦀".repeat(2000),
         components: vec![],
     };
@@ -538,7 +538,7 @@ fn oversized_reply_content_is_rejected_before_the_discord_edit() {
 #[test]
 fn native_selects_need_no_string_options() -> anyhow::Result<()> {
     for kind in [5, 6, 7, 8] {
-        let reply = carillon_discord_commands::contract::Reply {
+        let reply = carillon_discord_module::contract::Reply {
             content: "Choose".to_owned(),
             components: vec![json!({
                 "type": 1,
@@ -548,7 +548,7 @@ fn native_selects_need_no_string_options() -> anyhow::Result<()> {
         assert_eq!(super::validate_reply(&reply)?.len(), 1, "type {kind}");
     }
     for options in [Value::Null, json!([])] {
-        let reply = carillon_discord_commands::contract::Reply {
+        let reply = carillon_discord_module::contract::Reply {
             content: "Choose".to_owned(),
             components: vec![json!({
                 "type": 1, "components": [{"type": 3, "custom_id": "string", "options": options}]
@@ -568,7 +568,7 @@ async fn deterministic_interactions_run_the_module_and_check_replies() -> anyhow
     )
     .await?;
     let button = json!({"type": 1, "components": [{"type": 2, "style": 2, "custom_id": "model:refresh", "label": "Refresh"}]});
-    state.commands = stub_commands(
+    state.module = stub_module(
         directory.path(),
         &replying("Current model", std::slice::from_ref(&button)),
     )
@@ -612,7 +612,7 @@ async fn deterministic_interactions_run_the_module_and_check_replies() -> anyhow
             "empty action row",
         ),
     ] {
-        state.commands = stub_commands(directory.path(), &replying("bad", &components)).await?;
+        state.module = stub_module(directory.path(), &replying("bad", &components)).await?;
         let (status, body) = interact(&state, Some("token"), &interaction("300", None)).await?;
         assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
         assert!(
@@ -622,7 +622,7 @@ async fn deterministic_interactions_run_the_module_and_check_replies() -> anyhow
             "{body}"
         );
     }
-    state.commands = stub_commands(
+    state.module = stub_module(
         directory.path(),
         &replying("full", &[select((0..25).map(option).collect())]),
     )
@@ -630,7 +630,7 @@ async fn deterministic_interactions_run_the_module_and_check_replies() -> anyhow
     let (status, body) = interact(&state, Some("token"), &interaction("300", None)).await?;
     assert_eq!(status, StatusCode::OK, "{body}");
 
-    state.commands = stub_commands(directory.path(), r#"{"Failure":"no such command"}"#).await?;
+    state.module = stub_module(directory.path(), r#"{"Failure":"no such command"}"#).await?;
     let (status, body) = interact(&state, Some("token"), &interaction("300", None)).await?;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert!(
@@ -647,7 +647,7 @@ async fn operate(
     bearer: Option<&str>,
     body: Vec<u8>,
 ) -> anyhow::Result<(StatusCode, Value)> {
-    let mut request = Request::builder().method(method).uri("/v1/commands");
+    let mut request = Request::builder().method(method).uri("/v1/module");
     if let Some(bearer) = bearer {
         request = request.header("authorization", format!("Bearer {bearer}"));
     }
@@ -702,7 +702,7 @@ fn names(module: &Value) -> Vec<&str> {
 }
 
 #[tokio::test]
-async fn command_module_operations_require_the_operator_credential() -> anyhow::Result<()> {
+async fn module_operations_require_the_operator_credential() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let state = discord_state(
         core_client("http://127.0.0.1:1".to_owned())?,
@@ -719,7 +719,7 @@ async fn command_module_operations_require_the_operator_credential() -> anyhow::
             assert_eq!(status, StatusCode::FORBIDDEN, "{method} {bearer:?}");
         }
     }
-    assert_eq!(state.commands.serving().source, Source::Release);
+    assert_eq!(state.module.serving().source, Source::Release);
 
     let (status, body) = operate(&state, Method::GET, Some("operator"), Vec::new()).await?;
     assert_eq!(status, StatusCode::OK);
@@ -748,7 +748,7 @@ async fn command_module_operations_require_the_operator_credential() -> anyhow::
     assert!(
         body["error"]
             .as_str()
-            .is_some_and(|error| error.starts_with("not a usable command module")
+            .is_some_and(|error| error.starts_with("not a usable Discord module")
                 && error.ends_with("nothing was changed")),
         "{body}"
     );
@@ -767,7 +767,7 @@ async fn command_module_operations_require_the_operator_credential() -> anyhow::
     assert_eq!(
         body["error"],
         format!(
-            "a command module may have at most {MODULE_LIMIT} bytes (16 MiB); nothing was changed"
+            "a Discord module may have at most {MODULE_LIMIT} bytes (16 MiB); nothing was changed"
         )
     );
     let at_limit = padded(variant(&["model", "other"], "at limit")?, MODULE_LIMIT)?;
@@ -894,7 +894,7 @@ async fn an_abandoned_install_completes_while_holding_the_maintenance_lock() -> 
         MaintenanceLock::try_acquire(directory.path())?.is_none(),
         "the change must hold the maintenance lock while Discord is registering"
     );
-    assert_eq!(state.commands.serving().source, Source::Release);
+    assert_eq!(state.module.serving().source, Source::Release);
     let (_, reply) = interact(&state, Some("token"), &interaction("300", None)).await?;
     assert_eq!(reply["content"], "stub reply");
     assert!(!files(directory.path()).installed.exists());
@@ -913,7 +913,7 @@ async fn an_abandoned_install_completes_while_holding_the_maintenance_lock() -> 
         std::fs::read(files(directory.path()).installed)?,
         replacement
     );
-    assert_eq!(state.commands.serving().source, Source::Installed);
+    assert_eq!(state.module.serving().source, Source::Installed);
     let (_, reply) = interact(&state, Some("token"), &interaction("300", None)).await?;
     assert_eq!(reply["content"], "replacement");
     let (_, status) = operate(&state, Method::GET, Some("operator"), Vec::new()).await?;
@@ -923,16 +923,17 @@ async fn an_abandoned_install_completes_while_holding_the_maintenance_lock() -> 
     Ok(())
 }
 
-/// A command module that asks core for the model state through its one
+/// A Discord module that asks core for the model state through its one
 /// native call, then replies `answered` when core gave the state, or
 /// `failed` when it did not.
 fn calling_model(answered: &str, failed: &str) -> anyhow::Result<Vec<u8>> {
     let description = describing(&[definition("model")]);
     let describe_length =
-        serde_json::to_vec(&carillon_discord_commands::contract::Invocation::Describe)?.len();
+        serde_json::to_vec(&carillon_discord_module::contract::Invocation::Describe)?.len();
     let request =
-        serde_json::to_string(&carillon_discord_commands::contract::HostRequest::ModelState)?;
+        serde_json::to_string(&carillon_discord_module::contract::HostRequest::ModelState)?;
     let (answered, failed) = (replying(answered, &[]), replying(failed, &[]));
+    let card = showing("A test card");
     let escape = |text: &str| text.replace('\\', "\\\\").replace('"', "\\\"");
     let text = format!(
         r#"(module
@@ -945,6 +946,7 @@ fn calling_model(answered: &str, failed: &str) -> anyhow::Result<Vec<u8>> {
   (data (i32.const 4096) "{}")
   (data (i32.const 5120) "{}")
   (data (i32.const 6144) "{}")
+  (data (i32.const 7168) "{}")
   (func (export "input") (param $length i32) (result i32)
     (global.set $length (local.get $length))
     (i32.const 8192))
@@ -953,18 +955,24 @@ fn calling_model(answered: &str, failed: &str) -> anyhow::Result<Vec<u8>> {
     (if (result i32) (i32.eq (global.get $length) (i32.const {describe_length}))
       (then (global.set $output (i32.const 1024)) (i32.const {}))
       (else
-        (local.set $reply (call $call (i32.const 4096) (i32.const {})))
-        (call $take (i32.const 32768) (local.get $reply))
-        ;; {{"ModelState": ...}} or {{"Error": ...}}
-        (if (result i32) (i32.eq (i32.load8_u (i32.const 32770)) (i32.const 77))
-          (then (global.set $output (i32.const 5120)) (i32.const {}))
-          (else (global.set $output (i32.const 6144)) (i32.const {}))))))
+        ;; A card request begins {{"Card"
+        (if (result i32) (i32.eq (i32.load8_u (i32.const 8194)) (i32.const 67))
+          (then (global.set $output (i32.const 7168)) (i32.const {}))
+          (else
+            (local.set $reply (call $call (i32.const 4096) (i32.const {})))
+            (call $take (i32.const 32768) (local.get $reply))
+            ;; {{"ModelState": ...}} or {{"Error": ...}}
+            (if (result i32) (i32.eq (i32.load8_u (i32.const 32770)) (i32.const 77))
+              (then (global.set $output (i32.const 5120)) (i32.const {}))
+              (else (global.set $output (i32.const 6144)) (i32.const {}))))))))
   (func (export "output") (result i32) (global.get $output)))"#,
         escape(&description),
         escape(&request),
         escape(&answered),
         escape(&failed),
+        escape(&card),
         description.len(),
+        card.len(),
         request.len(),
         answered.len(),
         failed.len(),
@@ -1068,7 +1076,7 @@ async fn an_acknowledged_interaction_is_answered_before_the_provider_returns() -
         directory.path().join("release.wasm"),
         calling_model("model state received", "the native call failed")?,
     )?;
-    state.commands = Arc::new(Commands::load(files(directory.path())).await?);
+    state.module = Arc::new(Module::load(files(directory.path())).await?);
     let target = Arc::new(app(&discord_address.to_string(), 2, 100));
     state.app = Some(target.clone());
     let ingress = Arc::new(crate::inbound::Ingress {

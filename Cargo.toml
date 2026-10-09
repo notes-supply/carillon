@@ -3,7 +3,7 @@ resolver = "3"
 members = [
     "crates/carillon-core",
     "crates/carillon-discord",
-    "crates/carillon-discord-commands",
+    "crates/carillon-discord-module",
     "crates/carillon-protocol",
     "crates/carillon-installation",
     "crates/carillon-wasm",
@@ -35,7 +35,7 @@ tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 twilight-model = "0.17.1"
 uuid = { version = "1.21.0", features = ["serde", "v7"] }
 
-# The reloadable Discord command module is built with `--profile wasm` for
+# The replaceable Discord module is built with `--profile wasm` for
 # `wasm32-unknown-unknown`; size matters more than speed for guest code.
 [profile.wasm]
 inherits = "release"

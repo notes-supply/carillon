@@ -1,18 +1,17 @@
-//! Pure Discord work-card embeds: a job's status, the reasoning its runtime
-//! published, its calls, its delegated work and its agent, within Discord's
-//! embed limits, from what core recorded of the job. Monitoring and
-//! retention live in the activity lifecycle.
-//! Markers are validated provider configuration, shown on status/model rows;
-//! section names stay plain. Text a model wrote cannot format, mention or
-//! link anything.
-use crate::config::ActivityMarkers;
+//! Work cards: a job's status, the reasoning its runtime published, its
+//! calls, its delegated work and its agent, within Discord's embed limits,
+//! from what core recorded of the job, and whether a settled job keeps its
+//! card as a summary. The provider owns the card's lifecycle and every
+//! Discord call. Markers are the provider's validated configuration, shown
+//! on status/model rows; section names stay plain. Text a model wrote cannot
+//! format, mention or link anything.
+use crate::contract::{ActivityMarkers, Card, CardRequest, Seen};
 use carillon_protocol::model::{
-    ActivityPhase, AgentInfo, DeliveryOutcome, DeliveryState, FinishedTool, Job, JobTurn,
-    TurnActivity, TurnState, WorkItem, WorkKind, WorkState,
+    ActivityPhase, AgentInfo, DeliveryOutcome, FinishedTool, Job, TurnActivity, TurnState,
+    WorkItem, WorkKind, WorkState,
 };
+use serde::Serialize;
 use std::{collections::HashMap, fmt::Write as _};
-use twilight_model::channel::message::{Embed, embed::EmbedField};
-use twilight_validate::embed::{DESCRIPTION_LENGTH, FIELD_VALUE_LENGTH};
 
 const RECENT_LINES: usize = 5;
 const RUNNING_LINES: usize = 3;
@@ -20,10 +19,42 @@ const WORK_LINES: usize = 6;
 const LABEL_LIMIT: usize = 60;
 const DETAIL_LIMIT: usize = 120;
 const HEADLINE_LIMIT: usize = 100;
+/// Discord's limits for an embed's description and a field's value.
+const DESCRIPTION_LENGTH: usize = 4096;
+const FIELD_VALUE_LENGTH: usize = 1024;
+
+/// The card of the job `request` describes: its progress while it is at
+/// work or finishing, and once it settled the summary it earned, or its
+/// removal when it earned none.
+#[must_use]
+pub fn render(request: &CardRequest) -> Card {
+    let CardRequest { job, seen, markers } = request;
+    if job.settled().is_some() && !earned(job, seen.as_ref()) {
+        return Card::Remove;
+    }
+    Card::Show(serde_json::to_value(job_card(job, seen.as_ref(), markers)).unwrap_or_default())
+}
+
+/// A card's embed, as Discord's JSON names its parts.
+#[derive(Debug, Serialize)]
+struct Embed {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    description: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    fields: Vec<Field>,
+}
+
+#[derive(Debug, Serialize)]
+struct Field {
+    inline: bool,
+    name: String,
+    value: String,
+}
 
 /// What a card says of its job as a whole.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Status {
+enum Status {
     /// The job's message waits behind earlier work, since `since`.
     Queued { since: i64 },
     /// The job's live turn runs, in its phase when the runtime says.
@@ -43,45 +74,19 @@ pub(super) enum Status {
 }
 
 /// What a card shows of one job.
-pub(super) struct Shown<'a> {
-    pub(super) status: Status,
+struct Shown<'a> {
+    status: Status,
     /// When the person asked, once known.
-    pub(super) requested_at: Option<i64>,
+    requested_at: Option<i64>,
     /// What the job's turns did, oldest first: the final reports of those
     /// that ended, and then what is known of one that did not.
-    pub(super) reports: Vec<&'a TurnActivity>,
+    reports: Vec<&'a TurnActivity>,
     /// The snapshot of the job's turn running now: the only part shown as
     /// still running.
-    pub(super) live: Option<&'a TurnActivity>,
+    live: Option<&'a TurnActivity>,
     /// Reports of some of the job's turns are not known here: what is shown
     /// may not be all of its work.
-    pub(super) partial: bool,
-}
-
-/// The latest snapshot a card saw of a job's running turn, by turn.
-pub(super) type Seen = (String, TurnActivity);
-
-fn ended(turn: &JobTurn) -> bool {
-    matches!(turn.state, TurnState::Completed | TurnState::Interrupted)
-}
-
-/// How the job's last turn ended and its answer or notice was sent, once
-/// both are recorded: the job is settled.
-pub(super) fn settled(job: &Job) -> Option<(TurnState, DeliveryOutcome)> {
-    let last = job.turns.last().filter(|turn| ended(turn))?;
-    let delivery = match last.delivery? {
-        DeliveryState::Delivered => DeliveryOutcome::Delivered,
-        DeliveryState::Uncertain => DeliveryOutcome::Uncertain,
-        DeliveryState::Pending | DeliveryState::Delivering => return None,
-    };
-    Some((last.state, delivery))
-}
-
-/// The job's turn queued or running, its newest.
-pub(super) fn at_work(job: &Job) -> Option<&JobTurn> {
-    job.turns
-        .last()
-        .filter(|turn| matches!(turn.state, TurnState::Queued | TurnState::Running))
+    partial: bool,
 }
 
 /// Whether a job earns a retained summary: a turn stopped before finishing,
@@ -92,34 +97,29 @@ pub(super) fn at_work(job: &Job) -> Option<&JobTurn> {
 /// said native work the turn started would report later; so a job with
 /// earlier turns than a read lists delegated work too, whatever the reports
 /// left out showed. An answer alone needs no card.
-pub(super) fn earned(job: &Job, seen: Option<&Seen>) -> bool {
+fn earned(job: &Job, seen: Option<&Seen>) -> bool {
     job.earlier
         || job.turns.len() > 1
         || job.turns.iter().any(|turn| {
             turn.state == TurnState::Interrupted
-                || (ended(turn) && turn.activity.as_ref().is_some_and(earns_report))
+                || (turn.ended() && turn.activity.as_ref().is_some_and(earns_report))
         })
-        || seen.is_some_and(|(_, snapshot)| earns_report(snapshot))
+        || seen.is_some_and(|seen| earns_report(&seen.activity))
 }
 
-/// The summary a settled job's card keeps, when it earned one.
-pub(crate) fn job_summary(job: &Job, markers: &ActivityMarkers) -> Option<Embed> {
-    earned(job, None).then(|| job_card(job, None, markers))
-}
-
-pub(super) fn earns_report(report: &TurnActivity) -> bool {
+fn earns_report(report: &TurnActivity) -> bool {
     report.tool_calls > 0 || !report.notes.is_empty() || report.work.is_some()
 }
 
 /// The card of a job as core recorded it. `seen` is the latest snapshot the
 /// card saw of a running turn: it stands for the turn's work while a read
 /// has no snapshot of it, and after it ended without a report.
-pub(super) fn job_card(job: &Job, seen: Option<&Seen>, markers: &ActivityMarkers) -> Embed {
-    let working = at_work(job);
+fn job_card(job: &Job, seen: Option<&Seen>, markers: &ActivityMarkers) -> Embed {
+    let working = job.at_work();
     let live = working
         .filter(|turn| turn.state == TurnState::Running)
         .and_then(|turn| turn.activity.as_ref());
-    let status = match (working, settled(job)) {
+    let status = match (working, job.settled()) {
         (Some(turn), _)
             if turn.state == TurnState::Queued && turn.turn_id == job.origin.turn_id =>
         {
@@ -129,7 +129,7 @@ pub(super) fn job_card(job: &Job, seen: Option<&Seen>, markers: &ActivityMarkers
         }
         (Some(turn), _) if turn.state == TurnState::Queued => Status::Continuing,
         (Some(_), _) => Status::Working(
-            live.or(seen.map(|(_, snapshot)| snapshot))
+            live.or(seen.map(|seen| &seen.activity))
                 .map(|snapshot| snapshot.phase),
         ),
         (None, Some((turn_state, delivery))) => Status::Ended {
@@ -141,25 +141,25 @@ pub(super) fn job_card(job: &Job, seen: Option<&Seen>, markers: &ActivityMarkers
     };
     // The snapshot seen stands for a turn that has no report of its own and
     // is not shown running now.
-    let history = seen.filter(|(turn_id, _)| {
+    let history = seen.filter(|seen| {
         live.is_none()
             && !job
                 .turns
                 .iter()
-                .any(|turn| &turn.turn_id == turn_id && ended(turn) && turn.activity.is_some())
+                .any(|turn| turn.turn_id == seen.turn_id && turn.ended() && turn.activity.is_some())
     });
     let reports = job
         .turns
         .iter()
-        .filter(|turn| ended(turn))
+        .filter(|turn| turn.ended())
         .filter_map(|turn| turn.activity.as_ref())
-        .chain(history.map(|(_, snapshot)| snapshot))
+        .chain(history.map(|seen| &seen.activity))
         .collect();
     // What a turn without a report did is not known once a later turn shows
     // its own, nor is an observation's, which no read may have shown.
     let last = job.turns.len().saturating_sub(1);
     let unreported = job.turns.iter().enumerate().any(|(index, turn)| {
-        ended(turn)
+        turn.ended()
             && turn.activity.is_none()
             && (index < last || turn.turn_id != job.origin.turn_id)
     });
@@ -176,7 +176,7 @@ pub(super) fn job_card(job: &Job, seen: Option<&Seen>, markers: &ActivityMarkers
 }
 
 /// The card's embed.
-pub(super) fn card(shown: &Shown<'_>, markers: &ActivityMarkers) -> Embed {
+fn card(shown: &Shown<'_>, markers: &ActivityMarkers) -> Embed {
     let merged = Merged::of(&shown.reports, shown.live);
     let mut description = vec![status_line(shown, markers)];
     if let Some(headline) = shown.live.and_then(|live| live.headline.as_deref()) {
@@ -191,7 +191,7 @@ pub(super) fn card(shown: &Shown<'_>, markers: &ActivityMarkers) -> Embed {
     let mut fields = Vec::new();
     let mut field = |name: &str, lines: Vec<String>| {
         if !lines.is_empty() {
-            fields.push(EmbedField {
+            fields.push(Field {
                 inline: false,
                 name: name.to_owned(),
                 value: fitted(&lines, FIELD_VALUE_LENGTH),
@@ -211,19 +211,9 @@ pub(super) fn card(shown: &Shown<'_>, markers: &ActivityMarkers) -> Embed {
         .filter(|line| !line.is_empty());
     field("Agent", agent.into_iter().collect());
     Embed {
-        author: None,
-        color: None,
-        description: Some(cut(&description.join("\n"), DESCRIPTION_LENGTH)),
+        kind: "rich",
+        description: cut(&description.join("\n"), DESCRIPTION_LENGTH),
         fields,
-        footer: None,
-        image: None,
-        kind: "rich".to_owned(),
-        provider: None,
-        thumbnail: None,
-        timestamp: None,
-        title: None,
-        url: None,
-        video: None,
     }
 }
 
@@ -525,7 +515,7 @@ fn since(started_at: i64, estimated: bool) -> String {
 }
 
 /// A fixed compact duration: `<1s`, `45s`, `2m 15s`, `1h 3m 8s`.
-pub(super) fn compact(milliseconds: u64) -> String {
+fn compact(milliseconds: u64) -> String {
     let seconds = milliseconds / 1000;
     if seconds == 0 {
         return "<1s".to_owned();

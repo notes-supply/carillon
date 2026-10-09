@@ -2,12 +2,7 @@
 //! `carillon.toml`. Core never reads it; only the provider and its
 //! `configure` command know the schema.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs,
-    path::PathBuf,
-    str::FromStr,
-};
+use std::{collections::BTreeSet, fs, path::PathBuf, str::FromStr};
 
 use anyhow::{Context as _, Result, bail};
 use carillon_installation::config::{LoadedConfig, ProviderRole, component_directory};
@@ -66,67 +61,35 @@ fn uncertain_emoji() -> String {
     "⚠️".to_owned()
 }
 
-/// Inline card markers, independent of the provider's reaction emoji.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields)]
-pub struct ActivityMarkers {
-    pub working: String,
-    pub queued: String,
-    pub finishing: String,
-    pub running: String,
-    pub succeeded: String,
-    pub failed: String,
-    pub uncertain: String,
-    pub stopped: String,
-    /// Optional brand emotes by model-ID prefix; the longest match wins.
-    /// Unmatched models remain plain, rather than guessing their brand.
-    pub models: BTreeMap<String, String>,
-}
+/// Inline card markers, independent of the provider's reaction emoji. The
+/// Discord module shows them; this configuration validates them.
+pub use carillon_discord_module::contract::ActivityMarkers;
 
-impl Default for ActivityMarkers {
-    fn default() -> Self {
-        Self {
-            working: "⏳".to_owned(),
-            queued: "⏳".to_owned(),
-            finishing: "⏳".to_owned(),
-            running: "↳".to_owned(),
-            succeeded: "✓".to_owned(),
-            failed: "✗".to_owned(),
-            uncertain: "⚠️".to_owned(),
-            stopped: "⏹️".to_owned(),
-            models: BTreeMap::new(),
-        }
+fn validate_activity_markers(markers: &ActivityMarkers) -> Result<()> {
+    for (field, value) in [
+        ("working", &markers.working),
+        ("queued", &markers.queued),
+        ("finishing", &markers.finishing),
+        ("running", &markers.running),
+        ("succeeded", &markers.succeeded),
+        ("failed", &markers.failed),
+        ("uncertain", &markers.uncertain),
+        ("stopped", &markers.stopped),
+    ] {
+        validate_activity_marker(value)
+            .with_context(|| format!("invalid Discord activity_markers.{field}"))?;
     }
-}
-
-impl ActivityMarkers {
-    fn validate(&self) -> Result<()> {
-        for (field, value) in [
-            ("working", &self.working),
-            ("queued", &self.queued),
-            ("finishing", &self.finishing),
-            ("running", &self.running),
-            ("succeeded", &self.succeeded),
-            ("failed", &self.failed),
-            ("uncertain", &self.uncertain),
-            ("stopped", &self.stopped),
-        ] {
-            validate_activity_marker(value)
-                .with_context(|| format!("invalid Discord activity_markers.{field}"))?;
-        }
-        if self.models.len() > 32 {
-            bail!("activity_markers.models must contain at most 32 prefixes");
-        }
-        for (prefix, marker) in &self.models {
-            if prefix.is_empty() || prefix.len() > 63 {
-                bail!("activity_markers.models prefixes must contain 1–63 UTF-8 bytes");
-            }
-            validate_activity_marker(marker).with_context(|| {
-                format!("invalid activity_markers.models marker for {prefix:?}")
-            })?;
-        }
-        Ok(())
+    if markers.models.len() > 32 {
+        bail!("activity_markers.models must contain at most 32 prefixes");
     }
+    for (prefix, marker) in &markers.models {
+        if prefix.is_empty() || prefix.len() > 63 {
+            bail!("activity_markers.models prefixes must contain 1–63 UTF-8 bytes");
+        }
+        validate_activity_marker(marker)
+            .with_context(|| format!("invalid activity_markers.models marker for {prefix:?}"))?;
+    }
+    Ok(())
 }
 
 fn validate_activity_marker(value: &str) -> Result<()> {
@@ -400,7 +363,7 @@ impl DiscordConfig {
         ] {
             DiscordEmoji::parse(emoji)?;
         }
-        self.activity_markers.validate()?;
+        validate_activity_markers(&self.activity_markers)?;
         self.attachments
             .validate()
             .context("invalid Discord attachments settings")?;
@@ -464,7 +427,7 @@ pub(crate) mod tests {
 
     use super::{
         ActivityMarkers, DiscordActivation, DiscordConfig, DiscordConversation, DiscordEmoji,
-        DiscordRoute, validate_activity_marker,
+        DiscordRoute, validate_activity_marker, validate_activity_markers,
     };
 
     /// A complete installation on disk: `carillon.toml`, credentials, and
@@ -587,7 +550,7 @@ failed = ""
         assert_eq!(partial.failed, "");
         assert_eq!(partial.uncertain, "⚠️");
         assert_eq!(partial.stopped, "⏹️");
-        partial.validate()?;
+        validate_activity_markers(&partial)?;
 
         assert!(toml::from_str::<ActivityMarkers>("suceeded = '✓'").is_err());
         Ok(())
@@ -622,19 +585,19 @@ failed = ""
         markers
             .models
             .insert("claude-".to_owned(), "<:claude:123>".to_owned());
-        assert!(markers.validate().is_ok());
+        assert!(validate_activity_markers(&markers).is_ok());
         markers
             .models
             .insert("gpt-".to_owned(), "<@123>".to_owned());
-        assert!(markers.validate().is_err());
+        assert!(validate_activity_markers(&markers).is_err());
         markers.models.remove("gpt-");
         markers.models.insert("x".repeat(63), "✓".to_owned());
-        assert!(markers.validate().is_ok());
+        assert!(validate_activity_markers(&markers).is_ok());
         markers.models.insert("x".repeat(64), "✓".to_owned());
-        assert!(markers.validate().is_err());
+        assert!(validate_activity_markers(&markers).is_err());
         markers.models.remove(&"x".repeat(64));
         markers.models.insert(String::new(), "✓".to_owned());
-        assert!(markers.validate().is_err());
+        assert!(validate_activity_markers(&markers).is_err());
     }
 
     #[test]
@@ -705,7 +668,9 @@ failed = ""
             "stopped",
         ] {
             let markers: ActivityMarkers = toml::from_str(&format!("{field} = '@everyone'"))?;
-            let error = markers.validate().err().context("accepted mention")?;
+            let error = validate_activity_markers(&markers)
+                .err()
+                .context("accepted mention")?;
             assert!(
                 error
                     .to_string()

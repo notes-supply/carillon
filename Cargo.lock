@@ -290,7 +290,7 @@ dependencies = [
  "anyhow",
  "axum",
  "base64",
- "carillon-discord-commands",
+ "carillon-discord-module",
  "carillon-installation",
  "carillon-protocol",
  "carillon-wasm",
@@ -318,12 +318,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "carillon-discord-commands"
+name = "carillon-discord-module"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
  "carillon-protocol",
  "serde",
  "serde_json",
+ "twilight-model",
+ "twilight-validate",
 ]
 
 [[package]]

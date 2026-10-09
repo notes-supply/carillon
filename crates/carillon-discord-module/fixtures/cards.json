@@ -1,0 +1,883 @@
+[
+  {
+    "card": {
+      "description": "⏳ Waiting for earlier work to finish · queued <t:1790000000:R>",
+      "type": "rich"
+    },
+    "name": "queued",
+    "request": {
+      "job": {
+        "origin": {
+          "accepted_at": 1790000000,
+          "turn_id": "turn-1"
+        },
+        "target_id": "300",
+        "turns": [
+          {
+            "accepted_at": 1790000000,
+            "state": "queued",
+            "turn_id": "turn-1"
+          }
+        ]
+      },
+      "markers": {}
+    }
+  },
+  {
+    "card": {
+      "description": "⏳ Working · started <t:1790000000:R>\n> Running the crate's tests first.",
+      "fields": [
+        {
+          "inline": false,
+          "name": "Calls",
+          "value": "… 4 earlier calls\n✓ read `crates/carillon-discord/src/delivery.rs` · <1s\n✗ grep `\"fn delivery_loop\" in crates`\n↳ bash `cargo test -p carillon-discord --all-targets` · <t:1790000020:R>"
+        },
+        {
+          "inline": false,
+          "name": "Agent",
+          "value": "claude-opus-5-5 · effort high · context ≈ 48k of 200k tokens"
+        }
+      ],
+      "type": "rich"
+    },
+    "name": "working",
+    "request": {
+      "job": {
+        "origin": {
+          "accepted_at": 1790000000,
+          "turn_id": "turn-1"
+        },
+        "target_id": "300",
+        "turns": [
+          {
+            "accepted_at": 1790000000,
+            "activity": {
+              "agent": {
+                "context": {
+                  "used": 48213,
+                  "window": 200000
+                },
+                "effort": "high",
+                "model": "claude-opus-5-5"
+              },
+              "headline": "Running the crate's tests first.",
+              "phase": "tools",
+              "recent": [
+                {
+                  "detail": "crates/carillon-discord/src/delivery.rs",
+                  "duration_ms": 120,
+                  "ok": true,
+                  "tool": "read"
+                },
+                {
+                  "detail": "\"fn delivery_loop\" in crates",
+                  "ok": false,
+                  "tool": "grep"
+                }
+              ],
+              "running": [
+                {
+                  "detail": "cargo test -p carillon-discord --all-targets",
+                  "started_at": 1790000020,
+                  "tool": "bash"
+                }
+              ],
+              "tool_calls": 7
+            },
+            "state": "running",
+            "turn_id": "turn-1"
+          }
+        ]
+      },
+      "markers": {}
+    }
+  },
+  {
+    "card": {
+      "description": "⏳ Working · Waiting for the model · started <t:1790000000:R>",
+      "fields": [
+        {
+          "inline": false,
+          "name": "Calls",
+          "value": "… 5 earlier calls\n✓ read `crates/carillon-discord/src/delivery.rs` · <1s\n✗ grep `\"fn delivery_loop\" in crates`"
+        },
+        {
+          "inline": false,
+          "name": "Agent",
+          "value": "claude-opus-5-5 · effort high · context ≈ 48k of 200k tokens"
+        }
+      ],
+      "type": "rich"
+    },
+    "name": "working-seen-snapshot",
+    "request": {
+      "job": {
+        "origin": {
+          "accepted_at": 1790000000,
+          "turn_id": "turn-1"
+        },
+        "target_id": "300",
+        "turns": [
+          {
+            "accepted_at": 1790000000,
+            "state": "running",
+            "turn_id": "turn-1"
+          }
+        ]
+      },
+      "markers": {},
+      "seen": {
+        "activity": {
+          "agent": {
+            "context": {
+              "used": 48213,
+              "window": 200000
+            },
+            "effort": "high",
+            "model": "claude-opus-5-5"
+          },
+          "headline": "Running the crate's tests first.",
+          "phase": "model",
+          "recent": [
+            {
+              "detail": "crates/carillon-discord/src/delivery.rs",
+              "duration_ms": 120,
+              "ok": true,
+              "tool": "read"
+            },
+            {
+              "detail": "\"fn delivery_loop\" in crates",
+              "ok": false,
+              "tool": "grep"
+            }
+          ],
+          "running": [
+            {
+              "detail": "cargo test -p carillon-discord --all-targets",
+              "started_at": 1790000020,
+              "tool": "bash"
+            }
+          ],
+          "tool_calls": 7
+        },
+        "turn_id": "turn-1"
+      }
+    }
+  },
+  {
+    "card": {
+      "description": "⏳ Answered · delegated work goes on · started <t:1790000000:R>",
+      "fields": [
+        {
+          "inline": false,
+          "name": "Reasoning",
+          "value": "Checking whether the claim query uses the partial index.\nThe index covers it."
+        },
+        {
+          "inline": false,
+          "name": "Calls",
+          "value": "… 10 earlier calls\n✓ bash `mise run check` · 1m 35s\n✓ edit `crates/carillon-core/src/db.rs`"
+        },
+        {
+          "inline": false,
+          "name": "Work",
+          "value": " ↳ task `watch CI` · running · about <t:1790000030:R>\n⚠️ handoff `context handoff` · state unknown\n✓ delegation `review the migration` · done · gpt-5.5-codex · 1m 1s"
+        },
+        {
+          "inline": false,
+          "name": "Agent",
+          "value": "claude-opus-5-5 · context ≈ 1.2M tokens"
+        }
+      ],
+      "type": "rich"
+    },
+    "name": "continuing",
+    "request": {
+      "job": {
+        "origin": {
+          "accepted_at": 1790000000,
+          "turn_id": "turn-1"
+        },
+        "target_id": "300",
+        "turns": [
+          {
+            "accepted_at": 1790000000,
+            "activity": {
+              "agent": {
+                "context": {
+                  "used": 1250000
+                },
+                "model": "claude-opus-5-5"
+              },
+              "notes": [
+                "Checking whether the claim query uses the partial index.",
+                "The index covers it."
+              ],
+              "phase": "tools",
+              "recent": [
+                {
+                  "detail": "mise run check",
+                  "duration_ms": 95000,
+                  "ok": true,
+                  "tool": "bash"
+                },
+                {
+                  "detail": "crates/carillon-core/src/db.rs",
+                  "ok": true,
+                  "tool": "edit"
+                }
+              ],
+              "running": [],
+              "tool_calls": 12,
+              "work": {
+                "items": [
+                  {
+                    "actor": "gpt-5.5-codex",
+                    "duration_ms": 61000,
+                    "id": "a",
+                    "kind": "delegation",
+                    "label": "review the migration",
+                    "state": "succeeded"
+                  },
+                  {
+                    "estimated": true,
+                    "id": "b",
+                    "kind": "task",
+                    "label": "watch CI",
+                    "parent": "a",
+                    "started_at": 1790000030,
+                    "state": "running"
+                  },
+                  {
+                    "id": "c",
+                    "kind": "handoff",
+                    "label": "context handoff",
+                    "state": "unknown"
+                  }
+                ],
+                "partial": false
+              }
+            },
+            "delivery": "delivered",
+            "finished_at": 1790000045,
+            "state": "completed",
+            "turn_id": "turn-1"
+          },
+          {
+            "accepted_at": 1790000045,
+            "state": "queued",
+            "turn_id": "turn-2"
+          }
+        ]
+      },
+      "markers": {}
+    }
+  },
+  {
+    "card": {
+      "description": "⏳ Finishing up",
+      "fields": [
+        {
+          "inline": false,
+          "name": "Reasoning",
+          "value": "Checking whether the claim query uses the partial index.\nThe index covers it."
+        },
+        {
+          "inline": false,
+          "name": "Calls",
+          "value": "… 10 earlier calls\n✓ bash `mise run check` · 1m 35s\n✓ edit `crates/carillon-core/src/db.rs`"
+        },
+        {
+          "inline": false,
+          "name": "Work",
+          "value": " ↳ task `watch CI` · running · about <t:1790000030:R>\n⚠️ handoff `context handoff` · state unknown\n✓ delegation `review the migration` · done · gpt-5.5-codex · 1m 1s"
+        },
+        {
+          "inline": false,
+          "name": "Agent",
+          "value": "claude-opus-5-5 · context ≈ 1.2M tokens"
+        }
+      ],
+      "type": "rich"
+    },
+    "name": "finishing",
+    "request": {
+      "job": {
+        "origin": {
+          "accepted_at": 1790000000,
+          "turn_id": "turn-1"
+        },
+        "target_id": "300",
+        "turns": [
+          {
+            "accepted_at": 1790000000,
+            "activity": {
+              "agent": {
+                "context": {
+                  "used": 1250000
+                },
+                "model": "claude-opus-5-5"
+              },
+              "notes": [
+                "Checking whether the claim query uses the partial index.",
+                "The index covers it."
+              ],
+              "phase": "tools",
+              "recent": [
+                {
+                  "detail": "mise run check",
+                  "duration_ms": 95000,
+                  "ok": true,
+                  "tool": "bash"
+                },
+                {
+                  "detail": "crates/carillon-core/src/db.rs",
+                  "ok": true,
+                  "tool": "edit"
+                }
+              ],
+              "running": [],
+              "tool_calls": 12,
+              "work": {
+                "items": [
+                  {
+                    "actor": "gpt-5.5-codex",
+                    "duration_ms": 61000,
+                    "id": "a",
+                    "kind": "delegation",
+                    "label": "review the migration",
+                    "state": "succeeded"
+                  },
+                  {
+                    "estimated": true,
+                    "id": "b",
+                    "kind": "task",
+                    "label": "watch CI",
+                    "parent": "a",
+                    "started_at": 1790000030,
+                    "state": "running"
+                  },
+                  {
+                    "id": "c",
+                    "kind": "handoff",
+                    "label": "context handoff",
+                    "state": "unknown"
+                  }
+                ],
+                "partial": false
+              }
+            },
+            "delivery": "pending",
+            "finished_at": 1790000045,
+            "state": "completed",
+            "turn_id": "turn-1"
+          }
+        ]
+      },
+      "markers": {}
+    }
+  },
+  {
+    "card": {
+      "description": "⏹️ Stopped before finishing.",
+      "type": "rich"
+    },
+    "name": "interrupted",
+    "request": {
+      "job": {
+        "origin": {
+          "accepted_at": 1790000000,
+          "turn_id": "turn-1"
+        },
+        "target_id": "300",
+        "turns": [
+          {
+            "accepted_at": 1790000000,
+            "delivery": "delivered",
+            "finished_at": 1790000009,
+            "state": "interrupted",
+            "turn_id": "turn-1"
+          }
+        ]
+      },
+      "markers": {}
+    }
+  },
+  {
+    "card": {
+      "description": "✅ Done · answered 1h 2m 5s after the request",
+      "fields": [
+        {
+          "inline": false,
+          "name": "Reasoning",
+          "value": "Checking whether the claim query uses the partial index.\nThe index covers it."
+        },
+        {
+          "inline": false,
+          "name": "Calls",
+          "value": "… 10 earlier calls\n✅ bash `mise run check` · 1m 35s\n✅ edit `crates/carillon-core/src/db.rs`"
+        },
+        {
+          "inline": false,
+          "name": "Work",
+          "value": " ▸ task `watch CI` · running · about <t:1790000030:R>\n❓ handoff `context handoff` · state unknown\n✅ delegation `review the migration` · done · <:openai:423456789012345678> gpt-5.5-codex · 1m 1s"
+        },
+        {
+          "inline": false,
+          "name": "Agent",
+          "value": "<:opus:323456789012345678> claude-opus-5-5 · context ≈ 1.2M tokens"
+        }
+      ],
+      "type": "rich"
+    },
+    "name": "earned-summary",
+    "request": {
+      "job": {
+        "origin": {
+          "accepted_at": 1790000000,
+          "turn_id": "turn-1"
+        },
+        "target_id": "300",
+        "turns": [
+          {
+            "accepted_at": 1790000000,
+            "activity": {
+              "agent": {
+                "context": {
+                  "used": 1250000
+                },
+                "model": "claude-opus-5-5"
+              },
+              "notes": [
+                "Checking whether the claim query uses the partial index.",
+                "The index covers it."
+              ],
+              "phase": "tools",
+              "recent": [
+                {
+                  "detail": "mise run check",
+                  "duration_ms": 95000,
+                  "ok": true,
+                  "tool": "bash"
+                },
+                {
+                  "detail": "crates/carillon-core/src/db.rs",
+                  "ok": true,
+                  "tool": "edit"
+                }
+              ],
+              "running": [],
+              "tool_calls": 12,
+              "work": {
+                "items": [
+                  {
+                    "actor": "gpt-5.5-codex",
+                    "duration_ms": 61000,
+                    "id": "a",
+                    "kind": "delegation",
+                    "label": "review the migration",
+                    "state": "succeeded"
+                  },
+                  {
+                    "estimated": true,
+                    "id": "b",
+                    "kind": "task",
+                    "label": "watch CI",
+                    "parent": "a",
+                    "started_at": 1790000030,
+                    "state": "running"
+                  },
+                  {
+                    "id": "c",
+                    "kind": "handoff",
+                    "label": "context handoff",
+                    "state": "unknown"
+                  }
+                ],
+                "partial": false
+              }
+            },
+            "delivery": "delivered",
+            "finished_at": 1790003725,
+            "state": "completed",
+            "turn_id": "turn-1"
+          }
+        ]
+      },
+      "markers": {
+        "failed": "❌",
+        "finishing": "⌛",
+        "models": {
+          "claude": "<:claude:223456789012345678>",
+          "claude-opus": "<:opus:323456789012345678>",
+          "gpt": "<:openai:423456789012345678>"
+        },
+        "queued": "",
+        "running": "▸",
+        "stopped": "⛔",
+        "succeeded": "✅",
+        "uncertain": "❓",
+        "working": "<a:spin:123456789012345678>"
+      }
+    }
+  },
+  {
+    "card": {
+      "description": "✓ Done · answered 45s after the request",
+      "fields": [
+        {
+          "inline": false,
+          "name": "Calls",
+          "value": "… 5 earlier calls\n✓ read `crates/carillon-discord/src/delivery.rs` · <1s\n✗ grep `\"fn delivery_loop\" in crates`"
+        },
+        {
+          "inline": false,
+          "name": "Agent",
+          "value": "claude-opus-5-5 · effort high · context ≈ 48k of 200k tokens"
+        }
+      ],
+      "type": "rich"
+    },
+    "name": "earned-from-seen",
+    "request": {
+      "job": {
+        "origin": {
+          "accepted_at": 1790000000,
+          "turn_id": "turn-1"
+        },
+        "target_id": "300",
+        "turns": [
+          {
+            "accepted_at": 1790000000,
+            "delivery": "delivered",
+            "finished_at": 1790000045,
+            "state": "completed",
+            "turn_id": "turn-1"
+          }
+        ]
+      },
+      "markers": {},
+      "seen": {
+        "activity": {
+          "agent": {
+            "context": {
+              "used": 48213,
+              "window": 200000
+            },
+            "effort": "high",
+            "model": "claude-opus-5-5"
+          },
+          "headline": "Running the crate's tests first.",
+          "phase": "tools",
+          "recent": [
+            {
+              "detail": "crates/carillon-discord/src/delivery.rs",
+              "duration_ms": 120,
+              "ok": true,
+              "tool": "read"
+            },
+            {
+              "detail": "\"fn delivery_loop\" in crates",
+              "ok": false,
+              "tool": "grep"
+            }
+          ],
+          "running": [
+            {
+              "detail": "cargo test -p carillon-discord --all-targets",
+              "started_at": 1790000020,
+              "tool": "bash"
+            }
+          ],
+          "tool_calls": 7
+        },
+        "turn_id": "turn-1"
+      }
+    }
+  },
+  {
+    "card": null,
+    "name": "removal",
+    "request": {
+      "job": {
+        "origin": {
+          "accepted_at": 1790000000,
+          "turn_id": "turn-1"
+        },
+        "target_id": "300",
+        "turns": [
+          {
+            "accepted_at": 1790000000,
+            "activity": {
+              "phase": "model",
+              "recent": [],
+              "running": [],
+              "tool_calls": 0
+            },
+            "delivery": "delivered",
+            "finished_at": 1790000004,
+            "state": "completed",
+            "turn_id": "turn-1"
+          }
+        ]
+      },
+      "markers": {}
+    }
+  },
+  {
+    "card": {
+      "description": "⚠️ Finished, but the reply may not have been delivered.",
+      "fields": [
+        {
+          "inline": false,
+          "name": "Reasoning",
+          "value": "Checking whether the claim query uses the partial index.\nThe index covers it."
+        },
+        {
+          "inline": false,
+          "name": "Calls",
+          "value": "… 10 earlier calls\n✓ bash `mise run check` · 1m 35s\n✓ edit `crates/carillon-core/src/db.rs`"
+        },
+        {
+          "inline": false,
+          "name": "Work",
+          "value": " ↳ task `watch CI` · running · about <t:1790000030:R>\n⚠️ handoff `context handoff` · state unknown\n✓ delegation `review the migration` · done · gpt-5.5-codex · 1m 1s"
+        },
+        {
+          "inline": false,
+          "name": "Agent",
+          "value": "claude-opus-5-5 · context ≈ 1.2M tokens"
+        }
+      ],
+      "type": "rich"
+    },
+    "name": "uncertain-delivery",
+    "request": {
+      "job": {
+        "origin": {
+          "accepted_at": 1790000000,
+          "turn_id": "turn-1"
+        },
+        "target_id": "300",
+        "turns": [
+          {
+            "accepted_at": 1790000000,
+            "activity": {
+              "agent": {
+                "context": {
+                  "used": 1250000
+                },
+                "model": "claude-opus-5-5"
+              },
+              "notes": [
+                "Checking whether the claim query uses the partial index.",
+                "The index covers it."
+              ],
+              "phase": "tools",
+              "recent": [
+                {
+                  "detail": "mise run check",
+                  "duration_ms": 95000,
+                  "ok": true,
+                  "tool": "bash"
+                },
+                {
+                  "detail": "crates/carillon-core/src/db.rs",
+                  "ok": true,
+                  "tool": "edit"
+                }
+              ],
+              "running": [],
+              "tool_calls": 12,
+              "work": {
+                "items": [
+                  {
+                    "actor": "gpt-5.5-codex",
+                    "duration_ms": 61000,
+                    "id": "a",
+                    "kind": "delegation",
+                    "label": "review the migration",
+                    "state": "succeeded"
+                  },
+                  {
+                    "estimated": true,
+                    "id": "b",
+                    "kind": "task",
+                    "label": "watch CI",
+                    "parent": "a",
+                    "started_at": 1790000030,
+                    "state": "running"
+                  },
+                  {
+                    "id": "c",
+                    "kind": "handoff",
+                    "label": "context handoff",
+                    "state": "unknown"
+                  }
+                ],
+                "partial": false
+              }
+            },
+            "delivery": "uncertain",
+            "finished_at": 1790000045,
+            "state": "completed",
+            "turn_id": "turn-1"
+          }
+        ]
+      },
+      "markers": {}
+    }
+  },
+  {
+    "card": {
+      "description": "⛔ Stopped before finishing; the notice about it may not have been delivered.",
+      "fields": [
+        {
+          "inline": false,
+          "name": "Reasoning",
+          "value": "\\# heading \\<\\#456\\> \\|\\|spoiler\\|\\| \\~\\~strike\\~\\~ https\\://evil.example"
+        },
+        {
+          "inline": false,
+          "name": "Calls",
+          "value": "✅ mcp??1? `echo ˋidˋ > x`"
+        },
+        {
+          "inline": false,
+          "name": "Work",
+          "value": "❌ fork `fork ˋxˋ <@&9>` · failed · model??1?\n… and 3 more\n❓ … additional work not fully observed"
+        }
+      ],
+      "type": "rich"
+    },
+    "name": "stopped-uncertain",
+    "request": {
+      "job": {
+        "origin": {
+          "accepted_at": 1790000000,
+          "turn_id": "turn-1"
+        },
+        "target_id": "300",
+        "turns": [
+          {
+            "accepted_at": 1790000000,
+            "activity": {
+              "headline": "**bold** <@123> @everyone [link](https://example.com) `code`",
+              "notes": ["# heading <#456> ||spoiler|| ~~strike~~ https://evil.example"],
+              "phase": "tools",
+              "recent": [
+                {
+                  "detail": "echo `id` > x",
+                  "ok": true,
+                  "tool": "mcp<@1>"
+                }
+              ],
+              "running": [],
+              "tool_calls": 1,
+              "work": {
+                "items": [
+                  {
+                    "actor": "model<@1>",
+                    "id": "w",
+                    "kind": "fork",
+                    "label": "fork `x` <@&9>",
+                    "state": "failed"
+                  }
+                ],
+                "omitted": 3,
+                "partial": true
+              }
+            },
+            "delivery": "uncertain",
+            "finished_at": 1790000045,
+            "state": "interrupted",
+            "turn_id": "turn-1"
+          }
+        ]
+      },
+      "markers": {
+        "failed": "❌",
+        "finishing": "⌛",
+        "models": {
+          "claude": "<:claude:223456789012345678>",
+          "claude-opus": "<:opus:323456789012345678>",
+          "gpt": "<:openai:423456789012345678>"
+        },
+        "queued": "",
+        "running": "▸",
+        "stopped": "⛔",
+        "succeeded": "✅",
+        "uncertain": "❓",
+        "working": "<a:spin:123456789012345678>"
+      }
+    }
+  },
+  {
+    "card": {
+      "description": "⏳ Working · started <t:1790000000:R>\n> \\*\\*bold\\*\\* \\<\\@123\\> \\@everyone \\[link\\]\\(https\\://example.com\\) \\`code\\`",
+      "fields": [
+        {
+          "inline": false,
+          "name": "Reasoning",
+          "value": "\\# heading \\<\\#456\\> \\|\\|spoiler\\|\\| \\~\\~strike\\~\\~ https\\://evil.example"
+        },
+        {
+          "inline": false,
+          "name": "Calls",
+          "value": "✓ mcp??1? `echo ˋidˋ > x`"
+        },
+        {
+          "inline": false,
+          "name": "Work",
+          "value": "✗ fork `fork ˋxˋ <@&9>` · failed · model??1?\n⏳ … and 3 more\n⚠️ … additional work not fully observed"
+        }
+      ],
+      "type": "rich"
+    },
+    "name": "model-text-is-inert",
+    "request": {
+      "job": {
+        "origin": {
+          "accepted_at": 1790000000,
+          "turn_id": "turn-1"
+        },
+        "target_id": "300",
+        "turns": [
+          {
+            "accepted_at": 1790000000,
+            "activity": {
+              "headline": "**bold** <@123> @everyone [link](https://example.com) `code`",
+              "notes": ["# heading <#456> ||spoiler|| ~~strike~~ https://evil.example"],
+              "phase": "tools",
+              "recent": [
+                {
+                  "detail": "echo `id` > x",
+                  "ok": true,
+                  "tool": "mcp<@1>"
+                }
+              ],
+              "running": [],
+              "tool_calls": 1,
+              "work": {
+                "items": [
+                  {
+                    "actor": "model<@1>",
+                    "id": "w",
+                    "kind": "fork",
+                    "label": "fork `x` <@&9>",
+                    "state": "failed"
+                  }
+                ],
+                "omitted": 3,
+                "partial": true
+              }
+            },
+            "state": "running",
+            "turn_id": "turn-1"
+          }
+        ]
+      },
+      "markers": {}
+    }
+  }
+]

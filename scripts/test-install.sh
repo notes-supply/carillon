@@ -14,7 +14,7 @@ TEST_ROOT_T3_OUT=$(mktemp)
 for artifact in \
   bin/carillon \
   bin/carillon-discord \
-  lib/carillon_discord_commands.wasm \
+  lib/carillon_discord_module.wasm \
   lib/carillon-discord-pi.js \
   bin/carillon-runtime-pi \
   bin/carillon-runtime-t3 \
@@ -79,7 +79,7 @@ node "$ROOT/scripts/test-codemode.mjs" "$RELEASE"
 node "$ROOT/scripts/test-images.mjs" "$RELEASE"
 
 CARILLON_CORE_BINARY="$RELEASE/bin/carillon" CARILLON_RUNTIME_BINARY="$RELEASE/bin/carillon-runtime-pi" \
-  CARILLON_COMMANDS_MODULE="$RELEASE/lib/carillon_discord_commands.wasm" \
+  CARILLON_DISCORD_MODULE="$RELEASE/lib/carillon_discord_module.wasm" \
   node "$ROOT/scripts/test-integration.mjs"
 
 TEST_ROOT=$(mktemp -d)
@@ -354,7 +354,7 @@ env HOME="$OWNER_HOME" USER="$OWNER" LOGNAME="$OWNER" SHELL="$OWNER_SHELL" PATH=
   CARILLON_HOME="$CARILLON_HOME" PI_CODING_AGENT_DIR="$CARILLON_HOME/pi" \
   "$APP/carillon" discord serve --config "$CONFIG" --provider discord-private \
     --token-file "$CARILLON_HOME/credentials/discord-private.token" \
-    --commands "$CARILLON_HOME/app/lib/carillon_discord_commands.wasm" --deterministic \
+    --module "$CARILLON_HOME/app/lib/carillon_discord_module.wasm" --deterministic \
     >>"$CARILLON_HOME/logs/discord.log" 2>&1 &
 DISCORD_PID=$!
 
@@ -396,7 +396,7 @@ grep -F -- '--provider runtime-pi' "$XDG_CONFIG_HOME/systemd/user/carillon-runti
 # target nor enabled, so a default Pi installation never activates it.
 grep -F -- '--provider runtime-t3' "$XDG_CONFIG_HOME/systemd/user/carillon-runtime-t3.service" >/dev/null
 [ ! -e "$XDG_CONFIG_HOME/systemd/user/carillon.target.wants/carillon-runtime-t3.service" ]
-grep -F -- "--commands \"$CARILLON_HOME/app/lib/carillon_discord_commands.wasm\"" \
+grep -F -- "--module \"$CARILLON_HOME/app/lib/carillon_discord_module.wasm\"" \
   "$XDG_CONFIG_HOME/systemd/user/carillon-discord.service" >/dev/null
 RUNTIME_TOKEN=$(cat "$CARILLON_HOME/credentials/runtime-pi.token")
 ENVIRONMENT=$(curl --fail --silent -H "authorization: Bearer $RUNTIME_TOKEN" \
@@ -432,7 +432,7 @@ FIRST=$(curl --fail --silent -X POST -H 'content-type: application/json' \
   --data '{"event_id":"installed-1","guild_id":"100","user_id":"200","channel_id":"300","content":"installed identity turn"}' \
   "http://127.0.0.1:$DISCORD_PORT/v1/simulate")
 case "$FIRST" in *"Local provider response 1"*) ;; *) printf '%s\n' "$FIRST" >&2; exit 1 ;; esac
-# The packaged command module answers slash commands through the packaged provider.
+# The packaged Discord module answers slash commands through the packaged provider.
 PANEL=$(curl --fail --silent -X POST -H 'content-type: application/json' \
   -H "@$SIMULATION_HEADERS" \
   --data '{"guild_id":"100","user_id":"200","channel_id":"300","kind":"command","name":"model"}' \

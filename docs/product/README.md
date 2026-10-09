@@ -13,7 +13,7 @@
 - [Runtime boundary](../../packages/runtime/README.md): shared HTTP adapter and registry loading.
 - [Discord agent tools](../../packages/discord-pi/README.md): optional Pi extension and skill.
 - [Wire contracts](../../packages/protocol/README.md): shared Rust/TypeScript vocabulary and fixtures.
-- [Wasm host](../../crates/carillon-wasm/README.md): command modules and native operations.
+- [Wasm host](../../crates/carillon-wasm/README.md): replaceable guest modules and native operations.
 
 Try `mise run example:core` without a model account, `mise run example:pi` with
 Pi credentials, or `mise run example:discord` without a gateway.

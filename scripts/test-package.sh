@@ -48,7 +48,7 @@ case "${0##*/}" in
     if [ "$target" = wasm32-unknown-unknown ]; then
       [ "$profile" = wasm ]
       mkdir -p "target/$target/$profile"
-      printf 'wasm\n' >"target/$target/$profile/carillon_discord_commands.wasm"
+      printf 'wasm\n' >"target/$target/$profile/carillon_discord_module.wasm"
     else
       [ "$target" = "$TEST_TARGET" ]
       mkdir -p "target/$target/release"
@@ -91,12 +91,12 @@ for arch in x86_64 aarch64; do
   for binary in carillon-runtime-pi pi carillon-runtime-t3; do
     [ "$(tar -xOf "$archive" "carillon-1.2.3/bin/$binary")" = "bun-linux-$bun_arch" ]
   done
-  [ "$(tar -xOf "$archive" carillon-1.2.3/lib/carillon_discord_commands.wasm)" = wasm ]
+  [ "$(tar -xOf "$archive" carillon-1.2.3/lib/carillon_discord_module.wasm)" = wasm ]
   [ "$(tar -xOf "$archive" carillon-1.2.3/bin/photon_rs_bg.wasm)" = photon ]
   # The manifest lists exactly the shipped files, marking what must be executable.
   tar -xOf "$archive" carillon-1.2.3/MANIFEST >"$TEST_ROOT/$arch.manifest"
   for line in 'x install.sh' 'x bin/carillon' 'x bin/carillon-discord' 'x bin/carillon-register-services' \
-    'r lib/carillon_discord_commands.wasm' 'r lib/carillon-discord-pi.js' 'r lib/carillon-discord-SKILL.md' \
+    'r lib/carillon_discord_module.wasm' 'r lib/carillon-discord-pi.js' 'r lib/carillon-discord-SKILL.md' \
     'r bin/photon_rs_bg.wasm' 'r systemd/example.service'; do
     grep -Fx "$line" "$TEST_ROOT/$arch.manifest" >/dev/null
   done
