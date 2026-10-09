@@ -146,6 +146,11 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
     commands(): Promise<CommandCatalog> {
       return track(() => Promise.resolve({ commands: [] }));
     },
+    restartReadiness() {
+      return executing.size === 0
+        ? { state: "ready" }
+        : { state: "unready", reason: `${String(executing.size)} turn(s) still executing` };
+    },
     async close() {
       shutdown.abort(new RuntimeClosed("Pi runtime is closed"));
       await Promise.allSettled([...pending]);

@@ -36,13 +36,19 @@ export async function createDeterministicRuntime(
   const selections = await ModelSelections.open(join(stateDirectory, "model-selection.json"));
   const turns = new Serial();
   const shutdown = new AbortController();
+  let executing = 0;
   return {
-    executeTurn(request, signal) {
-      return turns.run(() => {
-        shutdown.signal.throwIfAborted();
-        signal?.throwIfAborted();
-        return executeDeterministic(request);
-      });
+    async executeTurn(request, signal) {
+      executing += 1;
+      try {
+        return await turns.run(() => {
+          shutdown.signal.throwIfAborted();
+          signal?.throwIfAborted();
+          return executeDeterministic(request);
+        });
+      } finally {
+        executing -= 1;
+      }
     },
     activity() {
       return undefined;
@@ -58,6 +64,11 @@ export async function createDeterministicRuntime(
     commands() {
       shutdown.signal.throwIfAborted();
       return Promise.resolve({ commands: [] });
+    },
+    restartReadiness() {
+      return executing === 0
+        ? { state: "ready" }
+        : { state: "unready", reason: `${String(executing)} turn(s) executing` };
     },
     async close() {
       shutdown.abort();
