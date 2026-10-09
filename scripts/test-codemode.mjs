@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -88,8 +88,8 @@ try {
     const env = { ...process.env, PI_OFFLINE: "1", PI_CODING_AGENT_DIR: state };
     if (kind === "cli") {
       active = spawn(
-        join(release, "bin/pi"),
-        ["--offline", "--no-session", "--mode", "json", "-p", "Run the verification."],
+        join(release, "bin/carillon-runtime-pi"),
+        ["pi", "--offline", "--no-session", "--mode", "json", "-p", "Run the verification."],
         { cwd: work, env, stdio: ["ignore", "pipe", "pipe"] },
       );
       const timeout = setTimeout(() => active?.kill("SIGKILL"), 30_000);
@@ -170,6 +170,12 @@ try {
       sent[0].tools.map((tool) => tool.function.name),
       ["codemode"],
     );
+    // Pi finds its documentation beside the executable, as it tells the model.
+    const system = sent[0].messages.find((message) => message.role === "system")?.content ?? "";
+    const docs = { readme: join(release, "bin/README.md"), docs: join(release, "bin/docs") };
+    assert.match(system, new RegExp(`Main documentation: ${RegExp.escape(docs.readme)}$`, "mu"));
+    assert.match(system, new RegExp(`Additional docs: ${RegExp.escape(docs.docs)}$`, "mu"));
+    assert.ok((await stat(docs.readme)).isFile() && (await stat(docs.docs)).isDirectory());
     const nested = sent[1].messages
       .filter((message) => message.role === "tool")
       .map((message) => message.content)

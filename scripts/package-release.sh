@@ -27,12 +27,24 @@ BUNDLE="$ROOT/target/pi-bundle"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/bin/theme" "$STAGE/bin/assets" "$STAGE/lib" "$STAGE/licenses" "$STAGE/systemd" "$(dirname -- "$OUTPUT")"
 
-# Pi's native Bun setup embeds QuickJS. Its worker specifiers use the source
-# layout, so keep those entrypoint identities even when building from npm's dist.
+# One executable serves the runtime and, as `carillon-runtime-pi pi …`, Pi's own
+# command line. Each mode is imported only once chosen: Pi's Bun entry, which
+# restores a sandboxed environment and runs Pi's runtime setup before its CLI,
+# or that runtime setup (Bun OAuth flows, Bedrock, embedded QuickJS) before the
+# runtime's CLI. Pi reads its arguments without the mode's.
+rm -rf "$BUNDLE"
 mkdir -p "$BUNDLE/src/extensions/codemode" "$BUNDLE/src/utils"
-printf 'import "%s";\n' "$ROOT/$PI_DIST/bun/runtime-setup.js" \
-  "$ROOT/packages/runtime-pi/src/cli.ts" >"$BUNDLE/runtime.ts"
-printf 'import "%s";\n' "$ROOT/$PI_DIST/bun/cli.js" >"$BUNDLE/pi.ts"
+cat >"$BUNDLE/carillon-runtime-pi.ts" <<ENTRY
+if (process.argv[2] === "pi") {
+  process.argv.splice(2, 1);
+  await import("$ROOT/$PI_DIST/bun/cli.js");
+} else {
+  await import("$ROOT/$PI_DIST/bun/runtime-setup.js");
+  await import("$ROOT/packages/runtime-pi/src/cli.ts");
+}
+ENTRY
+# Pi's worker specifiers use its source layout, so keep those entrypoint
+# identities even when building from npm's dist.
 printf 'import "%s";\n' "$ROOT/$PI_DIST/extensions/codemode/worker.js" \
   >"$BUNDLE/src/extensions/codemode/worker.ts"
 printf 'import "%s";\n' "$ROOT/$PI_DIST/utils/image-resize-worker.js" \
@@ -45,13 +57,11 @@ cargo build --release --locked --target "$TARGET" --target-dir "$ROOT/target" --
 # The Discord module runs in the provider's Wasm sandbox; it is data,
 # not a native binary, and is built for the wasm32 target regardless of host.
 cargo build --locked --profile wasm --target wasm32-unknown-unknown --target-dir "$ROOT/target" -p carillon-discord-module
-bun build --compile --target "$BUN_TARGET" --root "$BUNDLE" \
-  "$BUNDLE/runtime.ts" "$BUNDLE/src/extensions/codemode/worker.ts" \
-  "$BUNDLE/src/utils/image-resize-worker.ts" --outfile "$STAGE/bin/carillon-runtime-pi"
+# Compiled providers never load a bunfig.toml from where they are started.
 bun build --compile --target "$BUN_TARGET" --no-compile-autoload-bunfig \
-  --root "$BUNDLE" "$BUNDLE/pi.ts" "$BUNDLE/src/extensions/codemode/worker.ts" \
-  "$BUNDLE/src/utils/image-resize-worker.ts" \
-  --outfile "$STAGE/bin/pi"
+  --root "$BUNDLE" "$BUNDLE/carillon-runtime-pi.ts" \
+  "$BUNDLE/src/extensions/codemode/worker.ts" "$BUNDLE/src/utils/image-resize-worker.ts" \
+  --outfile "$STAGE/bin/carillon-runtime-pi"
 # The T3 runtime is an optional provider: shipped as its own executable and
 # unit, registered and started only when the operator configures it.
 bun build --compile --target "$BUN_TARGET" --no-compile-autoload-bunfig \
