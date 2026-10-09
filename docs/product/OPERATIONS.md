@@ -42,7 +42,7 @@ Discord commands that act on a configured instance (`configure`, `check`, `setti
 After installation:
 
 1. write the Discord bot token to the credential path printed by the installer;
-2. authenticate the packaged Pi installation using the printed `carillon-pi` command, then open `/model` and press Ctrl+S on the desired model to save its startup default;
+2. authenticate the packaged Pi installation using the printed `carillon-pi` command, then open `/model` and press Ctrl+S on the desired model to save its startup default. `carillon-pi` runs Pi's own command line, a mode of the runtime executable (`carillon-runtime-pi pi …`), as the owner with the installation's `pi` directory;
 3. run `carillon start`; and
 4. inspect it with `carillon status` and `carillon logs`.
 

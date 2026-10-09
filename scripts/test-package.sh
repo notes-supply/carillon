@@ -88,9 +88,14 @@ for arch in x86_64 aarch64; do
   for binary in carillon carillon-discord; do
     [ "$(tar -xOf "$archive" "carillon-1.2.3/bin/$binary")" = "$target" ]
   done
-  for binary in carillon-runtime-pi pi carillon-runtime-t3; do
+  for binary in carillon-runtime-pi carillon-runtime-t3; do
     [ "$(tar -xOf "$archive" "carillon-1.2.3/bin/$binary")" = "bun-linux-$bun_arch" ]
   done
+  # Pi's command line is a mode of the runtime executable, not a second one.
+  if tar -tzf "$archive" carillon-1.2.3/bin/pi >/dev/null 2>&1; then
+    echo 'the release ships a second Pi executable' >&2
+    exit 1
+  fi
   [ "$(tar -xOf "$archive" carillon-1.2.3/lib/carillon_discord_module.wasm)" = wasm ]
   [ "$(tar -xOf "$archive" carillon-1.2.3/bin/photon_rs_bg.wasm)" = photon ]
   # The manifest lists exactly the shipped files, marking what must be executable.
@@ -103,7 +108,13 @@ for arch in x86_64 aarch64; do
   [ "$(wc -l <"$TEST_ROOT/$arch.manifest")" -eq \
     "$(tar -tzvf "$archive" | grep -c '^-' | awk '{ print $1 - 1 }')" ]
   [ "$(wc -l <"$TEST_ROOT/$arch.cargo")" -eq 2 ]
-  [ "$(wc -l <"$TEST_ROOT/$arch.bun")" -eq 4 ]
+  [ "$(wc -l <"$TEST_ROOT/$arch.bun")" -eq 3 ]
+  # No compiled provider loads a bunfig.toml from where it is started.
+  [ "$(grep -c -- '--compile ' "$TEST_ROOT/$arch.bun")" -eq 2 ]
+  if grep -- '--compile ' "$TEST_ROOT/$arch.bun" | grep -v -- '--no-compile-autoload-bunfig'; then
+    echo 'a compiled provider may load bunfig.toml' >&2
+    exit 1
+  fi
   printf 'package target selection passed: %s\n' "$arch"
 done
 rm -rf "$FIXTURE/target" "$FIXTURE/dist"

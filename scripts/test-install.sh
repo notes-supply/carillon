@@ -18,7 +18,6 @@ for artifact in \
   lib/carillon-discord-pi.js \
   bin/carillon-runtime-pi \
   bin/carillon-runtime-t3 \
-  bin/pi \
   bin/photon_rs_bg.wasm \
   bin/carillon-pi \
   bin/carillon-register-services \
@@ -33,6 +32,8 @@ for artifact in \
 do
   [ -e "$RELEASE/$artifact" ] || { printf 'release artifact missing: %s\n' "$artifact" >&2; exit 1; }
 done
+# Pi's command line is a mode of the runtime executable; nothing else is Pi.
+[ ! -e "$RELEASE/bin/pi" ] || { printf '%s\n' "the release ships a second Pi executable" >&2; exit 1; }
 [ "$(find "$RELEASE/systemd" -maxdepth 1 -type f | wc -l)" -eq 5 ] || {
   printf '%s\n' "release must contain exactly the target, three default service units and the optional T3 unit" >&2
   exit 1
@@ -75,6 +76,7 @@ grep -F 'runtime provider runtime-t3 is disabled; not serving' "$TEST_ROOT_T3_OU
 rm -rf -- "$T3_DISABLED"
 rm -f "$TEST_ROOT_T3_OUT"
 
+node "$ROOT/scripts/test-pi-cli.mjs" "$RELEASE"
 node "$ROOT/scripts/test-codemode.mjs" "$RELEASE"
 node "$ROOT/scripts/test-images.mjs" "$RELEASE"
 
@@ -299,29 +301,40 @@ grep -Fqx 'guild_id = "100"' "$CARILLON_HOME/providers/discord-private.toml"
 [ "$(sha256sum "$GLOBAL_PI/sentinel" | cut -d' ' -f1)" = "$GLOBAL_PI_HASH" ]
 [ ! -e "$GLOBAL_PI/auth.json" ]
 
-# Exercise the packaged login entry without launching an interactive provider flow.
-mv "$CARILLON_HOME/app/bin/pi" "$CARILLON_HOME/app/bin/pi.real"
-cat >"$CARILLON_HOME/app/bin/pi" <<'PROBE'
+# Exercise the packaged login entry without launching an interactive provider
+# flow: it runs the runtime executable in Pi's mode with the person's arguments.
+PI_EXECUTABLE=$CARILLON_HOME/app/bin/carillon-runtime-pi
+mv "$PI_EXECUTABLE" "$PI_EXECUTABLE.real"
+cat >"$PI_EXECUTABLE" <<'PROBE'
 #!/bin/sh
-printf '%s\n%s\n' "$PI_CODING_AGENT_DIR" "$HOME" >"$CARILLON_HOME/pi/login-probe"
+printf '%s\n' "$PI_CODING_AGENT_DIR" "$HOME" "$@" >"$CARILLON_HOME/pi/login-probe"
 PROBE
-chmod 0755 "$CARILLON_HOME/app/bin/pi"
+chmod 0755 "$PI_EXECUTABLE"
 ln -s "$CARILLON_HOME/app/bin/carillon-pi" "$TEST_ROOT/pi-login"
 for launcher in "$CARILLON_HOME/app/bin/carillon-pi" "$TEST_ROOT/pi-login"; do
   for location in unset conflicting; do
     rm -f "$CARILLON_HOME/pi/login-probe"
     if [ "$location" = unset ]; then
-      env -u CARILLON_HOME HOME="$OWNER_HOME" "$launcher"
+      env -u CARILLON_HOME HOME="$OWNER_HOME" "$launcher" --no-session "two words"
     else
-      env HOME="$OWNER_HOME" CARILLON_HOME="$TEST_ROOT/wrong-root" "$launcher"
+      env HOME="$OWNER_HOME" CARILLON_HOME="$TEST_ROOT/wrong-root" "$launcher" --no-session "two words"
     fi
     [ "$(sed -n '1p' "$CARILLON_HOME/pi/login-probe")" = "$CARILLON_HOME/pi" ]
     [ "$(sed -n '2p' "$CARILLON_HOME/pi/login-probe")" = "$OWNER_HOME" ]
+    [ "$(sed -n '3,$p' "$CARILLON_HOME/pi/login-probe")" = "$(printf '%s\n' pi --no-session 'two words')" ]
     [ ! -e "$TEST_ROOT/wrong-root" ]
     [ ! -e "$OWNER_HOME/.carillon" ]
   done
 done
-mv "$CARILLON_HOME/app/bin/pi.real" "$CARILLON_HOME/app/bin/pi"
+mv "$PI_EXECUTABLE.real" "$PI_EXECUTABLE"
+rm -f "$CARILLON_HOME/pi/login-probe"
+# The real executable answers as Pi through either path, without touching Pi's state.
+PI_VERSION=$(bun -e 'console.log((await Bun.file(process.argv[1]).json()).version)' "$CARILLON_HOME/app/bin/package.json")
+PI_STATE_BEFORE=$(find "$CARILLON_HOME/pi" -printf '%P %s %T@\n' | LC_ALL=C sort)
+for launcher in "$CARILLON_HOME/app/bin/carillon-pi" "$TEST_ROOT/pi-login"; do
+  [ "$(env -u CARILLON_HOME HOME="$OWNER_HOME" "$launcher" --version)" = "$PI_VERSION" ]
+done
+[ "$(find "$CARILLON_HOME/pi" -printf '%P %s %T@\n' | LC_ALL=C sort)" = "$PI_STATE_BEFORE" ]
 
 APP=$CARILLON_HOME/app/bin
 CONFIG=$CARILLON_HOME/carillon.toml

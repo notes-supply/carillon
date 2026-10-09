@@ -9,4 +9,4 @@ CARILLON_HOME=$(CDPATH='' cd -- "$BIN/../.." && pwd)
 export CARILLON_HOME
 export PI_CODING_AGENT_DIR="$CARILLON_HOME/pi"
 umask 077
-exec "$BIN/pi" "$@"
+exec "$BIN/carillon-runtime-pi" pi "$@"
