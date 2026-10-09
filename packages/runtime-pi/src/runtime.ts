@@ -39,7 +39,7 @@ import { ModelSelections } from "./model.ts";
 import { resolved } from "@carillon/runtime/models";
 import { openConversation } from "./namespace.ts";
 import { finalReport, toolName } from "@carillon/runtime/activity";
-import { RuntimeClosed, withReport } from "@carillon/runtime/failure";
+import { ExplainedFailure, RuntimeClosed, withReport } from "@carillon/runtime/failure";
 import { Serial } from "@carillon/runtime/serial";
 import { createPiExecutionSession, promptSession } from "./session.ts";
 import {
@@ -113,6 +113,12 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
 
   return {
     executeTurn(request, signal) {
+      // Pi hands core no follow-up cursor, so a follow-up turn is none of
+      // its own: run as ordinary input, it would answer what nobody asked.
+      if (request.follow_up !== undefined)
+        return Promise.reject(
+          new ExplainedFailure(422, "This runtime does not follow up on delegated work."),
+        );
       return track(() =>
         turns.run(async () => {
           const combined =

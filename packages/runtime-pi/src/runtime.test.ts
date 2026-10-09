@@ -272,3 +272,60 @@ it("close waits for accepted operations and prevents queued execution from start
     await rm(root, { recursive: true, force: true });
   }
 });
+
+it("refuses a follow-up it never offered, and says a restart loses a turn it executes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "carillon-follow-up-"));
+  const models = await ModelRuntime.create({
+    authPath: join(root, "auth.json"),
+    modelsPath: null,
+    modelsStorePath: join(root, "models.json"),
+    refreshOnCreate: false,
+  });
+  const catalogue = vi.spyOn(models, "getAvailable").mockResolvedValue([model]);
+  const runtime = await createPiRuntime({
+    workspace: root,
+    stateDirectory: join(root, "state"),
+    modelRuntime: models,
+    settings: SettingsManager.inMemory({ defaultProvider: model.provider, defaultModel: model.id }),
+  });
+  const request = {
+    interface_id: "test",
+    agent_id: "test",
+    audience_id: "test",
+    correlation_id: "one",
+    input: "",
+    resource_root: root,
+    attachment_root: root,
+  };
+  const deferred = Promise.withResolvers<readonly Model<typeof model.api>[]>();
+  try {
+    expect(runtime.restartReadiness()).toEqual({ state: "ready" });
+    // Pi hands core no cursor: a follow-up is not run as ordinary input.
+    await expect(
+      runtime.executeTurn({ ...request, follow_up: { cursor: 1 } }),
+    ).rejects.toMatchObject({
+      status: 422,
+      message: "This runtime does not follow up on delegated work.",
+    });
+    expect(catalogue).toHaveBeenCalledTimes(1); // construction alone
+    catalogue.mockReturnValue(deferred.promise);
+    const active = runtime.executeTurn({ ...request, input: "Do not execute" });
+    void active.catch(() => undefined);
+    await vi.waitFor(() => {
+      expect(runtime.restartReadiness()).toEqual({
+        state: "unready",
+        reason: "1 turn(s) still executing",
+      });
+    });
+    const closing = runtime.close();
+    deferred.resolve([model]);
+    await closing;
+    await expect(active).rejects.toThrow("closed");
+    expect(runtime.restartReadiness()).toEqual({ state: "ready" });
+  } finally {
+    deferred.resolve([model]);
+    await runtime.close();
+    vi.restoreAllMocks();
+    await rm(root, { recursive: true, force: true });
+  }
+});
