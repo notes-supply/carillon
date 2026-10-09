@@ -515,7 +515,10 @@ async fn the_pause_holds_through_a_slow_stop_only_while_core_acknowledges_it() -
 /// Core serving with its runtime disabled, so no worker runs and nothing
 /// but the pause changes the arrangement; its runtime answers `/v1/restart`
 /// after `delay`.
-async fn without_workers(directory: &std::path::Path, delay: Duration) -> Result<AppState> {
+async fn without_workers(
+    directory: &std::path::Path,
+    delay: Duration,
+) -> Result<(Fixture, AppState)> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let url = format!("http://{}", listener.local_addr()?);
     let readiness = Router::new().route(
@@ -530,13 +533,14 @@ async fn without_workers(directory: &std::path::Path, delay: Duration) -> Result
     let runtime = &mut fixture.config.value.providers[1];
     runtime.url = url;
     runtime.enabled = false;
-    Ok(super::configured(&fixture))
+    let state = super::configured(&fixture);
+    Ok((fixture, state))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_pause_arranged_just_before_it_lapses_still_ends() -> Result<()> {
     let directory = tempdir()?;
-    let state = without_workers(directory.path(), Duration::ZERO).await?;
+    let (_fixture, state) = without_workers(directory.path(), Duration::ZERO).await?;
     let (stopping, supervisor) = supervise(&state);
     let mut census = state.workers.subscribe();
     census.wait_for(|census| census.registry.is_some()).await?;
@@ -575,7 +579,7 @@ async fn a_pause_arranged_just_before_it_lapses_still_ends() -> Result<()> {
 async fn a_drain_report_outlived_by_its_pause_is_not_given() -> Result<()> {
     let directory = tempdir()?;
     // The runtime answers only after the pause's lease.
-    let state = without_workers(directory.path(), Duration::from_millis(500)).await?;
+    let (_fixture, state) = without_workers(directory.path(), Duration::from_millis(500)).await?;
     let (stopping, supervisor) = supervise(&state);
     let holder = ok(begin(&state, Duration::from_millis(300)).await)?.holder;
     let mut census = state.workers.subscribe();
@@ -592,4 +596,49 @@ async fn a_drain_report_outlived_by_its_pause_is_not_given() -> Result<()> {
     stopping.cancel();
     supervisor.await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn the_timeout_bounds_the_whole_drain_however_slowly_core_answers() -> Result<()> {
+    let directory = tempdir()?;
+    // A core that takes the connection and never answers, and a real core
+    // whose runtime takes longer to say it can restart than the timeout.
+    let (fixture, state) = without_workers(directory.path(), Duration::from_secs(5)).await?;
+    let silent = TcpListener::bind("127.0.0.1:0").await?;
+    let mut hung = fixture.config.clone();
+    hung.value.core.listen = silent.local_addr()?;
+    let held = tokio::spawn(async move {
+        let mut connections = Vec::new();
+        while let Ok((connection, _)) = silent.accept().await {
+            connections.push(connection);
+        }
+    });
+    let running = Running::start(&fixture, &state).await?;
+    for (config, timeout) in [
+        (&hung, Duration::ZERO),
+        (&hung, Duration::from_secs(1)),
+        (&running.config, Duration::from_secs(1)),
+    ] {
+        state.pause.send_replace(None);
+        let started = tokio::time::Instant::now();
+        let refused = drain(config, timeout, false, PACE)
+            .await
+            .err()
+            .context("drained past its timeout")?;
+        let elapsed = started.elapsed();
+        let refused = format!("{refused:#}");
+        assert!(
+            elapsed < timeout + Duration::from_millis(800),
+            "{elapsed:?} for {timeout:?}: {refused}"
+        );
+        assert!(
+            refused.contains(&format!(
+                "did not drain within {} seconds",
+                timeout.as_secs()
+            )),
+            "{refused}"
+        );
+    }
+    held.abort();
+    running.stop().await
 }

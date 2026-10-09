@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow};
 use carillon_installation::{config::LoadedConfig, loopback};
 use reqwest::{Client, StatusCode, Url};
 use serde::Deserialize;
@@ -42,9 +42,14 @@ impl Pace {
     };
 }
 
-/// A pause request waits at most this long for core; a drain report asks
-/// the runtimes, each within five seconds.
+/// A renewal while the services stop waits at most this long for core; a
+/// drain report asks the runtimes, each within five seconds. Before then,
+/// requests wait only for what is left of the drain's `--timeout`.
 const REQUEST: Duration = Duration::from_secs(15);
+
+/// Ending a pause waits only briefly: one core does not hear lapses within
+/// its lease anyway.
+const END: Duration = Duration::from_secs(2);
 
 /// Core's pause of its runtime workers, held by this command.
 pub(super) struct Hold {
@@ -87,7 +92,7 @@ pub(super) enum Held {
 }
 
 impl Hold {
-    async fn begin(config: &LoadedConfig, pace: Pace) -> Result<(Self, Drain)> {
+    async fn begin(config: &LoadedConfig, pace: Pace, within: Duration) -> Result<(Self, Drain)> {
         // A request that may have reached core is never sent again: a
         // pause whose answer was lost lapses on its own.
         let client = loopback::client().retry(reqwest::retry::never()).build()?;
@@ -100,7 +105,7 @@ impl Hold {
             .post(operator_url(config, "/v1/pause")?)
             .bearer_auth(&token)
             .json(&lease)
-            .timeout(REQUEST)
+            .timeout(within)
             .send()
             .await;
         let drain = answer(response)
@@ -125,13 +130,13 @@ impl Hold {
         ))
     }
 
-    async fn renew(&mut self) -> Result<Drain, Refusal> {
+    async fn renew(&mut self, within: Duration) -> Result<Drain, Refusal> {
         let sent = Instant::now();
         let response = self
             .client
             .put(self.url.clone())
             .bearer_auth(&self.token)
-            .timeout(REQUEST)
+            .timeout(within)
             .send()
             .await;
         let drain = answer(response).await?;
@@ -146,7 +151,7 @@ impl Hold {
             .client
             .delete(self.url.clone())
             .bearer_auth(&self.token)
-            .timeout(REQUEST)
+            .timeout(END)
             .send()
             .await
             .and_then(reqwest::Response::error_for_status);
@@ -174,7 +179,7 @@ impl Hold {
                 stopped = &mut stop => break stopped,
                 renewed = async {
                     tokio::time::sleep(renew).await;
-                    self.renew().await
+                    self.renew(REQUEST).await
                 }, if !lapsed => lapsed = matches!(renewed, Err(Refusal::Conflict(_))),
             }
         };
@@ -239,20 +244,34 @@ fn unsettled(drain: &Drain) -> Vec<String> {
 }
 
 /// Pauses core's runtime workers and waits up to `timeout` for core to
-/// drain, returning the pause to hold while the services stop. Refused, the
-/// pause ends and nothing is stopped. Forced, it does not wait, and reports
-/// what the stop interrupts.
+/// drain, counting every request to core, and returns the pause to hold
+/// while the services stop. Refused, the pause ends and nothing is stopped.
+/// Forced, it does not wait, and reports what the stop interrupts.
 pub(super) async fn drain(
     config: &LoadedConfig,
     timeout: Duration,
     force: bool,
     pace: Pace,
 ) -> Result<Option<Hold>> {
-    let (mut hold, mut drain) = match Hold::begin(config, pace).await {
+    let deadline = Instant::now() + timeout;
+    let left = || deadline.saturating_duration_since(Instant::now());
+    let refused = |unsettled: &str| {
+        anyhow!(
+            "core did not drain within {} seconds: {unsettled}. `--force` stops anyway, \
+             interrupting it",
+            timeout.as_secs()
+        )
+    };
+    let (mut hold, mut drain) = match Hold::begin(config, pace, left()).await {
         Ok(begun) => begun,
         Err(error) if force => {
             println!("Forcing the stop without a drain: {error:#}.");
             return Ok(None);
+        }
+        Err(error) if left().is_zero() => {
+            return Err(error.context(refused(
+                "core did not answer in time, and a pause it began meanwhile lapses on its own",
+            )));
         }
         Err(error) => return Err(error),
     };
@@ -268,31 +287,32 @@ pub(super) async fn drain(
         }
         return Ok(Some(hold));
     }
-    let deadline = Instant::now() + timeout;
-    let mut shown = Vec::new();
+    let mut shown = String::new();
     loop {
-        let unsettled = unsettled(&drain);
+        let unsettled = unsettled(&drain).join("; ");
         if unsettled.is_empty() {
             return Ok(Some(hold));
         }
-        if Instant::now() >= deadline {
+        if left().is_zero() {
             hold.end().await;
-            bail!(
-                "core did not drain within {} seconds: {}. `--force` stops anyway, interrupting it",
-                timeout.as_secs(),
-                unsettled.join("; ")
-            );
+            return Err(refused(&unsettled));
         }
         if unsettled != shown {
-            println!("Waiting for core to drain: {}.", unsettled.join("; "));
+            println!("Waiting for core to drain: {unsettled}.");
             shown = unsettled;
         }
-        tokio::time::sleep(pace.check).await;
-        drain = match hold.renew().await {
+        tokio::time::sleep(pace.check.min(left())).await;
+        drain = match hold.renew(left()).await {
             Ok(drain) => drain,
             Err(refusal) => {
                 hold.end().await;
-                return Err(anyhow::Error::from(refusal).context("core's drain was not shown"));
+                let refusal = anyhow::Error::from(refusal);
+                // A report cut off by the deadline leaves the last one's account.
+                return Err(if left().is_zero() {
+                    refusal.context(refused(&shown))
+                } else {
+                    refusal.context("core's drain was not shown")
+                });
             }
         };
     }
