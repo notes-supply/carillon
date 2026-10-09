@@ -211,8 +211,8 @@ fn now() -> u64 {
 /// Consumes the session record at `path`, if any, and decides how to start:
 /// the record is removed before it is used, so no later start uses it again.
 pub(crate) fn take_record(path: &Path, identity: &Identity) -> Start {
-    let bytes = match read_record(path) {
-        Ok(Some(bytes)) => bytes,
+    let found = match read_record(path) {
+        Ok(Some(found)) => found,
         Ok(None) => return Start::Identify(Gap::NoRecord),
         Err(error) => return Start::Identify(Gap::Unreadable(error)),
     };
@@ -223,6 +223,9 @@ pub(crate) fn take_record(path: &Path, identity: &Identity) -> Start {
         }
         Err(error) => return Start::Identify(Gap::NotConsumed(error)),
     }
+    let Found::Record(bytes) = found else {
+        return Start::Identify(Gap::Corrupt);
+    };
     let Ok(record) = serde_json::from_slice::<Record>(&bytes) else {
         return Start::Identify(Gap::Corrupt);
     };
@@ -245,22 +248,37 @@ pub(crate) fn take_record(path: &Path, identity: &Identity) -> Start {
     }
 }
 
-/// The record's bytes, `None` when there is none. Only a regular file within
-/// [`RECORD_LIMIT`] is read; anything else reads as no valid record.
-fn read_record(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+/// What the record's path holds.
+enum Found {
+    /// A regular file within [`RECORD_LIMIT`].
+    Record(Vec<u8>),
+    /// Something no stop writes: another kind of file, or a larger one.
+    NotARecord,
+}
+
+/// What the record's path holds, `None` when nothing.
+fn read_record(path: &Path) -> std::io::Result<Option<Found>> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
-    if !metadata.is_file() || metadata.len() > RECORD_LIMIT {
-        return Ok(Some(Vec::new()));
+    if !metadata.is_file() {
+        return Ok(Some(Found::NotARecord));
     }
+    // One byte past the limit is read, so a larger file, even one that grew
+    // since, is never taken for a record.
     let mut bytes = Vec::new();
     fs::File::open(path)?
         .take(RECORD_LIMIT + 1)
         .read_to_end(&mut bytes)?;
-    Ok(Some(bytes))
+    Ok(Some(
+        if u64::try_from(bytes.len()).is_ok_and(|length| length <= RECORD_LIMIT) {
+            Found::Record(bytes)
+        } else {
+            Found::NotARecord
+        },
+    ))
 }
 
 /// The provider's gateway connection, and the floor below which every
@@ -515,4 +533,4 @@ pub(crate) fn record_path(state: &Path) -> PathBuf {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

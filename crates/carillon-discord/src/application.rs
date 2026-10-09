@@ -207,14 +207,9 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
     let cards = CardRecords::open(
         state_directory(&state.installation, &provider.id).join("activity-cards.json"),
     );
-    connect(
-        state,
-        listener,
-        read_token_file(discord_token_path)?,
-        reconciled,
-        cards,
-    )
-    .await
+    let discord_token = read_token_file(discord_token_path)?;
+    let http = Arc::new(DiscordHttp::new(discord_token.clone()));
+    connect(state, listener, http, discord_token, reconciled, cards).await
 }
 
 /// Runs the provider against Discord: authenticates the bot, registers the
@@ -223,25 +218,14 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
 async fn connect(
     mut state: DiscordState,
     listener: TcpListener,
+    http: Arc<DiscordHttp>,
     discord_token: String,
     reconciled: DeliveryReconciliation,
     cards: Option<CardRecords>,
 ) -> Result<()> {
-    let http = Arc::new(DiscordHttp::new(discord_token.clone()));
     // Identity applies at a restart only, so the settings serving now say it.
     let identity = state.settings.current();
     let app = Arc::new(application(&http, &identity).await?);
-    // A session recorded by a graceful stop is resumed only by the same
-    // provider, bot, guild and token, and only once.
-    let record = record_path(&state_directory(&state.installation, &state.health.id));
-    let owner = Identity::new(
-        &state.health.id,
-        &identity.bot_user_id,
-        &identity.guild_id,
-        &discord_token,
-    );
-    let (settled, settlements) = mpsc::unbounded_channel();
-    let mut gateway = Gateway::new(discord_token, take_record(&record, &owner), settlements);
     state.module.reconcile(&app).await?;
     state.app = Some(app);
     let reactions = Reactions::new(http.clone(), state.settings.clone());
@@ -253,6 +237,7 @@ async fn connect(
     state.lanes = Some(Lanes::new(messages.clone()));
     let delivery_state = state.clone();
     let stopping = CancellationToken::new();
+    let (settled, settlements) = mpsc::unbounded_channel();
     let ingress = Arc::new(Ingress {
         core: state.core.clone(),
         participation: state.participation.clone(),
@@ -292,9 +277,20 @@ async fn connect(
     // Interactions are this function's tasks, not the gateway's, so ending
     // the gateway does not cut short one it already took.
     let mut interactions = JoinSet::new();
+    // A session recorded by a graceful stop is resumed only by the same
+    // provider, bot, guild and token, and only once. It is consumed only now,
+    // when nothing that can still fail stands before the gateway serving it.
+    let record = record_path(&state_directory(&state.installation, &state.health.id));
+    let owner = Identity::new(
+        &state.health.id,
+        &identity.bot_user_id,
+        &identity.guild_id,
+        &discord_token,
+    );
+    let mut gateway = Gateway::new(discord_token, take_record(&record, &owner), settlements);
     let outcome = tokio::select! {
         result = axum::serve(listener, router).into_future() => result.map_err(Into::into),
-        result = gateway_loop(state, &mut gateway, messages, ingress, &mut interactions) => {
+        result = gateway_loop(&state, &mut gateway, &messages, &ingress, &mut interactions) => {
             result.context("Discord gateway stopped")
         },
         result = &mut deliveries => {
@@ -792,47 +788,47 @@ async fn simulate_interaction(
 }
 
 async fn gateway_loop(
-    state: DiscordState,
+    state: &DiscordState,
     gateway: &mut Gateway,
-    messages: mpsc::Sender<Queued>,
-    ingress: Arc<Ingress>,
+    messages: &mpsc::Sender<Queued>,
+    ingress: &Arc<Ingress>,
     interactions: &mut JoinSet<()>,
 ) -> Result<()> {
     while let Some(event) = gateway.next_event().await {
         let (event, dispatch) = event.context("receive Discord gateway event")?;
-        if take_event(&state, event, dispatch, &messages, &ingress, interactions)? {
+        if let Some(message) = take_event(state, event, dispatch, interactions) {
+            // Unsettled before the handoff, which fails once the lanes have
+            // stopped: a message they never took keeps the floor below it.
             gateway.taken(dispatch);
+            queue_or_refuse(messages, ingress, message)?;
         }
     }
     bail!("Discord gateway event stream ended")
 }
 
-/// One gateway event: a message goes to the lanes, and an interaction
-/// becomes a task in `interactions`, whose finished tasks are reaped here.
-/// Returns whether a message went to the lanes, where it stays unsettled
-/// until its preparation settles it.
+/// One gateway event: an interaction becomes a task in `interactions`, whose
+/// finished tasks are reaped here, and an admitted message is returned for
+/// the lanes, where it stays unsettled until its preparation settles it.
 fn take_event(
     state: &DiscordState,
     event: Event,
     dispatch: Option<Dispatch>,
-    messages: &mpsc::Sender<Queued>,
-    ingress: &Arc<Ingress>,
     interactions: &mut JoinSet<()>,
-) -> Result<bool> {
+) -> Option<QueuedMessage> {
     while let Some(finished) = interactions.try_join_next() {
         reap(finished);
     }
     match event {
         Event::MessageCreate(message) => {
             if message.author.bot || message.kind == MessageType::ThreadStarterMessage {
-                return Ok(false);
+                return None;
             }
             let guild = message.guild_id.map(|id| id.to_string());
             // The message keeps the settings it is admitted with.
             let settings = state.settings.current();
             if admit_identity(&settings, guild.as_deref(), &message.author.id.to_string()).is_err()
             {
-                return Ok(false);
+                return None;
             }
             let request = IncomingMessage {
                 event_id: message.id.to_string(),
@@ -853,18 +849,12 @@ fn take_event(
                     })
                     .collect(),
             };
-            let native = native_message(&message);
-            queue_or_refuse(
-                messages,
-                ingress,
-                QueuedMessage {
-                    request,
-                    native,
-                    settings,
-                    dispatch,
-                },
-            )?;
-            Ok(true)
+            Some(QueuedMessage {
+                request,
+                native: native_message(&message),
+                settings,
+                dispatch,
+            })
         }
         Event::InteractionCreate(interaction) => {
             // Interactions are independent of message order and of each
@@ -872,9 +862,9 @@ fn take_event(
             // here is answered before the provider stops, and Discord takes
             // its acknowledgement only once, so a replay never runs it again.
             interactions.spawn(handle_interaction(state.clone(), interaction.0));
-            Ok(false)
+            None
         }
-        _ => Ok(false),
+        _ => None,
     }
 }
 

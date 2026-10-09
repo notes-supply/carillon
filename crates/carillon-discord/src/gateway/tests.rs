@@ -19,12 +19,12 @@ use super::{
     record_path, take_record,
 };
 
-const TOKEN: &str = "test-only-token";
+pub(crate) const TOKEN: &str = "test-only-token";
 
 /// Which kind of gap an unusable record must give.
 type Expected = fn(&Gap) -> bool;
 
-fn identity() -> Identity {
+pub(crate) fn identity() -> Identity {
     Identity::new("discord-private", "201", "100", TOKEN)
 }
 
@@ -152,6 +152,29 @@ fn an_unusable_record_starts_a_new_session_and_is_never_used_again() -> anyhow::
 }
 
 #[test]
+fn a_record_is_read_only_within_its_size_bound() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = record_path(directory.path());
+    let limit = usize::try_from(super::RECORD_LIMIT)?;
+    let valid = serde_json::to_vec(&record(identity()))?;
+    // A valid record padded to the bound is one; a byte more and it is not,
+    // though its first bytes alone would still read as a valid record.
+    for (length, resumed) in [(limit, true), (limit + 1, false)] {
+        let mut bytes = valid.clone();
+        bytes.resize(length, b' ');
+        std::fs::write(&path, &bytes)?;
+        let start = take_record(&path, &identity());
+        if resumed {
+            assert!(matches!(start, Start::Resume { .. }), "{start:?}");
+        } else {
+            assert!(matches!(start, Start::Identify(Gap::Corrupt)), "{start:?}");
+        }
+        assert!(!path.exists());
+    }
+    Ok(())
+}
+
+#[test]
 fn a_record_that_cannot_be_removed_is_not_used() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let state = directory.path().join("state");
@@ -186,7 +209,7 @@ enum Received {
 /// identifies or resumes it sends that connection's scripted frames, then
 /// any frame the test sends. It reports what the shard sent, and answers a
 /// close with a close.
-struct LocalGateway {
+pub(crate) struct LocalGateway {
     url: String,
     frames: mpsc::UnboundedSender<(String, oneshot::Sender<()>)>,
     received: mpsc::UnboundedReceiver<Received>,
@@ -200,7 +223,7 @@ impl Drop for LocalGateway {
 }
 
 impl LocalGateway {
-    async fn start(connections: Vec<Vec<Value>>) -> anyhow::Result<Self> {
+    pub(crate) async fn start(connections: Vec<Vec<Value>>) -> anyhow::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let url = format!("ws://{}", listener.local_addr()?);
         let (frames, mut outgoing) = mpsc::unbounded_channel::<(String, oneshot::Sender<()>)>();
@@ -284,7 +307,7 @@ impl LocalGateway {
 
     /// A gateway that connects here, starting as `start` says, with
     /// settlements reported on the returned sender.
-    fn gateway(&self, start: Start) -> (Gateway, mpsc::UnboundedSender<Dispatch>) {
+    pub(crate) fn gateway(&self, start: Start) -> (Gateway, mpsc::UnboundedSender<Dispatch>) {
         let (settled, settlements) = mpsc::unbounded_channel();
         let config = ConfigBuilder::new(TOKEN.to_owned(), INTENTS).proxy_url(self.url.clone());
         (Gateway::configured(config, start, settlements), settled)
@@ -295,7 +318,7 @@ fn dispatch(kind: &str, sequence: u64, data: &Value) -> Value {
     json!({"op": 0, "t": kind, "s": sequence, "d": data})
 }
 
-fn ready(sequence: u64, session_id: &str) -> Value {
+pub(crate) fn ready(sequence: u64, session_id: &str) -> Value {
     dispatch(
         "READY",
         sequence,
@@ -311,7 +334,7 @@ fn ready(sequence: u64, session_id: &str) -> Value {
     )
 }
 
-fn message(sequence: u64, id: &str) -> Value {
+pub(crate) fn message(sequence: u64, id: &str) -> Value {
     dispatch(
         "MESSAGE_CREATE",
         sequence,
@@ -345,7 +368,7 @@ async fn next_message(gateway: &mut Gateway) -> anyhow::Result<(String, Dispatch
     }
 }
 
-fn recorded(path: &Path) -> anyhow::Result<Value> {
+pub(crate) fn recorded(path: &Path) -> anyhow::Result<Value> {
     assert_eq!(std::fs::metadata(path)?.permissions().mode() & 0o777, 0o600);
     Ok(serde_json::from_slice(&std::fs::read(path)?)?)
 }

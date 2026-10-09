@@ -77,8 +77,10 @@ pub(crate) enum Prepared {
     /// Core holds it, from this preparation or an earlier one.
     Accepted,
     /// The stop cut its preparation short before core said whether it holds
-    /// it, or core would not say: only a replay, which core's event identity
-    /// resolves, settles it.
+    /// it, or core would not say. When the stop cut short asking core, the
+    /// answer that comes later, as feedback, may still report it settled;
+    /// otherwise only a replay, which core's event identity resolves,
+    /// settles it.
     Unconfirmed,
 }
 
@@ -308,46 +310,24 @@ async fn prepare_text(
     }
     // Unless the provider has already stopped, submission makes an attempt
     // core may receive. A stop cuts none short; when core has not answered
-    // by then, it is asked whether it holds the event, as for files, and
-    // one it would not say about is uncertain, never refused.
+    // by then, it is asked whether it holds the event, as for files.
     let attempted = !ingress.stopping.is_cancelled();
-    let receipt = match submit_event_with_retry(&ingress.core, &ingress.stopping, &resolved.event)
-        .await
-    {
-        Some(receipt) => receipt,
-        None if attempted => match settled(&ingress.core, &resolved.event.event_id).await {
-            Ok(Some(receipt)) => Ok(receipt),
-            Ok(None) => {
-                unfinished().await;
+    let submitted =
+        match submit_event_with_retry(&ingress.core, &ingress.stopping, &resolved.event).await {
+            Some(Ok(receipt)) => Ok(receipt),
+            Some(Err(failure)) => {
+                warn!(error = %failure.message, "Discord event submission failed");
+                reactions
+                    .outcome_as(&source, Feedback::Failed, settings)
+                    .await;
                 return Prepared::Refused;
             }
-            Err(failure) => {
-                warn!(error = %failure.message, event_id = %resolved.event.event_id, "core would not say whether it holds a message it may have received");
-                reactions
-                    .outcome_as(&source, Feedback::Uncertain, settings)
-                    .await;
-                return Prepared::Unconfirmed;
-            }
-        },
-        None => {
-            unfinished().await;
-            return Prepared::Refused;
-        }
-    };
+            None if attempted => unanswered(ingress, &resolved.event.event_id).await,
+            None => Err(NotAccepted::Refused(ingress.unfinished())),
+        };
     // Accepted, even as a duplicate of its own earlier attempt, the message
     // gets its outcome from delivery.
-    if let Err(failure) = receipt {
-        warn!(error = %failure.message, "Discord event submission failed");
-        reactions
-            .outcome_as(
-                &resolved.event.feedback_target_id,
-                Feedback::Failed,
-                settings,
-            )
-            .await;
-        return Prepared::Refused;
-    }
-    Prepared::Accepted
+    settle_submission(ingress, &source, settings, submitted).await
 }
 
 /// Feedback for a text whose preparation the stop or the deadline ended
@@ -470,19 +450,7 @@ async fn prepare_files(
     typing.abort();
     // Core holds its own copy once it answers; the staged files go.
     drop(staged);
-    match submitted {
-        Ok(_) => Prepared::Accepted,
-        Err(NotAccepted::Refused(refusal)) => {
-            refuse(refusal).await;
-            Prepared::Refused
-        }
-        Err(NotAccepted::Unconfirmed) => {
-            reactions
-                .outcome_as(&source, Feedback::Uncertain, settings)
-                .await;
-            Prepared::Unconfirmed
-        }
-    }
+    settle_submission(ingress, &source, settings, submitted).await
 }
 
 /// Why core does not confirm holding a submission.
@@ -492,6 +460,49 @@ enum NotAccepted {
     Refused(Refusal),
     /// Core may have received it, but would not say whether it holds it.
     Unconfirmed,
+}
+
+/// Shows the sender what became of a submission, and what it settled: an
+/// accepted one gets its outcome from delivery, a refused one its reason,
+/// and one core would not confirm the uncertain reaction, never a refusal.
+async fn settle_submission(
+    ingress: &Ingress,
+    source: &str,
+    settings: &Arc<DiscordConfig>,
+    submitted: Result<EventReceipt, NotAccepted>,
+) -> Prepared {
+    match submitted {
+        Ok(_) => Prepared::Accepted,
+        Err(NotAccepted::Refused(refusal)) => {
+            explain(&ingress.http, source, &refusal.0).await;
+            ingress
+                .reactions
+                .outcome_as(source, Feedback::Failed, settings)
+                .await;
+            Prepared::Refused
+        }
+        Err(NotAccepted::Unconfirmed) => {
+            ingress
+                .reactions
+                .outcome_as(source, Feedback::Uncertain, settings)
+                .await;
+            Prepared::Unconfirmed
+        }
+    }
+}
+
+/// What core says of a submission it may have received without answering:
+/// accepted, refused when core does not hold it, or unconfirmed when it
+/// will not say.
+async fn unanswered(ingress: &Ingress, event_id: &str) -> Result<EventReceipt, NotAccepted> {
+    match settled(&ingress.core, event_id).await {
+        Ok(Some(receipt)) => Ok(receipt),
+        Ok(None) => Err(NotAccepted::Refused(ingress.unfinished())),
+        Err(failure) => {
+            warn!(error = %failure.message, %event_id, "core would not say whether it holds an event it may have received");
+            Err(NotAccepted::Unconfirmed)
+        }
+    }
 }
 
 async fn keep_typing(http: Arc<DiscordHttp>, config: Arc<DiscordConfig>, channel: String) {
@@ -630,14 +641,7 @@ async fn submit_files(
     if !submitted {
         return Err(NotAccepted::Refused(ingress.unfinished()));
     }
-    match settled(&ingress.core, &event.event_id).await {
-        Ok(Some(receipt)) => Ok(receipt),
-        Ok(None) => Err(NotAccepted::Refused(ingress.unfinished())),
-        Err(failure) => {
-            warn!(error = %failure.message, event_id = %event.event_id, "core would not say whether it holds attachments it may have received");
-            Err(NotAccepted::Unconfirmed)
-        }
-    }
+    unanswered(ingress, &event.event_id).await
 }
 
 /// Core's refusal of files, in Discord's words for the sender.
