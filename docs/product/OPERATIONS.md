@@ -281,7 +281,9 @@ send them again.
 ### Agent Discord tools
 
 An optional [Pi extension and skill](../../packages/discord-pi/README.md) let
-the agent read and manage the Discord server with the bot's permissions:
+the agent read and manage the Discord server with the bot's permissions.
+Setup doesn't install them, because they can administer the server; install
+them yourself:
 
 ```sh
 carillon stop
