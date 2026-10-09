@@ -384,13 +384,16 @@ impl Gateway {
     }
 
     /// Keeps the floor below `dispatch` if it is of the current session.
+    /// Past [`UNSETTLED_LIMIT`] this session cannot be recorded, so nothing
+    /// more of it is kept.
     fn unsettle(&mut self, dispatch: Dispatch) {
-        if dispatch.session != self.session {
+        if dispatch.session != self.session || self.overflowed {
             return;
         }
         self.unsettled.insert(dispatch.sequence);
         if self.unsettled.len() > UNSETTLED_LIMIT {
             self.overflowed = true;
+            self.unsettled.clear();
         }
     }
 

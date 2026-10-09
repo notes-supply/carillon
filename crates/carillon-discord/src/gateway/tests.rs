@@ -472,17 +472,35 @@ async fn a_new_session_in_process_never_takes_the_old_sessions_settlements() -> 
 }
 
 #[tokio::test]
-async fn more_unsettled_messages_than_a_record_covers_record_nothing() -> anyhow::Result<()> {
-    let local = LocalGateway::start(vec![vec![ready(1, "session1"), message(2, "900")]]).await?;
+async fn more_unsettled_messages_than_a_record_covers_record_nothing_until_a_new_session()
+-> anyhow::Result<()> {
+    let local = LocalGateway::start(vec![
+        vec![ready(1, "session1"), message(2, "900")],
+        vec![ready(1, "session2"), message(2, "912")],
+    ])
+    .await?;
     let (mut gateway, _settled) = local.gateway(Start::Identify(Gap::NoRecord));
     let (_, first) = next_message(&mut gateway).await?;
-    for sequence in 2..=2 + super::UNSETTLED_LIMIT as u64 {
+    let limit = u64::try_from(super::UNSETTLED_LIMIT)?;
+    for sequence in 2..=2 + 3 * limit {
         gateway.taken(Some(Dispatch::new(first.session, sequence)));
     }
-    assert!(gateway.close().await);
+    // Past the bound nothing more of this session is kept.
+    assert!(gateway.overflowed);
+    assert!(gateway.unsettled.len() <= super::UNSETTLED_LIMIT);
     let directory = tempfile::tempdir()?;
     let path = record_path(directory.path());
     gateway.record(&path, &identity());
     assert!(!path.exists());
+    // Discord ends the session; the next one starts with a floor of its own.
+    local.send(&json!({"op": 9, "d": false})).await?;
+    let (id, next) = next_message(&mut gateway).await?;
+    assert_eq!((id.as_str(), next), ("912", Dispatch::new(2, 2)));
+    gateway.taken(Some(next));
+    assert!(gateway.close().await);
+    gateway.record(&path, &identity());
+    let record = recorded(&path)?;
+    assert_eq!(record["session_id"], "session2");
+    assert_eq!(record["sequence"], 1);
     Ok(())
 }
