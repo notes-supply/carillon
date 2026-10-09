@@ -1,6 +1,7 @@
 //! Authenticated transport for the core provider API; no service startup.
 use crate::InterfaceError;
 use anyhow::Result;
+use carillon_installation::loopback;
 use carillon_protocol::model::{
     CommandCatalog, Delivery, DeliveryAck, DeliveryOutcome, DeliveryReconciliation, EventReceipt,
     EventStatus, ExternalEvent, INSTANCE_HEADER, Job, JobPage, ModelQuery, ModelUpdate,
@@ -26,15 +27,16 @@ pub struct CoreClient {
 }
 
 impl CoreClient {
-    #[must_use]
-    pub fn new(base_url: String, provider_id: String, token: String) -> Self {
-        Self {
-            http: Client::new(),
+    /// # Errors
+    /// Returns an error when the HTTP client cannot be initialized.
+    pub fn new(base_url: String, provider_id: String, token: String) -> Result<Self> {
+        Ok(Self {
+            http: loopback::client().build()?,
             base_url,
             token,
             provider_id,
             instance_id: Uuid::now_v7().to_string(),
-        }
+        })
     }
 
     fn url(&self, path: &str) -> String {
@@ -302,10 +304,10 @@ async fn core_json<T: DeserializeOwned>(
 }
 
 #[cfg(test)]
-pub(crate) fn test_client(base_url: String) -> CoreClient {
-    let mut client = CoreClient::new(base_url, "discord".to_owned(), "token".to_owned());
+pub(crate) fn test_client(base_url: String) -> Result<CoreClient> {
+    let mut client = CoreClient::new(base_url, "discord".to_owned(), "token".to_owned())?;
     client.instance_id = "instance".to_owned();
-    client
+    Ok(client)
 }
 
 #[cfg(test)]

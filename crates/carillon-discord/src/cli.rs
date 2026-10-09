@@ -4,6 +4,7 @@
 
 use std::{
     fs,
+    io::Read as _,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -11,7 +12,7 @@ use std::{
 use anyhow::{Context as _, Result, anyhow, bail};
 use carillon_installation::{
     config::{LoadedConfig, ProviderRole, RELEASE_VERSION},
-    home,
+    home, loopback,
 };
 use clap::{Parser, Subcommand};
 use reqwest::{Method, StatusCode};
@@ -25,6 +26,9 @@ use crate::{
         Status,
     },
     config::{DiscordConfig, DiscordRoute, configure},
+    operations::{
+        self, ATTACHMENT_BYTES, ATTACHMENT_COUNT, Messages, Operation, OperationError, Upload,
+    },
 };
 
 /// Status requests only read.
@@ -92,10 +96,18 @@ enum Command {
         #[arg(long)]
         provider: Option<String>,
     },
-    /// Install the optional native Pi tools and skill into captured agent resources.
+    /// Install Discord tools for Pi or a skill for Claude Code and Codex.
     Tools {
         #[command(subcommand)]
         action: ToolsAction,
+    },
+    /// Call the running provider's Discord API; prints JSON and never retries a write.
+    Call {
+        /// Registry ID of the Discord instance; inferred when only one is configured.
+        #[arg(long, global = true)]
+        provider: Option<String>,
+        #[command(subcommand)]
+        operation: Operation,
     },
     /// Show which command module the running provider serves, or change it.
     #[command(after_help = "\
@@ -117,8 +129,15 @@ they started with.")]
 
 #[derive(Debug, Subcommand)]
 enum ToolsAction {
-    /// Copy this release's tools and skill. Replaces only the two owned files.
-    Install,
+    /// Install Pi tools, or only the common skill in a native T3 workspace.
+    Install {
+        /// Install the skill for Claude Code and Codex in this workspace, without Pi tools.
+        #[arg(long, value_name = "PATH")]
+        workspace: Option<PathBuf>,
+        /// Operator-provided invocation to use instead of `carillon discord call`.
+        #[arg(long, requires = "workspace", value_name = "COMMAND")]
+        invocation: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -202,13 +221,140 @@ pub(crate) async fn run() -> Result<()> {
             check_installed(&loaded, &provider).await?;
         }
         Command::Tools {
-            action: ToolsAction::Install,
-        } => install_tools(&installation()?, &release_library()?)?,
+            action:
+                ToolsAction::Install {
+                    workspace,
+                    invocation,
+                },
+        } => {
+            let lib = release_library()?;
+            if let Some(workspace) = workspace {
+                install_workspace_skill(&workspace, &lib, invocation.as_deref())?;
+            } else {
+                install_tools(&installation()?, &lib)?;
+            }
+        }
+        Command::Call {
+            provider,
+            operation,
+        } => {
+            let loaded = installation()?;
+            let provider = instance(&loaded, provider)?;
+            let result = call(&loaded, &provider, operation).await?;
+            println!("{}", serde_json::to_string(&result)?);
+        }
         Command::Commands { provider, action } => {
             manage_commands(installation, provider, action).await?;
         }
     }
     Ok(())
+}
+
+/// The provider owns validation and Discord execution. This client only loads
+/// caller-owned files and authentication outside the model's shell arguments.
+async fn call(
+    loaded: &LoadedConfig,
+    provider: &str,
+    mut operation: Operation,
+) -> Result<serde_json::Value> {
+    if let Operation::Messages(Messages::Send {
+        files, attachments, ..
+    }) = &mut operation
+    {
+        *attachments = uploads(files)?;
+    }
+    let mutates = operation.mutates();
+    let target = loaded.provider(provider, ProviderRole::Interface)?;
+    let url = format!("{}/v1/operations", target.url);
+    let unanswered = |error: reqwest::Error| {
+        if mutates && !error.is_connect() {
+            anyhow!(
+                "uncertain: Discord did not confirm the operation; inspect the target before repeating it"
+            )
+        } else {
+            anyhow!("unavailable: the Discord provider did not complete the request")
+        }
+    };
+    let mut response = loopback::client()
+        .retry(reqwest::retry::never())
+        .timeout(Duration::from_secs(35))
+        .build()?
+        .post(&url)
+        .bearer_auth(loaded.credential("operator")?)
+        .json(&operation)
+        .send()
+        .await
+        .map_err(unanswered)?;
+    let status = response.status();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(unanswered)? {
+        if chunk.len() > 2 * 1024 * 1024 - bytes.len() {
+            bail!(
+                "{}: Discord response exceeds 2 MiB; inspect the target before repeating a write",
+                if mutates { "uncertain" } else { "unavailable" }
+            );
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let result: serde_json::Value = serde_json::from_slice(&bytes).with_context(|| {
+        format!(
+            "{}: invalid Discord provider response; inspect the target before repeating a write",
+            if mutates { "uncertain" } else { "unavailable" }
+        )
+    })?;
+    if !status.is_success() {
+        let fallback = if status.is_client_error() {
+            "rejected"
+        } else if mutates {
+            "uncertain"
+        } else {
+            "unavailable"
+        };
+        bail!(
+            "{}: {}",
+            result["outcome"].as_str().unwrap_or(fallback),
+            result["message"]
+                .as_str()
+                .or_else(|| result["error"].as_str())
+                .unwrap_or("the Discord provider refused the request")
+        );
+    }
+    Ok(result)
+}
+
+/// The files a message send names, read here so the provider receives
+/// their bytes. Every limit is checked before anything is sent.
+fn uploads(files: &[PathBuf]) -> Result<Vec<Upload>> {
+    let refused = |failure: OperationError| anyhow!("{failure}; nothing was changed");
+    if files.len() > ATTACHMENT_COUNT {
+        return Err(refused(operations::too_many()));
+    }
+    let mut remaining = ATTACHMENT_BYTES;
+    files
+        .iter()
+        .map(|path| {
+            if !fs::metadata(path)?.is_file() {
+                bail!("attachments must be regular files; nothing was changed");
+            }
+            let file = fs::File::open(path)?;
+            if !file.metadata()?.is_file() {
+                bail!("attachments must be regular files; nothing was changed");
+            }
+            let mut bytes = Vec::new();
+            file.take(u64::try_from(remaining)? + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > remaining {
+                return Err(refused(operations::too_large()));
+            }
+            remaining -= bytes.len();
+            let filename = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .context("attachment filename must be UTF-8")?
+                .to_owned();
+            Upload::new(filename, &bytes).map_err(refused)
+        })
+        .collect()
 }
 
 /// The release's `lib` directory, beside the directory of this program.
@@ -219,6 +365,34 @@ fn release_library() -> Result<PathBuf> {
         .and_then(Path::parent)
         .context("cannot locate release library")?
         .join("lib"))
+}
+
+/// Native harnesses own these resource directories and when changes are loaded.
+fn install_workspace_skill(workspace: &Path, lib: &Path, invocation: Option<&str>) -> Result<()> {
+    use carillon_installation::filesystem::{publish, sync_ancestors};
+    // Syncing reaches every ancestor, which a relative path does not name.
+    let workspace = &std::path::absolute(workspace)?;
+    if !workspace.is_dir() {
+        bail!("workspace must be an existing directory");
+    }
+    let mut skill = fs::read_to_string(lib.join("carillon-discord-SKILL.md"))?;
+    if let Some(invocation) = invocation {
+        skill
+            .push_str("\n## Local installation\n\nThe operator-provided invocation is:\n\n```sh\n");
+        skill.push_str(invocation);
+        skill.push_str("\n```\n\nUse it in place of `carillon discord call` in the examples and help commands. This does not grant additional OS authority.\n");
+    }
+    for root in [".claude", ".agents"] {
+        let directory = workspace.join(root).join("skills/discord");
+        fs::create_dir_all(&directory)?;
+        sync_ancestors(&directory)?;
+        publish(&directory.join("SKILL.md"), skill.as_bytes(), 0o644)?;
+    }
+    println!(
+        "Installed Discord skill for Claude Code and Codex in {}",
+        workspace.display()
+    );
+    Ok(())
 }
 
 /// Copy the release's tools and skill from `lib` into the agent resources,
@@ -390,7 +564,8 @@ impl Operator {
         body: Option<Vec<u8>>,
     ) -> Result<T> {
         let changing = method != Method::GET;
-        let mut request = reqwest::Client::new()
+        let mut request = loopback::client()
+            .build()?
             .request(method, &self.url)
             .bearer_auth(&self.credential)
             .timeout(if changing {
@@ -573,7 +748,375 @@ mod tests {
         maintenance::ServiceLock,
     };
 
-    use super::{install_tools, instance};
+    use super::{Cli, Command, call, install_tools, install_workspace_skill, instance, uploads};
+    use crate::operations::{Messages, Operation};
+    use axum::{
+        Router,
+        body::Bytes,
+        http::{HeaderMap, StatusCode, Uri},
+        response::IntoResponse as _,
+    };
+    use clap::Parser as _;
+    use serde_json::{Value, json};
+    use std::sync::{Arc, Mutex};
+
+    fn parsed_call(arguments: &[&str]) -> Result<Operation> {
+        let cli = Cli::try_parse_from(
+            ["carillon-discord", "call"]
+                .into_iter()
+                .chain(arguments.iter().copied()),
+        )?;
+        let Command::Call { operation, .. } = cli.command else {
+            anyhow::bail!("not a call");
+        };
+        Ok(operation)
+    }
+
+    #[test]
+    fn call_preserves_large_ids_and_explicit_false_flags() -> Result<()> {
+        let operation = parsed_call(&[
+            "messages",
+            "pin",
+            "--channel-id",
+            "1557758596627038269",
+            "--message-id",
+            "1557758596627038270",
+            "--pinned",
+            "false",
+        ])?;
+        let encoded = serde_json::to_value(&operation)?;
+        assert_eq!(
+            encoded,
+            json!({
+                "action": "messages.pin", "channel_id": "1557758596627038269",
+                "message_id": "1557758596627038270", "pinned": false,
+            })
+        );
+        let decoded: Operation = serde_json::from_value(encoded)?;
+        assert!(matches!(
+            decoded,
+            Operation::Messages(Messages::Pin { pinned: false, .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn call_requires_the_intent_of_toggle_mutations_and_valid_ids() {
+        assert!(
+            parsed_call(&["messages", "pin", "--channel-id", "2", "--message-id", "3"]).is_err()
+        );
+        assert!(parsed_call(&["members", "ban", "--user-id", "3"]).is_err());
+        assert!(
+            parsed_call(&["messages", "get", "--channel-id", "0", "--message-id", "3"]).is_err()
+        );
+    }
+
+    struct CallProvider {
+        config: LoadedConfig,
+        seen: Arc<Mutex<Vec<(String, Value)>>>,
+        server: tokio::task::JoinHandle<std::io::Result<()>>,
+        directory: tempfile::TempDir,
+    }
+
+    impl Drop for CallProvider {
+        fn drop(&mut self) {
+            self.server.abort();
+        }
+    }
+
+    impl CallProvider {
+        async fn new(status: StatusCode, answer: String) -> Result<Self> {
+            let directory = tempfile::tempdir()?;
+            let mut config =
+                crate::config::tests::installation(directory.path(), "discord-private", 46_400)?;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let target = config
+                .value
+                .providers
+                .iter_mut()
+                .find(|provider| provider.id == "discord-private")
+                .context("missing provider")?;
+            target.url = format!("http://{}", listener.local_addr()?);
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let requests = seen.clone();
+            let router = Router::new().fallback(move |headers: HeaderMap, uri: Uri, body: Bytes| {
+                let requests = requests.clone();
+                let answer = answer.clone();
+                async move {
+                    let recorded = json!({
+                        "authorization": headers.get("authorization").and_then(|value| value.to_str().ok()),
+                        "operation": serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null),
+                    });
+                    if let Ok(mut requests) = requests.lock() {
+                        requests.push((uri.to_string(), recorded));
+                    }
+                    let mut response = (status, answer).into_response();
+                    if status.is_redirection() {
+                        response.headers_mut().insert("location", axum::http::HeaderValue::from_static("/redirected"));
+                    }
+                    response
+                }
+            });
+            let server = tokio::spawn(async move { axum::serve(listener, router).await });
+            Ok(Self {
+                config,
+                seen,
+                server,
+                directory,
+            })
+        }
+
+        fn requests(&self) -> Result<Vec<(String, Value)>> {
+            Ok(self
+                .seen
+                .lock()
+                .map_err(|_| anyhow::anyhow!("poisoned requests"))?
+                .clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn call_authenticates_at_the_existing_endpoint_and_returns_native_json() -> Result<()> {
+        let provider = CallProvider::new(
+            StatusCode::OK,
+            json!({"messages": [], "may_have_more": false}).to_string(),
+        )
+        .await?;
+        let operation = parsed_call(&["messages", "list", "--channel-id", "2", "--limit", "7"])?;
+        let result = call(&provider.config, "discord-private", operation).await?;
+        assert_eq!(result, json!({"messages": [], "may_have_more": false}));
+        assert_eq!(
+            provider.requests()?,
+            vec![(
+                "/v1/operations".into(),
+                json!({
+                    "authorization": "Bearer operator",
+                    "operation": {"action": "messages.list", "channel_id": "2", "before": null, "limit": 7},
+                })
+            )]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn call_never_retries_an_uncertain_write_or_follows_a_redirect() -> Result<()> {
+        for (status, answer) in [
+            (
+                StatusCode::BAD_GATEWAY,
+                json!({"outcome": "uncertain", "message": "inspect the message"}).to_string(),
+            ),
+            (StatusCode::FOUND, json!({"error": "moved"}).to_string()),
+        ] {
+            let provider = CallProvider::new(status, answer).await?;
+            let operation = parsed_call(&[
+                "messages",
+                "delete",
+                "--channel-id",
+                "2",
+                "--message-id",
+                "3",
+            ])?;
+            let error = call(&provider.config, "discord-private", operation)
+                .await
+                .err()
+                .context("write should fail")?;
+            assert!(error.to_string().starts_with("uncertain:"), "{error}");
+            assert_eq!(provider.requests()?.len(), 1);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_answer_preserves_write_uncertainty_without_replaying() -> Result<()> {
+        for answer in ["not JSON".to_owned(), "x".repeat(3 * 1024 * 1024)] {
+            let provider = CallProvider::new(StatusCode::OK, answer).await?;
+            let operation = parsed_call(&[
+                "messages",
+                "send",
+                "--channel-id",
+                "2",
+                "--content",
+                "hello",
+            ])?;
+            let error = call(&provider.config, "discord-private", operation)
+                .await
+                .err()
+                .context("invalid answer should fail")?;
+            assert!(error.to_string().starts_with("uncertain:"), "{error}");
+            assert_eq!(provider.requests()?.len(), 1);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn upload_rejections_happen_before_any_http_operation() -> Result<()> {
+        let provider = CallProvider::new(StatusCode::OK, "{}".into()).await?;
+        let file = provider.directory.path().join("oversize");
+        fs::File::create(&file)?.set_len(5 * 1024 * 1024)?;
+        let path = file.to_str().context("temporary path")?;
+        let send = |files: &[&str]| {
+            let mut arguments = vec!["messages", "send", "--channel-id", "2", "--content", "hi"];
+            for file in files {
+                arguments.extend(["--file", file]);
+            }
+            parsed_call(&arguments)
+        };
+        let refused = call(&provider.config, "discord-private", send(&[path])?)
+            .await
+            .err()
+            .context("an oversized file was sent")?;
+        assert!(refused.to_string().contains("4 MiB"), "{refused}");
+        let small = provider.directory.path().join("small");
+        fs::write(&small, "x")?;
+        let small = small.to_str().context("temporary path")?;
+        let refused = call(&provider.config, "discord-private", send(&[small; 11])?)
+            .await
+            .err()
+            .context("eleven files were sent")?;
+        assert!(refused.to_string().contains("At most 10"), "{refused}");
+        assert!(provider.requests()?.is_empty());
+        assert!(uploads(&[provider.directory.path().to_path_buf()]).is_err());
+        // Only a message send takes files.
+        assert!(
+            parsed_call(&[
+                "messages",
+                "get",
+                "--channel-id",
+                "2",
+                "--message-id",
+                "3",
+                "--file",
+                small
+            ])
+            .is_err()
+        );
+        assert!(parsed_call(&["--file", small, "messages", "send", "--channel-id", "2"]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_timeout_is_set_or_cleared_explicitly() -> Result<()> {
+        let timeout = |arguments: &[&str]| {
+            let mut all = vec!["members", "timeout", "--user-id", "3"];
+            all.extend(arguments);
+            parsed_call(&all).and_then(|operation| Ok(serde_json::to_value(operation)?))
+        };
+        assert!(timeout(&[]).is_err(), "no expiry must not remove a timeout");
+        assert!(timeout(&["--clear", "--until", "2030-01-01T00:00:00Z"]).is_err());
+        assert_eq!(
+            timeout(&["--clear"])?,
+            json!({"action": "members.timeout", "user_id": "3", "until": null})
+        );
+        assert_eq!(
+            timeout(&["--until", "2030-01-01T00:00:00Z"])?,
+            json!({"action": "members.timeout", "user_id": "3", "until": "2030-01-01T00:00:00Z"})
+        );
+        // On the wire, too, only an explicit null clears.
+        assert!(
+            serde_json::from_value::<Operation>(
+                json!({"action": "members.timeout", "user_id": "3"})
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_provider_is_named_before_or_after_the_operation() -> Result<()> {
+        for arguments in [
+            ["--provider", "discord-b", "server", "info"],
+            ["server", "info", "--provider", "discord-b"],
+        ] {
+            let cli =
+                Cli::try_parse_from(["carillon-discord", "call"].into_iter().chain(arguments))?;
+            let Command::Call { provider, .. } = cli.command else {
+                anyhow::bail!("not a call");
+            };
+            assert_eq!(provider.as_deref(), Some("discord-b"));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn message_files_are_loaded_locally_and_sent_as_bounded_bytes() -> Result<()> {
+        let provider = CallProvider::new(StatusCode::OK, json!({"id": "3"}).to_string()).await?;
+        let file = provider.directory.path().join("evidence.txt");
+        fs::write(&file, b"hello\n")?;
+        let operation = parsed_call(&[
+            "messages",
+            "send",
+            "--channel-id",
+            "2",
+            "--content",
+            "evidence",
+            "--file",
+            file.to_str().context("temporary path")?,
+        ])?;
+        call(&provider.config, "discord-private", operation).await?;
+        let requests = provider.requests()?;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].1["operation"]["attachments"],
+            json!([
+                {"filename": "evidence.txt", "data": "aGVsbG8K"}
+            ])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_install_uses_both_native_skill_locations_without_touching_other_resources()
+    -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let (config, lib) = tools_fixture(directory.path())?;
+        let workspace = directory.path().join("workspace");
+        fs::create_dir(&workspace)?;
+        let personal = workspace.join("CLAUDE.md");
+        fs::write(&personal, "personal instructions")?;
+        // Native workspace skills do not participate in Pi's resource capture.
+        let _serving = ServiceLock::acquire(&config.value.data_dir)?;
+        install_workspace_skill(&workspace, &lib, Some("owner-cli discord call"))?;
+        for root in [".claude", ".agents"] {
+            let installed =
+                fs::read_to_string(workspace.join(root).join("skills/discord/SKILL.md"))?;
+            assert!(installed.starts_with("Discord skill\n"));
+            assert!(installed.contains("owner-cli discord call"));
+        }
+        assert_eq!(fs::read_to_string(personal)?, "personal instructions");
+        assert!(!workspace.join("extensions").exists());
+        install_workspace_skill(&workspace, &lib, None)?;
+        assert_eq!(
+            fs::read_to_string(workspace.join(".agents/skills/discord/SKILL.md"))?,
+            "Discord skill\n"
+        );
+        assert!(install_workspace_skill(&workspace.join("missing"), &lib, None).is_err());
+        assert!(!workspace.join("missing").exists());
+        // A workspace named relative to the current directory, as people type it.
+        let relative = std::env::current_dir()?
+            .components()
+            .skip(1)
+            .map(|_| Path::new(".."))
+            .collect::<std::path::PathBuf>()
+            .join(workspace.strip_prefix("/")?);
+        assert!(relative.is_relative());
+        fs::remove_dir_all(workspace.join(".claude"))?;
+        install_workspace_skill(&relative, &lib, None)?;
+        assert_eq!(
+            fs::read_to_string(workspace.join(".claude/skills/discord/SKILL.md"))?,
+            "Discord skill\n"
+        );
+        assert!(
+            Cli::try_parse_from([
+                "carillon-discord",
+                "tools",
+                "install",
+                "--invocation",
+                "owner-cli"
+            ])
+            .is_err()
+        );
+        Ok(())
+    }
 
     /// An installation whose agent resources already hold a file of the
     /// owner's own, and a release library with the Discord tools.

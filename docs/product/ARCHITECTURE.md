@@ -93,10 +93,18 @@ agent resources, with core stopped: it holds core's service lock throughout, so
 no accepted turn captures one file without the other. Core captures their bytes
 with accepted work, as for any resource.
 
+Local harnesses can instead run `carillon discord call`, a typed CLI over that
+same operator API. Its commands derive from the provider's operation types;
+authentication, file reads and bounded responses stay in the CLI. Workspace
+skill installation uses Claude Code's and Codex's native skill directories,
+without a new MCP service or SDK integration.
+
 Core forwards the event's opaque `native` metadata on runtime requests. Discord
 constructs `native.origin` from admitted input and the resolved delivery target;
 core does not interpret it. Pi's application assembly supplies the current interface
 connection and opaque metadata through a per-session `carillon:context` event.
+T3 includes only a bounded string/null origin record in ordinary user messages,
+marked as data; native commands remain verbatim and raw provider payloads stay out.
 Credentials and endpoint selection stay outside prompts and captured resources.
 The generic runtime/session component knows nothing about Discord. Native extension
 activation is an input-context optimization, not an authorization mechanism.

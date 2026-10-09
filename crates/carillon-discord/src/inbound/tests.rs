@@ -128,7 +128,7 @@ async fn discord_retries_ambiguous_submission_with_the_same_event_id() -> anyhow
     let address = listener.local_addr()?;
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
 
-    let core = core_client(format!("http://{address}"));
+    let core = core_client(format!("http://{address}"))?;
     let event = ExternalEvent {
         event_id: "event".to_owned(),
         agent_id: "default".to_owned(),
@@ -161,7 +161,7 @@ async fn interrupted_success_receipt_recovers_the_committed_turn() -> anyhow::Re
     use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let core = core_client(format!("http://{}", listener.local_addr()?));
+    let core = core_client(format!("http://{}", listener.local_addr()?))?;
     let event = ExternalEvent {
         event_id: "lost-receipt".to_owned(),
         agent_id: "agent".to_owned(),
@@ -278,7 +278,7 @@ async fn configuration_rejection_does_not_block_the_next_message_in_its_conversa
     let address = listener.local_addr()?;
     let http = discord_client(address);
     let directory = tempfile::tempdir()?;
-    let core = core_client(format!("http://{address}"));
+    let core = core_client(format!("http://{address}"))?;
     let participation = Arc::new(Participation::load(
         directory.path().join("participation.json"),
     )?);
@@ -354,7 +354,7 @@ async fn complete_invalid_receipt_is_not_retried_forever() -> anyhow::Result<()>
         }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let core = core_client(format!("http://{}", listener.local_addr()?));
+    let core = core_client(format!("http://{}", listener.local_addr()?))?;
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
     let event = ExternalEvent {
         event_id: "invalid-receipt".to_owned(),
@@ -397,7 +397,7 @@ async fn a_stopping_provider_starts_no_attempt() -> anyhow::Result<()> {
         }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let core = core_client(format!("http://{}", listener.local_addr()?));
+    let core = core_client(format!("http://{}", listener.local_addr()?))?;
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
     let event = ExternalEvent {
         event_id: "stopping".to_owned(),
@@ -494,7 +494,7 @@ async fn slow_feedback_never_delays_a_messages_admission() -> anyhow::Result<()>
     send.send(hello().into()).await?;
     drop(send);
     let ingress = ingress(
-        core_client(format!("http://{address}")),
+        core_client(format!("http://{address}"))?,
         config,
         participation,
         http,
@@ -602,7 +602,7 @@ async fn a_duplicate_never_lets_the_processing_reaction_land_after_the_outcome()
         directory.path().join("participation.json"),
     )?);
     let ingress = ingress(
-        core_client(format!("http://{address}")),
+        core_client(format!("http://{address}"))?,
         config,
         participation,
         discord_client(address),
@@ -682,7 +682,7 @@ async fn an_accepted_message_whose_answer_was_lost_keeps_its_processing_reaction
     let mut config = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
     config.typing = false;
     let ingress = ingress(
-        core_client(format!("http://{address}")),
+        core_client(format!("http://{address}"))?,
         config,
         participation,
         discord_client(address),
@@ -751,7 +751,7 @@ async fn a_message_stopped_before_core_says_whether_it_holds_it_gets_no_feedback
         directory.path().join("participation.json"),
     )?);
     let ingress = ingress(
-        core_client(format!("http://{address}")),
+        core_client(format!("http://{address}"))?,
         discord_config(DiscordActivation::Always, DiscordConversation::Channel),
         participation,
         discord_client(address),
@@ -806,7 +806,7 @@ async fn an_overload_refusal_ends_with_the_reactions() -> anyhow::Result<()> {
     let mut config = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
     config.typing = false;
     let ingress = ingress(
-        core_client(format!("http://{address}")),
+        core_client(format!("http://{address}"))?,
         config,
         participation,
         discord_client(address),

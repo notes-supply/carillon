@@ -153,7 +153,7 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
         format!("http://{}", config.value.core.listen),
         provider.id.clone(),
         token,
-    );
+    )?;
     let reconciled = loop {
         match core.reconcile().await {
             Ok(reconciled) => break reconciled,

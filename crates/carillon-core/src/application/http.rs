@@ -16,8 +16,9 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use carillon_installation::config::{
-    LoadedConfig, Provider, ProviderRole, RELEASE_VERSION, token_matches,
+use carillon_installation::{
+    config::{LoadedConfig, Provider, ProviderRole, RELEASE_VERSION, token_matches},
+    loopback,
 };
 use carillon_protocol::model::{
     Delivery, DeliveryAck, DeliveryReconciliation, EventReceipt, EventStatus, ExternalEvent,
@@ -152,7 +153,7 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
     let state = AppState {
         config: config.clone(),
         core,
-        client: Client::new(),
+        client: loopback::client().build()?,
     };
     // A runtime configured for concurrent conversations gets that many
     // message workers. Each claim is one transaction that skips

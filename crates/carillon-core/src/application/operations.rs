@@ -16,6 +16,7 @@ use std::{
 use anyhow::{Context as _, Result, bail};
 use carillon_installation::{
     config::{LoadedConfig, validate_provider_identity},
+    loopback,
     maintenance::UnitsLock,
 };
 use carillon_protocol::model::{Health, StatusReport};
@@ -327,7 +328,8 @@ pub(super) async fn operator_get<T: DeserializeOwned>(
     config: &LoadedConfig,
     url: Url,
 ) -> Result<T> {
-    reqwest::Client::new()
+    loopback::client()
+        .build()?
         .get(url)
         .bearer_auth(config.credential("operator")?)
         .timeout(Duration::from_secs(5))
