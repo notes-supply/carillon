@@ -49,6 +49,15 @@ export interface TurnResponse {
   readonly attachments_left?: boolean;
 }
 
+/**
+ * Whether restarting the runtime now would lose something only its process
+ * knows. Core asks before maintenance stops the services, and counts no
+ * answer as not ready.
+ */
+export type RestartReadiness =
+  | { readonly state: "ready" }
+  | { readonly state: "unready"; readonly reason: string };
+
 export interface RuntimeOperations {
   executeTurn(request: TurnRequest, signal?: AbortSignal): Promise<TurnResponse>;
   /** The latest activity of a turn this instance is executing for that interface. */
@@ -57,5 +66,6 @@ export interface RuntimeOperations {
   setModel(update: ModelUpdate): Promise<ModelState>;
   /** The engine's own commands a person may run in the agent's conversation, as the engine lists them now. */
   commands(query: ModelQuery): Promise<CommandCatalog>;
+  restartReadiness(): RestartReadiness;
   close(): Promise<void>;
 }

@@ -261,6 +261,19 @@ pub struct RuntimeTurnResponse {
     pub activity: Option<TurnActivity>,
 }
 
+/// Whether restarting a runtime now would lose something only its process
+/// knows. Only the runtime can say; a runtime that gives no such answer has
+/// not shown a restart is safe.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RestartReadiness {
+    /// Nothing the runtime holds is lost by a restart. A struct variant, so
+    /// an answer that says more than this is refused rather than read as it.
+    Ready {},
+    /// A restart now would lose what `reason` names.
+    Unready { reason: String },
+}
+
 /// The most bytes a turn's final report takes, serialized. A runtime keeps
 /// its report within it; core stores no larger one.
 pub const ACTIVITY_REPORT_LIMIT: usize = 16 * 1024;

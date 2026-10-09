@@ -71,14 +71,28 @@ carillon discord module    # the Discord module serving slash commands and cards
 carillon update /path/to/carillon-VERSION-linux-ARCH.tar.gz
 ```
 
-`start`, `stop` and `restart` call `systemctl --user` on `carillon.target`; `logs` runs `tail` on `logs/`. `start` and `restart` report each provider's health; they fail when a provider is still unavailable after `--timeout` seconds (default 60). A version mismatch is reported but is not a failure. Restart an individual provider with:
+`start`, `stop` and `restart` call `systemctl --user` on `carillon.target`. The target stops before its services, so a stop also names each loaded service that is part of it and returns only once they have stopped. `restart` stops running services only once core has drained ([below](#restarts-and-updates-drain-core-first)). `logs` runs `tail` on `logs/`. `start` and `restart` report each provider's health; they fail when a provider is still unavailable after `--timeout` seconds (default 60). A version mismatch is reported but is not a failure. Restart an individual provider with:
 
 ```sh
 systemctl --user restart carillon-discord.service
 systemctl --user restart carillon-runtime-pi.service
 ```
 
-Core is restarted separately. A bundled provider disabled in the registry (`carillon provider ID disable`) still starts with its unit, but exits successfully at once without serving or reading its credential, so the unit is not restarted; status shows it as `disabled`. The T3 runtime does the same when its enabled unit starts while the registry disables it.
+Core is restarted separately. Restarting a provider's unit directly does not drain core. A bundled provider disabled in the registry (`carillon provider ID disable`) still starts with its unit, but exits successfully at once without serving or reading its credential, so the unit is not restarted; status shows it as `disabled`. The T3 runtime does the same when its enabled unit starts while the registry disables it.
+
+### Restarts and updates drain core first
+
+`carillon restart` and `carillon update` stop running services only once stopping them interrupts nothing core runs. Holding the installation's maintenance lock and the owner's units lock (and, for `update`, once the new release has checked itself), they pause core's runtime workers and wait, within `--timeout` seconds:
+
+- for every turn a runtime is running to settle through its ordinary outcome; none is cancelled or replayed. An observation of delegated work is set aside instead, and asked again once core runs again;
+- for every answer to an enabled interface to be delivered while that interface still runs;
+- for every runtime in the registry to say a restart loses nothing only its process knows. The T3 runtime is not ready while a conversation is fenced after native work whose stop T3 never confirmed: only that process remembers the fence.
+
+Events that arrive meanwhile are accepted and wait in the queue. When the drain does not finish in time, or core or a runtime does not answer, nothing is stopped or replaced: the pause ends, the workers resume, and the command names what remained. Once drained, the command keeps renewing the pause until the service manager reports the services stopped, so core claims nothing while they stop: Discord before core, and the runtimes beside them. It then says whether core confirmed the pause until it stopped. When core stopped answering for longer than the pause's lease, or said the pause had lapsed, a turn may have been claimed and interrupted, and `carillon recent` shows what ran.
+
+A pause whose command disappears lapses within 15 seconds and the workers resume. `carillon registry` shows when maintenance holds them. `--force` stops without waiting and names what it interrupts: a message a runtime is still running is recorded as interrupted and not replayed, an observation is asked again, and the T3 runtime's fences are forgotten. Forcing does not show that native work a runtime started has stopped. `carillon stop` does not drain.
+
+The update to the first release that drains runs the `carillon` installed before it, which does not drain; the drain applies from the next restart or update.
 
 ### Registry changes while core runs
 
@@ -380,10 +394,10 @@ Update leaves configuration alone. It never runs Discord configuration or `init`
    - `mv --exchange` works in the installation directory;
    - its `carillon check` opens the registry and core database exactly as its core service would, requiring the core schema it was built for;
    - its `carillon discord check` loads the Discord settings and checks that it can serve an installed Discord module.
-4. Only then are running services stopped. The release's own `install.sh --update` uses the same application exchange and service registration as setup, and installs the entry point when it is missing.
+4. Only then are running services stopped, once core has [drained](#restarts-and-updates-drain-core-first); a drain that does not finish leaves the services running and the application unchanged. The update waits until the service manager reports the services stopped, not only their target. The release's own `install.sh --update` uses the same application exchange and service registration as setup, and installs the entry point when it is missing.
 5. Services that were running are started again and must answer within `--timeout` seconds. Stopped services stay stopped.
 
-A refusal in steps 1–3 changes nothing and leaves the services as they were. The staging directory is removed afterwards. Later failures state what may have changed:
+A refusal in steps 1–3, or a drain that does not finish, changes nothing and leaves the services as they were. The staging directory is removed afterwards. Later failures state what may have changed:
 
 - **The installer cannot be started:** the application was not replaced. The services are stopped; `carillon start` resumes the current release.
 - **During publication or registration:** the services stay stopped. `app` may hold either complete application and the units may be mixed. Rerun the same `carillon update` until it succeeds, then `carillon start` if the services should run.

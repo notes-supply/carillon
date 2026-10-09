@@ -373,6 +373,18 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
         }),
       );
     },
+    restartReadiness() {
+      // A restart forgets which threads are fenced: their later follow-ups
+      // would be trusted while a stray wake may still arrive.
+      if (uncertain.size > 0)
+        return {
+          state: "unready",
+          reason: `${String(uncertain.size)} conversation thread(s) have T3 work whose stop T3 never confirmed, which only this process remembers`,
+        };
+      if (executing.size > 0)
+        return { state: "unready", reason: `${String(executing.size)} turn(s) still executing` };
+      return { state: "ready" };
+    },
     async close() {
       shutdown.abort(new RuntimeClosed("T3 runtime is closed"));
       await Promise.allSettled([...pending]);

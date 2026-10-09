@@ -1,6 +1,7 @@
 //! The core service: admission, the turn lifecycle worker, and the delivery
 //! outbox, served over the loopback provider API.
 
+mod maintenance;
 mod registry;
 #[cfg(test)]
 mod tests;
@@ -14,7 +15,7 @@ use axum::{
     extract::{Path as AxumPath, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use carillon_installation::{
     config::{LoadedConfig, Provider, ProviderRole, RELEASE_VERSION, token_matches},
@@ -34,9 +35,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::{Core, CoreError, CoreOptions, Lane, RuntimeClient, TurnFailure, WorkerStep};
+pub(super) use maintenance::{Drain, Lease};
 pub(super) use registry::{Applied, FileState, RegistryStatus, ServingRuntime};
 use registry::{Refusal, Registry, runtime_facts};
-use workers::Census;
+use workers::{Census, Pause};
 
 #[derive(Clone)]
 struct AppState {
@@ -46,6 +48,9 @@ struct AppState {
     client: Client,
     /// How the runtime workers stand, as their supervisor last arranged them.
     workers: Arc<watch::Sender<Census>>,
+    /// The operator's pause of the workers for maintenance, if one was
+    /// taken: written by its routes alone, acted on by the supervisor alone.
+    pause: Arc<watch::Sender<Option<Pause>>>,
 }
 
 impl AppState {
@@ -151,6 +156,7 @@ pub async fn serve(path: PathBuf, config: LoadedConfig) -> Result<()> {
         core,
         client: loopback::client().build()?,
         workers: Arc::new(watch::Sender::new(Census::default())),
+        pause: Arc::new(watch::Sender::new(None)),
     };
     // A runtime configured for concurrent conversations gets that many
     // message workers. Each claim is one transaction that skips
@@ -167,21 +173,7 @@ pub async fn serve(path: PathBuf, config: LoadedConfig) -> Result<()> {
         stopping.clone(),
     ));
 
-    let router = Router::new()
-        .route("/health", get(health))
-        .route("/v1/events", post(accept_event))
-        .route("/v1/events/{event_id}", get(event_status))
-        .route("/v1/jobs", get(jobs))
-        .route("/v1/deliveries", get(claim_delivery))
-        .route("/v1/deliveries/reconcile", post(reconcile_delivery_claims))
-        .route("/v1/deliveries/{id}/ack", post(acknowledge_delivery))
-        .route("/v1/turns", get(recent_turns))
-        .route("/v1/turns/{id}", get(inspect_turn))
-        .route("/v1/model", get(model_state).put(set_model))
-        .route("/v1/commands", get(commands))
-        .route("/v1/status", get(status))
-        .route("/v1/registry", get(registry_status).post(apply_registry))
-        .with_state(state.clone());
+    let router = router(state.clone());
     info!(%listen, "Carillon core ready");
     let served = axum::serve(listener, router)
         .with_graceful_shutdown(shutdown(state.core.clone(), stopping.clone()))
@@ -199,6 +191,30 @@ pub async fn serve(path: PathBuf, config: LoadedConfig) -> Result<()> {
     state.core.storage_settled().await;
     served?;
     Ok(())
+}
+
+/// Core's provider and operator API over `state`.
+fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .route("/v1/events", post(accept_event))
+        .route("/v1/events/{event_id}", get(event_status))
+        .route("/v1/jobs", get(jobs))
+        .route("/v1/deliveries", get(claim_delivery))
+        .route("/v1/deliveries/reconcile", post(reconcile_delivery_claims))
+        .route("/v1/deliveries/{id}/ack", post(acknowledge_delivery))
+        .route("/v1/turns", get(recent_turns))
+        .route("/v1/turns/{id}", get(inspect_turn))
+        .route("/v1/model", get(model_state).put(set_model))
+        .route("/v1/commands", get(commands))
+        .route("/v1/status", get(status))
+        .route("/v1/registry", get(registry_status).post(apply_registry))
+        .route("/v1/pause", post(maintenance::begin))
+        .route(
+            "/v1/pause/{holder}",
+            put(maintenance::renew).delete(maintenance::end),
+        )
+        .with_state(state)
 }
 
 async fn health() -> Json<Health> {
@@ -485,14 +501,17 @@ async fn runtime_activity(
 }
 
 /// Runs a runtime's turns of one lane until `stopping` is cancelled. An idle
-/// worker waits for core to signal new work instead of polling. A turn
+/// worker waits for core to signal new work instead of polling. A message
 /// already claimed runs to its outcome; none is claimed after the
-/// cancellation.
+/// cancellation. An observation only reads, and may wait hours on native
+/// work: once `set_aside` is cancelled, for maintenance or shutdown, core
+/// stops waiting for its answer and asks again later.
 async fn runtime_worker(
     state: AppState,
     runtime_id: String,
     lane: Lane,
     stopping: CancellationToken,
+    set_aside: CancellationToken,
 ) {
     // A runtime that gave an observation no answer is asked again after a
     // pause, not in a tight loop.
@@ -509,7 +528,19 @@ async fn runtime_worker(
             lane,
             &stopping,
             async |runtime, token, request| {
-                call_runtime(&state.client, runtime, token, request).await
+                let observation = request.follow_up.is_some();
+                let call = call_runtime(&state.client, runtime, token, request);
+                if !observation {
+                    return call.await;
+                }
+                set_aside
+                    .run_until_cancelled(call)
+                    .await
+                    .unwrap_or_else(|| {
+                        Err(TurnFailure::Unanswered(anyhow!(
+                            "observation set aside: core paused its workers or is stopping"
+                        )))
+                    })
             },
         )
         .await
@@ -745,9 +776,11 @@ async fn apply_registry(
     if !matches!(arranged, Ok(Ok(_))) {
         warn!("runtime workers were not arranged for the applied registry in time");
     }
+    let census = state.workers.borrow();
     Ok(Json(Applied {
         changed,
-        runtimes: ServingRuntime::all(&config, &state.workers.borrow()),
+        runtimes: ServingRuntime::all(&config, &census),
+        paused: census.paused.is_some(),
     }))
 }
 

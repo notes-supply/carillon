@@ -6,10 +6,15 @@
 //! nothing more, and the turn it holds settles as at shutdown. A lane gets
 //! new workers only as retired ones end, so it never runs more turns at once
 //! than the registry has allowed it since.
+//!
+//! While an operator's [`Pause`] is in force it runs none: every worker
+//! retires, an observation in progress is set aside to be asked again, and
+//! nothing is started until the pause ends or lapses.
 
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
+    time::Duration,
 };
 
 use carillon_installation::config::{LoadedConfig, ProviderRole};
@@ -17,9 +22,11 @@ use serde::{Deserialize, Serialize};
 use tokio::{
     sync::watch,
     task::{Id, JoinSet},
+    time::Instant,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::error;
+use uuid::Uuid;
 
 use super::{AppState, runtime_worker};
 use crate::Lane;
@@ -48,7 +55,32 @@ pub(crate) struct RuntimeWorkers {
 #[derive(Clone, Debug, Default)]
 pub(super) struct Census {
     pub(super) registry: Option<Arc<LoadedConfig>>,
+    /// The holder of the pause in force when they were arranged.
+    pub(super) paused: Option<Uuid>,
     pub(super) runtimes: BTreeMap<String, RuntimeWorkers>,
+}
+
+/// An operator's hold on the runtime workers while maintenance drains core.
+/// Its holder renews it within each `lease`; unrenewed, it lapses at
+/// `until` and the workers return.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Pause {
+    pub(super) holder: Uuid,
+    pub(super) lease: Duration,
+    pub(super) until: Instant,
+}
+
+impl Pause {
+    /// The one test of whether a pause is still in force, for its holder's
+    /// renewals and for the supervisor alike.
+    pub(super) fn live(&self, now: Instant) -> bool {
+        now < self.until
+    }
+}
+
+/// The pause in force now, if any.
+fn in_force(pause: &watch::Sender<Option<Pause>>) -> Option<Pause> {
+    pause.borrow().filter(|pause| pause.live(Instant::now()))
 }
 
 /// The workers the registry asks for, by runtime and lane.
@@ -82,6 +114,12 @@ struct Supervisor {
     state: AppState,
     census: Arc<watch::Sender<Census>>,
     stopping: CancellationToken,
+    /// Parent of every claiming worker's token: cancelled by a pause, or
+    /// by shutdown through `stopping`, it retires them all and sets aside
+    /// the observations they run. Replaced when the pause ends.
+    set_aside: CancellationToken,
+    /// The holder of the pause the workers are arranged under.
+    paused: Option<Uuid>,
     tasks: JoinSet<()>,
     workers: HashMap<Id, Worker>,
 }
@@ -89,8 +127,18 @@ struct Supervisor {
 impl Supervisor {
     /// Starts the workers each lane lacks and retires those it no longer
     /// wants, counting retired workers still settling as the lane's own.
+    /// A pause in force wants none.
     fn arrange(&mut self, config: &Arc<LoadedConfig>) {
-        let wanted = wanted(config);
+        self.paused = in_force(&self.state.pause).map(|pause| pause.holder);
+        let mut wanted = wanted(config);
+        if self.paused.is_some() {
+            self.set_aside.cancel();
+            for workers in wanted.values_mut() {
+                *workers = 0;
+            }
+        } else if self.set_aside.is_cancelled() {
+            self.set_aside = self.stopping.child_token();
+        }
         let mut lanes = wanted.keys().cloned().collect::<Vec<_>>();
         for worker in self.workers.values() {
             let lane = (worker.runtime.clone(), worker.lane);
@@ -114,12 +162,13 @@ impl Supervisor {
                 retire.cancel();
             }
             for _ in claiming.len() + settling..target {
-                let retire = self.stopping.child_token();
+                let retire = self.set_aside.child_token();
                 let task = self.tasks.spawn(runtime_worker(
                     self.state.clone(),
                     runtime.clone(),
                     lane,
                     retire.clone(),
+                    self.set_aside.clone(),
                 ));
                 self.workers.insert(
                     task.id(),
@@ -154,8 +203,25 @@ impl Supervisor {
         }
         self.census.send_replace(Census {
             registry: Some(config.clone()),
+            paused: self.paused,
             runtimes,
         });
+    }
+
+    /// When the pause the workers are arranged under ends, to arrange them
+    /// again then. A renewal moves `until` without notice, so waking at an
+    /// earlier one finds the pause still in force. One that has ended, or
+    /// that the pause no longer is, is due at once, however late this is
+    /// asked; arranged under no pause, there is nothing to wake for.
+    fn lapse(&self) -> Option<Instant> {
+        let holder = self.paused?;
+        Some(
+            self.state
+                .pause
+                .borrow()
+                .filter(|pause| pause.holder == holder)
+                .map_or_else(Instant::now, |pause| pause.until),
+        )
     }
 
     fn ended(&mut self, ended: Result<(Id, ()), tokio::task::JoinError>) {
@@ -170,25 +236,30 @@ impl Supervisor {
     }
 }
 
-/// Keeps the workers to the serving registry until `stopping`, then waits
-/// for every worker to settle the turn it holds. `census` tells who asks
-/// how the workers stand.
+/// Keeps the workers to the serving registry and the operator's pause until
+/// `stopping`, then waits for every worker to settle the turn it holds.
+/// `census` tells who asks how the workers stand.
 pub(super) async fn supervise(
     state: AppState,
     census: Arc<watch::Sender<Census>>,
     stopping: CancellationToken,
 ) {
     let mut registry = state.registry.subscribe();
+    let mut pause = state.pause.subscribe();
     let mut supervisor = Supervisor {
         state,
         census,
+        set_aside: stopping.child_token(),
         stopping: stopping.clone(),
+        paused: None,
         tasks: JoinSet::new(),
         workers: HashMap::new(),
     };
     let config = registry.borrow_and_update().clone();
+    pause.borrow_and_update();
     supervisor.arrange(&config);
     loop {
+        let lapse = supervisor.lapse();
         tokio::select! {
             () = stopping.cancelled() => break,
             changed = registry.changed() => {
@@ -198,6 +269,18 @@ pub(super) async fn supervise(
                 let config = registry.borrow_and_update().clone();
                 supervisor.arrange(&config);
             }
+            changed = pause.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                pause.borrow_and_update();
+                let config = registry.borrow().clone();
+                supervisor.arrange(&config);
+            }
+            () = tokio::time::sleep_until(lapse.unwrap_or_else(Instant::now)), if lapse.is_some() => {
+                let config = registry.borrow().clone();
+                supervisor.arrange(&config);
+            }
             Some(ended) = supervisor.tasks.join_next_with_id() => {
                 supervisor.ended(ended);
                 let config = registry.borrow().clone();
@@ -205,8 +288,8 @@ pub(super) async fn supervise(
             }
         }
     }
-    // Each worker's token is a child of `stopping`: none claims again, and
-    // each settles the turn it holds.
+    // Each worker's token descends from `stopping`: none claims again, and
+    // each settles the turn it holds, or sets aside its observation.
     let config = registry.borrow().clone();
     while let Some(ended) = supervisor.tasks.join_next_with_id().await {
         supervisor.ended(ended);

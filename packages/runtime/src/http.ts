@@ -84,6 +84,11 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
       return;
     }
 
+    if (request.method === "GET" && request.url === "/v1/restart") {
+      writeJson(response, 200, options.runtime.restartReadiness());
+      return;
+    }
+
     if (request.method === "POST" && request.url === "/v1/turns") {
       let parsed: TurnRequest;
       try {

@@ -28,12 +28,18 @@ use carillon_installation::{
 
 use super::{
     admin::unpack_regular,
+    drain::{Pace, drain, stop},
     operations::{
         Action, Activity, HeldUnits, Registration, Services, print_health, wait_until_healthy,
     },
 };
 
-pub(super) async fn update(home: &Path, archive: &Path, timeout: Duration) -> Result<()> {
+pub(super) async fn update(
+    home: &Path,
+    archive: &Path,
+    timeout: Duration,
+    force: bool,
+) -> Result<()> {
     let config = LoadedConfig::load(&home.join("carillon.toml"))
         .with_context(|| format!("{} is not a Carillon installation", home.display()))?;
     // The release scripts name the installation by its canonical path.
@@ -80,7 +86,10 @@ pub(super) async fn update(home: &Path, archive: &Path, timeout: Duration) -> Re
     );
 
     if activity == Activity::Running {
-        services.control(Action::Stop).context(
+        let hold = drain(&config, timeout, force, Pace::OPERATOR)
+            .await
+            .context("the application was not replaced; the services keep running")?;
+        stop(&services, hold).await.context(
             "stopping the services failed; the application was not replaced. \
              Inspect `carillon logs`, then run `carillon start` or retry the update",
         )?;
@@ -120,6 +129,7 @@ pub(super) async fn update(home: &Path, archive: &Path, timeout: Duration) -> Re
     );
     services
         .control(Action::Start)
+        .await
         .with_context(|| format!("restarting the services failed. {recovery}"))?;
     drop(units);
     let health = wait_until_healthy(&config, timeout)

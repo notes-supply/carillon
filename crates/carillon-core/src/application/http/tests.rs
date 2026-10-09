@@ -104,6 +104,7 @@ fn configured(fixture: &Fixture) -> AppState {
         registry: Arc::new(Registry::new(config.root.join("carillon.toml"), config)),
         client: fixture.client.clone(),
         workers: Arc::new(watch::Sender::new(Census::default())),
+        pause: Arc::new(watch::Sender::new(None)),
     }
 }
 
@@ -1707,6 +1708,7 @@ async fn a_stopping_worker_settles_its_turn_and_claims_no_other() -> Result<()> 
         "test-runtime".to_owned(),
         Lane::Messages,
         stopping.clone(),
+        stopping.clone(),
     ));
     tokio::time::timeout(Duration::from_secs(5), called.notified()).await?;
     // Shutdown begins while the first turn runs.
@@ -1773,6 +1775,7 @@ async fn a_claim_waiting_for_the_database_writer_is_not_made_once_stopping() -> 
         configured(&state),
         "test-runtime".to_owned(),
         Lane::Messages,
+        stopping.clone(),
         stopping.clone(),
     ));
     let mut fifo =
@@ -2652,6 +2655,7 @@ async fn job_reads_answer_promptly_when_several_runtimes_cannot_describe_their_t
 }
 mod attachments;
 mod live;
+mod maintenance;
 
 /// A runtime endpoint written at the socket level: while `cut` is set it sends
 /// a successful answer's headers and only the start of its body, then closes;

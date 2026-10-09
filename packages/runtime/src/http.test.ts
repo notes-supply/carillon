@@ -47,6 +47,7 @@ async function serve() {
         commands:
           query.audience_id === undefined ? [] : [{ name: "compact", hint: "<instructions>" }],
       }),
+    restartReadiness: () => ({ state: "unready", reason: "1 turn(s) still executing" }),
     close: () => Promise.resolve(),
   };
   const server = createRuntimeServer({
@@ -183,6 +184,19 @@ it("reports the build version its runtime was given, not a shared package's", as
       status: 200,
       body: { id: "runtime-pi", role: "runtime", version: "9.9.9-test", status: "ready" },
     });
+  } finally {
+    await close();
+  }
+});
+
+it("tells core, and only core, whether a restart would lose what the runtime holds", async () => {
+  const { call, close } = await serve();
+  try {
+    expect(await call("GET", "/v1/restart")).toEqual({
+      status: 200,
+      body: { state: "unready", reason: "1 turn(s) still executing" },
+    });
+    expect((await call("GET", "/v1/restart", undefined, "wrong")).status).toBe(403);
   } finally {
     await close();
   }

@@ -673,6 +673,14 @@ impl Core {
         self.database.delivery_counts()
     }
 
+    /// Answers to `interfaces` not yet delivered: waiting for their
+    /// interface, or claimed by it and not acknowledged.
+    /// # Errors
+    /// Returns storage errors.
+    pub fn undelivered(&self, interfaces: &[&str]) -> Result<u64> {
+        self.database.undelivered(interfaces)
+    }
+
     pub(crate) fn runtime_request(
         &self,
         turn: &ClaimedTurn,

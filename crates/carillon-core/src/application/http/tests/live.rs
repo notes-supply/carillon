@@ -23,30 +23,41 @@ use crate::application::http::{
 /// A runtime that keeps every turn until the case releases it, answering
 /// with or without a follow-up cursor, and records what it was given.
 #[derive(Clone)]
-struct HeldRuntime {
+pub(super) struct HeldRuntime {
     url: String,
     held: Arc<Mutex<HashMap<String, oneshot::Sender<Option<Value>>>>>,
     /// Every turn it was given, in order: its input and whether it was an
     /// observation.
     given: Arc<Mutex<Vec<(String, bool)>>>,
+    /// What it answers when asked whether it can restart.
+    pub(super) restart: Arc<Mutex<Value>>,
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(super) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl HeldRuntime {
-    async fn start() -> Result<Self> {
+    pub(super) async fn start() -> Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let runtime = Self {
             url: format!("http://{}", listener.local_addr()?),
             held: Arc::default(),
             given: Arc::default(),
+            restart: Arc::new(Mutex::new(json!({"state": "ready"}))),
         };
-        let (held, given) = (runtime.held.clone(), runtime.given.clone());
-        let router = Router::new().route(
+        let (held, given, restart) = (
+            runtime.held.clone(),
+            runtime.given.clone(),
+            runtime.restart.clone(),
+        );
+        let answer = move || {
+            let answer = lock(&restart).clone();
+            async move { Json(answer) }
+        };
+        let router = Router::new().route("/v1/restart", get(answer)).route(
             "/v1/turns",
             post(move |Json(request): Json<RuntimeTurnRequest>| {
                 let (held, given) = (held.clone(), given.clone());
@@ -66,7 +77,7 @@ impl HeldRuntime {
     }
 
     /// Waits until it holds `count` turns, and returns their inputs.
-    async fn holding(&self, count: usize) -> Result<Vec<String>> {
+    pub(super) async fn holding(&self, count: usize) -> Result<Vec<String>> {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let held = lock(&self.held).keys().cloned().collect::<Vec<_>>();
@@ -81,7 +92,7 @@ impl HeldRuntime {
     }
 
     /// Answers the turn given `input`, optionally saying its work goes on.
-    fn release(&self, input: &str, follow_up: Option<Value>) -> Result<()> {
+    pub(super) fn release(&self, input: &str, follow_up: Option<Value>) -> Result<()> {
         lock(&self.held)
             .remove(input)
             .with_context(|| format!("the runtime holds no turn {input}"))?
@@ -89,12 +100,12 @@ impl HeldRuntime {
             .map_err(|_| anyhow!("turn {input} was abandoned"))
     }
 
-    fn given(&self) -> Vec<(String, bool)> {
+    pub(super) fn given(&self) -> Vec<(String, bool)> {
         lock(&self.given).clone()
     }
 
     /// Answers whatever it holds until core has `counts`.
-    async fn drain(&self, state: &AppState, wanted: (u64, u64, u64)) -> Result<()> {
+    pub(super) async fn drain(&self, state: &AppState, wanted: (u64, u64, u64)) -> Result<()> {
         tokio::time::timeout(Duration::from_secs(10), async {
             while counts(state)? != wanted {
                 let held = lock(&self.held).keys().cloned().collect::<Vec<_>>();
@@ -112,7 +123,11 @@ impl HeldRuntime {
 
 /// An installation whose runtime is `runtime`, its registry file written
 /// out as core would read it, and core serving it.
-fn serving(directory: &Path, runtime: &HeldRuntime, parallel: u32) -> Result<(Fixture, AppState)> {
+pub(super) fn serving(
+    directory: &Path,
+    runtime: &HeldRuntime,
+    parallel: u32,
+) -> Result<(Fixture, AppState)> {
     let mut fixture = installation(directory)?;
     let provider = &mut fixture.config.value.providers[1];
     provider.url.clone_from(&runtime.url);
@@ -131,30 +146,30 @@ fn write(config: &LoadedConfig) -> Result<()> {
 }
 
 /// Edits the registry file as an operator would.
-fn edit(fixture: &mut Fixture, change: impl FnOnce(&mut Provider)) -> Result<()> {
+pub(super) fn edit(fixture: &mut Fixture, change: impl FnOnce(&mut Provider)) -> Result<()> {
     change(&mut fixture.config.value.providers[1]);
     write(&fixture.config)
 }
 
 /// A handler's answer, or its refusal as an error.
-fn ok<T>(answer: Result<T, ApiError>) -> Result<T> {
+pub(super) fn ok<T>(answer: Result<T, ApiError>) -> Result<T> {
     answer.map_err(|refusal| anyhow!("{}: {}", refusal.status, refusal.message))
 }
 
-fn operator() -> Result<HeaderMap> {
+pub(super) fn operator() -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     headers.insert(http::header::AUTHORIZATION, "Bearer test-operator".parse()?);
     Ok(headers)
 }
 
-async fn apply(state: &AppState) -> Result<Applied, ApiError> {
+pub(super) async fn apply(state: &AppState) -> Result<Applied, ApiError> {
     apply_registry(State(state.clone()), operator()?)
         .await
         .map(|Json(applied)| applied)
 }
 
 /// Submits a message of `conversation` through the shared state.
-async fn submit(
+pub(super) async fn submit(
     state: &AppState,
     input: &str,
     conversation: &str,
@@ -188,7 +203,7 @@ async fn submit(
 }
 
 /// Waits until the supervisor reports `wanted` for the test runtime.
-async fn workers_are(
+pub(super) async fn workers_are(
     state: &AppState,
     wanted: impl Fn(&workers::RuntimeWorkers) -> bool,
 ) -> Result<()> {
@@ -207,7 +222,7 @@ async fn workers_are(
     Ok(())
 }
 
-fn counts(state: &AppState) -> Result<(u64, u64, u64)> {
+pub(super) fn counts(state: &AppState) -> Result<(u64, u64, u64)> {
     let turns = state.core.turn_counts()?;
     Ok((turns.pending, turns.active, turns.completed))
 }

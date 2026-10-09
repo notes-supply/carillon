@@ -1007,6 +1007,26 @@ impl Database {
         Ok(counts)
     }
 
+    /// Deliveries of `interfaces` their interface has not yet settled:
+    /// waiting to be claimed, or claimed and not acknowledged.
+    pub fn undelivered(&self, interfaces: &[&str]) -> Result<u64> {
+        let connection = self.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT interface_id, COUNT(*) FROM deliveries
+             WHERE state IN ('pending', 'delivering') GROUP BY interface_id",
+        )?;
+        let mut undelivered = 0;
+        for row in statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+        })? {
+            let (interface, count) = row?;
+            if interfaces.contains(&interface.as_str()) {
+                undelivered += u64::from(count);
+            }
+        }
+        Ok(undelivered)
+    }
+
     pub fn recent_turns(&self, event_id: Option<&str>, limit: u32) -> Result<Vec<TurnSummary>> {
         let connection = self.connect()?;
         let mut statement = connection.prepare(

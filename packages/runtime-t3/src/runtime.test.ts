@@ -1420,13 +1420,25 @@ it("closes promptly while the first snapshot never arrives", async () => {
 const started2 = started;
 
 it("fails closed on any follow-up after an unconfirmed stop on the conversation, while plain turns continue", async () => {
+  expect(runtime.restartReadiness()).toEqual({ state: "ready" });
   // Turn 1 is cancelled while waiting and T3 never confirms the stop.
   fake.interruptBehaviour = "ignore";
   const controller = new AbortController();
   const first = runtime.executeTurn(turn("turn-1", "first"), controller.signal);
   const run1 = await started("turn-1");
+  expect(runtime.restartReadiness()).toEqual({
+    state: "unready",
+    reason: "1 turn(s) still executing",
+  });
   controller.abort(new Error("core disconnected"));
   await expect(first).rejects.toThrow("core disconnected");
+  // Only this process remembers the fence, so a restart now would lose it.
+  const fenced = {
+    state: "unready",
+    reason:
+      "1 conversation thread(s) have T3 work whose stop T3 never confirmed, which only this process remembers",
+  };
+  expect(runtime.restartReadiness()).toEqual(fenced);
   fake.interruptBehaviour = "settle";
   fake.stop(threadId, run1.id, "interrupted");
 
@@ -1460,6 +1472,8 @@ it("fails closed on any follow-up after an unconfirmed stop on the conversation,
   fake.assistant(threadId, own.id, "My result.");
   await expect(fourth).rejects.toThrow(/was not confirmed stopped/u);
   expect(fake.interrupts).toEqual([run1.id, wake.id, own.id]);
+  // Turns that completed since do not lift it either.
+  expect(runtime.restartReadiness()).toEqual(fenced);
 });
 
 /**
@@ -1881,10 +1895,14 @@ it("stops nothing when a follow-up turn is cancelled: the continuation is T3's",
   );
   const continuation = fake.finishDelegation(threadId, child.id);
   await until(() => runtime.activity("turn-1-report", "discord-private")?.phase === "model");
+  const sent = fake.received.length;
   controller.abort(new Error("core disconnected"));
   await expect(followUp).rejects.toThrow("core disconnected");
   expect(fake.interrupts).toEqual([]);
+  expect(fake.received.slice(sent)).toEqual([]);
   expect(thread().runs.find((run) => run.id === continuation.id)?.status).toBe("running");
+  // Set aside, it leaves nothing executing and fences nothing: a restart loses nothing.
+  expect(runtime.restartReadiness()).toEqual({ state: "ready" });
   // Nor does it fence the conversation: a later turn's own follow-up is still trusted.
   fake.complete(threadId, continuation.id);
   expect((await (await backgroundTurn("turn-2")).result).output).toBe("Started.\n\nResult.");

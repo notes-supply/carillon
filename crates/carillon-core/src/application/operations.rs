@@ -116,7 +116,6 @@ impl fmt::Display for Activity {
 pub(super) enum Action {
     Start,
     Stop,
-    Restart,
 }
 
 impl Action {
@@ -124,7 +123,6 @@ impl Action {
         match self {
             Self::Start => "start",
             Self::Stop => "stop",
-            Self::Restart => "restart",
         }
     }
 }
@@ -186,16 +184,44 @@ impl<'a> Services<'a> {
         })
     }
 
-    /// Start, stop or restart the target; `PartOf=` propagates to services.
-    pub(super) fn control(&self, action: Action) -> Result<()> {
+    /// Start or stop the target; `PartOf=` propagates to services. The
+    /// target is ordered before its services, so its own stop job ends
+    /// first: a stop also names each loaded service that is part of it, and
+    /// `systemctl` returns once those have stopped, their processes gone.
+    /// The command waits without blocking other work, such as renewing
+    /// core's pause while the services stop.
+    pub(super) async fn control(&self, action: Action) -> Result<()> {
         let verb = action.verb();
-        let status = Process::new("systemctl")
-            .args(["--user", verb, TARGET])
+        let mut units = vec![TARGET.to_owned()];
+        if let Action::Stop = action {
+            let output = tokio::process::Command::new("systemctl")
+                .args(["--user", "show", "--property=ConsistsOf", "--value", TARGET])
+                .output()
+                .await
+                .context("run systemctl")?;
+            if !output.status.success() {
+                bail!(
+                    "cannot read the services of {TARGET} for {}: {}",
+                    self.home.display(),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+            units.extend(
+                String::from_utf8_lossy(&output.stdout)
+                    .split_whitespace()
+                    .map(str::to_owned),
+            );
+        }
+        let status = tokio::process::Command::new("systemctl")
+            .args(["--user", verb])
+            .args(&units)
             .status()
+            .await
             .context("run systemctl")?;
         if !status.success() {
             bail!(
-                "systemctl --user {verb} {TARGET} failed ({status}) for {}",
+                "systemctl --user {verb} {} failed ({status}) for {}",
+                units.join(" "),
                 self.home.display()
             );
         }

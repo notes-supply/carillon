@@ -1,6 +1,7 @@
 //! Installation and service assembly; importing the core does not start it.
 mod admin;
 mod cli;
+mod drain;
 mod http;
 mod operations;
 mod update;
