@@ -331,6 +331,40 @@ async fn an_apply_serves_live_changes_whole_or_nothing_for_the_operator_alone() 
 }
 
 #[tokio::test]
+async fn a_misspelt_setting_is_refused_rather_than_dropped() -> Result<()> {
+    let directory = tempdir()?;
+    let runtime = HeldRuntime::start().await?;
+    let (fixture, state) = serving(directory.path(), &runtime, 2)?;
+    let serving = state.config();
+    // The runtime entry names a setting the registry does not define.
+    let path = fixture.config.root.join("carillon.toml");
+    let file = fs::read_to_string(&path)?;
+    let misspelt = file.replace(
+        "parallel_turns = 2",
+        "parallel_turns = 2\nparallel_turn = 4",
+    );
+    assert_ne!(misspelt, file);
+    fs::write(&path, misspelt)?;
+    let refused = apply(&state)
+        .await
+        .err()
+        .context("applied a file with a misspelt setting")?;
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        refused.message.contains("unknown field `parallel_turn`"),
+        "{}",
+        refused.message
+    );
+    assert!(Arc::ptr_eq(&state.config(), &serving));
+    let Json(status) = ok(registry_status(State(state.clone()), operator()?).await)?;
+    let FileState::Invalid { error } = status.file else {
+        anyhow::bail!("a misspelt file read as a registry");
+    };
+    assert!(error.contains("parallel_turn"), "{error}");
+    Ok(())
+}
+
+#[tokio::test]
 async fn fewer_parallel_turns_let_running_turns_finish_and_then_run_fewer_at_once() -> Result<()> {
     let directory = tempdir()?;
     let runtime = HeldRuntime::start().await?;

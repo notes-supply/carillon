@@ -20,7 +20,10 @@ pub const RELEASE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Credential names that are never provider identities.
 pub const RESERVED_CREDENTIALS: [&str; 2] = ["operator", "discord-bot"];
 
+/// The registry, `carillon.toml`. Its tables reject fields they do not
+/// define, so a misspelt setting fails validation instead of being dropped.
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub data_dir: PathBuf,
     pub core: CoreConfig,
@@ -29,6 +32,7 @@ pub struct Config {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct CoreConfig {
     pub listen: SocketAddr,
     pub operator_token_hash: String,
@@ -143,6 +147,7 @@ pub fn attachment_staging(data_dir: &Path, provider_id: &str) -> PathBuf {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentConfig {
     pub id: String,
     pub name: String,
@@ -152,6 +157,7 @@ pub struct AgentConfig {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Provider {
     pub id: String,
     pub role: ProviderRole,

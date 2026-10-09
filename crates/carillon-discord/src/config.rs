@@ -17,7 +17,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use unicode_general_category::{GeneralCategory, get_general_category};
 
+/// The provider's settings file. It rejects fields it does not define, so a
+/// misspelt setting fails validation instead of being dropped.
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct DiscordConfig {
     pub agent: String,
     pub guild_id: String,
@@ -200,6 +203,7 @@ impl AttachmentPolicy {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct DiscordRoute {
     pub channel_id: String,
     pub activation: DiscordActivation,

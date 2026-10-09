@@ -490,7 +490,8 @@ fn instance(config: &LoadedConfig, explicit: Option<String>) -> Result<String> {
     match discord.as_slice() {
         [only] => Ok((*only).to_owned()),
         [] => bail!(
-            "no interface provider has Discord settings; choose one with --provider from: {}",
+            "no interface provider has Discord settings this program can read; choose one \
+             with --provider from: {}",
             interfaces.join(", ")
         ),
         several => bail!(

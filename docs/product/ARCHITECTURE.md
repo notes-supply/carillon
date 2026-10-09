@@ -42,7 +42,7 @@ Each provider is its own executable, built and packaged separately from core. `c
 
 Executable names and registry instance IDs are separate: `carillon discord` can serve an instance named `discord-private`. A provider executable must not use a core subcommand name, but that restriction does not apply to instance IDs.
 
-A provider's own settings live in `providers/<id>.toml` beside `carillon.toml`. Core never reads that file; the provider and its `configure` command own the schema. The registry in `carillon.toml` records only what core needs about a provider: ID, role, expected version, loopback URL, credential hash, and whether it is enabled.
+A provider's own settings live in `providers/<id>.toml` beside `carillon.toml`. Core never reads that file; the provider and its `configure` command own the schema. Both files reject fields their schema does not define, so a misspelt setting is an invalid file rather than a silently ignored one. The registry in `carillon.toml` records only what core needs about a provider: ID, role, expected version, loopback URL, credential hash, and whether it is enabled.
 
 ## Interface providers
 

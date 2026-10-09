@@ -1502,6 +1502,44 @@ async fn the_operator_alone_applies_a_settings_file_whole_or_not_at_all() -> any
 }
 
 #[tokio::test]
+async fn a_misspelt_setting_is_refused_rather_than_dropped() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let state = discord_state(
+        core_client("http://127.0.0.1:1".to_owned())?,
+        directory.path(),
+    )
+    .await?;
+    let serving = state.settings.current();
+    let path = state.installation.provider_config_path("discord")?;
+    let file = std::fs::read_to_string(&path)?;
+    // A setting the file does not define, at the top or in a route.
+    for (misspelt, field) in [
+        (
+            format!("processing_emoj = \"⏳\"\n{file}"),
+            "processing_emoj",
+        ),
+        (
+            file.replace("[[routes]]\n", "[[routes]]\nchanel_id = \"301\"\n"),
+            "chanel_id",
+        ),
+    ] {
+        assert_ne!(misspelt, file);
+        std::fs::write(&path, misspelt)?;
+        let (status, body) = settings(&state, Method::POST, "operator").await?;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let error = body["error"].as_str().context("no error")?;
+        assert!(
+            error.contains(&format!("unknown field `{field}`")),
+            "{error}"
+        );
+        assert!(Arc::ptr_eq(&state.settings.current(), &serving));
+        let (_, body) = settings(&state, Method::GET, "operator").await?;
+        assert_eq!(body["file"]["state"], "invalid");
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn each_message_is_admitted_by_the_settings_serving_when_it_arrives() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let (core_address, _core) = simulated_core(directory.path().join("staging")).await?;
