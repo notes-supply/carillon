@@ -22,7 +22,9 @@
 //!
 //! When the provider stops, waiting messages are dropped, as a crash would
 //! drop them, and running ones end their preparation or settle what they
-//! handed to core before the dispatcher returns. Once it is stopping, a
+//! handed to core before the dispatcher returns. Each gateway message is
+//! reported settled once its preparation settles it; a dropped one never is,
+//! so a resumed gateway session replays it. Once it is stopping, a
 //! command's submission, from its first attempt to the lane's settlement,
 //! starts no attempt beyond its first: one core has not confirmed when the
 //! attempt under way ends is left unconfirmed rather than holding the stop.
@@ -40,7 +42,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use super::{Ingress, QueuedMessage, prepare, submit_event_with_retry};
+use super::{Ingress, Prepared, QueuedMessage, prepare, submit_event_with_retry};
 use crate::{
     config::{DiscordConfig, DiscordConversation},
     conversations::{IncomingMessage, admit_message},
@@ -216,7 +218,9 @@ fn start(
         Some(Queued::Message(head)) => {
             let (ingress, head) = (ingress.clone(), head.clone());
             running.spawn(async move {
-                prepare(&ingress, head).await;
+                let dispatch = head.dispatch;
+                let prepared = prepare(&ingress, head).await;
+                ingress.settlements.report(dispatch, prepared);
                 key
             });
         }
@@ -273,8 +277,11 @@ pub(crate) fn refuse_overloaded(ingress: &Arc<Ingress>, queued: QueuedMessage) {
     let QueuedMessage {
         request: message,
         settings,
+        dispatch,
         ..
     } = queued;
+    // Refused or ignored, it is settled: a replay would admit it afresh.
+    ingress.settlements.report(dispatch, Prepared::Refused);
     warn!(
         channel = %message.channel_id,
         message = %message.event_id,

@@ -1099,11 +1099,12 @@ async fn an_acknowledged_interaction_is_answered_before_the_provider_returns() -
         downloads: state.downloads.clone(),
         refusals: Arc::new(tokio::sync::Semaphore::new(crate::inbound::lanes::REFUSALS)),
         stopping: tokio_util::sync::CancellationToken::new(),
+        settlements: crate::inbound::Settlements::new(tokio::sync::mpsc::unbounded_channel().0),
     });
     let event = model_command()?;
     let (messages, _queue) = tokio::sync::mpsc::channel(1);
     let mut interactions = tokio::task::JoinSet::new();
-    super::take_event(&state, event, &messages, &ingress, &mut interactions)?;
+    super::take_event(&state, event, None, &messages, &ingress, &mut interactions)?;
     // No event follows: the gateway is gone. Discord has the acknowledgement,
     // and the module's native call is waiting for core.
     tokio::time::timeout(Duration::from_secs(5), acknowledged.notified()).await?;
@@ -1129,6 +1130,89 @@ async fn an_acknowledged_interaction_is_answered_before_the_provider_returns() -
     Ok(())
 }
 
+/// A resumed gateway session replays an interaction this provider already
+/// answered: Discord takes no second acknowledgement, so the module never
+/// runs it again and core is never asked.
+#[tokio::test]
+async fn a_replayed_interaction_discord_does_not_acknowledge_again_runs_nothing()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let replies = Arc::new(AtomicUsize::new(0));
+    let discord = Router::new()
+        .route(
+            "/api/v10/interactions/{id}/{token}/callback",
+            post(|| async {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"code": 40060, "message": "Interaction has already been acknowledged."})),
+                )
+            }),
+        )
+        .fallback({
+            let replies = replies.clone();
+            move || async move {
+                replies.fetch_add(1, Ordering::SeqCst);
+                StatusCode::NO_CONTENT
+            }
+        });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let discord_address = listener.local_addr()?;
+    let discord_server = tokio::spawn(async move { axum::serve(listener, discord).await });
+    let asked = Arc::new(AtomicUsize::new(0));
+    let core = Router::new().fallback({
+        let asked = asked.clone();
+        move || async move {
+            asked.fetch_add(1, Ordering::SeqCst);
+            StatusCode::NO_CONTENT
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let core_address = listener.local_addr()?;
+    let core_server = tokio::spawn(async move { axum::serve(listener, core).await });
+    let mut state = discord_state(
+        core_client(format!("http://{core_address}"))?,
+        directory.path(),
+    )
+    .await?;
+    std::fs::write(
+        directory.path().join("release.wasm"),
+        calling_model("model state received", "the native call failed")?,
+    )?;
+    state.module = Arc::new(Module::load(files(directory.path())).await?);
+    let target = Arc::new(app(&discord_address.to_string(), 2, 100));
+    state.app = Some(target.clone());
+    let ingress = Arc::new(crate::inbound::Ingress {
+        core: state.core.clone(),
+        participation: state.participation.clone(),
+        http: target.http.clone(),
+        reactions: crate::delivery::Reactions::new(target.http.clone(), state.settings.clone()),
+        downloads: state.downloads.clone(),
+        refusals: Arc::new(tokio::sync::Semaphore::new(crate::inbound::lanes::REFUSALS)),
+        stopping: tokio_util::sync::CancellationToken::new(),
+        settlements: crate::inbound::Settlements::new(tokio::sync::mpsc::unbounded_channel().0),
+    });
+    let (messages, _queue) = tokio::sync::mpsc::channel(1);
+    let mut interactions = tokio::task::JoinSet::new();
+    let taken = super::take_event(
+        &state,
+        model_command()?,
+        None,
+        &messages,
+        &ingress,
+        &mut interactions,
+    )?;
+    assert!(
+        !taken,
+        "an interaction is not a message awaiting settlement"
+    );
+    tokio::time::timeout(Duration::from_secs(10), super::answered(&mut interactions)).await?;
+    assert_eq!(asked.load(Ordering::SeqCst), 0, "the module ran the replay");
+    assert_eq!(replies.load(Ordering::SeqCst), 0, "the replay was answered");
+    discord_server.abort();
+    core_server.abort();
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_full_message_queue_refuses_instead_of_holding_the_gateway() -> anyhow::Result<()> {
     let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
@@ -1147,6 +1231,7 @@ async fn a_full_message_queue_refuses_instead_of_holding_the_gateway() -> anyhow
             DiscordActivation::Always,
             DiscordConversation::Channel,
         )),
+        dispatch: None,
     };
     assert!(queue_message(&sender, inbound.clone())?.is_ok());
     let refused = queue_message(&sender, inbound.clone())?

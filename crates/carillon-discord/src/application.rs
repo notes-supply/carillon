@@ -5,8 +5,9 @@ use crate::conversations::{
 use crate::{
     attachments::Downloads,
     error::discord_failure_is_terminal,
+    gateway::{Dispatch, Gateway, Identity, record_path, take_record},
     inbound::{
-        Ingress, PREPARATION_DEADLINE, QueuedMessage, known_receipt,
+        Ingress, PREPARATION_DEADLINE, QueuedMessage, Settlements, known_receipt,
         lanes::{self, Lanes, Queued},
     },
 };
@@ -60,7 +61,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
-use twilight_gateway::{Event, EventTypeFlags, Intents, Shard, ShardId, StreamExt as _};
+use twilight_gateway::Event;
 use twilight_http::Client as DiscordHttp;
 use twilight_model::channel::ChannelType;
 use twilight_model::{
@@ -227,25 +228,20 @@ async fn connect(
     cards: Option<CardRecords>,
 ) -> Result<()> {
     let http = Arc::new(DiscordHttp::new(discord_token.clone()));
-    let current_user = http.current_user().await?.model().await?;
     // Identity applies at a restart only, so the settings serving now say it.
     let identity = state.settings.current();
-    if current_user.id.to_string() != identity.bot_user_id {
-        bail!("configured Discord bot user ID does not match the token");
-    }
-    let application_id = http
-        .current_user_application()
-        .await
-        .context("resolve Discord application")?
-        .model()
-        .await
-        .context("decode Discord application")?
-        .id;
-    let app = Arc::new(DiscordApp {
-        http: http.clone(),
-        application_id,
-        guild_id: guild(&identity)?,
-    });
+    let app = Arc::new(application(&http, &identity).await?);
+    // A session recorded by a graceful stop is resumed only by the same
+    // provider, bot, guild and token, and only once.
+    let record = record_path(&state_directory(&state.installation, &state.health.id));
+    let owner = Identity::new(
+        &state.health.id,
+        &identity.bot_user_id,
+        &identity.guild_id,
+        &discord_token,
+    );
+    let (settled, settlements) = mpsc::unbounded_channel();
+    let mut gateway = Gateway::new(discord_token, take_record(&record, &owner), settlements);
     state.module.reconcile(&app).await?;
     state.app = Some(app);
     let reactions = Reactions::new(http.clone(), state.settings.clone());
@@ -265,6 +261,7 @@ async fn connect(
         downloads: state.downloads.clone(),
         refusals: Arc::new(Semaphore::new(lanes::REFUSALS)),
         stopping: stopping.clone(),
+        settlements: Settlements::new(settled),
     });
     let dispatcher = tokio::spawn(lanes::dispatch(ingress.clone(), receiver));
     let mut terminate = signal(SignalKind::terminate()).context("handle termination")?;
@@ -297,7 +294,7 @@ async fn connect(
     let mut interactions = JoinSet::new();
     let outcome = tokio::select! {
         result = axum::serve(listener, router).into_future() => result.map_err(Into::into),
-        result = gateway_loop(state, discord_token, messages, ingress, &mut interactions) => {
+        result = gateway_loop(state, &mut gateway, messages, ingress, &mut interactions) => {
             result.context("Discord gateway stopped")
         },
         result = &mut deliveries => {
@@ -311,13 +308,16 @@ async fn connect(
         interrupted = tokio::signal::ctrl_c() => interrupted.context("handle interruption"),
         _ = terminate.recv() => Ok(()),
     };
-    // No new message, interaction or delivery is taken. Preparation not yet
-    // handed to core ends; a submission core may have received is settled,
-    // so its staged files stay until core no longer needs them; an
-    // interaction already acknowledged finishes its invocation and attempts
-    // its reply; a claimed delivery is sent and acknowledged, and the card its
-    // outcome settles shows its summary. Reactions still under way then get
-    // a moment to end before the rest are cancelled.
+    // No new message, interaction or delivery is taken: the gateway closes
+    // first, keeping its session resumable. Preparation not yet handed to
+    // core ends; a submission core may have received is settled, so its
+    // staged files stay until core no longer needs them; an interaction
+    // already acknowledged finishes its invocation and attempts its reply; a
+    // claimed delivery is sent and acknowledged, and the card its outcome
+    // settles shows its summary. Reactions still under way then get a moment
+    // to end before the rest are cancelled. Only then is the session recorded,
+    // with a replay floor below every message that did not settle.
+    gateway.close().await;
     stopping.cancel();
     answered(&mut interactions).await;
     let prepared = dispatcher.await;
@@ -329,10 +329,33 @@ async fn connect(
     // Its outcomes now closed, the monitor ends within its bound.
     let watched = if watching { monitoring.await } else { Ok(()) };
     reactions.stop(PROMPT_FEEDBACK).await;
+    gateway.record(&record, &owner);
     prepared.context("Discord message preparation failed")?;
     delivered.context("Discord delivery worker stopped")?;
     watched.context("Discord activity monitor failed")?;
     outcome
+}
+
+/// The Discord application of the bot the token authenticates, which must
+/// be the configured bot.
+async fn application(http: &Arc<DiscordHttp>, identity: &DiscordConfig) -> Result<DiscordApp> {
+    let current_user = http.current_user().await?.model().await?;
+    if current_user.id.to_string() != identity.bot_user_id {
+        bail!("configured Discord bot user ID does not match the token");
+    }
+    let application_id = http
+        .current_user_application()
+        .await
+        .context("resolve Discord application")?
+        .model()
+        .await
+        .context("decode Discord application")?
+        .id;
+    Ok(DiscordApp {
+        http: http.clone(),
+        application_id,
+        guild_id: guild(identity)?,
+    })
 }
 
 fn guild(discord: &DiscordConfig) -> Result<Id<twilight_model::id::marker::GuildMarker>> {
@@ -770,44 +793,46 @@ async fn simulate_interaction(
 
 async fn gateway_loop(
     state: DiscordState,
-    token: String,
+    gateway: &mut Gateway,
     messages: mpsc::Sender<Queued>,
     ingress: Arc<Ingress>,
     interactions: &mut JoinSet<()>,
 ) -> Result<()> {
-    let intents = Intents::GUILDS | Intents::GUILD_MESSAGES | Intents::MESSAGE_CONTENT;
-    let mut shard = Shard::new(ShardId::ONE, token, intents);
-    let event_types = EventTypeFlags::MESSAGE_CREATE | EventTypeFlags::INTERACTION_CREATE;
-    while let Some(event) = shard.next_event(event_types).await {
-        let event = event.context("receive Discord gateway event")?;
-        take_event(&state, event, &messages, &ingress, interactions)?;
+    while let Some(event) = gateway.next_event().await {
+        let (event, dispatch) = event.context("receive Discord gateway event")?;
+        if take_event(&state, event, dispatch, &messages, &ingress, interactions)? {
+            gateway.taken(dispatch);
+        }
     }
     bail!("Discord gateway event stream ended")
 }
 
 /// One gateway event: a message goes to the lanes, and an interaction
 /// becomes a task in `interactions`, whose finished tasks are reaped here.
+/// Returns whether a message went to the lanes, where it stays unsettled
+/// until its preparation settles it.
 fn take_event(
     state: &DiscordState,
     event: Event,
+    dispatch: Option<Dispatch>,
     messages: &mpsc::Sender<Queued>,
     ingress: &Arc<Ingress>,
     interactions: &mut JoinSet<()>,
-) -> Result<()> {
+) -> Result<bool> {
     while let Some(finished) = interactions.try_join_next() {
         reap(finished);
     }
     match event {
         Event::MessageCreate(message) => {
             if message.author.bot || message.kind == MessageType::ThreadStarterMessage {
-                return Ok(());
+                return Ok(false);
             }
             let guild = message.guild_id.map(|id| id.to_string());
             // The message keeps the settings it is admitted with.
             let settings = state.settings.current();
             if admit_identity(&settings, guild.as_deref(), &message.author.id.to_string()).is_err()
             {
-                return Ok(());
+                return Ok(false);
             }
             let request = IncomingMessage {
                 event_id: message.id.to_string(),
@@ -836,17 +861,21 @@ fn take_event(
                     request,
                     native,
                     settings,
+                    dispatch,
                 },
             )?;
+            Ok(true)
         }
         Event::InteractionCreate(interaction) => {
             // Interactions are independent of message order and of each
-            // other; each answers within Discord's own deadline.
+            // other; each answers within Discord's own deadline. One taken
+            // here is answered before the provider stops, and Discord takes
+            // its acknowledgement only once, so a replay never runs it again.
             interactions.spawn(handle_interaction(state.clone(), interaction.0));
+            Ok(false)
         }
-        _ => {}
+        _ => Ok(false),
     }
-    Ok(())
 }
 
 /// Wait until every interaction already taken has been answered.
