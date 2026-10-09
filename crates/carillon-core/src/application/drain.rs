@@ -32,6 +32,10 @@ pub(super) struct Pace {
     pub(super) renew: Duration,
     /// How often the drain is checked while waiting for it.
     pub(super) check: Duration,
+    /// The longest one request waits for core; a drain report asks the
+    /// runtimes, each within five seconds. While waiting for the drain, a
+    /// request also waits no longer than what is left of `--timeout`.
+    pub(super) request: Duration,
 }
 
 impl Pace {
@@ -39,16 +43,13 @@ impl Pace {
         lease: Duration::from_secs(15),
         renew: Duration::from_secs(3),
         check: Duration::from_millis(500),
+        request: Duration::from_secs(15),
     };
 }
 
-/// A renewal while the services stop waits at most this long for core; a
-/// drain report asks the runtimes, each within five seconds. Before then,
-/// requests wait only for what is left of the drain's `--timeout`.
-const REQUEST: Duration = Duration::from_secs(15);
-
-/// Ending a pause waits only briefly: one core does not hear lapses within
-/// its lease anyway.
+/// Ending a pause waits only briefly, and while waiting for the drain no
+/// longer than what is left of `--timeout`: a pause core does not hear end
+/// lapses within its lease anyway.
 const END: Duration = Duration::from_secs(2);
 
 /// Core's pause of its runtime workers, held by this command.
@@ -144,14 +145,22 @@ impl Hold {
         Ok(drain)
     }
 
-    /// Ends the pause so core's workers claim again. A pause core does not
-    /// hear end lapses within its lease.
-    pub(super) async fn end(&self) {
+    /// Ends the pause so core's workers claim again, waiting at most
+    /// `within`. With no time left it asks nothing, and the pause lapses
+    /// within its lease, as a pause core does not hear end does.
+    pub(super) async fn end(&self, within: Duration) {
+        if within.is_zero() {
+            println!(
+                "core's workers resume when its pause lapses, within {} seconds",
+                self.pace.lease.as_secs()
+            );
+            return;
+        }
         let ended = self
             .client
             .delete(self.url.clone())
             .bearer_auth(&self.token)
-            .timeout(END)
+            .timeout(within)
             .send()
             .await
             .and_then(reqwest::Response::error_for_status);
@@ -179,7 +188,7 @@ impl Hold {
                 stopped = &mut stop => break stopped,
                 renewed = async {
                     tokio::time::sleep(renew).await;
-                    self.renew(REQUEST).await
+                    self.renew(self.pace.request).await
                 }, if !lapsed => lapsed = matches!(renewed, Err(Refusal::Conflict(_))),
             }
         };
@@ -255,6 +264,7 @@ pub(super) async fn drain(
 ) -> Result<Option<Hold>> {
     let deadline = Instant::now() + timeout;
     let left = || deadline.saturating_duration_since(Instant::now());
+    let within = || left().min(pace.request);
     let refused = |unsettled: &str| {
         anyhow!(
             "core did not drain within {} seconds: {unsettled}. `--force` stops anyway, \
@@ -262,7 +272,7 @@ pub(super) async fn drain(
             timeout.as_secs()
         )
     };
-    let (mut hold, mut drain) = match Hold::begin(config, pace, left()).await {
+    let (mut hold, mut drain) = match Hold::begin(config, pace, within()).await {
         Ok(begun) => begun,
         Err(error) if force => {
             println!("Forcing the stop without a drain: {error:#}.");
@@ -294,7 +304,7 @@ pub(super) async fn drain(
             return Ok(Some(hold));
         }
         if left().is_zero() {
-            hold.end().await;
+            hold.end(Duration::ZERO).await;
             return Err(refused(&unsettled));
         }
         if unsettled != shown {
@@ -302,10 +312,10 @@ pub(super) async fn drain(
             shown = unsettled;
         }
         tokio::time::sleep(pace.check.min(left())).await;
-        drain = match hold.renew(left()).await {
+        drain = match hold.renew(within()).await {
             Ok(drain) => drain,
             Err(refusal) => {
-                hold.end().await;
+                hold.end(left().min(END)).await;
                 let refusal = anyhow::Error::from(refusal);
                 // A report cut off by the deadline leaves the last one's account.
                 return Err(if left().is_zero() {
@@ -327,7 +337,7 @@ pub(super) async fn stop(services: &Services<'_>, hold: Option<Hold>) -> Result<
     };
     let (stopped, kept) = hold.through(services.control(Action::Stop)).await;
     if stopped.is_err() {
-        hold.end().await;
+        hold.end(END).await;
         return stopped;
     }
     match kept {

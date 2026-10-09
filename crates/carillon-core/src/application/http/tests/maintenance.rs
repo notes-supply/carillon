@@ -3,7 +3,11 @@
 //! waits, which arrangement a report may rely on, and how long the pause
 //! is known to hold while the services stop.
 
-use std::{fs, time::Duration};
+use std::{
+    fs,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    time::Duration,
+};
 
 use anyhow::Context as _;
 use carillon_protocol::model::{DeliveryAck, DeliveryOutcome};
@@ -375,10 +379,11 @@ const PACE: Pace = Pace {
     lease: Duration::from_millis(600),
     renew: Duration::from_millis(150),
     check: Duration::from_millis(50),
+    request: Duration::from_millis(400),
 };
 
 #[tokio::test]
-async fn the_cli_stops_nothing_on_a_drain_it_cannot_show_and_ends_the_pause() -> Result<()> {
+async fn the_cli_stops_nothing_on_a_drain_it_cannot_show_and_the_workers_return() -> Result<()> {
     let directory = tempdir()?;
     let runtime = HeldRuntime::start().await?;
     let (fixture, state) = serving(directory.path(), &runtime, 1)?;
@@ -389,8 +394,20 @@ async fn the_cli_stops_nothing_on_a_drain_it_cannot_show_and_ends_the_pause() ->
     let refusal = |error: Option<anyhow::Error>| -> Result<String> {
         Ok(format!("{:#}", error.context("drained")?))
     };
-    // A turn still running: refused once the time is up, and the workers
-    // return at once.
+    // A refusal at the deadline asks nothing more of core: its pause lapses
+    // within the lease and the workers return.
+    let lapsed = || async {
+        let mut census = state.workers.subscribe();
+        tokio::time::timeout(
+            PACE.lease * 4,
+            census.wait_for(|census| census.paused.is_none()),
+        )
+        .await
+        .context("the pause did not lapse")?
+        .map(|_| ())
+        .map_err(anyhow::Error::from)
+    };
+    // A turn still running: refused once the time is up.
     let refused = refusal(drain(&running.config, timeout, false, PACE).await.err())?;
     assert!(
         refused.contains("did not drain within 1 seconds"),
@@ -400,7 +417,7 @@ async fn the_cli_stops_nothing_on_a_drain_it_cannot_show_and_ends_the_pause() ->
         refused.contains("1 runtime worker(s) have not ended"),
         "{refused}"
     );
-    assert!(state.pause.borrow().is_none());
+    lapsed().await?;
     workers_are(&state, |runtime| runtime.observations.claiming == 4).await?;
     // An answer its interface has not delivered.
     runtime.release("busy", None)?;
@@ -410,6 +427,7 @@ async fn the_cli_stops_nothing_on_a_drain_it_cannot_show_and_ends_the_pause() ->
         refused.contains("1 answer(s) not yet delivered"),
         "{refused}"
     );
+    lapsed().await?;
     deliver(&state)?;
     // A runtime that would lose what it holds.
     *lock(&runtime.restart) = json!({"state": "unready", "reason": "a fence"});
@@ -418,14 +436,18 @@ async fn the_cli_stops_nothing_on_a_drain_it_cannot_show_and_ends_the_pause() ->
         refused.contains("test-runtime is not ready to restart: a fence"),
         "{refused}"
     );
+    lapsed().await?;
     // Forced, it pauses and does not wait.
     let forced = drain(&running.config, timeout, true, PACE).await?;
-    forced.context("forced without a pause")?.end().await;
+    forced
+        .context("forced without a pause")?
+        .end(Duration::from_secs(2))
+        .await;
     *lock(&runtime.restart) = json!({"state": "ready"});
     drain(&running.config, timeout, false, PACE)
         .await?
         .context("drained without a pause")?
-        .end()
+        .end(Duration::from_secs(2))
         .await;
     // Core that does not answer shows no drain; forced, nothing is paused.
     let config = running.config.clone();
@@ -621,7 +643,12 @@ async fn the_timeout_bounds_the_whole_drain_however_slowly_core_answers() -> Res
     ] {
         state.pause.send_replace(None);
         let started = tokio::time::Instant::now();
-        let refused = drain(config, timeout, false, PACE)
+        // Each request may wait longer than the whole drain here.
+        let pace = Pace {
+            request: Duration::from_secs(5),
+            ..PACE
+        };
+        let refused = drain(config, timeout, false, pace)
             .await
             .err()
             .context("drained past its timeout")?;
@@ -641,4 +668,129 @@ async fn the_timeout_bounds_the_whole_drain_however_slowly_core_answers() -> Res
     }
     held.abort();
     running.stop().await
+}
+
+/// A core whose pause requests the test controls: the report never drains,
+/// a renewal is refused while `refuse` is set, and an end is counted and
+/// never answered.
+async fn undrained_core(
+    fixture: &Fixture,
+) -> Result<(LoadedConfig, Arc<AtomicBool>, Arc<AtomicUsize>)> {
+    let (refuse, ends) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let report = Drain {
+        holder: Uuid::now_v7(),
+        workers: Some(1),
+        undelivered: 0,
+        runtimes: Vec::new(),
+    };
+    let renewed = (report.clone(), refuse.clone());
+    let ended = ends.clone();
+    let router = Router::new()
+        .route("/v1/pause", post(move || async move { Json(report) }))
+        .route(
+            "/v1/pause/{holder}",
+            put(move || async move {
+                if renewed.1.load(Ordering::SeqCst) {
+                    (
+                        StatusCode::CONFLICT,
+                        Json(json!({"error": "not this pause"})),
+                    )
+                        .into_response()
+                } else {
+                    Json(renewed.0).into_response()
+                }
+            })
+            .delete(move || async move {
+                ended.fetch_add(1, Ordering::SeqCst);
+                std::future::pending::<()>().await;
+            }),
+        );
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let mut config = fixture.config.clone();
+    config.value.core.listen = listener.local_addr()?;
+    fs::write(
+        config.root.join("credentials/operator.token"),
+        "test-operator",
+    )?;
+    tokio::spawn(async move { axum::serve(listener, router).await });
+    Ok((config, refuse, ends))
+}
+
+#[tokio::test]
+async fn forcing_waits_for_one_request_to_core_not_the_whole_timeout() -> Result<()> {
+    let directory = tempdir()?;
+    let fixture = super::installation(directory.path())?;
+    let silent = TcpListener::bind("127.0.0.1:0").await?;
+    let mut config = fixture.config.clone();
+    config.value.core.listen = silent.local_addr()?;
+    fs::write(
+        config.root.join("credentials/operator.token"),
+        "test-operator",
+    )?;
+    let held = tokio::spawn(async move {
+        let mut connections = Vec::new();
+        while let Ok((connection, _)) = silent.accept().await {
+            connections.push(connection);
+        }
+    });
+    for force in [true, false] {
+        let started = tokio::time::Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            drain(&config, Duration::from_secs(60), force, PACE),
+        )
+        .await
+        .context("a core that never answers held the drain past one request")?;
+        assert!(started.elapsed() < PACE.request + Duration::from_millis(500));
+        if force {
+            assert!(
+                outcome?.is_none(),
+                "forced on with a pause core never granted"
+            );
+        } else {
+            let refused = format!("{:#}", outcome.err().context("drained a silent core")?);
+            assert!(
+                refused.contains("did not pause its runtime workers"),
+                "{refused}"
+            );
+        }
+    }
+    held.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn ending_a_refused_drain_stays_within_the_timeout() -> Result<()> {
+    let directory = tempdir()?;
+    let fixture = super::installation(directory.path())?;
+    let (config, refuse, ends) = undrained_core(&fixture).await?;
+    // The time is spent: the pause is left to lapse, and nothing more is asked.
+    let timeout = Duration::from_secs(1);
+    let started = tokio::time::Instant::now();
+    let refused = drain(&config, timeout, false, PACE)
+        .await
+        .err()
+        .context("an undrained core drained")?;
+    assert!(
+        started.elapsed() < timeout + Duration::from_millis(300),
+        "{:?}: {refused:#}",
+        started.elapsed()
+    );
+    assert!(format!("{refused:#}").contains("did not drain within 1 seconds"));
+    assert_eq!(ends.load(Ordering::SeqCst), 0);
+    // A renewal refused with time left still asks core to end the pause,
+    // within that time and the end's own short bound.
+    refuse.store(true, Ordering::SeqCst);
+    let started = tokio::time::Instant::now();
+    let refused = drain(&config, Duration::from_secs(60), false, PACE)
+        .await
+        .err()
+        .context("a refused renewal drained")?;
+    assert!(started.elapsed() < Duration::from_secs(3), "{refused:#}");
+    assert!(format!("{refused:#}").contains("core's drain was not shown"));
+    assert_eq!(ends.load(Ordering::SeqCst), 1);
+    Ok(())
 }
