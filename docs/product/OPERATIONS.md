@@ -9,7 +9,7 @@ The release installs four default user units:
 - `carillon-discord.service`
 - `carillon-runtime-pi.service`
 
-It also registers one optional unit, `carillon-runtime-t3.service`, for the T3 runtime executable `app/bin/carillon-runtime-t3`. The target does not want it and setup does not enable it: it serves `--provider runtime-t3` with `credentials/runtime-t3.token` and logs to `logs/runtime-t3.log`, and runs only after the operator has added that provider to the registry with its settings file and credential and enabled the unit without starting it on its own (`systemctl --user enable carillon-runtime-t3.service`, then `carillon restart`, or `carillon start` when Carillon is stopped). T3 runs different conversations at once; to let core run several of its conversations concurrently, set `parallel_turns` (1 to 16, default 1) on the `runtime-t3` entry in `carillon.toml` and restart core. Each conversation still runs one turn at a time, in order; the setting is only valid on runtime entries, and Pi's runtime serializes its conversations whatever it says, so leave it unset there. It is part of `carillon.target`, so once enabled it starts and stops with the target: `start`, `stop`, `restart` and `update`, which act on the target's state, account for it, and uninstall removes it with the other units. Starting the service on its own (`--now`) while the target is stopped would leave the target inactive and the service outside those operations.
+It also registers one optional unit, `carillon-runtime-t3.service`, for the T3 runtime executable `app/bin/carillon-runtime-t3`. The target does not want it and setup does not enable it: it serves `--provider runtime-t3` with `credentials/runtime-t3.token` and logs to `logs/runtime-t3.log`, and runs only after the operator has added that provider to the registry with its settings file and credential and enabled the unit without starting it on its own (`systemctl --user enable carillon-runtime-t3.service`, then `carillon restart`, or `carillon start` when Carillon is stopped). T3 runs different conversations at once; to let core run several of its conversations concurrently, set `parallel_turns` (1 to 16, default 1) on the `runtime-t3` entry in `carillon.toml` and run `carillon registry apply` (or restart core). Each conversation still runs one turn at a time, in order; the setting is only valid on runtime entries, and Pi's runtime serializes its conversations whatever it says, so leave it unset there. It is part of `carillon.target`, so once enabled it starts and stops with the target: `start`, `stop`, `restart` and `update`, which act on the target's state, account for it, and uninstall removes it with the other units. Starting the service on its own (`--now`) while the target is stopped would leave the target inactive and the service outside those operations.
 
 Run `install.sh` as the non-root Unix user that should own Carillon. The installer rejects root, creates no users or groups, changes no sudo policy, and does not enable lingering. It enables but does not start `carillon.target`.
 
@@ -78,7 +78,20 @@ systemctl --user restart carillon-discord.service
 systemctl --user restart carillon-runtime-pi.service
 ```
 
-Core is restarted separately. Registry and provider configuration are static until restart. A bundled provider disabled in the registry (`carillon provider ID disable`) still starts with its unit, but exits successfully at once without serving or reading its credential, so the unit is not restarted; status shows it as `disabled`. The T3 runtime does the same when its enabled unit starts while the registry disables it.
+Core is restarted separately. A bundled provider disabled in the registry (`carillon provider ID disable`) still starts with its unit, but exits successfully at once without serving or reading its credential, so the unit is not restarted; status shows it as `disabled`. The T3 runtime does the same when its enabled unit starts while the registry disables it.
+
+### Registry changes while core runs
+
+Core serves the registry it loaded at start until a restart, or until it is asked to serve the file again:
+
+```sh
+carillon registry          # runtimes as core serves them, their workers, and how carillon.toml differs
+carillon registry apply    # serve carillon.toml's live changes now
+```
+
+A runtime's `enabled` and `parallel_turns` apply live; `carillon provider ID enable|disable` writes the file and then asks core to apply it. Disabling a runtime refuses new messages for its conversations and starts none of its queued turns; turns it is already running settle, and their answers are delivered. Enabling it again resumes its queue. Fewer `parallel_turns` let running turns finish before fewer run at once. Applying does not start or stop the runtime's program: enabling a runtime whose service exited because it was disabled at its start still needs that service started (`carillon restart`).
+
+Anything else that differs, such as addresses, credential hashes, the agent, storage settings, an interface's `enabled`, or providers added or removed, is applied only by a restart. An apply that meets such a difference refuses the whole file and names the fields; core keeps serving what it had, and `carillon registry` keeps showing the difference until a restart. When core does not answer at the address in the file, the command says it could not confirm the change: a stopped core serves the file when it starts, and a core whose address the file changed still serves its old one. Changing a credential file is not adopted by any apply.
 
 ### Discord commands
 

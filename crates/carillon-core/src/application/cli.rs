@@ -25,10 +25,10 @@ use carillon_installation::maintenance::ServiceLock;
 
 use super::{
     admin::{backup, enable_demo_resources, initialize as init, restore, set_provider},
-    http::{check, serve},
+    http::{Applied, RegistryStatus, check, serve},
     operations::{
-        Action, HeldUnits, Services, logs, operator_get, operator_url, print_health, status,
-        wait_until_healthy,
+        Action, Applying, HeldUnits, Services, apply_registry, logs, operator_get, operator_url,
+        print_health, registry_status, status, wait_until_healthy,
     },
     update::update,
 };
@@ -55,6 +55,12 @@ struct Cli {
 enum ProviderAction {
     Enable,
     Disable,
+}
+
+#[derive(Debug, Subcommand)]
+enum RegistryAction {
+    /// Have the running core serve `carillon.toml`.
+    Apply,
 }
 
 #[derive(Debug, clap::Args)]
@@ -105,11 +111,26 @@ enum Command {
         #[command(flatten)]
         wait: Wait,
     },
-    /// Enable or disable a provider in the registry; restart to apply.
+    /// Enable or disable a provider in the registry. A running core applies
+    /// a runtime's change at once; an interface's needs a restart.
     Provider {
         /// The provider's registry ID.
         id: String,
         action: ProviderAction,
+    },
+    /// Show the registry core serves, with its runtimes' workers, and how
+    /// `carillon.toml` differs from it; or have core serve the file.
+    #[command(after_help = "\
+Core serves a changed runtime `enabled` or `parallel_turns` without a
+restart: a disabled runtime admits no new work and starts no queued turn,
+while turns it is running settle and their answers are delivered; fewer
+parallel turns let running turns finish first. Applying neither starts nor
+stops a runtime's program. A file that also changes anything else, such as
+addresses, credentials, the agent or the set of providers, is refused whole
+and applies when Carillon restarts.")]
+    Registry {
+        #[command(subcommand)]
+        action: Option<RegistryAction>,
     },
     /// Add the example Pi extension and Agent Skill to the agent resources.
     EnableDemoResources,
@@ -165,7 +186,7 @@ pub(crate) async fn run() -> Result<()> {
         Command::Core { config } => {
             let loaded = LoadedConfig::load(&config)?;
             let _lock = ServiceLock::acquire(&loaded.value.data_dir)?;
-            serve(loaded).await?;
+            serve(config.canonicalize()?, loaded).await?;
         }
         Command::Restore { input, target } => {
             println!("{}", restore(&input, &target)?.display());
@@ -217,11 +238,8 @@ pub(crate) async fn run() -> Result<()> {
         Command::Update { archive, wait } => {
             update(&home()?, &archive, Duration::from_secs(wait.timeout)).await?;
         }
-        Command::Provider { id, action } => {
-            let enabled = action == ProviderAction::Enable;
-            set_provider(&home()?.join("carillon.toml"), &id, enabled)?;
-            println!("{id} {}", if enabled { "enabled" } else { "disabled" });
-        }
+        Command::Provider { id, action } => provider(&home()?, &id, action).await?,
+        Command::Registry { action } => registry(&load(&home()?)?, action).await?,
         Command::EnableDemoResources => {
             enable_demo_resources(&load(&home()?)?)?;
             println!("Pi-native extension and Agent Skill enabled");
@@ -238,6 +256,57 @@ pub(crate) async fn run() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Enables or disables a provider in `carillon.toml`, then has a running
+/// core serve the change when it applies live.
+async fn provider(home: &Path, id: &str, action: ProviderAction) -> Result<()> {
+    let enabled = action == ProviderAction::Enable;
+    set_provider(&home.join("carillon.toml"), id, enabled)?;
+    let changed = if enabled { "enabled" } else { "disabled" };
+    let config = LoadedConfig::load(&home.join("carillon.toml"))?;
+    match apply_registry(&config).await? {
+        Applying::Applied(applied) => {
+            println!("{id} {changed}; core serves it now.");
+            print_runtimes(&applied);
+        }
+        Applying::Refused(refusal) => println!(
+            "{id} {changed} in carillon.toml; core keeps serving the registry it has: \
+             {refusal}. `carillon restart` applies it."
+        ),
+        Applying::Unreachable => println!(
+            "{id} {changed} in carillon.toml. Core does not answer at {}, so whether it serves \
+             the change is not confirmed: a stopped core serves it when it starts, and \
+             `carillon registry` shows what a running one serves.",
+            config.value.core.listen
+        ),
+    }
+    Ok(())
+}
+
+/// Shows the registry core serves, or has core serve `carillon.toml`.
+async fn registry(config: &LoadedConfig, action: Option<RegistryAction>) -> Result<()> {
+    let Some(RegistryAction::Apply) = action else {
+        print_registry(&registry_status(config).await?);
+        return Ok(());
+    };
+    match apply_registry(config).await? {
+        Applying::Applied(applied) => {
+            if applied.changed.is_empty() {
+                println!("core already serves carillon.toml.");
+            } else {
+                println!("core now serves: {}.", applied.changed.join(", "));
+            }
+            print_runtimes(&applied);
+            Ok(())
+        }
+        Applying::Refused(refusal) => anyhow::bail!("{refusal}"),
+        Applying::Unreachable => anyhow::bail!(
+            "core does not answer at {}, so it did not confirm serving carillon.toml; a stopped \
+             core serves it when it starts",
+            config.value.core.listen
+        ),
+    }
 }
 
 /// Act on this installation's units, serialized with this installation's
@@ -330,6 +399,67 @@ async fn print_inspection(config: &LoadedConfig, turn_id: &str) -> Result<()> {
     )
     .await?;
     print_pretty(&inspection)
+}
+
+/// Each runtime as core serves it.
+fn print_runtimes(applied: &Applied) {
+    for runtime in &applied.runtimes {
+        print_runtime(runtime);
+    }
+}
+
+fn print_runtime(runtime: &super::http::ServingRuntime) {
+    let workers = runtime.workers;
+    let settling = workers.messages.settling + workers.observations.settling;
+    let state = if runtime.enabled {
+        format!(
+            "enabled, {} conversation(s) at once",
+            runtime.parallel_turns
+        )
+    } else {
+        "disabled".to_owned()
+    };
+    println!(
+        "  {}: {state}; {} message and {} observation worker(s){}",
+        runtime.id,
+        workers.messages.claiming,
+        workers.observations.claiming,
+        if settling > 0 {
+            format!(", {settling} more settling the turn they hold")
+        } else {
+            String::new()
+        }
+    );
+}
+
+fn print_registry(status: &RegistryStatus) {
+    use super::http::FileState;
+    println!("core serves:");
+    for runtime in &status.runtimes {
+        print_runtime(runtime);
+    }
+    match &status.file {
+        FileState::Read(difference)
+            if difference.live.is_empty() && difference.restart.is_empty() =>
+        {
+            println!("carillon.toml is what core serves.");
+        }
+        FileState::Read(difference) => {
+            if !difference.live.is_empty() {
+                println!(
+                    "carillon.toml changes what core can apply now ({}); `carillon registry apply` serves it.",
+                    difference.live.join(", ")
+                );
+            }
+            if !difference.restart.is_empty() {
+                println!(
+                    "carillon.toml changes what only a restart applies ({}); `carillon restart` serves it.",
+                    difference.restart.join(", ")
+                );
+            }
+        }
+        FileState::Invalid { error } => println!("carillon.toml is not a valid registry: {error}"),
+    }
 }
 
 fn print_pretty<T: Serialize>(value: &T) -> Result<()> {

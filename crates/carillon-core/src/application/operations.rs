@@ -21,7 +21,9 @@ use carillon_installation::{
 };
 use carillon_protocol::model::{Health, StatusReport};
 use reqwest::Url;
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, de::DeserializeOwned};
+
+use super::http::{Applied, RegistryStatus};
 
 const TARGET: &str = "carillon.target";
 /// The registered core unit records which installation the units run.
@@ -341,6 +343,82 @@ pub(super) async fn operator_get<T: DeserializeOwned>(
         .map_err(Into::into)
 }
 
+/// How the registry core serves stands beside the file, with its runtimes'
+/// workers.
+pub(super) async fn registry_status(config: &LoadedConfig) -> Result<RegistryStatus> {
+    operator_get(config, operator_url(config, "/v1/registry")?)
+        .await
+        .with_context(|| {
+            format!(
+                "core at {} did not answer. If Carillon is stopped, it serves the file when it \
+                 starts",
+                config.value.core.listen
+            )
+        })
+}
+
+/// What core did with an operator's request to serve the registry file.
+pub(super) enum Applying {
+    /// It serves the file's live changes.
+    Applied(Applied),
+    /// It refused, saying why; what serves is unchanged.
+    Refused(String),
+    /// Nothing answers at the file's core address. That does not show core
+    /// is stopped: a core started with another address still serves there,
+    /// so whether it serves the file is not confirmed.
+    Unreachable,
+}
+
+/// Asks the running core to serve the registry file.
+///
+/// # Errors
+///
+/// Returns an error when core may or may not have applied it.
+pub(super) async fn apply_registry(config: &LoadedConfig) -> Result<Applying> {
+    #[derive(Deserialize)]
+    struct Refusal {
+        error: String,
+    }
+    let unconfirmed = |error: reqwest::Error| {
+        anyhow::anyhow!(
+            "core did not confirm whether it applied the registry ({error}); `carillon registry` \
+             shows what it serves"
+        )
+    };
+    // An apply is a change: a request that may have reached core is never
+    // sent again.
+    let response = match loopback::client()
+        .retry(reqwest::retry::never())
+        .build()?
+        .post(operator_url(config, "/v1/registry")?)
+        .bearer_auth(config.credential("operator")?)
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) if error.is_connect() => return Ok(Applying::Unreachable),
+        Err(error) => return Err(unconfirmed(error)),
+    };
+    let status = response.status();
+    let body = response.bytes().await.map_err(unconfirmed)?;
+    if status.is_success() {
+        return Ok(Applying::Applied(serde_json::from_slice(&body).context(
+            "core applied the registry but its answer could not be read; `carillon registry` \
+             shows what it serves",
+        )?));
+    }
+    let refusal = serde_json::from_slice::<Refusal>(&body).map_or_else(
+        |_| format!("core refused the registry ({status})"),
+        |refusal| refusal.error,
+    );
+    if status.is_client_error() {
+        Ok(Applying::Refused(refusal))
+    } else {
+        bail!("{refusal}; `carillon registry` shows what core serves")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{path::PathBuf, time::Duration};
@@ -402,6 +480,83 @@ mod tests {
                     .is_timeout()
             );
         }
+        Ok(())
+    }
+
+    /// A core configured at `listen`, answering an apply the way `answer`
+    /// says and counting the requests it receives.
+    async fn applying_core(
+        answer: Option<&'static [u8]>,
+    ) -> Result<(
+        super::LoadedConfig,
+        tempfile::TempDir,
+        tokio::task::JoinHandle<usize>,
+    )> {
+        let directory = tempfile::tempdir()?;
+        let config_path = crate::application::admin::initialize(
+            &directory.path().join("installation"),
+            directory.path(),
+            44_100,
+        )?;
+        let mut config = super::LoadedConfig::load(&config_path)?;
+        let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await?;
+        config.value.core.listen = listener.local_addr()?;
+        let server = tokio::spawn(async move {
+            let mut requests = 0;
+            while let Ok(Ok((mut stream, _))) =
+                tokio::time::timeout(Duration::from_secs(1), listener.accept()).await
+            {
+                requests += 1;
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let Ok(byte) = stream.read_u8().await else {
+                        break;
+                    };
+                    request.push(byte);
+                }
+                // Without an answer the connection closes with none.
+                if let Some(answer) = answer {
+                    let _ = stream.write_all(answer).await;
+                }
+            }
+            requests
+        });
+        Ok((config, directory, server))
+    }
+
+    #[tokio::test]
+    async fn an_apply_is_sent_once_and_only_an_answer_confirms_it() -> Result<()> {
+        // Nothing answering at the configured address does not confirm core
+        // is stopped.
+        let (mut config, _directory, server) = applying_core(None).await?;
+        server.abort();
+        let unused = tokio::net::TcpListener::bind("127.0.0.2:0").await?;
+        config.value.core.listen = unused.local_addr()?;
+        drop(unused);
+        assert!(matches!(
+            super::apply_registry(&config).await?,
+            super::Applying::Unreachable
+        ));
+        // A refusal is core's answer, and leaves what serves in place.
+        let refusal: &[u8] = b"HTTP/1.1 409 Conflict\r\nContent-Length: 31\r\n\r\n{\"error\":\"core.listen changed\"}";
+        let (config, _directory, server) = applying_core(Some(refusal)).await?;
+        let super::Applying::Refused(message) = super::apply_registry(&config).await? else {
+            anyhow::bail!("a refusal was not reported as one");
+        };
+        assert_eq!(message, "core.listen changed");
+        assert_eq!(server.await?, 1);
+        // A request core received without answering may have been applied:
+        // it is reported as unconfirmed and not sent again.
+        let (config, _directory, server) = applying_core(None).await?;
+        let unconfirmed = super::apply_registry(&config)
+            .await
+            .err()
+            .context("an unanswered apply was confirmed")?;
+        assert!(
+            unconfirmed.to_string().contains("did not confirm"),
+            "{unconfirmed}"
+        );
+        assert_eq!(server.await?, 1);
         Ok(())
     }
 }

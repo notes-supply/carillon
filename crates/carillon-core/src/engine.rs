@@ -34,6 +34,8 @@ pub struct CoreOptions {
     pub agent_id: String,
     pub resource_root: PathBuf,
     pub default_runtime: String,
+    /// The runtimes core starts with; [`Core::set_runtimes`] replaces them
+    /// while it serves.
     pub runtimes: Vec<RuntimeProvider>,
     pub attachments: AttachmentLimits,
 }
@@ -75,7 +77,7 @@ const UNREADABLE_ATTACHMENT: &str = "a file attached to that message could not b
 message was not run";
 
 /// The two kinds of queued turn, each run by workers of its own.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Lane {
     /// Turns for the messages people send: each conversation's run one at
     /// a time, in acceptance order.
@@ -91,7 +93,11 @@ pub enum Lane {
 #[derive(Clone)]
 pub struct Core {
     pub(crate) database: Database,
+    /// Fixed for the handle's life; its runtimes live in `runtimes`.
     pub(crate) options: CoreOptions,
+    /// The runtimes work is admitted for and run by, as the application last
+    /// derived them.
+    runtimes: Arc<watch::Sender<Arc<[RuntimeProvider]>>>,
     pub(crate) intake: Arc<Intake>,
     /// Marked changed, per lane, whenever this handle may have made a turn
     /// claimable.
@@ -119,13 +125,27 @@ impl Core {
         Ok(Self::assemble(database, options))
     }
 
-    fn assemble(database: Database, options: CoreOptions) -> Self {
+    fn assemble(database: Database, mut options: CoreOptions) -> Self {
+        let runtimes = std::mem::take(&mut options.runtimes);
         Self {
             intake: Arc::new(Intake::new(options.attachments)),
             database,
             options,
+            runtimes: Arc::new(watch::Sender::new(runtimes.into())),
             work: Arc::new([watch::Sender::new(()), watch::Sender::new(())]),
             storage: TaskTracker::new(),
+        }
+    }
+
+    /// This handle's storage with other options, as a restart with them
+    /// would serve it.
+    #[cfg(test)]
+    pub(crate) fn reconfigured(&self, mut options: CoreOptions) -> Self {
+        let runtimes = std::mem::take(&mut options.runtimes);
+        Self {
+            options,
+            runtimes: Arc::new(watch::Sender::new(runtimes.into())),
+            ..self.clone()
         }
     }
 
@@ -314,7 +334,7 @@ impl Core {
         &self,
         interface_id: &str,
         query: &ModelQuery,
-    ) -> Result<&RuntimeProvider, CoreError> {
+    ) -> Result<RuntimeProvider, CoreError> {
         if query.agent_id != self.options.agent_id {
             return Err(CoreError::InvalidInput("unknown agent".to_owned()));
         }
@@ -335,12 +355,28 @@ impl Core {
         Ok(runtime)
     }
 
-    fn runtime(&self, id: &str) -> Result<&RuntimeProvider, CoreError> {
-        self.options
-            .runtimes
+    fn runtime(&self, id: &str) -> Result<RuntimeProvider, CoreError> {
+        self.runtimes
+            .borrow()
             .iter()
             .find(|runtime| runtime.id == id)
+            .cloned()
             .ok_or_else(|| CoreError::Conflict(format!("runtime provider {id} is not configured")))
+    }
+
+    /// Replaces the runtimes core admits work for and runs it by, as the
+    /// application derived them from its registry. A runtime disabled from
+    /// now on admits no new conversation turn and starts no queued one;
+    /// turns already running settle as they would. Workers hear of the
+    /// change, so queued turns of a runtime enabled again are claimed.
+    /// # Errors
+    /// Returns invalid runtime facts, which leave the current ones in place.
+    pub fn set_runtimes(&self, runtimes: Vec<RuntimeProvider>) -> Result<()> {
+        validate_runtimes(&runtimes)?;
+        self.runtimes.send_replace(runtimes.into());
+        self.wake(Lane::Messages);
+        self.wake(Lane::Observations);
+        Ok(())
     }
 
     /// Claim and run a runtime's oldest claimable turn of `lane` through a
@@ -839,8 +875,12 @@ fn validate_options(options: &CoreOptions) -> Result<()> {
         !options.agent_id.is_empty() && !options.default_runtime.is_empty(),
         "agent identity and default runtime are required"
     );
+    validate_runtimes(&options.runtimes)
+}
+
+fn validate_runtimes(runtimes: &[RuntimeProvider]) -> Result<()> {
     let mut ids = std::collections::BTreeSet::new();
-    for runtime in &options.runtimes {
+    for runtime in runtimes {
         anyhow::ensure!(
             !runtime.id.is_empty() && ids.insert(&runtime.id),
             "runtime identities must be nonempty and unique"

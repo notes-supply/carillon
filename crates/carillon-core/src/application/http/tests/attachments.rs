@@ -14,13 +14,13 @@ use carillon_protocol::model::{StagedAttachments, StagedFile, TurnAttachment, Un
 use super::*;
 
 /// Reopen core with `limits`, as a restart with that configuration would.
-fn with_limits(state: &mut AppState, limits: AttachmentLimits) -> Result<()> {
+fn with_limits(state: &mut Fixture, limits: AttachmentLimits) -> Result<()> {
     state.config.value.core.attachments = limits;
     state.core = Core::open(core_options(&state.config))?;
     Ok(())
 }
 
-fn staging(state: &AppState) -> std::path::PathBuf {
+fn staging(state: &Fixture) -> std::path::PathBuf {
     state
         .config
         .value
@@ -28,7 +28,7 @@ fn staging(state: &AppState) -> std::path::PathBuf {
         .join("components/test-interface/incoming")
 }
 
-fn stage(state: &AppState, batch: &str, files: &[(&str, &[u8])]) -> Result<StagedAttachments> {
+fn stage(state: &Fixture, batch: &str, files: &[(&str, &[u8])]) -> Result<StagedAttachments> {
     let directory = staging(state).join(batch);
     fs::create_dir_all(&directory)?;
     for (ordinal, (_, bytes)) in files.iter().enumerate() {
@@ -61,7 +61,7 @@ fn event(id: &str, content: &str, attachments: StagedAttachments) -> ExternalEve
     }
 }
 
-fn interface_headers(state: &AppState) -> Result<HeaderMap> {
+fn interface_headers(state: &Fixture) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     headers.insert(PROVIDER_HEADER, "test-interface".parse()?);
     headers.insert(
@@ -71,16 +71,16 @@ fn interface_headers(state: &AppState) -> Result<HeaderMap> {
     Ok(headers)
 }
 
-async fn submit(state: &AppState, event: ExternalEvent) -> Result<EventReceipt, ApiError> {
+async fn submit(state: &Fixture, event: ExternalEvent) -> Result<EventReceipt, ApiError> {
     let headers = interface_headers(state).map_err(ApiError::from)?;
-    Ok(accept_event(State(state.clone()), headers, Json(event))
+    Ok(accept_event(State(configured(state)), headers, Json(event))
         .await?
         .0)
 }
 
-async fn status(state: &AppState, event_id: &str) -> Result<EventStatus> {
+async fn status(state: &Fixture, event_id: &str) -> Result<EventStatus> {
     Ok(event_status(
-        State(state.clone()),
+        State(configured(state)),
         interface_headers(state)?,
         AxumPath(event_id.to_owned()),
     )
@@ -89,7 +89,7 @@ async fn status(state: &AppState, event_id: &str) -> Result<EventStatus> {
     .0)
 }
 
-fn captures(state: &AppState) -> Result<Vec<String>> {
+fn captures(state: &Fixture) -> Result<Vec<String>> {
     let Ok(entries) = fs::read_dir(state.config.value.data_dir.join("attachments")) else {
         return Ok(Vec::new());
     };
@@ -102,7 +102,7 @@ fn captures(state: &AppState) -> Result<Vec<String>> {
 
 /// Wait, without timers, until core reports the event's capture running:
 /// a paused test clock does not advance while a blocking copy runs.
-async fn wait_for_capture(state: &AppState, event_id: &str) -> Result<()> {
+async fn wait_for_capture(state: &Fixture, event_id: &str) -> Result<()> {
     for _ in 0..100_000 {
         if matches!(status(state, event_id).await?, EventStatus::Capturing) {
             return Ok(());
@@ -723,14 +723,14 @@ async fn an_altered_capture_interrupts_its_turn_without_running_it() -> Result<(
 /// Run the next turn, answering with `output`, and return the earlier files
 /// it was offered. An empty answer ends the turn unanswered, as a command
 /// that consumed its message does.
-async fn offered(state: &AppState, output: &str) -> Result<Vec<UnansweredTurn>> {
+async fn offered(state: &Fixture, output: &str) -> Result<Vec<UnansweredTurn>> {
     offered_answering(state, serde_json::json!({ "output": output })).await
 }
 
 /// Run the next turn, answering with the fields of `answer` as a runtime's
 /// response reads on the wire, and return the earlier files it was offered.
 async fn offered_answering(
-    state: &AppState,
+    state: &Fixture,
     mut answer: serde_json::Value,
 ) -> Result<Vec<UnansweredTurn>> {
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -828,7 +828,7 @@ async fn files_an_answered_command_left_are_offered_again_until_a_turn_carries_t
 }
 
 /// What `receipt`'s turn holds, as core offers it to a later turn.
-fn held(state: &AppState, receipt: &EventReceipt) -> Result<UnansweredTurn> {
+fn held(state: &Fixture, receipt: &EventReceipt) -> Result<UnansweredTurn> {
     Ok(UnansweredTurn {
         correlation_id: receipt.turn_id.clone(),
         attachments: state
@@ -1115,7 +1115,7 @@ async fn status_and_staging_belong_to_the_authenticated_interface() -> Result<()
     headers.insert(PROVIDER_HEADER, "other-interface".parse()?);
     headers.insert(http::header::AUTHORIZATION, "Bearer other-only".parse()?);
     let other = event_status(
-        State(state.clone()),
+        State(configured(&state)),
         headers.clone(),
         AxumPath("mine".to_owned()),
     )
@@ -1138,7 +1138,7 @@ async fn status_and_staging_belong_to_the_authenticated_interface() -> Result<()
     assert_eq!(refusal.status, StatusCode::BAD_REQUEST);
     // Unauthenticated status requests learn nothing.
     let anonymous = event_status(
-        State(state.clone()),
+        State(configured(&state)),
         HeaderMap::new(),
         AxumPath("mine".to_owned()),
     )
