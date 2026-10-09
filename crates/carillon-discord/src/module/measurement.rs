@@ -34,22 +34,35 @@ use super::{
     tests::{files, release_module_bytes},
 };
 
+/// A card request to draw, with the card the native renderer drew for it
+/// when that was recorded.
+#[derive(serde::Deserialize)]
+struct Case {
+    name: String,
+    request: CardRequest,
+    #[serde(default, rename = "card", deserialize_with = "recorded")]
+    recorded: Option<Recorded>,
+}
+
+/// The native renderer's card, or `None` for a removal.
+#[derive(serde::Deserialize)]
+#[serde(transparent)]
+struct Recorded(Option<Embed>);
+
+fn recorded<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Recorded>, D::Error> {
+    serde::Deserialize::deserialize(deserializer).map(Some)
+}
+
 /// The requests to draw: the recorded parity cases, or `CARILLON_CARD_INPUTS`.
-fn requests() -> anyhow::Result<Vec<(String, CardRequest)>> {
-    #[derive(serde::Deserialize)]
-    struct Case {
-        name: String,
-        request: CardRequest,
-    }
+fn requests() -> anyhow::Result<Vec<Case>> {
     let text = match std::env::var_os("CARILLON_CARD_INPUTS") {
         Some(path) => std::fs::read_to_string(&path)
             .with_context(|| format!("read {}", path.to_string_lossy()))?,
         None => include_str!("../../../carillon-discord-module/fixtures/cards.json").to_owned(),
     };
-    Ok(serde_json::from_str::<Vec<Case>>(&text)?
-        .into_iter()
-        .map(|case| (case.name, case.request))
-        .collect())
+    Ok(serde_json::from_str(&text)?)
 }
 
 /// The guest's own code, compiled into this program, makes no native call.
@@ -138,11 +151,22 @@ async fn card_rendering_cost() -> anyhow::Result<()> {
             "memory": memory(),
         })
     );
-    let requests = requests()?;
-    for (name, request) in &requests {
+    let cases = requests()?;
+    for Case {
+        name,
+        request,
+        recorded,
+    } in &cases
+    {
         let size = serde_json::to_vec(request)?.len();
         let expected = native(request.clone())?;
         assert_eq!(module.render_card(request).await?, expected, "{name}");
+        if let Some(Recorded(recorded)) = recorded {
+            assert_eq!(
+                &expected, recorded,
+                "{name} differs from the native renderer"
+            );
+        }
         let mut copies = vec![request.clone(); SAMPLES + WARMUP];
         let mut native_samples = Vec::with_capacity(SAMPLES);
         for (index, copy) in copies.drain(..).enumerate() {
@@ -166,12 +190,13 @@ async fn card_rendering_cost() -> anyhow::Result<()> {
                 "measure": "card",
                 "case": name,
                 "request_bytes": size,
+                "matches_recorded": recorded.is_some(),
                 "native": summary(&mut native_samples),
                 "wasm": summary(&mut wasm_samples),
             })
         );
     }
-    for (name, request) in &requests {
+    for Case { name, request, .. } in &cases {
         let mut sequential = Vec::new();
         let mut concurrent = Vec::new();
         for _ in 0..20 {
@@ -349,7 +374,7 @@ async fn replacement_under_load() -> anyhow::Result<()> {
     let before = memory();
     let cases: Cases = requests()?
         .into_iter()
-        .map(|(_, request)| Ok((request.clone(), native(request)?)))
+        .map(|case| Ok((case.request.clone(), native(case.request)?)))
         .collect::<anyhow::Result<_>>()?;
     let seen = Arc::new(Seen::default());
     let (mut changes, mut after) = (Vec::new(), Vec::new());
