@@ -300,6 +300,16 @@ done
 grep -Fqx 'guild_id = "100"' "$CARILLON_HOME/providers/discord-private.toml"
 [ "$(sha256sum "$GLOBAL_PI/sentinel" | cut -d' ' -f1)" = "$GLOBAL_PI_HASH" ]
 [ ! -e "$GLOBAL_PI/auth.json" ]
+# The installed application keeps Carillon's licence and the notices, and
+# every standard text the npm notices refer to.
+cmp "$RELEASE/licenses/Apache-2.0.txt" "$ROOT/LICENSE"
+for notice in Apache-2.0.txt MIT.txt bun.md pi-coding-agent.txt rust.txt npm.txt; do
+  cmp "$RELEASE/licenses/$notice" "$CARILLON_HOME/app/licenses/$notice"
+done
+grep -o 'the standard text is licenses/[^ ]* in this release' "$CARILLON_HOME/app/licenses/npm.txt" |
+  sed 's|the standard text is ||; s| in this release||' | sort -u | while read -r standard; do
+  [ -f "$CARILLON_HOME/app/$standard" ]
+done
 
 # Exercise the packaged login entry without launching an interactive provider
 # flow: it runs the runtime executable in Pi's mode with the person's arguments.
