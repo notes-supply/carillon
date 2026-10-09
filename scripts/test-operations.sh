@@ -96,7 +96,7 @@ cleanup() {
   result=$?
   systemctl --user stop carillon.target >/dev/null 2>&1 || true
   if [ "$result" -ne 0 ]; then
-    for log in "$TEST_ROOT"/*.log "$INSTALLATION"/logs/*.log; do
+    for log in "$TEST_ROOT"/*.log "$INSTALLATION"/logs/*.log "$ALTERNATE"/logs/*.log; do
       [ ! -f "$log" ] || { printf '==> %s <==\n' "$log" >&2; tail -n 20 "$log" >&2; }
     done
   fi
