@@ -267,7 +267,11 @@ async fn provider(home: &Path, id: &str, action: ProviderAction) -> Result<()> {
     let config = LoadedConfig::load(&home.join("carillon.toml"))?;
     match apply_registry(&config).await? {
         Applying::Applied(applied) => {
-            println!("{id} {changed}; core serves it now.");
+            println!("{id} {changed} in core's serving registry.");
+            println!(
+                "This changes admission and workers, not provider programs. \
+                 If an enabled runtime is not running, `carillon restart` starts it."
+            );
             print_runtimes(&applied);
         }
         Applying::Refused(refusal) => println!(
