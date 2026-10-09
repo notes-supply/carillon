@@ -149,7 +149,7 @@ async fn ambiguous_claim_failures_reconcile_before_polling_again() -> anyhow::Re
         Duration::from_secs(5),
         delivery_loop(
             core,
-            Reactions::new(http.clone(), config),
+            Reactions::new(http.clone(), crate::config::Settings::new(config)),
             http,
             outcomes,
             tokio_util::sync::CancellationToken::new(),
@@ -374,7 +374,10 @@ async fn stopping_finishes_a_claimed_delivery_and_claims_no_more() -> anyhow::Re
             core.clone(),
             Reactions::new(
                 http.clone(),
-                discord_config(DiscordActivation::Always, DiscordConversation::Channel),
+                crate::config::Settings::new(discord_config(
+                    DiscordActivation::Always,
+                    DiscordConversation::Channel,
+                )),
             ),
             http.clone(),
             outcomes,
@@ -443,7 +446,10 @@ async fn deliveries_reach_discord_verbatim_without_notifying_anyone() -> anyhow:
             core_client(format!("http://{address}"))?,
             Reactions::new(
                 http.clone(),
-                discord_config(DiscordActivation::Always, DiscordConversation::Channel),
+                crate::config::Settings::new(discord_config(
+                    DiscordActivation::Always,
+                    DiscordConversation::Channel,
+                )),
             ),
             http,
             outcomes,
@@ -522,7 +528,10 @@ async fn slow_reactions_never_hold_up_deliveries_and_stay_bounded() -> anyhow::R
     let http = discord_client(address);
     let reactions = Reactions::new(
         http.clone(),
-        discord_config(DiscordActivation::Always, DiscordConversation::Channel),
+        crate::config::Settings::new(discord_config(
+            DiscordActivation::Always,
+            DiscordConversation::Channel,
+        )),
     );
     let (outcomes, _observed) = tokio::sync::mpsc::unbounded_channel();
     let outcome = tokio::time::timeout(
@@ -612,9 +621,16 @@ async fn a_message_admitted_again_shares_its_processing_request() -> anyhow::Res
         config.processing_emoji.clone(),
         config.delivered_emoji.clone(),
     );
-    let reactions = Reactions::new(discord_client(address), config);
-    reactions.admission(&event("400")).await;
-    reactions.admission(&event("400")).await;
+    let reactions = Reactions::new(
+        discord_client(address),
+        crate::config::Settings::new(config),
+    );
+    reactions
+        .admission(&event("400"), &reactions.settings().current())
+        .await;
+    reactions
+        .admission(&event("400"), &reactions.settings().current())
+        .await;
     reactions.show_outcome("300:400".to_owned(), Feedback::Delivered);
     assert_eq!(reactions.stop(Duration::from_secs(10)).await, 0);
     server.abort();
@@ -626,6 +642,113 @@ async fn a_message_admitted_again_shares_its_processing_request() -> anyhow::Res
             format!("DELETE {processing}"),
             format!("PUT {delivered}"),
         ]
+    );
+    Ok(())
+}
+
+/// Discord's reaction endpoint, which applies the reactions of message 400
+/// at once, recording them in `applied`, and holds every other one for 30
+/// seconds.
+fn reactions_on_400(applied: Arc<tokio::sync::Mutex<Vec<String>>>) -> Router {
+    Router::new().route(
+        "/api/v10/channels/{channel}/messages/{message}/reactions/{emoji}/@me",
+        any(
+            move |method: Method, Path((_, message, emoji)): Path<(String, String, String)>| {
+                let applied = applied.clone();
+                async move {
+                    if message == "400" {
+                        applied.lock().await.push(format!("{method} {emoji}"));
+                    } else {
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                    }
+                    StatusCode::NO_CONTENT
+                }
+            },
+        ),
+    )
+}
+
+/// Message 400's settings: the defaults, without typing, before any apply.
+fn admitted_settings() -> crate::config::DiscordConfig {
+    let mut config = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
+    config.typing = false;
+    config
+}
+
+/// Settings whose reactions differ from [`admitted_settings`].
+fn other_reactions() -> crate::config::DiscordConfig {
+    let mut config = admitted_settings();
+    "⏳".clone_into(&mut config.processing_emoji);
+    "📬".clone_into(&mut config.delivered_emoji);
+    config
+}
+
+#[tokio::test]
+async fn an_outcome_replaces_the_processing_reaction_its_message_was_admitted_with()
+-> anyhow::Result<()> {
+    let applied = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let app = reactions_on_400(applied.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let settings = crate::config::Settings::new(admitted_settings());
+    let reactions = Reactions::new(discord_client(address), settings.clone());
+    reactions
+        .admission(&event("400"), &settings.current())
+        .await;
+    // The operator serves other reactions while the message is answered.
+    let changed = settings
+        .apply(|| Ok(other_reactions()))
+        .map_err(|refusal| anyhow::anyhow!("{refusal:?}"))?;
+    assert_eq!(changed, ["processing_emoji", "delivered_emoji"]);
+    reactions.outcome("300:400", Feedback::Delivered).await;
+    assert_eq!(reactions.stop(Duration::from_secs(10)).await, 0);
+    server.abort();
+    // The reaction removed is the one added, and the outcome is the one
+    // the message was admitted with.
+    assert_eq!(*applied.lock().await, ["PUT 👀", "DELETE 👀", "PUT ✅"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_skipped_outcome_leaves_a_replayed_message_to_the_settings_serving() -> anyhow::Result<()>
+{
+    let applied = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let app = reactions_on_400(applied.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let settings = crate::config::Settings::new(admitted_settings());
+    let reactions = Reactions::new(discord_client(address), settings.clone());
+    reactions
+        .admission(&event("400"), &settings.current())
+        .await;
+    // Core refuses message 400 while every outcome slot is taken by
+    // reactions Discord holds, so its outcome is not shown.
+    for message in 1_000..1_000 + OUTCOMES {
+        reactions.show_outcome(format!("300:{message}"), Feedback::Delivered);
+    }
+    reactions.show_outcome("300:400".to_owned(), Feedback::Failed);
+    // The operator then serves other reactions, and the gateway replays the
+    // message, which is admitted again and answered.
+    settings
+        .apply(|| Ok(other_reactions()))
+        .map_err(|refusal| anyhow::anyhow!("{refusal:?}"))?;
+    reactions
+        .admission(&event("400"), &settings.current())
+        .await;
+    reactions.outcome("300:400", Feedback::Delivered).await;
+    assert_eq!(
+        reactions.stop(Duration::from_millis(100)).await,
+        OUTCOMES,
+        "only the held outcomes were still under way"
+    );
+    server.abort();
+    // The replay follows the settings serving when it was admitted, not
+    // those of the admission whose outcome was skipped.
+    assert_eq!(
+        *applied.lock().await,
+        ["PUT 👀", "PUT ⏳", "DELETE ⏳", "PUT 📬"]
     );
     Ok(())
 }
@@ -675,7 +798,10 @@ async fn a_stopping_provider_ends_its_reactions_within_the_grace() -> anyhow::Re
         config.processing_emoji.clone(),
         config.delivered_emoji.clone(),
     );
-    let reactions = Reactions::new(discord_client(address), config);
+    let reactions = Reactions::new(
+        discord_client(address),
+        crate::config::Settings::new(config),
+    );
     reactions.show_outcome("300:401".to_owned(), Feedback::Delivered);
     reactions.show_outcome("300:402".to_owned(), Feedback::Delivered);
     // Work of its own awaits message 406's outcome.
@@ -701,7 +827,9 @@ async fn a_stopping_provider_ends_its_reactions_within_the_grace() -> anyhow::Re
     reactions.show_outcome("300:403".to_owned(), Feedback::Delivered);
     reactions.outcome("300:405", Feedback::Failed).await;
     let admitting = std::time::Instant::now();
-    reactions.admission(&event("404")).await;
+    reactions
+        .admission(&event("404"), &reactions.settings().current())
+        .await;
     assert!(admitting.elapsed() < Duration::from_millis(500));
     tokio::time::sleep(Duration::from_millis(300)).await;
     server.abort();

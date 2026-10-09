@@ -21,7 +21,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::{
     application::{ServeOptions, serve},
-    config::{DiscordConfig, DiscordRoute, configure},
+    config::{self, Applied, DiscordConfig, DiscordRoute, FileState, configure},
     module::{
         self, Change, ModuleFiles, ModuleSummary, NextStart, Refusal, Registration, Saved, Source,
         Status,
@@ -75,7 +75,8 @@ enum Command {
         #[arg(long)]
         deterministic: bool,
     },
-    /// Write the provider's admission settings, keeping tuned feedback settings.
+    /// Write the provider's admission settings, keeping tuned feedback
+    /// settings, then have a running provider serve them when they apply live.
     Configure {
         /// Registry ID of the Discord instance; inferred when only one is configured.
         #[arg(long)]
@@ -109,6 +110,25 @@ enum Command {
         #[command(subcommand)]
         operation: Operation,
     },
+    /// Show the settings the running provider serves, or have it serve its
+    /// settings file.
+    #[command(after_help = "\
+Without a subcommand, shows what the running provider serves and how its
+settings file differs.
+
+Allowed users, routes, typing, reactions and their emoji, and activity
+markers apply live: messages and interactions admitted afterwards follow
+them, while work already admitted keeps the settings it was admitted with.
+The agent, guild and bot identity, attachment limits and whether activity
+cards are shown apply only when the provider restarts; a file that changes
+any of them is not applied at all until then.")]
+    Settings {
+        /// Registry ID of the Discord instance; inferred when only one is configured.
+        #[arg(long, global = true)]
+        provider: Option<String>,
+        #[command(subcommand)]
+        action: Option<SettingsAction>,
+    },
     /// Show which Discord module the running provider serves, or change it.
     #[command(after_help = "\
 Without a subcommand, shows the serving module and its commands.
@@ -138,6 +158,13 @@ enum ToolsAction {
         #[arg(long, requires = "workspace", value_name = "COMMAND")]
         invocation: Option<String>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum SettingsAction {
+    /// Serve the settings file in the running provider, whole, when
+    /// everything it changes applies live.
+    Apply,
 }
 
 #[derive(Debug, Subcommand)]
@@ -206,6 +233,7 @@ pub(crate) async fn run() -> Result<()> {
                 &route,
             )?;
             println!("{}", loaded.provider_config_path(&provider)?.display());
+            serve_configured(&loaded, &provider).await?;
         }
         Command::Check { provider } => {
             let loaded = installation()?;
@@ -242,6 +270,11 @@ pub(crate) async fn run() -> Result<()> {
             let provider = instance(&loaded, provider)?;
             let result = call(&loaded, &provider, operation).await?;
             println!("{}", serde_json::to_string(&result)?);
+        }
+        Command::Settings { provider, action } => {
+            let loaded = installation()?;
+            let provider = instance(&loaded, provider)?;
+            manage_settings(&loaded, &provider, action).await?;
         }
         Command::Module { provider, action } => {
             manage_module(installation, provider, action).await?;
@@ -457,7 +490,8 @@ fn instance(config: &LoadedConfig, explicit: Option<String>) -> Result<String> {
     match discord.as_slice() {
         [only] => Ok((*only).to_owned()),
         [] => bail!(
-            "no interface provider has Discord settings; choose one with --provider from: {}",
+            "no interface provider has Discord settings this program can read; choose one \
+             with --provider from: {}",
             interfaces.join(", ")
         ),
         several => bail!(
@@ -497,7 +531,7 @@ async fn manage_module(
     };
     let loaded = installation()?;
     let provider = instance(&loaded, provider)?;
-    let operator = Operator::new(&loaded, &provider)?;
+    let operator = Operator::new(&loaded, &provider, "module")?;
     match requested {
         None => {
             print_status(&provider, &operator.request(method, body).await?);
@@ -542,19 +576,52 @@ async fn check_file(file: &Path) -> Result<ModuleSummary> {
     })
 }
 
-/// The running provider's operator endpoint for the Discord module.
+/// The running provider's operator endpoint for its Discord module or its
+/// settings, at the address `carillon.toml` gives the provider.
 struct Operator {
     url: String,
     credential: String,
 }
 
+/// What became of asking the running provider to serve its settings file.
+enum Applying {
+    Applied(Applied),
+    /// The provider answered and serves what it served before, because of
+    /// this.
+    Refused(String),
+    /// Nothing answers at the provider's address: it may be stopped, or
+    /// still serve at an address `carillon.toml` no longer gives, which only
+    /// a restart changes. Whether it serves the file is not confirmed.
+    Unreachable,
+}
+
 impl Operator {
-    fn new(loaded: &LoadedConfig, provider: &str) -> Result<Self> {
+    fn new(loaded: &LoadedConfig, provider: &str, endpoint: &str) -> Result<Self> {
         let target = loaded.provider(provider, ProviderRole::Interface)?;
         Ok(Self {
-            url: format!("{}/v1/module", target.url),
+            url: format!("{}/v1/{endpoint}", target.url),
             credential: loaded.credential("operator")?,
         })
+    }
+
+    /// One request, never repeated: a write the provider may have received
+    /// is not sent again.
+    async fn send(
+        &self,
+        method: Method,
+        body: Option<Vec<u8>>,
+        timeout: Duration,
+    ) -> reqwest::Result<reqwest::Response> {
+        let mut request = loopback::client()
+            .retry(reqwest::retry::never())
+            .build()?
+            .request(method, &self.url)
+            .bearer_auth(&self.credential)
+            .timeout(timeout);
+        if let Some(body) = body {
+            request = request.body(body);
+        }
+        request.send().await
     }
 
     /// The provider's answer, or its refusal rendered with what still serves.
@@ -564,20 +631,13 @@ impl Operator {
         body: Option<Vec<u8>>,
     ) -> Result<T> {
         let changing = method != Method::GET;
-        let mut request = loopback::client()
-            .build()?
-            .request(method, &self.url)
-            .bearer_auth(&self.credential)
-            .timeout(if changing {
-                CHANGE_TIMEOUT
-            } else {
-                STATUS_TIMEOUT
-            });
-        if let Some(body) = body {
-            request = request.body(body);
-        }
-        let response = request
-            .send()
+        let timeout = if changing {
+            CHANGE_TIMEOUT
+        } else {
+            STATUS_TIMEOUT
+        };
+        let response = self
+            .send(method, body, timeout)
             .await
             .map_err(|error| self.unreachable(&error, changing))?;
         let status = response.status();
@@ -600,10 +660,7 @@ impl Operator {
                 list(&serving)
             );
         }
-        let message = serde_json::from_slice::<serde_json::Value>(&bytes)
-            .ok()
-            .and_then(|body| body["error"].as_str().map(str::to_owned))
-            .unwrap_or_else(|| String::from_utf8_lossy(&bytes).trim().to_owned());
+        let message = refusal(&bytes);
         if status == StatusCode::NOT_FOUND {
             bail!(
                 "the Discord provider at {} does not offer Discord module operations ({message}); \
@@ -612,6 +669,44 @@ impl Operator {
             );
         }
         bail!("the Discord provider refused the request ({status}): {message}")
+    }
+
+    /// Asks the provider to serve its settings file. Only its answer says
+    /// what became of that; an apply is never sent twice.
+    async fn apply_settings(&self) -> Result<Applying> {
+        let unconfirmed = |error: &dyn std::fmt::Display| {
+            anyhow!(
+                "the Discord provider at {} did not confirm whether it serves the settings file \
+                 ({error}); `carillon discord settings` shows what it serves",
+                self.url
+            )
+        };
+        let response = match self.send(Method::POST, None, STATUS_TIMEOUT).await {
+            Ok(response) => response,
+            Err(error) if error.is_connect() => return Ok(Applying::Unreachable),
+            Err(error) => return Err(unconfirmed(&error)),
+        };
+        let status = response.status();
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| unconfirmed(&error))?;
+        if status.is_success() {
+            return serde_json::from_slice(&bytes)
+                .map(Applying::Applied)
+                .map_err(|error| unconfirmed(&error));
+        }
+        let message = refusal(&bytes);
+        if status == StatusCode::NOT_FOUND {
+            return Ok(Applying::Refused(format!(
+                "it does not offer settings operations ({message}) and may be a different \
+                 release than this program"
+            )));
+        }
+        if status.is_client_error() {
+            return Ok(Applying::Refused(message));
+        }
+        Err(unconfirmed(&format!("{status}: {message}")))
     }
 
     /// A transport failure establishes only that the provider did not
@@ -643,6 +738,117 @@ impl Operator {
                     ""
                 }
             )
+        }
+    }
+}
+
+/// The reason an error answer gives.
+fn refusal(bytes: &[u8]) -> String {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|body| body["error"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| String::from_utf8_lossy(bytes).trim().to_owned())
+}
+
+/// `carillon discord settings [apply]`, answered by the running provider.
+async fn manage_settings(
+    loaded: &LoadedConfig,
+    provider: &str,
+    action: Option<SettingsAction>,
+) -> Result<()> {
+    let operator = Operator::new(loaded, provider, "settings")?;
+    let Some(SettingsAction::Apply) = action else {
+        print_settings(provider, &operator.request(Method::GET, None).await?);
+        return Ok(());
+    };
+    match operator.apply_settings().await? {
+        Applying::Applied(applied) => {
+            report_applied(provider, &applied);
+            Ok(())
+        }
+        Applying::Refused(refusal) => {
+            bail!("{refusal}; {provider} keeps serving the settings it has")
+        }
+        Applying::Unreachable => bail!(
+            "the Discord provider does not answer at {}, so it did not confirm serving the \
+             settings file; a stopped provider reads it when it starts",
+            operator.url
+        ),
+    }
+}
+
+/// After `configure` saved the settings file: has a running provider serve
+/// it, and says what became of that.
+async fn serve_configured(loaded: &LoadedConfig, provider: &str) -> Result<()> {
+    let operator = Operator::new(loaded, provider, "settings")?;
+    match operator.apply_settings().await? {
+        Applying::Applied(applied) => report_applied(provider, &applied),
+        Applying::Refused(refusal) => println!(
+            "{provider} keeps serving the settings it has: {refusal}. `carillon restart` serves \
+             the file."
+        ),
+        Applying::Unreachable => println!(
+            "The Discord provider does not answer at {}, so whether it serves these settings is \
+             not confirmed: a stopped provider reads them when it starts, and \
+             `carillon discord settings` shows what a running one serves.",
+            operator.url
+        ),
+    }
+    Ok(())
+}
+
+fn report_applied(provider: &str, applied: &Applied) {
+    if applied.changed.is_empty() {
+        println!("{provider} already serves its settings file.");
+    } else {
+        println!(
+            "{provider} now serves its settings file: {}.",
+            applied.changed.join(", ")
+        );
+    }
+}
+
+fn print_settings(provider: &str, status: &config::Status) {
+    let config::Status { serving, file } = status;
+    let on = |enabled: bool| if enabled { "on" } else { "off" };
+    println!(
+        "{provider} serves guild {} as bot {} for agent {}: {} allowed users, {} routes; \
+         typing {}, reactions {}, activity cards {}.",
+        serving.guild_id,
+        serving.bot_user_id,
+        serving.agent,
+        serving.allowed_user_ids.len(),
+        serving.routes.len(),
+        on(serving.typing),
+        on(serving.reactions),
+        on(serving.activity),
+    );
+    match file {
+        FileState::Read(difference)
+            if difference.live.is_empty() && difference.restart.is_empty() =>
+        {
+            println!("It serves its settings file.");
+        }
+        FileState::Read(difference) => {
+            if !difference.restart.is_empty() {
+                println!(
+                    "The settings file changes what only a restart applies ({}); \
+                     `carillon restart` serves it, and until then it is not applied.",
+                    difference.restart.join(", ")
+                );
+            }
+            if !difference.live.is_empty() {
+                println!(
+                    "The settings file also changes: {}.",
+                    difference.live.join(", ")
+                );
+            }
+            if difference.restart.is_empty() {
+                println!("`carillon discord settings apply` serves it.");
+            }
+        }
+        FileState::Invalid { error } => {
+            println!("The settings file is not valid, so nothing would apply it: {error}.");
         }
     }
 }
@@ -770,6 +976,77 @@ mod tests {
             anyhow::bail!("not a call");
         };
         Ok(operation)
+    }
+
+    /// A provider at a loopback address that reads each request and gives
+    /// `answer`, or closes without one. It counts the requests it received.
+    async fn applying_provider(
+        answer: Option<&'static [u8]>,
+    ) -> Result<(super::Operator, tokio::task::JoinHandle<usize>)> {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await?;
+        let operator = super::Operator {
+            url: format!("http://{}/v1/settings", listener.local_addr()?),
+            credential: "operator".to_owned(),
+        };
+        let server = tokio::spawn(async move {
+            let mut requests = 0;
+            while let Ok(Ok((mut stream, _))) =
+                tokio::time::timeout(std::time::Duration::from_secs(1), listener.accept()).await
+            {
+                requests += 1;
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let Ok(byte) = stream.read_u8().await else {
+                        break;
+                    };
+                    request.push(byte);
+                }
+                if let Some(answer) = answer {
+                    let _ = stream.write_all(answer).await;
+                }
+            }
+            requests
+        });
+        Ok((operator, server))
+    }
+
+    #[tokio::test]
+    async fn a_settings_apply_is_sent_once_and_only_an_answer_confirms_it() -> Result<()> {
+        // Nothing answering at the provider's configured address does not
+        // confirm it is stopped.
+        let (mut operator, server) = applying_provider(None).await?;
+        server.abort();
+        let unused = tokio::net::TcpListener::bind("127.0.0.2:0").await?;
+        operator.url = format!("http://{}/v1/settings", unused.local_addr()?);
+        drop(unused);
+        assert!(matches!(
+            operator.apply_settings().await?,
+            super::Applying::Unreachable
+        ));
+        // A refusal is the provider's answer.
+        let refusal: &[u8] =
+            b"HTTP/1.1 409 Conflict\r\nContent-Length: 25\r\n\r\n{\"error\":\"guild changed\"}";
+        let (operator, server) = applying_provider(Some(refusal)).await?;
+        let super::Applying::Refused(message) = operator.apply_settings().await? else {
+            anyhow::bail!("a refusal was not reported as one");
+        };
+        assert_eq!(message, "guild changed");
+        assert_eq!(server.await?, 1);
+        // A request the provider received without answering may have been
+        // applied: it is reported as unconfirmed and not sent again.
+        let (operator, server) = applying_provider(None).await?;
+        let unconfirmed = operator
+            .apply_settings()
+            .await
+            .err()
+            .context("an unanswered apply was confirmed")?;
+        assert!(
+            unconfirmed.to_string().contains("did not confirm"),
+            "{unconfirmed}"
+        );
+        assert_eq!(server.await?, 1);
+        Ok(())
     }
 
     #[test]

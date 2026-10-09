@@ -38,8 +38,10 @@ pub(crate) fn ingress(
             config.attachments,
         )?),
         core,
-        reactions: crate::delivery::Reactions::new(http.clone(), config.clone()),
-        config,
+        reactions: crate::delivery::Reactions::new(
+            http.clone(),
+            crate::config::Settings::new(config),
+        ),
         participation,
         http,
         refusals: Arc::new(tokio::sync::Semaphore::new(super::lanes::REFUSALS)),
@@ -81,8 +83,9 @@ fn discord_client(address: std::net::SocketAddr) -> Arc<twilight_http::Client> {
     )
 }
 
-/// Message 400 in channel 300, from the allowlisted person.
-pub(crate) fn hello() -> super::QueuedMessage {
+/// Message 400 in channel 300, from the allowlisted person, admitted with
+/// the settings `ingress` serves.
+pub(crate) fn hello(ingress: &super::Ingress) -> super::QueuedMessage {
     super::QueuedMessage {
         request: IncomingMessage {
             event_id: "400".to_owned(),
@@ -94,6 +97,7 @@ pub(crate) fn hello() -> super::QueuedMessage {
             attachments: Vec::new(),
         },
         native: Value::Null,
+        settings: ingress.reactions.settings().current(),
     }
 }
 
@@ -237,6 +241,90 @@ async fn interrupted_success_receipt_recovers_the_committed_turn() -> anyhow::Re
 }
 
 #[tokio::test]
+async fn a_queued_message_keeps_the_settings_it_arrived_with() -> anyhow::Result<()> {
+    let (trace, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    let core_trace = trace.clone();
+    let app = Router::new()
+        .route(
+            "/v1/events",
+            post(move |Json(event): Json<ExternalEvent>| {
+                let _ = core_trace.send(format!("submit {}", event.event_id));
+                async move {
+                    Json(EventReceipt {
+                        event_id: event.event_id,
+                        turn_id: "accepted".to_owned(),
+                        duplicate: false,
+                        state: TurnState::Queued,
+                    })
+                }
+            }),
+        )
+        .merge(event_status(Arc::default()))
+        .fallback(move |method: Method, uri: Uri| {
+            let _ = trace.send(format!("{method} {uri}"));
+            async { StatusCode::NO_CONTENT }
+        });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let directory = tempfile::tempdir()?;
+    let mut config = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
+    config.typing = false;
+    let ingress = ingress(
+        core_client(format!("http://{address}"))?,
+        config.clone(),
+        Arc::new(Participation::load(
+            directory.path().join("participation.json"),
+        )?),
+        discord_client(address),
+        directory.path(),
+    )?;
+    let (send, receive) = tokio::sync::mpsc::channel(2);
+    send.send(hello(&ingress).into()).await?;
+    let mut overloaded = hello(&ingress);
+    "402".clone_into(&mut overloaded.request.event_id);
+    // While it waits, the operator serves settings that would not admit
+    // it, with another processing reaction. A message from its sender that
+    // arrives now is not admitted.
+    config.allowed_user_ids = vec!["250".to_owned()];
+    "⏳".clone_into(&mut config.processing_emoji);
+    ingress
+        .reactions
+        .settings()
+        .apply(|| Ok(config))
+        .map_err(|refusal| anyhow!("{refusal:?}"))?;
+    let mut later = hello(&ingress);
+    "401".clone_into(&mut later.request.event_id);
+    send.send(later.into()).await?;
+    drop(send);
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        super::lanes::dispatch(ingress.clone(), receive),
+    )
+    .await?;
+    // One that arrived before it is refused for overload as its own
+    // settings say.
+    super::lanes::refuse_overloaded(&ingress, overloaded);
+    ingress.reactions.stop(Duration::from_secs(3)).await;
+    server.abort();
+    let requests = std::iter::from_fn(|| observed.try_recv().ok()).collect::<Vec<_>>();
+    // The waiting message is submitted and shows the reaction it was
+    // admitted with; the later one is neither; the refusal removes the
+    // processing reaction of the refused message's settings.
+    assert_eq!(
+        requests,
+        [
+            "PUT /api/v10/channels/300/messages/400/reactions/%F0%9F%91%80/@me",
+            "submit 400",
+            "POST /api/v10/channels/300/messages",
+            "DELETE /api/v10/channels/300/messages/402/reactions/%F0%9F%91%80/@me",
+            "PUT /api/v10/channels/300/messages/402/reactions/%E2%9D%8C/@me",
+        ],
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn configuration_rejection_does_not_block_the_next_message_in_its_conversation()
 -> anyhow::Result<()> {
     let (trace, mut observed) = tokio::sync::mpsc::unbounded_channel();
@@ -302,6 +390,7 @@ async fn configuration_rejection_does_not_block_the_next_message_in_its_conversa
                     attachments: Vec::new(),
                 },
                 native: Value::Null,
+                settings: Arc::new(config.clone()),
             }
             .into(),
         )
@@ -490,9 +579,6 @@ async fn slow_feedback_never_delays_a_messages_admission() -> anyhow::Result<()>
     config.typing = true;
     let mut services = tokio::task::JoinSet::new();
     services.spawn(async move { axum::serve(listener, app).await });
-    let (send, receive) = tokio::sync::mpsc::channel(2);
-    send.send(hello().into()).await?;
-    drop(send);
     let ingress = ingress(
         core_client(format!("http://{address}"))?,
         config,
@@ -500,6 +586,9 @@ async fn slow_feedback_never_delays_a_messages_admission() -> anyhow::Result<()>
         http,
         directory.path(),
     )?;
+    let (send, receive) = tokio::sync::mpsc::channel(2);
+    send.send(hello(&ingress).into()).await?;
+    drop(send);
     let started = std::time::Instant::now();
     tokio::time::timeout(
         crate::delivery::PROMPT_FEEDBACK + Duration::from_secs(2),
@@ -608,7 +697,7 @@ async fn a_duplicate_never_lets_the_processing_reaction_land_after_the_outcome()
         discord_client(address),
         directory.path(),
     )?;
-    super::prepare(&ingress, hello()).await;
+    super::prepare(&ingress, hello(&ingress)).await;
     // The answer is delivered and its outcome shown, as the delivery loop does.
     ingress
         .reactions
@@ -617,7 +706,8 @@ async fn a_duplicate_never_lets_the_processing_reaction_land_after_the_outcome()
         .await
         .context("the outcome did not remove the processing reaction")?;
     // The replay is prepared like any message while that removal is under way.
-    tokio::time::timeout(Duration::from_secs(10), super::prepare(&ingress, hello())).await?;
+    let replay = hello(&ingress);
+    tokio::time::timeout(Duration::from_secs(10), super::prepare(&ingress, replay)).await?;
     release.notify_one();
     assert_eq!(ingress.reactions.stop(Duration::from_secs(10)).await, 0);
     server.abort();
@@ -691,7 +781,7 @@ async fn an_accepted_message_whose_answer_was_lost_keeps_its_processing_reaction
     let reaction =
         |emoji: &str| format!("/api/v10/channels/300/messages/400/reactions/{emoji}/@me");
     let (processing, delivered) = (reaction("%F0%9F%91%80"), reaction("%E2%9C%85"));
-    super::prepare(&ingress, hello()).await;
+    super::prepare(&ingress, hello(&ingress)).await;
     // Accepted, the message keeps its processing reaction until its answer.
     let admitted = std::iter::from_fn(|| observed.try_recv().ok()).collect::<Vec<_>>();
     assert_eq!(
@@ -759,7 +849,7 @@ async fn a_message_stopped_before_core_says_whether_it_holds_it_gets_no_feedback
     )?;
     let preparing = tokio::spawn({
         let ingress = ingress.clone();
-        async move { super::prepare(&ingress, hello()).await }
+        async move { super::prepare(&ingress, hello(&ingress)).await }
     });
     tokio::time::timeout(Duration::from_secs(2), asked.notified()).await?;
     ingress.stopping.cancel();
@@ -812,7 +902,7 @@ async fn an_overload_refusal_ends_with_the_reactions() -> anyhow::Result<()> {
         discord_client(address),
         directory.path(),
     )?;
-    super::lanes::refuse_overloaded(&ingress, hello().request);
+    super::lanes::refuse_overloaded(&ingress, hello(&ingress));
     tokio::time::timeout(Duration::from_secs(2), explaining.notified()).await?;
     ingress.stopping.cancel();
     // The refusal is the reactions' own: given the grace, then cancelled,

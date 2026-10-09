@@ -9,7 +9,7 @@ The release installs four default user units:
 - `carillon-discord.service`
 - `carillon-runtime-pi.service`
 
-It also registers one optional unit, `carillon-runtime-t3.service`, for the T3 runtime executable `app/bin/carillon-runtime-t3`. The target does not want it and setup does not enable it: it serves `--provider runtime-t3` with `credentials/runtime-t3.token` and logs to `logs/runtime-t3.log`, and runs only after the operator has added that provider to the registry with its settings file and credential and enabled the unit without starting it on its own (`systemctl --user enable carillon-runtime-t3.service`, then `carillon restart`, or `carillon start` when Carillon is stopped). T3 runs different conversations at once; to let core run several of its conversations concurrently, set `parallel_turns` (1 to 16, default 1) on the `runtime-t3` entry in `carillon.toml` and restart core. Each conversation still runs one turn at a time, in order; the setting is only valid on runtime entries, and Pi's runtime serializes its conversations whatever it says, so leave it unset there. It is part of `carillon.target`, so once enabled it starts and stops with the target: `start`, `stop`, `restart` and `update`, which act on the target's state, account for it, and uninstall removes it with the other units. Starting the service on its own (`--now`) while the target is stopped would leave the target inactive and the service outside those operations.
+It also registers one optional unit, `carillon-runtime-t3.service`, for the T3 runtime executable `app/bin/carillon-runtime-t3`. The target does not want it and setup does not enable it: it serves `--provider runtime-t3` with `credentials/runtime-t3.token` and logs to `logs/runtime-t3.log`, and runs only after the operator has added that provider to the registry with its settings file and credential and enabled the unit without starting it on its own (`systemctl --user enable carillon-runtime-t3.service`, then `carillon restart`, or `carillon start` when Carillon is stopped). T3 runs different conversations at once; to let core run several of its conversations concurrently, set `parallel_turns` (1 to 16, default 1) on the `runtime-t3` entry in `carillon.toml` and run `carillon registry apply` (or restart core). Each conversation still runs one turn at a time, in order; the setting is only valid on runtime entries, and Pi's runtime serializes its conversations whatever it says, so leave it unset there. It is part of `carillon.target`, so once enabled it starts and stops with the target: `start`, `stop`, `restart` and `update`, which act on the target's state, account for it, and uninstall removes it with the other units. Starting the service on its own (`--now`) while the target is stopped would leave the target inactive and the service outside those operations.
 
 Run `install.sh` as the non-root Unix user that should own Carillon. The installer rejects root, creates no users or groups, changes no sudo policy, and does not enable lingering. It enables but does not start `carillon.target`.
 
@@ -35,9 +35,9 @@ Installation requires:
 - at least one channel route with activation and conversation mode; and
 - an existing absolute workspace path.
 
-`carillon init` writes the registry and credentials; the installer then writes the Discord settings with `carillon discord configure`, which owns `providers/discord-private.toml`. Run `carillon discord configure --guild-id … --bot-user-id … --user-id … --route …` to change the guild, users, or routes; it rewrites the file completely, keeping any tuned feedback settings, and leaves it untouched when the input is invalid. Restart the Discord service afterwards.
+`carillon init` writes the registry and credentials; the installer then writes the Discord settings with `carillon discord configure`, which owns `providers/discord-private.toml`. Run `carillon discord configure --guild-id … --bot-user-id … --user-id … --route …` to change the guild, users, or routes; it rewrites the file completely, keeping any tuned feedback settings, and leaves it untouched when the input is invalid. It then asks a running provider to serve the file and says what became of that: users and routes apply to the next message, while a guild or bot change waits for a restart (see [Discord settings while the provider runs](#discord-settings-while-the-provider-runs)).
 
-Discord commands that act on a configured instance (`configure`, `check`, `commands`) use the only interface provider with Discord settings. When there is none or several, they list the choices and require `--provider ID`.
+Discord commands that act on a configured instance (`configure`, `check`, `settings`, `module`, `call`) use the only interface provider with Discord settings. When there is none or several, they list the choices and require `--provider ID`.
 
 After installation:
 
@@ -78,7 +78,33 @@ systemctl --user restart carillon-discord.service
 systemctl --user restart carillon-runtime-pi.service
 ```
 
-Core is restarted separately. Registry and provider configuration are static until restart. A bundled provider disabled in the registry (`carillon provider ID disable`) still starts with its unit, but exits successfully at once without serving or reading its credential, so the unit is not restarted; status shows it as `disabled`. The T3 runtime does the same when its enabled unit starts while the registry disables it.
+Core is restarted separately. A bundled provider disabled in the registry (`carillon provider ID disable`) still starts with its unit, but exits successfully at once without serving or reading its credential, so the unit is not restarted; status shows it as `disabled`. The T3 runtime does the same when its enabled unit starts while the registry disables it.
+
+### Registry changes while core runs
+
+Core serves the registry it loaded at start until a restart, or until it is asked to serve the file again:
+
+```sh
+carillon registry          # runtimes as core serves them, their workers, and how carillon.toml differs
+carillon registry apply    # serve carillon.toml's live changes now
+```
+
+A runtime's `enabled` and `parallel_turns` apply live; `carillon provider ID enable|disable` writes the file and then asks core to apply it. Disabling a runtime refuses new messages for its conversations and starts none of its queued turns; turns it is already running settle, and their answers are delivered. Enabling it again resumes its queue. Fewer `parallel_turns` let running turns finish before fewer run at once. Applying does not start or stop the runtime's program: enabling a runtime whose service exited because it was disabled at its start still needs that service started (`carillon restart`).
+
+`carillon.toml` defines every field it accepts: a file with any other, such as a misspelt `parallel_turn`, is not valid, so core refuses it at start and an apply refuses it rather than ignoring the field. Anything else that differs, such as addresses, credential hashes, the agent, storage settings, an interface's `enabled`, or providers added or removed, is applied only by a restart. An apply that meets such a difference refuses the whole file and names the fields; core keeps serving what it had, and `carillon registry` keeps showing the difference until a restart. When core does not answer at the address in the file, the command says it could not confirm the change: a stopped core serves the file when it starts, and a core whose address the file changed still serves its old one. Changing a credential file is not adopted by any apply.
+
+### Discord settings while the provider runs
+
+The Discord provider serves the settings it read at start until it restarts, or until it is asked to serve `providers/<id>.toml` again:
+
+```sh
+carillon discord settings          # what the provider serves, and how its settings file differs
+carillon discord settings apply    # serve the file's live changes now
+```
+
+`allowed_user_ids`, `routes`, `typing`, `reactions` with the four reaction emoji, and `activity_markers` apply live, and `carillon discord configure` applies them when it has saved the file. A message or interaction keeps the settings it was admitted with: one already waiting or being prepared is neither admitted again under the new settings nor shown differently, and its outcome reaction replaces the processing reaction it actually got. Messages and interactions that arrive afterwards follow the new allowlist, routes and reactions; jobs that start afterwards follow the new typing setting, and every card is drawn with the markers serving when it is drawn.
+
+The agent, `guild_id`, `bot_user_id`, the `[attachments]` limits and `activity` (whether cards are shown at all) apply only when the provider restarts (`carillon restart`). An apply that meets such a difference refuses the whole file and names the fields; the provider keeps serving what it had, and `carillon discord settings` shows the difference until a restart. A file that is not valid, including one with a field the schema does not define, is refused the same way. When nothing answers at the provider's address in `carillon.toml`, the command says it could not confirm the change: a stopped provider reads the file when it starts. The Discord bot token is read only at start.
 
 ### Discord commands
 
@@ -120,7 +146,7 @@ While a message's work runs, Discord shows one card for it in the conversation, 
 
 The card stays as the work's summary when it ends: done, with how long after the request the answer came, or stopped before finishing, and a delivery that may not have arrived is stated on the card, including when both apply. When an answer arrives while delegated work goes on, the card says so and keeps showing that work until its report is delivered, on the same card. A card that showed only an answer's wait is removed when the answer is sent. Work that finishes before its card would appear, but used tools, published reasoning or delegated work, or stopped before finishing, gets a card with its summary after the answer or notice; an answer alone gets none. Answers and notices are plain text. When core is briefly unreachable the card keeps what it last showed.
 
-Redaction of what cards show is best-effort. Known credential shapes (labelled values, `name=value` assignments, authorization headers, URL user information and queries, values after options such as `--password`, and long opaque tokens) are hidden, but a short secret passed as an ordinary argument can appear. Cards go only to the conversation that started the turn. Turn cards off with `activity = false` in `providers/<id>.toml` and restart the Discord service; cards made before are then left as they are, neither edited nor removed. `typing = false` turns off typing independently.
+Redaction of what cards show is best-effort. Known credential shapes (labelled values, `name=value` assignments, authorization headers, URL user information and queries, values after options such as `--password`, and long opaque tokens) are hidden, but a short secret passed as an ordinary argument can appear. Cards go only to the conversation that started the turn. Turn cards off with `activity = false` in `providers/<id>.toml` and restart the Discord service; cards made before are then left as they are, neither edited nor removed. `typing = false` turns off typing independently, and applies live to jobs that start afterwards.
 
 Configure card markers in that same provider file. Omitting the `[activity_markers]` table, or any field within it, uses these defaults:
 
@@ -187,15 +213,13 @@ and reuse the application's existing emojis when provisioning; upload only
 missing approved assets and verify their API records, CDN transparency and a
 real Discord message before activating the mapping. Never upload at reconnect.
 
-After editing the file, validate it and use the existing restart workflow:
+After editing the file, have the running provider serve it:
 
 ```sh
-carillon discord check
-systemctl --user restart carillon-discord.service
-carillon status
+carillon discord settings apply
 ```
 
-Use `carillon discord check --provider ID` when several Discord providers are configured. Settings take effect at provider startup; invalid markers fail configuration validation before work starts. Card requests continue to disable all mentions, including with custom markers.
+Use `--provider ID` when several Discord providers are configured. Markers apply to every card drawn afterwards; invalid markers make the file invalid, so an apply refuses it and the provider keeps the markers it serves, and a provider starting with them refuses to start. Card requests continue to disable all mentions, including with custom markers.
 
 The provider records which Discord message is each unfinished job's card in `<data_dir>/components/<provider>/activity-cards.json`, or, when Discord may have created a card without confirming it or someone deleted it, only that the job has one, so it gets no other until it ends; core keeps everything else of the job. Every card creation is suppressed durably before its POST, then its message identity is saved when Discord confirms it. A creation known not sent is recorded as `pending_create`, so a restart retries it; an in-flight or unknown creation is never repeated. A refused final edit or removal keeps the message identity for retry, rather than deleting an earned card or forgetting one still present. After a restart the provider goes on with the recorded cards from core's record of their jobs instead of making new ones: work still running shows on its card again with what its earlier turns reported, work that ended meanwhile gets its summary or loses its card as it would have, and a card whose work core has no record of is removed. Work answered while the Discord service stops still gets its summary on its card, within about 22 seconds; a card not finished by then is finished at the next start. If the file cannot be read (for example it is malformed, uses an unsupported older record format, or is not a readable file), the provider logs `activity cards are off until their records can be read`, starts without cards and leaves the file untouched; typing and delivery continue. This beta does not migrate card records; settle recorded cards before an update. Inspect an unreadable file, delete any stale cards it names by hand, then remove or repair it and restart the Discord service. A card created just before a crash, before its identity was recorded, is not removed automatically; its durable creation checkpoint suppresses a second card. Progress messages share Discord's rate limits with answers: they are bounded and never block delivery in the provider, but Discord can make an answer wait for its share of a common limit.
 

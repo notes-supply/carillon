@@ -18,7 +18,7 @@ use axum::{
     routing::{get, post},
 };
 use carillon_discord_module::contract::{InteractionKind, Reply};
-use carillon_installation::config::{LoadedConfig, hash_token};
+use carillon_installation::config::LoadedConfig;
 use carillon_protocol::model::{DeliveryReconciliation, Health};
 use serde_json::{Value, json};
 use tower::ServiceExt as _;
@@ -35,7 +35,7 @@ use crate::{
         tests::{Serve, attachment, serve_cdn},
     },
     client::test_client as core_client,
-    config::{DiscordActivation, DiscordConversation},
+    config::{DiscordActivation, DiscordConfig, DiscordConversation, Settings},
     module::{
         MODULE_LIMIT, Module, Source,
         tests::{
@@ -56,14 +56,20 @@ async fn stub_module(directory: &Path, reply: &str) -> anyhow::Result<Arc<Module
     Ok(Arc::new(Module::load(files(directory)).await?))
 }
 
+/// The provider `discord`, in deterministic mode, serving the settings its
+/// file under `directory` holds.
 async fn discord_state(core: CoreClient, directory: &Path) -> anyhow::Result<DiscordState> {
     let discord = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
+    let installation =
+        crate::config::tests::installation(&directory.join("installation"), "discord", 45_300)?;
+    discord.write(&installation, "discord")?;
     Ok(DiscordState {
         downloads: Arc::new(Downloads::open(
             directory.join("incoming"),
             discord.attachments,
         )?),
-        discord,
+        settings: Settings::new(discord),
+        installation: Arc::new(installation),
         health: Health {
             id: "discord".to_owned(),
             role: "interface".to_owned(),
@@ -76,8 +82,14 @@ async fn discord_state(core: CoreClient, directory: &Path) -> anyhow::Result<Dis
         app: None,
         reactions: None,
         lanes: None,
-        operator_token_hash: hash_token("operator"),
     })
+}
+
+/// Has `state` serve its settings changed by `change`, as a restart would.
+fn restarted(state: &mut DiscordState, change: impl FnOnce(&mut DiscordConfig)) {
+    let mut settings = DiscordConfig::clone(&state.settings.current());
+    change(&mut settings);
+    state.settings = Settings::new(settings);
 }
 
 /// An installation whose interface points at `provider_address` and whose
@@ -1081,10 +1093,9 @@ async fn an_acknowledged_interaction_is_answered_before_the_provider_returns() -
     state.app = Some(target.clone());
     let ingress = Arc::new(crate::inbound::Ingress {
         core: state.core.clone(),
-        config: state.discord.clone(),
         participation: state.participation.clone(),
         http: target.http.clone(),
-        reactions: crate::delivery::Reactions::new(target.http.clone(), state.discord.clone()),
+        reactions: crate::delivery::Reactions::new(target.http.clone(), state.settings.clone()),
         downloads: state.downloads.clone(),
         refusals: Arc::new(tokio::sync::Semaphore::new(crate::inbound::lanes::REFUSALS)),
         stopping: tokio_util::sync::CancellationToken::new(),
@@ -1132,6 +1143,10 @@ async fn a_full_message_queue_refuses_instead_of_holding_the_gateway() -> anyhow
             attachments: Vec::new(),
         },
         native: Value::Null,
+        settings: Arc::new(discord_config(
+            DiscordActivation::Always,
+            DiscordConversation::Channel,
+        )),
     };
     assert!(queue_message(&sender, inbound.clone())?.is_ok());
     let refused = queue_message(&sender, inbound.clone())?
@@ -1373,6 +1388,195 @@ async fn simulated_core(staging: PathBuf) -> anyhow::Result<(std::net::SocketAdd
     Ok((address, shared))
 }
 
+/// Asks the provider's settings endpoint, as `bearer`, for its status or
+/// to apply its settings file.
+async fn settings(
+    state: &DiscordState,
+    method: Method,
+    bearer: &str,
+) -> anyhow::Result<(StatusCode, Value)> {
+    let request = Request::builder()
+        .method(method)
+        .uri("/v1/settings")
+        .header("authorization", format!("Bearer {bearer}"))
+        .body(Body::empty())?;
+    let response = discord_router(state.clone(), false)
+        .oneshot(request)
+        .await?;
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+    Ok((status, serde_json::from_slice(&body)?))
+}
+
+/// Saves the settings `state` serves, changed by `change`, as its file.
+fn edit_settings(
+    state: &DiscordState,
+    change: impl FnOnce(&mut DiscordConfig),
+) -> anyhow::Result<()> {
+    let mut file = DiscordConfig::clone(&state.settings.current());
+    change(&mut file);
+    file.write(&state.installation, "discord")
+}
+
+#[tokio::test]
+async fn the_operator_alone_applies_a_settings_file_whole_or_not_at_all() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let state = discord_state(
+        core_client("http://127.0.0.1:1".to_owned())?,
+        directory.path(),
+    )
+    .await?;
+    let serving = state.settings.current();
+    let (status, body) = settings(&state, Method::GET, "operator").await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["file"],
+        json!({"state": "read", "live": [], "restart": []})
+    );
+    assert_eq!(body["serving"]["allowed_user_ids"], json!(["200"]));
+    // Neither anyone else nor the interface's own credential reads or
+    // applies settings.
+    edit_settings(&state, |file| file.allowed_user_ids.push("250".to_owned()))?;
+    for bearer in ["", "wrong", "token"] {
+        for method in [Method::GET, Method::POST] {
+            let (status, _) = settings(&state, method, bearer).await?;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+        }
+    }
+    assert!(Arc::ptr_eq(&state.settings.current(), &serving));
+    // A file that also changes the provider's identity is refused whole,
+    // naming what only a restart applies.
+    edit_settings(&state, |file| {
+        file.allowed_user_ids.push("250".to_owned());
+        "999".clone_into(&mut file.guild_id);
+    })?;
+    let (status, body) = settings(&state, Method::POST, "operator").await?;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        body["error"],
+        "the settings file changes what only a restart applies (guild_id); nothing was applied"
+    );
+    assert!(Arc::ptr_eq(&state.settings.current(), &serving));
+    let (_, body) = settings(&state, Method::GET, "operator").await?;
+    assert_eq!(
+        body["file"],
+        json!({"state": "read", "live": ["allowed_user_ids"], "restart": ["guild_id"]})
+    );
+    // A file that is not valid settings, or is gone, is refused.
+    let path = state.installation.provider_config_path("discord")?;
+    std::fs::write(&path, "allowed_user_ids = [")?;
+    let (status, body) = settings(&state, Method::POST, "operator").await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let error = body["error"].as_str().context("no error")?;
+    assert!(
+        error.starts_with("the settings file is not valid: "),
+        "{error}"
+    );
+    assert!(error.ends_with("; nothing was applied"), "{error}");
+    let (_, body) = settings(&state, Method::GET, "operator").await?;
+    assert_eq!(body["file"]["state"], "invalid");
+    std::fs::remove_file(&path)?;
+    let (status, _) = settings(&state, Method::POST, "operator").await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(Arc::ptr_eq(&state.settings.current(), &serving));
+    // A file whose changes all apply live serves whole, once.
+    edit_settings(&state, |file| {
+        file.allowed_user_ids.push("250".to_owned());
+        "⏳".clone_into(&mut file.processing_emoji);
+    })?;
+    let (status, body) = settings(&state, Method::POST, "operator").await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        json!({"changed": ["allowed_user_ids", "processing_emoji"]})
+    );
+    let applied = state.settings.current();
+    assert_eq!(applied.allowed_user_ids, ["200", "250"]);
+    assert_eq!(applied.processing_emoji, "⏳");
+    let (_, body) = settings(&state, Method::POST, "operator").await?;
+    assert_eq!(body, json!({"changed": []}));
+    // What the endpoint shows holds no credential.
+    let (_, body) = settings(&state, Method::GET, "operator").await?;
+    assert!(!body.to_string().contains("token"), "{body}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_misspelt_setting_is_refused_rather_than_dropped() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let state = discord_state(
+        core_client("http://127.0.0.1:1".to_owned())?,
+        directory.path(),
+    )
+    .await?;
+    let serving = state.settings.current();
+    let path = state.installation.provider_config_path("discord")?;
+    let file = std::fs::read_to_string(&path)?;
+    // A setting the file does not define, at the top or in a route.
+    for (misspelt, field) in [
+        (
+            format!("processing_emoj = \"⏳\"\n{file}"),
+            "processing_emoj",
+        ),
+        (
+            file.replace("[[routes]]\n", "[[routes]]\nchanel_id = \"301\"\n"),
+            "chanel_id",
+        ),
+    ] {
+        assert_ne!(misspelt, file);
+        std::fs::write(&path, misspelt)?;
+        let (status, body) = settings(&state, Method::POST, "operator").await?;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let error = body["error"].as_str().context("no error")?;
+        assert!(
+            error.contains(&format!("unknown field `{field}`")),
+            "{error}"
+        );
+        assert!(Arc::ptr_eq(&state.settings.current(), &serving));
+        let (_, body) = settings(&state, Method::GET, "operator").await?;
+        assert_eq!(body["file"]["state"], "invalid");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn each_message_is_admitted_by_the_settings_serving_when_it_arrives() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let (core_address, _core) = simulated_core(directory.path().join("staging")).await?;
+    let state = discord_state(
+        core_client(format!("http://{core_address}"))?,
+        directory.path(),
+    )
+    .await?;
+    let from = |id: &str, user: &str, channel: &str| {
+        json!({
+            "event_id": id, "guild_id": "100", "user_id": user, "channel_id": channel,
+            "content": "hello", "attachments": [],
+        })
+    };
+    // Neither the person nor the channel is admitted yet.
+    let (status, _) = simulate_message(&state, &from("1", "250", "300")).await?;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = simulate_message(&state, &from("2", "200", "301")).await?;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    edit_settings(&state, |file| {
+        file.allowed_user_ids.push("250".to_owned());
+        let mut route = file.routes[0].clone();
+        "301".clone_into(&mut route.channel_id);
+        file.routes.push(route);
+        file.reactions = false;
+    })?;
+    let (status, _) = settings(&state, Method::POST, "operator").await?;
+    assert_eq!(status, StatusCode::OK);
+    // The next messages are, and are shown as the applied settings say.
+    let (status, body) = simulate_message(&state, &from("3", "250", "300")).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["feedback"], json!([]));
+    let (status, body) = simulate_message(&state, &from("4", "200", "301")).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    Ok(())
+}
+
 /// Send `files` from `user` through deterministic simulation.
 async fn simulate(
     state: &DiscordState,
@@ -1434,7 +1638,8 @@ async fn simulation_admits_then_downloads_files_under_the_provider_policy() -> a
     )
     .await?;
     state.downloads = Arc::new(
-        Downloads::open(staging.clone(), state.discord.attachments)?.with_fixture_cdn(cdn),
+        Downloads::open(staging.clone(), state.settings.current().attachments)?
+            .with_fixture_cdn(cdn),
     );
     let requests = || log.lock().map_or(usize::MAX, |log| log.requests.len());
     let file = attachment(cdn, "601", "a.png", 32);
@@ -1443,10 +1648,14 @@ async fn simulation_admits_then_downloads_files_under_the_provider_policy() -> a
     // would not activate, causes no fetch.
     let (status, _) = simulate(&state, "1", "999", std::slice::from_ref(&file)).await?;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    state.discord.routes[0].activation = DiscordActivation::Mention;
+    restarted(&mut state, |settings| {
+        settings.routes[0].activation = DiscordActivation::Mention;
+    });
     let (status, _) = simulate(&state, "1", "200", std::slice::from_ref(&file)).await?;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    state.discord.routes[0].activation = DiscordActivation::Always;
+    restarted(&mut state, |settings| {
+        settings.routes[0].activation = DiscordActivation::Always;
+    });
     assert_eq!(requests(), 0);
     // The provider's address policy refuses before any request.
     let mut elsewhere = file.clone();

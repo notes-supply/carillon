@@ -39,6 +39,17 @@ let installation = root;
 let runtimeHost = "127.0.0.1";
 let runtimeConfigPath;
 const services = new Map();
+/**
+ * The Discord routes the installation serves. Channel 305 is reserved for the
+ * model picker so its turns do not disturb the response counters of the
+ * other conversations.
+ */
+const DISCORD_ROUTES = [
+  "300:always:channel",
+  "301:mention:thread",
+  "302:always:thread",
+  "305:always:channel",
+];
 
 try {
   run("--home", installation, "init", "--workspace", workspace, "--base-port", String(basePort));
@@ -50,21 +61,16 @@ try {
   const rewritten = await readFile(configPath(), "utf8");
   assert.match(rewritten, /^\[core\.attachments\]$/mu);
   assert.match(rewritten, /^free_space_mib = 0$/mu);
-  // Channel 305 is reserved for the model picker so its turns do not disturb
-  // the response counters of the conversations below.
+  const configured = configureDiscord(installation, "100", "201", "200", ...DISCORD_ROUTES);
   assert.match(
-    configureDiscord(
-      installation,
-      "100",
-      "201",
-      "200",
-      "300:always:channel",
-      "301:mention:thread",
-      "302:always:thread",
-      "305:always:channel",
-    ),
-    /providers\/discord-private\.toml$/u,
+    configured,
+    /^\S*providers\/discord-private\.toml$/mu,
     "configure must print the provider-owned file it wrote",
+  );
+  assert.match(
+    configured,
+    /^The Discord provider does not answer at \S+, so whether it serves these settings is not confirmed/mu,
+    "configure must not claim a provider it cannot reach is stopped or serving",
   );
   await testConfigurationRefusals();
   await testConfigurationSymlinkUpdates();
@@ -106,7 +112,15 @@ try {
     event("denied-route", "100", "200", "399", null, "no"),
   );
   assert.equal(deniedRoute.status, 403, "unconfigured channels must fail closed");
-  for (const eventId of ["denied", "denied-user", "denied-dm", "denied-route"]) {
+  await testLiveDiscordSettings();
+  for (const eventId of [
+    "denied",
+    "denied-user",
+    "denied-dm",
+    "denied-route",
+    "live-denied",
+    "live-still-denied",
+  ]) {
     const turns = JSON.parse(run("--home", installation, "recent", "--event-id", eventId));
     assert.deepEqual(turns, [], "rejected ingress must not create accepted work");
   }
@@ -356,6 +370,38 @@ try {
 
 function configPath() {
   return join(installation, "carillon.toml");
+}
+
+/**
+ * Discord settings apply while the provider serves, whole: the next message
+ * follows an applied allowlist, and a file that also changes what only a
+ * restart applies leaves the serving settings in place.
+ */
+async function testLiveDiscordSettings() {
+  const settings = () => run("--home", installation, "discord", "settings");
+  assert.match(settings(), /^It serves its settings file\.$/mu);
+  assert.match(
+    configureDiscord(installation, "100", "201", "250", ...DISCORD_ROUTES),
+    /^discord-private now serves its settings file: allowed_user_ids\.$/mu,
+  );
+  const moved = await requestSimulation(event("live-denied", "100", "200", "300", null, "no"));
+  assert.equal(moved.status, 403, "the next message must follow the applied allowlist");
+  assert.match(
+    configureDiscord(installation, "101", "201", "200", ...DISCORD_ROUTES),
+    /^discord-private keeps serving the settings it has: .*only a restart applies \(guild_id\)/mu,
+  );
+  assert.match(settings(), /only a restart applies \(guild_id\)/u);
+  assert.throws(
+    () => run("--home", installation, "discord", "settings", "apply"),
+    /only a restart applies \(guild_id\); nothing was applied; discord-private keeps serving/u,
+  );
+  const kept = await requestSimulation(event("live-still-denied", "100", "200", "300", null, "no"));
+  assert.equal(kept.status, 403, "a refused file must leave the serving allowlist in place");
+  assert.match(
+    configureDiscord(installation, "100", "201", "200", ...DISCORD_ROUTES),
+    /^discord-private now serves its settings file: allowed_user_ids\.$/mu,
+  );
+  assert.match(settings(), /^It serves its settings file\.$/mu);
 }
 
 function providerConfigPath() {

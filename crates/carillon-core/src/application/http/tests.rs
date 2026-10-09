@@ -16,7 +16,22 @@ use crate::Reported;
 use crate::db::Database;
 use carillon_protocol::model::{DeliveryOutcome, JOB_READ_LIMIT, TurnActivity, TurnState};
 
-fn installation(root: &Path) -> Result<AppState> {
+/// A test installation: its registry, which cases change in memory as an
+/// operator would edit and restart it, and core over its storage.
+#[derive(Clone)]
+struct Fixture {
+    config: LoadedConfig,
+    core: Core,
+    client: Client,
+}
+
+impl Fixture {
+    fn snapshot_store(&self) -> PathBuf {
+        self.core.snapshot_store()
+    }
+}
+
+fn installation(root: &Path) -> Result<Fixture> {
     use carillon_installation::config::{AgentConfig, Config, CoreConfig, Provider, hash_token};
 
     // Core tests use opaque provider IDs, without a Discord or Pi installation.
@@ -72,7 +87,7 @@ fn installation(root: &Path) -> Result<AppState> {
         root: root.to_path_buf(),
         value,
     };
-    Ok(AppState {
+    Ok(Fixture {
         core: Core::create(core_options(&config))?,
         config,
         client: carillon_installation::loopback::client().build()?,
@@ -80,15 +95,20 @@ fn installation(root: &Path) -> Result<AppState> {
 }
 
 // These tests mutate configuration in memory to exercise ownership changes.
-// Recompose policy without reopening storage: fault-injection tests deliberately alter its schema.
-fn configured(state: &AppState) -> AppState {
-    let mut state = state.clone();
-    state.core.options = core_options(&state.config);
-    state
+// Serve it as a restart would, without reopening storage: fault-injection
+// tests deliberately alter its schema.
+fn configured(fixture: &Fixture) -> AppState {
+    let config = fixture.config.clone();
+    AppState {
+        core: fixture.core.reconfigured(core_options(&config)),
+        registry: Arc::new(Registry::new(config.root.join("carillon.toml"), config)),
+        client: fixture.client.clone(),
+        workers: Arc::new(watch::Sender::new(Census::default())),
+    }
 }
 
 async fn run_next_turn(
-    state: &AppState,
+    state: &Fixture,
     runtime_id: &str,
     submit: impl AsyncFnOnce(
         &Provider,
@@ -107,7 +127,7 @@ async fn run_next_turn(
 }
 
 async fn run_next_observation(
-    state: &AppState,
+    state: &Fixture,
     runtime_id: &str,
     submit: impl AsyncFnOnce(
         &Provider,
@@ -125,7 +145,7 @@ async fn run_next_observation(
     .await
 }
 
-async fn accept(state: &AppState, id: &str, audience: &str) -> Result<EventReceipt> {
+async fn accept(state: &Fixture, id: &str, audience: &str) -> Result<EventReceipt> {
     let mut headers = HeaderMap::new();
     headers.insert(PROVIDER_HEADER, "test-interface".parse()?);
     headers.insert(
@@ -270,7 +290,7 @@ async fn status_probes_public_health_without_provider_credentials() -> Result<()
     }
     let router = Router::new()
         .route("/v1/status", get(status))
-        .with_state(state);
+        .with_state(configured(&state));
     let response = router
         .clone()
         .oneshot(Request::builder().uri("/v1/status").body(Body::empty())?)
@@ -341,7 +361,7 @@ async fn stalled_providers_are_reported_within_the_operator_timeout() -> Result<
     let config = state.config.clone();
     let router = Router::new()
         .route("/v1/status", get(status))
-        .with_state(state);
+        .with_state(configured(&state));
     services.spawn(async move { axum::serve(listener, router).await });
 
     // The operator's status request, bounded at five seconds, gets the
@@ -419,7 +439,14 @@ async fn startup_opens_the_database_without_creating_one() -> Result<()> {
     drop(listener);
     let path = state.config.value.data_dir.join("carillon.sqlite3");
     fs::remove_file(&path)?;
-    assert!(serve(state.config.clone()).await.is_err());
+    assert!(
+        serve(
+            state.config.root.join("carillon.toml"),
+            state.config.clone()
+        )
+        .await
+        .is_err()
+    );
     assert!(!path.exists());
     Ok(())
 }
@@ -485,7 +512,7 @@ fn fake_runtime(
 async fn model_fixture(
     directory: &Path,
 ) -> Result<(
-    AppState,
+    Fixture,
     tokio::sync::mpsc::UnboundedReceiver<(&'static str, serde_json::Value)>,
     tokio::task::JoinSet<std::io::Result<()>>,
 )> {
@@ -518,7 +545,7 @@ async fn model_fixture(
 }
 
 async fn model_call(
-    state: &AppState,
+    state: &Fixture,
     method: &str,
     uri: &str,
     authorized: bool,
@@ -681,10 +708,16 @@ async fn occupied_listener_leaves_accepted_and_running_work_untouched() -> Resul
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     state.config.value.core.listen = listener.local_addr()?;
 
-    let error = tokio::time::timeout(Duration::from_secs(5), serve(state.config.clone()))
-        .await?
-        .err()
-        .context("occupied port was accepted")?;
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        serve(
+            state.config.root.join("carillon.toml"),
+            state.config.clone(),
+        ),
+    )
+    .await?
+    .err()
+    .context("occupied port was accepted")?;
     assert_eq!(
         error
             .downcast_ref::<std::io::Error>()
@@ -734,7 +767,10 @@ async fn live_interface_claim_survives_core_startup_and_acknowledges_once() -> R
     state.config.value.core.listen = listener.local_addr()?;
     drop(listener);
     let base = format!("http://{}", state.config.value.core.listen);
-    let server = tokio::spawn(serve(state.config.clone()));
+    let server = tokio::spawn(serve(
+        state.config.root.join("carillon.toml"),
+        state.config.clone(),
+    ));
     let outcome = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if state
@@ -1493,7 +1529,11 @@ async fn startup_drains_queued_nondefault_runtime_without_replaying_running_work
     drop(listener);
     // Exercise the real startup worker selection and recovery against reopened SQLite.
     let config = state.config.clone();
-    services.spawn(async move { serve(config).await.map_err(std::io::Error::other) });
+    services.spawn(async move {
+        serve(config.root.join("carillon.toml"), config)
+            .await
+            .map_err(std::io::Error::other)
+    });
     tokio::time::timeout(Duration::from_secs(5), async {
         let mut calls = Vec::new();
         for _ in 0..3 {
@@ -1759,7 +1799,7 @@ async fn a_claim_waiting_for_the_database_writer_is_not_made_once_stopping() -> 
 
 /// A runtime serving `/v1/turns` with a fixed failure response, counting calls.
 async fn failing_runtime(
-    state: &AppState,
+    state: &Fixture,
     status: StatusCode,
     body: Value,
 ) -> Result<(
@@ -2232,7 +2272,7 @@ enum Snapshot {
 }
 
 async fn jobs_call(
-    state: &AppState,
+    state: &Fixture,
     provider: &str,
     token: Option<&str>,
     query: &str,
@@ -2301,7 +2341,7 @@ fn activity_runtime(
 }
 
 /// Registers `other-interface` and accepts one turn for it.
-async fn foreign_turn(state: &mut AppState, directory: &Path) -> Result<EventReceipt> {
+async fn foreign_turn(state: &mut Fixture, directory: &Path) -> Result<EventReceipt> {
     use carillon_installation::config::hash_token;
 
     let mut other = state
@@ -2340,7 +2380,7 @@ async fn foreign_turn(state: &mut AppState, directory: &Path) -> Result<EventRec
 
 /// Claims the next turn, which must be `turn_id`, and keeps it running until released.
 async fn hold_running(
-    state: &AppState,
+    state: &Fixture,
     runtime_id: &str,
     turn_id: &str,
 ) -> Result<(
@@ -2611,6 +2651,7 @@ async fn job_reads_answer_promptly_when_several_runtimes_cannot_describe_their_t
     Ok(())
 }
 mod attachments;
+mod live;
 
 /// A runtime endpoint written at the socket level: while `cut` is set it sends
 /// a successful answer's headers and only the start of its body, then closes;

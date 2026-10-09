@@ -360,12 +360,22 @@ impl Substitute {
         config: DiscordConfig,
         records: &Path,
     ) -> (mpsc::UnboundedSender<Delivering>, JoinHandle<()>) {
+        self.serving(http, crate::config::Settings::new(config), records)
+    }
+
+    /// The monitor alone, under settings the case may change as it runs.
+    fn serving(
+        &self,
+        http: Arc<twilight_http::Client>,
+        settings: crate::config::Settings,
+        records: &Path,
+    ) -> (mpsc::UnboundedSender<Delivering>, JoinHandle<()>) {
         let (delivering, heard) = mpsc::unbounded_channel();
         let monitor = activity_monitor(
             self.client.clone(),
             http,
             self.module.clone(),
-            config,
+            settings,
             CardRecords::open(records.to_path_buf()),
             heard,
             CancellationToken::new(),
@@ -385,9 +395,10 @@ impl Substitute {
         let core = self.client.clone();
         let (delivering, heard) = mpsc::unbounded_channel();
         let stopping = CancellationToken::new();
+        let settings = crate::config::Settings::new(config);
         let delivered = delivery_loop(
             core.clone(),
-            Reactions::new(http.clone(), config.clone()),
+            Reactions::new(http.clone(), settings.clone()),
             http.clone(),
             delivering,
             stopping.clone(),
@@ -397,7 +408,7 @@ impl Substitute {
             core,
             http,
             self.module.clone(),
-            config,
+            settings,
             records,
             heard,
             stopping.clone(),
@@ -1973,6 +1984,54 @@ async fn disabled_cards_still_type_name_no_jobs_and_leave_records_alone() -> any
 }
 
 #[tokio::test]
+async fn new_jobs_type_and_cards_draw_as_the_settings_serving_then_say() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let records = directory.path().join("activity-cards.json");
+    let discord = Substitute::start(succeed()).await?;
+    let accepted = now();
+    let work = || tools(None, &[("bash", "make")], &[]);
+    let first = running("first", "300", accepted, Some(work()));
+    discord.record(vec![first.clone()]);
+    // The provider starts without typing, drawing the default markers.
+    let settings = crate::config::Settings::new(config(false));
+    let (_delivering, monitor) = discord.serving(discord.http(false), settings.clone(), &records);
+    let card = discord
+        .wait_for(&Method::POST, "/channels/300/messages", 1)
+        .await?;
+    assert!(card[0].content().starts_with("⏳ Working"), "{card:#?}");
+    // The operator then serves typing and other markers, and another job
+    // starts.
+    let mut next = with_markers()?;
+    next.typing = true;
+    let changed = settings
+        .apply(|| Ok(next))
+        .map_err(|refusal| anyhow::anyhow!("{refusal:?}"))?;
+    assert_eq!(changed, ["typing", "activity_markers"]);
+    discord.record(vec![
+        first,
+        running("second", "301", accepted, Some(work())),
+    ]);
+    discord
+        .wait_for(&Method::POST, "/channels/301/typing", 1)
+        .await?;
+    let card = discord
+        .wait_for(&Method::POST, "/channels/301/messages", 1)
+        .await?;
+    assert!(
+        card[0].content().starts_with("<a:working:123> Working"),
+        "{card:#?}"
+    );
+    // The job followed before keeps the typing decision it started with.
+    assert!(
+        discord
+            .matching(&Method::POST, "/channels/300/typing")
+            .is_empty()
+    );
+    monitor.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn an_unreachable_core_neither_finishes_nor_removes_a_card() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let records = directory.path().join("activity-cards.json");
@@ -2248,7 +2307,7 @@ async fn cards(
     Ok(super::Cards {
         http,
         module: release_module().await?,
-        markers: config(false).activity_markers,
+        settings: crate::config::Settings::new(config(false)),
         records: Arc::new(CardRecords::open(directory.join("cards.json")).context("records")?),
         stopping,
     })

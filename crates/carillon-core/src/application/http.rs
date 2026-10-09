@@ -1,12 +1,12 @@
 //! The core service: admission, the turn lifecycle worker, and the delivery
 //! outbox, served over the loopback provider API.
 
+mod registry;
 #[cfg(test)]
 mod tests;
+mod workers;
 
-#[cfg(test)]
-use std::path::PathBuf;
-use std::time::Duration;
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context as _, Result, anyhow};
 use axum::{
@@ -29,25 +29,29 @@ use carillon_protocol::model::{
 use reqwest::{Client, RequestBuilder, Url};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::{
-    Core, CoreError, CoreOptions, Lane, RuntimeClient, RuntimeProvider, TurnFailure, WorkerStep,
-};
+use crate::{Core, CoreError, CoreOptions, Lane, RuntimeClient, TurnFailure, WorkerStep};
+pub(super) use registry::{Applied, FileState, RegistryStatus, ServingRuntime};
+use registry::{Refusal, Registry, runtime_facts};
+use workers::Census;
 
 #[derive(Clone)]
 struct AppState {
-    config: LoadedConfig,
+    /// The registry serving now, owned by the application.
+    registry: Arc<Registry>,
     core: Core,
     client: Client,
+    /// How the runtime workers stand, as their supervisor last arranged them.
+    workers: Arc<watch::Sender<Census>>,
 }
 
-#[cfg(test)]
 impl AppState {
-    fn snapshot_store(&self) -> PathBuf {
-        self.core.snapshot_store()
+    /// The serving registry, read once by each request.
+    fn config(&self) -> Arc<LoadedConfig> {
+        self.registry.current()
     }
 }
 
@@ -58,18 +62,7 @@ fn core_options(config: &LoadedConfig) -> CoreOptions {
         resource_root: config.value.agent.resource_root.clone(),
         default_runtime: config.value.agent.runtime_provider.clone(),
         attachments: config.value.core.attachments,
-        runtimes: config
-            .value
-            .providers
-            .iter()
-            .filter(|provider| provider.role == ProviderRole::Runtime)
-            .map(|provider| RuntimeProvider {
-                id: provider.id.clone(),
-                version: provider.version.clone(),
-                url: provider.url.clone(),
-                enabled: provider.enabled,
-            })
-            .collect(),
+        runtimes: runtime_facts(config),
     }
 }
 
@@ -130,7 +123,9 @@ pub fn check(config: &LoadedConfig) -> Result<()> {
     Ok(())
 }
 
-pub async fn serve(config: LoadedConfig) -> Result<()> {
+/// Serves the installation whose registry `config` was loaded from `path`,
+/// which [`Registry::apply`] reads again.
+pub async fn serve(path: PathBuf, config: LoadedConfig) -> Result<()> {
     // A failed bind must not recover state or start accepted work.
     let listener = TcpListener::bind(config.value.core.listen).await?;
     let core = Core::open(core_options(&config))?;
@@ -150,35 +145,27 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
         );
     }
 
+    let listen = config.value.core.listen;
     let state = AppState {
-        config: config.clone(),
+        registry: Arc::new(Registry::new(path, config)),
         core,
         client: loopback::client().build()?,
+        workers: Arc::new(watch::Sender::new(Census::default())),
     };
     // A runtime configured for concurrent conversations gets that many
     // message workers. Each claim is one transaction that skips
     // conversations with an earlier message queued or running, so workers
     // never share a conversation and each conversation keeps its order.
     // Observations wait on native work that may take hours; a fixed few run
-    // per runtime beside its messages, never in their place. All of them
-    // claim no further turn once `stopping` is cancelled, as shutdown begins.
+    // per runtime beside its messages, never in their place. Their
+    // supervisor follows the serving registry; none claims a turn once
+    // `stopping` is cancelled, as shutdown begins.
     let stopping = CancellationToken::new();
-    let mut workers = tokio::task::JoinSet::new();
-    for runtime in config
-        .value
-        .providers
-        .iter()
-        .filter(|provider| provider.role == ProviderRole::Runtime && provider.enabled)
-    {
-        let lanes = (0..runtime.parallel_turns())
-            .map(|_| Lane::Messages)
-            .chain((0..OBSERVATION_WORKERS).map(|_| Lane::Observations));
-        for lane in lanes {
-            let (runtime_id, worker, stopping) =
-                (runtime.id.clone(), state.clone(), stopping.clone());
-            workers.spawn(async move { runtime_worker(worker, runtime_id, lane, stopping).await });
-        }
-    }
+    let supervisor = tokio::spawn(workers::supervise(
+        state.clone(),
+        state.workers.clone(),
+        stopping.clone(),
+    ));
 
     let router = Router::new()
         .route("/health", get(health))
@@ -193,8 +180,9 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
         .route("/v1/model", get(model_state).put(set_model))
         .route("/v1/commands", get(commands))
         .route("/v1/status", get(status))
+        .route("/v1/registry", get(registry_status).post(apply_registry))
         .with_state(state.clone());
-    info!(listen = %config.value.core.listen, "Carillon core ready");
+    info!(%listen, "Carillon core ready");
     let served = axum::serve(listener, router)
         .with_graceful_shutdown(shutdown(state.core.clone(), stopping.clone()))
         .await;
@@ -205,10 +193,8 @@ pub async fn serve(config: LoadedConfig) -> Result<()> {
     stopping.cancel();
     state.core.stop_capturing();
     state.core.captures_settled().await;
-    while let Some(worker) = workers.join_next().await {
-        if let Err(error) = worker {
-            error!(%error, "runtime worker ended abnormally");
-        }
+    if let Err(error) = supervisor.await {
+        error!(%error, "runtime worker supervisor ended abnormally");
     }
     state.core.storage_settled().await;
     served?;
@@ -233,7 +219,8 @@ async fn accept_event(
     headers: HeaderMap,
     Json(event): Json<ExternalEvent>,
 ) -> Result<Json<EventReceipt>, ApiError> {
-    let interface = interface_provider(&headers, &state.config)?;
+    let config = state.config();
+    let interface = interface_provider(&headers, &config)?;
     Ok(Json(
         state
             .core
@@ -247,7 +234,8 @@ async fn event_status(
     headers: HeaderMap,
     AxumPath(event_id): AxumPath<String>,
 ) -> Result<Json<EventStatus>, ApiError> {
-    let interface = interface_provider(&headers, &state.config)?;
+    let config = state.config();
+    let interface = interface_provider(&headers, &config)?;
     Ok(Json(state.core.event_status(&interface.id, &event_id)?))
 }
 
@@ -280,9 +268,10 @@ async fn relay_query(
     path: &str,
     query: ModelQuery,
 ) -> Result<Response, ApiError> {
-    let interface = interface_provider(headers, &state.config)?;
+    let config = state.config();
+    let interface = interface_provider(headers, &config)?;
     let runtime = model_runtime(state, &interface.id, &query)?;
-    let token = runtime_token(&state.config, &runtime)?;
+    let token = runtime_token(&config, &runtime)?;
     let query = RuntimeModelQuery {
         interface_id: interface.id.clone(),
         query,
@@ -305,7 +294,8 @@ async fn set_model(
     headers: HeaderMap,
     Json(update): Json<ModelUpdate>,
 ) -> Result<Response, ApiError> {
-    let interface = interface_provider(&headers, &state.config)?;
+    let config = state.config();
+    let interface = interface_provider(&headers, &config)?;
     let runtime = model_runtime(
         &state,
         &interface.id,
@@ -314,7 +304,7 @@ async fn set_model(
             audience_id: update.audience_id.clone(),
         },
     )?;
-    let token = runtime_token(&state.config, &runtime)?;
+    let token = runtime_token(&config, &runtime)?;
     let update = RuntimeModelUpdate {
         interface_id: interface.id.clone(),
         update,
@@ -338,7 +328,7 @@ fn model_runtime(
 ) -> Result<Provider, ApiError> {
     let runtime = state.core.runtime_for(interface_id, query)?;
     Ok(state
-        .config
+        .config()
         .provider(&runtime.id, ProviderRole::Runtime)?
         .clone())
 }
@@ -400,7 +390,8 @@ async fn jobs(
     headers: HeaderMap,
     Query(query): Query<JobQuery>,
 ) -> Result<Json<JobPage>, ApiError> {
-    let interface = interface_provider(&headers, &state.config)?;
+    let config = state.config();
+    let interface = interface_provider(&headers, &config)?;
     let (listed, next) = match (query.tracked, query.after) {
         (Some(tracked), None) => {
             let mut named = Vec::new();
@@ -462,8 +453,9 @@ async fn runtime_activity(
     turn_id: &str,
 ) -> Option<TurnActivity> {
     let snapshot = async {
-        let runtime = state.config.provider(runtime_id, ProviderRole::Runtime)?;
-        let token = runtime_token(&state.config, runtime)?;
+        let config = state.config();
+        let runtime = config.provider(runtime_id, ProviderRole::Runtime)?;
+        let token = runtime_token(&config, runtime)?;
         let mut url = Url::parse(&runtime.url)?;
         url.path_segments_mut()
             .map_err(|()| anyhow!("runtime provider URL cannot have a path"))?
@@ -491,10 +483,6 @@ async fn runtime_activity(
         None
     })
 }
-
-/// How many observations of one runtime core follows at once. More wait in
-/// the queue; messages are unaffected.
-const OBSERVATION_WORKERS: u32 = 4;
 
 /// Runs a runtime's turns of one lane until `stopping` is cancelled. An idle
 /// worker waits for core to signal new work instead of polling. A turn
@@ -559,11 +547,12 @@ async fn run_next(
         RuntimeTurnRequest,
     ) -> Result<RuntimeTurnResponse, TurnFailure>,
 ) -> Result<WorkerStep> {
-    let runtime = state.config.provider(runtime_id, ProviderRole::Runtime)?;
+    let config = state.config();
+    let runtime = config.provider(runtime_id, ProviderRole::Runtime)?;
     if !runtime.enabled {
         return Ok(WorkerStep::Backoff);
     }
-    let token = runtime_token(&state.config, runtime)?;
+    let token = runtime_token(&config, runtime)?;
     state
         .core
         .run_next(runtime_id, lane, stopping, async |request| {
@@ -606,7 +595,7 @@ async fn claim_delivery(
     headers: HeaderMap,
     Query(query): Query<ClaimQuery>,
 ) -> Result<Json<Option<Delivery>>, ApiError> {
-    let interface = interface_provider(&headers, &state.config)?.id.clone();
+    let interface = interface_provider(&headers, &state.config())?.id.clone();
     let owner = interface_instance(&headers)?.to_owned();
     let claimed = state
         .core
@@ -622,7 +611,7 @@ async fn reconcile_delivery_claims(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<DeliveryReconciliation>, ApiError> {
-    let interface = interface_provider(&headers, &state.config)?.id.clone();
+    let interface = interface_provider(&headers, &state.config())?.id.clone();
     let owner = interface_instance(&headers)?.to_owned();
     let reconciled = state
         .core
@@ -637,7 +626,7 @@ async fn acknowledge_delivery(
     AxumPath(id): AxumPath<i64>,
     Json(ack): Json<DeliveryAck>,
 ) -> Result<StatusCode, ApiError> {
-    let interface = interface_provider(&headers, &state.config)?.id.clone();
+    let interface = interface_provider(&headers, &state.config())?.id.clone();
     let owner = interface_instance(&headers)?.to_owned();
     state
         .core
@@ -651,7 +640,7 @@ async fn inspect_turn(
     headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<TurnInspection>, ApiError> {
-    authorize(&headers, &state.config.value.core.operator_token_hash)?;
+    authorize(&headers, &state.config().value.core.operator_token_hash)?;
     state
         .core
         .inspect_turn(&id)?
@@ -670,7 +659,7 @@ async fn recent_turns(
     headers: HeaderMap,
     Query(query): Query<RecentQuery>,
 ) -> Result<Json<Vec<TurnSummary>>, ApiError> {
-    authorize(&headers, &state.config.value.core.operator_token_hash)?;
+    authorize(&headers, &state.config().value.core.operator_token_hash)?;
     Ok(Json(state.core.recent_turns(
         query.event_id.as_deref(),
         query.limit.unwrap_or(20),
@@ -681,15 +670,84 @@ async fn status(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<StatusReport>, ApiError> {
-    authorize(&headers, &state.config.value.core.operator_token_hash)?;
-    let providers = provider_health(&state.client, &state.config).await;
+    let config = state.config();
+    authorize(&headers, &config.value.core.operator_token_hash)?;
+    let providers = provider_health(&state.client, &config).await;
     Ok(Json(StatusReport {
         release: RELEASE_VERSION.to_owned(),
-        agent_id: state.config.value.agent.id.clone(),
+        agent_id: config.value.agent.id.clone(),
         providers,
         turns: state.core.turn_counts()?,
         deliveries: state.core.delivery_counts()?,
         recent_turns: state.core.recent_turns(None, 10)?,
+    }))
+}
+
+/// The registry serving, its runtimes' workers, and how the file differs.
+async fn registry_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<RegistryStatus>, ApiError> {
+    let config = state.config();
+    authorize(&headers, &config.value.core.operator_token_hash)?;
+    Ok(Json(RegistryStatus::of(
+        &config,
+        &state.workers.borrow(),
+        state.registry.compare(),
+    )))
+}
+
+/// How long an apply waits for the workers to be arranged for it before
+/// answering with how they stand.
+const ARRANGEMENT_WAIT: Duration = Duration::from_secs(5);
+
+/// Serves the registry file when it differs from what serves only in what
+/// applies live; otherwise names why it does not. The runtime programs are
+/// not started or stopped: this changes which runtimes core admits work
+/// for and runs it by, and how many of their conversations at once.
+async fn apply_registry(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Applied>, ApiError> {
+    authorize(&headers, &state.config().value.core.operator_token_hash)?;
+    let changed = match state.registry.apply(&state.core).await {
+        Ok(changed) => changed,
+        Err(Refusal::Invalid(error)) => {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("the registry file is not valid: {error:#}; nothing was applied"),
+            ));
+        }
+        Err(Refusal::Restart(difference)) => {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                format!(
+                    "the registry file changes what only a restart applies ({}); nothing was \
+                     applied",
+                    difference.restart.join(", ")
+                ),
+            ));
+        }
+        Err(Refusal::Facts(error)) => return Err(error.into()),
+    };
+    let config = state.config();
+    let mut census = state.workers.subscribe();
+    let arranged = tokio::time::timeout(
+        ARRANGEMENT_WAIT,
+        census.wait_for(|census| {
+            census
+                .registry
+                .as_ref()
+                .is_some_and(|arranged| Arc::ptr_eq(arranged, &config))
+        }),
+    )
+    .await;
+    if !matches!(arranged, Ok(Ok(_))) {
+        warn!("runtime workers were not arranged for the applied registry in time");
+    }
+    Ok(Json(Applied {
+        changed,
+        runtimes: ServingRuntime::all(&config, &state.workers.borrow()),
     }))
 }
 
