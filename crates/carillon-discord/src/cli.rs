@@ -276,6 +276,7 @@ async fn call(
         }
     };
     let mut response = loopback::client()
+        .retry(reqwest::retry::never())
         .timeout(Duration::from_secs(35))
         .build()?
         .post(&url)
