@@ -19,7 +19,7 @@ An operator can:
 3. converse through Pi with channel- or thread-scoped continuity, including files and images attached to messages;
 4. use Pi-native tools, extensions, and skills with the owner's Unix authority, and follow what a running turn is doing in a Discord card kept as the work's summary;
 5. choose the model and its engine settings for the agent or for one conversation with `/model` in Discord, and run the runtime's own commands and skills in a conversation with `/command`;
-6. restart the Discord or Pi provider independently, and install or reset Discord's command module without restarting it, keeping an installed module across restarts and updates;
+6. restart the Discord or Pi provider independently, and install or reset the Discord module (its commands and work cards) without restarting it, keeping an installed module across restarts and updates;
 7. inspect recent turns and current provider/resource identity; and
 8. back up and restore the stopped installation.
 

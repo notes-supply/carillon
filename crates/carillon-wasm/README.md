@@ -21,5 +21,5 @@ mise run test:integration
 ```
 
 The host's local tests cover ABI validation, isolation, memory and deadlines.
-The service integration suite exercises the compiled Discord command module and
+The service integration suite exercises the compiled Discord module and
 its install/reset path. A provider that does not need replaceable modules need not use Wasm.

@@ -13,18 +13,18 @@ use crate::{
 
 use crate::{
     InterfaceError,
-    activity::{CardRecords, activity_monitor, job_summary},
+    activity::{CardRecords, activity_monitor},
     client::CoreClient,
-    commands::{
-        Change, ChangeError, CommandFiles, Commands, DiscordApp, InteractionCalls, MODULE_LIMIT,
-        Refusal, Status, Submissions,
-    },
     config::{DiscordConfig, state_directory},
     conversations::{
         IncomingMessage, Participation, admit_identity, admit_message,
         prepare_deterministic_conversation,
     },
     delivery::{Feedback, PROMPT_FEEDBACK, Reactions, delivery_loop},
+    module::{
+        Change, ChangeError, DiscordApp, InteractionCalls, MODULE_LIMIT, Module, ModuleFiles,
+        Refusal, Status, Submissions,
+    },
 };
 #[cfg(test)]
 use crate::{
@@ -40,12 +40,13 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use carillon_discord_commands::contract::{InteractionKind, Reply};
+use carillon_discord_module::contract::{CardRequest, InteractionKind, Reply};
 use carillon_installation::config::{
     LoadedConfig, ProviderRole, RELEASE_VERSION, attachment_staging, read_token_file, token_matches,
 };
 use carillon_protocol::model::{
-    Delivery, DeliveryOutcome, DeliveryReconciliation, EventReceipt, Health, ModelQuery, TurnState,
+    Delivery, DeliveryOutcome, DeliveryReconciliation, EventReceipt, Health, Job, ModelQuery,
+    TurnState,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -96,7 +97,7 @@ struct DiscordState {
     health: Health,
     core: CoreClient,
     participation: Arc<Participation>,
-    commands: Arc<Commands>,
+    module: Arc<Module>,
     /// Absent in deterministic mode, where no Discord application exists.
     app: Option<Arc<DiscordApp>>,
     /// The reactions shown on messages, with the Discord application.
@@ -114,7 +115,7 @@ pub(crate) struct ServeOptions<'a> {
     pub provider_id: &'a str,
     pub token_file: &'a Path,
     pub discord_token_file: Option<&'a Path>,
-    pub commands: &'a Path,
+    pub module: &'a Path,
     pub deterministic: bool,
 }
 
@@ -141,11 +142,11 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
     let participation = Arc::new(Participation::load(
         state_directory(&config, &provider.id).join("participation.json"),
     )?);
-    let commands = Arc::new(
-        Commands::load(CommandFiles::of(
+    let module = Arc::new(
+        Module::load(ModuleFiles::of(
             &config,
             &provider.id,
-            options.commands.to_path_buf(),
+            options.module.to_path_buf(),
         ))
         .await?,
     );
@@ -181,7 +182,7 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
         health,
         core,
         participation,
-        commands,
+        module,
         app: None,
         reactions: None,
         lanes: None,
@@ -210,7 +211,7 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
 }
 
 /// Runs the provider against Discord: authenticates the bot, registers the
-/// command module's commands when they changed, then serves the gateway,
+/// Discord module's commands when they changed, then serves the gateway,
 /// deliveries, and the operator endpoints together.
 async fn connect(
     mut state: DiscordState,
@@ -237,7 +238,7 @@ async fn connect(
         application_id,
         guild_id: guild(&state.discord)?,
     });
-    state.commands.reconcile(&app).await?;
+    state.module.reconcile(&app).await?;
     state.app = Some(app);
     let reactions = Reactions::new(http.clone(), state.discord.clone());
     state.reactions = Some(reactions.clone());
@@ -267,6 +268,7 @@ async fn connect(
     let mut monitoring = tokio::spawn(activity_monitor(
         state.core.clone(),
         http.clone(),
+        state.module.clone(),
         state.discord.clone(),
         cards,
         heard,
@@ -338,10 +340,8 @@ fn discord_router(state: DiscordState, deterministic: bool) -> Router {
         .route("/health", get(discord_health))
         .route("/v1/operations", post(discord_operation))
         .route(
-            "/v1/commands",
-            get(command_status)
-                .put(install_commands)
-                .delete(reset_commands),
+            "/v1/module",
+            get(module_status).put(install_module).delete(reset_module),
         );
     if deterministic {
         router
@@ -421,19 +421,19 @@ async fn discord_operation(
     })
 }
 
-async fn command_status(
+async fn module_status(
     State(state): State<DiscordState>,
     headers: HeaderMap,
 ) -> Result<Json<Status>, InterfaceError> {
     authorize_operator(&state, &headers)?;
-    Ok(Json(state.commands.status(state.app.as_deref())))
+    Ok(Json(state.module.status(state.app.as_deref())))
 }
 
 /// Serves the uploaded module and saves it as the installed module. When the
 /// provider has a Discord application, definitions the record does not show
 /// registered are registered first; the module serves only once Discord
 /// confirmed them. The body is read only after authentication.
-async fn install_commands(
+async fn install_module(
     State(state): State<DiscordState>,
     headers: HeaderMap,
     body: Body,
@@ -444,22 +444,22 @@ async fn install_commands(
         .map_err(|_| InterfaceError {
             status: StatusCode::PAYLOAD_TOO_LARGE,
             message: format!(
-                "a command module may have at most {MODULE_LIMIT} bytes (16 MiB); nothing was changed"
+                "a Discord module may have at most {MODULE_LIMIT} bytes (16 MiB); nothing was changed"
             ),
         })?;
-    let (commands, app) = (state.commands.clone(), state.app.clone());
-    let change = tokio::spawn(async move { commands.install(&bytes, app.as_deref()).await });
+    let (module, app) = (state.module.clone(), state.app.clone());
+    let change = tokio::spawn(async move { module.install(&bytes, app.as_deref()).await });
     Ok(changed(&state, change.await))
 }
 
 /// Serves the release's module again and removes the installed one.
-async fn reset_commands(
+async fn reset_module(
     State(state): State<DiscordState>,
     headers: HeaderMap,
 ) -> Result<Response, InterfaceError> {
     authorize_operator(&state, &headers)?;
-    let (commands, app) = (state.commands.clone(), state.app.clone());
-    let change = tokio::spawn(async move { commands.reset(app.as_deref()).await });
+    let (module, app) = (state.module.clone(), state.app.clone());
+    let change = tokio::spawn(async move { module.reset(app.as_deref()).await });
     Ok(changed(&state, change.await))
 }
 
@@ -474,18 +474,18 @@ fn changed(
         Ok(Ok(change)) => return Json(change).into_response(),
         Ok(Err(failure)) => failure,
         Err(failure) => {
-            error!(error = %failure, "command module change failed");
+            error!(error = %failure, "Discord module change failed");
             return InterfaceError {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 message: format!(
-                    "the command module change failed unexpectedly ({failure}); check \
-                     `carillon discord commands` and run the same command again"
+                    "the Discord module change failed unexpectedly ({failure}); check \
+                     `carillon discord module` and run the same command again"
                 ),
             }
             .into_response();
         }
     };
-    error!(error = %failure, "command module change refused");
+    error!(error = %failure, "Discord module change refused");
     let (status, error) = match failure {
         ChangeError::Busy(installation) => (
             StatusCode::CONFLICT,
@@ -501,7 +501,7 @@ fn changed(
         ),
         ChangeError::Unusable(failure) => (
             StatusCode::UNPROCESSABLE_ENTITY,
-            format!("not a usable command module: {failure:#}; nothing was changed"),
+            format!("not a usable Discord module: {failure:#}; nothing was changed"),
         ),
         ChangeError::Record(failure) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -531,7 +531,7 @@ fn changed(
         status,
         Json(Refusal {
             error,
-            serving: state.commands.serving(),
+            serving: state.module.serving(),
         }),
     )
         .into_response()
@@ -611,12 +611,14 @@ async fn simulate(
         feedback.push("delivered".to_owned());
     }
     let card = if delivery.is_some() && state.discord.activity {
-        let job = state
+        let jobs = state
             .core
             .named_jobs(std::slice::from_ref(&receipt.turn_id))
             .await?;
-        job.first()
-            .and_then(|job| job_summary(job, &state.discord.activity_markers))
+        match jobs.into_iter().next() {
+            Some(job) => summary(&state, job).await,
+            None => None,
+        }
     } else {
         None
     };
@@ -628,6 +630,28 @@ async fn simulate(
         feedback,
     })
     .into_response())
+}
+
+/// The summary card the monitor would keep of a settled job, rendered by the
+/// module serving now; none when the job earned none or the module gave no
+/// usable card, which is logged as the monitor logs it.
+async fn summary(state: &DiscordState, job: Job) -> Option<Embed> {
+    let request = CardRequest {
+        job,
+        seen: None,
+        markers: state.discord.activity_markers.clone(),
+    };
+    state
+        .module
+        .render_card(&request)
+        .await
+        .unwrap_or_else(|error| {
+            warn!(
+                error = format!("{error:#}"),
+                "the Discord module gave no usable card"
+            );
+            None
+        })
 }
 
 /// Settles the simulated message's own turn's delivery and no other, as the
@@ -872,7 +896,7 @@ async fn run_interaction(state: &DiscordState, admitted: AdmittedInteraction) ->
             origin: admitted.origin,
         });
     }
-    state.commands.invoke(calls, admitted.interaction).await
+    state.module.invoke(calls, admitted.interaction).await
 }
 
 /// Validate content and components before editing an acknowledgement.
@@ -882,31 +906,31 @@ async fn run_interaction(state: &DiscordState, admitted: AdmittedInteraction) ->
 /// edit that leaves the acknowledgement hanging.
 fn validate_reply(reply: &Reply) -> Result<Vec<Component>> {
     twilight_validate::message::content(&reply.content)
-        .context("command module reply has unusable content")?;
+        .context("Discord module reply has unusable content")?;
     let components: Vec<Component> = serde_json::from_value(Value::Array(reply.components.clone()))
-        .context("command module reply has invalid components")?;
+        .context("Discord module reply has invalid components")?;
     if components.len() > COMPONENT_COUNT {
         bail!(
-            "command module reply has {} action rows; Discord allows {COMPONENT_COUNT}",
+            "Discord module reply has {} action rows; Discord allows {COMPONENT_COUNT}",
             components.len()
         );
     }
     for component in &components {
-        component_v1(component).context("command module reply has an unusable component")?;
+        component_v1(component).context("Discord module reply has an unusable component")?;
         // twilight checks the maxima; Discord also refuses an empty row or an
         // empty select menu.
         let Component::ActionRow(row) = component else {
-            bail!("command module reply has a component outside an action row");
+            bail!("Discord module reply has a component outside an action row");
         };
         if row.components.is_empty() {
-            bail!("command module reply has an empty action row");
+            bail!("Discord module reply has an empty action row");
         }
         for inner in &row.components {
             if let Component::SelectMenu(menu) = inner
                 && menu.kind == SelectMenuType::Text
                 && menu.options.as_ref().is_none_or(Vec::is_empty)
             {
-                bail!("command module reply has a select menu without options");
+                bail!("Discord module reply has a select menu without options");
             }
         }
     }
@@ -947,7 +971,7 @@ async fn handle_interaction(state: DiscordState, interaction: DiscordInteraction
             Ok(reply) => match validate_reply(&reply) {
                 Ok(components) => (reply.content, components),
                 Err(error) => {
-                    error!(%error, "command module reply was unusable");
+                    error!(%error, "Discord module reply was unusable");
                     (
                         "The command produced an unusable reply.".to_owned(),
                         Vec::new(),
@@ -955,7 +979,7 @@ async fn handle_interaction(state: DiscordState, interaction: DiscordInteraction
                 }
             },
             Err(error) => {
-                error!(%error, "command module invocation failed");
+                error!(%error, "Discord module invocation failed");
                 ("The command could not be completed.".to_owned(), Vec::new())
             }
         },

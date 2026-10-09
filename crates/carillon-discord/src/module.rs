@@ -1,7 +1,8 @@
-//! Hosting of the replaceable command module: choosing the module to serve,
+//! Hosting of the replaceable Discord module: choosing the module to serve,
 //! learning which commands it defines, registering those with Discord,
-//! running each interaction through it with the native model operations it
-//! may ask for, and installing or resetting the module while serving.
+//! running each interaction through it with the native operations it may ask
+//! for, rendering work cards through it without any, and installing or
+//! resetting the module while serving.
 //!
 //! Three facts have separate owners. Memory holds the generation serving now.
 //! The disk holds what the next start serves: the operator-installed module
@@ -19,16 +20,20 @@ use std::{
 use tokio::time::{Instant, timeout_at};
 
 use anyhow::{Context as _, Result, bail};
-use carillon_discord_commands::contract::{
-    CONTRACT, Description, HostReply, HostRequest, Intent, Interaction, Invocation, Outcome, Reply,
+use carillon_discord_module::contract::{
+    ActivityMarkers, CONTRACT, Card, CardRequest, Description, HostReply, HostRequest, Intent,
+    Interaction, Invocation, Outcome, Reply,
 };
 use carillon_installation::{
     config::LoadedConfig,
     filesystem::{PublishError, atomic_write, publish, remove, sync_ancestors},
     maintenance::MaintenanceLock,
 };
-use carillon_protocol::model::{ModelQuery, ModelScope, ModelUpdate};
-use carillon_wasm::{Host, Module, Native};
+use carillon_protocol::model::{
+    ActivityPhase, DeliveryState, Job, JobTurn, ModelQuery, ModelScope, ModelUpdate, Origin,
+    TurnActivity, TurnState,
+};
+use carillon_wasm::{Host, Module as Compiled, Native};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -36,7 +41,7 @@ use tracing::{info, warn};
 use twilight_http::Client as DiscordHttp;
 use twilight_model::{
     application::command::Command,
-    channel::message::AllowedMentions,
+    channel::message::{AllowedMentions, Embed},
     id::{
         Id,
         marker::{ApplicationMarker, ChannelMarker, GuildMarker},
@@ -54,6 +59,11 @@ use crate::{
 const DEADLINE: Duration = Duration::from_secs(10);
 /// Description is pure computation; a module that needs longer is broken.
 const DESCRIBE_DEADLINE: Duration = Duration::from_secs(2);
+/// A card is pure computation too; one that takes longer is not shown.
+const CARD_DEADLINE: Duration = Duration::from_secs(1);
+/// The largest card request sent to the module, well within its memory. A
+/// job core reads is far smaller unless a runtime's snapshot is not bounded.
+const CARD_REQUEST_LIMIT: usize = 1 << 20;
 /// The largest module an operator may install.
 pub const MODULE_LIMIT: usize = 16 << 20;
 
@@ -101,8 +111,8 @@ impl InteractionCalls {
     }
 }
 
-/// Native calls for invocations that must not perform any, or those of
-/// one interaction, which all end by `until`.
+/// Native calls for invocations that must not perform any (descriptions and
+/// cards), or those of one interaction, which all end by `until`.
 enum Calls {
     Refused,
     Interaction {
@@ -366,9 +376,9 @@ impl fmt::Display for Source {
     }
 }
 
-/// The files of one provider instance's commands.
+/// The files of one provider instance's module.
 #[derive(Clone, Debug)]
-pub struct CommandFiles {
+pub struct ModuleFiles {
     /// The release's module; release updates replace it.
     pub release: PathBuf,
     /// The operator-installed module, outside the release's files.
@@ -379,13 +389,13 @@ pub struct CommandFiles {
     pub installation: PathBuf,
 }
 
-impl CommandFiles {
+impl ModuleFiles {
     /// The files of a configured instance whose release module is `release`.
     pub fn of(config: &LoadedConfig, provider_id: &str, release: PathBuf) -> Self {
         let state = crate::config::state_directory(config, provider_id);
         Self {
             release,
-            installed: state.join("command-module.wasm"),
+            installed: state.join("module.wasm"),
             record: state.join("commands.json"),
             installation: config.root.clone(),
         }
@@ -401,12 +411,12 @@ impl CommandFiles {
             Ok(bytes) => Ok((Source::Installed, bytes)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let bytes = fs::read(&self.release).with_context(|| {
-                    format!("read release command module {}", self.release.display())
+                    format!("read release Discord module {}", self.release.display())
                 })?;
                 Ok((Source::Release, bytes))
             }
             Err(error) => Err(error).with_context(|| {
-                format!("read installed command module {}", self.installed.display())
+                format!("read installed Discord module {}", self.installed.display())
             }),
         }
     }
@@ -415,7 +425,7 @@ impl CommandFiles {
 /// One immutable module and the definitions it described. In-flight calls
 /// retain their generation when a replacement starts serving.
 struct Generation {
-    module: Module,
+    module: Compiled,
     definitions: Vec<Value>,
     source: Source,
     digest: String,
@@ -531,7 +541,7 @@ pub enum ChangeError {
     Busy(PathBuf),
     /// The maintenance lock could not be taken.
     Lock(anyhow::Error),
-    /// The candidate is not a usable command module.
+    /// The candidate is not a usable Discord module.
     Unusable(anyhow::Error),
     /// The registration record could not be cleared durably, so Discord was
     /// not contacted.
@@ -573,34 +583,34 @@ struct Record {
 
 /// The module in use, its command definitions, and the files that decide
 /// what the next start serves and what Discord holds.
-pub struct Commands {
+pub struct Module {
     host: Host<Calls>,
-    files: CommandFiles,
+    files: ModuleFiles,
     current: Mutex<Arc<Generation>>,
     /// Queues changes within this process; the maintenance lock refuses
     /// changes from other processes.
     changes: tokio::sync::Mutex<()>,
 }
 
-impl Commands {
+impl Module {
     /// Loads the module the next start serves and learns its commands.
     ///
     /// # Errors
     ///
     /// Returns an error when the selected module is unusable; an unusable
     /// installed module is named so the operator can remove it.
-    pub async fn load(files: CommandFiles) -> Result<Self> {
+    pub async fn load(files: ModuleFiles) -> Result<Self> {
         let host = Host::new()?;
         let (source, bytes) = files.selected()?;
         let generation = prepare(&host, &bytes, source).await.map_err(|error| {
             if source == Source::Installed {
                 error.context(format!(
-                    "installed command module {} is unusable; remove it to serve the release's module",
+                    "installed Discord module {} is unusable; remove it to serve the release's module",
                     files.installed.display()
                 ))
             } else {
                 error.context(format!(
-                    "release command module {} is unusable",
+                    "release Discord module {} is unusable",
                     files.release.display()
                 ))
             }
@@ -639,7 +649,7 @@ impl Commands {
         let bytes = fs::read(&self.files.release)
             .with_context(|| {
                 format!(
-                    "read release command module {}",
+                    "read release Discord module {}",
                     self.files.release.display()
                 )
             })
@@ -693,11 +703,24 @@ impl Commands {
         };
         match outcome(&self.host, &generation.module, calls, &payload, DEADLINE).await? {
             Outcome::Reply(reply) => Ok(reply),
-            Outcome::Failure(message) => bail!("command module failed: {message}"),
-            Outcome::Description(_) => {
-                bail!("command module answered an interaction with a description")
+            Outcome::Failure(message) => bail!("Discord module failed: {message}"),
+            Outcome::Description(_) | Outcome::Card(_) => {
+                bail!("Discord module answered an interaction with something else")
             }
         }
+    }
+
+    /// Renders a job's card through the module serving now: the embed to
+    /// show, or `None` when a settled job's card goes. The module makes no
+    /// native call, and what it answers is checked against Discord's embed
+    /// limits. A failure shows nothing new; the card keeps what it showed.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the module gave no usable card.
+    pub async fn render_card(&self, request: &CardRequest) -> Result<Option<Embed>> {
+        let generation = self.current();
+        card(&self.host, &generation.module, request).await
     }
 
     async fn exclusive(
@@ -736,7 +759,7 @@ impl Commands {
         };
         let saved = Saved::of(&self.files.installed, saved);
         if saved != Saved::Durable {
-            warn!(?saved, path = %self.files.installed.display(), "command module serves but its saved state is not confirmed");
+            warn!(?saved, path = %self.files.installed.display(), "Discord module serves but its saved state is not confirmed");
         }
         Ok(Change {
             serving,
@@ -768,7 +791,7 @@ impl Commands {
             &mut *self.current.lock().unwrap_or_else(PoisonError::into_inner),
             Arc::new(candidate),
         );
-        info!(%source, "command module activated");
+        info!(%source, "Discord module activated");
         previous
     }
 
@@ -831,7 +854,7 @@ impl Commands {
     }
 }
 
-/// Validates `bytes` as a command module this provider can serve, without
+/// Validates `bytes` as a Discord module this provider can serve, without
 /// serving it: the commands it defines, or why it is unusable.
 ///
 /// # Errors
@@ -865,7 +888,7 @@ fn digest(bytes: &[u8]) -> String {
 async fn prepare(host: &Host<Calls>, bytes: &[u8], source: Source) -> Result<Generation> {
     if bytes.len() > MODULE_LIMIT {
         bail!(
-            "the module has {} bytes; a command module may have at most {MODULE_LIMIT} bytes (16 MiB)",
+            "the module has {} bytes; a Discord module may have at most {MODULE_LIMIT} bytes (16 MiB)",
             bytes.len()
         );
     }
@@ -873,17 +896,26 @@ async fn prepare(host: &Host<Calls>, bytes: &[u8], source: Source) -> Result<Gen
     let payload = serde_json::to_vec(&Invocation::Describe)?;
     let description = match outcome(host, &module, Calls::Refused, &payload, DESCRIBE_DEADLINE)
         .await
-        .context("describe command module")?
+        .context("describe Discord module")?
     {
         Outcome::Description(description) => description,
-        Outcome::Reply(_) | Outcome::Failure(_) => bail!("command module did not describe itself"),
+        Outcome::Reply(_) | Outcome::Card(_) | Outcome::Failure(_) => {
+            bail!("Discord module did not describe itself")
+        }
     };
     let Description { contract, commands } = description;
     if contract != CONTRACT {
-        bail!("command module speaks contract {contract}; this provider speaks {CONTRACT}");
+        bail!("Discord module speaks contract {contract}; this provider speaks {CONTRACT}");
     }
     for definition in &commands {
         command(definition)?;
+    }
+    // A module that cannot show a job at work, nor end a settled job's card,
+    // would leave every card stale.
+    for (case, request) in smoke_cards() {
+        card(host, &module, &request)
+            .await
+            .with_context(|| format!("render a card of {case}"))?;
     }
     Ok(Generation {
         module,
@@ -893,9 +925,108 @@ async fn prepare(host: &Host<Calls>, bytes: &[u8], source: Source) -> Result<Gen
     })
 }
 
+/// One card through `module`, which makes no native call: the embed it
+/// shows, valid as Discord takes it, or `None` for a settled job whose card
+/// goes.
+async fn card(
+    host: &Host<Calls>,
+    module: &Compiled,
+    request: &CardRequest,
+) -> Result<Option<Embed>> {
+    let payload = serde_json::to_vec(&InvocationRef::Card(request))?;
+    if payload.len() > CARD_REQUEST_LIMIT {
+        bail!(
+            "the job's card request has {} bytes, more than the {CARD_REQUEST_LIMIT} a module is given",
+            payload.len()
+        );
+    }
+    let card = match outcome(host, module, Calls::Refused, &payload, CARD_DEADLINE).await? {
+        Outcome::Card(card) => card,
+        Outcome::Failure(message) => bail!("Discord module failed: {message}"),
+        Outcome::Description(_) | Outcome::Reply(_) => {
+            bail!("Discord module answered a card with something else")
+        }
+    };
+    match card {
+        Card::Show(embed) => {
+            let embed: Embed = serde_json::from_value(embed).context("decode the card's embed")?;
+            twilight_validate::embed::embed(&embed).context("the card's embed is unusable")?;
+            Ok(Some(embed))
+        }
+        Card::Remove if request.job.settled().is_some() => Ok(None),
+        Card::Remove => bail!("Discord module removed the card of a job that has not settled"),
+    }
+}
+
+/// [`Invocation::Card`] by reference, so a card request is serialized
+/// without first being copied.
+#[derive(Serialize)]
+enum InvocationRef<'a> {
+    Card(&'a CardRequest),
+}
+
+/// Jobs a module must show on a card before it serves: one at work, and
+/// settled ones with and without a summary to keep.
+fn smoke_cards() -> [(&'static str, CardRequest); 3] {
+    let turn = |state, activity: Option<TurnActivity>, delivery| JobTurn {
+        turn_id: "turn".to_owned(),
+        state,
+        accepted_at: 1_790_000_000,
+        finished_at: (state != TurnState::Running).then_some(1_790_000_045),
+        activity,
+        delivery,
+    };
+    let request = |turn| CardRequest {
+        job: Job {
+            origin: Origin {
+                turn_id: "turn".to_owned(),
+                accepted_at: 1_790_000_000,
+            },
+            target_id: "1".to_owned(),
+            turns: vec![turn],
+            earlier: false,
+        },
+        seen: None,
+        markers: ActivityMarkers::default(),
+    };
+    let answer = TurnActivity {
+        phase: ActivityPhase::Model,
+        headline: Some("Answering.".to_owned()),
+        running: Vec::new(),
+        recent: Vec::new(),
+        tool_calls: 0,
+        work: None,
+        notes: Vec::new(),
+        agent: None,
+        partial: false,
+    };
+    [
+        (
+            "a job at work",
+            request(turn(TurnState::Running, Some(answer.clone()), None)),
+        ),
+        (
+            "a stopped job",
+            request(turn(
+                TurnState::Interrupted,
+                None,
+                Some(DeliveryState::Delivered),
+            )),
+        ),
+        (
+            "an answered job",
+            request(turn(
+                TurnState::Completed,
+                Some(answer),
+                Some(DeliveryState::Delivered),
+            )),
+        ),
+    ]
+}
+
 async fn outcome(
     host: &Host<Calls>,
-    module: &Module,
+    module: &Compiled,
     calls: Calls,
     payload: &[u8],
     deadline: Duration,
@@ -904,7 +1035,7 @@ async fn outcome(
         .invoke(module, calls, payload, deadline)
         .await
         .map_err(anyhow::Error::from)?;
-    serde_json::from_slice(&output).context("decode command module outcome")
+    serde_json::from_slice(&output).context("decode Discord module outcome")
 }
 
 /// A command definition as Discord's registration API expects it. Modules
@@ -919,9 +1050,12 @@ fn command(definition: &Value) -> Result<Command> {
 }
 
 #[cfg(test)]
+mod measurement;
+
+#[cfg(test)]
 pub(crate) mod tests {
     use std::{
-        path::Path,
+        path::{Path, PathBuf},
         sync::{
             Arc,
             atomic::{AtomicU16, AtomicUsize, Ordering},
@@ -929,14 +1063,15 @@ pub(crate) mod tests {
         time::Duration,
     };
 
+    use anyhow::Context as _;
     use axum::{Router, http::StatusCode, routing::put};
-    use carillon_discord_commands::contract::{Interaction, InteractionKind};
+    use carillon_discord_module::contract::{CardRequest, Interaction, InteractionKind};
     use carillon_installation::maintenance::MaintenanceLock;
     use serde_json::{Value, json};
 
     use super::{
-        ChangeError, CommandFiles, Commands, DiscordApp, MODULE_LIMIT, NextStart, Registration,
-        Saved, Source,
+        ChangeError, DiscordApp, MODULE_LIMIT, Module, ModuleFiles, NextStart, Registration, Saved,
+        Source,
     };
 
     /// `text` as the contents of a WAT string.
@@ -944,11 +1079,22 @@ pub(crate) mod tests {
         text.replace('\\', "\\\\").replace('"', "\\\"")
     }
 
-    /// A module that answers `Describe` with `description` and every other
-    /// invocation with `reply`, in binary form.
+    /// A module that answers `Describe` with `description`, a card with an
+    /// embed that says so, and every other invocation with `reply`, in binary
+    /// form.
     pub(crate) fn module(description: &str, reply: &str) -> anyhow::Result<Vec<u8>> {
+        module_with_card(description, reply, &showing("A test card"))
+    }
+
+    /// [`module`], answering every card with `card`.
+    pub(crate) fn module_with_card(
+        description: &str,
+        reply: &str,
+        card: &str,
+    ) -> anyhow::Result<Vec<u8>> {
         let describe_length =
-            serde_json::to_vec(&carillon_discord_commands::contract::Invocation::Describe)?.len();
+            serde_json::to_vec(&carillon_discord_module::contract::Invocation::Describe)?.len();
+        // A card request begins `{"Card"`; an interaction `{"Interaction"`.
         let text = format!(
             r#"(module
   (memory (export "memory") 1)
@@ -956,20 +1102,65 @@ pub(crate) mod tests {
   (global $output (mut i32) (i32.const 0))
   (data (i32.const 1024) "{}")
   (data (i32.const 4096) "{}")
+  (data (i32.const 16384) "{}")
   (func (export "input") (param $length i32) (result i32)
     (global.set $length (local.get $length))
-    (i32.const 8192))
+    (i32.const 32768))
   (func (export "invoke") (result i32)
     (if (result i32) (i32.eq (global.get $length) (i32.const {describe_length}))
       (then (global.set $output (i32.const 1024)) (i32.const {}))
-      (else (global.set $output (i32.const 4096)) (i32.const {}))))
+      (else
+        (if (result i32) (i32.eq (i32.load8_u (i32.const 32770)) (i32.const 67))
+          (then (global.set $output (i32.const 16384)) (i32.const {}))
+          (else (global.set $output (i32.const 4096)) (i32.const {}))))))
   (func (export "output") (result i32) (global.get $output)))"#,
             escape(description),
             escape(reply),
+            escape(card),
             description.len(),
+            card.len(),
             reply.len(),
         );
         Ok(wat::parse_str(text)?)
+    }
+
+    /// The release module as built for this tree: the file
+    /// `CARILLON_DISCORD_MODULE` names, or `mise run build:module`'s output.
+    pub(crate) fn release_module_bytes() -> anyhow::Result<Vec<u8>> {
+        let path = std::env::var_os("CARILLON_DISCORD_MODULE").map_or_else(
+            || {
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../target/wasm32-unknown-unknown/wasm/carillon_discord_module.wasm")
+            },
+            PathBuf::from,
+        );
+        std::fs::read(&path).with_context(|| {
+            format!(
+                "read the built Discord module {}; build it with `mise run build:module`",
+                path.display()
+            )
+        })
+    }
+
+    /// The release module, compiled once for the tests that draw real cards.
+    pub(crate) async fn release_module() -> anyhow::Result<Arc<Module>> {
+        static RELEASE: tokio::sync::OnceCell<Arc<Module>> = tokio::sync::OnceCell::const_new();
+        RELEASE
+            .get_or_try_init(|| async {
+                let directory = tempfile::tempdir()?;
+                std::fs::write(
+                    directory.path().join("release.wasm"),
+                    release_module_bytes()?,
+                )?;
+                Ok::<_, anyhow::Error>(Arc::new(Module::load(files(directory.path())).await?))
+            })
+            .await
+            .cloned()
+    }
+
+    /// A card answer showing an embed described by `text`.
+    pub(crate) fn showing(text: &str) -> String {
+        json!({"Card": {"Show": {"type": "rich", "description": text}}}).to_string()
     }
 
     /// [`module`], written to `path`.
@@ -979,7 +1170,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn describing(commands: &[Value]) -> String {
-        json!({"Description": {"contract": carillon_discord_commands::contract::CONTRACT, "commands": commands}}).to_string()
+        json!({"Description": {"contract": carillon_discord_module::contract::CONTRACT, "commands": commands}}).to_string()
     }
 
     pub(crate) fn replying(content: &str, components: &[Value]) -> String {
@@ -992,10 +1183,10 @@ pub(crate) mod tests {
 
     /// Command files in `root`: the release module at `release.wasm`, state
     /// under `state/`, and `root` as the installation.
-    pub(crate) fn files(root: &Path) -> CommandFiles {
-        CommandFiles {
+    pub(crate) fn files(root: &Path) -> ModuleFiles {
+        ModuleFiles {
             release: root.join("release.wasm"),
-            installed: root.join("state/command-module.wasm"),
+            installed: root.join("state/module.wasm"),
             record: root.join("state/commands.json"),
             installation: root.to_path_buf(),
         }
@@ -1006,14 +1197,14 @@ pub(crate) mod tests {
         root: &Path,
         names: &[&str],
         reply: &str,
-    ) -> anyhow::Result<Commands> {
+    ) -> anyhow::Result<Module> {
         let definitions: Vec<Value> = names.iter().map(|name| definition(name)).collect();
         write_module(
             &root.join("release.wasm"),
             &describing(&definitions),
             &replying(reply, &[]),
         )?;
-        Commands::load(files(root)).await
+        Module::load(files(root)).await
     }
 
     pub(crate) fn variant(names: &[&str], reply: &str) -> anyhow::Result<Vec<u8>> {
@@ -1102,7 +1293,7 @@ pub(crate) mod tests {
         }
     }
 
-    async fn reply(commands: &Commands) -> anyhow::Result<String> {
+    async fn reply(commands: &Module) -> anyhow::Result<String> {
         Ok(commands.invoke(calls()?, interaction()).await?.content)
     }
 
@@ -1112,7 +1303,7 @@ pub(crate) mod tests {
         let release = directory.path().join("release.wasm");
         let reply = replying("unused", &[]);
         for description in [
-            json!({"Description": {"contract": carillon_discord_commands::contract::CONTRACT + 1, "commands": []}}).to_string(),
+            json!({"Description": {"contract": carillon_discord_module::contract::CONTRACT + 1, "commands": []}}).to_string(),
             describing(&[json!({"name": "missing-type"})]),
             reply.clone(),
             "not json".to_owned(),
@@ -1121,7 +1312,7 @@ pub(crate) mod tests {
             assert!(super::check(&bytes).await.is_err(), "accepted {description}");
             std::fs::write(&release, bytes)?;
             assert!(
-                Commands::load(files(directory.path())).await.is_err(),
+                Module::load(files(directory.path())).await.is_err(),
                 "accepted {description}"
             );
         }
@@ -1174,19 +1365,19 @@ pub(crate) mod tests {
         assert_eq!(reply(&commands).await?, "wider");
 
         // A restart serves the saved module, even though the release differs.
-        let restarted = Commands::load(files(root)).await?;
+        let restarted = Module::load(files(root)).await?;
         assert_eq!(restarted.serving(), change.serving);
         assert_eq!(reply(&restarted).await?, "wider");
 
         // An unusable installed module refuses startup, naming the file.
         std::fs::write(&installed, b"\0asm broken")?;
-        let failure = Commands::load(files(root))
+        let failure = Module::load(files(root))
             .await
             .err()
             .map(|error| format!("{error:#}"))
             .unwrap_or_default();
         assert!(
-            failure.contains("command-module.wasm is unusable; remove it"),
+            failure.contains("module.wasm is unusable; remove it"),
             "{failure}"
         );
 
@@ -1196,7 +1387,7 @@ pub(crate) mod tests {
         assert_eq!(change.saved, Saved::Durable);
         assert!(!installed.exists());
         assert_eq!(reply(&commands).await?, "release");
-        assert_eq!(Commands::load(files(root)).await?.serving(), change.serving);
+        assert_eq!(Module::load(files(root)).await?.serving(), change.serving);
         Ok(())
     }
 
@@ -1407,7 +1598,7 @@ pub(crate) mod tests {
         // A previously captured generation keeps both its code and metadata.
         assert_eq!(retained.definitions, vec![definition("initial")]);
         let payload = serde_json::to_vec(
-            &carillon_discord_commands::contract::Invocation::Interaction(interaction()),
+            &carillon_discord_module::contract::Invocation::Interaction(interaction()),
         )?;
         let old = super::outcome(
             &commands.host,
@@ -1419,8 +1610,8 @@ pub(crate) mod tests {
         .await?;
         assert_eq!(
             old,
-            carillon_discord_commands::contract::Outcome::Reply(
-                carillon_discord_commands::contract::Reply {
+            carillon_discord_module::contract::Outcome::Reply(
+                carillon_discord_module::contract::Reply {
                     content: "initial".to_owned(),
                     components: vec![],
                 }
@@ -1563,13 +1754,13 @@ pub(crate) mod tests {
         );
         assert_eq!(reply(&commands).await?, "padded");
         assert_eq!(
-            Commands::load(files(root)).await?.serving().commands,
+            Module::load(files(root)).await?.serving().commands,
             ["model"]
         );
 
         // A module placed on disk by other means obeys the same limit at startup.
         std::fs::write(files(root).installed, &over)?;
-        assert!(Commands::load(files(root)).await.is_err());
+        assert!(Module::load(files(root)).await.is_err());
         Ok(())
     }
 
@@ -1637,7 +1828,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn model_calls_preserve_the_conditional_write() -> anyhow::Result<()> {
         use axum::Json;
-        use carillon_discord_commands::contract::{HostReply, HostRequest};
+        use carillon_discord_module::contract::{HostReply, HostRequest};
         use carillon_protocol::model::{ModelQuery, ModelUpdate};
         use carillon_protocol::{model::ModelScope as Scope, models::Selection};
         let selection = Selection {
@@ -1779,7 +1970,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn commands_are_listed_and_submissions_anchored_in_the_conversation() -> anyhow::Result<()>
     {
-        use carillon_discord_commands::contract::{HostReply, HostRequest, Intent};
+        use carillon_discord_module::contract::{HostReply, HostRequest, Intent};
         use carillon_protocol::model::{CommandCatalog, ModelQuery, RuntimeCommand};
         let catalog = CommandCatalog {
             commands: vec![RuntimeCommand {
@@ -1884,7 +2075,7 @@ pub(crate) mod tests {
             &describing(&[]),
             &replying("hello", std::slice::from_ref(&button)),
         )?;
-        let commands = Commands::load(files(directory.path())).await?;
+        let commands = Module::load(files(directory.path())).await?;
         let reply = commands.invoke(calls()?, interaction()).await?;
         assert_eq!(reply.content, "hello");
         assert_eq!(reply.components, vec![button]);
@@ -1987,16 +2178,16 @@ pub(crate) mod tests {
 
     fn submit_request() -> anyhow::Result<Vec<u8>> {
         Ok(serde_json::to_vec(
-            &carillon_discord_commands::contract::HostRequest::Submit {
+            &carillon_discord_module::contract::HostRequest::Submit {
                 text: "/compact keep decisions".to_owned(),
-                intent: carillon_discord_commands::contract::Intent::Command,
+                intent: carillon_discord_module::contract::Intent::Command,
             },
         )?)
     }
 
     #[tokio::test]
     async fn slow_feedback_never_costs_a_command_its_admission() -> anyhow::Result<()> {
-        use carillon_discord_commands::contract::HostReply;
+        use carillon_discord_module::contract::HostReply;
         // Discord takes longer than the module's whole deadline to show the
         // processing reaction and typing.
         let trace = Arc::new(tokio::sync::Mutex::new(Vec::new()));
@@ -2034,7 +2225,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_command_core_does_not_answer_in_time_says_so_within_the_module_deadline()
     -> anyhow::Result<()> {
-        use carillon_discord_commands::contract::HostReply;
+        use carillon_discord_module::contract::HostReply;
         let trace = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let router = submission_server(
             carillon_protocol::model::CommandCatalog {
@@ -2077,12 +2268,13 @@ pub(crate) mod tests {
     /// for the runtime's commands, then submits `/compact keep decisions`,
     /// then replies `ran`.
     fn running_module() -> anyhow::Result<Vec<u8>> {
-        use carillon_discord_commands::contract::{HostRequest, Invocation};
+        use carillon_discord_module::contract::{HostRequest, Invocation};
         let describe = describing(&[definition("command")]);
         let describe_length = serde_json::to_vec(&Invocation::Describe)?.len();
         let commands = serde_json::to_string(&HostRequest::Commands)?;
         let submit = String::from_utf8(submit_request()?)?;
         let reply = replying("ran", &[]);
+        let card = showing("A test card");
         let text = format!(
             r#"(module
   (import "carillon" "call" (func $call (param i32 i32) (result i32)))
@@ -2093,6 +2285,7 @@ pub(crate) mod tests {
   (data (i32.const 2048) "{}")
   (data (i32.const 3072) "{}")
   (data (i32.const 4096) "{}")
+  (data (i32.const 6144) "{}")
   (func (export "input") (param $length i32) (result i32)
     (global.set $length (local.get $length))
     (i32.const 8192))
@@ -2100,16 +2293,22 @@ pub(crate) mod tests {
     (if (result i32) (i32.eq (global.get $length) (i32.const {describe_length}))
       (then (global.set $output (i32.const 1024)) (i32.const {}))
       (else
-        (drop (call $call (i32.const 2048) (i32.const {})))
-        (drop (call $call (i32.const 3072) (i32.const {})))
-        (global.set $output (i32.const 4096))
-        (i32.const {}))))
+        ;; A card request begins {{"Card"
+        (if (result i32) (i32.eq (i32.load8_u (i32.const 8194)) (i32.const 67))
+          (then (global.set $output (i32.const 6144)) (i32.const {}))
+          (else
+            (drop (call $call (i32.const 2048) (i32.const {})))
+            (drop (call $call (i32.const 3072) (i32.const {})))
+            (global.set $output (i32.const 4096))
+            (i32.const {}))))))
   (func (export "output") (result i32) (global.get $output)))"#,
             escape(&describe),
             escape(&commands),
             escape(&submit),
             escape(&reply),
+            escape(&card),
             describe.len(),
+            card.len(),
             commands.len(),
             submit.len(),
             reply.len(),
@@ -2143,7 +2342,7 @@ pub(crate) mod tests {
         let (calls, reactions, server) = submitting(router, |config| config.typing = false).await?;
         let directory = tempfile::tempdir()?;
         std::fs::write(directory.path().join("release.wasm"), running_module()?)?;
-        let commands = Commands::load(files(directory.path())).await?;
+        let commands = Module::load(files(directory.path())).await?;
         let started = std::time::Instant::now();
         let reply = commands.invoke(calls, interaction()).await?;
         let elapsed = started.elapsed();
@@ -2196,7 +2395,7 @@ pub(crate) mod tests {
         let (calls, reactions, server) = submitting(router, |config| config.typing = true).await?;
         let directory = tempfile::tempdir()?;
         std::fs::write(directory.path().join("release.wasm"), running_module()?)?;
-        let commands = Commands::load(files(directory.path())).await?;
+        let commands = Module::load(files(directory.path())).await?;
         let started = std::time::Instant::now();
         let reply = commands.invoke(calls, interaction()).await?;
         let elapsed = started.elapsed();
@@ -2514,7 +2713,7 @@ pub(crate) mod tests {
         let (calls, preparing) = preparing(Duration::from_secs(2)).await?;
         let directory = tempfile::tempdir()?;
         std::fs::write(directory.path().join("release.wasm"), running_module()?)?;
-        let commands = Commands::load(files(directory.path())).await?;
+        let commands = Module::load(files(directory.path())).await?;
         assert_eq!(commands.invoke(calls, interaction()).await?.content, "ran");
         // Core accepted the message before the command that followed it.
         assert_eq!(preparing.settled().await?, ["400", "901"]);
@@ -2524,7 +2723,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_command_still_waiting_at_its_deadline_is_not_sent_and_its_conversation_goes_on()
     -> anyhow::Result<()> {
-        use carillon_discord_commands::contract::HostReply;
+        use carillon_discord_module::contract::HostReply;
         let (calls, preparing) = preparing(Duration::from_secs(3)).await?;
         let started = std::time::Instant::now();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
@@ -2594,7 +2793,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_command_whose_marker_discord_does_not_confirm_is_not_sent_and_its_conversation_goes_on()
     -> anyhow::Result<()> {
-        use carillon_discord_commands::contract::HostReply;
+        use carillon_discord_module::contract::HostReply;
         let (accepted, markers, posted) = (
             Arc::new(tokio::sync::Mutex::new(Vec::new())),
             Arc::new(AtomicUsize::new(0)),
@@ -2642,7 +2841,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_command_waiting_when_the_provider_stops_is_not_sent() -> anyhow::Result<()> {
-        use carillon_discord_commands::contract::HostReply;
+        use carillon_discord_module::contract::HostReply;
         let (calls, preparing) = preparing(Duration::from_secs(30)).await?;
         let submit = submit_request()?;
         let waiting = tokio::spawn(async move { calls.answer(&submit, calls_until()).await });
@@ -2661,7 +2860,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn listing_commands_never_waits_for_the_conversation() -> anyhow::Result<()> {
-        use carillon_discord_commands::contract::{HostReply, HostRequest};
+        use carillon_discord_module::contract::{HostReply, HostRequest};
         // The conversation's message is being prepared for half a minute.
         let (calls, preparing) = preparing(Duration::from_secs(30)).await?;
         let started = std::time::Instant::now();
@@ -2697,7 +2896,7 @@ pub(crate) mod tests {
     async fn unconfirmed(
         serve: impl FnOnce(Arc<tokio::sync::Mutex<Vec<String>>>, Arc<AtomicUsize>) -> Router,
     ) -> anyhow::Result<(Preparing, Arc<tokio::sync::Mutex<Vec<String>>>)> {
-        use carillon_discord_commands::contract::HostReply;
+        use carillon_discord_module::contract::HostReply;
         let (accepted, markers) = (
             Arc::new(tokio::sync::Mutex::new(Vec::new())),
             Arc::new(AtomicUsize::new(0)),
@@ -2876,7 +3075,7 @@ pub(crate) mod tests {
     async fn stopped_while_submitting(
         answer: Duration,
         after: Duration,
-    ) -> anyhow::Result<(carillon_discord_commands::contract::HostReply, Vec<String>)> {
+    ) -> anyhow::Result<(carillon_discord_module::contract::HostReply, Vec<String>)> {
         let trace = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let (accepted, markers) = (
             Arc::new(tokio::sync::Mutex::new(Vec::new())),
@@ -2915,11 +3114,8 @@ pub(crate) mod tests {
     /// the reply says it may have been accepted, core got one attempt, the
     /// message behind it was never prepared, and the marker shows the
     /// uncertain reaction.
-    fn assert_unconfirmed(
-        reply: &carillon_discord_commands::contract::HostReply,
-        trace: &[String],
-    ) {
-        use carillon_discord_commands::contract::HostReply;
+    fn assert_unconfirmed(reply: &carillon_discord_module::contract::HostReply, trace: &[String]) {
+        use carillon_discord_module::contract::HostReply;
         assert_eq!(
             *reply,
             HostReply::Error("Carillon did not confirm that it accepted it; if it did, the answer follows in this conversation.".to_owned())
@@ -3091,7 +3287,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_late_processing_reaction_never_lands_after_the_outcome() -> anyhow::Result<()> {
-        use carillon_discord_commands::contract::HostReply;
+        use carillon_discord_module::contract::HostReply;
         // The coordinator's fault: Discord applies the processing reaction
         // four seconds after receiving it, after admission stopped waiting.
         let applied = Arc::new(tokio::sync::Mutex::new(Vec::new()));
@@ -3121,6 +3317,318 @@ pub(crate) mod tests {
                 format!("PUT {}", config.delivered_emoji),
             ]
         );
+        Ok(())
+    }
+
+    /// A module that answers the cards a module is checked with before it
+    /// serves, whose origin turn is `turn`, with a valid card, and every other
+    /// card by running `on_card`: WAT that leaves the output's length, with
+    /// each of `data` at its address. Whatever it does, it installs.
+    pub(crate) fn other_cards(on_card: &str, data: &[(u32, &str)]) -> anyhow::Result<Vec<u8>> {
+        let describe = describing(&[definition("model")]);
+        let describe_length =
+            serde_json::to_vec(&carillon_discord_module::contract::Invocation::Describe)?.len();
+        let card = showing("checked");
+        // The first byte of the origin turn's ID in `{"Card":{"job":{"origin":{"turn_id":"`.
+        let turn = 32768 + 37;
+        let text = format!(
+            r#"(module
+  (import "carillon" "call" (func $call (param i32 i32) (result i32)))
+  (import "carillon" "take" (func $take (param i32 i32)))
+  (memory (export "memory") 40)
+  (global $length (mut i32) (i32.const 0))
+  (global $output (mut i32) (i32.const 0))
+  (data (i32.const 1024) "{}")
+  (data (i32.const 4096) "{}")
+  {}
+  (func (export "input") (param $length i32) (result i32)
+    (global.set $length (local.get $length))
+    (i32.const 32768))
+  (func (export "invoke") (result i32)
+    (local $reply i32)
+    (if (result i32) (i32.eq (global.get $length) (i32.const {describe_length}))
+      (then (global.set $output (i32.const 1024)) (i32.const {}))
+      (else
+        (if (result i32) (i32.eq (i32.load8_u (i32.const {turn})) (i32.const 116))
+          (then (global.set $output (i32.const 4096)) (i32.const {}))
+          (else {on_card})))))
+  (func (export "output") (result i32) (global.get $output)))"#,
+            escape(&describe),
+            escape(&card),
+            data.iter()
+                .map(|(at, text)| format!("(data (i32.const {at}) \"{}\")", escape(text)))
+                .collect::<Vec<_>>()
+                .join(" "),
+            describe.len(),
+            card.len(),
+        );
+        Ok(wat::parse_str(text)?)
+    }
+
+    /// A job at work, whose origin turn is `job`.
+    fn working_card(headline: &str) -> CardRequest {
+        CardRequest {
+            job: carillon_protocol::model::Job {
+                origin: carillon_protocol::model::Origin {
+                    turn_id: "job".to_owned(),
+                    accepted_at: 1_790_000_000,
+                },
+                target_id: "300".to_owned(),
+                turns: vec![carillon_protocol::model::JobTurn {
+                    turn_id: "job".to_owned(),
+                    state: carillon_protocol::model::TurnState::Running,
+                    accepted_at: 1_790_000_000,
+                    finished_at: None,
+                    activity: Some(carillon_protocol::model::TurnActivity {
+                        phase: carillon_protocol::model::ActivityPhase::Tools,
+                        headline: Some(headline.to_owned()),
+                        running: Vec::new(),
+                        recent: Vec::new(),
+                        tool_calls: 0,
+                        work: None,
+                        notes: Vec::new(),
+                        agent: None,
+                        partial: false,
+                    }),
+                    delivery: None,
+                }],
+                earlier: false,
+            },
+            seen: None,
+            markers: carillon_discord_module::contract::ActivityMarkers::default(),
+        }
+    }
+
+    /// The same job, settled: answered and its answer delivered.
+    fn settled_card() -> CardRequest {
+        let mut request = working_card("done");
+        let turn = &mut request.job.turns[0];
+        turn.state = carillon_protocol::model::TurnState::Completed;
+        turn.finished_at = Some(1_790_000_045);
+        turn.delivery = Some(carillon_protocol::model::DeliveryState::Delivered);
+        request
+    }
+
+    /// What `module` makes of `request`, and how long it took.
+    async fn drawn(
+        module: &[u8],
+        request: &CardRequest,
+    ) -> anyhow::Result<(
+        anyhow::Result<Option<twilight_model::channel::message::Embed>>,
+        Duration,
+    )> {
+        let host = super::Host::new()?;
+        let module = host.load(module)?;
+        let started = std::time::Instant::now();
+        let card = super::card(&host, &module, request).await;
+        Ok((card, started.elapsed()))
+    }
+
+    #[tokio::test]
+    async fn a_card_the_module_cannot_give_is_a_bounded_failure() -> anyhow::Result<()> {
+        let request = working_card("Working");
+        let answer = |text: &str| {
+            format!(
+                "(global.set $output (i32.const 16384)) (i32.const {})",
+                text.len()
+            )
+        };
+        let embed = |embed: Value| json!({"Card": {"Show": embed}}).to_string();
+        let failing = [
+            ("not JSON", "not json".to_owned()),
+            ("another answer", replying("hello", &[])),
+            ("a failure", r#"{"Failure":"no card"}"#.to_owned()),
+            ("not an embed", embed(json!({"description": "no type"}))),
+            (
+                "over Discord's limits",
+                embed(json!({"type": "rich", "description": "x".repeat(4_097)})),
+            ),
+            (
+                "a removal while the job works",
+                r#"{"Card":"Remove"}"#.to_owned(),
+            ),
+        ];
+        for (case, output) in failing {
+            let module = other_cards(&answer(&output), &[(16384, &output)])?;
+            let (card, _) = drawn(&module, &request).await?;
+            assert!(card.is_err(), "{case} was shown");
+        }
+        // The same removal of a settled job is the module's to decide.
+        let remove = r#"{"Card":"Remove"}"#;
+        let module = other_cards(&answer(remove), &[(16384, remove)])?;
+        assert_eq!(drawn(&module, &settled_card()).await?.0?, None);
+
+        for (case, on_card) in [
+            ("a trap", "(unreachable)"),
+            (
+                "a guest that never ends",
+                "(loop $forever (br $forever)) (i32.const 0)",
+            ),
+            (
+                "an output outside memory",
+                "(global.set $output (i32.const 2621400)) (i32.const 4096)",
+            ),
+        ] {
+            let (card, took) = drawn(&other_cards(on_card, &[])?, &request).await?;
+            assert!(card.is_err(), "{case} was shown");
+            assert!(took < Duration::from_secs(3), "{case} took {took:?}");
+        }
+
+        // A request beyond what a module is given is not sent to it.
+        let huge = working_card(&"x".repeat(super::CARD_REQUEST_LIMIT));
+        let (card, took) = drawn(
+            &other_cards("(loop $forever (br $forever)) (i32.const 0)", &[])?,
+            &huge,
+        )
+        .await?;
+        assert!(
+            format!("{:#}", card.err().context("a huge card was shown")?).contains("more than the"),
+        );
+        assert!(took < Duration::from_millis(500), "{took:?}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_card_reaches_no_native_operation() -> anyhow::Result<()> {
+        // The module asks to submit text, then shows whether it was refused:
+        // `{"Error": …}` is refused, anything else would have been done.
+        let submit = String::from_utf8(submit_request()?)?;
+        let (refused, done) = (showing("refused"), showing("done"));
+        let on_card = format!(
+            "(local.set $reply (call $call (i32.const 16384) (i32.const {})))
+             (call $take (i32.const 24576) (local.get $reply))
+             (if (result i32) (i32.eq (i32.load8_u (i32.const 24578)) (i32.const 69))
+               (then (global.set $output (i32.const 20480)) (i32.const {}))
+               (else (global.set $output (i32.const 22528)) (i32.const {})))",
+            submit.len(),
+            refused.len(),
+            done.len(),
+        );
+        let module = other_cards(
+            &on_card,
+            &[(16384, &submit), (20480, &refused), (22528, &done)],
+        )?;
+        let (card, _) = drawn(&module, &working_card("Working")).await?;
+        assert_eq!(
+            card?.and_then(|embed| embed.description).as_deref(),
+            Some("refused")
+        );
+        Ok(())
+    }
+
+    /// The description a card shows, as the serving module draws it.
+    async fn drawn_by(module: &Module) -> anyhow::Result<Option<String>> {
+        Ok(module
+            .render_card(&working_card("Working"))
+            .await?
+            .and_then(|embed| embed.description))
+    }
+
+    #[tokio::test]
+    async fn a_module_that_cannot_draw_cards_does_not_serve() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        let module = release_commands(root, &["model"], "release").await?;
+        let describe = describing(&[definition("model")]);
+        for card in [
+            replying("not a card", &[]),
+            r#"{"Failure":"no cards here"}"#.to_owned(),
+            json!({"Card": {"Show": {"type": "rich", "description": "x".repeat(4_097)}}})
+                .to_string(),
+            // Removing the card of a job at work.
+            r#"{"Card":"Remove"}"#.to_owned(),
+        ] {
+            let candidate = module_with_card(&describe, &replying("candidate", &[]), &card)?;
+            let refused = module.install(&candidate, None).await;
+            let Err(ChangeError::Unusable(error)) = refused else {
+                anyhow::bail!("a module answering cards with {card} was installed");
+            };
+            assert!(
+                format!("{error:#}").contains("render a card of"),
+                "{error:#}"
+            );
+            assert_eq!(reply(&module).await?, "release");
+            assert!(!files(root).installed.exists());
+            // Nor does it serve at startup.
+            std::fs::create_dir_all(root.join("state"))?;
+            std::fs::write(&files(root).installed, &candidate)?;
+            assert!(Module::load(files(root)).await.is_err());
+            std::fs::remove_file(&files(root).installed)?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cards_are_drawn_by_the_module_serving_when_they_are_drawn() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        let describe = describing(&[definition("model")]);
+        std::fs::write(
+            root.join("release.wasm"),
+            module_with_card(
+                &describe,
+                &replying("release", &[]),
+                &showing("release card"),
+            )?,
+        )?;
+        let module = Module::load(files(root)).await?;
+        assert_eq!(drawn_by(&module).await?.as_deref(), Some("release card"));
+        let installed = module_with_card(
+            &describe,
+            &replying("installed", &[]),
+            &showing("installed card"),
+        )?;
+        module.install(&installed, None).await?;
+        assert_eq!(drawn_by(&module).await?.as_deref(), Some("installed card"));
+        // A restart draws them with the module it saved.
+        let restarted = Module::load(files(root)).await?;
+        assert_eq!(
+            drawn_by(&restarted).await?.as_deref(),
+            Some("installed card")
+        );
+        module.reset(None).await?;
+        assert_eq!(drawn_by(&module).await?.as_deref(), Some("release card"));
+        Ok(())
+    }
+
+    /// The cards the native renderer showed before cards moved into the
+    /// module, with the requests they were drawn from.
+    #[derive(serde::Deserialize)]
+    struct Recorded {
+        name: String,
+        request: CardRequest,
+        card: Option<twilight_model::channel::message::Embed>,
+    }
+
+    #[tokio::test]
+    async fn the_release_module_draws_what_the_native_renderer_drew() -> anyhow::Result<()> {
+        let recorded: Vec<Recorded> = serde_json::from_str(include_str!(
+            "../../carillon-discord-module/fixtures/cards.json"
+        ))?;
+        let names = recorded
+            .iter()
+            .map(|case| case.name.as_str())
+            .collect::<Vec<_>>();
+        for case in [
+            "queued",
+            "working",
+            "interrupted",
+            "earned-summary",
+            "removal",
+        ] {
+            assert!(names.contains(&case), "{case} is not recorded");
+        }
+        let module = release_module().await?;
+        for case in recorded {
+            assert_eq!(
+                module.render_card(&case.request).await?,
+                case.card,
+                "{}",
+                case.name
+            );
+        }
+        let summary = super::check(&release_module_bytes()?).await?;
+        assert_eq!(summary.commands, ["model", "command"]);
         Ok(())
     }
 }

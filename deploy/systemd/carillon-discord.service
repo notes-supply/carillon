@@ -14,7 +14,7 @@ Environment="SHELL=@OWNER_SHELL@"
 Environment="PATH=@OWNER_PATH@"
 Environment="CARILLON_HOME=@CARILLON_HOME@"
 Environment="PI_CODING_AGENT_DIR=@CARILLON_HOME@/pi"
-ExecStart="@CARILLON_HOME@/app/bin/carillon" discord serve --config "@CARILLON_HOME@/carillon.toml" --provider discord-private --token-file "@CARILLON_HOME@/credentials/discord-private.token" --discord-token-file "@CARILLON_HOME@/credentials/discord-bot.token" --commands "@CARILLON_HOME@/app/lib/carillon_discord_commands.wasm"
+ExecStart="@CARILLON_HOME@/app/bin/carillon" discord serve --config "@CARILLON_HOME@/carillon.toml" --provider discord-private --token-file "@CARILLON_HOME@/credentials/discord-private.token" --discord-token-file "@CARILLON_HOME@/credentials/discord-bot.token" --module "@CARILLON_HOME@/app/lib/carillon_discord_module.wasm"
 Restart=on-failure
 RestartSec=2s
 UMask=0077

@@ -10,7 +10,7 @@ import { setTimeout as delay } from "node:timers/promises";
 // application fault switches, mocked storage, or service-manager interaction.
 const [mode, artifact] = process.argv.slice(2);
 assert.ok(
-  ["init", "resources", "restore", "participation", "config", "commands", "attachments"].includes(
+  ["init", "resources", "restore", "participation", "config", "module", "attachments"].includes(
     mode,
   ),
   "unknown filesystem test mode",
@@ -57,16 +57,16 @@ try {
   else if (mode === "participation") await testParticipation();
   else if (mode === "config") await testConfiguration();
   else if (mode === "attachments") await testAttachments();
-  else if (mode === "commands") {
-    await testCommandModule();
-    await testCommandDirectory();
+  else if (mode === "module") {
+    await testModule();
+    await testModuleDirectory();
   } else {
     await testConfiguration();
     await testResources();
     await testAttachments();
     await testParticipation();
-    await testCommandModule();
-    await testCommandDirectory();
+    await testModule();
+    await testModuleDirectory();
   }
 } finally {
   await rm(scratch, { recursive: true, force: true });
@@ -504,16 +504,16 @@ async function testParticipation() {
 }
 
 /**
- * Installing a command module clears the registration record durably before
+ * Installing a Discord module clears the registration record durably before
  * contacting Discord, then saves the module with a synced file and directory.
  * A failure at each boundary must be reported as what it is, and repeating the
  * install must finish the change.
  */
-async function testCommandModule() {
+async function testModule() {
   const args = [
     providerTestBinary(),
     "--exact",
-    "commands::tests::saving_reports_its_boundary_and_a_repeat_confirms_it",
+    "module::tests::saving_reports_its_boundary_and_a_repeat_confirms_it",
     "--nocapture",
     "--test-threads=1",
   ];
@@ -521,7 +521,7 @@ async function testCommandModule() {
     ...traceOptions.slice(0, -1),
     "trace=mkdir,rename,fsync,fdatasync,unlink,unlinkat",
   ];
-  const trace = join(scratch, "commands.trace");
+  const trace = join(scratch, "module.trace");
   const baseline = spawnSync("strace", [...options, "-o", trace, ...args], {
     encoding: "utf8",
     timeout: 60_000,
@@ -539,7 +539,7 @@ async function testCommandModule() {
       position > invalidation && line.includes(" fsync(") && line.includes(`<${state}>`),
   );
   const publication = lines.findIndex(
-    (line) => line.includes(" rename(") && line.includes(`, "${state}/command-module.wasm")`),
+    (line) => line.includes(" rename(") && line.includes(`, "${state}/module.wasm")`),
   );
   const firstRegistration = lines.findIndex(
     (line) => line.includes(" rename(") && line.includes(`, "${state}/commands.json")`),
@@ -570,7 +570,7 @@ async function testCommandModule() {
     const ordinal = lines
       .slice(0, position + 1)
       .filter((line) => line.trim().startsWith(`${tid} `) && line.includes(" fsync(")).length;
-    const log = join(scratch, `commands-${boundary}.trace`);
+    const log = join(scratch, `module-${boundary}.trace`);
     const result = spawnSync(
       "strace",
       [...options, "-o", log, "-e", `inject=fsync:error=EIO:when=${ordinal}`, ...args],
@@ -589,9 +589,9 @@ async function testCommandModule() {
     assert.match(
       injected[0],
       boundary === "file" ? /\/state\/\.tmp[^/>]*>\)/u : /\/state>\)/u,
-      `wrong command module boundary: ${injected[0]}`,
+      `wrong Discord module boundary: ${injected[0]}`,
     );
-    console.log(`command module durability failure passed: ${boundary}`);
+    console.log(`Discord module durability failure passed: ${boundary}`);
   }
 }
 
@@ -601,15 +601,15 @@ async function testCommandModule() {
  * happen, and a repeat must sync both again before publishing: an existing
  * directory does not show that its entry is durable.
  */
-async function testCommandDirectory() {
+async function testModuleDirectory() {
   const args = [
     providerTestBinary(),
     "--exact",
-    "commands::tests::a_new_state_directory_is_synced_again_by_a_repeat",
+    "module::tests::a_new_state_directory_is_synced_again_by_a_repeat",
     "--nocapture",
     "--test-threads=1",
   ];
-  const trace = join(scratch, "command-directory.trace");
+  const trace = join(scratch, "module-directory.trace");
   const baseline = spawnSync("strace", [...traceOptions, "-o", trace, ...args], {
     encoding: "utf8",
     timeout: 60_000,
@@ -635,7 +635,7 @@ async function testCommandDirectory() {
     const ordinal = lines
       .slice(0, position + 1)
       .filter((line) => line.trim().startsWith(`${tid} `) && line.includes(" fsync(")).length;
-    const log = join(scratch, `command-directory-${boundary}.trace`);
+    const log = join(scratch, `module-directory-${boundary}.trace`);
     const result = spawnSync(
       "strace",
       [...traceOptions, "-o", log, "-e", `inject=fsync:error=EIO:when=${ordinal}`, ...args],
@@ -657,7 +657,7 @@ async function testCommandDirectory() {
     );
     const publication = observed.findIndex(
       (line, index) =>
-        index > injected && line.includes(" rename(") && line.includes('/command-module.wasm")'),
+        index > injected && line.includes(" rename(") && line.includes('/module.wasm")'),
     );
     assert.ok(publication > injected, "the repeat must publish the module");
     for (const path of ["state", "parent"]) {
@@ -672,7 +672,7 @@ async function testCommandDirectory() {
         `the repeat must sync the ${path} directory again before publishing`,
       );
     }
-    console.log(`command module directory failure passed: ${boundary}`);
+    console.log(`Discord module directory failure passed: ${boundary}`);
   }
 }
 

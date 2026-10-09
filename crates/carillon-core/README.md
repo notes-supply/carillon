@@ -32,6 +32,6 @@ The example creates temporary storage, accepts and deduplicates a message, invok
 - [`runtime_client.rs`](src/runtime_client.rs): concrete HTTP execution transport. A turn's request has no total deadline: it takes as long as the runtime's work, and a caller that stops waiting ends it, which the runtime takes as cancellation.
 - [`application/http.rs`](src/application/http.rs): authentication, request/response formatting, runtime workers and service assembly.
 - [`application/admin.rs`](src/application/admin.rs), [`application/cli.rs`](src/application/cli.rs): bundled installation defaults, operator commands and startup.
-- [`application/operations.rs`](src/application/operations.rs), [`application/update.rs`](src/application/update.rs): the installed release's user services, logs, health and archive updates. The maintenance lock they take is `carillon_installation::maintenance`, shared with the Discord provider's command module changes.
+- [`application/operations.rs`](src/application/operations.rs), [`application/update.rs`](src/application/update.rs): the installed release's user services, logs, health and archive updates. The maintenance lock they take is `carillon_installation::maintenance`, shared with the Discord provider's module changes.
 
 The CLI and the direct example use the same `Core`. Application assembly stays ordinary modules in this crate: a second core service or a generic provider framework would add no useful boundary.

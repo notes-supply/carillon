@@ -42,9 +42,9 @@ bun build --target=bun packages/discord-pi/src/index.ts --outfile "$STAGE/lib/ca
 install -m 0644 packages/discord-pi/skill/SKILL.md "$STAGE/lib/carillon-discord-SKILL.md"
 
 cargo build --release --locked --target "$TARGET" --target-dir "$ROOT/target" --bin carillon --bin carillon-discord
-# The Discord command module runs in the provider's Wasm sandbox; it is data,
+# The Discord module runs in the provider's Wasm sandbox; it is data,
 # not a native binary, and is built for the wasm32 target regardless of host.
-cargo build --locked --profile wasm --target wasm32-unknown-unknown --target-dir "$ROOT/target" -p carillon-discord-commands
+cargo build --locked --profile wasm --target wasm32-unknown-unknown --target-dir "$ROOT/target" -p carillon-discord-module
 bun build --compile --target "$BUN_TARGET" --root "$BUNDLE" \
   "$BUNDLE/runtime.ts" "$BUNDLE/src/extensions/codemode/worker.ts" \
   "$BUNDLE/src/utils/image-resize-worker.ts" --outfile "$STAGE/bin/carillon-runtime-pi"
@@ -58,7 +58,7 @@ bun build --compile --target "$BUN_TARGET" --no-compile-autoload-bunfig \
   packages/runtime-t3/src/cli.ts --outfile "$STAGE/bin/carillon-runtime-t3"
 install -m 0755 "target/$TARGET/release/carillon" "$STAGE/bin/carillon"
 install -m 0755 "target/$TARGET/release/carillon-discord" "$STAGE/bin/carillon-discord"
-install -m 0644 target/wasm32-unknown-unknown/wasm/carillon_discord_commands.wasm "$STAGE/lib/carillon_discord_commands.wasm"
+install -m 0644 target/wasm32-unknown-unknown/wasm/carillon_discord_module.wasm "$STAGE/lib/carillon_discord_module.wasm"
 install -m 0755 scripts/carillon-pi.sh "$STAGE/bin/carillon-pi"
 install -m 0755 scripts/register-services.sh "$STAGE/bin/carillon-register-services"
 install -m 0755 scripts/install-release.sh "$STAGE/install.sh"

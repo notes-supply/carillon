@@ -53,18 +53,21 @@ retain the actual Wasm path rather than substituting this direct native call.
   gives the cards they settle one final edit's bound to show their summaries before
   connect returns.
   Every Discord call is bounded, including rate-limiter waits and Twilight's 429
-  retries. Its ordinary [`render` module](src/activity/render.rs) owns pure card embed rendering,
-  using the concrete activity markers from [`config`](src/config.rs). Markers have
-  configurable defaults, independently of reactions; see [activity card settings](../../docs/product/OPERATIONS.md#activity-cards).
-- [`commands`](src/commands.rs) hosts replaceable command generations, registers
-  them with Discord, and owns the installed module: `Commands::install`/`reset`
-  validate, register, activate and save under the installation's maintenance lock,
-  reporting activation, registration and save durability separately. Construct it
-  with `CommandFiles` naming the release module, installed module, registration
-  record and installation. Command presentation ([`/model`](../carillon-discord-commands/src/model.rs),
-  [`/command`](../carillon-discord-commands/src/run.rs)) lives in the separate guest library;
-  [`HostCalls`](../carillon-discord-commands/src/lib.rs) is the existing native-operation
-  boundary, also used by the example. A submission from `/command` posts a silent marker
+  retries. The Discord module draws each card ([`card.rs`](../carillon-discord-module/src/card.rs))
+  with the activity markers from [`config`](src/config.rs); the monitor checks what it
+  draws against Discord's embed limits and keeps a card as it was when the module
+  draws none. Markers have configurable defaults, independently of reactions; see
+  [activity card settings](../../docs/product/OPERATIONS.md#activity-cards).
+- [`module`](src/module.rs) hosts replaceable module generations, registers their
+  commands with Discord, draws cards through the serving one with no native calls,
+  and owns the installed module: `Module::install`/`reset` validate, register,
+  activate and save under the installation's maintenance lock, reporting activation,
+  registration and save durability separately. Construct it with `ModuleFiles` naming
+  the release module, installed module, registration record and installation. Command
+  presentation ([`/model`](../carillon-discord-module/src/model.rs),
+  [`/command`](../carillon-discord-module/src/run.rs)) and cards live in the separate
+  guest library; [`HostCalls`](../carillon-discord-module/src/lib.rs) is the existing
+  native-operation boundary, also used by the example. A submission from `/command` posts a silent marker
   message in the conversation and submits an event anchored on it, with the interaction's
   admission and `native.intent: "command"`. An interaction's native calls, such as a Run
   click's catalog lookup and the submission that follows it, end within seven of the
@@ -102,7 +105,7 @@ retain the actual Wasm path rather than substituting this direct native call.
   and credentials. Importing the library starts none of these services.
 
 For ordinary service use, keep using `carillon discord serve …`. Operators change the
-command module with `carillon discord commands`, which asks the running provider.
+Discord module with `carillon discord module`, which asks the running provider.
 Thread creation/reconciliation and delivery stay native. Pass the admitted plan to
 `prepare_conversation(&participation, &discord_http, plan)`: it creates or reconciles
 threads, persists participation, and returns the resolved event. Channel routes make
@@ -114,33 +117,37 @@ writers is not supported.
 ## Change and test locally
 
 Admission and identity tests live [beside conversations](src/conversations/tests.rs).
-Change picker and command-menu layout in the [command library](../carillon-discord-commands/src/),
-not in core or a runtime. Host, install and reset tests live in `commands.rs`; HTTP/gateway composition,
+Change picker, command-menu and card layout in the [module library](../carillon-discord-module/src/),
+not in core or a runtime. Host, card, install and reset tests live in `module.rs`; HTTP/gateway composition,
 tests live in [application tests](src/application/tests.rs). Transport-failure tests
 live [beside the core client](src/client/tests.rs), native delivery recovery tests
 [beside delivery](src/delivery/tests.rs), activity lifecycle tests, several with Twilight's real
-rate limiter, [beside activity](src/activity/tests.rs), literal card rendering tests
-[beside the renderer](src/activity/render/tests.rs), and message retry/feedback tests
+rate limiter and the built module, [beside activity](src/activity/tests.rs), literal card
+rendering tests [beside the cards](../carillon-discord-module/src/card/tests.rs), and message
+retry/feedback tests
 [beside inbound processing](src/inbound/tests.rs). The [external conversation tests](tests/conversations.rs)
 exercise native thread preparation with a local Discord HTTP substitute, not a gateway.
 
 ```sh
+mise run build:module
 mise exec -- cargo test -p carillon-discord --all-targets
-mise exec -- cargo test -p carillon-discord-commands
+mise exec -- cargo test -p carillon-discord-module
 mise run test:integration
 ```
 
-The last task uses simulated Discord input/model responses with the real Wasm host.
+Tests that draw real cards run the built module through the Wasm host: build it first,
+or name another file with `CARILLON_DISCORD_MODULE`. The last task uses simulated Discord
+input/model responses with the real Wasm host.
 
-To try a command change in an installation, build the module, check it against the
-installed provider program, and install it into the running provider:
+To try a command or card change in an installation, build the module, check it against
+the installed provider program, and install it into the running provider:
 
 ```sh
-mise run build:commands
-module=target/wasm32-unknown-unknown/wasm/carillon_discord_commands.wasm
-carillon discord commands check "$module"
-carillon discord commands install "$module"
-carillon discord commands reset    # back to the release's module
+mise run build:module
+module=target/wasm32-unknown-unknown/wasm/carillon_discord_module.wasm
+carillon discord module check "$module"
+carillon discord module install "$module"
+carillon discord module reset    # back to the release's module
 ```
 
 `check` only reads the file. `install` serves the module at once, registers changed

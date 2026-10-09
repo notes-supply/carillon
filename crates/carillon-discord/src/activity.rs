@@ -19,7 +19,9 @@
 //! The monitor alone makes a job's card: one embed, edited as the job goes
 //! on and kept as its summary when the job earned one, or removed when it
 //! did not. A job that ended before its card appeared and earned a summary
-//! gets a card showing it. Answers are plain text.
+//! gets a card showing it. Answers are plain text. What a card shows, and
+//! whether a settled job keeps it, is the Discord module's to decide; a
+//! module that gives no usable card leaves the card as it was.
 //!
 //! Every Discord call is bounded, and its outcome is classified by what it
 //! proves: a job gets at most one card, and a card whose creation is unknown
@@ -30,8 +32,10 @@
 use crate::{
     client::CoreClient,
     config::{ActivityMarkers, DiscordConfig},
+    module::Module,
 };
 use anyhow::{Context as _, Result};
+use carillon_discord_module::contract::{CardRequest, Seen};
 use carillon_installation::filesystem::{PublishError, publish};
 use carillon_protocol::model::{JOB_READ_LIMIT, Job, TurnState};
 use serde::{Deserialize, Serialize};
@@ -66,12 +70,8 @@ use twilight_model::{
     },
 };
 
-mod render;
-
-pub(crate) use render::job_summary;
-
 /// How often core is read.
-const POLL_INTERVAL: Duration = Duration::from_secs(3);
+pub(crate) const POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// A job whose turn finishes sooner after acceptance gets no card of its own.
 const APPEAR_AFTER: Duration = Duration::from_secs(2);
 /// The least time between two edits of one card.
@@ -126,7 +126,7 @@ impl Known {
     /// Nothing more will happen to the job.
     fn is_over(&self) -> bool {
         match self {
-            Self::Read(job) => render::settled(job).is_some(),
+            Self::Read(job) => job.settled().is_some(),
             Self::Unknown => true,
             Self::Unread => false,
         }
@@ -135,7 +135,7 @@ impl Known {
     /// The channel a running turn of the job answers in.
     fn running_in(&self) -> Option<Id<ChannelMarker>> {
         let job = self.job()?;
-        render::at_work(job)
+        job.at_work()
             .filter(|turn| turn.state == TurnState::Running)
             .and_then(|_| job.target_id.parse().ok())
     }
@@ -266,6 +266,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[derive(Clone)]
 struct Cards {
     http: Arc<DiscordHttp>,
+    module: Arc<Module>,
     markers: ActivityMarkers,
     records: Arc<CardRecords>,
     /// The provider is stopping: no new card is made.
@@ -283,6 +284,7 @@ struct Cards {
 pub(crate) async fn activity_monitor(
     core: CoreClient,
     http: Arc<DiscordHttp>,
+    module: Arc<Module>,
     config: DiscordConfig,
     records: Option<CardRecords>,
     mut delivering: mpsc::UnboundedReceiver<Delivering>,
@@ -291,6 +293,7 @@ pub(crate) async fn activity_monitor(
     let typing = config.typing.then(|| http.clone());
     let cards = records.filter(|_| config.activity).map(|records| Cards {
         http,
+        module,
         markers: config.activity_markers.clone(),
         records: Arc::new(records),
         stopping: stopping.clone(),
@@ -468,7 +471,7 @@ fn take_read(
         let job_id = job.origin.turn_id.clone();
         if let Some(view) = jobs.get(&job_id) {
             view.send_replace(Known::Read(job));
-        } else if render::at_work(&job).is_some() {
+        } else if job.at_work().is_some() {
             new.push(job);
         }
         mentioned.insert(job_id);
@@ -548,8 +551,9 @@ async fn show_card(
     old: Option<Recorded>,
 ) {
     let mut holding = old.map_or(Holding::Nothing, Recorded::holding);
-    let mut seen: Option<render::Seen> = None;
+    let mut seen: Option<Seen> = None;
     let mut next_edit = Instant::now();
+    let mut failed = false;
     loop {
         let known = view.borrow_and_update().clone();
         let job = match known {
@@ -566,25 +570,24 @@ async fn show_card(
             }
             Known::Read(job) => job,
         };
-        if let Some(turn) = render::at_work(&job)
+        if let Some(turn) = job.at_work()
             && let Some(snapshot) = &turn.activity
         {
-            seen = Some((turn.turn_id.clone(), snapshot.clone()));
+            seen = Some(Seen {
+                turn_id: turn.turn_id.clone(),
+                activity: snapshot.clone(),
+            });
         }
-        if render::settled(&job).is_some() {
-            let summary = render::earned(&job, seen.as_ref())
-                .then(|| render::job_card(&job, seen.as_ref(), &cards.markers));
-            cards
-                .finish(&job_id, holding, summary, job.target_id.parse().ok())
-                .await;
+        if job.settled().is_some() {
+            cards.settle(&job_id, holding, job, seen, &mut failed).await;
             return;
         }
-        let embed = render::job_card(&job, seen.as_ref(), &cards.markers);
+        let channel = job.target_id.parse().ok();
         match &mut holding {
             Holding::Nothing => {
                 // A job that ended but whose answer is not yet sent waits
                 // for it; a stopping provider makes no new card.
-                if let Some(turn) = render::at_work(&job)
+                if let Some(turn) = job.at_work()
                     && !cards.stopping.is_cancelled()
                 {
                     let appear = Instant::now() + until_after(turn.accepted_at, APPEAR_AFTER);
@@ -594,53 +597,35 @@ async fn show_card(
                             Ok(Ok(())) | Err(_) => continue,
                         }
                     }
-                    holding = cards.create_progress(&job_id, &job, &embed).await;
-                    next_edit = Instant::now() + EDIT_INTERVAL;
+                    let rendered = cards.render(&job_id, job, seen.clone(), &mut failed);
+                    if let Ok(Some(embed)) = rendered.await {
+                        holding = cards.create_progress(&job_id, channel, &embed).await;
+                        next_edit = Instant::now() + EDIT_INTERVAL;
+                    }
                 }
             }
             Holding::Card {
                 card,
                 shown,
-                editable,
-                uncertain_edit,
-            } if *editable && shown.as_deref() != Some(&embed) => {
-                // Edits wait out the interval; the job's end does not.
-                if Instant::now() < next_edit {
-                    match timeout_at(next_edit, view.wait_for(Known::is_over)).await {
-                        Ok(Err(_)) => return,
-                        Ok(Ok(_)) | Err(_) => continue,
+                editable: true,
+                ..
+            } => {
+                let rendered = cards.render(&job_id, job, seen.clone(), &mut failed);
+                if let Ok(Some(embed)) = rendered.await
+                    && shown.as_deref() != Some(&embed)
+                {
+                    // Edits wait out the interval; the job's end does not.
+                    if Instant::now() < next_edit {
+                        match timeout_at(next_edit, view.wait_for(Known::is_over)).await {
+                            Ok(Err(_)) => return,
+                            Ok(Ok(_)) | Err(_) => continue,
+                        }
                     }
+                    let wanted = job_wanted(&view, &cards.stopping, |known| !known.is_over());
+                    let edit = cards.edit(*card, &embed, Some(wanted)).await;
+                    holding = cards.edited(&job_id, holding, edit, embed);
+                    next_edit = Instant::now() + EDIT_INTERVAL;
                 }
-                let wanted = job_wanted(&view, &cards.stopping, |known| !known.is_over());
-                match cards.edit(*card, &embed, Some(wanted)).await {
-                    Call::Done(()) => *shown = Some(Box::new(embed)),
-                    // The next read brings the latest again.
-                    Call::NotSent => {}
-                    Call::Unknown => {
-                        *editable = false;
-                        *uncertain_edit = true;
-                        warn!(job_id, "activity card edit outcome is unknown");
-                    }
-                    Call::Refused(404) => {
-                        // Deleted by someone: the job gets no other card,
-                        // even after a restart, before it settles.
-                        cards.records.insert(
-                            &job_id,
-                            Recorded {
-                                channel_id: card.channel_id,
-                                message_id: None,
-                                pending_create: false,
-                            },
-                        );
-                        warn!(job_id, "activity card was deleted in Discord");
-                        holding = Holding::Held;
-                    }
-                    Call::Refused(status) => {
-                        warn!(job_id, status, "activity card can no longer be edited");
-                        *editable = false;
-                    }
-                }
-                next_edit = Instant::now() + EDIT_INTERVAL;
             }
             Holding::Card { .. } | Holding::Held => {}
         }
@@ -661,9 +646,112 @@ fn until_after(accepted_at: i64, after: Duration) -> Duration {
 }
 
 impl Cards {
-    /// Makes the card of a job at work, showing `embed`, and records it.
-    async fn create_progress(&self, job_id: &str, job: &Job, embed: &Embed) -> Holding {
-        let Ok(channel_id) = job.target_id.parse::<Id<ChannelMarker>>() else {
+    /// The job's card as the module serving now renders it: the embed to
+    /// show, or `None` when a settled job's card goes. A failure keeps the
+    /// card as it was, and is logged unless `failed` says it already was.
+    async fn render(
+        &self,
+        job_id: &str,
+        job: Job,
+        seen: Option<Seen>,
+        failed: &mut bool,
+    ) -> Result<Option<Embed>, ()> {
+        let request = CardRequest {
+            job,
+            seen,
+            markers: self.markers.clone(),
+        };
+        self.module.render_card(&request).await.map_err(|error| {
+            if !std::mem::replace(failed, true) {
+                warn!(
+                    job_id,
+                    error = format!("{error:#}"),
+                    "the Discord module gave no usable card"
+                );
+            }
+        })
+    }
+
+    /// Finishes a settled job's card with the summary the module draws, or
+    /// without one when it draws none. A card the module could not draw keeps
+    /// its record, so the next start finishes it; one nobody can name needs
+    /// no drawing.
+    async fn settle(
+        &self,
+        job_id: &str,
+        holding: Holding,
+        job: Job,
+        seen: Option<Seen>,
+        failed: &mut bool,
+    ) {
+        let channel = job.target_id.parse().ok();
+        let summary = match holding {
+            Holding::Held => None,
+            Holding::Nothing | Holding::Card { .. } => {
+                let Ok(summary) = self.render(job_id, job, seen, failed).await else {
+                    return;
+                };
+                summary
+            }
+        };
+        self.finish(job_id, holding, summary, channel).await;
+    }
+
+    /// What a card is once its progress edit to `embed` ended as `edit`.
+    fn edited(&self, job_id: &str, holding: Holding, edit: Call<()>, embed: Embed) -> Holding {
+        let Holding::Card {
+            card,
+            shown,
+            uncertain_edit,
+            ..
+        } = holding
+        else {
+            return holding;
+        };
+        let (shown, editable, uncertain_edit) = match edit {
+            Call::Done(()) => (Some(Box::new(embed)), true, uncertain_edit),
+            // The next read brings the latest again.
+            Call::NotSent => (shown, true, uncertain_edit),
+            Call::Unknown => {
+                warn!(job_id, "activity card edit outcome is unknown");
+                (shown, false, true)
+            }
+            Call::Refused(404) => {
+                // Deleted by someone: the job gets no other card, even after
+                // a restart, before it settles.
+                self.records.insert(
+                    job_id,
+                    Recorded {
+                        channel_id: card.channel_id,
+                        message_id: None,
+                        pending_create: false,
+                    },
+                );
+                warn!(job_id, "activity card was deleted in Discord");
+                return Holding::Held;
+            }
+            Call::Refused(status) => {
+                warn!(job_id, status, "activity card can no longer be edited");
+                (shown, false, uncertain_edit)
+            }
+        };
+        Holding::Card {
+            card,
+            shown,
+            editable,
+            uncertain_edit,
+        }
+    }
+
+    /// Makes the card of a job at work in `channel`, showing `embed`, and
+    /// records it.
+    async fn create_progress(
+        &self,
+        job_id: &str,
+        channel: Option<Id<ChannelMarker>>,
+        embed: &Embed,
+    ) -> Holding {
+        let Some(channel_id) = channel else {
             warn!(job_id, "activity card target is not a Discord channel");
             return Holding::Held;
         };
@@ -903,7 +991,7 @@ impl Cards {
 }
 
 /// What a bounded Discord call established.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Call<T> {
     Done(T),
     /// Discord certainly did not receive it.

@@ -1,5 +1,5 @@
-use super::{Shown, Status, card, compact, earned, job_card, job_summary};
-use crate::config::ActivityMarkers;
+use super::{Shown, Status, card, compact, earned, job_card, render};
+use crate::contract::{ActivityMarkers, Card, CardRequest, Seen};
 use carillon_protocol::model::{
     ActivityPhase, AgentInfo, ContextUse, DeliveryOutcome, DeliveryState, FinishedTool, Job,
     JobTurn, Origin, RunningTool, TurnActivity, TurnState, WorkItem, WorkKind, WorkState,
@@ -57,6 +57,14 @@ fn work(id: &str, kind: WorkKind, label: &str, state: WorkState) -> WorkItem {
     }
 }
 
+/// What a card saw of the job's message turn while it ran.
+fn seen(activity: TurnActivity) -> Seen {
+    Seen {
+        turn_id: "turn".to_owned(),
+        activity,
+    }
+}
+
 /// A live card of a job asked for at 1 790 000 000.
 fn live<'a>(activity: &'a TurnActivity, reports: Vec<&'a TurnActivity>) -> Shown<'a> {
     Shown {
@@ -101,6 +109,48 @@ fn settled(turn_state: TurnState, activity: Option<TurnActivity>) -> Job {
     job(vec![turn("turn", turn_state, activity)])
 }
 
+/// The embed as Discord receives it.
+fn discord(embed: &super::Embed) -> Embed {
+    serde_json::to_value(embed)
+        .and_then(serde_json::from_value)
+        .unwrap_or_else(|error| Embed {
+            description: Some(format!("not an embed: {error}")),
+            ..empty()
+        })
+}
+
+fn empty() -> Embed {
+    Embed {
+        author: None,
+        color: None,
+        description: None,
+        fields: Vec::new(),
+        footer: None,
+        image: None,
+        kind: String::new(),
+        provider: None,
+        thumbnail: None,
+        timestamp: None,
+        title: None,
+        url: None,
+        video: None,
+    }
+}
+
+/// What a settled job's card keeps through the module's entry point: the
+/// summary it earned, or nothing when its card goes.
+fn summary(job: &Job, markers: &ActivityMarkers) -> Option<Embed> {
+    let request = CardRequest {
+        job: job.clone(),
+        seen: None,
+        markers: markers.clone(),
+    };
+    match render(&request) {
+        Card::Show(embed) => serde_json::from_value(embed).ok(),
+        Card::Remove => None,
+    }
+}
+
 /// The card as text: its description, then each field under its name.
 fn text(embed: &Embed) -> String {
     let mut parts = vec![embed.description.clone().unwrap_or_default()];
@@ -136,7 +186,7 @@ fn cards_show_bounded_safe_text() {
     busy.running
         .extend(["a", "b", "c", "d"].map(|detail| running("read", detail)));
     busy.tool_calls = 12;
-    let embed = card(&live(&busy, Vec::new()), &markers);
+    let embed = discord(&card(&live(&busy, Vec::new()), &markers));
     let description = embed.description.clone().unwrap_or_default();
     let lines = description.lines().collect::<Vec<_>>();
     assert_eq!(lines[0], "⏳ Working · started <t:1790000000:R>");
@@ -172,7 +222,7 @@ fn cards_show_bounded_safe_text() {
         live: None,
         partial: false,
     };
-    let embed = card(&history, &markers);
+    let embed = discord(&card(&history, &markers));
     assert_eq!(embed.description.as_deref(), Some("⏳ Finishing up"));
     assert_eq!(
         field(&embed, "Calls"),
@@ -183,7 +233,7 @@ fn cards_show_bounded_safe_text() {
     busy.running.clear();
     busy.recent = vec![finished("bash", Some(&"x".repeat(3_000)), true); 5];
     busy.notes = vec!["n".repeat(500); 8];
-    let embed = card(&live(&busy, Vec::new()), &markers);
+    let embed = discord(&card(&live(&busy, Vec::new()), &markers));
     valid(&embed);
     assert!(
         embed
@@ -202,7 +252,7 @@ fn cards_show_bounded_safe_text() {
 fn status_rows_say_how_the_job_stands() {
     let markers = ActivityMarkers::default();
     let status = |status| {
-        card(
+        discord(&card(
             &Shown {
                 status,
                 requested_at: Some(1_790_000_000),
@@ -211,7 +261,7 @@ fn status_rows_say_how_the_job_stands() {
                 partial: false,
             },
             &markers,
-        )
+        ))
         .description
         .unwrap_or_default()
     };
@@ -309,7 +359,7 @@ fn durations_are_fixed_and_compact_and_estimated_starts_say_so() {
         partial: false,
         omitted: None,
     });
-    let embed = card(&live(&activity, Vec::new()), &markers);
+    let embed = discord(&card(&live(&activity, Vec::new()), &markers));
     assert_eq!(
         field(&embed, "Calls"),
         Some("✓ bash `cargo test` · 12s\n↳ bash `make` · about <t:1790000000:R>")
@@ -370,7 +420,7 @@ fn a_job_shows_its_turns_together_and_the_latest_state_of_each_work_wins() {
         partial: false,
         omitted: None,
     });
-    let embed = card(&live(&report, vec![&parent]), &markers);
+    let embed = discord(&card(&live(&report, vec![&parent]), &markers));
     valid(&embed);
     assert_eq!(
         field(&embed, "Calls"),
@@ -401,7 +451,7 @@ fn model_text_cannot_format_mention_or_link() {
     activity.headline = Some("**bold** <@200> @everyone".to_owned());
     activity.notes =
         vec!["See [here](https://example.invalid) and <#300> `code` # title".to_owned()];
-    let embed = card(&live(&activity, Vec::new()), &markers);
+    let embed = discord(&card(&live(&activity, Vec::new()), &markers));
     assert!(
         text(&embed).contains(r"> \*\*bold\*\* \<\@200\> \@everyone"),
         "{}",
@@ -469,7 +519,7 @@ fn work_items_render_generic_bounded_rows_without_provider_knowledge() {
         partial: false,
         omitted: NonZeroU32::new(2),
     });
-    let embed = card(&live(&activity, Vec::new()), &markers);
+    let embed = discord(&card(&live(&activity, Vec::new()), &markers));
     assert_eq!(
         embed
             .description
@@ -497,7 +547,7 @@ fn work_items_render_generic_bounded_rows_without_provider_knowledge() {
         partial: true,
         omitted: None,
     });
-    let embed = card(&live(&activity, Vec::new()), &markers);
+    let embed = discord(&card(&live(&activity, Vec::new()), &markers));
     assert_eq!(
         field(&embed, "Work"),
         Some("✗ delegation `child` · failed\n⚠️ … additional work not fully observed")
@@ -521,7 +571,7 @@ fn work_a_jobs_reports_left_uncounted_is_said_to_be_unobserved_not_totalled() {
         report
     };
     let work_of = |earlier: &TurnActivity, latest: &TurnActivity| {
-        let embed = card(&live(latest, vec![earlier]), &markers);
+        let embed = discord(&card(&live(latest, vec![earlier]), &markers));
         field(&embed, "Work").map(|work| work.lines().map(str::to_owned).collect::<Vec<_>>())
     };
     let unobserved = "⚠️ … additional work not fully observed";
@@ -596,7 +646,7 @@ fn an_agent_the_runtime_said_nothing_of_shows_no_agent_section() {
     let agent_of = |agent: AgentInfo| {
         let mut activity = activity.clone();
         activity.agent = Some(agent);
-        let embed = card(&live(&activity, Vec::new()), &markers);
+        let embed = discord(&card(&live(&activity, Vec::new()), &markers));
         // Discord's limits, as Twilight checks them, allow either way.
         valid(&embed);
         (field(&embed, "Agent").map(str::to_owned), embed)
@@ -643,7 +693,7 @@ fn markers_are_configured_per_row_and_empty_ones_leave_no_space() {
         models: BTreeMap::new(),
     };
     let activity = tools();
-    let embed = card(&live(&activity, Vec::new()), &custom);
+    let embed = discord(&card(&live(&activity, Vec::new()), &custom));
     assert_eq!(
         text(&embed),
         "<a:working:101> Working · started <t:1790000000:R>\n> Checking tests\nCalls:\n<:done:103> read `README.md`\n<a:error:104> mcp??1?\n➜ bash `echo ˋidˋ > x` · <t:1790000000:R>"
@@ -659,7 +709,7 @@ fn markers_are_configured_per_row_and_empty_ones_leave_no_space() {
         stopped: String::new(),
         models: BTreeMap::new(),
     };
-    let embed = card(&live(&activity, Vec::new()), &empty);
+    let embed = discord(&card(&live(&activity, Vec::new()), &empty));
     assert_eq!(
         text(&embed),
         "Working · started <t:1790000000:R>\n> Checking tests\nCalls:\nread `README.md`\nmcp??1?\nbash `echo ˋidˋ > x` · <t:1790000000:R>"
@@ -696,7 +746,7 @@ fn configured_brand_emotes_match_the_actual_main_and_child_models_without_changi
         partial: false,
         omitted: None,
     });
-    let shown = text(&card(&live(&activity, Vec::new()), &markers));
+    let shown = text(&discord(&card(&live(&activity, Vec::new()), &markers)));
     assert!(shown.starts_with("⏳ Working"));
     assert!(shown.contains("Agent:\n<:special:102> claude-special-model"));
     assert!(shown.contains("done · <:openai:103> gpt-6.1-sol"));
@@ -705,7 +755,7 @@ fn configured_brand_emotes_match_the_actual_main_and_child_models_without_changi
         effort: None,
         context: None,
     });
-    let plain = text(&card(&live(&activity, Vec::new()), &markers));
+    let plain = text(&discord(&card(&live(&activity, Vec::new()), &markers)));
     assert!(plain.contains("Agent:\nunknown-model"));
     assert!(!plain.contains("<:special:102>"));
 }
@@ -714,7 +764,10 @@ fn configured_brand_emotes_match_the_actual_main_and_child_models_without_changi
 fn a_partial_report_says_so() {
     let mut activity = tools();
     activity.partial = true;
-    let embed = card(&live(&activity, Vec::new()), &ActivityMarkers::default());
+    let embed = discord(&card(
+        &live(&activity, Vec::new()),
+        &ActivityMarkers::default(),
+    ));
     assert!(
         embed
             .description
@@ -732,12 +785,12 @@ fn every_runtimes_report_renders_as_a_summary_within_discords_limits() -> anyhow
         activities: Vec<TurnActivity>,
     }
     let fixtures: Fixtures = serde_json::from_str(include_str!(
-        "../../../../../packages/protocol/fixtures/activity.json"
+        "../../../../packages/protocol/fixtures/activity.json"
     ))?;
     let markers = ActivityMarkers::default();
     for activity in fixtures.activities {
         let settled = settled(TurnState::Completed, Some(activity.clone()));
-        let embed = job_card(&settled, None, &markers);
+        let embed = discord(&job_card(&settled, None, &markers));
         valid(&embed);
         let shown = text(&embed);
         assert!(
@@ -745,10 +798,10 @@ fn every_runtimes_report_renders_as_a_summary_within_discords_limits() -> anyhow
             "{shown}"
         );
         assert_eq!(
-            job_summary(&settled, &markers).is_some(),
+            summary(&settled, &markers).is_some(),
             earned(&settled, None)
         );
-        valid(&card(&live(&activity, Vec::new()), &markers));
+        valid(&discord(&card(&live(&activity, Vec::new()), &markers)));
     }
     Ok(())
 }
@@ -780,11 +833,11 @@ fn work_a_stop_or_work_continued_after_an_answer_earns_a_summary() {
     assert!(earns(completed, Some(&delegated)));
     // What a card saw a turn do counts when the turn gave no report.
     let plain = settled(completed, None);
-    assert!(earned(&plain, Some(&("turn".to_owned(), tools()))));
+    assert!(earned(&plain, Some(&seen(tools()))));
     // A turn that stopped earns one whatever it reported, and it shows only the stop.
     assert!(earns(TurnState::Interrupted, None));
     assert!(earns(TurnState::Interrupted, Some(&answer_only)));
-    let stopped = job_summary(
+    let stopped = summary(
         &settled(TurnState::Interrupted, None),
         &ActivityMarkers::default(),
     );
@@ -821,7 +874,7 @@ fn a_long_jobs_summary_keeps_work_its_listed_reports_left_out_and_says_so() {
         .collect());
     long.earlier = true;
     assert!(earned(&long, None));
-    let summary = job_summary(&long, &markers).map(|embed| text(valid(&embed)));
+    let summary = summary(&long, &markers).map(|embed| text(valid(&embed)));
     let summary = summary.unwrap_or_default();
     assert!(summary.starts_with("✓ Done · answered 45s"), "{summary}");
     assert!(
@@ -833,8 +886,8 @@ fn a_long_jobs_summary_keeps_work_its_listed_reports_left_out_and_says_so() {
 #[test]
 fn a_cards_status_and_rows_come_from_the_jobs_recorded_turns() {
     let markers = ActivityMarkers::default();
-    let status = |job: &Job, seen: Option<&super::Seen>| {
-        job_card(job, seen, &markers)
+    let status = |job: &Job, seen: Option<&Seen>| {
+        discord(&job_card(job, seen, &markers))
             .description
             .unwrap_or_default()
     };
@@ -855,10 +908,7 @@ fn a_cards_status_and_rows_come_from_the_jobs_recorded_turns() {
     let running = job(vec![turn("turn", TurnState::Running, None)]);
     let mut model = tools();
     model.phase = ActivityPhase::Model;
-    assert!(
-        status(&running, Some(&("turn".to_owned(), model)))
-            .starts_with("⏳ Working · Waiting for the model")
-    );
+    assert!(status(&running, Some(&seen(model))).starts_with("⏳ Working · Waiting for the model"));
     // Ended, its answer not yet sent, and then sent or not.
     let finishing = job(vec![parent.clone()]);
     assert!(status(&finishing, None).starts_with("⏳ Finishing up"));
@@ -879,12 +929,74 @@ fn a_cards_status_and_rows_come_from_the_jobs_recorded_turns() {
     let mut snapshot = tools();
     snapshot.recent = vec![finished("grep", Some("TODO"), true)];
     let plain = job(vec![turn("turn", TurnState::Completed, None)]);
-    let shown = text(&job_card(
-        &plain,
-        Some(&("turn".to_owned(), snapshot)),
-        &markers,
-    ));
+    let shown = text(&discord(&job_card(&plain, Some(&seen(snapshot)), &markers)));
     assert!(shown.contains("✓ grep `TODO`"), "{shown}");
     assert!(!shown.contains("echo"), "{shown}");
     assert!(!shown.contains("may not be shown"), "{shown}");
+}
+
+/// Cards the native renderer this module replaced showed for queued,
+/// working, continuing, finishing, interrupted, earned and plain jobs,
+/// recorded with their requests.
+const PARITY: &str = include_str!("../../fixtures/cards.json");
+
+#[derive(serde::Deserialize)]
+struct Recorded {
+    name: String,
+    request: CardRequest,
+    /// The embed in Discord's JSON, or `None` when the card went.
+    card: Option<serde_json::Value>,
+}
+
+#[test]
+fn cards_match_what_the_native_renderer_showed() -> anyhow::Result<()> {
+    let recorded: Vec<Recorded> = serde_json::from_str(PARITY)?;
+    assert_eq!(recorded.len(), 12);
+    for case in recorded {
+        let card = match render(&case.request) {
+            Card::Show(embed) => {
+                valid(&serde_json::from_value(embed.clone())?);
+                Some(embed)
+            }
+            Card::Remove => None,
+        };
+        assert_eq!(card, case.card, "{}", case.name);
+    }
+    Ok(())
+}
+
+#[test]
+fn only_a_settled_job_loses_its_card() {
+    let markers = ActivityMarkers::default();
+    let plain = TurnActivity {
+        phase: ActivityPhase::Model,
+        headline: None,
+        running: Vec::new(),
+        recent: Vec::new(),
+        tool_calls: 0,
+        work: None,
+        notes: Vec::new(),
+        agent: None,
+        partial: false,
+    };
+    let mut finishing = turn("turn", TurnState::Completed, Some(plain.clone()));
+    finishing.delivery = Some(DeliveryState::Delivering);
+    for job in [
+        job(vec![turn("turn", TurnState::Queued, None)]),
+        job(vec![turn("turn", TurnState::Running, Some(plain.clone()))]),
+        job(vec![finishing]),
+    ] {
+        let request = CardRequest {
+            job,
+            seen: None,
+            markers: markers.clone(),
+        };
+        assert!(matches!(render(&request), Card::Show(_)));
+    }
+    let answered = CardRequest {
+        job: settled(TurnState::Completed, Some(plain)),
+        seen: None,
+        markers,
+    };
+    assert_eq!(render(&answered), Card::Remove);
 }

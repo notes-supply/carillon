@@ -1,10 +1,11 @@
-//! The JSON exchanged between the Discord provider and its command module.
-//! Every message is an externally tagged enum; unknown fields are ignored so
-//! either side can grow without breaking the other within one contract
-//! version.
+//! The JSON exchanged between the Discord provider and its module. Every
+//! message is an externally tagged enum. Unknown fields are ignored except
+//! in the fixed [`ActivityMarkers`] schema, which is also provider config.
+
+use std::collections::BTreeMap;
 
 use carillon_protocol::{
-    model::{CommandCatalog, ModelScope as Scope},
+    model::{CommandCatalog, Job, ModelScope as Scope, TurnActivity},
     models::{ModelState, Selection},
 };
 
@@ -12,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Contract version the module speaks; the provider refuses others.
-pub const CONTRACT: u32 = 3;
+pub const CONTRACT: u32 = 4;
 
 /// Provider to module: the invocation payload.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -22,6 +23,8 @@ pub enum Invocation {
     /// Handle an admitted interaction. Replies are ephemeral; a component
     /// interaction's reply updates the message carrying the component.
     Interaction(Interaction),
+    /// Show a job on its card. The module may make no native call.
+    Card(Box<CardRequest>),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -52,6 +55,7 @@ pub enum InteractionKind {
 pub enum Outcome {
     Description(Description),
     Reply(Reply),
+    Card(Card),
     /// The module could not handle the invocation; the provider reports a
     /// generic error to the user and logs the message.
     Failure(String),
@@ -112,4 +116,69 @@ pub enum HostReply {
     /// Core accepted the submission.
     Submitted,
     Error(String),
+}
+
+/// A job as its card shows it: what core recorded of it, the latest
+/// snapshot the card saw of a turn while it ran, and the provider's markers.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CardRequest {
+    pub job: Job,
+    /// It stands for its turn's work while a read has no snapshot of the
+    /// turn, and after the turn ended without a report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seen: Option<Seen>,
+    pub markers: ActivityMarkers,
+}
+
+/// The latest snapshot a card saw of one of its job's running turns.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Seen {
+    pub turn_id: String,
+    pub activity: TurnActivity,
+}
+
+/// What a job's card shows.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum Card {
+    /// One embed in Discord's own JSON, validated by the host and sent without
+    /// mentions. Operator modules may use Discord's other embed fields too.
+    Show(Value),
+    /// Only for a settled job: its card goes, as the job earned no summary.
+    Remove,
+}
+
+/// Inline card markers, set in the provider's configuration, which
+/// validates them; independent of the provider's reaction emoji.
+/// Unknown fields are rejected to catch configuration typos; adding a marker
+/// field therefore requires a new contract version.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ActivityMarkers {
+    pub working: String,
+    pub queued: String,
+    pub finishing: String,
+    pub running: String,
+    pub succeeded: String,
+    pub failed: String,
+    pub uncertain: String,
+    pub stopped: String,
+    /// Optional brand emotes by model-ID prefix; the longest match wins.
+    /// Unmatched models remain plain, rather than guessing their brand.
+    pub models: BTreeMap<String, String>,
+}
+
+impl Default for ActivityMarkers {
+    fn default() -> Self {
+        Self {
+            working: "⏳".to_owned(),
+            queued: "⏳".to_owned(),
+            finishing: "⏳".to_owned(),
+            running: "↳".to_owned(),
+            succeeded: "✓".to_owned(),
+            failed: "✗".to_owned(),
+            uncertain: "⚠️".to_owned(),
+            stopped: "⏹️".to_owned(),
+            models: BTreeMap::new(),
+        }
+    }
 }

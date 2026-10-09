@@ -21,11 +21,11 @@ use tracing_subscriber::EnvFilter;
 
 use crate::{
     application::{ServeOptions, serve},
-    commands::{
-        self, Change, CommandFiles, ModuleSummary, NextStart, Refusal, Registration, Saved, Source,
+    config::{DiscordConfig, DiscordRoute, configure},
+    module::{
+        self, Change, ModuleFiles, ModuleSummary, NextStart, Refusal, Registration, Saved, Source,
         Status,
     },
-    config::{DiscordConfig, DiscordRoute, configure},
     operations::{
         self, ATTACHMENT_BYTES, ATTACHMENT_COUNT, Messages, Operation, OperationError, Upload,
     },
@@ -41,8 +41,8 @@ const CHANGE_TIMEOUT: Duration = Duration::from_secs(60);
     name = "carillon-discord",
     version,
     about = "Carillon Discord interface provider",
-    after_help = "Run as `carillon discord …`. Slash commands come from a replaceable command \
-                  module; see `carillon discord commands --help`."
+    after_help = "Run as `carillon discord …`. Slash commands and work cards come from a \
+                  replaceable Discord module; see `carillon discord module --help`."
 )]
 struct Cli {
     /// Installation for operator actions. Defaults to `CARILLON_HOME`, then
@@ -68,9 +68,9 @@ enum Command {
         /// The Discord bot token; required outside deterministic mode.
         #[arg(long)]
         discord_token_file: Option<PathBuf>,
-        /// The release's command module; an installed module takes precedence.
+        /// The release's Discord module; an installed module takes precedence.
         #[arg(long)]
-        commands: PathBuf,
+        module: PathBuf,
         /// Serve local simulation endpoints instead of connecting to Discord.
         #[arg(long)]
         deterministic: bool,
@@ -90,7 +90,7 @@ enum Command {
         route: Vec<DiscordRoute>,
     },
     /// Check, without changing anything, that this program accepts the
-    /// instance's Discord settings and its installed command module.
+    /// instance's Discord settings and its installed Discord module.
     Check {
         /// Registry ID of the Discord instance; inferred when only one is configured.
         #[arg(long)]
@@ -109,7 +109,7 @@ enum Command {
         #[command(subcommand)]
         operation: Operation,
     },
-    /// Show which command module the running provider serves, or change it.
+    /// Show which Discord module the running provider serves, or change it.
     #[command(after_help = "\
 Without a subcommand, shows the serving module and its commands.
 
@@ -117,13 +117,13 @@ An installed module replaces the release's module without restarting the
 provider or reconnecting its gateway, and keeps serving after restarts and
 release updates. Changed command definitions are registered with Discord
 before the module serves. Interactions already running finish on the module
-they started with.")]
-    Commands {
+they started with; each card update is drawn by the module serving then.")]
+    Module {
         /// Registry ID of the Discord instance; inferred when only one is configured.
         #[arg(long, global = true)]
         provider: Option<String>,
         #[command(subcommand)]
-        action: Option<CommandsAction>,
+        action: Option<ModuleAction>,
     },
 }
 
@@ -141,13 +141,13 @@ enum ToolsAction {
 }
 
 #[derive(Debug, Subcommand)]
-enum CommandsAction {
-    /// Check that FILE is a command module this program can serve, without
+enum ModuleAction {
+    /// Check that FILE is a Discord module this program can serve, without
     /// serving it. Needs no installation or running provider.
     Check { file: PathBuf },
     /// Serve FILE in the running provider and keep it for later starts.
     Install { file: PathBuf },
-    /// Serve the release's command module again and remove the installed one.
+    /// Serve the release's Discord module again and remove the installed one.
     Reset,
 }
 
@@ -173,7 +173,7 @@ pub(crate) async fn run() -> Result<()> {
             provider,
             token_file,
             discord_token_file,
-            commands,
+            module,
             deterministic,
         } => {
             serve(
@@ -182,7 +182,7 @@ pub(crate) async fn run() -> Result<()> {
                     provider_id: &provider,
                     token_file: &token_file,
                     discord_token_file: discord_token_file.as_deref(),
-                    commands: &commands,
+                    module: &module,
                     deterministic,
                 },
             )
@@ -243,8 +243,8 @@ pub(crate) async fn run() -> Result<()> {
             let result = call(&loaded, &provider, operation).await?;
             println!("{}", serde_json::to_string(&result)?);
         }
-        Command::Commands { provider, action } => {
-            manage_commands(installation, provider, action).await?;
+        Command::Module { provider, action } => {
+            manage_module(installation, provider, action).await?;
         }
     }
     Ok(())
@@ -467,33 +467,33 @@ fn instance(config: &LoadedConfig, explicit: Option<String>) -> Result<String> {
     }
 }
 
-/// `carillon discord commands …`: a file check needs no installation; the
+/// `carillon discord module …`: a file check needs no installation; the
 /// rest ask the running provider, which owns the module and its changes.
-async fn manage_commands(
+async fn manage_module(
     installation: impl FnOnce() -> Result<LoadedConfig>,
     provider: Option<String>,
-    action: Option<CommandsAction>,
+    action: Option<ModuleAction>,
 ) -> Result<()> {
     let (method, body, requested) = match action {
-        Some(CommandsAction::Check { file }) => {
+        Some(ModuleAction::Check { file }) => {
             if let Some(provider) = provider {
-                bail!("`commands check` examines a file and does not use --provider {provider}");
+                bail!("`module check` examines a file and does not use --provider {provider}");
             }
             let module = check_file(&file).await?;
             println!(
-                "{} is a usable command module for carillon-discord {RELEASE_VERSION}: {}.",
+                "{} is a usable Discord module for carillon-discord {RELEASE_VERSION}: {}.",
                 file.display(),
                 list(&module)
             );
             return Ok(());
         }
         None => (Method::GET, None, None),
-        Some(CommandsAction::Install { file }) => {
+        Some(ModuleAction::Install { file }) => {
             let bytes = fs::read(&file)
-                .with_context(|| format!("read command module {}", file.display()))?;
+                .with_context(|| format!("read Discord module {}", file.display()))?;
             (Method::PUT, Some(bytes), Some(Source::Installed))
         }
-        Some(CommandsAction::Reset) => (Method::DELETE, None, Some(Source::Release)),
+        Some(ModuleAction::Reset) => (Method::DELETE, None, Some(Source::Release)),
     };
     let loaded = installation()?;
     let provider = instance(&loaded, provider)?;
@@ -512,19 +512,19 @@ async fn manage_commands(
 /// Validates an installed module against this program, as an update's
 /// preflight does before it stops the services.
 async fn check_installed(loaded: &LoadedConfig, provider: &str) -> Result<()> {
-    let installed = CommandFiles::of(loaded, provider, PathBuf::new()).installed;
+    let installed = ModuleFiles::of(loaded, provider, PathBuf::new()).installed;
     if !installed.exists() {
         return Ok(());
     }
     let module = check_file(&installed).await.with_context(|| {
         format!(
-            "{provider} has an installed command module this release cannot serve. Run \
-             `carillon discord commands reset` (or remove the file while the provider is \
+            "{provider} has an installed Discord module this release cannot serve. Run \
+             `carillon discord module reset` (or remove the file while the provider is \
              stopped), then install a module built for this release"
         )
     })?;
     println!(
-        "installed command module {} is usable by carillon-discord {RELEASE_VERSION}: {}.",
+        "installed Discord module {} is usable by carillon-discord {RELEASE_VERSION}: {}.",
         installed.display(),
         list(&module)
     );
@@ -533,16 +533,16 @@ async fn check_installed(loaded: &LoadedConfig, provider: &str) -> Result<()> {
 
 async fn check_file(file: &Path) -> Result<ModuleSummary> {
     let bytes =
-        fs::read(file).with_context(|| format!("read command module {}", file.display()))?;
-    commands::check(&bytes).await.with_context(|| {
+        fs::read(file).with_context(|| format!("read Discord module {}", file.display()))?;
+    module::check(&bytes).await.with_context(|| {
         format!(
-            "{} is not a usable command module for carillon-discord {RELEASE_VERSION}",
+            "{} is not a usable Discord module for carillon-discord {RELEASE_VERSION}",
             file.display()
         )
     })
 }
 
-/// The running provider's operator endpoint for the command module.
+/// The running provider's operator endpoint for the Discord module.
 struct Operator {
     url: String,
     credential: String,
@@ -552,7 +552,7 @@ impl Operator {
     fn new(loaded: &LoadedConfig, provider: &str) -> Result<Self> {
         let target = loaded.provider(provider, ProviderRole::Interface)?;
         Ok(Self {
-            url: format!("{}/v1/commands", target.url),
+            url: format!("{}/v1/module", target.url),
             credential: loaded.credential("operator")?,
         })
     }
@@ -595,7 +595,7 @@ impl Operator {
         }
         if let Ok(Refusal { error, serving }) = serde_json::from_slice(&bytes) {
             bail!(
-                "{error}.\nStill serving the {} command module: {}.",
+                "{error}.\nStill serving the {} Discord module: {}.",
                 serving.source,
                 list(&serving)
             );
@@ -606,7 +606,7 @@ impl Operator {
             .unwrap_or_else(|| String::from_utf8_lossy(&bytes).trim().to_owned());
         if status == StatusCode::NOT_FOUND {
             bail!(
-                "the Discord provider at {} does not offer command module operations ({message}); \
+                "the Discord provider at {} does not offer Discord module operations ({message}); \
                  it may be a different release than this program",
                 self.url
             );
@@ -619,7 +619,7 @@ impl Operator {
     fn unreachable(&self, error: &reqwest::Error, changing: bool) -> anyhow::Error {
         if error.is_timeout() {
             let outcome = if changing {
-                " The change may still complete; check with `carillon discord commands`."
+                " The change may still complete; check with `carillon discord module`."
             } else {
                 ""
             };
@@ -638,7 +638,7 @@ impl Operator {
                 "the request to the Discord provider at {} failed: {error}.{}",
                 self.url,
                 if changing {
-                    " Whether the change happened is unknown; check with `carillon discord commands`."
+                    " Whether the change happened is unknown; check with `carillon discord module`."
                 } else {
                     ""
                 }
@@ -666,7 +666,7 @@ fn print_status(provider: &str, status: &Status) {
         registered,
     } = status;
     println!(
-        "{provider} serves the {} command module: {}.",
+        "{provider} serves the {} Discord module: {}.",
         serving.source,
         list(serving)
     );
@@ -699,13 +699,13 @@ fn report_change(provider: &str, requested: Source, change: &Change) -> Result<(
     } = change;
     if previous == serving {
         println!(
-            "{provider} was already serving the {} command module: {}.",
+            "{provider} was already serving the {} Discord module: {}.",
             serving.source,
             list(serving)
         );
     } else {
         println!(
-            "{provider} now serves the {} command module: {}.",
+            "{provider} now serves the {} Discord module: {}.",
             serving.source,
             list(serving)
         );
@@ -715,7 +715,7 @@ fn report_change(provider: &str, requested: Source, change: &Change) -> Result<(
     }
     let again = match requested {
         Source::Installed => "Run the same install again",
-        Source::Release => "Run `carillon discord commands reset` again",
+        Source::Release => "Run `carillon discord module reset` again",
     };
     match (saved, requested) {
         (Saved::Durable, _) => Ok(()),
@@ -1232,7 +1232,7 @@ mod tests {
 
     #[test]
     fn failed_saves_do_not_infer_restart_selection() -> Result<()> {
-        use crate::commands::{Change, ModuleSummary, Registration, Saved, Source};
+        use crate::module::{Change, ModuleSummary, Registration, Saved, Source};
 
         // Retrying may request the same bytes already on disk, and a reset
         // may fail before it even inspects an absent override. Neither error

@@ -1,5 +1,5 @@
 [package]
-name = "carillon-discord-commands"
+name = "carillon-discord-module"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,6 +12,11 @@ crate-type = ["cdylib", "rlib"]
 carillon-protocol = { path = "../carillon-protocol" }
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+twilight-model.workspace = true
+twilight-validate = "0.17.0"
 
 # The guest ABI needs `unsafe extern` imports and `#[unsafe(no_mangle)]`
 # exports, which the workspace's `forbid` cannot admit. Everything else keeps

@@ -29,9 +29,9 @@ const restoredRoot = await mkdtemp(join(tmpdir(), "carillon-restored-"));
 const workspace = await mkdtemp(join(tmpdir(), "carillon-workspace-"));
 const backup = join(tmpdir(), `carillon-backup-${crypto.randomUUID()}.tar.gz`);
 const binary = resolve(process.env.CARILLON_CORE_BINARY ?? "target/debug/carillon");
-const commandsModule = resolve(
-  process.env.CARILLON_COMMANDS_MODULE ??
-    "target/wasm32-unknown-unknown/wasm/carillon_discord_commands.wasm",
+const discordModule = resolve(
+  process.env.CARILLON_DISCORD_MODULE ??
+    "target/wasm32-unknown-unknown/wasm/carillon_discord_module.wasm",
 );
 const runtimeEntry = resolve("packages/runtime-pi/src/cli.ts");
 const packagedRuntime = process.env.CARILLON_RUNTIME_BINARY;
@@ -626,7 +626,7 @@ async function testModelPicker() {
   });
   assert.equal(unauthenticated.status, 403, "interactions require the provider credential");
   await testRuntimeCommands();
-  await testCommandModuleOperations();
+  await testModuleOperations();
 }
 
 /**
@@ -658,52 +658,49 @@ async function testRuntimeCommands() {
 }
 
 /**
- * The operator replaces the running command module and returns to the
+ * The operator replaces the running Discord module and returns to the
  * release's; every installed module keeps serving through the same Wasm host.
  */
-async function testCommandModuleOperations() {
-  const commands = (...args) => run("--home", installation, "discord", "commands", ...args);
-  assert.equal(commands(), "discord-private serves the release command module: /model, /command.");
+async function testModuleOperations() {
+  const operate = (...args) => run("--home", installation, "discord", "module", ...args);
+  assert.equal(operate(), "discord-private serves the release Discord module: /model, /command.");
   assert.match(
-    commands("check", commandsModule),
-    /is a usable command module .*: \/model, \/command\.$/u,
+    operate("check", discordModule),
+    /is a usable Discord module .*: \/model, \/command\.$/u,
   );
   assert.equal(
-    commands("install", commandsModule),
-    "discord-private now serves the installed command module: /model, /command.",
+    operate("install", discordModule),
+    "discord-private now serves the installed Discord module: /model, /command.",
   );
   assert.match((await interact("305", null, "command", "model")).content, /Agent default:/u);
   // Repeating an install finishes its save; it serves the same module.
   assert.equal(
-    commands("install", commandsModule),
-    "discord-private was already serving the installed command module: /model, /command.",
+    operate("install", discordModule),
+    "discord-private was already serving the installed Discord module: /model, /command.",
   );
-  const broken = join(workspace, "broken-commands.wasm");
+  const broken = join(workspace, "broken-module.wasm");
   await writeFile(broken, "\0asm broken");
   for (const args of [
     ["check", broken],
     ["install", broken],
   ]) {
-    const refused = spawnSync(binary, ["--home", installation, "discord", "commands", ...args], {
+    const refused = spawnSync(binary, ["--home", installation, "discord", "module", ...args], {
       encoding: "utf8",
     });
     assert.notEqual(refused.status, 0, `${args[0]} accepted a broken module`);
-    assert.match(refused.stderr, /^error: .*not a usable command module/u);
+    assert.match(refused.stderr, /^error: .*not a usable Discord module/u);
     if (args[0] === "install") {
       assert.match(
         refused.stderr,
-        /Still serving the installed command module: \/model, \/command\.$/mu,
+        /Still serving the installed Discord module: \/model, \/command\.$/mu,
       );
     }
   }
   await rm(broken);
+  assert.equal(operate(), "discord-private serves the installed Discord module: /model, /command.");
   assert.equal(
-    commands(),
-    "discord-private serves the installed command module: /model, /command.",
-  );
-  assert.equal(
-    commands("reset"),
-    "discord-private now serves the release command module: /model, /command.",
+    operate("reset"),
+    "discord-private now serves the release Discord module: /model, /command.",
   );
   assert.match((await interact("305", null, "command", "model")).content, /Agent default:/u);
 }
@@ -1516,7 +1513,7 @@ async function testConfigurationRefusals() {
   const database = join(installation, "state/carillon.sqlite3");
   const previousDatabase = await readFile(database);
   try {
-    // The provider serves nothing without its own settings or its command module.
+    // The provider serves nothing without its own settings or its Discord module.
     await rename(providerConfigPath(), `${providerConfigPath()}-saved`);
     try {
       assertStartupRefused("discord", /read Discord configuration/u);
@@ -1554,20 +1551,20 @@ async function testConfigurationRefusals() {
     }
     const brokenModule = join(workspace, "broken.wasm");
     await writeFile(brokenModule, "\0asm broken");
-    assertStartupRefused("discord", /read release command module/u, [], {
-      commands: join(workspace, "missing.wasm"),
+    assertStartupRefused("discord", /read release Discord module/u, [], {
+      module: join(workspace, "missing.wasm"),
     });
-    assertStartupRefused("discord", /release command module .* is unusable/u, [], {
-      commands: brokenModule,
+    assertStartupRefused("discord", /release Discord module .* is unusable/u, [], {
+      module: brokenModule,
     });
     // An unusable installed module refuses startup, naming the file to remove,
     // even though the release's module is usable.
-    const installed = join(installation, "state/components/discord-private/command-module.wasm");
+    const installed = join(installation, "state/components/discord-private/module.wasm");
     await mkdir(join(installed, ".."), { recursive: true });
     await rename(brokenModule, installed);
     assertStartupRefused(
       "discord",
-      /installed command module .*command-module\.wasm is unusable; remove it/u,
+      /installed Discord module .*module\.wasm is unusable; remove it/u,
     );
     await rm(installed);
     for (const id of ["runtime-pi", "discord-private"]) {
@@ -1962,7 +1959,7 @@ async function waitForTurn(turnId, state, deliveryState = null) {
   );
 }
 
-function serviceArguments(name, { nativePi = false, commands = commandsModule } = {}) {
+function serviceArguments(name, { nativePi = false, module = discordModule } = {}) {
   if (name === "core") return [binary, ["core", "--config", configPath()]];
   if (name === "runtime-t3")
     return [
@@ -2004,8 +2001,8 @@ function serviceArguments(name, { nativePi = false, commands = commandsModule } 
       "discord-private",
       "--token-file",
       credential("discord-private"),
-      "--commands",
-      commands,
+      "--module",
+      module,
       "--deterministic",
     ],
   ];

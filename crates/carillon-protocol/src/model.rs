@@ -354,6 +354,29 @@ pub struct Job {
     pub earlier: bool,
 }
 
+impl Job {
+    /// The job's turn queued or running: its newest, when it is at work.
+    #[must_use]
+    pub fn at_work(&self) -> Option<&JobTurn> {
+        self.turns
+            .last()
+            .filter(|turn| matches!(turn.state, TurnState::Queued | TurnState::Running))
+    }
+
+    /// How the job's last turn ended and its answer or notice was sent, once
+    /// both are recorded: nothing more will happen to the job.
+    #[must_use]
+    pub fn settled(&self) -> Option<(TurnState, DeliveryOutcome)> {
+        let last = self.turns.last().filter(|turn| turn.ended())?;
+        let delivery = match last.delivery? {
+            DeliveryState::Delivered => DeliveryOutcome::Delivered,
+            DeliveryState::Uncertain => DeliveryOutcome::Uncertain,
+            DeliveryState::Pending | DeliveryState::Delivering => return None,
+        };
+        Some((last.state, delivery))
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct JobTurn {
     pub turn_id: String,
@@ -383,6 +406,14 @@ pub struct JobTurn {
         skip_serializing_if = "Option::is_none"
     )]
     pub delivery: Option<DeliveryState>,
+}
+
+impl JobTurn {
+    /// The turn completed or was interrupted.
+    #[must_use]
+    pub const fn ended(&self) -> bool {
+        matches!(self.state, TurnState::Completed | TurnState::Interrupted)
+    }
 }
 
 /// What a runtime is doing in one executing turn. The runtime formats each

@@ -1,10 +1,12 @@
-//! The replaceable Discord command module: definitions, handlers, and
-//! presentation for the commands the Discord provider serves. The provider
-//! keeps the gateway connection, admission, and every Discord or core call;
-//! this module only decides what to show and what to ask for.
+//! The replaceable Discord module: the commands the Discord provider serves,
+//! with their definitions, handlers and presentation, and the work cards it
+//! shows of jobs. The provider keeps the gateway connection, admission, card
+//! lifecycle and every Discord or core call; this module only decides what
+//! to show and what to ask for.
 
 use carillon_protocol::model::{CommandCatalog, ModelScope as Scope};
 use carillon_protocol::models::{ModelState, Selection};
+mod card;
 mod components;
 pub mod contract;
 mod model;
@@ -100,5 +102,6 @@ pub fn handle(host: &mut impl HostCalls, invocation: Invocation) -> Outcome {
             Some(run::COMMAND) => run::interact(host, &interaction),
             _ => model::interact(host, &interaction),
         },
+        Invocation::Card(request) => Outcome::Card(card::render(&request)),
     }
 }

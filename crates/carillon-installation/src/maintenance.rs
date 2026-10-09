@@ -1,6 +1,6 @@
 //! The locks serializing changes to one installation and to the owner's
 //! user units. Operator maintenance, the release scripts, and the Discord
-//! provider's command-module changes take the same `flock(2)` lock on
+//! provider's module changes take the same `flock(2)` lock on
 //! `CARILLON_HOME/.maintenance.lock`. Every installation of an owner shares
 //! the owner's Carillon user units, so whatever reads or changes which
 //! installation they run also takes `.carillon-units.lock` beside them,

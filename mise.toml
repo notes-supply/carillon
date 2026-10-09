@@ -26,6 +26,8 @@ depends = ["check:rust", "check:ts"]
 
 [tasks."check:rust"]
 description = "Check and test the Rust workspace"
+# Discord's tests run the built module through the provider's Wasm host.
+depends = ["build:module"]
 run = [
   "cargo fmt --all -- --check",
   "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
@@ -45,9 +47,9 @@ run = [
   "vitest run",
 ]
 
-[tasks."build:commands"]
-description = "Build the Discord command module for the Wasm sandbox"
-run = "cargo build --locked --profile wasm -p carillon-discord-commands --target wasm32-unknown-unknown"
+[tasks."build:module"]
+description = "Build the Discord module for the Wasm sandbox"
+run = "cargo build --locked --profile wasm -p carillon-discord-module --target wasm32-unknown-unknown"
 
 [tasks."example:core"]
 description = "Run a durable conversation with temporary SQLite and an in-process test runtime"
@@ -60,7 +62,7 @@ run = "bun packages/runtime-pi/examples/session.ts"
 
 [tasks."test:integration"]
 description = "Test local core, Discord, Pi and T3 runtime services together"
-depends = ["install", "build:commands"]
+depends = ["install", "build:module"]
 run = "cargo build --locked --bin carillon --bin carillon-discord && node scripts/test-integration.mjs"
 
 [tasks."test:persistence"]
