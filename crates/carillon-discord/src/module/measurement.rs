@@ -75,7 +75,7 @@ impl HostCalls for Refusing {
 }
 
 /// The card the guest's code draws natively, as the host takes it.
-fn native(request: CardRequest) -> anyhow::Result<Option<Embed>> {
+fn direct_guest(request: CardRequest) -> anyhow::Result<Option<Embed>> {
     match carillon_discord_module::handle(&mut Refusing, Invocation::Card(Box::new(request))) {
         carillon_discord_module::contract::Outcome::Card(Card::Show(embed)) => {
             let embed: Embed = serde_json::from_value(embed)?;
@@ -159,7 +159,7 @@ async fn card_rendering_cost() -> anyhow::Result<()> {
     } in &cases
     {
         let size = serde_json::to_vec(request)?.len();
-        let expected = native(request.clone())?;
+        let expected = direct_guest(request.clone())?;
         assert_eq!(module.render_card(request).await?, expected, "{name}");
         if let Some(Recorded(recorded)) = recorded {
             assert_eq!(
@@ -171,7 +171,7 @@ async fn card_rendering_cost() -> anyhow::Result<()> {
         let mut native_samples = Vec::with_capacity(SAMPLES);
         for (index, copy) in copies.drain(..).enumerate() {
             let started = Instant::now();
-            native(copy)?;
+            direct_guest(copy)?;
             if index >= WARMUP {
                 native_samples.push(started.elapsed());
             }
@@ -191,7 +191,7 @@ async fn card_rendering_cost() -> anyhow::Result<()> {
                 "case": name,
                 "request_bytes": size,
                 "matches_recorded": recorded.is_some(),
-                "native": summary(&mut native_samples),
+                "direct_guest": summary(&mut native_samples),
                 "wasm": summary(&mut wasm_samples),
             })
         );
@@ -246,7 +246,7 @@ fn variant(bytes: &[u8]) -> Vec<u8> {
 
 /// What the load beside the replacements saw.
 #[derive(Default)]
-struct Seen {
+struct Counters {
     drawn: AtomicUsize,
     wrong: AtomicUsize,
     failed: AtomicUsize,
@@ -264,7 +264,7 @@ async fn draw(
     cases: Cases,
     start: usize,
     stop: Arc<AtomicBool>,
-    seen: Arc<Seen>,
+    seen: Arc<Counters>,
 ) {
     let mut index = start;
     while !stop.load(Ordering::Relaxed) {
@@ -281,7 +281,7 @@ async fn draw(
 
 /// Runs `/model` until `stop`. Core is not there, so the module answers
 /// with its native call's refusal.
-async fn interact(module: Arc<Module>, stop: Arc<AtomicBool>, seen: Arc<Seen>) {
+async fn interact(module: Arc<Module>, stop: Arc<AtomicBool>, seen: Arc<Counters>) {
     while !stop.load(Ordering::Relaxed) {
         let calls = crate::client::test_client("http://127.0.0.1:1".to_owned()).map(|core| {
             InteractionCalls::new(
@@ -318,7 +318,7 @@ async fn round(
     module: &Arc<Module>,
     cases: &Cases,
     modules: (&[u8], usize),
-    seen: &Arc<Seen>,
+    seen: &Arc<Counters>,
 ) -> anyhow::Result<(Vec<Weak<super::Generation>>, Vec<Duration>)> {
     const RENDERERS: usize = 32;
     const INTERACTIONS: usize = 10;
@@ -374,9 +374,9 @@ async fn replacement_under_load() -> anyhow::Result<()> {
     let before = memory();
     let cases: Cases = requests()?
         .into_iter()
-        .map(|case| Ok((case.request.clone(), native(case.request)?)))
+        .map(|case| Ok((case.request.clone(), direct_guest(case.request)?)))
         .collect::<anyhow::Result<_>>()?;
-    let seen = Arc::new(Seen::default());
+    let seen = Arc::new(Counters::default());
     let (mut changes, mut after) = (Vec::new(), Vec::new());
     let mut retained = 0;
     for _ in 0..rounds {

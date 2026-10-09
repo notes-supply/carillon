@@ -1,6 +1,6 @@
 //! The JSON exchanged between the Discord provider and its module. Every
-//! message is an externally tagged enum; unknown fields are ignored so either
-//! side can grow without breaking the other within one contract version.
+//! message is an externally tagged enum. Unknown fields are ignored except
+//! in the fixed [`ActivityMarkers`] schema, which is also provider config.
 
 use std::collections::BTreeMap;
 
@@ -140,7 +140,8 @@ pub struct Seen {
 /// What a job's card shows.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum Card {
-    /// One embed in Discord's own JSON. Sent without mentions.
+    /// One embed in Discord's own JSON, validated by the host and sent without
+    /// mentions. Operator modules may use Discord's other embed fields too.
     Show(Value),
     /// Only for a settled job: its card goes, as the job earned no summary.
     Remove,
@@ -148,6 +149,8 @@ pub enum Card {
 
 /// Inline card markers, set in the provider's configuration, which
 /// validates them; independent of the provider's reaction emoji.
+/// Unknown fields are rejected to catch configuration typos; adding a marker
+/// field therefore requires a new contract version.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ActivityMarkers {
