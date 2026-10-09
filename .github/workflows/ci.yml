@@ -15,6 +15,9 @@ concurrency:
   # A newer push supersedes a pull request's run; main and queue runs finish.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Every run saves the caches it missed. GitHub keeps a pull request's caches
+# to that pull request; main restores only main's, which every run can read.
+
 env:
   # Each lane installs its own tools; a task needing another fails instead.
   MISE_AUTO_INSTALL: "false"
@@ -87,11 +90,12 @@ jobs:
           version: ${{ env.MISE_VERSION }}
           install_args: rust cargo:cargo-deny cargo:cargo-shear
           cache_key_prefix: mise-rust
-          cache_save: ${{ github.ref == 'refs/heads/main' }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: check
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # Dependency builds are kept even when a test fails: rust-cache
+          # saves no workspace crates, and the next run needn't start cold.
+          cache-on-failure: true
       - run: mise run check:rust
 
   ts:
@@ -110,7 +114,6 @@ jobs:
           version: ${{ env.MISE_VERSION }}
           install_args: node pnpm
           cache_key_prefix: mise-ts
-          cache_save: ${{ github.ref == 'refs/heads/main' }}
       - id: store
         run: echo "path=$(pnpm store path)" >> "$GITHUB_OUTPUT"
       - id: pnpm
@@ -120,7 +123,7 @@ jobs:
           key: pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
           restore-keys: pnpm-store-
       - run: mise run check:ts
-      - if: github.ref == 'refs/heads/main' && steps.pnpm.outputs.cache-hit != 'true'
+      - if: steps.pnpm.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.store.outputs.path }}
@@ -151,11 +154,12 @@ jobs:
           version: ${{ env.MISE_VERSION }}
           install_args: rust node bun pnpm github:EmbarkStudios/cargo-about
           cache_key_prefix: mise-release
-          cache_save: ${{ github.ref == 'refs/heads/main' }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: release
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # Dependency builds are kept even when a test fails: rust-cache
+          # saves no workspace crates, and the next run needn't start cold.
+          cache-on-failure: true
       - id: store
         run: echo "path=$(pnpm store path)" >> "$GITHUB_OUTPUT"
       - id: pnpm
@@ -185,7 +189,7 @@ jobs:
             dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 30
-      - if: github.ref == 'refs/heads/main' && steps.pnpm.outputs.cache-hit != 'true'
+      - if: steps.pnpm.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.store.outputs.path }}
@@ -206,7 +210,6 @@ jobs:
           version: ${{ env.MISE_VERSION }}
           install_args: actionlint shellcheck zizmor
           cache_key_prefix: mise-workflows
-          cache_save: ${{ github.ref == 'refs/heads/main' }}
       - run: mise run check:workflows
         env:
           # zizmor's online audits check pinned actions against upstream.
