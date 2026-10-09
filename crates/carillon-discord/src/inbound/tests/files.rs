@@ -308,6 +308,7 @@ fn admitted(ingress: &crate::inbound::Ingress, request: IncomingMessage) -> Queu
         request,
         native: Value::Null,
         settings: ingress.reactions.settings().current(),
+        dispatch: None,
     }
 }
 
@@ -342,6 +343,7 @@ fn ingress(
         ),
         refusals: Arc::new(tokio::sync::Semaphore::new(lanes::REFUSALS)),
         stopping: tokio_util::sync::CancellationToken::new(),
+        settlements: crate::inbound::Settlements::new(tokio::sync::mpsc::unbounded_channel().0),
     }))
 }
 
@@ -853,6 +855,7 @@ async fn overload_replies_only_to_messages_admission_would_activate() -> Result<
         ),
         refusals: Arc::new(tokio::sync::Semaphore::new(lanes::REFUSALS)),
         stopping: tokio_util::sync::CancellationToken::new(),
+        settlements: crate::inbound::Settlements::new(tokio::sync::mpsc::unbounded_channel().0),
     });
     for ignored in [
         // A mention route, not mentioned.
@@ -1241,10 +1244,11 @@ async fn a_submission_still_waiting_for_a_slot_at_the_deadline_is_never_made() -
         attachments: None,
     };
     let started = Instant::now();
-    let refusal = crate::inbound::submit_files(&ingress, &event, started + DEADLINE)
-        .await
-        .err()
-        .context("submitted after the deadline")?;
+    let Err(crate::inbound::NotAccepted::Refused(refusal)) =
+        crate::inbound::submit_files(&ingress, &event, started + DEADLINE).await
+    else {
+        anyhow::bail!("submitted after the deadline");
+    };
     assert!(refusal.0.contains("in time"), "{}", refusal.0);
     assert!(started.elapsed() <= DEADLINE + Duration::from_secs(1));
     // Nothing was sent, so nothing is ambiguous: core is not even asked.
@@ -1738,7 +1742,14 @@ async fn a_text_whose_window_closes_during_its_feedback_is_never_submitted() -> 
     // admission waits for its feedback. Real time: the replay lookup must
     // not let paused time jump past the window before the conversation opens.
     let started = Instant::now();
-    crate::inbound::prepare_text(&ingress, plan, &settings, started + Duration::from_secs(1)).await;
+    crate::inbound::prepare_text(
+        &ingress,
+        plan,
+        &settings,
+        started + Duration::from_secs(1),
+        None,
+    )
+    .await;
     ingress.reactions.stop(Duration::from_secs(5)).await;
     let requests = log
         .lock()

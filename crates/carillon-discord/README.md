@@ -107,6 +107,11 @@ retain the actual Wasm path rather than substituting this direct native call.
 - [`operations`](src/operations.rs) owns authenticated assistant actions using the existing
   Discord client, independently of admission and the delivery outbox. The optional
   [Pi extension](../../packages/discord-pi/README.md) exposes them on demand.
+- [`gateway`](src/gateway.rs) owns the gateway session: the dispatches it yields, a
+  graceful stop's resume close, and the one-shot session record the next start resumes
+  from. The record's sequence is the replay floor below every message of the session
+  that did not settle, which preparations report through `Settlements`; see
+  [Operations](../../docs/product/OPERATIONS.md) for what a resume replays.
 - [`application`](src/application.rs) binds the operator server, connects the gateway,
   and assembles these pieces. [`cli`](src/cli.rs) supplies installation-derived paths
   and credentials. Importing the library starts none of these services.

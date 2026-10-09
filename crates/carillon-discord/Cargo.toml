@@ -37,8 +37,11 @@ unicode-general-category = "1.1.0"
 uuid.workspace = true
 
 [dev-dependencies]
+# A local gateway for the shard's resume and close in tests.
+futures-util = { version = "0.3.34", features = ["sink"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+tokio-websockets = { version = "0.13.3", default-features = false, features = ["fastrand", "server", "sha1_smol"] }
 tower = { version = "0.5.2", features = ["util"] }
 wat = "1.254.0"
 

@@ -8,6 +8,7 @@ pub mod config;
 pub mod conversations;
 mod delivery;
 mod error;
+mod gateway;
 mod inbound;
 mod module;
 mod operations;

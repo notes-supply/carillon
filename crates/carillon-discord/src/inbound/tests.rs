@@ -46,6 +46,7 @@ pub(crate) fn ingress(
         http,
         refusals: Arc::new(tokio::sync::Semaphore::new(super::lanes::REFUSALS)),
         stopping: CancellationToken::new(),
+        settlements: crate::inbound::Settlements::new(tokio::sync::mpsc::unbounded_channel().0),
     }))
 }
 
@@ -98,6 +99,7 @@ pub(crate) fn hello(ingress: &super::Ingress) -> super::QueuedMessage {
         },
         native: Value::Null,
         settings: ingress.reactions.settings().current(),
+        dispatch: None,
     }
 }
 
@@ -367,9 +369,8 @@ async fn configuration_rejection_does_not_block_the_next_message_in_its_conversa
     let http = discord_client(address);
     let directory = tempfile::tempdir()?;
     let core = core_client(format!("http://{address}"))?;
-    let participation = Arc::new(Participation::load(
-        directory.path().join("participation.json"),
-    )?);
+    let participation = directory.path().join("participation.json");
+    let participation = Arc::new(Participation::load(participation)?);
     let mut config = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
     config.typing = false;
     config.failed_emoji = "❌".to_owned();
@@ -377,20 +378,21 @@ async fn configuration_rejection_does_not_block_the_next_message_in_its_conversa
     services.spawn(async move { axum::serve(listener, app).await });
     let (send, receive) = tokio::sync::mpsc::channel(2);
     // One conversation: the second message waits for the first to settle.
-    for (event, channel) in [("400", "300"), ("401", "300")] {
+    for event in ["400", "401"] {
         send.send(
             super::QueuedMessage {
                 request: IncomingMessage {
                     event_id: event.to_owned(),
                     guild_id: Some("100".to_owned()),
                     user_id: "200".to_owned(),
-                    channel_id: channel.to_owned(),
+                    channel_id: "300".to_owned(),
                     parent_channel_id: None,
                     content: "hello".to_owned(),
                     attachments: Vec::new(),
                 },
                 native: Value::Null,
                 settings: Arc::new(config.clone()),
+                dispatch: None,
             }
             .into(),
         )
@@ -537,6 +539,7 @@ async fn a_stopping_provider_starts_no_attempt() -> anyhow::Result<()> {
 }
 
 mod files;
+mod settlement;
 
 #[tokio::test]
 async fn slow_feedback_never_delays_a_messages_admission() -> anyhow::Result<()> {
