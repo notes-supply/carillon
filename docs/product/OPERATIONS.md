@@ -96,7 +96,8 @@ once nothing would be interrupted, waiting up to `--timeout` seconds:
 
 New messages are accepted meanwhile and wait. If the drain doesn't finish in
 time, or core or a runtime doesn't answer, nothing is stopped and the command
-says what remained. `--force` restarts anyway: a running message is recorded
+says what remained. After a drain that ran out of time, core's paused
+workers resume within 15 seconds, when the pause lapses. `--force` restarts anyway: a running message is recorded
 as interrupted and not replayed, and native work a runtime started may carry
 on. `carillon stop`, and restarting a single unit with `systemctl --user`, do
 not drain.
