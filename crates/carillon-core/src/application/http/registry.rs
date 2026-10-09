@@ -56,6 +56,8 @@ pub(crate) struct ServingRuntime {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct RegistryStatus {
     pub(crate) runtimes: Vec<ServingRuntime>,
+    /// Whether maintenance holds the workers paused.
+    pub(crate) paused: bool,
     pub(crate) file: FileState,
 }
 
@@ -74,6 +76,8 @@ pub(crate) enum FileState {
 pub(crate) struct Applied {
     pub(crate) changed: Vec<String>,
     pub(crate) runtimes: Vec<ServingRuntime>,
+    /// Whether maintenance holds the workers paused.
+    pub(crate) paused: bool,
 }
 
 impl ServingRuntime {
@@ -102,6 +106,7 @@ impl RegistryStatus {
     pub(super) fn of(config: &LoadedConfig, census: &Census, file: Result<Difference>) -> Self {
         Self {
             runtimes: ServingRuntime::all(config, census),
+            paused: census.paused.is_some(),
             file: match file {
                 Ok(difference) => FileState::Read(difference),
                 Err(error) => FileState::Invalid {

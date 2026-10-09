@@ -1,7 +1,7 @@
 //! Concrete authenticated runtime transport. It does not claim or commit turns.
 use crate::TurnFailure;
 use anyhow::anyhow;
-use carillon_protocol::model::{RuntimeTurnRequest, RuntimeTurnResponse};
+use carillon_protocol::model::{RestartReadiness, RuntimeTurnRequest, RuntimeTurnResponse};
 use reqwest::Client;
 use serde::Deserialize;
 
@@ -97,5 +97,22 @@ impl RuntimeClient {
         })?;
         crate::engine::validate_response(&request.correlation_id, &response)?;
         Ok(response)
+    }
+
+    /// Whether the runtime says restarting it now loses nothing it alone
+    /// knows. It answers at once from its own state.
+    /// # Errors
+    /// Returns transport failures and answers that are not a readiness.
+    pub async fn restart_readiness(&self) -> anyhow::Result<RestartReadiness> {
+        Ok(self
+            .client
+            .get(format!("{}/v1/restart", self.url))
+            .bearer_auth(&self.token)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
     }
 }

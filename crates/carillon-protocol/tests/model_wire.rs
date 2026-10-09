@@ -136,3 +136,27 @@ fn an_invalid_final_report_never_invalidates_the_answer() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn only_a_whole_readiness_says_a_runtime_can_restart() -> Result<()> {
+    use carillon_protocol::model::RestartReadiness;
+    for value in [
+        serde_json::json!({"state": "ready"}),
+        serde_json::json!({"state": "unready", "reason": "a fence"}),
+    ] {
+        round_trip::<RestartReadiness>(&value)?;
+    }
+    for value in [
+        serde_json::json!({"state": "ready", "also": 1}),
+        serde_json::json!({"state": "unready"}),
+        serde_json::json!({"state": "unready", "reason": "a fence", "also": 1}),
+        serde_json::json!({"state": "maybe"}),
+        serde_json::json!({}),
+    ] {
+        assert!(
+            serde_json::from_value::<RestartReadiness>(value.clone()).is_err(),
+            "{value}"
+        );
+    }
+    Ok(())
+}

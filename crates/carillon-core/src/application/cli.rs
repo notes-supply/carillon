@@ -25,10 +25,11 @@ use carillon_installation::maintenance::ServiceLock;
 
 use super::{
     admin::{backup, enable_demo_resources, initialize as init, restore, set_provider},
+    drain::{Pace, drain, stop},
     http::{Applied, RegistryStatus, check, serve},
     operations::{
-        Action, Applying, HeldUnits, Services, apply_registry, logs, operator_get, operator_url,
-        print_health, registry_status, status, wait_until_healthy,
+        Action, Activity, Applying, HeldUnits, Services, apply_registry, logs, operator_get,
+        operator_url, print_health, registry_status, status, wait_until_healthy,
     },
     update::update,
 };
@@ -65,9 +66,26 @@ enum RegistryAction {
 
 #[derive(Debug, clap::Args)]
 struct Wait {
-    /// Seconds to wait for every enabled provider to answer core.
+    /// Seconds to wait for every enabled provider to answer core, and,
+    /// before running services stop, for core to drain.
     #[arg(long, value_name = "SECONDS", default_value_t = 60)]
     timeout: u64,
+}
+
+impl Wait {
+    const fn timeout(&self) -> Duration {
+        Duration::from_secs(self.timeout)
+    }
+}
+
+/// Whether running services stop only once core has drained.
+#[derive(Debug, clap::Args)]
+struct Drained {
+    /// Stop without waiting for core to drain. A message a runtime is still
+    /// running is recorded as interrupted and not replayed, and native work
+    /// a runtime started may go on.
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -93,8 +111,16 @@ enum Command {
     Start(Wait),
     /// Stop the installation's user services.
     Stop,
-    /// Restart the installation's user services and wait until they are healthy.
-    Restart(Wait),
+    /// Restart the installation's user services and wait until they are
+    /// healthy. Running services stop once core has drained: no runtime
+    /// turn left running, every answer delivered, and every runtime ready
+    /// to restart. Otherwise nothing is stopped.
+    Restart {
+        #[command(flatten)]
+        wait: Wait,
+        #[command(flatten)]
+        drained: Drained,
+    },
     /// Show service logs.
     Logs {
         /// Only this log, such as `core` or `discord`.
@@ -106,10 +132,14 @@ enum Command {
     },
     /// Replace the application from a local release archive, keeping
     /// configuration and state, and restore the previous running state.
+    /// Running services stop once the release is checked and core has
+    /// drained, as for `restart`.
     Update {
         archive: PathBuf,
         #[command(flatten)]
         wait: Wait,
+        #[command(flatten)]
+        drained: Drained,
     },
     /// Enable or disable a provider in the registry. A running core applies
     /// a runtime's change at once; an interface's needs a restart.
@@ -217,27 +247,30 @@ pub(crate) async fn run() -> Result<()> {
         }
         Command::Start(wait) => {
             let home = home()?;
-            control(&home, Action::Start)?;
+            control(&home, Action::Start).await?;
             report_running(&load(&home)?, &wait).await?;
         }
         Command::Stop => {
             let home = home()?;
-            control(&home, Action::Stop)?;
+            control(&home, Action::Stop).await?;
             println!("Carillon at {} stopped", home.display());
         }
-        Command::Restart(wait) => {
+        Command::Restart { wait, drained } => {
             let home = home()?;
-            control(&home, Action::Restart)?;
-            report_running(&load(&home)?, &wait).await?;
+            let config = load(&home)?;
+            restart(&home, &config, wait.timeout(), drained.force).await?;
+            report_running(&config, &wait).await?;
         }
         Command::Logs {
             service,
             lines,
             follow,
         } => logs(&home()?, service.as_deref(), lines, follow)?,
-        Command::Update { archive, wait } => {
-            update(&home()?, &archive, Duration::from_secs(wait.timeout)).await?;
-        }
+        Command::Update {
+            archive,
+            wait,
+            drained,
+        } => update(&home()?, &archive, wait.timeout(), drained.force).await?,
         Command::Provider { id, action } => provider(&home()?, &id, action).await?,
         Command::Registry { action } => registry(&load(&home()?)?, action).await?,
         Command::EnableDemoResources => {
@@ -315,14 +348,29 @@ async fn registry(config: &LoadedConfig, action: Option<RegistryAction>) -> Resu
 
 /// Act on this installation's units, serialized with this installation's
 /// maintenance and with every installation's use of the owner's units.
-fn control(home: &Path, action: Action) -> Result<()> {
+async fn control(home: &Path, action: Action) -> Result<()> {
     let _lock = MaintenanceLock::acquire(home)?;
     let units = HeldUnits::acquire()?;
-    Services::registered(home, &units)?.control(action)
+    Services::registered(home, &units)?.control(action).await
+}
+
+/// Stops running services once core has drained within `timeout`, or
+/// forced, then starts them, under the same locks as [`control`].
+async fn restart(home: &Path, config: &LoadedConfig, timeout: Duration, force: bool) -> Result<()> {
+    let _lock = MaintenanceLock::acquire(home)?;
+    let units = HeldUnits::acquire()?;
+    let services = Services::registered(home, &units)?;
+    if services.activity()? == Activity::Running {
+        let hold = drain(config, timeout, force, Pace::OPERATOR)
+            .await
+            .context("Carillon was not restarted; its services keep running")?;
+        stop(&services, hold).await?;
+    }
+    services.control(Action::Start).await
 }
 
 async fn report_running(config: &LoadedConfig, wait: &Wait) -> Result<()> {
-    let health = wait_until_healthy(config, Duration::from_secs(wait.timeout))
+    let health = wait_until_healthy(config, wait.timeout())
         .await
         .context("inspect `carillon logs` and `carillon status`")?;
     println!("Carillon at {} is running:", config.root.display());
@@ -410,6 +458,13 @@ fn print_runtimes(applied: &Applied) {
     for runtime in &applied.runtimes {
         print_runtime(runtime);
     }
+    print_paused(applied.paused);
+}
+
+fn print_paused(paused: bool) {
+    if paused {
+        println!("  Maintenance holds the workers paused; they return when it ends.");
+    }
 }
 
 fn print_runtime(runtime: &super::http::ServingRuntime) {
@@ -442,6 +497,7 @@ fn print_registry(status: &RegistryStatus) {
     for runtime in &status.runtimes {
         print_runtime(runtime);
     }
+    print_paused(status.paused);
     match &status.file {
         FileState::Read(difference)
             if difference.live.is_empty() && difference.restart.is_empty() =>
