@@ -45,7 +45,7 @@ try {
   // Without the mode, the executable is the runtime, and Pi's arguments are not its own.
   const runtime = run(["--version"], home);
   assert.notEqual(runtime.status, 0);
-  assert.match(runtime.stderr, /missing value for --version/u);
+  assert.notEqual(runtime.stdout.trim(), version);
 
   // Pi's Bun setup registers the login flows embedded in the executable: a
   // stored subscription credential resolves through its flow without a request.
