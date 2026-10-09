@@ -71,7 +71,7 @@ use twilight_model::{
 };
 
 /// How often core is read.
-const POLL_INTERVAL: Duration = Duration::from_secs(3);
+pub(crate) const POLL_INTERVAL: Duration = Duration::from_secs(3);
 /// A job whose turn finishes sooner after acceptance gets no card of its own.
 const APPEAR_AFTER: Duration = Duration::from_secs(2);
 /// The least time between two edits of one card.

@@ -1050,6 +1050,9 @@ fn command(definition: &Value) -> Result<Command> {
 }
 
 #[cfg(test)]
+mod measurement;
+
+#[cfg(test)]
 pub(crate) mod tests {
     use std::{
         path::{Path, PathBuf},
