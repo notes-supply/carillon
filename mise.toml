@@ -80,6 +80,9 @@ run = """
 version=$(bun -e 'import manifest from "./Cargo.toml"; console.log(manifest.workspace.package.version)')
 release="target/package/carillon-$version"
 node scripts/test-filesystem.mjs init "$release"
+# Build the provider test binary the fault injection runs, so a cold build is
+# its own step rather than inside the harness's bounds.
+cargo test --locked -p carillon-discord --lib --no-run
 node scripts/test-filesystem.mjs resources "$release/bin/carillon"
 """
 
