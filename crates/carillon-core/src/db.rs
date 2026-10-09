@@ -1970,27 +1970,23 @@ mod tests {
     }
 
     #[test]
-    fn the_documented_origin_index_cutover_keeps_an_earlier_database_and_its_history() -> Result<()>
-    {
-        // The statement the operations guide gives, as SQLite records it.
-        const CUTOVER: &str =
-            "CREATE INDEX turns_origin ON turns(origin_turn_id, acceptance_sequence);";
-        assert!(include_str!("../../../docs/product/OPERATIONS.md").contains(CUTOVER));
+    fn a_database_missing_a_current_index_is_refused_without_repair() -> Result<()> {
         let directory = tempdir()?;
         let path = directory.path().join("state.sqlite3");
         let database = Database::create(&path)?;
-        let accepted = accept(&database, "one", "conversation")?;
-        // A database an earlier release wrote has no such index, and is refused.
-        let connection = rusqlite::Connection::open(&path)?;
-        connection.execute_batch("DROP INDEX turns_origin")?;
+        accept(&database, "one", "conversation")?;
+        drop(database);
+        // An index is part of the format: a database an earlier release wrote
+        // without it is refused, and nothing adds it.
+        rusqlite::Connection::open(&path)?.execute_batch("DROP INDEX turns_origin")?;
         assert!(Database::validate_backup(&path).is_err());
-        connection.execute_batch(CUTOVER)?;
-        drop(connection);
-        let reopened = Database::open(&path)?;
-        assert_eq!(
-            job(&reopened, &[&accepted.turn_id])?.origin.turn_id,
-            accepted.turn_id
-        );
+        assert!(Database::open(&path).is_err());
+        let indexes: u32 = rusqlite::Connection::open(&path)?.query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'turns_origin'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(indexes, 0, "a refused database was repaired");
         Ok(())
     }
 
