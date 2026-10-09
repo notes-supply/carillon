@@ -1,25 +1,16 @@
 # Bounded Wasm host
 
-[`Host<N>`](src/lib.rs) hosts replaceable modules without knowing Discord, Pi, or
-installation layout. The provider supplies a concrete `Native` implementation to
-interpret byte requests. Construct a host, compile a module, then invoke it with
-native operations and a deadline. Every invocation gets a fresh instance.
+[`Host<N>`](src/lib.rs) runs replaceable WebAssembly modules without knowing
+Discord, Pi or the installation. The embedding provider supplies a `Native`
+implementation that interprets the module's byte requests. Every invocation
+gets a fresh instance, a cap on linear memory (not on the whole process) and a
+deadline; a deadline can't undo a native side effect that already happened.
+The ABI and limits are documented at [the entry point](src/lib.rs).
 
-The ABI and limits are documented [at the public entry point](src/lib.rs). The
-memory limit applies to guest linear memory, not the whole process. A deadline
-cannot undo a native side effect that already happened.
-
-For a production caller, see [Discord command hosting](../carillon-discord/src/commands.rs).
-It owns contract validation, registration, replacement and the installed module:
-failed candidates leave the last good generation serving, while in-flight requests
-retain their generation.
-Those are provider policies, not responsibilities of this host.
+The Discord provider's [`module`](../carillon-discord/src/module.rs) is the
+production caller: it owns contract validation, registration and replacement,
+and keeps the last good module serving when a candidate fails.
 
 ```sh
 mise exec -- cargo test -p carillon-wasm
-mise run test:integration
 ```
-
-The host's local tests cover ABI validation, isolation, memory and deadlines.
-The service integration suite exercises the compiled Discord module and
-its install/reset path. A provider that does not need replaceable modules need not use Wasm.

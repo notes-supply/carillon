@@ -1,10 +1,10 @@
 # Discord agent access
 
-Optional native Pi extension for Carillon's Discord provider. This is separate
-from the Wasm module that renders slash commands. It does not start a service,
-load model credentials, or make Discord calls when imported.
+An optional Pi extension and skill that let the agent read and manage the
+Discord server through Carillon's Discord provider. It is separate from the
+Wasm module behind slash commands, and importing it starts nothing.
 
-## Installed use
+## Install
 
 ```sh
 carillon stop
@@ -12,28 +12,21 @@ carillon discord tools install
 carillon start
 ```
 
-This copies the release's bundled extension and skill into the configured agent's
-resource root. It replaces only `extensions/carillon-discord.js` and
-`skills/discord/SKILL.md`; put personal customizations elsewhere. Core must be
-stopped: the install refuses while it serves and keeps it from starting until
-both files are in place. If the install fails, the two files may not match: run
-it again until it succeeds before starting core. Re-run after a release update to
-update this optional integration. Remove those two files to stop including it in
-newly accepted turns. No separate gateway restart is required. Already accepted turns keep
-their captured extension and skill, as with other agent resources. The ordinary
-release installer does not enable these tools.
+This copies the release's extension and skill into the agent's resources,
+replacing only `extensions/carillon-discord.js` and `skills/discord/SKILL.md`.
+Core must be stopped while it runs; if it fails, run it again before starting.
+Run it again after an update. Remove the two files to turn it off for new
+turns. The regular installer doesn't enable these tools.
 
-For Pi, the skill teaches the assistant to call `enable_discord`. A fresh conversation
-exposes that small activation tool, not the detailed Discord schemas. Activation
-checks the connection, adds the domain tools without replacing existing tools,
-and takes effect on the next inference within the same turn. Pi's native system
-messages persist the tool loadout. Reopening the same conversation restores it;
-another conversation starts inactive. This is context management, not a security
-barrier: native extensions and Bash have the installing Unix user's authority.
+A fresh conversation sees one small tool, `enable_discord`; the skill tells
+the agent to call it when needed, which adds the Discord tools to that
+conversation. That's context management, not a security boundary: the agent
+already has your Unix authority.
 
-## Local T3 / Claude Code / Codex
+## Other local agents
 
-With the provider running, use the same API through the installed CLI:
+With the provider running, other harnesses (T3, Claude Code, Codex) can use
+the same operations:
 
 ```sh
 carillon discord call --help
@@ -41,104 +34,46 @@ carillon discord call messages list --channel-id CHANNEL_ID --limit 20
 carillon discord tools install --workspace /path/to/workspace
 ```
 
-The workspace install writes the common skill to `.claude/skills/discord/SKILL.md`
-and `.agents/skills/discord/SKILL.md`. The native harness discovers and loads it;
-no MCP server or T3 modification is needed. Re-run after updating Carillon.
-The CLI prints JSON, requires explicit target IDs, and loads the operator
-credential itself. It does not expose credentials in model arguments.
+The workspace install writes the skill to `.claude/skills/discord/` and
+`.agents/skills/discord/`. The CLI prints JSON, needs explicit IDs, and reads
+the operator credential itself, so credentials never pass through model
+arguments. If the harness runs as another Unix user, `--invocation 'COMMAND'`
+records a command that user can already run; it changes no permissions.
 
-If T3 runs as another Unix user, `--invocation 'COMMAND'` records an invocation
-that user is already authorized to execute. It does not change permissions or
-copy credentials. Normal T3 sessions in the workspace can use the same skill;
-only Carillon-admitted turns receive Carillon's per-turn origin metadata.
+## What it can do
 
-## Ownership and construction
+Operations run in the provider with the bot's credential, within the
+configured guild and Discord's own permissions and role hierarchy:
 
-- [`index.ts`](src/index.ts): native extension entry point and tool adaptation.
-- [`activation.ts`](src/activation.ts): native per-conversation activation.
-- [`schemas.ts`](src/schemas.ts): model-facing action-specific schemas, grouped by
-  server, messages, channels, threads, roles and members.
-- [`client.ts`](src/client.ts): bounded authenticated provider client. No bot token
-  and no model-supplied endpoint; the operator credential is read for, and sent to,
-  only an HTTP loopback socket address, as the registry records providers.
+- server and bot discovery;
+- channels and categories: list, create, edit, remove, permission overwrites;
+- threads: list active, create, archive, lock;
+- messages: read history, send, reply, edit, delete, pin and react, with up
+  to ten local files (4 MiB together);
+- roles: list, create, edit, remove;
+- members: look up, list, assign roles, time out, kick, ban and unban.
+
+It doesn't cover DMs, private-thread membership, archived threads, custom
+emoji, webhooks, voice, audit logs or bulk moderation. Sends mention only the
+user and role IDs listed explicitly. Results leave out Discord's signed
+attachment URLs.
+
+Requests time out after 30 seconds in the provider and 35 in the client. A
+write whose answer was lost is reported as `uncertain` and never repeated
+automatically; check before trying again. Explicit sends are separate from
+the agent's normal reply.
+
+## Where things live
+
+- [`index.ts`](src/index.ts): the extension and its tools;
+  [`activation.ts`](src/activation.ts): per-conversation activation;
+  [`schemas.ts`](src/schemas.ts): the model-facing schemas.
+- [`client.ts`](src/client.ts): the provider client, which only talks to a
+  loopback address from the registry.
 - [Rust operations](../../crates/carillon-discord/src/operations.rs): Discord
-  API execution, configured-guild validation, mention behavior and failures.
-- [`skill`](skill/SKILL.md): progressive discovery and operating guidance.
+  calls and guild checks.
+- [`skill`](skill/SKILL.md): the agent's instructions.
 
-The Pi runtime supplies a private `carillon:context` event after loading extensions
-and before constructing the session. Application assembly supplies:
-
-```ts
-{
-  interface_id: "discord-private",
-  connection: { url, token_file, token_hash },
-  native: { origin: {
-    guild_id, channel_id, source_channel_id, message_id, user_id,
-    parent_channel_id // optional / null
-  } }
-}
-```
-
-`native` is captured from admitted interface input; it is not parsed from user
-text. The connection comes from the installation registry and credentials, not
-from captured resources or model arguments. Each session gets a separate event
-bus and client closure. Another runtime can call the same provider endpoint
-without importing Pi. For direct Pi composition, pass explicit `extensionContext`
-to `createPiExecutionSession` and include this extension in the resource root.
-No globals or process environment variables carry the current conversation.
-
-The integration defaults channel-scoped actions to the admitted target, which
-may be a new thread rather than the triggering message's source channel. Replies
-require an explicit message ID. Reading/administering other channels never
-changes participation routes. The configured guild and Discord's permissions
-and hierarchy bound operations; activation does not grant permissions.
-
-## Operations and limits
-
-`POST /v1/operations` accepts one action-specific JSON request, authenticated with
-the installation operator credential. Reads return IDs and honest pagination.
-Normal final-answer delivery remains core-owned; explicit tool sends are separate
-side effects and must not also be sent through the normal outbox.
-
-Coverage: guild/bot discovery; channel/category listing, creation, edits, removal
-and per-target permission overwrites; active thread listing, public/message thread
-creation and archive/lock changes; message history/read/send/reply/edit/delete,
-pins and Unicode reactions; role listing/creation/edit/removal; member lookup and
-pagination, role assignment, timeout, kick and ban/unban. Message sends support
-up to ten explicit local files, 4 MiB combined. File reads happen in the extension or CLI,
-not via arbitrary provider filesystem paths. `files` become bounded wire
-`attachments` containing filenames and base64 bytes. The provider uses Twilight's
-multipart API. Mentions are disabled except explicitly listed user/role IDs.
-Results leave out Discord's signed attachment addresses: messages read, sent
-or edited keep their attachments' names, sizes and types, including those of
-nested replied-to and forwarded messages, without their `url` and `proxy_url`,
-and an attachment link that stands as a whole value, such as an embed's, loses
-its signature, even when it is all of a message's content. Other text people
-wrote, including attachment links pasted among other words, is returned as
-written.
-
-Not all Discord APIs are covered: no DMs, private-thread membership, archived
-thread enumeration, custom emoji management, webhooks, voice, audit logs or bulk
-moderation. These are incremental operations, not reasons for another framework.
-
-Provider requests time out after 30 seconds, client requests after 35 seconds;
-HTTP request bodies are capped at 6 MiB and client responses at 2 MiB. List calls
-are bounded and expose cursors or explicitly identify active-only scope. A lost
-write response is `uncertain`, not failed-and-safe-to-retry. No tool request is
-replayed automatically. Native Discord errors are summarized without raw
-upstream bodies, credentials or stack traces. This is not exactly-once execution.
-
-## Verification
-
-```sh
-mise run check
-mise run test:integration
-mise run test:install
-mise run test:persistence
-```
-
-The native adapter tests drive actual Pi sessions and this extension with
-controlled inference and a local provider stub. Rust tests drive the production
-operations through a local Discord HTTP substitute; shared fixtures verify request
-conformance. Install tests load the bundled artifact outside source dependencies.
-These tests do not prove a live bot's permissions or a live model's tool choices.
+The runtime gives the extension the current conversation's Discord origin and
+provider connection through a per-session `carillon:context` event, taken from
+the admitted message and the installation's registry, never from user text.

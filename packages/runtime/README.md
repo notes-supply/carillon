@@ -1,15 +1,24 @@
 # Shared runtime boundary
 
-`@carillon/runtime` is what every runtime provider serves to core, independent of the engine behind it. It depends on `@carillon/protocol` and small parsing libraries only: no Pi, T3 or Discord code. Each provider package ([Pi](../runtime-pi/README.md), [T3](../runtime-t3/README.md)) depends on it and on its own engine; nothing here imports a provider.
+`@carillon/runtime` is what every runtime provider serves to core, whatever
+engine is behind it. It depends on `@carillon/protocol` and small parsing
+libraries only. [Pi](../runtime-pi/README.md) and [T3](../runtime-t3/README.md)
+depend on it; it imports neither. Import modules by path
+(`@carillon/runtime/<module>`).
 
-Modules are imported by path (`@carillon/runtime/<module>`); there is no aggregate entry point.
-
-- [`operations.ts`](src/operations.ts): `RuntimeOperations`, the interface a runtime implements: execute a turn, describe its activity, read and change the model selection, list its commands, close. `commandFinished` is the answer to a command invocation the engine completed without a reply of its own.
-- [`http.ts`](src/http.ts): the authenticated HTTP adapter over those operations (`/health`, `POST /v1/turns`, `GET /v1/turns/{id}/activity`, `GET`/`PUT /v1/model`, `GET /v1/commands`, and `GET /v1/restart`, the runtime's own word on whether a restart now would lose what only its process holds). Creating a server binds no listener. The provider passes its own identity, engine name, build version and features. Callers receive only the displayable part of an `ExplainedFailure`; a request a closing runtime abandons (`RuntimeClosed`) is answered 503 without an explanation, which core reads as no answer; every other failure is logged, redacted, by method and path.
-- [`failure.ts`](src/failure.ts): `ExplainedFailure` and `RuntimeClosed`, the classes the adapter recognises by `instanceof`, and the conservative, best-effort rules for what of an explanation may be shown and how diagnostics are redacted. `withReport` keeps a failed turn's final report with whatever failure it ended with, and returns the failure to throw: an object or function itself, with its class and status, and any other value as an ordinary internal error whose cause it is; the adapter sends the report apart from the explanation, so withholding unsafe text never withholds the report, and closing (503) and cancellation are unchanged.
-- [`activity.ts`](src/activity.ts): deny-by-default descriptions of what a tool acts on (the Bash command-header policy, workspace-relative paths, operation targets), the headline of a model's public text, bounded single-line display, reasoning notes kept by native identity, and `finalReport`, which keeps a turn's final report within the protocol's byte limit, dropping notes, then finished work, then old calls, and saying the report is `partial` when it lost anything. Native event tracking stays with each provider.
-- [`installation.ts`](src/installation.ts): what a runtime service reads of the installation registry `carillon.toml`, its installation credential, and `--name value` arguments.
-- [`endpoint.ts`](src/endpoint.ts): loopback listen-address validation.
-- [`serial.ts`](src/serial.ts): one-at-a-time execution in arrival order.
-
-Tests beside each module cover the behaviour callers depend on: failure display and redaction, command headers and tool descriptions, the HTTP boundary's authentication, activity and error handling, and endpoint validation.
+- [`operations.ts`](src/operations.ts): `RuntimeOperations`, the interface a
+  runtime implements: run a turn, describe its activity, read and change the
+  model selection, list commands, say whether a restart loses anything, close.
+- [`http.ts`](src/http.ts): the authenticated HTTP adapter over those
+  operations (`/health`, `POST /v1/turns`, `GET /v1/turns/{id}/activity`,
+  `GET`/`PUT /v1/model`, `GET /v1/commands`, `GET /v1/restart`). Callers get
+  only the displayable part of an explanation; other failures are logged,
+  redacted.
+- [`failure.ts`](src/failure.ts): `ExplainedFailure`, `RuntimeClosed` and the
+  best-effort rules for what of an explanation may be shown.
+- [`activity.ts`](src/activity.ts): deny-by-default descriptions of what a
+  tool acts on, and `finalReport`, which keeps a turn's report within the
+  protocol's size limit and marks it `partial` when it had to drop anything.
+- [`installation.ts`](src/installation.ts), [`endpoint.ts`](src/endpoint.ts),
+  [`serial.ts`](src/serial.ts): registry and credential loading, loopback
+  address checks, and one-at-a-time execution.
