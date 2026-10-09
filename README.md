@@ -33,9 +33,9 @@ tar -xzf "carillon-$version-linux-x86_64.tar.gz"
   --user-id YOUR_DISCORD_ID --route CHANNEL_ID:always:thread
 ```
 
-The installer links the `carillon` command into `~/.local/bin` and prints
-the next steps. Put the bot token where it says, sign in to a model provider
-with the printed `carillon-pi` command, then start Carillon:
+The installer links `carillon` into `~/.local/bin` and prints the next steps.
+Put the bot token where it says. With the printed `carillon-pi` command, sign
+in, choose a model with `/model` and save it with Ctrl+S. Then start Carillon:
 
 ```sh
 ~/.local/bin/carillon start    # or just `carillon start` if ~/.local/bin is on your PATH
@@ -43,6 +43,7 @@ with the printed `carillon-pi` command, then start Carillon:
 
 The [operations guide](docs/product/OPERATIONS.md) covers the options,
 everyday commands, configuration, updates and backups.
+The agent's [Discord tools](packages/discord-pi/README.md) are optional.
 [T3 Code](packages/runtime-t3/README.md) is optional.
 
 ## Development
