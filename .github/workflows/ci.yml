@@ -123,7 +123,8 @@ jobs:
           key: pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
           restore-keys: pnpm-store-
       - run: mise run check:ts
-      - if: steps.pnpm.outputs.cache-hit != 'true'
+      # Saved after a failed check too, but not once cancelled or never restored.
+      - if: ${{ !cancelled() && steps.pnpm.outcome == 'success' && steps.pnpm.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.store.outputs.path }}
@@ -189,7 +190,8 @@ jobs:
             dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 30
-      - if: steps.pnpm.outputs.cache-hit != 'true'
+      # Saved after a failed check too, but not once cancelled or never restored.
+      - if: ${{ !cancelled() && steps.pnpm.outcome == 'success' && steps.pnpm.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ steps.store.outputs.path }}
