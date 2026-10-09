@@ -9,11 +9,15 @@ publish.workspace = true
 anyhow.workspace = true
 fs2.workspace = true
 hex.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 toml.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
 
 [lints]
 workspace = true

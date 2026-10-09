@@ -282,7 +282,7 @@ async fn occupied_listener_fails_before_touching_delivery_claims() -> anyhow::Re
 async fn ambiguous_thread_creation_recovers_native_thread_before_retrying() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let mut state = discord_state(
-        core_client("http://127.0.0.1:1".to_owned()),
+        core_client("http://127.0.0.1:1".to_owned())?,
         directory.path(),
     )
     .await?;
@@ -429,7 +429,7 @@ async fn thread_lookup_failures_do_not_speculatively_create() -> anyhow::Result<
 async fn production_discord_does_not_expose_deterministic_endpoints() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let state = discord_state(
-        core_client("http://127.0.0.1:1".to_owned()),
+        core_client("http://127.0.0.1:1".to_owned())?,
         directory.path(),
     )
     .await?;
@@ -563,7 +563,7 @@ fn native_selects_need_no_string_options() -> anyhow::Result<()> {
 async fn deterministic_interactions_run_the_module_and_check_replies() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let mut state = discord_state(
-        core_client("http://127.0.0.1:1".to_owned()),
+        core_client("http://127.0.0.1:1".to_owned())?,
         directory.path(),
     )
     .await?;
@@ -664,7 +664,7 @@ async fn agent_operations_authenticate_before_parsing_and_refuse_simulation() ->
 {
     let directory = tempfile::tempdir()?;
     let state = discord_state(
-        core_client("http://127.0.0.1:1".to_owned()),
+        core_client("http://127.0.0.1:1".to_owned())?,
         directory.path(),
     )
     .await?;
@@ -705,7 +705,7 @@ fn names(module: &Value) -> Vec<&str> {
 async fn command_module_operations_require_the_operator_credential() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let state = discord_state(
-        core_client("http://127.0.0.1:1".to_owned()),
+        core_client("http://127.0.0.1:1".to_owned())?,
         directory.path(),
     )
     .await?;
@@ -803,7 +803,7 @@ async fn installs_serve_the_replacement_only_once_discord_confirmed_it() -> anyh
     let status = Arc::new(AtomicU16::new(200));
     let (address, server) = registration_server(status.clone()).await?;
     let mut state = discord_state(
-        core_client("http://127.0.0.1:1".to_owned()),
+        core_client("http://127.0.0.1:1".to_owned())?,
         directory.path(),
     )
     .await?;
@@ -875,7 +875,7 @@ async fn an_abandoned_install_completes_while_holding_the_maintenance_lock() -> 
     let router = gated_registration(sent, gate.clone());
     let server = tokio::spawn(async move { axum::serve(listener, router).await });
     let mut state = discord_state(
-        core_client("http://127.0.0.1:1".to_owned()),
+        core_client("http://127.0.0.1:1".to_owned())?,
         directory.path(),
     )
     .await?;
@@ -1060,7 +1060,7 @@ async fn an_acknowledged_interaction_is_answered_before_the_provider_returns() -
     let core_address = listener.local_addr()?;
     let core_server = tokio::spawn(async move { axum::serve(listener, core).await });
     let mut state = discord_state(
-        core_client(format!("http://{core_address}")),
+        core_client(format!("http://{core_address}"))?,
         directory.path(),
     )
     .await?;
@@ -1421,7 +1421,7 @@ async fn simulation_admits_then_downloads_files_under_the_provider_policy() -> a
     .await?;
     let (core_address, core) = simulated_core(staging.clone()).await?;
     let mut state = discord_state(
-        core_client(format!("http://{core_address}")),
+        core_client(format!("http://{core_address}"))?,
         directory.path(),
     )
     .await?;
@@ -1518,7 +1518,7 @@ async fn simulation_settles_its_own_turns_delivery_and_no_other() -> anyhow::Res
     let directory = tempfile::tempdir()?;
     let (core_address, core) = simulated_core(directory.path().join("staging")).await?;
     let state = discord_state(
-        core_client(format!("http://{core_address}")),
+        core_client(format!("http://{core_address}"))?,
         directory.path(),
     )
     .await?;

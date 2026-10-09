@@ -333,9 +333,11 @@ dependencies = [
  "anyhow",
  "fs2",
  "hex",
+ "reqwest",
  "serde",
  "sha2",
  "tempfile",
+ "tokio",
  "toml",
  "uuid",
 ]

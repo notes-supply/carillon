@@ -140,7 +140,7 @@ async fn ambiguous_claim_failures_reconcile_before_polling_again() -> anyhow::Re
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
-    let core = core_client(format!("http://{address}"));
+    let core = core_client(format!("http://{address}"))?;
     let config = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
     let expected_uncertain = config.uncertain_emoji.clone();
     let http = discord_client(address);
@@ -367,10 +367,11 @@ async fn stopping_finishes_a_claimed_delivery_and_claims_no_more() -> anyhow::Re
     let address = listener.local_addr()?;
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
     let http = discord_client(address);
+    let core = core_client(format!("http://{address}"))?;
     let run = |stopping: &tokio_util::sync::CancellationToken| {
         let (outcomes, _) = tokio::sync::mpsc::unbounded_channel();
         tokio::spawn(delivery_loop(
-            core_client(format!("http://{address}")),
+            core.clone(),
             Reactions::new(
                 http.clone(),
                 discord_config(DiscordActivation::Always, DiscordConversation::Channel),
@@ -439,7 +440,7 @@ async fn deliveries_reach_discord_verbatim_without_notifying_anyone() -> anyhow:
     let outcome = tokio::time::timeout(
         Duration::from_secs(5),
         delivery_loop(
-            core_client(format!("http://{address}")),
+            core_client(format!("http://{address}"))?,
             Reactions::new(
                 http.clone(),
                 discord_config(DiscordActivation::Always, DiscordConversation::Channel),
@@ -527,7 +528,7 @@ async fn slow_reactions_never_hold_up_deliveries_and_stay_bounded() -> anyhow::R
     let outcome = tokio::time::timeout(
         Duration::from_secs(5),
         delivery_loop(
-            core_client(format!("http://{address}")),
+            core_client(format!("http://{address}"))?,
             reactions.clone(),
             http,
             outcomes,

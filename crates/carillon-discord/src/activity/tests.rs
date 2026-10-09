@@ -6,6 +6,7 @@
 //! retries.
 use super::{CardRecords, Delivering, activity_monitor};
 use crate::{
+    CoreClient,
     client::test_client as core_client,
     config::{DiscordActivation, DiscordConfig, DiscordConversation},
     conversations::tests::discord_config,
@@ -119,6 +120,8 @@ struct Substitute {
     /// Core answers no read, with the jobs it took when asked, while a case
     /// holds this.
     reading: Arc<tokio::sync::Mutex<()>>,
+    /// The provider's client for this core.
+    client: CoreClient,
     server: JoinHandle<()>,
 }
 
@@ -213,6 +216,7 @@ impl Substitute {
             recording,
             reads,
             reading,
+            client: core_client(format!("http://{address}"))?,
             server,
         })
     }
@@ -354,7 +358,7 @@ impl Substitute {
     ) -> (mpsc::UnboundedSender<Delivering>, JoinHandle<()>) {
         let (delivering, heard) = mpsc::unbounded_channel();
         let monitor = activity_monitor(
-            core_client(format!("http://{}", self.address)),
+            self.client.clone(),
             http,
             config,
             CardRecords::open(records.to_path_buf()),
@@ -373,7 +377,7 @@ impl Substitute {
         records: &Path,
     ) -> Provider {
         config.reactions = false;
-        let core = core_client(format!("http://{}", self.address));
+        let core = self.client.clone();
         let (delivering, heard) = mpsc::unbounded_channel();
         let stopping = CancellationToken::new();
         let delivered = delivery_loop(

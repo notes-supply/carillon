@@ -18,7 +18,7 @@ async fn core_requests_timeout_on_stalled_headers_and_bodies() -> anyhow::Result
             }
             cases.spawn(async move {
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-                let client = core_client(format!("http://{}", listener.local_addr()?));
+                let client = core_client(format!("http://{}", listener.local_addr()?))?;
                 let mut services = tokio::task::JoinSet::new();
                 services.spawn(async move {
                     let (mut connection, _) = listener.accept().await?;
@@ -99,7 +99,7 @@ async fn model_calls_relay_rejections_in_the_runtime_words() -> anyhow::Result<(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
-    let core = core_client(format!("http://{address}"));
+    let core = core_client(format!("http://{address}"))?;
     let query = carillon_protocol::model::ModelQuery {
         agent_id: "default".to_owned(),
         audience_id: None,
@@ -120,7 +120,7 @@ async fn model_calls_relay_rejections_in_the_runtime_words() -> anyhow::Result<(
         Some("The runtime gave an unusable answer.")
     );
     server.abort();
-    let unreachable = core_client("http://127.0.0.1:1".to_owned());
+    let unreachable = core_client("http://127.0.0.1:1".to_owned())?;
     assert_eq!(
         unreachable.model_state(&query).await.err().as_deref(),
         Some("The runtime is not reachable right now.")

@@ -75,7 +75,7 @@ fn installation(root: &Path) -> Result<AppState> {
     Ok(AppState {
         core: Core::create(core_options(&config))?,
         config,
-        client: Client::new(),
+        client: carillon_installation::loopback::client().build()?,
     })
 }
 

@@ -382,8 +382,11 @@ grep -F 'Carillon core is running' "$TEST_ROOT/tools.log" >/dev/null
 [ "$(cat "$CARILLON_HOME/agents/default/extensions/carillon-discord.js" \
   "$CARILLON_HOME/agents/default/skills/discord/SKILL.md" | sha256sum)" = "$TOOLS_HASH" ]
 
-# A running installation can publish a skill into the native T3 workspace.
-env CARILLON_HOME="$CARILLON_HOME" "$APP/carillon" discord tools install --workspace "$WORKSPACE"
+# A running installation can publish a skill into the native T3 workspace,
+# named relative to the current directory as people type it.
+(cd "$(dirname -- "$WORKSPACE")" &&
+  env CARILLON_HOME="$CARILLON_HOME" "$APP/carillon" discord tools install \
+    --workspace "$(basename -- "$WORKSPACE")")
 cmp "$CARILLON_HOME/app/lib/carillon-discord-SKILL.md" "$WORKSPACE/.claude/skills/discord/SKILL.md"
 cmp "$WORKSPACE/.claude/skills/discord/SKILL.md" "$WORKSPACE/.agents/skills/discord/SKILL.md"
 env CARILLON_HOME="$CARILLON_HOME" "$APP/carillon" discord call messages pin --help >/dev/null

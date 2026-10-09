@@ -3,7 +3,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clap::{ArgAction, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 use twilight_http::{
     Client, Response, error::ErrorType, request::channel::reaction::RequestReactionType,
 };
@@ -180,6 +180,11 @@ pub enum Messages {
         #[arg(long)]
         #[serde(default)]
         mention_roles: Vec<RoleId>,
+        /// A local file to attach; at most ten, 4 MiB together. The command
+        /// reads it and sends its bytes as an attachment.
+        #[arg(long = "file", value_name = "PATH")]
+        #[serde(skip)]
+        files: Vec<PathBuf>,
         #[arg(skip)]
         #[serde(default)]
         attachments: Vec<Upload>,
@@ -284,14 +289,19 @@ pub enum Members {
         #[arg(long, action = ArgAction::Set, required = true)]
         add: bool,
     },
+    /// Time a member out until a moment, or remove their timeout.
     #[serde(rename = "members.timeout")]
     Timeout {
         #[arg(long)]
         user_id: UserId,
-        /// RFC3339 expiry; omit to remove the timeout.
-        #[arg(long)]
+        /// RFC 3339 expiry of the timeout. On the wire, null removes it.
+        #[arg(long, required_unless_present = "clear", value_name = "TIME")]
         #[serde(deserialize_with = "Option::deserialize")]
         until: Option<String>,
+        /// Remove the member's timeout.
+        #[arg(long, conflicts_with = "until")]
+        #[serde(skip)]
+        clear: bool,
     },
     #[serde(rename = "members.kick")]
     Kick {
@@ -306,11 +316,34 @@ pub enum Members {
         banned: bool,
     },
 }
+/// The most files one sent message may carry.
+pub const ATTACHMENT_COUNT: usize = 10;
+/// The most bytes the files of one sent message may hold together.
+pub const ATTACHMENT_BYTES: usize = 4 * 1024 * 1024;
+
+/// A file to attach to a sent message: a plain filename and its bytes,
+/// base64-encoded on the wire.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Upload {
-    pub(crate) filename: String,
-    pub(crate) data: String,
+    filename: String,
+    data: String,
+}
+
+impl Upload {
+    /// # Errors
+    /// Rejects a name that is not a plain filename, or more bytes than one
+    /// message may carry.
+    pub fn new(filename: String, bytes: &[u8]) -> Result<Self, OperationError> {
+        plain_filename(&filename)?;
+        if bytes.len() > ATTACHMENT_BYTES {
+            return Err(too_large());
+        }
+        Ok(Self {
+            filename,
+            data: STANDARD.encode(bytes),
+        })
+    }
 }
 
 const fn page_size() -> u16 {
@@ -703,6 +736,7 @@ impl Messages {
                 mention_users,
                 mention_roles,
                 attachments,
+                ..
             } => {
                 let attachments = uploads(attachments)?;
                 if content.is_empty() && attachments.is_empty() {
@@ -892,7 +926,7 @@ impl Members {
                 }
                 Ok(json!({ "user_id": user_id, "role_id": role_id, "added": add }))
             }
-            Self::Timeout { user_id, until } => {
+            Self::Timeout { user_id, until, .. } => {
                 let timestamp =
                     until
                         .as_deref()
@@ -929,33 +963,47 @@ impl Members {
 }
 
 fn uploads(input: Vec<Upload>) -> Result<Vec<Attachment>, OperationError> {
-    if input.len() > 10 {
-        return Err(OperationError::invalid(
-            "At most 10 attachments are supported.",
-        ));
+    if input.len() > ATTACHMENT_COUNT {
+        return Err(too_many());
     }
     let mut size = 0;
     input
         .into_iter()
         .enumerate()
-        .map(|(index, upload)| {
-            if upload.filename.is_empty() || upload.filename.contains(['/', '\\', '\0']) {
-                return Err(OperationError::invalid(
-                    "Attachment filename must be a plain filename.",
-                ));
-            }
+        .map(|(index, Upload { filename, data })| {
+            plain_filename(&filename)?;
             let bytes = STANDARD
-                .decode(upload.data)
+                .decode(data)
                 .map_err(|_| OperationError::invalid("Attachment data must be base64."))?;
             size += bytes.len();
-            if size > 4 * 1024 * 1024 {
-                return Err(OperationError::invalid(
-                    "Attachments exceed the 4 MiB per-message limit.",
-                ));
+            if size > ATTACHMENT_BYTES {
+                return Err(too_large());
             }
-            Ok(Attachment::from_bytes(upload.filename, bytes, index as u64))
+            Ok(Attachment::from_bytes(filename, bytes, index as u64))
         })
         .collect()
+}
+
+fn plain_filename(filename: &str) -> Result<(), OperationError> {
+    if filename.is_empty() || filename.contains(['/', '\\', '\0']) {
+        return Err(OperationError::invalid(
+            "Attachment filename must be a plain filename.",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn too_many() -> OperationError {
+    OperationError::invalid(&format!(
+        "At most {ATTACHMENT_COUNT} attachments are supported."
+    ))
+}
+
+pub(crate) fn too_large() -> OperationError {
+    OperationError::invalid(&format!(
+        "Attachments exceed the {} MiB per-message limit.",
+        ATTACHMENT_BYTES >> 20
+    ))
 }
 
 /// Remove signed addresses from every attachment list, including those of

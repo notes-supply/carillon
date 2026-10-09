@@ -15,7 +15,7 @@ carillon discord call messages list --channel-id CHANNEL_ID --limit 20
 carillon discord call messages pin --channel-id CHANNEL_ID --message-id MESSAGE_ID --pinned true
 ```
 
-Use `--provider INSTANCE` when several Discord providers are configured. `messages send` accepts `--file PATH` for up to ten caller-owned files, 4 MiB combined. Use only the operator-provided invocation when the installation belongs to another OS user. Never find or copy a bot token, change file permissions, or improvise raw HTTP calls to work around an unavailable connection.
+Use `--provider INSTANCE` when several Discord providers are configured. `messages send` accepts `--file PATH` for up to ten caller-owned files, 4 MiB combined. `members timeout` needs `--until TIME` or `--clear`. Use only the operator-provided invocation when the installation belongs to another OS user. Never find or copy a bot token, change file permissions, or improvise raw HTTP calls to work around an unavailable connection.
 
 - For a Carillon-admitted turn, let Carillon deliver your ordinary final response. In an ordinary harness session, answer there as usual. Use explicit message sends for deliberate Discord posts, replies elsewhere, or intermediate messages; do not repeat their content automatically in your final answer.
 - Native tools default an omitted `channel_id` to the current turn's admitted conversation destination. The CLI requires explicit IDs. Use the current turn's origin metadata, not a guessed thread name. The source message may be in a parent channel while this conversation is a new thread: never assume it is a valid reply reference in that thread.

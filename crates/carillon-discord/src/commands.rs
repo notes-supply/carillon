@@ -1082,14 +1082,14 @@ pub(crate) mod tests {
         ))
     }
 
-    fn calls() -> super::InteractionCalls {
-        super::InteractionCalls::new(
-            crate::client::test_client("http://127.0.0.1:1".to_owned()),
+    fn calls() -> anyhow::Result<super::InteractionCalls> {
+        Ok(super::InteractionCalls::new(
+            crate::client::test_client("http://127.0.0.1:1".to_owned())?,
             carillon_protocol::model::ModelQuery {
                 agent_id: "default".to_owned(),
                 audience_id: None,
             },
-        )
+        ))
     }
 
     fn interaction() -> Interaction {
@@ -1103,7 +1103,7 @@ pub(crate) mod tests {
     }
 
     async fn reply(commands: &Commands) -> anyhow::Result<String> {
-        Ok(commands.invoke(calls(), interaction()).await?.content)
+        Ok(commands.invoke(calls()?, interaction()).await?.content)
     }
 
     #[tokio::test]
@@ -1663,7 +1663,7 @@ pub(crate) mod tests {
         );
         let server = tokio::spawn(async move { axum::serve(listener, router).await });
         let calls = super::InteractionCalls::new(
-            crate::client::test_client(format!("http://{address}")),
+            crate::client::test_client(format!("http://{address}"))?,
             ModelQuery {
                 agent_id: "default".to_owned(),
                 audience_id: None,
@@ -1799,7 +1799,7 @@ pub(crate) mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let server = tokio::spawn(async move { axum::serve(listener, router).await });
-        let core = crate::client::test_client(format!("http://{address}"));
+        let core = crate::client::test_client(format!("http://{address}"))?;
         let query = ModelQuery {
             agent_id: "default".to_owned(),
             audience_id: Some("discord-100-400".to_owned()),
@@ -1885,7 +1885,7 @@ pub(crate) mod tests {
             &replying("hello", std::slice::from_ref(&button)),
         )?;
         let commands = Commands::load(files(directory.path())).await?;
-        let reply = commands.invoke(calls(), interaction()).await?;
+        let reply = commands.invoke(calls()?, interaction()).await?;
         assert_eq!(reply.content, "hello");
         assert_eq!(reply.components, vec![button]);
         for output in [
@@ -1897,7 +1897,7 @@ pub(crate) mod tests {
                 .install(&module(&describing(&[]), &output)?, None)
                 .await?;
             assert!(
-                commands.invoke(calls(), interaction()).await.is_err(),
+                commands.invoke(calls()?, interaction()).await.is_err(),
                 "accepted {output}"
             );
         }
@@ -1930,7 +1930,7 @@ pub(crate) mod tests {
                 .build(),
         );
         let reactions = crate::delivery::Reactions::new(http.clone(), config);
-        let core = crate::client::test_client(format!("http://{address}"));
+        let core = crate::client::test_client(format!("http://{address}"))?;
         let calls = super::InteractionCalls::new(
             core.clone(),
             carillon_protocol::model::ModelQuery {
@@ -2462,7 +2462,7 @@ pub(crate) mod tests {
                 .ratelimiter(None)
                 .build(),
         );
-        let core = crate::client::test_client(format!("http://{address}"));
+        let core = crate::client::test_client(format!("http://{address}"))?;
         let directory = tempfile::tempdir()?;
         let participation = Arc::new(crate::conversations::Participation::load(
             directory.path().join("participation.json"),

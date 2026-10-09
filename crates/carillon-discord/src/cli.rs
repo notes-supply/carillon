@@ -10,10 +10,9 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 use carillon_installation::{
     config::{LoadedConfig, ProviderRole, RELEASE_VERSION},
-    home,
+    home, loopback,
 };
 use clap::{Parser, Subcommand};
 use reqwest::{Method, StatusCode};
@@ -27,7 +26,9 @@ use crate::{
         Status,
     },
     config::{DiscordConfig, DiscordRoute, configure},
-    operations::{Messages, Operation, Upload},
+    operations::{
+        self, ATTACHMENT_BYTES, ATTACHMENT_COUNT, Messages, Operation, OperationError, Upload,
+    },
 };
 
 /// Status requests only read.
@@ -102,12 +103,9 @@ enum Command {
     },
     /// Call the running provider's Discord API; prints JSON and never retries a write.
     Call {
-        /// Registry ID; inferred when only one Discord provider is configured.
-        #[arg(long)]
+        /// Registry ID of the Discord instance; inferred when only one is configured.
+        #[arg(long, global = true)]
         provider: Option<String>,
-        /// Attach a local file to a message send (ten files, 4 MiB combined).
-        #[arg(long = "file", global = true, value_name = "PATH")]
-        files: Vec<PathBuf>,
         #[command(subcommand)]
         operation: Operation,
     },
@@ -238,12 +236,11 @@ pub(crate) async fn run() -> Result<()> {
         }
         Command::Call {
             provider,
-            files,
             operation,
         } => {
             let loaded = installation()?;
             let provider = instance(&loaded, provider)?;
-            let result = call(&loaded, &provider, operation, &files).await?;
+            let result = call(&loaded, &provider, operation).await?;
             println!("{}", serde_json::to_string(&result)?);
         }
         Command::Commands { provider, action } => {
@@ -259,12 +256,11 @@ async fn call(
     loaded: &LoadedConfig,
     provider: &str,
     mut operation: Operation,
-    files: &[PathBuf],
 ) -> Result<serde_json::Value> {
-    if !files.is_empty() {
-        let Operation::Messages(Messages::Send { attachments, .. }) = &mut operation else {
-            bail!("--file is only supported for messages send; nothing was changed");
-        };
+    if let Operation::Messages(Messages::Send {
+        files, attachments, ..
+    }) = &mut operation
+    {
         *attachments = uploads(files)?;
     }
     let mutates = operation.mutates();
@@ -279,10 +275,7 @@ async fn call(
             anyhow!("unavailable: the Discord provider did not complete the request")
         }
     };
-    let mut response = reqwest::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .retry(reqwest::retry::never())
+    let mut response = loopback::client()
         .timeout(Duration::from_secs(35))
         .build()?
         .post(&url)
@@ -328,11 +321,14 @@ async fn call(
     Ok(result)
 }
 
+/// The files a message send names, read here so the provider receives
+/// their bytes. Every limit is checked before anything is sent.
 fn uploads(files: &[PathBuf]) -> Result<Vec<Upload>> {
-    if files.len() > 10 {
-        bail!("at most ten files can be attached; nothing was changed");
+    let refused = |failure: OperationError| anyhow!("{failure}; nothing was changed");
+    if files.len() > ATTACHMENT_COUNT {
+        return Err(refused(operations::too_many()));
     }
-    let mut remaining = 4 * 1024 * 1024;
+    let mut remaining = ATTACHMENT_BYTES;
     files
         .iter()
         .map(|path| {
@@ -347,17 +343,15 @@ fn uploads(files: &[PathBuf]) -> Result<Vec<Upload>> {
             file.take(u64::try_from(remaining)? + 1)
                 .read_to_end(&mut bytes)?;
             if bytes.len() > remaining {
-                bail!("attachments exceed 4 MiB combined; nothing was changed");
+                return Err(refused(operations::too_large()));
             }
             remaining -= bytes.len();
-            Ok(Upload {
-                filename: path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .context("attachment filename must be UTF-8")?
-                    .to_owned(),
-                data: STANDARD.encode(bytes),
-            })
+            let filename = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .context("attachment filename must be UTF-8")?
+                .to_owned();
+            Upload::new(filename, &bytes).map_err(refused)
         })
         .collect()
 }
@@ -375,6 +369,8 @@ fn release_library() -> Result<PathBuf> {
 /// Native harnesses own these resource directories and when changes are loaded.
 fn install_workspace_skill(workspace: &Path, lib: &Path, invocation: Option<&str>) -> Result<()> {
     use carillon_installation::filesystem::{publish, sync_ancestors};
+    // Syncing reaches every ancestor, which a relative path does not name.
+    let workspace = &std::path::absolute(workspace)?;
     if !workspace.is_dir() {
         bail!("workspace must be an existing directory");
     }
@@ -567,7 +563,8 @@ impl Operator {
         body: Option<Vec<u8>>,
     ) -> Result<T> {
         let changing = method != Method::GET;
-        let mut request = reqwest::Client::new()
+        let mut request = loopback::client()
+            .build()?
             .request(method, &self.url)
             .bearer_auth(&self.credential)
             .timeout(if changing {
@@ -885,7 +882,7 @@ mod tests {
         )
         .await?;
         let operation = parsed_call(&["messages", "list", "--channel-id", "2", "--limit", "7"])?;
-        let result = call(&provider.config, "discord-private", operation, &[]).await?;
+        let result = call(&provider.config, "discord-private", operation).await?;
         assert_eq!(result, json!({"messages": [], "may_have_more": false}));
         assert_eq!(
             provider.requests()?,
@@ -918,7 +915,7 @@ mod tests {
                 "--message-id",
                 "3",
             ])?;
-            let error = call(&provider.config, "discord-private", operation, &[])
+            let error = call(&provider.config, "discord-private", operation)
                 .await
                 .err()
                 .context("write should fail")?;
@@ -940,7 +937,7 @@ mod tests {
                 "--content",
                 "hello",
             ])?;
-            let error = call(&provider.config, "discord-private", operation, &[])
+            let error = call(&provider.config, "discord-private", operation)
                 .await
                 .err()
                 .context("invalid answer should fail")?;
@@ -955,33 +952,87 @@ mod tests {
         let provider = CallProvider::new(StatusCode::OK, "{}".into()).await?;
         let file = provider.directory.path().join("oversize");
         fs::File::create(&file)?.set_len(5 * 1024 * 1024)?;
-        let operation = parsed_call(&[
-            "messages",
-            "send",
-            "--channel-id",
-            "2",
-            "--content",
-            "hello",
-        ])?;
-        assert!(
-            call(
-                &provider.config,
-                "discord-private",
-                operation,
-                std::slice::from_ref(&file)
-            )
+        let path = file.to_str().context("temporary path")?;
+        let send = |files: &[&str]| {
+            let mut arguments = vec!["messages", "send", "--channel-id", "2", "--content", "hi"];
+            for file in files {
+                arguments.extend(["--file", file]);
+            }
+            parsed_call(&arguments)
+        };
+        let refused = call(&provider.config, "discord-private", send(&[path])?)
             .await
-            .is_err()
-        );
-        let operation =
-            parsed_call(&["messages", "get", "--channel-id", "2", "--message-id", "3"])?;
-        assert!(
-            call(&provider.config, "discord-private", operation, &[file])
-                .await
-                .is_err()
-        );
+            .err()
+            .context("an oversized file was sent")?;
+        assert!(refused.to_string().contains("4 MiB"), "{refused}");
+        let small = provider.directory.path().join("small");
+        fs::write(&small, "x")?;
+        let small = small.to_str().context("temporary path")?;
+        let refused = call(&provider.config, "discord-private", send(&[small; 11])?)
+            .await
+            .err()
+            .context("eleven files were sent")?;
+        assert!(refused.to_string().contains("At most 10"), "{refused}");
         assert!(provider.requests()?.is_empty());
         assert!(uploads(&[provider.directory.path().to_path_buf()]).is_err());
+        // Only a message send takes files.
+        assert!(
+            parsed_call(&[
+                "messages",
+                "get",
+                "--channel-id",
+                "2",
+                "--message-id",
+                "3",
+                "--file",
+                small
+            ])
+            .is_err()
+        );
+        assert!(parsed_call(&["--file", small, "messages", "send", "--channel-id", "2"]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_timeout_is_set_or_cleared_explicitly() -> Result<()> {
+        let timeout = |arguments: &[&str]| {
+            let mut all = vec!["members", "timeout", "--user-id", "3"];
+            all.extend(arguments);
+            parsed_call(&all).and_then(|operation| Ok(serde_json::to_value(operation)?))
+        };
+        assert!(timeout(&[]).is_err(), "no expiry must not remove a timeout");
+        assert!(timeout(&["--clear", "--until", "2030-01-01T00:00:00Z"]).is_err());
+        assert_eq!(
+            timeout(&["--clear"])?,
+            json!({"action": "members.timeout", "user_id": "3", "until": null})
+        );
+        assert_eq!(
+            timeout(&["--until", "2030-01-01T00:00:00Z"])?,
+            json!({"action": "members.timeout", "user_id": "3", "until": "2030-01-01T00:00:00Z"})
+        );
+        // On the wire, too, only an explicit null clears.
+        assert!(
+            serde_json::from_value::<Operation>(
+                json!({"action": "members.timeout", "user_id": "3"})
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_provider_is_named_before_or_after_the_operation() -> Result<()> {
+        for arguments in [
+            ["--provider", "discord-b", "server", "info"],
+            ["server", "info", "--provider", "discord-b"],
+        ] {
+            let cli =
+                Cli::try_parse_from(["carillon-discord", "call"].into_iter().chain(arguments))?;
+            let Command::Call { provider, .. } = cli.command else {
+                anyhow::bail!("not a call");
+            };
+            assert_eq!(provider.as_deref(), Some("discord-b"));
+        }
         Ok(())
     }
 
@@ -997,8 +1048,10 @@ mod tests {
             "2",
             "--content",
             "evidence",
+            "--file",
+            file.to_str().context("temporary path")?,
         ])?;
-        call(&provider.config, "discord-private", operation, &[file]).await?;
+        call(&provider.config, "discord-private", operation).await?;
         let requests = provider.requests()?;
         assert_eq!(requests.len(), 1);
         assert_eq!(
@@ -1037,6 +1090,20 @@ mod tests {
         );
         assert!(install_workspace_skill(&workspace.join("missing"), &lib, None).is_err());
         assert!(!workspace.join("missing").exists());
+        // A workspace named relative to the current directory, as people type it.
+        let relative = std::env::current_dir()?
+            .components()
+            .skip(1)
+            .map(|_| Path::new(".."))
+            .collect::<std::path::PathBuf>()
+            .join(workspace.strip_prefix("/")?);
+        assert!(relative.is_relative());
+        fs::remove_dir_all(workspace.join(".claude"))?;
+        install_workspace_skill(&relative, &lib, None)?;
+        assert_eq!(
+            fs::read_to_string(workspace.join(".claude/skills/discord/SKILL.md"))?,
+            "Discord skill\n"
+        );
         assert!(
             Cli::try_parse_from([
                 "carillon-discord",

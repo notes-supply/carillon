@@ -69,6 +69,15 @@ it("keeps request validation aligned with provider-owned wire fixtures", async (
   if (!Check(fixtureSchema, fixtures)) throw new Error("Invalid wire fixtures");
   for (const fixture of fixtures)
     expect(groups.filter((group) => Check(group.schema, fixture.operation))).toHaveLength(1);
+  // An unanswered write is uncertain and an unanswered read only unavailable,
+  // as the provider classifies the same operations.
+  const unanswered = await fixture(502, "not a provider answer");
+  for (const { operation, mutates } of fixtures)
+    await expect(
+      unanswered.client.call(operation),
+      String(operation["action"]),
+    ).rejects.toMatchObject({ outcome: mutates ? "uncertain" : "unavailable" });
+  expect(unanswered.requests()).toBe(fixtures.length);
   const messages = groups.find((group) => group.name === "discord_messages");
   if (messages === undefined) throw new Error("Missing message schema");
   expect(Check(messages.schema, { action: "messages.get", channel_id: 2, message_id: "3" })).toBe(

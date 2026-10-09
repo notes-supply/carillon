@@ -325,7 +325,7 @@ fn ingress(
             crate::attachments::Downloads::open(world.staging.clone(), config.attachments)?
                 .with_fixture_cdn(cdn),
         ),
-        core: test_client(format!("http://{}", world.address)),
+        core: test_client(format!("http://{}", world.address))?,
         participation: Arc::new(Participation::load(
             world.staging.with_file_name("participation.json"),
         )?),
@@ -834,7 +834,7 @@ async fn overload_replies_only_to_messages_admission_would_activate() -> Result<
             world.staging.clone(),
             config.attachments,
         )?),
-        core: test_client(format!("http://{}", world.address)),
+        core: test_client(format!("http://{}", world.address))?,
         participation: Arc::new(Participation::load(
             world.staging.with_file_name("participation.json"),
         )?),
