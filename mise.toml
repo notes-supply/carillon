@@ -51,6 +51,10 @@ run = [
   "vitest run",
 ]
 
+[tasks."check:workflows"]
+description = "Lint the GitHub workflows"
+run = ["actionlint", "zizmor .github/workflows"]
+
 [tasks."build:module"]
 description = "Build the Discord module for the Wasm sandbox"
 run = "cargo build --locked --profile wasm -p carillon-discord-module --target wasm32-unknown-unknown"

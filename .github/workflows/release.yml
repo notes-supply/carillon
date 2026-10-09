@@ -1,0 +1,82 @@
+name: Release
+
+# Publishes the archive a successful CI run on main built and tested, as a
+# prerelease tagged at exactly the commit that run tested. Nothing is built
+# here. A full CI run (Actions > CI > Run workflow on main) makes a release
+# candidate when the latest push did not build one.
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: ID of the successful CI run on main whose archive to publish
+        required: true
+      version:
+        description: Version the archive carries, such as 0.1.0-beta.1
+        required: true
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-26.04
+    environment: release
+    permissions:
+      actions: read # the producing run and its artifact
+      contents: write # the tag and the release
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN_ID: ${{ inputs.run_id }}
+      VERSION: ${{ inputs.version }}
+    steps:
+      - name: Verify the run tested the current main and this version
+        run: |
+          set -euo pipefail
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]] || { echo "run_id must be a number"; exit 1; }
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "invalid version $VERSION"; exit 1; }
+          run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID")
+          read -r path conclusion branch event sha < <(jq -r '[.path, .conclusion, .head_branch, .event, .head_sha] | @tsv' <<<"$run")
+          [ "$path" = .github/workflows/ci.yml ] || { echo "run $RUN_ID is $path, not CI"; exit 1; }
+          [ "$conclusion" = success ] || { echo "run $RUN_ID concluded $conclusion"; exit 1; }
+          if [ "$branch" != main ] || { [ "$event" != push ] && [ "$event" != workflow_dispatch ]; }; then
+            echo "run $RUN_ID is a $event run of $branch, not a push or manual run of main"; exit 1
+          fi
+          main=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
+          [ "$sha" = "$main" ] || { echo "run $RUN_ID tested $sha, but main is now $main"; exit 1; }
+          declared=$(gh api "repos/$GITHUB_REPOSITORY/contents/Cargo.toml?ref=$sha" --jq .content | base64 -d |
+            sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p')
+          [ "$declared" = "$VERSION" ] || { echo "$sha declares version '$declared', not $VERSION"; exit 1; }
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/v$VERSION" >/dev/null 2>&1; then
+            echo "tag v$VERSION already exists"; exit 1
+          fi
+          echo "SHA=$sha" >> "$GITHUB_ENV"
+      - name: Download the archive and verify its digest
+        run: |
+          set -euo pipefail
+          artifacts=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts" \
+            --jq '[.artifacts[] | select(.name == "release" and (.expired | not))]')
+          [ "$(jq length <<<"$artifacts")" = 1 ] || { echo "run $RUN_ID has no single release artifact"; exit 1; }
+          read -r id digest < <(jq -r '.[0] | [.id, .digest] | @tsv' <<<"$artifacts")
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$id/zip" > release.zip
+          [ "sha256:$(sha256sum release.zip | cut -d' ' -f1)" = "$digest" ] ||
+            { echo "the downloaded artifact does not match the digest GitHub recorded"; exit 1; }
+          unzip -q release.zip -d release
+      - name: Verify the archive is this version's tested release
+        working-directory: release
+        run: |
+          set -euo pipefail
+          archive="carillon-$VERSION-linux-x86_64.tar.gz"
+          files=(*)
+          [ "${files[*]}" = "SHA256SUMS $archive" ] || { echo "unexpected artifact contents: ${files[*]}"; exit 1; }
+          sha256sum --strict -c SHA256SUMS
+          [ "$(tar -tzf "$archive" | cut -d/ -f1 | sort -u)" = "carillon-$VERSION" ]
+      - name: Publish the prerelease
+        working-directory: release
+        run: |
+          gh release create "v$VERSION" "carillon-$VERSION-linux-x86_64.tar.gz" SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --target "$SHA" --prerelease --title "Carillon $VERSION" \
+            --notes "Public beta of Carillon $VERSION for x86_64 Linux. Install with the README at $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/v$VERSION/README.md#install. Built and tested by CI run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$RUN_ID from $SHA."
