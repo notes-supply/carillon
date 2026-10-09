@@ -15,7 +15,7 @@ use crate::{
     InterfaceError,
     activity::{CardRecords, activity_monitor},
     client::CoreClient,
-    config::{DiscordConfig, state_directory},
+    config::{self, DiscordConfig, Settings, state_directory},
     conversations::{
         IncomingMessage, Participation, admit_identity, admit_message,
         prepare_deterministic_conversation,
@@ -93,7 +93,13 @@ impl IntoResponse for InterfaceError {
 
 #[derive(Clone)]
 struct DiscordState {
-    discord: DiscordConfig,
+    /// The settings serving. Each message or interaction keeps the snapshot
+    /// it was admitted with.
+    settings: Settings,
+    /// The registry the provider started with: its settings file is read
+    /// and validated against it, and its operator credential authorizes the
+    /// operator endpoints.
+    installation: Arc<LoadedConfig>,
     health: Health,
     core: CoreClient,
     participation: Arc<Participation>,
@@ -107,7 +113,6 @@ struct DiscordState {
     lanes: Option<Lanes>,
     /// The provider's attachment downloads and staging, in either mode.
     downloads: Arc<Downloads>,
-    operator_token_hash: String,
 }
 
 /// Everything `serve` needs besides the registry.
@@ -178,7 +183,8 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
         discord.attachments,
     )?);
     let state = DiscordState {
-        discord,
+        settings: Settings::new(discord),
+        installation: Arc::new(config),
         health,
         core,
         participation,
@@ -187,7 +193,6 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
         reactions: None,
         lanes: None,
         downloads,
-        operator_token_hash: config.value.core.operator_token_hash.clone(),
     };
     info!(url = %provider.url, deterministic = options.deterministic, "Discord interface provider ready");
     if options.deterministic {
@@ -198,8 +203,9 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
         .discord_token_file
         .context("--discord-token-file is required outside deterministic mode")?;
     // Cosmetic: records that cannot be read turn cards off, not the provider.
-    let cards =
-        CardRecords::open(state_directory(&config, &provider.id).join("activity-cards.json"));
+    let cards = CardRecords::open(
+        state_directory(&state.installation, &provider.id).join("activity-cards.json"),
+    );
     connect(
         state,
         listener,
@@ -222,7 +228,9 @@ async fn connect(
 ) -> Result<()> {
     let http = Arc::new(DiscordHttp::new(discord_token.clone()));
     let current_user = http.current_user().await?.model().await?;
-    if current_user.id.to_string() != state.discord.bot_user_id {
+    // Identity applies at a restart only, so the settings serving now say it.
+    let identity = state.settings.current();
+    if current_user.id.to_string() != identity.bot_user_id {
         bail!("configured Discord bot user ID does not match the token");
     }
     let application_id = http
@@ -236,11 +244,11 @@ async fn connect(
     let app = Arc::new(DiscordApp {
         http: http.clone(),
         application_id,
-        guild_id: guild(&state.discord)?,
+        guild_id: guild(&identity)?,
     });
     state.module.reconcile(&app).await?;
     state.app = Some(app);
-    let reactions = Reactions::new(http.clone(), state.discord.clone());
+    let reactions = Reactions::new(http.clone(), state.settings.clone());
     state.reactions = Some(reactions.clone());
     for target in reconciled.feedback_target_ids {
         reactions.outcome(&target, Feedback::Uncertain).await;
@@ -251,7 +259,6 @@ async fn connect(
     let stopping = CancellationToken::new();
     let ingress = Arc::new(Ingress {
         core: state.core.clone(),
-        config: state.discord.clone(),
         participation: state.participation.clone(),
         http: http.clone(),
         reactions: reactions.clone(),
@@ -269,7 +276,7 @@ async fn connect(
         state.core.clone(),
         http.clone(),
         state.module.clone(),
-        state.discord.clone(),
+        state.settings.clone(),
         cards,
         heard,
         stopping.clone(),
@@ -342,7 +349,8 @@ fn discord_router(state: DiscordState, deterministic: bool) -> Router {
         .route(
             "/v1/module",
             get(module_status).put(install_module).delete(reset_module),
-        );
+        )
+        .route("/v1/settings", get(settings_status).post(apply_settings));
     if deterministic {
         router
             .route("/v1/simulate", post(simulate))
@@ -379,7 +387,10 @@ fn authorize_interface(state: &DiscordState, headers: &HeaderMap) -> Result<(), 
 
 /// Operator actions need the operator credential, not the interface's.
 fn authorize_operator(state: &DiscordState, headers: &HeaderMap) -> Result<(), InterfaceError> {
-    if !token_matches(&state.operator_token_hash, bearer(headers)) {
+    if !token_matches(
+        &state.installation.value.core.operator_token_hash,
+        bearer(headers),
+    ) {
         return Err(InterfaceError {
             status: StatusCode::FORBIDDEN,
             message: "Discord operator endpoints require the operator credential".to_owned(),
@@ -419,6 +430,49 @@ async fn discord_operation(
             (status, Json(failure)).into_response()
         }
     })
+}
+
+/// The provider's settings file, read and validated as at startup.
+fn read_settings(state: &DiscordState) -> Result<DiscordConfig> {
+    DiscordConfig::load(&state.installation, &state.health.id)
+}
+
+/// The settings serving, and how the provider's settings file differs.
+async fn settings_status(
+    State(state): State<DiscordState>,
+    headers: HeaderMap,
+) -> Result<Json<config::Status>, InterfaceError> {
+    authorize_operator(&state, &headers)?;
+    Ok(Json(state.settings.status(|| read_settings(&state))))
+}
+
+/// Serves the provider's settings file in place of the serving settings,
+/// whole, when everything it changes applies live; otherwise the serving
+/// settings stay, and the answer says why.
+async fn apply_settings(
+    State(state): State<DiscordState>,
+    headers: HeaderMap,
+) -> Result<Json<config::Applied>, InterfaceError> {
+    authorize_operator(&state, &headers)?;
+    match state.settings.apply(|| read_settings(&state)) {
+        Ok(changed) => {
+            if !changed.is_empty() {
+                info!(changed = changed.join(", "), "Discord settings applied");
+            }
+            Ok(Json(config::Applied { changed }))
+        }
+        Err(config::Refusal::Invalid(error)) => Err(InterfaceError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            message: format!("the settings file is not valid: {error:#}; nothing was applied"),
+        }),
+        Err(config::Refusal::Restart(difference)) => Err(InterfaceError {
+            status: StatusCode::CONFLICT,
+            message: format!(
+                "the settings file changes what only a restart applies ({}); nothing was applied",
+                difference.restart.join(", ")
+            ),
+        }),
+    }
 }
 
 async fn module_status(
@@ -543,8 +597,9 @@ async fn simulate(
     Json(request): Json<IncomingMessage>,
 ) -> Result<Response, InterfaceError> {
     authorize_interface(&state, &headers)?;
+    let settings = state.settings.current();
     let Some(plan) = admit_message(
-        &state.discord,
+        &settings,
         &state.participation,
         request,
         Value::String("deterministic-local-discord".to_owned()),
@@ -585,7 +640,7 @@ async fn simulate(
     let mut resolved = prepare_deterministic_conversation(&state.participation, plan)?;
     resolved.event.attachments = staged.as_ref().map(|staged| staged.manifest.clone());
     let mut feedback = Vec::new();
-    if state.discord.reactions {
+    if settings.reactions {
         feedback.push("processing".to_owned());
     }
     let receipt = if let Some(receipt) = known {
@@ -607,10 +662,10 @@ async fn simulate(
     };
     let native_ref = format!("local:{}", resolved.event.event_id);
     let delivery = settle_own_delivery(&state.core, &receipt, native_ref).await?;
-    if delivery.is_some() && state.discord.reactions {
+    if delivery.is_some() && settings.reactions {
         feedback.push("delivered".to_owned());
     }
-    let card = if delivery.is_some() && state.discord.activity {
+    let card = if delivery.is_some() && settings.activity {
         let jobs = state
             .core
             .named_jobs(std::slice::from_ref(&receipt.turn_id))
@@ -639,7 +694,7 @@ async fn summary(state: &DiscordState, job: Job) -> Option<Embed> {
     let request = CardRequest {
         job,
         seen: None,
-        markers: state.discord.activity_markers.clone(),
+        markers: state.settings.current().activity_markers.clone(),
     };
     state
         .module
@@ -698,8 +753,9 @@ async fn simulate_interaction(
     Json(source): Json<InteractionSource>,
 ) -> Result<Json<Reply>, InterfaceError> {
     authorize_interface(&state, &headers)?;
-    let admitted = admit_interaction(&state.discord, source)?;
-    let reply = run_interaction(&state, admitted)
+    let settings = state.settings.current();
+    let admitted = admit_interaction(&settings, source)?;
+    let reply = run_interaction(&state, admitted, settings)
         .await
         .map_err(|error| InterfaceError {
             status: StatusCode::BAD_GATEWAY,
@@ -747,12 +803,9 @@ fn take_event(
                 return Ok(());
             }
             let guild = message.guild_id.map(|id| id.to_string());
-            if admit_identity(
-                &state.discord,
-                guild.as_deref(),
-                &message.author.id.to_string(),
-            )
-            .is_err()
+            // The message keeps the settings it is admitted with.
+            let settings = state.settings.current();
+            if admit_identity(&settings, guild.as_deref(), &message.author.id.to_string()).is_err()
             {
                 return Ok(());
             }
@@ -776,7 +829,15 @@ fn take_event(
                     .collect(),
             };
             let native = native_message(&message);
-            queue_or_refuse(messages, ingress, QueuedMessage { request, native })?;
+            queue_or_refuse(
+                messages,
+                ingress,
+                QueuedMessage {
+                    request,
+                    native,
+                    settings,
+                },
+            )?;
         }
         Event::InteractionCreate(interaction) => {
             // Interactions are independent of message order and of each
@@ -819,7 +880,7 @@ pub(crate) fn queue_or_refuse(
     inbound: QueuedMessage,
 ) -> Result<()> {
     if let Err(refused) = queue_message(messages, inbound)? {
-        lanes::refuse_overloaded(ingress, refused.request);
+        lanes::refuse_overloaded(ingress, refused);
     }
     Ok(())
 }
@@ -878,11 +939,16 @@ fn interaction_source(interaction: &DiscordInteraction) -> Option<InteractionSou
     })
 }
 
-async fn run_interaction(state: &DiscordState, admitted: AdmittedInteraction) -> Result<Reply> {
+/// Runs an admitted interaction under the settings it was admitted with.
+async fn run_interaction(
+    state: &DiscordState,
+    admitted: AdmittedInteraction,
+    settings: Arc<DiscordConfig>,
+) -> Result<Reply> {
     let mut calls = InteractionCalls::new(
         state.core.clone(),
         ModelQuery {
-            agent_id: state.discord.agent.clone(),
+            agent_id: settings.agent.clone(),
             audience_id: admitted.audience_id,
         },
     );
@@ -894,6 +960,7 @@ async fn run_interaction(state: &DiscordState, admitted: AdmittedInteraction) ->
             reactions: reactions.clone(),
             lanes: lanes.clone(),
             origin: admitted.origin,
+            settings,
         });
     }
     state.module.invoke(calls, admitted.interaction).await
@@ -966,8 +1033,10 @@ async fn handle_interaction(state: DiscordState, interaction: DiscordInteraction
         warn!(%error, "Discord interaction acknowledgement failed");
         return;
     }
-    let (content, components) = match admit_interaction(&state.discord, source) {
-        Ok(admitted) => match run_interaction(&state, admitted).await {
+    // The interaction keeps the settings it is admitted with.
+    let settings = state.settings.current();
+    let (content, components) = match admit_interaction(&settings, source) {
+        Ok(admitted) => match run_interaction(&state, admitted, settings).await {
             Ok(reply) => match validate_reply(&reply) {
                 Ok(components) => (reply.content, components),
                 Err(error) => {

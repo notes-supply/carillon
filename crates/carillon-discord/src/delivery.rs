@@ -2,7 +2,7 @@
 use crate::{
     activity::Delivering,
     client::CoreClient,
-    config::{DiscordConfig, DiscordEmoji},
+    config::{DiscordConfig, DiscordEmoji, Settings},
 };
 use anyhow::{Context, Result, bail};
 use carillon_protocol::model::{Delivery, DeliveryOutcome, ExternalEvent, TurnState};
@@ -69,12 +69,22 @@ pub(crate) enum Feedback {
 /// [`Reactions::stop`]: processing requests, one per message at a time, at
 /// most [`OUTCOMES`] outcome reactions, and the lanes' overload refusals.
 /// After the stop nothing is sent, not even an outcome a caller awaits.
+///
+/// A message's reactions follow the settings it was admitted with, so its
+/// outcome replaces the processing reaction that was added, whichever emoji
+/// serves by then. Asking for the outcome ends the message's hold on those
+/// settings, whether or not the outcome is shown; a message admitted again
+/// after that, or one an earlier process admitted, follows the settings
+/// serving then.
 #[derive(Clone)]
 pub(crate) struct Reactions(Arc<Owned>);
 
 struct Owned {
     http: Arc<DiscordHttp>,
-    config: DiscordConfig,
+    settings: Settings,
+    /// The settings each message this process admitted was admitted with,
+    /// by feedback target, until its outcome is asked for.
+    admitted: Mutex<HashMap<String, Arc<DiscordConfig>>>,
     /// Processing requests not yet ended, one per feedback target. A
     /// receiver closes when its request ends.
     unanswered: Mutex<HashMap<String, watch::Receiver<()>>>,
@@ -85,10 +95,11 @@ struct Owned {
 }
 
 impl Reactions {
-    pub(crate) fn new(http: Arc<DiscordHttp>, config: DiscordConfig) -> Self {
+    pub(crate) fn new(http: Arc<DiscordHttp>, settings: Settings) -> Self {
         Self(Arc::new(Owned {
             http,
-            config,
+            settings,
+            admitted: Mutex::new(HashMap::new()),
             unanswered: Mutex::new(HashMap::new()),
             outcomes: Arc::new(Semaphore::new(OUTCOMES)),
             tasks: TaskTracker::new(),
@@ -96,22 +107,18 @@ impl Reactions {
         }))
     }
 
-    /// The processing reaction and a typing indicator, before a message is
-    /// handed to core. The processing request is registered when admission
-    /// is asked for, so the message's outcome waits for it; the returned
-    /// wait for both ends within [`PROMPT_FEEDBACK`], and the processing
-    /// request goes on without it.
+    /// The processing reaction and a typing indicator, as the settings the
+    /// message was admitted with say, before it is handed to core. The
+    /// processing request is registered when admission is asked for, so the
+    /// message's outcome waits for it; the returned wait for both ends within
+    /// [`PROMPT_FEEDBACK`], and the processing request goes on without it.
     pub(crate) fn admission<'a>(
         &'a self,
         event: &'a ExternalEvent,
+        config: &'a Arc<DiscordConfig>,
     ) -> impl Future<Output = ()> + 'a {
-        let Owned {
-            http,
-            config,
-            stopped,
-            ..
-        } = &*self.0;
-        let processing = self.processing(&event.feedback_target_id);
+        let Owned { http, stopped, .. } = &*self.0;
+        let processing = self.processing(&event.feedback_target_id, config);
         let shown = async move {
             tokio::join!(
                 async {
@@ -133,10 +140,17 @@ impl Reactions {
     }
 
     /// Sends the message's processing reaction as a task these reactions
-    /// own, unless its request is still under way. The returned receiver
-    /// closes when the request has ended.
-    fn processing(&self, target: &str) -> Option<watch::Receiver<()>> {
-        if !self.0.config.reactions {
+    /// own, unless its request is still under way, and remembers the
+    /// settings it was admitted with. A message admitted again before its
+    /// outcome is asked for keeps the settings it was first admitted with,
+    /// whose emoji its request added.
+    /// The returned receiver closes when the request has ended.
+    fn processing(&self, target: &str, config: &Arc<DiscordConfig>) -> Option<watch::Receiver<()>> {
+        let admitted = lock(&self.0.admitted)
+            .entry(target.to_owned())
+            .or_insert_with(|| config.clone())
+            .clone();
+        if !admitted.reactions {
             return None;
         }
         let (sent, ended) = match lock(&self.0.unanswered).entry(target.to_owned()) {
@@ -153,7 +167,7 @@ impl Reactions {
         self.spawn(async move {
             let owned = &this.0;
             if let Err(failure) =
-                create_feedback_reaction(&owned.http, &target, &owned.config.processing_emoji).await
+                create_feedback_reaction(&owned.http, &target, &admitted.processing_emoji).await
             {
                 // Unanswered, Discord may still apply it after the outcome.
                 warn!(error = %failure, %target, "Discord processing reaction failed or was not answered");
@@ -162,6 +176,12 @@ impl Reactions {
             drop(sent);
         });
         Some(ended)
+    }
+
+    /// The settings serving, which the provider's tests admit messages with.
+    #[cfg(test)]
+    pub(crate) fn settings(&self) -> &Settings {
+        &self.0.settings
     }
 
     /// Runs `feedback` as a task these reactions own, until it ends or they
@@ -180,15 +200,48 @@ impl Reactions {
         }
     }
 
-    /// Replaces the message's processing reaction with its outcome, once
-    /// the processing request has ended, unless these reactions stop first.
-    pub(crate) async fn outcome(&self, target: &str, feedback: Feedback) {
+    /// The settings the message's outcome follows: those of its admission
+    /// when this process admitted it, otherwise `known`, the settings the
+    /// caller took it with, otherwise those serving now.
+    fn settled(&self, target: &str, known: Option<&Arc<DiscordConfig>>) -> Arc<DiscordConfig> {
         let Owned {
-            http,
-            config,
-            stopped,
-            ..
+            settings, admitted, ..
         } = &*self.0;
+        let admitted = lock(admitted).remove(target);
+        admitted
+            .or_else(|| known.cloned())
+            .unwrap_or_else(|| settings.current())
+    }
+
+    /// Replaces the message's processing reaction with its outcome, as the
+    /// settings it was admitted with say, once the processing request has
+    /// ended, unless these reactions stop first. The message's settings are
+    /// taken when this is called, so an outcome never awaited still ends
+    /// their hold.
+    pub(crate) fn outcome<'a>(
+        &'a self,
+        target: &'a str,
+        feedback: Feedback,
+    ) -> impl Future<Output = ()> + 'a {
+        let config = self.settled(target, None);
+        self.show(target, feedback, config)
+    }
+
+    /// As [`Reactions::outcome`], for a message the caller took with
+    /// `settings`, which its outcome follows even when it ends before
+    /// admission.
+    pub(crate) fn outcome_as<'a>(
+        &'a self,
+        target: &'a str,
+        feedback: Feedback,
+        settings: &Arc<DiscordConfig>,
+    ) -> impl Future<Output = ()> + 'a {
+        let config = self.settled(target, Some(settings));
+        self.show(target, feedback, config)
+    }
+
+    async fn show(&self, target: &str, feedback: Feedback, config: Arc<DiscordConfig>) {
+        let Owned { http, stopped, .. } = &*self.0;
         if !config.reactions {
             return;
         }
@@ -215,15 +268,17 @@ impl Reactions {
 
     /// Shows the message's outcome as a task these reactions own, so the
     /// work that asked for it goes on. Beyond [`OUTCOMES`] under way, it is
-    /// not shown, and that is logged.
+    /// not shown, and that is logged. Either way, as for
+    /// [`Reactions::outcome`], the message's settings are taken now.
     pub(crate) fn show_outcome(&self, target: String, feedback: Feedback) {
+        let config = self.settled(&target, None);
         let Ok(slot) = self.0.outcomes.clone().try_acquire_owned() else {
             warn!(%target, "Discord outcome reaction not shown: too many are under way");
             return;
         };
         let this = self.clone();
         self.spawn(async move {
-            this.outcome(&target, feedback).await;
+            this.show(&target, feedback, config).await;
             drop(slot);
         });
     }

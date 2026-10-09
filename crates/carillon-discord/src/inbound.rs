@@ -54,12 +54,14 @@ const STOPPED: &str =
 pub(crate) struct QueuedMessage {
     pub(crate) request: IncomingMessage,
     pub(crate) native: Value,
+    /// The settings serving when the gateway took the message: its route,
+    /// admission and feedback follow them however the settings change.
+    pub(crate) settings: Arc<DiscordConfig>,
 }
 
 /// What preparing a message needs, shared by every lane.
 pub(crate) struct Ingress {
     pub(crate) core: CoreClient,
-    pub(crate) config: DiscordConfig,
     pub(crate) participation: Arc<Participation>,
     pub(crate) http: Arc<DiscordHttp>,
     /// The reactions that show each message's progress, in order.
@@ -136,7 +138,8 @@ impl Ingress {
 /// known by then was never admitted and is dropped silently.
 pub(crate) async fn prepare(ingress: &Ingress, mut inbound: QueuedMessage) {
     let deadline = Instant::now() + PREPARATION_DEADLINE;
-    let discord = &ingress.config;
+    let settings = inbound.settings;
+    let discord = &*settings;
     let http = &ingress.http;
     let channel = &inbound.request.channel_id;
     let route = ingress
@@ -148,7 +151,10 @@ pub(crate) async fn prepare(ingress: &Ingress, mut inbound: QueuedMessage) {
         Some(Ok(parent)) => parent,
         Some(Err(failure)) => {
             let source = format!("{channel}:{}", inbound.request.event_id);
-            ingress.reactions.outcome(&source, Feedback::Failed).await;
+            ingress
+                .reactions
+                .outcome_as(&source, Feedback::Failed, &settings)
+                .await;
             warn!(error = %failure, "Discord message route is unavailable");
             return;
         }
@@ -163,21 +169,28 @@ pub(crate) async fn prepare(ingress: &Ingress, mut inbound: QueuedMessage) {
         return;
     };
     if plan.attachments.is_empty() {
-        prepare_text(ingress, plan, deadline).await;
+        prepare_text(ingress, plan, &settings, deadline).await;
     } else {
-        prepare_files(ingress, plan, deadline).await;
+        prepare_files(ingress, plan, &settings, deadline).await;
     }
 }
 
 /// Open a text's conversation and start submitting it by `deadline`, then
 /// submit it until core answers: once submitted, core may hold it, so only
 /// the stop ends that.
-async fn prepare_text(ingress: &Ingress, plan: MessagePlan, deadline: Instant) {
+async fn prepare_text(
+    ingress: &Ingress,
+    plan: MessagePlan,
+    settings: &Arc<DiscordConfig>,
+    deadline: Instant,
+) {
     let (reactions, http) = (&ingress.reactions, &*ingress.http);
     let source = format!("{}:{}", plan.channel_id, plan.message_id);
     let unfinished = async || {
         explain(http, &source, &ingress.unfinished().0).await;
-        reactions.outcome(&source, Feedback::Failed).await;
+        reactions
+            .outcome_as(&source, Feedback::Failed, settings)
+            .await;
     };
     // A message core already holds, such as one the gateway replayed, is
     // not admitted again: its feedback belongs to its first admission. A
@@ -201,6 +214,7 @@ async fn prepare_text(ingress: &Ingress, plan: MessagePlan, deadline: Instant) {
                 plan.message_id,
                 source,
                 ingress.unfinished(),
+                settings.clone(),
             ));
             return;
         }
@@ -214,7 +228,9 @@ async fn prepare_text(ingress: &Ingress, plan: MessagePlan, deadline: Instant) {
         Some(Ok(resolved)) => resolved,
         Some(Err(failure)) => {
             warn!(error = %failure, "Discord conversation cannot be prepared");
-            reactions.outcome(&source, Feedback::Failed).await;
+            reactions
+                .outcome_as(&source, Feedback::Failed, settings)
+                .await;
             return;
         }
         None => {
@@ -222,7 +238,7 @@ async fn prepare_text(ingress: &Ingress, plan: MessagePlan, deadline: Instant) {
             return;
         }
     };
-    reactions.admission(&resolved.event).await;
+    reactions.admission(&resolved.event, settings).await;
     // Admission feedback can outlast the window; a text it closed on is not
     // submitted.
     if Instant::now() >= deadline {
@@ -250,7 +266,11 @@ async fn prepare_text(ingress: &Ingress, plan: MessagePlan, deadline: Instant) {
     if let Err(failure) = receipt {
         warn!(error = %failure.message, "Discord event submission failed");
         reactions
-            .outcome(&resolved.event.feedback_target_id, Feedback::Failed)
+            .outcome_as(
+                &resolved.event.feedback_target_id,
+                Feedback::Failed,
+                settings,
+            )
             .await;
     }
 }
@@ -266,16 +286,21 @@ async fn settle_unfinished_text(
     event_id: String,
     source: String,
     refusal: Refusal,
+    settings: Arc<DiscordConfig>,
 ) {
     match core.event_status(&event_id).await {
         Ok(EventStatus::Accepted(_) | EventStatus::Capturing) => {}
         Ok(EventStatus::Unknown) => {
             explain(&http, &source, &refusal.0).await;
-            reactions.outcome(&source, Feedback::Failed).await;
+            reactions
+                .outcome_as(&source, Feedback::Failed, &settings)
+                .await;
         }
         Err(failure) => {
             warn!(error = %failure.message, %event_id, "Discord stopped before core said whether it holds a message");
-            reactions.outcome(&source, Feedback::Uncertain).await;
+            reactions
+                .outcome_as(&source, Feedback::Uncertain, &settings)
+                .await;
         }
     }
 }
@@ -283,12 +308,19 @@ async fn settle_unfinished_text(
 /// Download, stage and submit a message with files. While they download the
 /// sender sees typing; the processing reaction appears once they are handed
 /// to core. Everything before submission ends by `deadline`.
-async fn prepare_files(ingress: &Ingress, plan: MessagePlan, deadline: Instant) {
+async fn prepare_files(
+    ingress: &Ingress,
+    plan: MessagePlan,
+    settings: &Arc<DiscordConfig>,
+    deadline: Instant,
+) {
     let (reactions, http) = (&ingress.reactions, &*ingress.http);
     let source = format!("{}:{}", plan.channel_id, plan.message_id);
     let refuse = async |refusal: Refusal| {
         explain(http, &source, &refusal.0).await;
-        reactions.outcome(&source, Feedback::Failed).await;
+        reactions
+            .outcome_as(&source, Feedback::Failed, settings)
+            .await;
     };
     if let Err(refusal) = ingress.downloads.admit(&plan.attachments) {
         refuse(refusal).await;
@@ -304,13 +336,15 @@ async fn prepare_files(ingress: &Ingress, plan: MessagePlan, deadline: Instant) 
             return;
         }
         Replayed::Uncertain => {
-            reactions.outcome(&source, Feedback::Uncertain).await;
+            reactions
+                .outcome_as(&source, Feedback::Uncertain, settings)
+                .await;
             return;
         }
     }
     let typing = tokio::spawn(keep_typing(
         ingress.http.clone(),
-        ingress.config.clone(),
+        settings.clone(),
         plan.channel_id.clone(),
     ));
     let typing = typing.abort_handle();
@@ -342,7 +376,9 @@ async fn prepare_files(ingress: &Ingress, plan: MessagePlan, deadline: Instant) 
             drop(staged);
             if let Some(Err(failure)) = unopened {
                 warn!(error = %failure, "Discord conversation cannot be prepared");
-                reactions.outcome(&source, Feedback::Failed).await;
+                reactions
+                    .outcome_as(&source, Feedback::Failed, settings)
+                    .await;
             } else {
                 refuse(ingress.unfinished()).await;
             }
@@ -352,7 +388,7 @@ async fn prepare_files(ingress: &Ingress, plan: MessagePlan, deadline: Instant) 
     resolved.event.attachments = Some(staged.manifest.clone());
     // As for text, the processing reaction precedes submission, and the
     // delivered or failed reaction that follows always replaces it.
-    reactions.admission(&resolved.event).await;
+    reactions.admission(&resolved.event, settings).await;
     let settled = submit_files(ingress, &resolved.event, deadline).await;
     typing.abort();
     // Core holds its own copy once it answers; the staged files go.
@@ -362,7 +398,7 @@ async fn prepare_files(ingress: &Ingress, plan: MessagePlan, deadline: Instant) 
     }
 }
 
-async fn keep_typing(http: Arc<DiscordHttp>, config: DiscordConfig, channel: String) {
+async fn keep_typing(http: Arc<DiscordHttp>, config: Arc<DiscordConfig>, channel: String) {
     loop {
         trigger_typing(&http, &config, &channel).await;
         sleep(Duration::from_secs(8)).await;

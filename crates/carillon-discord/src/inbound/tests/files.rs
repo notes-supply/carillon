@@ -290,18 +290,24 @@ fn message(
     user: &str,
     content: &str,
     files: Vec<SourceAttachment>,
-) -> QueuedMessage {
+) -> IncomingMessage {
+    IncomingMessage {
+        event_id: id.to_owned(),
+        guild_id: Some("100".to_owned()),
+        user_id: user.to_owned(),
+        channel_id: channel.to_owned(),
+        parent_channel_id: None,
+        content: content.to_owned(),
+        attachments: files,
+    }
+}
+
+/// `request` as the gateway takes it, with the settings `ingress` serves.
+fn admitted(ingress: &crate::inbound::Ingress, request: IncomingMessage) -> QueuedMessage {
     QueuedMessage {
-        request: IncomingMessage {
-            event_id: id.to_owned(),
-            guild_id: Some("100".to_owned()),
-            user_id: user.to_owned(),
-            channel_id: channel.to_owned(),
-            parent_channel_id: None,
-            content: content.to_owned(),
-            attachments: files,
-        },
+        request,
         native: Value::Null,
+        settings: ingress.reactions.settings().current(),
     }
 }
 
@@ -310,7 +316,7 @@ async fn run(
     world: &World,
     config: crate::config::DiscordConfig,
     cdn: u16,
-    messages: Vec<QueuedMessage>,
+    messages: Vec<IncomingMessage>,
 ) -> Result<()> {
     run_for(world, config, cdn, messages, Duration::from_secs(20)).await
 }
@@ -330,8 +336,10 @@ fn ingress(
             world.staging.with_file_name("participation.json"),
         )?),
         http: world.http.clone(),
-        reactions: crate::delivery::Reactions::new(world.http.clone(), config.clone()),
-        config,
+        reactions: crate::delivery::Reactions::new(
+            world.http.clone(),
+            crate::config::Settings::new(config),
+        ),
         refusals: Arc::new(tokio::sync::Semaphore::new(lanes::REFUSALS)),
         stopping: tokio_util::sync::CancellationToken::new(),
     }))
@@ -342,13 +350,13 @@ async fn run_for(
     world: &World,
     config: crate::config::DiscordConfig,
     cdn: u16,
-    messages: Vec<QueuedMessage>,
+    messages: Vec<IncomingMessage>,
     limit: Duration,
 ) -> Result<()> {
     let ingress = ingress(world, config, cdn)?;
     let (send, receive) = mpsc::channel(lanes::MAX_PENDING);
     for message in messages {
-        send.send(message.into()).await?;
+        send.send(admitted(&ingress, message).into()).await?;
     }
     drop(send);
     tokio::time::timeout(limit, lanes::dispatch(ingress, receive)).await?;
@@ -390,9 +398,9 @@ async fn unauthorized_or_inactive_messages_acquire_nothing() -> Result<()> {
     let world = world(Vec::new(), Vec::new()).await?;
     let file = || vec![attachment(cdn, "601", "a.png", 10)];
     let mut wrong_guild = message("1", "300", "200", "", file());
-    wrong_guild.request.guild_id = Some("999".to_owned());
+    wrong_guild.guild_id = Some("999".to_owned());
     let mut direct = message("2", "300", "200", "", file());
-    direct.request.guild_id = None;
+    direct.guild_id = None;
     let mut config = channel_config();
     config.routes[0].activation = DiscordActivation::Mention;
     run(
@@ -839,8 +847,10 @@ async fn overload_replies_only_to_messages_admission_would_activate() -> Result<
             world.staging.with_file_name("participation.json"),
         )?),
         http: world.http.clone(),
-        reactions: crate::delivery::Reactions::new(world.http.clone(), config.clone()),
-        config,
+        reactions: crate::delivery::Reactions::new(
+            world.http.clone(),
+            crate::config::Settings::new(config),
+        ),
         refusals: Arc::new(tokio::sync::Semaphore::new(lanes::REFUSALS)),
         stopping: tokio_util::sync::CancellationToken::new(),
     });
@@ -852,11 +862,11 @@ async fn overload_replies_only_to_messages_admission_would_activate() -> Result<
         // Not allowlisted.
         message("82", "301", "999", "hello", Vec::new()),
     ] {
-        lanes::refuse_overloaded(&ingress, ignored.request);
+        lanes::refuse_overloaded(&ingress, admitted(&ingress, ignored));
     }
     lanes::refuse_overloaded(
         &ingress,
-        message("83", "301", "200", "hello", Vec::new()).request,
+        admitted(&ingress, message("83", "301", "200", "hello", Vec::new())),
     );
     for _ in 0..200 {
         let trace = trace(&world)?;
@@ -887,7 +897,7 @@ async fn a_full_gateway_queue_refuses_only_messages_admission_would_activate() -
     crate::application::queue_or_refuse(
         &send,
         &ingress,
-        message("90", "301", "200", "first", Vec::new()),
+        admitted(&ingress, message("90", "301", "200", "first", Vec::new())),
     )?;
     for queued in [
         // A mention route, not mentioned: ordinary chatter.
@@ -897,7 +907,7 @@ async fn a_full_gateway_queue_refuses_only_messages_admission_would_activate() -
         // A message the agent would answer.
         message("93", "301", "200", "hello", Vec::new()),
     ] {
-        crate::application::queue_or_refuse(&send, &ingress, queued)?;
+        crate::application::queue_or_refuse(&send, &ingress, admitted(&ingress, queued))?;
     }
     for _ in 0..200 {
         let trace = trace(&world)?;
@@ -931,12 +941,15 @@ async fn stopping_while_core_captures_a_replay_waits_for_its_outcome() -> Result
     let (send, receive) = mpsc::channel(lanes::MAX_PENDING);
     for (id, channel, file) in [("150", "300", "601"), ("151", "301", "602")] {
         send.send(
-            message(
-                id,
-                channel,
-                "200",
-                "",
-                vec![attachment(cdn, file, "a.bin", 8)],
+            admitted(
+                &ingress,
+                message(
+                    id,
+                    channel,
+                    "200",
+                    "",
+                    vec![attachment(cdn, file, "a.bin", 8)],
+                ),
             )
             .into(),
         )
@@ -1277,7 +1290,7 @@ async fn stopping_settles_what_core_may_hold_and_drops_the_rest() -> Result<()> 
             vec![attachment(cdn, "602", "stalled", 100)],
         ),
     ] {
-        send.send(queued.into()).await?;
+        send.send(admitted(&ingress, queued).into()).await?;
     }
     let dispatcher = tokio::spawn(lanes::dispatch(ingress, receive));
     // Stop once the first message is with core and the other is downloading.
@@ -1339,7 +1352,7 @@ async fn stopping_settles_text_submissions_and_tells_senders_what_core_lacks() -
         message("131", "301", "200", "never received", Vec::new()),
         message("132", "300", "200", "waiting", Vec::new()),
     ] {
-        send.send(queued.into()).await?;
+        send.send(admitted(&ingress, queued).into()).await?;
     }
     let dispatcher = tokio::spawn(lanes::dispatch(ingress, receive));
     for _ in 0..2000 {
@@ -1397,7 +1410,7 @@ async fn stopping_during_the_replay_lookup_settles_text_by_cores_answer() -> Res
     let (stopping, reactions) = (ingress.stopping.clone(), ingress.reactions.clone());
     let (send, receive) = mpsc::channel(lanes::MAX_PENDING);
     for (id, channel) in [("140", "300"), ("141", "301"), ("142", "302")] {
-        send.send(message(id, channel, "200", "hello", Vec::new()).into())
+        send.send(admitted(&ingress, message(id, channel, "200", "hello", Vec::new())).into())
             .await?;
     }
     let dispatcher = tokio::spawn(lanes::dispatch(ingress, receive));
@@ -1471,12 +1484,15 @@ async fn a_conversation_attempt_stalled_in_discords_answer_is_bounded() -> Resul
     Arc::get_mut(&mut ingress).context("shared ingress")?.http = discord_at(port);
     let (send, receive) = mpsc::channel(1);
     send.send(
-        message(
-            "86",
-            "300",
-            "200",
-            "",
-            vec![attachment(port, "601", "a.bin", 8)],
+        admitted(
+            &ingress,
+            message(
+                "86",
+                "300",
+                "200",
+                "",
+                vec![attachment(port, "601", "a.bin", 8)],
+            ),
         )
         .into(),
     )
@@ -1537,7 +1553,7 @@ async fn a_route_discord_never_resolves_releases_its_lane_silently() -> Result<(
     let mut ingress = ingress(&world, channel_config(), port)?;
     Arc::get_mut(&mut ingress).context("shared ingress")?.http = discord_at(port);
     let (send, receive) = mpsc::channel(1);
-    send.send(message("189", "89", "200", "hello", Vec::new()).into())
+    send.send(admitted(&ingress, message("189", "89", "200", "hello", Vec::new())).into())
         .await?;
     drop(send);
     let started = Instant::now();
@@ -1634,12 +1650,15 @@ async fn a_message_s_preparation_window_includes_resolving_its_route() -> Result
     }
     let (send, receive) = mpsc::channel(1);
     send.send(
-        message(
-            "188",
-            "88",
-            "200",
-            "",
-            vec![attachment(port, "601", "a.bin", 8)],
+        admitted(
+            &ingress,
+            message(
+                "188",
+                "88",
+                "200",
+                "",
+                vec![attachment(port, "601", "a.bin", 8)],
+            ),
         )
         .into(),
     )
@@ -1705,20 +1724,21 @@ async fn a_text_whose_window_closes_during_its_feedback_is_never_submitted() -> 
     let discord = discord_at(port);
     let shared = Arc::get_mut(&mut ingress).context("shared ingress")?;
     shared.http = discord.clone();
-    shared.reactions = crate::delivery::Reactions::new(discord, config);
-    let queued = message("150", "300", "200", "hello", Vec::new());
+    shared.reactions =
+        crate::delivery::Reactions::new(discord, crate::config::Settings::new(config));
+    let settings = ingress.reactions.settings().current();
     let plan = crate::conversations::admit_message(
-        &ingress.config,
+        &settings,
         &ingress.participation,
-        queued.request,
-        queued.native,
+        message("150", "300", "200", "hello", Vec::new()),
+        Value::Null,
     )?
     .context("not admitted")?;
     // The text's conversation opens with less of its window left than
     // admission waits for its feedback. Real time: the replay lookup must
     // not let paused time jump past the window before the conversation opens.
     let started = Instant::now();
-    crate::inbound::prepare_text(&ingress, plan, started + Duration::from_secs(1)).await;
+    crate::inbound::prepare_text(&ingress, plan, &settings, started + Duration::from_secs(1)).await;
     ingress.reactions.stop(Duration::from_secs(5)).await;
     let requests = log
         .lock()

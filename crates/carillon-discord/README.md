@@ -14,6 +14,12 @@ retain the actual Wasm path rather than substituting this direct native call.
 
 ## Components
 
+- [`config`](src/config.rs) owns the provider's settings file and the settings it
+  serves. `Settings` holds one validated snapshot at a time; `Settings::apply` serves
+  a newly read file whole when every field that differs applies live (`Difference`
+  classifies each field), and otherwise refuses, naming the fields that need a
+  restart. Admission takes `Settings::current()` once per message or interaction, and
+  that snapshot travels with the work.
 - [`conversations`](src/conversations.rs) owns message/interaction admission,
   activation, thread participation and conversation identity. Supply `DiscordConfig`
   and a `Participation` store; `admit_message` returns an activated plan or ignores
@@ -26,7 +32,8 @@ retain the actual Wasm path rather than substituting this direct native call.
 - [`delivery`](src/delivery.rs) implements native delivery and feedback using the
   concrete core and Discord clients. It does not own a second delivery queue.
   Delivered content is sent as given, split at Discord's length limit, with mentions
-  disabled. Its `Reactions` keep each message's reactions in order: the processing
+  disabled. Its `Reactions` keep each message's reactions in order, with the emoji of
+  the settings it was admitted with: the processing
   reaction is a request they own until Discord answers it, and the delivered, failed or
   uncertain reaction waits for that request before replacing it. Feedback beside the
   work, including the lanes' overload refusals, runs as their tasks, with at most 64

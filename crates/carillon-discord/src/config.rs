@@ -2,12 +2,19 @@
 //! `carillon.toml`. Core never reads it; only the provider and its
 //! `configure` command know the schema.
 
-use std::{collections::BTreeSet, fs, path::PathBuf, str::FromStr};
+use std::{
+    collections::BTreeSet,
+    fs,
+    path::PathBuf,
+    str::FromStr,
+    sync::{Arc, Mutex, PoisonError},
+};
 
 use anyhow::{Context as _, Result, bail};
 use carillon_installation::config::{LoadedConfig, ProviderRole, component_directory};
 use carillon_installation::filesystem::atomic_write;
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
 use unicode_general_category::{GeneralCategory, get_general_category};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -373,6 +380,191 @@ impl DiscordConfig {
         }
         Ok(())
     }
+}
+
+/// How a settings file differs from the settings that serve, by field:
+/// what an apply would change, and what only a restart applies.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Difference {
+    pub live: Vec<String>,
+    pub restart: Vec<String>,
+}
+
+impl Difference {
+    /// Every field that differs, classified. Every field is listed here, so
+    /// a new one must be classified before it compiles. Identity and the
+    /// capacity the provider set up at start apply at a restart; who is
+    /// admitted where, and how work is shown, apply live.
+    #[must_use]
+    pub fn between(serving: &DiscordConfig, file: &DiscordConfig) -> Self {
+        let DiscordConfig {
+            agent,
+            guild_id,
+            bot_user_id,
+            allowed_user_ids,
+            routes,
+            typing,
+            activity,
+            activity_markers,
+            attachments,
+            reactions,
+            processing_emoji,
+            delivered_emoji,
+            failed_emoji,
+            uncertain_emoji,
+        } = file;
+        let mut difference = Self::default();
+        for (changed, field, live) in [
+            (*agent != serving.agent, "agent", false),
+            (*guild_id != serving.guild_id, "guild_id", false),
+            (*bot_user_id != serving.bot_user_id, "bot_user_id", false),
+            (*activity != serving.activity, "activity", false),
+            (*attachments != serving.attachments, "attachments", false),
+            (
+                *allowed_user_ids != serving.allowed_user_ids,
+                "allowed_user_ids",
+                true,
+            ),
+            (*routes != serving.routes, "routes", true),
+            (*typing != serving.typing, "typing", true),
+            (
+                *activity_markers != serving.activity_markers,
+                "activity_markers",
+                true,
+            ),
+            (*reactions != serving.reactions, "reactions", true),
+            (
+                *processing_emoji != serving.processing_emoji,
+                "processing_emoji",
+                true,
+            ),
+            (
+                *delivered_emoji != serving.delivered_emoji,
+                "delivered_emoji",
+                true,
+            ),
+            (*failed_emoji != serving.failed_emoji, "failed_emoji", true),
+            (
+                *uncertain_emoji != serving.uncertain_emoji,
+                "uncertain_emoji",
+                true,
+            ),
+        ] {
+            if changed {
+                if live {
+                    &mut difference.live
+                } else {
+                    &mut difference.restart
+                }
+                .push(field.to_owned());
+            }
+        }
+        difference
+    }
+}
+
+/// The settings the provider serves: one validated file version at a time.
+/// Each message or interaction keeps the snapshot it was admitted with, so
+/// an apply changes only what is admitted after it, and shows work as it
+/// says from then on.
+#[derive(Clone)]
+pub struct Settings(Arc<Serving>);
+
+struct Serving {
+    current: watch::Sender<Arc<DiscordConfig>>,
+    /// One apply at a time, so the file each reads is the one that serves.
+    applying: Mutex<()>,
+}
+
+impl Settings {
+    #[must_use]
+    pub fn new(config: DiscordConfig) -> Self {
+        Self(Arc::new(Serving {
+            current: watch::Sender::new(Arc::new(config)),
+            applying: Mutex::new(()),
+        }))
+    }
+
+    /// The settings serving now.
+    #[must_use]
+    pub fn current(&self) -> Arc<DiscordConfig> {
+        self.0.current.borrow().clone()
+    }
+
+    /// What serves, and how the file `read` returns differs from it.
+    #[must_use]
+    pub fn status(&self, read: impl FnOnce() -> Result<DiscordConfig>) -> Status {
+        let serving = self.current();
+        let file = match read() {
+            Ok(file) => FileState::Read(Difference::between(&serving, &file)),
+            Err(error) => FileState::Invalid {
+                error: format!("{error:#}"),
+            },
+        };
+        Status {
+            serving: DiscordConfig::clone(&serving),
+            file,
+        }
+    }
+
+    /// Serves the file `read` returns in place of what serves, whole, when
+    /// everything that differs applies live. Returns the fields it changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns why what serves stays in place: the file did not read as
+    /// valid settings, or it changes what only a restart applies.
+    pub fn apply(
+        &self,
+        read: impl FnOnce() -> Result<DiscordConfig>,
+    ) -> Result<Vec<String>, Refusal> {
+        let _one = self
+            .0
+            .applying
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let file = read().map_err(Refusal::Invalid)?;
+        let difference = Difference::between(&self.current(), &file);
+        if !difference.restart.is_empty() {
+            return Err(Refusal::Restart(difference));
+        }
+        if !difference.live.is_empty() {
+            self.0.current.send_replace(Arc::new(file));
+        }
+        Ok(difference.live)
+    }
+}
+
+/// The settings that serve, and how the settings file differs from them.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Status {
+    pub serving: DiscordConfig,
+    pub file: FileState,
+}
+
+/// The settings file as an apply would read it now.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum FileState {
+    /// Valid settings, differing from what serves by these fields.
+    Read(Difference),
+    /// Not valid settings for this provider; an apply is refused.
+    Invalid { error: String },
+}
+
+/// The fields an apply changed; none when the file already served.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Applied {
+    pub changed: Vec<String>,
+}
+
+/// Why an apply left the serving settings in place.
+#[derive(Debug)]
+pub enum Refusal {
+    /// The file is not valid settings for this provider.
+    Invalid(anyhow::Error),
+    /// The file changes fields only a restart applies.
+    Restart(Difference),
 }
 
 /// Replaces the admission settings of an existing file, or creates the file,

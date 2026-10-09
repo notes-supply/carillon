@@ -153,7 +153,7 @@ pub(crate) async fn dispatch(ingress: Arc<Ingress>, mut messages: mpsc::Receiver
                     continue;
                 };
                 let key = match &queued {
-                    Queued::Message(message) => lane(&ingress.config, &message.request),
+                    Queued::Message(message) => lane(&message.settings, &message.request),
                     Queued::Submission(submission) => submission.channel.clone(),
                 };
                 let queue = lanes.entry(key.clone()).or_default();
@@ -163,7 +163,7 @@ pub(crate) async fn dispatch(ingress: Arc<Ingress>, mut messages: mpsc::Receiver
                     }
                     // A refused submission is dropped: its command is not sent.
                     if let Queued::Message(message) = queued {
-                        refuse_overloaded(&ingress, message.request);
+                        refuse_overloaded(&ingress, message);
                     }
                     continue;
                 }
@@ -269,7 +269,12 @@ async fn settle(ingress: &Ingress, event: &ExternalEvent) {
 /// Refuse a message beyond the bounds. Only a message admission would
 /// activate is answered, so overload never replies to messages Carillon
 /// would ignore; a thread the provider has not yet seen is not answered.
-pub(crate) fn refuse_overloaded(ingress: &Arc<Ingress>, message: IncomingMessage) {
+pub(crate) fn refuse_overloaded(ingress: &Arc<Ingress>, queued: QueuedMessage) {
+    let QueuedMessage {
+        request: message,
+        settings,
+        ..
+    } = queued;
     warn!(
         channel = %message.channel_id,
         message = %message.event_id,
@@ -280,12 +285,7 @@ pub(crate) fn refuse_overloaded(ingress: &Arc<Ingress>, message: IncomingMessage
         request.parent_channel_id = ingress.participation.parent_route(&request.channel_id);
     }
     if !matches!(
-        admit_message(
-            &ingress.config,
-            &ingress.participation,
-            request,
-            Value::Null
-        ),
+        admit_message(&settings, &ingress.participation, request, Value::Null),
         Ok(Some(_))
     ) {
         return;
@@ -304,7 +304,10 @@ pub(crate) fn refuse_overloaded(ingress: &Arc<Ingress>, message: IncomingMessage
             "Carillon is too busy to take this message right now; please send it again shortly.",
         )
         .await;
-        owner.reactions.outcome(&source, Feedback::Failed).await;
+        owner
+            .reactions
+            .outcome_as(&source, Feedback::Failed, &settings)
+            .await;
         drop(permit);
     });
 }

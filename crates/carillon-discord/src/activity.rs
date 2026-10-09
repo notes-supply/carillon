@@ -29,11 +29,7 @@
 //! settles. The provider records only what Discord alone knows: a card's
 //! message, or that one nobody can name may exist. A restart goes on with
 //! the recorded cards from what core recorded of their jobs.
-use crate::{
-    client::CoreClient,
-    config::{ActivityMarkers, DiscordConfig},
-    module::Module,
-};
+use crate::{client::CoreClient, config::Settings, module::Module};
 use anyhow::{Context as _, Result};
 use carillon_discord_module::contract::{CardRequest, Seen};
 use carillon_installation::filesystem::{PublishError, publish};
@@ -267,7 +263,8 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 struct Cards {
     http: Arc<DiscordHttp>,
     module: Arc<Module>,
-    markers: ActivityMarkers,
+    /// The settings serving: each card is drawn with the markers they give.
+    settings: Settings,
     records: Arc<CardRecords>,
     /// The provider is stopping: no new card is made.
     stopping: CancellationToken,
@@ -275,8 +272,10 @@ struct Cards {
 
 /// Follows this provider's jobs until `delivering` closes. Cards recorded
 /// before this start are taken up again. Without readable
-/// `records`, or with activity cards turned off, there are no cards, only
-/// typing: recorded cards and their records are left as they are. Once
+/// `records`, or with activity cards turned off when the monitor starts,
+/// there are no cards, only typing: recorded cards and their records are
+/// left as they are. Each job shows typing when the settings serving as it
+/// is first followed say so. Once
 /// `stopping`, nothing more is read, typed or made a card; when `delivering`
 /// closes, core is read once more and the cards of jobs that settled get up
 /// to [`FINAL_DRAIN`] to show their summaries, and every other card stays
@@ -285,25 +284,31 @@ pub(crate) async fn activity_monitor(
     core: CoreClient,
     http: Arc<DiscordHttp>,
     module: Arc<Module>,
-    config: DiscordConfig,
+    settings: Settings,
     records: Option<CardRecords>,
     mut delivering: mpsc::UnboundedReceiver<Delivering>,
     stopping: CancellationToken,
 ) {
-    let typing = config.typing.then(|| http.clone());
-    let cards = records.filter(|_| config.activity).map(|records| Cards {
-        http,
-        module,
-        markers: config.activity_markers.clone(),
-        records: Arc::new(records),
-        stopping: stopping.clone(),
-    });
+    let typist = http.clone();
+    let cards = records
+        .filter(|_| settings.current().activity)
+        .map(|records| Cards {
+            http,
+            module,
+            settings: settings.clone(),
+            records: Arc::new(records),
+            stopping: stopping.clone(),
+        });
     let mut tasks = JoinSet::new();
     let mut jobs = BTreeMap::new();
     let follow = |tasks: &mut JoinSet<()>, job_id: &str, known: Known, old: Option<Recorded>| {
         let (view, watched) = watch::channel(known);
-        if let Some(http) = &typing {
-            tasks.spawn(keep_typing(http.clone(), watched.clone(), stopping.clone()));
+        if settings.current().typing {
+            tasks.spawn(keep_typing(
+                typist.clone(),
+                watched.clone(),
+                stopping.clone(),
+            ));
         }
         if let Some(cards) = &cards {
             tasks.spawn(show_card(cards.clone(), job_id.to_owned(), watched, old));
@@ -659,7 +664,7 @@ impl Cards {
         let request = CardRequest {
             job,
             seen,
-            markers: self.markers.clone(),
+            markers: self.settings.current().activity_markers.clone(),
         };
         self.module.render_card(&request).await.map_err(|error| {
             if !std::mem::replace(failed, true) {

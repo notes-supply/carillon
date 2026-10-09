@@ -50,6 +50,7 @@ use twilight_model::{
 
 use crate::{
     client::{CoreClient, RUNTIME_LATE},
+    config::DiscordConfig,
     conversations::{InteractionOrigin, submitted_event},
     delivery::{Feedback, Reactions},
     inbound::lanes::Lanes,
@@ -86,13 +87,15 @@ pub struct InteractionCalls {
 }
 
 /// What submitting needs: the conversation's channel to anchor the text in,
-/// Discord to post that anchor, the reactions that show its progress, and
-/// the lanes in which it takes its place among the conversation's messages.
+/// Discord to post that anchor, the reactions that show its progress, the
+/// lanes in which it takes its place among the conversation's messages, and
+/// the settings that admitted the interaction, whose feedback it shows.
 pub struct Submissions {
     pub http: Arc<DiscordHttp>,
     pub reactions: Reactions,
     pub lanes: Lanes,
     pub origin: InteractionOrigin,
+    pub settings: Arc<DiscordConfig>,
 }
 
 impl InteractionCalls {
@@ -257,6 +260,7 @@ async fn submit(
         reactions,
         lanes,
         origin,
+        settings,
     } = submissions;
     let channel: Id<ChannelMarker> = origin
         .channel_id
@@ -310,7 +314,7 @@ async fn submit(
     // Admission registers the processing request at once, so the outcome
     // waits for it. Core's attempts then run beside the optional wait for the
     // feedback, which never takes time they need.
-    let shown = timeout_at(deadline, reactions.admission(&event));
+    let shown = timeout_at(deadline, reactions.admission(&event, settings));
     let stopping = turn.stopping();
     let attempts = async {
         let retry = Duration::from_millis(500);
@@ -2026,9 +2030,10 @@ pub(crate) mod tests {
                 .ratelimiter(None)
                 .build(),
         );
+        let settings = crate::config::Settings::new(config);
         let calls = super::InteractionCalls::new(core.clone(), query).with_submissions(
             super::Submissions {
-                reactions: crate::delivery::Reactions::new(http.clone(), config),
+                reactions: crate::delivery::Reactions::new(http.clone(), settings.clone()),
                 lanes: serving_lanes(core, http.clone())?,
                 http,
                 origin: crate::conversations::InteractionOrigin {
@@ -2037,6 +2042,7 @@ pub(crate) mod tests {
                     channel_id: "400".to_owned(),
                     route_channel_id: "300".to_owned(),
                 },
+                settings: settings.current(),
             },
         );
         assert_eq!(
@@ -2120,7 +2126,8 @@ pub(crate) mod tests {
                 .ratelimiter(None)
                 .build(),
         );
-        let reactions = crate::delivery::Reactions::new(http.clone(), config);
+        let reactions =
+            crate::delivery::Reactions::new(http.clone(), crate::config::Settings::new(config));
         let core = crate::client::test_client(format!("http://{address}"))?;
         let calls = super::InteractionCalls::new(
             core.clone(),
@@ -2139,6 +2146,7 @@ pub(crate) mod tests {
                 channel_id: "400".to_owned(),
                 route_channel_id: "300".to_owned(),
             },
+            settings: reactions.settings().current(),
         });
         Ok((calls, reactions, server))
     }
@@ -2632,7 +2640,7 @@ pub(crate) mod tests {
         // Message 400 arrives first, through the gateway's lanes.
         preparing
             .send
-            .send(crate::inbound::tests::hello().into())
+            .send(crate::inbound::tests::hello(&preparing.ingress).into())
             .await?;
         tokio::time::sleep(Duration::from_millis(300)).await;
         Ok((calls, preparing))
@@ -2692,6 +2700,7 @@ pub(crate) mod tests {
                 channel_id: "300".to_owned(),
                 route_channel_id: "300".to_owned(),
             },
+            settings: ingress.reactions.settings().current(),
         });
         let preparing = Preparing {
             ingress,
@@ -2809,7 +2818,7 @@ pub(crate) mod tests {
         tokio::time::sleep(Duration::from_secs(1)).await;
         preparing
             .send
-            .send(crate::inbound::tests::hello().into())
+            .send(crate::inbound::tests::hello(&preparing.ingress).into())
             .await?;
         tokio::time::sleep(Duration::from_millis(500)).await;
         assert!(accepted.lock().await.is_empty());
@@ -2923,7 +2932,7 @@ pub(crate) mod tests {
         let (preparing, accepted, _) = admitting().await?;
         // The person's next message arrives while core is still accepting
         // the command.
-        let mut next = crate::inbound::tests::hello();
+        let mut next = crate::inbound::tests::hello(&preparing.ingress);
         next.request.event_id = "402".to_owned();
         preparing.send.send(next.into()).await?;
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -3033,7 +3042,7 @@ pub(crate) mod tests {
         };
         // The person's next message waits while the lane goes on asking
         // core, which still cannot take the command.
-        let mut next = crate::inbound::tests::hello();
+        let mut next = crate::inbound::tests::hello(&preparing.ingress);
         next.request.event_id = "402".to_owned();
         preparing.send.send(next.into()).await?;
         let before = attempts().await;
@@ -3092,7 +3101,7 @@ pub(crate) mod tests {
         })
         .await?;
         // The command holds its conversation's turn; the message waits.
-        let mut next = crate::inbound::tests::hello();
+        let mut next = crate::inbound::tests::hello(&preparing.ingress);
         next.request.event_id = "402".to_owned();
         preparing.send.send(next.into()).await?;
         tokio::time::sleep(after).await;
@@ -3224,7 +3233,7 @@ pub(crate) mod tests {
         let (preparing, accepted) = unconfirmed(refusing_server).await?;
         // Core refuses the command when the lane asks again, while Discord
         // still holds its processing reaction, which its failure waits for.
-        let mut next = crate::inbound::tests::hello();
+        let mut next = crate::inbound::tests::hello(&preparing.ingress);
         next.request.event_id = "402".to_owned();
         preparing.send.send(next.into()).await?;
         // The person's next message is accepted within its own wait for
@@ -3315,6 +3324,41 @@ pub(crate) mod tests {
                 format!("PUT {}", config.processing_emoji),
                 format!("DELETE {}", config.processing_emoji),
                 format!("PUT {}", config.delivered_emoji),
+            ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_command_shows_the_reactions_of_the_settings_it_was_admitted_with()
+    -> anyhow::Result<()> {
+        use carillon_discord_module::contract::HostReply;
+        let applied = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let router = applying_server(Duration::ZERO, applied.clone());
+        let (calls, reactions, server) = submitting(router, |config| config.typing = false).await?;
+        let admitted = reactions.settings().current();
+        // The operator serves other reactions after the interaction was
+        // admitted, before the module submits its command.
+        let mut other = crate::config::DiscordConfig::clone(&admitted);
+        "⏳".clone_into(&mut other.processing_emoji);
+        "📬".clone_into(&mut other.delivered_emoji);
+        reactions
+            .settings()
+            .apply(|| Ok(other))
+            .map_err(|refusal| anyhow::anyhow!("{refusal:?}"))?;
+        assert_eq!(
+            calls.answer(&submit_request()?, calls_until()).await,
+            HostReply::Submitted
+        );
+        reactions.show_outcome("400:901".to_owned(), super::Feedback::Delivered);
+        assert_eq!(reactions.stop(Duration::from_secs(10)).await, 0);
+        server.abort();
+        assert_eq!(
+            *applied.lock().await,
+            [
+                format!("PUT {}", admitted.processing_emoji),
+                format!("DELETE {}", admitted.processing_emoji),
+                format!("PUT {}", admitted.delivered_emoji),
             ]
         );
         Ok(())
