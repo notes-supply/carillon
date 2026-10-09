@@ -7,7 +7,9 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-const release = resolve(process.argv[2] ?? "target/package/carillon-0.0.0");
+const release = resolve(
+  process.argv[2] ?? assert.fail("usage: node scripts/test-pi-cli.mjs RELEASE_DIRECTORY"),
+);
 const executable = join(release, "bin/carillon-runtime-pi");
 const root = await mkdtemp(join(tmpdir(), "carillon-packaged-pi-cli-"));
 

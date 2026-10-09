@@ -180,7 +180,7 @@ rm -f "$TRACE"
 refuse stopped-status carillon status
 grep -F 'carillon start' "$TEST_ROOT/stopped-status.log" >/dev/null
 carillon start >"$TEST_ROOT/start.log"
-grep -Fx '  discord-private: ready (0.0.0)' "$TEST_ROOT/start.log" >/dev/null
+grep -Fx "  discord-private: ready ($VERSION)" "$TEST_ROOT/start.log" >/dev/null
 expect_trace '--user start carillon.target'
 # Resolution never consults the current directory, even one that looks like an installation.
 mkdir "$TEST_ROOT/decoy"
