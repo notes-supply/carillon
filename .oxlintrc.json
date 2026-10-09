@@ -1,0 +1,32 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["eslint", "typescript"],
+  "options": {
+    "typeAware": true
+  },
+  "categories": {
+    "correctness": "error"
+  },
+  "rules": {
+    "typescript/consistent-type-imports": [
+      "error",
+      { "fixStyle": "inline-type-imports", "prefer": "type-imports" }
+    ],
+    "typescript/no-confusing-void-expression": ["error", { "ignoreArrowShorthand": true }],
+    "typescript/no-deprecated": "error",
+    "typescript/no-explicit-any": "error",
+    "typescript/no-misused-promises": "error",
+    "typescript/no-non-null-assertion": "error",
+    "typescript/no-unsafe-argument": "error",
+    "typescript/no-unsafe-assignment": "error",
+    "typescript/no-unsafe-call": "error",
+    "typescript/no-unsafe-member-access": "error",
+    "typescript/no-unsafe-return": "error",
+    "typescript/no-unsafe-type-assertion": "error",
+    "typescript/only-throw-error": "error",
+    "typescript/prefer-readonly": "error",
+    "typescript/strict-boolean-expressions": "error",
+    "typescript/switch-exhaustiveness-check": "error",
+    "typescript/unbound-method": "error"
+  }
+}

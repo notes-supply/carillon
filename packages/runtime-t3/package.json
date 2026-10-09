@@ -2,11 +2,11 @@
   "name": "@carillon/runtime-t3",
   "version": "0.0.0",
   "private": true,
-  "type": "module",
-  "exports": "./src/index.ts",
   "bin": {
     "carillon-runtime-t3": "./src/cli.ts"
   },
+  "type": "module",
+  "exports": "./src/index.ts",
   "dependencies": {
     "@carillon/protocol": "workspace:*",
     "@carillon/runtime": "workspace:*",
