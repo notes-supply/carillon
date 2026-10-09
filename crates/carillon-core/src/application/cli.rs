@@ -302,8 +302,8 @@ async fn provider(home: &Path, id: &str, action: ProviderAction) -> Result<()> {
         Applying::Applied(applied) => {
             println!("{id} {changed} in core's serving registry.");
             println!(
-                "This changes admission and workers, not provider programs. \
-                 If an enabled runtime is not running, `carillon restart` starts it."
+                "This changes admission and workers, not provider programs. If an enabled \
+                 runtime's program is not running, `carillon start` starts it and stops nothing."
             );
             print_runtimes(&applied);
         }

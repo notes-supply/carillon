@@ -1,6 +1,106 @@
 # T3 runtime
 
-A Carillon runtime provider that executes turns on a [T3 Code](https://github.com/pingdotgg/t3code) server instead of Pi. It is a separate execution runtime behind the same runtime boundary core already speaks: `POST /v1/turns`, `GET /v1/turns/{id}/activity`, `GET /v1/environment`, `GET`/`PUT /v1/model`, `GET /v1/commands`, `GET /v1/restart` and `/health`, authenticated with the installation credential and fail-closed before any T3 work. The boundary itself (HTTP adapter, failure display rules, tool descriptions, registry loading) comes from the shared [`@carillon/runtime`](../runtime/README.md) package; this package depends on no Pi or Discord code. The public entry point is [`src/index.ts`](src/index.ts); importing it opens no connection.
+Runs Carillon turns on a [T3 Code](https://github.com/pingdotgg/t3code) server
+instead of Pi, as another client of the threads T3's own UI shows. It serves
+the same runtime boundary as Pi through [`@carillon/runtime`](../runtime/README.md)
+and stores nothing of its own.
+
+## Set it up
+
+The release includes `app/bin/carillon-runtime-t3` and a user unit,
+`carillon-runtime-t3.service`, that Carillon's target doesn't start until you
+enable it.
+
+1. Create its installation token and the file holding your T3 token:
+
+   ```sh
+   cd ~/.carillon
+   head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > credentials/runtime-t3.token
+   printf '%s' 'YOUR_T3_TOKEN' > credentials/t3.token
+   chmod 600 credentials/runtime-t3.token credentials/t3.token
+   sha256sum credentials/runtime-t3.token   # the token_hash below
+   ```
+
+2. Add it to `carillon.toml`, and make it the agent's runtime for new
+   conversations:
+
+   ```toml
+   [agent]
+   runtime_provider = "runtime-t3"
+
+   [[providers]]
+   id = "runtime-t3"
+   role = "runtime"
+   version = "0.1.0-beta.1"
+   url = "http://127.0.0.1:43803"
+   token_hash = "SHA256_OF_THE_TOKEN_FILE"
+   enabled = true
+   parallel_turns = 4          # optional: conversations run at once (1 to 16)
+   ```
+
+3. Write `providers/runtime-t3.toml`:
+
+   ```toml
+   url = "http://127.0.0.1:3773"           # T3's HTTP origin, without credentials or path
+   token_file = "credentials/t3.token"     # relative to the installation
+   project_id = "…"                        # the T3 project whose workspace the agent uses
+   title = "Carillon"                      # optional thread title prefix
+
+   [model]                                 # the agent default, as T3 names it
+   instance_id = "claudeAgent"
+   model = "claude-fable-5-1"
+
+   [model.options]
+   effort = "high"
+   ```
+
+4. Enable the unit and restart through the target:
+
+   ```sh
+   systemctl --user enable carillon-runtime-t3.service
+   carillon restart
+   ```
+
+Startup fails closed: the registry entry must exist and be enabled, the
+credential must match, the settings must be valid, and T3 must speak
+orchestration protocol 2 and accept the token. Conversations that already
+started stay with the runtime that took their first turn.
+
+The agent's instructions and skills on T3 are the project's own (`CLAUDE.md`
+and `.claude/skills`, or `AGENTS.md` and `.agents/skills`); Carillon's Pi
+resources aren't sent.
+
+## How it behaves
+
+- **One T3 thread per conversation and one message per turn**, named from
+  Carillon's identifiers. A lost connection or answer reads the work back
+  instead of repeating it, and T3's per-command receipts mean a turn never
+  runs twice.
+- **A turn is done** when its run, and any follow-up run T3 starts for its
+  background work, have completed with nothing left open. A run waiting for
+  an approval or answer the runtime can't give is stopped, and the question
+  reported.
+- **Cancellation** withdraws a queued run or interrupts the turn's own run,
+  and waits for T3 to confirm the stop. Work by other runs (yours in T3's UI,
+  for example) is never interrupted.
+- **Uncertain stops.** When T3 can't confirm a turn's native work stopped, the
+  runtime remembers that thread in memory. Later turns there still run, but
+  one that depends on a follow-up ends unresolved, and the runtime refuses a
+  drained restart while it remembers any such thread.
+- **Delegated work.** A reply can say that work delegated to T3's child
+  agents goes on. Its report arrives later as its own message, read from T3's
+  records, even across restarts.
+- **Models.** A conversation's model is its T3 thread's own selection, which
+  T3's UI can change too; the last change wins. The agent default is
+  `[model]` above and can't be changed from Discord. A change is refused
+  while the conversation is busy.
+- **Commands.** `/command` lists what T3's composer offers in the agent's
+  workspace and sends an invocation verbatim.
+- **Images.** PNG, JPEG, WebP and GIF files up to 10 MiB each (80 MiB per
+  message) are uploaded to T3, after checking them against core's digest.
+  The message names the files T3 doesn't receive.
+
+## As a library
 
 ```ts
 import { createT3Runtime } from "@carillon/runtime-t3";
@@ -8,113 +108,19 @@ import { createT3Runtime } from "@carillon/runtime-t3";
 const runtime = createT3Runtime({
   endpoint: { url: "http://127.0.0.1:3773", token },
   projectId: "…",
-  selection: { instanceId: "claudeAgent", model: "claude-fable-5-1", options: [{ id: "effort", value: "high" }] }, // the agent default
+  selection: { instanceId: "claudeAgent", model: "claude-fable-5-1", options: [] },
   workspace: "/path/to/workspace",
 });
-const answer = await runtime.executeTurn({ correlation_id: "turn-1", interface_id: "discord", agent_id: "default", audience_id: "conversation-1", input: "Hello", resource_root: "…", attachment_root: "…" });
 ```
 
-## Ownership
-
-Carillon owns admission, turn identity and delivery. T3 owns execution, its transcript, jobs and provider policy. The runtime stores nothing: every T3 identifier it needs is derived from Carillon's own facts, encoded so that no fact can run into the next ([`contracts.ts`](src/contracts.ts)):
-
-- one T3 thread per conversation (project, interface, agent, audience), opened by a `thread.create` command whose ID is derived from the thread's, so opening it again replays the command's receipt instead of creating another thread;
-- one T3 message per Carillon turn, dispatched by a `message.dispatch` command derived from the turn's correlation ID. T3 keeps a receipt per command, so the same turn can never produce two runs. T3 commits a run with its accepted receipt in one transaction and keeps a rejected receipt only for a command that committed nothing, so a dispatch T3 answers with a failure is replayed once to read that receipt back: a rejected receipt means nothing of the turn is on T3, an accepted one means the run exists and is observed, and any other answer leaves the turn's work possibly running;
-- the turn's run is the one whose `userMessageId` is the turn's message.
-
-## How a turn runs
-
-Native Agent children can appear as provider-native subagent records without
-appearing in the provider thread's pending-background roster. A child of the
-turn still running when its parent completes also keeps that native turn open
-through its provider wake; Carillon delivers the parent text and the wake's
-result together. A child observed finishing inside the parent does not owe a
-wake. After a runtime restart, a settled native child with a completed parent
-does not prove whether its result was reported inside the parent or still owes
-a wake; that fresh view fails closed as unresolved, not as a successful parent
-answer that silently loses the result.
-When several native children settled across that gap, provider wakes do not
-identify which child's result they consumed. Those recovered results remain
-unresolved and the work summary is partial, even if unlinked wakes are present;
-counting wakes is not proof that every child reported. Live-observed child
-settlements and wakes retain their existing behavior.
-A child observed settled inside its active parent is excluded from that
-recovered cohort. When a native wake was already owed before reconnection,
-older settled children without individual delivery receipts remain possible
-members of it; an earlier generic wake is not per-child delivery proof.
-This retains the native wake ownership rules below; it does not create a second
-scheduler or treat unrelated child agents as this turn's work.
-An anonymous provider wake consumes the work evidence that attributed it.
-Another wake needs newly observed background work; surplus generic wakes
-without that evidence make the turn unresolved instead of contributing text
-from a run Carillon cannot attribute. T3-linked continuations are unaffected.
-
-Turns of one conversation run one at a time, in order; turns of different conversations (different threads) run at once, so a registry entry may set `parallel_turns` for this runtime. `executeTurn` ([`runtime.ts`](src/runtime.ts)) opens one WebSocket to T3 ([`t3.ts`](src/t3.ts)), ensures the thread and subscribes to it, asking for T3's bounded snapshot (recent messages and items; runs, requests, provider threads, sessions, child agents and context transfers whole) and a completion marker. If the thread has no run for this turn, the turn's images are uploaded and the message is dispatched as the person wrote it, referencing them (a command invocation verbatim, prose with bounded origin metadata and a note naming the files T3 does not receive). It carries no model selection, so it runs with the thread's own. Work already running on the thread is never interrupted, whoever started it (an earlier turn's late wake, or the person in T3's own UI): the message is dispatched with `queue_after_active` and waits in T3's queue, and the turn reports the `queued` phase until its run starts. From then on the subscription drives a bounded fold of the thread's state ([`watch.ts`](src/watch.ts)) until the outcome is known. The fold keeps only the turn's own facts: its run and the runs T3 started after it, earlier runs still active, the tools running now and the last few finished, open requests, the turn's assistant messages (kept across a bounded snapshot that omits earlier ones, and replaced by ID when a snapshot lists them), the child agents and context transfers of its runs, the provider thread's roster and session. A snapshot lists runs whole, so one that omits a run the turn observed, a follow-up's parent included, is refused as malformed rather than read as that run having stopped. History outside the turn is dropped as it arrives, and the turn's run is kept as its identity even if a later snapshot does not list it. T3 sends a run's provider thread record just before `run.created`, and its session record just before the thread record that names it when the turn starts, so the fold holds the few most recent provider records it cannot yet attribute and adopts them once the run or thread refers to them. A session record the fold has not seen is unknown, never detached: detachment is T3's own `provider-session.detached`, a thread that names no session, or a snapshot that omits the session a turn thread names.
-
-**Completion** requires more than a settled session, and is decided from T3's state alone, never from a timer. The turn owns its run and the runs T3 starts after it only when they can be its own: this turn's wake can start only after its run completed with work still listed, so a later run first seen while the run is still active is another process's (such as an earlier turn's late wake) and stays foreign, neither awaited nor answered with; the next turn waits behind it if it is still active. After the run completed, a later run is the owed wake, or resolves a resumed snapshot's ambiguity, only when T3 opened it for the provider: T3 begins every run's timeline with the message that started it, a person's as a `user_message` item and a wake it starts for the provider as a notification of the background work. T3 links no wake to the work it reports, so that opening is the only native evidence a run is a wake at all, and only the source kinds T3 defines for wakes count (`background_task`, `background_command`, `monitor`, and the decoded `command` and `subagent`). A wake names no work: it is the provider process's that runs it, so a wake is the turn's only when it runs on the provider thread whose roster held the turn's work; a wake on another provider's thread, such as an earlier run's process reporting its own task, is another's. A run a person's message opened (in T3's own UI, or another Carillon message) is never the turn's either. Neither is awaited, answered with nor stopped, and the turn keeps waiting for its own wake while its work is listed. A later run whose opening has not arrived, or a queued wake whose provider thread is not known yet, is not judged until it is (a queued run receives both when it starts); a run opened by a notification whose source is missing, malformed or unknown, or a started run a resumed snapshot shows without its opening, cannot be attributed: it is a stray. A later run no fact of this turn accounts for, as in a fresh snapshot that shows a completed run and a completed follow-up with nothing seen in between, is a stray: the turn ends unresolved rather than answering with the acknowledgement alone or with text of unknown origin. T3 labels every wake alike (`createdBy: "agent"` on the same provider thread), so when a turn's stop was not confirmed the runtime remembers that thread as uncertain: later turns there still run and complete on their own run's text, but one that comes to depend on a follow-up ends unresolved with that explanation. The public contract offers no stop or delivery fence that would show the earlier process gone, so the fence is never lifted by inference; it lives in the runtime process and a restart forgets it. While any thread is fenced, or a turn executes, `GET /v1/restart` answers that the runtime is not ready to restart, and `carillon restart` and `carillon update` stop nothing unless forced. The last of those runs must be `completed`, no request of the turn may be open (whatever the run's status), and the provider thread must list no pending background work of the turn. Background work is the turn's only when it was first listed while one of the turn's runs could have been executing (running or waiting), or across a gap the fold did not see in which one could have; work first listed otherwise (left by a run started in T3's own UI, or by an earlier turn, before this turn's run ran, or listed after it ended) is another run's: it neither holds the turn nor makes the run that reports it the turn's. A run first seen already past its start counts everything listed as its own. A run that completed while its roster still listed work owes a follow-up: Claude delivers task notifications inside a running turn, so work that was still listed at completion is reported in a run of its own, and the turn waits for a later run however long it takes. T3 projects no "wake pending" fact; if T3 reports the provider session stopped, the owed report cannot come and the turn fails with that explanation; if the session was merely detached, T3 removes its record before the process closes and does not fence what it may still deliver, so the turn fails saying that T3 does not confirm whether the result will still arrive. The facts "work was listed for this turn's run" and "the run completed while work was listed" survive snapshots: a resumed subscription that only shows a completed run with an empty roster cannot tell whether the result reached the running turn or is still owed, so the turn fails closed as unresolved, after the same stop, rather than report the run's text as the answer. The turn's request items also survive snapshots, so a request T3 still lists pending keeps its ownership and wording even when the bounded history window omits its item. The answer is those runs' assistant messages in order; an empty answer fails the turn. A `failed` run is explained with T3's own failure text, which passes the shared runtime package's display boundary before it reaches a conversation. A failed or otherwise stopped run whose provider thread still lists background work is not quiet: before the turn ends and the next may start, that work is stopped through the same path a cancellation uses, and the explanation adds only what T3 confirmed about the stop. A pending request belongs to the turn only when one of the turn's own request items names it; a run that waits before that item has arrived is unknown, not blocked. A run someone else stopped, or one waiting for an approval or answer this runtime cannot give, is reported as an actionable failure: the question or request kind is named, the run is interrupted so the thread is usable again, and the explanation says only what T3 confirmed: that the run stopped, that it ended but the request is still open, or that T3 did not confirm the stop.
-
-**Delegated work.** A run can delegate to T3's own child agents (`delegate_task`, in async or wait mode). T3 owns their execution and the delivery of their results: when a child finishes while the thread is idle, T3 publishes its result, announces a continuation message on the parent run (`delegatedCompletion`) and then starts that continuation as a run of the thread, whose first timeline item is the task's `delegated_task` notification; when a run is active then (a later message's, or one started in T3's own UI), T3 delivers the result into that run instead, as a notification inside a run that began with its own `user_message`. A wait that times out does not cancel the child, it switches the task to the same delivery. The fold links a continuation to the turn only through those native records (the parent run's announced message, or the message's own `delegatedCompletion.parentRunId`), whenever it is seen, so a continuation is never mistaken for a late wake or a stray. The turn answers when its own runs (and any owed wake) are done; the parent's reply is delivered then, while its children work. When work it started still owes the conversation a report (a T3-owned child still working, a result T3 has yet to deliver, an announced continuation not run, or a continuation no turn answered with), the answer carries a follow-up cursor (`{ message, after }`): the message the turn began with and the last run it answered for. Core queues a follow-up turn of the same conversation with that cursor, as an observation in a lane of its own; that turn dispatches nothing, runs beside the conversation's later messages (outside this runtime's per-thread queue), anchors on the same message, adopts only the continuations T3 started after `after` and never a run by its position, waits while the work still owes a report, and delivers their text through ordinary delivery, carrying another cursor when the continuation delegated in turn. If a continuation leaves background work of its own, its later result cannot be attributed beside other messages, so the report says it will show in T3. T3 keeps a child active while its own descendants work, so the parent thread's records reconcile nested work natively. A follow-up turn stops nothing and leaves the uncertainty fence alone: the continuations are T3's. Core asks again after a lost connection or a restart; the new attempt is rebuilt from T3's records alone, so what T3 delivered meanwhile is reported once. T3 sends a continuation's own message live but does not project it, and clears the parent run's announcement once delivered, so a fresh snapshot links a continuation run to the turn's work through the run's own `delegated_task` notification item. A task's `observedByRunId` is never such a link: T3 sets it to whichever run was active when an agent read the result through `task_status`, which may be another message's run, so it proves consumption, not ownership. When T3 gave a result to a later message's run, or an agent read it in another run, the follow-up turn says only that (it never repeats that run's reply, and does not claim the reply mentions the result); when T3 records the result as acknowledged without naming the run it was read in, the follow-up turn says only that it was acknowledged. When the delegated work ends without a report (cancelled and disposed), the follow-up turn says so; when T3 shows the result delivered but the continuation is older than the bounded window this runtime reads (the last ten user turns), it says that instead, pointing to T3. Only the snapshot's `hasMoreHistory` (validated as a boolean) says the window left history out; `payloadBudgetExceeded` only says the complete turns T3 kept exceed its byte budget, and is not read as an omission.
-
-The fold's records of the turn's work are bounded. It keeps up to 32 child agents and 32 transfers, dropping the oldest settled record to make room. When every kept child is live, a newer one is left out: the work summary is partial, and the report counts as owed until a snapshot, which lists children whole, settles coverage afresh. A child a resumed snapshot omits keeps the outcome T3 confirmed (succeeded, failed or cancelled), with the summary marked partial; only a live child becomes `unknown`, and its report stays owed. Continuation links are kept for the turn's runs (up to 32; room is made by a link whose continuation already ran, never by one still owed, and a snapshot decides the owed coverage afresh from the announcements it lists), and for other runs only in a window of the 16 most recent: a continuation of another turn's work is then known for what it is (neither this turn's wake nor a stray), and a link that names its parent before the fold knows the parent is the turn's is promoted when it does. A snapshot's links are never imported wholesale. This runtime never reads results through the agent-facing `task_status`, which acknowledges them; it only reads the thread's own records.
-
-**Reconnection.** A lost connection, or a lost answer to a command, never repeats work. Until the turn may have reached T3 (dispatched by this call, or read back from a run the thread already had for it), cancellation ends protocol discovery, the upgrade, the first-snapshot wait and reconnect delays. Thread-creation and interrupt RPCs already awaiting a receipt remain bounded by their timeout. Cancellation is rechecked immediately before dispatch, so a turn already cancelled at that boundary is not sent; once work may exist, recovery continues so it can be found and stopped. The next connection resumes the subscription after the last event sequence the fold saw, so T3 replays only what was missed (or sends a bounded snapshot when the gap is too old); a run that exists is adopted, and only a turn T3 has no run for is dispatched again, under the same command ID. Reconnections are bounded; when they run out, or when T3 can no longer be reached, refuses the credential or changes protocol after the turn's work may exist, the turn fails naming the native run that may still be running.
-
-**Cancellation.** When core disconnects (the HTTP request closes) or the runtime closes, the runtime withdraws the turn's own run with `queued-run.cancel` while it still waits in T3's queue (T3 refuses to interrupt a run that has not started, and marks a withdrawn one cancelled), and otherwise sends `run.interrupt` for the turn's own active run, or for the thread's latest run when only background work of the turn remains (T3 settles a stopped thread's background work through its latest run), waits for T3 to report no active run, an empty roster and no report still owed by a live process, and logs how many tool calls had started. It never interrupts a run it did not start. When nothing of the turn runs but the process still owes a report (the roster cleared before its wake), T3 refuses the interrupt; the runtime then requests the public `provider-session.detach`, the only stop T3 offers for that state, unless a run the turn does not own is active, or background work another run started is still listed: the session is shared by the thread's runs, so detaching it would stop that work too, and the stop is reported unconfirmed instead. T3 accepts the request, removes the session's record and closes the process afterwards, without confirming the closure or fencing a wake the process may still deliver, so the runtime reports that stop as unconfirmed and never as ended. Those are not undone. A cancellation that arrives while the dispatch is in flight waits for the dispatch's answer or the run's appearance before interrupting. If T3 does not confirm the stop in time, the runtime says so rather than claiming a stop, and the conversation's later turns wait behind whatever still runs.
-
-**Activity.** `activity(correlation_id, interface_id)` answers only for the interface the turn serves. It is derived from T3's timeline items: running and recently finished `command_execution`, `file_change`, `file_search`, `web_search`, `dynamic_tool` and `subagent` items, pending background work, and the first line of the model's latest public message. A call T3 lists as pending or waiting is not shown running: only T3's `running` status shows it executing. The phase is `queued` while the turn's run waits in T3's queue and `waiting` while its run (or, for a follow-up turn, the delegated work), or a call of it, waits. Delegated and transferred work is the shared bounded `work` summary: each child agent of the turn's runs (T3-owned or provider-native) as a `delegation` with the state T3 last confirmed, its title and model, nested under another listed child when T3 says so; the report T3 still owes the conversation as a `task`; provider handoffs, forks and merges of the turn's runs (spawn and result transfers belong to their delegation and are not listed); T3 records a provider handoff (a `/model` switch to another provider, for instance) before it creates the run it hands over to, so the fold holds the few most recent transfers it cannot yet attribute, as it does provider records. A child shows once: not also as its `subagent` item or as its parent's background task. A child a resumed snapshot no longer lists is `unknown` and the summary partial, never finished. Prompts, progress text and results are never shown. Each answer is assembled from the bounded state the fold keeps, not from a scan of the thread. `tool_calls` counts the distinct tool items of the turn T3 showed running or finished; their IDs (not bodies) are kept for the turn's lifetime, because item identity is the only deduplication the contract guarantees across updates, replay and snapshots. That set, like the turn's child agents, is proportional to the turn's own work, which is the accepted bound. Commands and file paths are described with the shared runtime package's deny-by-default descriptions and credential redaction; tool output is never shown. The reasoning T3 publishes for the turn's runs (`reasoning` items, such as Claude's summarised thinking) becomes up to eight notes, one bounded excerpt per item, updated in place as it streams and kept across snapshots. A call's start is T3's own `startedAt`; when T3 gives none, it is when the fold first saw the call running, kept stable through updates, waits and snapshots and marked as an estimate (as background tasks always are). A finished call or child agent has its duration when T3 dated both ends. The agent is the run's own model selection (its effort from Claude's `effort` or Codex's `reasoningEffort` option) and its provider thread's context usage. The turn's final report is taken from the fold before the turn's entry goes, and returned with the answer or kept with the failure, whatever explanation can be shown.
-
-## Protocol
-
-The runtime speaks T3 orchestration protocol 2 only: `orchestration.dispatchCommand` with the V2 commands `thread.create` and `message.dispatch` (with `createdBy` and `creationSource`; there is no `createdAt` and no legacy `thread.turn.start`), `run.interrupt` and `provider-session.detach`, and `orchestration.subscribeThread` with `acceptBoundedSnapshot`, `requestCompletionMarker` and `afterSequence`. T3 windows a bounded snapshot's messages and timeline items (recent user turns, item and byte limits); runs, requests, provider threads and sessions arrive whole. A snapshot, or a run, of a thread other than the one subscribed fails the turn. `turnLimit` and `beforeCursor` belong to T3's paged HTTP thread reads (`threadSnapshotPagination`), not to the subscription. Before sending a credential it checks T3's discovery answer and refuses any other version. The upgrade uses `/ws?orchestrationProtocol=2` with a bearer token T3 issued (`t3 auth session issue`); the token is read from a file and never passed on the command line or logged. Every answer is validated against the subset of T3's contracts the runtime consumes ([`contracts.ts`](src/contracts.ts)): timeline kinds are discriminated, each with the fields the runtime reads required, so a known kind missing them fails the turn as "a form this runtime does not understand", never a guess; kinds the runtime does not read are ignored, not retained.
-
-## Settings
-
-The service reads the registry for its own entry and `providers/<id>.toml`, checked strictly:
-
-```toml
-url = "http://127.0.0.1:3773"           # T3's HTTP origin only (https for a tailnet): no credentials, path, query or fragment
-token_file = "credentials/t3.token"     # relative to the installation
-project_id = "…"                        # the T3 project whose workspace is the agent's
-title = "Carillon"                      # optional thread title prefix
-
-[model]
-instance_id = "claudeAgent"
-model = "claude-fable-5-1"
-
-[model.options]
-effort = "high"                         # a select's choice ID, or true/false for a boolean
-```
-
-`[model]` is the agent default: the selection a conversation's thread is opened with, as T3 names it. Run it from the repository with:
-
-```sh
-bun packages/runtime-t3/src/cli.ts --config "$CARILLON_HOME/carillon.toml" --provider runtime-t3 --token-file "$CARILLON_HOME/credentials/runtime-t3.token"
-```
-
-The release ships the same program as the standalone executable `app/bin/carillon-runtime-t3` and registers the optional user unit `carillon-runtime-t3.service`, which runs that command with the installation's registry and `credentials/runtime-t3.token`. The default target does not want the unit: add the `runtime-t3` provider to `carillon.toml`, write `providers/runtime-t3.toml` and the two credentials (the installation token and the T3 token file), then enable the unit without starting it on its own (`systemctl --user enable carillon-runtime-t3.service`) and start or restart Carillon through its target (`carillon restart`, or `carillon start` when it is stopped), so the service runs under `carillon.target` like the others and Carillon's update and stop know it is running. Running is not being used: the agent's runtime is `[agent] runtime_provider` in `carillon.toml`, `runtime-pi` in a new installation, so set it to `runtime-t3` there before that start or restart; core reads it only when it starts. It is the runtime of new conversations only: a conversation's first accepted turn pins it to the runtime selected then, so conversations that already began stay with Pi and are not moved. To use T3, begin a new conversation after core has restarted. Uninstall removes the unit with the others.
-
-Startup fails closed: the registry entry must exist and be enabled, the installation credential must match, the settings file must be valid, and T3 must answer discovery with protocol 2 and accept the token.
-
-## Models
-
-The conversation's model is its thread's own selection, as T3 holds it: every message runs with it, and it changes when the person changes it here or in T3's own UI, the last change winning. Nothing is stored on the Carillon side ([`models.ts`](src/models.ts)). `GET /v1/model` reads T3's catalogue from `server.getConfig` (the models of provider instances T3 reports enabled, installed and usable, with their select and boolean settings; a boolean is offered as `on`/`off`) and, in a conversation, the thread's selection from its snapshot. A conversation whose thread does not exist yet shows the agent default, which it will start with; reading creates nothing. The agent default is `[model]` above and is marked read-only, so `/model` shows it without controls; changing it means editing this file and restarting.
-
-`PUT /v1/model` for a conversation sets the thread's selection with `thread.model-selection.set` (opening the thread first if needed), then reads it back; when T3 then lists no such thread, the change fails as an answer this runtime does not understand rather than reporting a selection T3 did not give, and is not sent again. T3 accepts any model name and setting value, so the change is checked against the catalogue first. It waits in the conversation's queue, so a turn that arrives meanwhile runs with it, and it is refused while a turn of the conversation is queued or running or while T3 still works or owes results on the thread: T3 may restart or replace the provider session to apply a change, which would end that work. `expected` is compared with the thread's selection just before the change; T3 has no compare-and-set, so a change made in T3's own UI in between is overwritten. T3 decides whether a change it accepts needs a new session or a handoff to another provider, and its refusal is reported as given. Returning the conversation to the agent default sets `[model]` on the thread.
-
-## Commands
-
-`GET /v1/commands` lists what T3's own composer offers in the conversation ([`commands.ts`](src/commands.ts)): the slash commands, then the enabled skills a person may invoke (`userInvocable` not false), of the conversation thread's provider instance (or the agent default's, before the thread exists), for the agent's workspace. It asks `server.refreshProviders` with that instance and workspace, which scans the workspace once if T3 has not; later scans follow T3's own schedule. A name listed twice is offered once, and a name over 100 characters is left out. A turn with `native.intent: "command"` is dispatched verbatim, and T3 runs it as it runs the same text typed in its own UI. It names none of the earlier messages' files core offered, so its answer says it left them (`unanswered_left`), nor its own files that could not go as images, so it says it left those too (`attachments_left`); core offers them again with a later turn. Its own images are uploaded and sent with it as usual. When such a run completes without an assistant message (a compaction, for instance), the turn answers with a short note naming the command instead of failing as an empty answer; a prose turn without an answer still fails, and a failed command keeps T3's explanation.
-
-## Resource snapshot
-
-T3 has no system-prompt facility for a thread, and the runtime writes nothing into the T3 project. The agent's instructions and skills for T3 are the project's own native configuration: its workspace's native instructions and skills (`CLAUDE.md` / `.claude/skills` for Claude Code, `AGENTS.md` / `.agents/skills` for Codex), loaded by the selected harness. The resource snapshot's `SYSTEM.md`, `AGENTS.md`, Pi extensions and skills are Pi's and are not sent: per-turn snapshot semantics remain Pi's. Files of earlier turns that core offers again are named in the message as unavailable, so the model and the person know.
-
-Ordinary turns include the admitted `native.origin` as bounded string/null metadata, marked as data rather than instructions. Raw interface payloads are not forwarded, and native commands remain verbatim. Local Discord access uses the existing provider's CLI and a [native workspace skill](../discord-pi/README.md#local-t3--claude-code--codex); it needs no MCP server and is also available to ordinary T3 sessions in that workspace.
-
-## Images
-
-A turn's PNG, JPEG, WebP and GIF files, recognised by their own header (the shared runtime package's detection, as Pi's), are T3 input images ([`images.ts`](src/images.ts)): each is read from the attachment directory, checked against the SHA-256 digest core recorded, so the bytes posted are those core accepted and their own header gives their type, granted an upload by `attachments.createUploadUrl` and posted, with its exact length, to the signed address T3 returns, which must be on T3's configured origin; the message references the uploaded images. T3's limits apply: at most 10 MiB per image and 80 MiB per message, so a larger image is named as unavailable with the other files T3 does not receive. Uploads happen just before the dispatch, once per attempt: when a dispatch is retried after a lost answer, it references the same images. A file that can no longer be read or has changed since core captured it, an upload T3 refuses or an address outside T3's origin fails the turn before anything is dispatched, so the conversation is not fenced; bytes T3 already holds for an unreferenced upload are T3's to sweep, and nothing on the Carillon side tracks them. After a runtime restart the turn uploads again.
+Importing [`src/index.ts`](src/index.ts) opens no connection. From the
+repository, run the service with
+`bun packages/runtime-t3/src/cli.ts --config "$CARILLON_HOME/carillon.toml" --provider runtime-t3 --token-file "$CARILLON_HOME/credentials/runtime-t3.token"`.
 
 ## Tests
 
-[`fake.ts`](src/fake.ts) is a test fixture: a double of the parts of T3 this runtime uses, with sequence-based replay, completion markers, provider sessions, queued runs that take a provider thread only when they start (and can be withdrawn but not interrupted), T3's settlement of background work through the latest run, delegated child agents with their continuations in the serving build's event order, context transfers, thread model selections, the provider catalogue, attachment uploads, and injectable faults (dropped answers, dropped requests, delayed answers, rejections, malformed frames, ignored interrupts, snapshot-only resumes, contradictory open requests, stalled discovery and upgrades, and disconnections). [`runtime.test.ts`](src/runtime.test.ts) proves continuity, lost-receipt recovery without a second run, reconnection by replay and by snapshot, cancellation including the in-flight dispatch race, background work left by a completed run, waiting behind runs this runtime did not start (an earlier turn's late wake, the person's own run in T3) without interrupting them, the parent reply and its follow-up report of delegated work, blocked runs with truthful stop reports, requests still open after a terminal run, late wakes and a session that ends before its wake, failed runs, activity, malformed known timeline kinds, fail-closed transport failures, native image uploads and their refusals, native model state and the command catalogue. [`watch.test.ts`](src/watch.test.ts) covers the bounded fold and [`t3.test.ts`](src/t3.test.ts) the client.
+[`fake.ts`](src/fake.ts) stands in for T3, with injectable faults (dropped
+answers, ignored interrupts, disconnections, stalled discovery and more).
+[`runtime.test.ts`](src/runtime.test.ts) covers continuity, recovery without a
+second run, cancellation, background and delegated work, models, commands and
+images against it.

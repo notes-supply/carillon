@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow};
 use carillon_installation::{config::LoadedConfig, loopback};
 use reqwest::{Client, StatusCode, Url};
 use serde::Deserialize;
@@ -32,6 +32,10 @@ pub(super) struct Pace {
     pub(super) renew: Duration,
     /// How often the drain is checked while waiting for it.
     pub(super) check: Duration,
+    /// The longest one request waits for core; a drain report asks the
+    /// runtimes, each within five seconds. While waiting for the drain, a
+    /// request also waits no longer than what is left of `--timeout`.
+    pub(super) request: Duration,
 }
 
 impl Pace {
@@ -39,12 +43,14 @@ impl Pace {
         lease: Duration::from_secs(15),
         renew: Duration::from_secs(3),
         check: Duration::from_millis(500),
+        request: Duration::from_secs(15),
     };
 }
 
-/// A pause request waits at most this long for core; a drain report asks
-/// the runtimes, each within five seconds.
-const REQUEST: Duration = Duration::from_secs(15);
+/// Ending a pause waits only briefly, and while waiting for the drain no
+/// longer than what is left of `--timeout`: a pause core does not hear end
+/// lapses within its lease anyway.
+const END: Duration = Duration::from_secs(2);
 
 /// Core's pause of its runtime workers, held by this command.
 pub(super) struct Hold {
@@ -87,7 +93,7 @@ pub(super) enum Held {
 }
 
 impl Hold {
-    async fn begin(config: &LoadedConfig, pace: Pace) -> Result<(Self, Drain)> {
+    async fn begin(config: &LoadedConfig, pace: Pace, within: Duration) -> Result<(Self, Drain)> {
         // A request that may have reached core is never sent again: a
         // pause whose answer was lost lapses on its own.
         let client = loopback::client().retry(reqwest::retry::never()).build()?;
@@ -100,7 +106,7 @@ impl Hold {
             .post(operator_url(config, "/v1/pause")?)
             .bearer_auth(&token)
             .json(&lease)
-            .timeout(REQUEST)
+            .timeout(within)
             .send()
             .await;
         let drain = answer(response)
@@ -125,13 +131,13 @@ impl Hold {
         ))
     }
 
-    async fn renew(&mut self) -> Result<Drain, Refusal> {
+    async fn renew(&mut self, within: Duration) -> Result<Drain, Refusal> {
         let sent = Instant::now();
         let response = self
             .client
             .put(self.url.clone())
             .bearer_auth(&self.token)
-            .timeout(REQUEST)
+            .timeout(within)
             .send()
             .await;
         let drain = answer(response).await?;
@@ -139,14 +145,22 @@ impl Hold {
         Ok(drain)
     }
 
-    /// Ends the pause so core's workers claim again. A pause core does not
-    /// hear end lapses within its lease.
-    pub(super) async fn end(&self) {
+    /// Ends the pause so core's workers claim again, waiting at most
+    /// `within`. With no time left it asks nothing, and the pause lapses
+    /// within its lease, as a pause core does not hear end does.
+    pub(super) async fn end(&self, within: Duration) {
+        if within.is_zero() {
+            println!(
+                "core's workers resume when its pause lapses, within {} seconds",
+                self.pace.lease.as_secs()
+            );
+            return;
+        }
         let ended = self
             .client
             .delete(self.url.clone())
             .bearer_auth(&self.token)
-            .timeout(REQUEST)
+            .timeout(within)
             .send()
             .await
             .and_then(reqwest::Response::error_for_status);
@@ -174,7 +188,7 @@ impl Hold {
                 stopped = &mut stop => break stopped,
                 renewed = async {
                     tokio::time::sleep(renew).await;
-                    self.renew().await
+                    self.renew(self.pace.request).await
                 }, if !lapsed => lapsed = matches!(renewed, Err(Refusal::Conflict(_))),
             }
         };
@@ -239,20 +253,35 @@ fn unsettled(drain: &Drain) -> Vec<String> {
 }
 
 /// Pauses core's runtime workers and waits up to `timeout` for core to
-/// drain, returning the pause to hold while the services stop. Refused, the
-/// pause ends and nothing is stopped. Forced, it does not wait, and reports
-/// what the stop interrupts.
+/// drain, counting every request to core, and returns the pause to hold
+/// while the services stop. Refused, the pause ends and nothing is stopped.
+/// Forced, it does not wait, and reports what the stop interrupts.
 pub(super) async fn drain(
     config: &LoadedConfig,
     timeout: Duration,
     force: bool,
     pace: Pace,
 ) -> Result<Option<Hold>> {
-    let (mut hold, mut drain) = match Hold::begin(config, pace).await {
+    let deadline = Instant::now() + timeout;
+    let left = || deadline.saturating_duration_since(Instant::now());
+    let within = || left().min(pace.request);
+    let refused = |unsettled: &str| {
+        anyhow!(
+            "core did not drain within {} seconds: {unsettled}. `--force` stops anyway, \
+             interrupting it",
+            timeout.as_secs()
+        )
+    };
+    let (mut hold, mut drain) = match Hold::begin(config, pace, within()).await {
         Ok(begun) => begun,
         Err(error) if force => {
             println!("Forcing the stop without a drain: {error:#}.");
             return Ok(None);
+        }
+        Err(error) if left().is_zero() => {
+            return Err(error.context(refused(
+                "core did not answer in time, and a pause it began meanwhile lapses on its own",
+            )));
         }
         Err(error) => return Err(error),
     };
@@ -268,31 +297,32 @@ pub(super) async fn drain(
         }
         return Ok(Some(hold));
     }
-    let deadline = Instant::now() + timeout;
-    let mut shown = Vec::new();
+    let mut shown = String::new();
     loop {
-        let unsettled = unsettled(&drain);
+        let unsettled = unsettled(&drain).join("; ");
         if unsettled.is_empty() {
             return Ok(Some(hold));
         }
-        if Instant::now() >= deadline {
-            hold.end().await;
-            bail!(
-                "core did not drain within {} seconds: {}. `--force` stops anyway, interrupting it",
-                timeout.as_secs(),
-                unsettled.join("; ")
-            );
+        if left().is_zero() {
+            hold.end(Duration::ZERO).await;
+            return Err(refused(&unsettled));
         }
         if unsettled != shown {
-            println!("Waiting for core to drain: {}.", unsettled.join("; "));
+            println!("Waiting for core to drain: {unsettled}.");
             shown = unsettled;
         }
-        tokio::time::sleep(pace.check).await;
-        drain = match hold.renew().await {
+        tokio::time::sleep(pace.check.min(left())).await;
+        drain = match hold.renew(within()).await {
             Ok(drain) => drain,
             Err(refusal) => {
-                hold.end().await;
-                return Err(anyhow::Error::from(refusal).context("core's drain was not shown"));
+                hold.end(left().min(END)).await;
+                let refusal = anyhow::Error::from(refusal);
+                // A report cut off by the deadline leaves the last one's account.
+                return Err(if left().is_zero() {
+                    refusal.context(refused(&shown))
+                } else {
+                    refusal.context("core's drain was not shown")
+                });
             }
         };
     }
@@ -307,7 +337,7 @@ pub(super) async fn stop(services: &Services<'_>, hold: Option<Hold>) -> Result<
     };
     let (stopped, kept) = hold.through(services.control(Action::Stop)).await;
     if stopped.is_err() {
-        hold.end().await;
+        hold.end(END).await;
         return stopped;
     }
     match kept {

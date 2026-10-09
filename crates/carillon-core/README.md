@@ -1,37 +1,56 @@
 # Durable core
 
-[`Core`](src/engine.rs) owns admission, conversation/runtime ownership, execution outcomes and delivery operations over real SQLite. It has no HTTP request types, credentials, bundled provider choices, or process startup. [`examples/conversation.rs`](examples/conversation.rs) is the shortest complete caller:
+[`Core`](src/engine.rs) owns admission, conversation ownership, turn outcomes
+and delivery over SQLite. It has no HTTP types, credentials or process
+startup. [`examples/conversation.rs`](examples/conversation.rs) runs a whole
+conversation against temporary storage and a deterministic in-process
+runtime, with no Discord or model account; `cargo test` runs it too.
 
 ```sh
 mise run example:core
 ```
 
-The example creates temporary storage, accepts and deduplicates a message, invokes an explicitly deterministic in-process runtime, reads the captured resource snapshot, and observes/acknowledges delivery. No Discord or model account is used. The example is also executed by `cargo test`.
+## Using it
 
-## Construct and use
+- `Core::create(CoreOptions)` creates fresh private storage and refuses to
+  adopt existing files; `Core::open` opens storage of the current format only.
+- `accept(interface, event)` returns a durable receipt. Authenticate external
+  ingress before passing an interface identity. An event with files is
+  accepted only once core has its own verified copy.
+- `event_status(interface, event_id)` says whether an event was accepted, is
+  still being captured, or is unknown, for an interface settling a lost answer.
+- `run_next(runtime, lane, stopping, operation)` claims one turn of a lane
+  (`Lane::Messages` or `Lane::Observations`), calls the supplied runtime
+  operation and commits the outcome with its delivery intent. Once `stopping`
+  is cancelled it claims nothing more; a claimed turn still settles. `work(lane)`
+  changes when a turn may have become claimable, so workers wait instead of
+  polling.
+- `claim_delivery`, `acknowledge_delivery` and `reconcile_deliveries` keep each
+  delivery with the interface instance that claimed it, and never treat an
+  uncertain send as safe to repeat.
+- `jobs_at_work` and `named_jobs` read an interface's jobs: a message's turn
+  and the observations that reported its delegated work.
+- `recover_interrupted` and `reconcile_attachments` are for exclusive
+  startup, before events are accepted.
 
-- `Core::create(CoreOptions)` exclusively creates fresh storage (private directory and 0600 database); it refuses existing files, symlinks, and non-private existing data directories rather than adopting or changing them. A failed initialization may leave a reserved file for the caller to inspect/remove.  `Core::open(CoreOptions)` requires an existing compatible database. Options name the agent, resource root, default runtime and concrete runtime descriptors. The application supplies these facts, and `set_runtimes` replaces the runtime descriptors while the handle serves (a disabled runtime admits no conversation turn and `run_next` starts none of its queued ones); core never chooses Pi or Discord and never sees the installation's configuration or credentials.
-- `accept(interface, event).await` returns a durable receipt. **The caller must authenticate external ingress before supplying the interface identity.** Native in-process callers have the same Unix authority as any other code in that process; this API is not a second permission system. An event with `attachments` names a batch the interface staged in its own staging directory of the installation (`carillon_installation::config::attachment_staging`); core captures those files before it accepts the event, and the capture continues if the caller stops waiting. `CoreOptions::attachments` bounds counts, sizes, storage and concurrent captures.
-- `event_status(interface, event_id)` reports an event as accepted (with its receipt), still being captured, or unknown, for interfaces settling a lost answer.
-- `runtime_for(interface_id, query)` resolves the conversation owner for model operations; existing conversations do not follow a changed default.
-- `run_next(runtime_id, lane, stopping, operation)` claims one eligible turn of a lane (`Lane::Messages` or `Lane::Observations`), calls the supplied runtime operation, validates its answer and commits completion plus delivery intent atomically. Once the `stopping` cancellation token is cancelled it claims nothing, even when its storage work was waiting for the database writer, while a turn it already claimed still runs to its outcome. A message's request also carries, as `unanswered`, earlier files of the conversation that no completed turn has carried yet, which the runtime may never have recorded; a completed turn marks what it carried: its own files, and the earlier ones unless its runtime answers that it left them (`unanswered_left`), as T3's runtime does for a command it sends as written. An observation's request carries the runtime's cursor as `follow_up`. It is one step, not an implicit background worker; `work(lane)` is a `watch` receiver that changes when this handle may have made a turn of the lane claimable, so a worker that found nothing waits instead of polling. Verify local transport prerequisites before claiming. [`RuntimeClient`](src/runtime_client.rs) is the service's concrete authenticated HTTP collaborator; an in-process caller can supply an ordinary async function instead.
-- `claim_delivery` (or `claim_turn_delivery` for one turn's), `acknowledge_delivery` and `reconcile_deliveries` preserve interface-instance ownership and delivery uncertainty. They never infer that ambiguous delivery is safe to repeat.
-- `jobs_at_work(interface, after)` pages through an authenticated interface's jobs with a turn queued or running, at most 32 a page with the next page's cursor, and `named_jobs(interface, names)` reads up to 32 of its jobs by their origin, however they stand. A job is a message's turn and the observations that continue it; each read lists a job's latest eight turns with their states, final reports and delivery states, through the `turns_origin` index, and says when earlier turns exist. The service relays each running turn's runtime snapshot at `GET /v1/jobs`; core stores no live activity and no job store of its own. A runtime's final report of a turn (within the protocol's 16 KiB limit; a larger or invalid one is dropped without failing the turn) is stored with the turn's outcome. A delivery names its turn's origin (the message turn its work began with, carried through chains of observations).
-- `recover_interrupted` and `reconcile_attachments` are explicit. Call them only when taking exclusive ownership after the old worker has stopped and before accepting events: reconciliation removes capture copies no committed turn references. Opening another handle or running diagnostics is not a restart. `Core` runs no workers of its own: the application owns workers, cancellation and the process lock. It starts only work a call asks for: attachment captures, which run as tasks of the caller's Tokio runtime until their copy returns (`stop_capturing` asks running captures to stop at their next chunk during shutdown), and the blocking storage work of async calls described below, which is tracked until it ends.
-- Storage operations are synchronous. Async paths (`accept`, `run_next`, and the service's delivery handlers through `blocking`) run SQLite writes, which wait up to five seconds for another writer, and resource snapshots on Tokio's blocking pool and await them, so a waiting write never occupies an async worker; plain reads stay inline, since in WAL mode a reader never waits for the writer. Such work finishes even if its caller stops waiting, with the same outcome a synchronous call would have; `storage_settled` waits for it, and the service calls it at shutdown before releasing its lock.
+Storage calls are synchronous. Async paths run SQLite writes and resource
+snapshots on Tokio's blocking pool.
 
-`TurnFailure::Retry` means the runtime **provably did not receive** the work. Anything ambiguous is `Uncertain`, terminally interrupting that turn and leaving the conversation usable for later input. `Explained` is a failure the runtime reported with an explanation for the conversation. Core stores it as the turn's error and includes it in the interruption notice, with the same no-replay semantics. A failed database outcome write remains running until explicit startup recovery. There is no alternate lifecycle store, generic repository, or transcript reconstruction.
+A runtime operation's failure decides what happens next.
+`TurnFailure::Retry` means the runtime provably never received the turn, so
+it is queued again. `Unanswered` asks an observation again and interrupts a
+message. `Uncertain` and `Reported` interrupt the turn, with the runtime's
+explanation when it gave one. An interrupted turn is never replayed.
 
-## Find the owner
+## Where things live
 
-- [`engine.rs`](src/engine.rs): the public operations and policy.
-- [`db.rs`](src/db.rs): private SQLite transactions and guarded state changes; the only lifecycle write authority.
-- [`resources.rs`](src/resources.rs): accepted resource snapshots.
-- [`attachments.rs`](src/attachments.rs): the capture store: confined streaming copies, publication, verification and reconciliation.
-- [`intake.rs`](src/intake.rs): accepting events with attachments: bounded, coalesced captures with storage reservations.
-- [`runtime_client.rs`](src/runtime_client.rs): concrete HTTP execution transport. A turn's request has no total deadline: it takes as long as the runtime's work, and a caller that stops waiting ends it, which the runtime takes as cancellation.
-- [`application/http.rs`](src/application/http.rs): authentication, request/response formatting and service assembly. [`http/registry.rs`](src/application/http/registry.rs) owns the registry the service serves and its live apply; [`http/workers.rs`](src/application/http/workers.rs) supervises the runtime workers it asks for, and runs none while maintenance holds them paused; [`http/maintenance.rs`](src/application/http/maintenance.rs) serves that pause and reports its drain.
-- [`application/admin.rs`](src/application/admin.rs), [`application/cli.rs`](src/application/cli.rs): bundled installation defaults, operator commands and startup.
-- [`application/operations.rs`](src/application/operations.rs), [`application/update.rs`](src/application/update.rs), [`application/drain.rs`](src/application/drain.rs): the installed release's user services, logs, health and archive updates, and the drain `restart` and `update` wait for before stopping services. The maintenance lock they take is `carillon_installation::maintenance`, shared with the Discord provider's module changes.
-
-The CLI and the direct example use the same `Core`. Application assembly stays ordinary modules in this crate: a second core service or a generic provider framework would add no useful boundary.
+- [`engine.rs`](src/engine.rs): public operations and policy.
+- [`db.rs`](src/db.rs): every lifecycle write, in SQLite transactions.
+- [`resources.rs`](src/resources.rs), [`attachments.rs`](src/attachments.rs),
+  [`intake.rs`](src/intake.rs): captured resources and files.
+- [`runtime_client.rs`](src/runtime_client.rs): the HTTP runtime transport.
+- [`application/`](src/application): the `carillon` command and service. In
+  `http/`, `registry.rs` serves the registry and its live apply,
+  `workers.rs` supervises the runtime workers, and `maintenance.rs` serves the
+  maintenance pause. `drain.rs`, `operations.rs` and `update.rs` run restarts,
+  services and updates.

@@ -329,13 +329,11 @@ async fn call(
         }
         bytes.extend_from_slice(&chunk);
     }
-    let result: serde_json::Value = serde_json::from_slice(&bytes).with_context(|| {
-        format!(
-            "{}: invalid Discord provider response; inspect the target before repeating a write",
-            if mutates { "uncertain" } else { "unavailable" }
-        )
-    })?;
+    let result = serde_json::from_slice::<serde_json::Value>(&bytes);
+    // The status decides a failure: a 4xx was not carried out, whether or not
+    // its body reads, such as an older provider's refusal of an operation.
     if !status.is_success() {
+        let result = result.unwrap_or_default();
         let fallback = if status.is_client_error() {
             "rejected"
         } else if mutates {
@@ -349,10 +347,18 @@ async fn call(
             result["message"]
                 .as_str()
                 .or_else(|| result["error"].as_str())
-                .unwrap_or("the Discord provider refused the request")
+                .map_or_else(
+                    || format!("the Discord provider answered {status}"),
+                    str::to_owned
+                )
         );
     }
-    Ok(result)
+    result.with_context(|| {
+        format!(
+            "{}: invalid Discord provider response; inspect the target before repeating a write",
+            if mutates { "uncertain" } else { "unavailable" }
+        )
+    })
 }
 
 /// The files a message send names, read here so the provider receives
@@ -1220,6 +1226,40 @@ mod tests {
                 .err()
                 .context("invalid answer should fail")?;
             assert!(error.to_string().starts_with("uncertain:"), "{error}");
+            assert_eq!(provider.requests()?.len(), 1);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_refusal_without_a_readable_body_keeps_its_status() -> Result<()> {
+        // An older provider's framework rejects an operation it does not
+        // know in plain text; a missing route answers with no body at all.
+        for (status, answer, outcome) in [
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Failed to deserialize the JSON body",
+                "rejected",
+            ),
+            (StatusCode::NOT_FOUND, "", "rejected"),
+            (StatusCode::BAD_GATEWAY, "upstream failed", "uncertain"),
+        ] {
+            let provider = CallProvider::new(status, answer.to_owned()).await?;
+            let operation = parsed_call(&[
+                "messages",
+                "send",
+                "--channel-id",
+                "2",
+                "--content",
+                "hello",
+            ])?;
+            let error = call(&provider.config, "discord-private", operation)
+                .await
+                .err()
+                .context("a refusal succeeded")?
+                .to_string();
+            assert!(error.starts_with(&format!("{outcome}:")), "{error}");
+            assert!(error.contains(status.as_str()), "{error}");
             assert_eq!(provider.requests()?.len(), 1);
         }
         Ok(())

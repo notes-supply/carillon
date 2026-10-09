@@ -180,7 +180,7 @@ rm -f "$TRACE"
 refuse stopped-status carillon status
 grep -F 'carillon start' "$TEST_ROOT/stopped-status.log" >/dev/null
 carillon start >"$TEST_ROOT/start.log"
-grep -Fx '  discord-private: ready (0.0.0)' "$TEST_ROOT/start.log" >/dev/null
+grep -Fx "  discord-private: ready ($VERSION)" "$TEST_ROOT/start.log" >/dev/null
 expect_trace '--user start carillon.target'
 # Resolution never consults the current directory, even one that looks like an installation.
 mkdir "$TEST_ROOT/decoy"
@@ -210,15 +210,25 @@ expect_trace '--user show --property=ActiveState --value carillon.target' \
   '--user start carillon.target'
 grep -F 'runtime workers paused for maintenance' "$INSTALLATION/logs/core.log" >/dev/null
 # A runtime that cannot say whether a restart loses anything keeps the
-# services running: the pause ends and nothing is stopped. Forced, the
-# restart goes ahead and says what it interrupts.
+# services running and stops nothing. Refused when its time is up, the
+# command asks nothing more of core: the pause lapses within its lease and
+# the workers resume. Forced, the restart goes ahead and says what it
+# interrupts.
 kill "$(head -n 1 "$MANAGER/pids")"
 refuse undrained carillon restart --timeout 2
 grep -F 'core did not drain within 2 seconds' "$TEST_ROOT/undrained.log" >/dev/null
 grep -F 'runtime-pi is not ready to restart: it did not say whether it can restart' \
   "$TEST_ROOT/undrained.log" >/dev/null
 expect_trace '--user show --property=ActiveState --value carillon.target'
-grep -F 'runtime workers resumed' "$INSTALLATION/logs/core.log" >/dev/null
+attempt=0
+until carillon registry >"$TEST_ROOT/resumed.log" &&
+  ! grep -F 'Maintenance holds the workers paused' "$TEST_ROOT/resumed.log" >/dev/null; do
+  attempt=$((attempt + 1))
+  [ "$attempt" -lt 120 ] || fail 'the workers did not resume when the pause lapsed'
+  sleep 0.25
+done
+grep -F 'runtime-pi: enabled, 1 conversation(s) at once; 1 message and 4 observation worker(s)' \
+  "$TEST_ROOT/resumed.log" >/dev/null
 carillon status | grep -F '"status": "unavailable"' >/dev/null
 # The forced restart waits, as any restart does, until every provider answers.
 carillon restart --force >"$TEST_ROOT/forced.log"

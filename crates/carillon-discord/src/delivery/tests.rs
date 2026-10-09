@@ -237,17 +237,31 @@ fn discord_messages_split_cleanly_at_the_platform_limit() {
 #[test]
 fn a_long_answer_is_split_in_one_pass() {
     // 12,000 chunks of an answer with nowhere to break. Counting the whole
-    // remaining answer for every chunk scanned it 6,000 times over, which
-    // took seconds; one bounded scan per chunk reads it about once.
+    // remaining answer for every chunk, as an earlier splitter did, read it
+    // 6,000 times over; one bounded scan per chunk reads it about once.
+    //
+    // A coarse guard against that quadratic regression, not a performance
+    // benchmark: the split is timed against one search of the same answer
+    // for whitespace, the scan the splitter makes over each chunk, in the
+    // same process, so a slow or busy machine slows both. The bounded
+    // splitter took about two such searches and the whole-tail one ten.
     let answer = "a".repeat(24_000_000);
+    let search = || {
+        let started = std::time::Instant::now();
+        assert_eq!(answer.rfind(char::is_whitespace), None);
+        started.elapsed()
+    };
+    let before = search();
     let started = std::time::Instant::now();
     let chunks = discord_chunks(&answer);
     let elapsed = started.elapsed();
+    let reference = before.min(search());
     assert_eq!(chunks.len(), 12_000);
     assert!(chunks.iter().all(|chunk| chunk.len() == 2_000));
     assert!(
-        elapsed < Duration::from_secs(2),
-        "splitting took {elapsed:?}"
+        elapsed < reference * 5,
+        "splitting took {elapsed:?}, {:.1} times one search of the answer ({reference:?})",
+        elapsed.as_secs_f64() / reference.as_secs_f64()
     );
 }
 

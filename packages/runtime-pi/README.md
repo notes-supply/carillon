@@ -1,6 +1,8 @@
 # Pi runtime
 
-Native Pi sessions as a constructible component. The public entry point is [`src/index.ts`](src/index.ts); importing it does not launch HTTP, load credentials, or discover providers.
+Native [Pi](https://github.com/earendil-works/pi) sessions as a component.
+Importing [`src/index.ts`](src/index.ts) starts nothing: no HTTP, credentials
+or provider discovery.
 
 ```ts
 import { createPiRuntime } from "@carillon/runtime-pi";
@@ -25,25 +27,36 @@ try {
 }
 ```
 
-The workspace must already exist. State includes Pi's `auth.json`, `settings.json`, `models.json`, catalogue cache, model selections and (by default) native sessions. Configure a usable default provider/model in Pi settings and credentials for that provider. Construction does not opt into catalogue network refresh unless `allowModelNetwork: true` is supplied. This is not a new login or credential system.
+The state directory holds Pi's `auth.json`, settings, model catalogue, model
+selections and, by default, sessions; it needs a usable default model. The
+workspace must exist. Pass `modelRuntime`, `settings`, `selections` or
+`sessionDirectory` to supply your own collaborators.
 
-Carillon loads Pi's native `codemode`, `tool_search` and MCP extensions, with their normal replacement and disable semantics. They do not replace Pi's native tools or permissions. To enable code mode, add `"defaultTools": ["+codemode"]` to the agent resource root's `settings.json`; `codemode.mode` may be `"on"` (keep direct tools) or `"only"` (call tools through scripts). MCP uses Pi's native global agent directory (`PI_CODING_AGENT_DIR`, or Pi's normal default), plus trusted project configuration. The installed service sets that directory to the installation's `pi`, so its global configuration is `pi/mcp.json`, not the turn resource snapshot. The SDK alone does not load these extensions automatically. The release compiles Pi into one executable, `carillon-runtime-pi`, with Pi's native QuickJS setup and worker entries. It serves the Carillon runtime, and with `pi` as its first argument it is Pi's own command line, which `carillon-pi` starts with the installation's Pi directory.
+## Behaviour
 
-Replace `modelRuntime`, `settings`, or `selections` independently when supplying your own concrete Pi/model-state collaborators. Omitted collaborators use the same defaults as the service. Supplied collaborators remain caller-owned. `sessionDirectory` permits a separate native-session location; the installed service uses its existing installation path.
+- Turns run one at a time. Interface, agent and audience name the native
+  conversation; each new input reopens its history. Cancelling settles before
+  the next turn runs, and `close` cancels and waits without erasing sessions.
+- A turn Pi reports as failed rejects with Pi's own failure text; the HTTP
+  adapter decides what of it may be shown.
+- Files arrive by path below `attachment_root`. PNG, JPEG, WebP and GIF
+  images within the `inline_images` limits also go to Pi as images, checked
+  from their headers before Pi decodes them. A note listing every file stays
+  in the conversation's history. Text, including `/commands`, is passed as
+  written.
+- `activity(correlation_id, interface_id)` describes a running turn from Pi's
+  session events: thinking notes, the model and context use, running and
+  recent tool calls. It is never stored.
+- Model selections live in `model-selection.json`, guarded by a cross-process
+  lock so separate handles don't overwrite each other.
+- Pi never hands core a follow-up cursor, so a follow-up turn is refused.
+- Pi's `codemode`, `tool_search` and MCP extensions load with their normal
+  semantics. Enable code mode with `"defaultTools": ["+codemode"]` in the
+  agent's `settings.json`. The service's MCP configuration is the
+  installation's `pi/mcp.json`.
 
-`executeTurn` serializes execution within the instance. The tuple of interface, agent and audience identifies the native conversation; a new input in that conversation reopens its native history. Cancellation settles before another turn executes. `close` rejects new work, cancels active/queued execution, and waits for outstanding operations to settle. It does not erase sessions, replay inputs, or dispose caller-owned collaborators. For lower-level native session use, `openConversation`, `createPiExecutionSession`, and `promptSession` are the same primitives used by this runtime. A turn Pi reports as failed rejects with `ExplainedFailure` carrying Pi's failure text as is; the HTTP adapter decides what of it may be displayed.
-
-A turn may carry `attachments`: files below `attachment_root`, named by relative path. [`attachments.ts`](src/attachments.ts) passes PNG, JPEG, WebP and GIF images within the inline policy (`inlineImages`; dimensions are read from headers with `image-size` before Pi decodes anything) to `session.prompt` as Pi's native images. A note listing every file travels with the message as a native custom message (`sendCustomMessage` with `deliverAs: "nextTurn"`), or is kept on its own when a command or extension consumes the message. A turn's `unanswered` files, from earlier turns no answered turn has carried yet, are noted too when the session does not hold their note yet (Pi saves nothing for a command that opens a conversation). Until Pi has written the conversation's file, which it does once the conversation has a message, a turn answers that it left the notes it made out (`unanswered_left` for earlier files, `attachments_left` for its own), so an acknowledged command does not mark them and core offers those files again. A per-turn native extension puts the current attachment directory in the system prompt while the conversation has such notes. Other formats, including ones `image-size` recognizes loosely, are files. The service's `providers/<id>.toml` is checked strictly: an unknown or mistyped setting refuses startup. The text is passed unchanged, so commands and input handlers keep their meaning. A `/command` invocation Pi completes without an assistant message, such as an extension's command, is answered with the shared note naming it (`commandFinished`); one an extension reported failing, or one the model answered with nothing, is not. Only the prompt's own answer decides whether it failed, so a conversation that ended with a failure earlier does not fail a later silent command. Pi normalizes the images for the model that runs and gives text-only models its own placeholder. The installed service reads `inline_images` limits from its optional `providers/<id>.toml`. The release ships Photon's WebAssembly beside the executable, where Pi's compiled image resizing looks for it.
-
-While a turn executes, `activity(correlation_id, interface_id)` returns a bounded snapshot of what it is doing, derived from Pi's native session events, or `undefined` for a turn that is not executing for that interface. The snapshot exists from before session preparation until the turn settles; it is never stored. Pi's thinking, as it streams, becomes notes: one bounded excerpt per thinking block, from its beginning. The agent is the session's model, its thinking level when the model reasons, and Pi's own estimate of the context it fills, read at the start of each model turn and compaction. Calls start at Pi's own events; work an extension reports has no start of its own, so it starts when first reported running, marked as an estimate. Durations use the monotonic clock, and reported work keeps the duration it finished with. The final report is taken before the turn's activity is removed and returned with the answer, or kept with the failure. Tool inputs are described in [`activity.ts`](src/activity.ts), beside the tools' semantics, and pass the same best-effort redaction as diagnostics. The HTTP adapter serves it at `GET /v1/turns/{id}/activity?interface_id=…`.
-
-`ModelSelections` reads the selection file as the authority, not a permanently cached
-copy. Its asynchronous reads refresh from disk; updates hold a short cross-process
-`proper-lockfile` lease around refresh, precondition checking and atomic persistence.
-Independent handles therefore preserve each other's acknowledged writes. Contention
-is bounded and reported as a failure, not a successful overwritten update. This is
-selection-file coordination only: it does not make concurrent runtime instances safe
-to execute against the same native sessions.
+The release compiles all of this into `carillon-runtime-pi`; run with `pi` as
+its first argument, it is Pi's own command line (`carillon-pi`).
 
 ## Try it
 
@@ -51,14 +64,18 @@ to execute against the same native sessions.
 mise run example:pi -- --state-dir /path/to/pi-state --workspace /path/to/workspace --resources /path/to/resources
 ```
 
-[`examples/session.ts`](examples/session.ts) performs two real prompts in one native session, without Discord or Carillon HTTP. This command needs configured model credentials and may incur model costs; it also exposes Pi's native tools under the invoking Unix user's authority. Use a suitable workspace. The automated runtime test exercises this exact example with Pi's real session adapter and a controlled model stream: it verifies history, not a live model's reasoning or network service.
+[`examples/session.ts`](examples/session.ts) sends two real prompts in one
+session. It needs model credentials, may cost money, and gives Pi's tools your
+authority in that workspace.
 
-## Find the owner
+## Where things live
 
-- [`runtime.ts`](src/runtime.ts): instance construction, model operations, execution queue and shutdown.
-- [`session.ts`](src/session.ts), [`namespace.ts`](src/namespace.ts): native Pi sessions/resources/cancellation and conversation identity.
-- [`model.ts`](src/model.ts): persisted selection policy; shared wire shapes come from [`@carillon/protocol`](../protocol/README.md).
-- [`activity.ts`](src/activity.ts): a running turn's snapshot from Pi's native session events; the deny-by-default description of tool inputs, including the Bash command-header policy, is the shared runtime package's. Pi has no session event for child agents, and a tool that runs other tools stays one tool call. An extension that runs child agents may report them on the session's `carillon:work` event-bus channel (`pi.events.emit("carillon:work", { id, kind, label, state, parent?, actor? })`, the shared work vocabulary, one fact per change under a stable `id`); the runtime validates each fact, bounds labels and keeps at most sixteen items, making room only by forgetting finished ones. Reports outside the vocabulary are ignored.
-- [`cli.ts`](src/cli.ts): installation arguments, credentials, OAuth registration, listener and signal lifecycle.
-- The authenticated HTTP adapter, `ExplainedFailure` and the display and redaction rules, registry loading and the runtime operations interface live in [`@carillon/runtime`](../runtime/README.md), shared with every runtime provider.
-- [`testing.ts`](src/testing.ts): explicit deterministic **service-test substitute**, not Pi execution. Production code does not branch through it during a turn.
+- [`runtime.ts`](src/runtime.ts): construction, model operations, the turn
+  queue and shutdown.
+- [`session.ts`](src/session.ts), [`namespace.ts`](src/namespace.ts): native
+  sessions, resources and conversation identity.
+- [`attachments.ts`](src/attachments.ts), [`activity.ts`](src/activity.ts),
+  [`model.ts`](src/model.ts): files, activity snapshots and selections.
+- [`cli.ts`](src/cli.ts): the service's arguments, credentials and lifecycle.
+- [`testing.ts`](src/testing.ts): a deterministic stand-in for service tests,
+  not Pi.

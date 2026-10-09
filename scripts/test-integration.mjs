@@ -2055,18 +2055,18 @@ function serviceArguments(name, { nativePi = false, module = discordModule } = {
 }
 
 // init assigns three consecutive ports, and the T3 runtime case takes the
-// next. Probe the whole range rather than deriving it from a PID that can
-// collide with an unrelated host service.
+// next. The probe releases them before the services bind, so the block lies
+// below the kernel's ephemeral range, where outgoing connections can't take a
+// port in between.
 async function availableBasePort() {
+  const range = await readFile("/proc/sys/net/ipv4/ip_local_port_range", "utf8");
+  const ephemeral = Number(range.trim().split(/\s+/)[0]);
+  assert.ok(ephemeral > 1027, `no four ports below the ephemeral range ${range.trim()}`);
   for (let attempt = 0; attempt < 10; attempt += 1) {
+    const port = 1024 + Math.floor(Math.random() * (ephemeral - 1027));
     const listeners = [];
     try {
-      const first = createServer().listen(0, "127.0.0.1");
-      listeners.push(first);
-      await once(first, "listening");
-      const { port } = first.address();
-      if (port > 65_532) continue;
-      for (const offset of [1, 2, 3]) {
+      for (const offset of [0, 1, 2, 3]) {
         const next = createServer().listen(port + offset, "127.0.0.1");
         listeners.push(next);
         await once(next, "listening");

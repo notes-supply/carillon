@@ -12,7 +12,9 @@ import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { deflateSync } from "node:zlib";
 
-const release = resolve(process.argv[2] ?? "target/package/carillon-0.0.0");
+const release = resolve(
+  process.argv[2] ?? assert.fail("usage: node scripts/test-images.mjs RELEASE_DIRECTORY"),
+);
 const pi = realpathSync(
   resolve(
     import.meta.dirname,

@@ -1,0 +1,247 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+  # A full run on main builds a release candidate whatever changed.
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  # A newer push supersedes a pull request's run; main and queue runs finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Every run saves the caches it missed. GitHub keeps a pull request's caches
+# to that pull request; main restores only main's, which every run can read.
+
+env:
+  # Each lane installs its own tools; a task needing another fails instead.
+  MISE_AUTO_INSTALL: "false"
+  MISE_VERSION: "2026.10.3"
+
+jobs:
+  plan:
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      actions: read # earlier successful runs, to compare with
+    outputs:
+      rust: ${{ steps.plan.outputs.rust }}
+      ts: ${{ steps.plan.outputs.ts }}
+      release: ${{ steps.plan.outputs.release }}
+      workflows: ${{ steps.plan.outputs.workflows }}
+      reason: ${{ steps.plan.outputs.reason }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: plan
+        name: Choose the lanes this change needs
+        env:
+          EVENT: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+        # The planner uses only Node's standard library, so the runner's Node runs it.
+        run: |
+          base=
+          case "$EVENT" in
+            pull_request)
+              # The checkout is the merge commit; its first parent is the base.
+              base=$(git rev-parse HEAD^1)
+              ;;
+            push | merge_group)
+              # Compare with the newest successful main or queue run this commit
+              # descends from. A failed or cancelled run is never a baseline, so
+              # what it changed is selected again. No such run selects everything.
+              for sha in $(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?status=success&per_page=100" \
+                --jq '.workflow_runs[] | select(.event == "merge_group" or (.head_branch == "main" and (.event == "push" or .event == "workflow_dispatch"))) | .head_sha'); do
+                if git merge-base --is-ancestor "$sha" HEAD; then
+                  base=$sha
+                  break
+                fi
+              done
+              ;;
+          esac
+          if [ "$EVENT" = workflow_dispatch ]; then
+            node scripts/ci-plan.mjs --all "manual full run" | tee -a "$GITHUB_OUTPUT"
+          else
+            echo "comparing with ${base:-nothing}"
+            node scripts/ci-plan.mjs "$base" | tee -a "$GITHUB_OUTPUT"
+          fi
+
+  rust:
+    needs: plan
+    if: needs.plan.outputs.rust == 'true'
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # /tmp is memory-backed on this image.
+      - run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+        with:
+          version: ${{ env.MISE_VERSION }}
+          install_args: rust cargo:cargo-deny cargo:cargo-shear
+          cache_key_prefix: mise-rust
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: check
+          # Dependency builds are kept even when a test fails: rust-cache
+          # saves no workspace crates, and the next run needn't start cold.
+          cache-on-failure: true
+      - run: mise run check:rust
+
+  ts:
+    needs: plan
+    if: needs.plan.outputs.ts == 'true'
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+        with:
+          version: ${{ env.MISE_VERSION }}
+          install_args: node pnpm
+          cache_key_prefix: mise-ts
+      - id: store
+        run: echo "path=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+      - id: pnpm
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.store.outputs.path }}
+          key: pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-
+      - run: mise run check:ts
+      # Saved after a failed check too, but not once cancelled or never restored.
+      - if: ${{ !cancelled() && steps.pnpm.outcome == 'success' && steps.pnpm.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.store.outputs.path }}
+          key: pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+
+  release:
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Install strace and GNU coreutils for the installation tests
+        # Updates exchange directories with GNU mv --exchange (coreutils 9.5+).
+        run: |
+          packages=strace
+          mv --version | head -n 1 | grep -q 'GNU coreutils' || packages="$packages coreutils-from-gnu"
+          sudo apt-get update -q
+          # shellcheck disable=SC2086 # one word per package
+          sudo apt-get install -y --no-install-recommends $packages
+          mv --version | head -n 1
+      - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+        with:
+          version: ${{ env.MISE_VERSION }}
+          install_args: rust node bun pnpm github:EmbarkStudios/cargo-about
+          cache_key_prefix: mise-release
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: release
+          # Dependency builds are kept even when a test fails: rust-cache
+          # saves no workspace crates, and the next run needn't start cold.
+          cache-on-failure: true
+      - id: store
+        run: echo "path=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+      - id: pnpm
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.store.outputs.path }}
+          key: pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-
+      - name: Build the release once, then test its installation and persistence
+        run: |
+          mise run --jobs 1 test:install ::: test:persistence
+      - name: Check the glibc the binaries need
+        # The documented floor for the x86_64 release is glibc 2.39.
+        run: |
+          for binary in target/package/carillon-*/bin/carillon*; do
+            [ -f "$binary" ] && [ "$(head -c 4 "$binary")" = "$(printf '\177ELF')" ] || continue
+            needed=$(objdump -T "$binary" | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -n 1)
+            echo "$binary needs ${needed:-no versioned glibc}"
+            [ "$(printf '%s\n' "$needed" GLIBC_2.39 | sort -V | tail -n 1)" = GLIBC_2.39 ]
+          done
+      - run: cd dist && sha256sum carillon-*-linux-x86_64.tar.gz > SHA256SUMS && cat SHA256SUMS
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: |
+            dist/carillon-*-linux-x86_64.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
+      # Saved after a failed check too, but not once cancelled or never restored.
+      - if: ${{ !cancelled() && steps.pnpm.outcome == 'success' && steps.pnpm.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.store.outputs.path }}
+          key: pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+
+  workflows:
+    needs: plan
+    if: needs.plan.outputs.workflows == 'true'
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+        with:
+          version: ${{ env.MISE_VERSION }}
+          install_args: actionlint shellcheck zizmor
+          cache_key_prefix: mise-workflows
+      - run: mise run check:workflows
+        env:
+          # zizmor's online audits check pinned actions against upstream.
+          GH_TOKEN: ${{ github.token }}
+
+  # The one required check: the plan succeeded, every selected lane passed and
+  # every other lane was deliberately skipped.
+  ci-ok:
+    needs: [plan, rust, ts, release, workflows]
+    if: always()
+    runs-on: ubuntu-26.04
+    permissions: {}
+    steps:
+      - env:
+          PLAN: ${{ needs.plan.result }}
+          REASON: ${{ needs.plan.outputs.reason }}
+          RUST: ${{ needs.plan.outputs.rust }}/${{ needs.rust.result }}
+          TS: ${{ needs.plan.outputs.ts }}/${{ needs.ts.result }}
+          RELEASE: ${{ needs.plan.outputs.release }}/${{ needs.release.result }}
+          WORKFLOWS: ${{ needs.plan.outputs.workflows }}/${{ needs.workflows.result }}
+        run: |
+          [ "$PLAN" = success ] || { echo "the plan did not succeed: $PLAN"; exit 1; }
+          echo "plan: $REASON"
+          status=0 tested=0
+          for lane in "rust=$RUST" "ts=$TS" "release=$RELEASE" "workflows=$WORKFLOWS"; do
+            case "${lane#*=}" in
+              true/success) echo "${lane%%=*}: passed"; tested=$((tested + 1)) ;;
+              false/skipped) echo "${lane%%=*}: not needed" ;;
+              *) echo "${lane%%=*}: selected/result ${lane#*=}"; status=1 ;;
+            esac
+          done
+          [ "$tested" -gt 0 ] || echo "nothing needed testing; no lane ran"
+          exit "$status"

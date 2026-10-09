@@ -402,7 +402,7 @@ async function testRestore() {
   }
 }
 
-/** The provider's library test binary, built for syscall tracing. */
+/** The provider's library test binary for syscall tracing, which `mise run test:persistence` builds first. */
 function providerTestBinary() {
   const messages = execFileSync(
     "cargo",
