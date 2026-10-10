@@ -13,7 +13,7 @@ import { Type } from "typebox";
 import { Check } from "typebox/value";
 import { ORCHESTRATION_PROTOCOL, RPC } from "./contracts.ts";
 import { catalog } from "./models.ts";
-import { loadSettings } from "./settings.ts";
+import { loadSettings, readSettings } from "./settings.ts";
 import { connectT3, DEFAULT_TIMEOUT_MS, T3Failure, type Connect, type T3Endpoint } from "./t3.ts";
 
 /** A T3 project: the agent works in its workspace. */
@@ -97,8 +97,10 @@ async function projects(endpoint: T3Endpoint): Promise<Project[]> {
  * Writes the runtime's files for `choice` on the server at `endpoint`: the
  * token to `credentials/t3.token` and the settings to the runtime's own
  * file, then reads the settings back as the runtime does. The server must
- * offer the project, rooted at the agent's workspace, and the model.
- * Returns the project.
+ * offer the project, rooted at the agent's workspace, and the model. Settings
+ * already there keep their title, and their model's options while the model
+ * stays the same; settings that do not read as valid are refused before
+ * anything is written. Returns the project.
  */
 export async function configure(
   installation: Installation,
@@ -106,6 +108,11 @@ export async function configure(
   choice: Choice,
   connect: Connect = connectT3,
 ): Promise<Project> {
+  const existing = await readSettings(installation.providerFile).catch((failure: unknown) => {
+    throw new Error(
+      `${failure instanceof Error ? failure.message : String(failure)}; nothing was changed: correct or remove it, then configure again`,
+    );
+  });
   const offer = await discover(endpoint, connect);
   const project = offer.projects.find(({ id }) => id === choice.projectId);
   if (project === undefined) throw new Error(`T3 has no project ${choice.projectId}`);
@@ -128,7 +135,16 @@ export async function configure(
       url: endpoint.url,
       token_file: "credentials/t3.token",
       project_id: project.id,
-      model: { instance_id: choice.instanceId, model: choice.model },
+      title: existing?.title,
+      model: {
+        instance_id: choice.instanceId,
+        model: choice.model,
+        // Options are the model's own; another model starts from its defaults.
+        options:
+          existing?.model.instance_id === choice.instanceId && existing.model.model === choice.model
+            ? existing.model.options
+            : undefined,
+      },
     }),
   );
   await loadSettings(installation.providerFile, installation.root);

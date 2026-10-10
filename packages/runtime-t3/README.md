@@ -43,6 +43,9 @@ model = "claude-fable-5-1"
 effort = "high"
 ```
 
+Rerunning `configure` keeps `title`, and keeps `[model.options]` while the
+model stays the same; another model starts from its own defaults.
+
 Then `carillon start`. The runtime reads these files only when it starts, so
 after `configure` or a setup rerun changes them, a running Carillon needs
 `carillon restart`. Startup fails closed: the registry entry must exist and

@@ -15,8 +15,8 @@ afterEach(async () => {
   await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
 });
 
-async function fakeT3(): Promise<FakeT3> {
-  const fake = await startFakeT3();
+async function fakeT3(token?: string): Promise<FakeT3> {
+  const fake = await startFakeT3(token);
   cleanups.push(() => fake.close());
   return fake;
 }
@@ -110,6 +110,106 @@ it("writes the runtime's files only for a project rooted at the agent's workspac
     expect((await stat(file)).mode & 0o777).toBe(0o600);
   // The settings name the credential file, never the token.
   expect(await readFile(runtime.providerFile, "utf8")).not.toContain(fake.token);
+});
+
+it("keeps the title on a rerun, and the model's options while the model stays the same", async () => {
+  const { workspace, config } = await installation();
+  const runtime = await loaded(config);
+  const sonnet = { projectId: "agent", instanceId: "claudeAgent", model: "claude-sonnet-5" };
+  // Settings the operator tuned as documented.
+  await writeFile(
+    runtime.providerFile,
+    [
+      'url = "http://127.0.0.1:1"',
+      'token_file = "credentials/t3.token"',
+      'project_id = "agent"',
+      'title = "Notes"',
+      "[model]",
+      'instance_id = "claudeAgent"',
+      'model = "claude-sonnet-5"',
+      "[model.options]",
+      'effort = "high"',
+      "thinking = true",
+    ].join("\n"),
+  );
+
+  // Another server with a new token, the same model: everything tuned stays.
+  const moved = await fakeT3("rotated-token");
+  moved.projects = [{ id: "agent", title: "Agent", workspaceRoot: workspace }];
+  await configure(runtime, { url: moved.url, token: moved.token }, sonnet);
+  let settings = await loadSettings(runtime.providerFile, runtime.root);
+  expect(settings).toMatchObject({
+    url: moved.url,
+    title: "Notes",
+    selection: {
+      instanceId: "claudeAgent",
+      model: "claude-sonnet-5",
+      options: [
+        { id: "effort", value: "high" },
+        { id: "thinking", value: true },
+      ],
+    },
+  });
+  expect((await readFile(settings.tokenFile, "utf8")).trim()).toBe("rotated-token");
+
+  // Another model starts from its own defaults; the title stays.
+  await configure(
+    runtime,
+    { url: moved.url, token: moved.token },
+    { ...sonnet, model: "claude-haiku-4-5" },
+  );
+  settings = await loadSettings(runtime.providerFile, runtime.root);
+  expect(settings.title).toBe("Notes");
+  expect(settings.selection).toEqual({
+    instanceId: "claudeAgent",
+    model: "claude-haiku-4-5",
+    options: [],
+  });
+});
+
+it("refuses settings that do not read as valid before writing anything", async () => {
+  const fake = await fakeT3();
+  const { root, workspace, config } = await installation();
+  const runtime = await loaded(config);
+  fake.projects = [{ id: "agent", title: "Agent", workspaceRoot: workspace }];
+  const valid = [
+    `url = "${fake.url}"`,
+    'token_file = "credentials/t3.token"',
+    'project_id = "agent"',
+    "[model]",
+    'instance_id = "claudeAgent"',
+    'model = "claude-sonnet-5"',
+  ];
+  for (const malformed of [
+    // Not TOML, the line before holding something that must not be repeated.
+    'note = "secret-in-file"\ntitle =\n',
+    // TOML, but not the runtime's settings.
+    [...valid, 'title = ""'].join("\n"),
+    [...valid, "[model.options]", "effort = 3"].join("\n"),
+  ]) {
+    await writeFile(runtime.providerFile, malformed);
+    await expect(
+      configure(
+        runtime,
+        { url: fake.url, token: fake.token },
+        {
+          projectId: "agent",
+          instanceId: "claudeAgent",
+          model: "claude-sonnet-5",
+        },
+      ),
+    ).rejects.toSatisfy(
+      (failure) =>
+        failure instanceof Error &&
+        failure.message.startsWith(runtime.providerFile) &&
+        failure.message.endsWith(
+          "nothing was changed: correct or remove it, then configure again",
+        ) &&
+        !failure.message.includes("secret-in-file"),
+    );
+    expect(await readFile(runtime.providerFile, "utf8")).toBe(malformed);
+    expect(await readdir(join(root, "credentials"))).toEqual([]);
+  }
 });
 
 /** The CLI with `input` on standard input; the fake T3 serves from this process meanwhile. */

@@ -1,9 +1,9 @@
 /** The runtime's own settings, `providers/<id>.toml`. Checked strictly: an unknown or mistyped setting refuses startup. */
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { Type } from "typebox";
+import { Type, type Static } from "typebox";
 import { Check, Errors } from "typebox/value";
-import { parse as parseToml } from "smol-toml";
+import { parse as parseToml, TomlError } from "smol-toml";
 import type { NativeSelection } from "./contracts.ts";
 
 const SettingsSchema = Type.Object(
@@ -35,6 +35,9 @@ const SettingsSchema = Type.Object(
   { additionalProperties: false },
 );
 
+/** The settings file as written, its URL an origin. */
+export type SettingsFile = Static<typeof SettingsSchema>;
+
 export interface T3Settings {
   readonly url: string;
   readonly tokenFile: string;
@@ -44,15 +47,42 @@ export interface T3Settings {
 }
 
 export async function loadSettings(path: string, root: string): Promise<T3Settings> {
+  const settings = await readSettings(path);
+  if (settings === undefined) throw new Error(`${path}: the T3 runtime needs its settings file`);
+  return {
+    url: settings.url,
+    tokenFile: resolve(root, settings.token_file),
+    projectId: settings.project_id,
+    title: settings.title ?? "Carillon",
+    selection: {
+      instanceId: settings.model.instance_id,
+      model: settings.model.model,
+      options: Object.entries(settings.model.options ?? {}).map(([id, value]) => ({ id, value })),
+    },
+  };
+}
+
+/** The settings file at `path`, checked strictly, or undefined when there is none. */
+export async function readSettings(path: string): Promise<SettingsFile | undefined> {
   let text: string;
   try {
     text = await readFile(path, "utf8");
   } catch (failure) {
     if (failure instanceof Error && "code" in failure && failure.code === "ENOENT")
-      throw new Error(`${path}: the T3 runtime needs its settings file`, { cause: failure });
+      return undefined;
     throw failure;
   }
-  const settings: unknown = parseToml(text);
+  let settings: unknown;
+  try {
+    settings = parseToml(text);
+  } catch (failure) {
+    // Refused by position, without quoting the file, which may hold a credential.
+    if (failure instanceof TomlError)
+      throw new Error(
+        `${path}: invalid TOML at line ${String(failure.line)}, column ${String(failure.column)}`,
+      );
+    throw failure;
+  }
   if (!Check(SettingsSchema, settings)) {
     const [first] = Errors(SettingsSchema, settings);
     throw new Error(
@@ -65,17 +95,7 @@ export async function loadSettings(path: string, root: string): Promise<T3Settin
     throw new Error(
       `${path}: /url must be an HTTP or HTTPS origin, without credentials, a path, a query or a fragment`,
     );
-  return {
-    url,
-    tokenFile: resolve(root, settings.token_file),
-    projectId: settings.project_id,
-    title: settings.title ?? "Carillon",
-    selection: {
-      instanceId: settings.model.instance_id,
-      model: settings.model.model,
-      options: Object.entries(settings.model.options ?? {}).map(([id, value]) => ({ id, value })),
-    },
-  };
+  return { ...settings, url };
 }
 
 /** `value` as an HTTP(S) origin, or undefined when it is not only one. */
