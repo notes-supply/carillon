@@ -7,7 +7,7 @@ use std::{
     },
 };
 
-use anyhow::anyhow;
+use anyhow::{Context as _, anyhow};
 use axum::{
     Json, Router,
     extract::Path as Segments,
@@ -19,8 +19,9 @@ use carillon_installation::{config::LoadedConfig, prompt::Questions};
 use serde_json::{Value, json};
 use twilight_model::guild::Permissions;
 
-use super::Token;
-use crate::config::{DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute};
+use crate::config::{
+    BOT_TOKEN_FILE, Difference, DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute,
+};
 
 const TOKEN: &str = "good-token";
 
@@ -356,12 +357,24 @@ fn fresh(root: &Path) -> anyhow::Result<LoadedConfig> {
     Ok(config)
 }
 
+/// An installation set up by hand: settings naming no token file, and in the
+/// canonical one a bot token Discord no longer accepts.
+fn by_hand(root: &Path) -> anyhow::Result<LoadedConfig> {
+    let config = crate::config::tests::installation(root, "discord-private", 46_600)?;
+    std::fs::write(config.root.join(BOT_TOKEN_FILE), "old-token\n")?;
+    Ok(config)
+}
+
+/// Setting an installation [`by_hand`] up again with `TOKEN`: declining to
+/// keep it, the refused saved token, then every default.
+const REPLACE: &[&str] = &["n", "", TOKEN, "", "", "", "", ""];
+
 /// Runs setup with `answers`, returning what it showed.
 async fn run(
     config: &LoadedConfig,
     address: std::net::SocketAddr,
     answers: &[&'static str],
-) -> (anyhow::Result<Token>, String) {
+) -> (anyhow::Result<()>, String) {
     let mut questions = Scripted::new(answers);
     let result = super::setup(&mut questions, config, "discord-private", |token| {
         twilight_http::Client::builder()
@@ -374,8 +387,25 @@ async fn run(
     (result, questions.shown)
 }
 
-fn bot_token(config: &LoadedConfig) -> std::path::PathBuf {
-    config.root.join("credentials/discord-bot.token")
+/// The bot token files in the installation, by name.
+fn bot_tokens(config: &LoadedConfig) -> anyhow::Result<Vec<String>> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(config.root.join("credentials"))? {
+        let name = entry?.file_name().to_string_lossy().into_owned();
+        if name.starts_with("discord-bot") {
+            names.push(name);
+        }
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// The bot token in the file the saved settings name.
+fn named_token(config: &LoadedConfig) -> anyhow::Result<String> {
+    let settings = DiscordConfig::load(config, "discord-private")?;
+    Ok(std::fs::read_to_string(
+        settings.bot_token_path(&config.root),
+    )?)
 }
 
 #[tokio::test]
@@ -422,10 +452,7 @@ async fn refused_tokens_and_unknown_people_are_asked_again_and_only_named_people
         !shown.contains(TOKEN) && !shown.contains("wrong-token"),
         "{shown}"
     );
-    assert_eq!(
-        std::fs::read_to_string(bot_token(&config))?,
-        format!("{TOKEN}\n")
-    );
+    assert_eq!(named_token(&config)?, format!("{TOKEN}\n"));
     let settings = DiscordConfig::load(&config, "discord-private")?;
     assert_eq!(settings.guild_id, "101");
     assert_eq!(settings.bot_user_id, "201");
@@ -493,7 +520,7 @@ async fn setup_that_ends_unanswered_writes_nothing() -> anyhow::Result<()> {
     let address = discord(Arc::new(Discord::default())).await?;
     let (result, _) = run(&config, address, &[TOKEN, "1"]).await;
     assert!(result.is_err());
-    assert!(!bot_token(&config).exists());
+    assert!(bot_tokens(&config)?.is_empty());
     assert!(!config.provider_config_path("discord-private")?.exists());
     Ok(())
 }
@@ -513,13 +540,13 @@ async fn setup_during_other_maintenance_changes_neither_token_nor_settings() -> 
         refusal.contains("were not changed") && refusal.contains("another Carillon maintenance"),
         "{refusal}"
     );
-    assert!(!bot_token(&config).exists());
+    assert!(bot_tokens(&config)?.is_empty());
     assert!(!config.provider_config_path("discord-private")?.exists());
     drop(held);
     // Once it ends, the same answers are written, and the lock is free again.
     let (result, _) = run(&config, address, &[TOKEN, "", "", "", "", ""]).await;
     result?;
-    assert!(bot_token(&config).exists());
+    assert_eq!(named_token(&config)?, format!("{TOKEN}\n"));
     assert!(
         carillon_installation::maintenance::MaintenanceLock::try_acquire(&config.root)?.is_some()
     );
@@ -580,7 +607,7 @@ async fn a_route_is_saved_only_once_the_bot_may_answer_there_as_its_mode_needs()
         ),
         "{shown}"
     );
-    assert!(!bot_token(&config).exists());
+    assert!(bot_tokens(&config)?.is_empty());
     assert!(!config.provider_config_path("discord-private")?.exists());
 
     // #general needs no role for the channel as one conversation, and lacking
@@ -657,26 +684,155 @@ async fn a_route_is_saved_only_once_the_bot_may_answer_there_as_its_mode_needs()
 }
 
 #[tokio::test]
-async fn only_a_replaced_bot_token_waits_for_the_provider_to_start() -> anyhow::Result<()> {
+async fn a_new_bot_token_gets_a_file_of_its_own_and_the_same_one_keeps_its_file()
+-> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
-    let config = fresh(directory.path())?;
+    let config = by_hand(directory.path())?;
     let address = discord(Arc::new(Discord::default())).await?;
-    std::fs::write(bot_token(&config), "old-token\n")?;
-    // Enter keeps the saved token, which Discord now refuses, so a new one
-    // replaces it.
-    let (result, _) = run(&config, address, &["", TOKEN, "", "", "", "", ""]).await;
-    assert_eq!(result?, Token::Replaced);
+    let before = DiscordConfig::load(&config, "discord-private")?;
+    let (result, _) = run(&config, address, REPLACE).await;
+    result?;
+    // The settings name the new token's file; the one put there by hand stays.
+    let after = DiscordConfig::load(&config, "discord-private")?;
+    assert_ne!(after.bot_token_file, before.bot_token_file);
+    assert_eq!(named_token(&config)?, format!("{TOKEN}\n"));
     assert_eq!(
-        std::fs::read_to_string(bot_token(&config))?,
-        format!("{TOKEN}\n")
+        std::fs::read_to_string(config.root.join(BOT_TOKEN_FILE))?,
+        "old-token\n"
     );
-    // Setting up again with the saved token, or keeping everything, leaves
-    // the provider its token.
-    let (result, _) = run(&config, address, &["n", "", "", "", "", "", ""]).await;
-    assert_eq!(result?, Token::Unchanged);
-    let (result, _) = run(&config, address, &["n", TOKEN, "", "", "", "", ""]).await;
-    assert_eq!(result?, Token::Unchanged);
-    let (result, _) = run(&config, address, &[""]).await;
-    assert_eq!(result?, Token::Unchanged);
+    // A running provider takes it only at a restart.
+    assert!(
+        Difference::between(&before, &after)
+            .restart
+            .contains(&"bot_token_file".to_owned())
+    );
+    // The same token again, kept or typed, keeps its file, so the settings
+    // apply live.
+    for token in ["", TOKEN] {
+        let (result, _) = run(&config, address, &["n", token, "", "", "", "", ""]).await;
+        result?;
+        let again = DiscordConfig::load(&config, "discord-private")?;
+        assert_eq!(again.bot_token_file, after.bot_token_file);
+        assert!(Difference::between(&after, &again).restart.is_empty());
+    }
+    assert_eq!(bot_tokens(&config)?.len(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn setup_of_a_disabled_provider_is_refused_before_any_question() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let mut config = by_hand(directory.path())?;
+    for provider in &mut config.value.providers {
+        if provider.id == "discord-private" {
+            provider.enabled = false;
+        }
+    }
+    let (result, shown) = run(&config, "127.0.0.1:1".parse()?, &[]).await;
+    let refusal = result
+        .err()
+        .map(|error| format!("{error:#}"))
+        .unwrap_or_default();
+    assert_eq!(
+        refusal,
+        "discord-private is disabled in carillon.toml; enable it with `carillon provider \
+         discord-private enable`, then run setup again"
+    );
+    assert!(shown.is_empty(), "{shown}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_failed_setup_leaves_settings_that_name_a_token_written_before_them() -> anyhow::Result<()>
+{
+    use std::{fs, os::unix::fs::PermissionsExt as _};
+
+    let address = discord(Arc::new(Discord::default())).await?;
+    let mode = |path: &Path, mode: u32| fs::set_permissions(path, fs::Permissions::from_mode(mode));
+
+    // Settings that would not be valid, here a tuned emoji kept from the
+    // file, are refused before any token is written. Without valid settings
+    // to keep, nothing asks to keep them.
+    let directory = tempfile::tempdir()?;
+    let config = by_hand(directory.path())?;
+    let file = config.provider_config_path("discord-private")?;
+    fs::write(
+        &file,
+        fs::read_to_string(&file)?
+            .replace("processing_emoji = \"👀\"", "processing_emoji = \"eyes\""),
+    )?;
+    let previous = fs::read(&file)?;
+    let (result, _) = run(&config, address, &REPLACE[1..]).await;
+    let refusal = format!(
+        "{:#}",
+        result.err().context("invalid settings were written")?
+    );
+    assert!(
+        refusal.contains("were not changed") && refusal.contains("emoji"),
+        "{refusal}"
+    );
+    assert_eq!(fs::read(&file)?, previous);
+    assert_eq!(bot_tokens(&config)?, ["discord-bot.token"]);
+
+    // A token file that cannot be written leaves the settings as they were.
+    let directory = tempfile::tempdir()?;
+    let config = by_hand(directory.path())?;
+    let file = config.provider_config_path("discord-private")?;
+    let previous = fs::read(&file)?;
+    let credentials = config.root.join("credentials");
+    mode(&credentials, 0o500)?;
+    let (result, _) = run(&config, address, REPLACE).await;
+    mode(&credentials, 0o700)?;
+    let refusal = format!(
+        "{:#}",
+        result.err().context("an unwritable token was accepted")?
+    );
+    assert!(refusal.contains("were not changed"), "{refusal}");
+    assert_eq!(fs::read(&file)?, previous);
+    assert_eq!(bot_tokens(&config)?, ["discord-bot.token"]);
+
+    // Settings that cannot replace the file leave it naming the old token;
+    // the new token's file is kept, named by nothing.
+    let directory = tempfile::tempdir()?;
+    let config = by_hand(directory.path())?;
+    let file = config.provider_config_path("discord-private")?;
+    let previous = fs::read(&file)?;
+    let providers = file.parent().context("settings directory")?.to_owned();
+    mode(&providers, 0o500)?;
+    let (result, _) = run(&config, address, REPLACE).await;
+    mode(&providers, 0o700)?;
+    let refusal = format!(
+        "{:#}",
+        result.err().context("unwritable settings were accepted")?
+    );
+    assert!(refusal.contains("not changed"), "{refusal}");
+    assert_eq!(fs::read(&file)?, previous);
+    assert_eq!(named_token(&config)?, "old-token\n");
+    assert_eq!(bot_tokens(&config)?.len(), 2);
+
+    // Settings that replace the file but whose directory cannot be synced
+    // are in place, naming the new token's file, which was synced first; a
+    // crash could bring back only the previous settings, naming the old
+    // token's file, which nothing changed.
+    let directory = tempfile::tempdir()?;
+    let config = by_hand(directory.path())?;
+    let file = config.provider_config_path("discord-private")?;
+    let providers = file.parent().context("settings directory")?.to_owned();
+    mode(&providers, 0o300)?;
+    let (result, _) = run(&config, address, REPLACE).await;
+    mode(&providers, 0o700)?;
+    let refusal = format!(
+        "{:#}",
+        result.err().context("an unsynced change was confirmed")?
+    );
+    assert!(
+        refusal.contains("changed, but not confirmed durable"),
+        "{refusal}"
+    );
+    assert_eq!(named_token(&config)?, format!("{TOKEN}\n"));
+    assert_eq!(
+        fs::read_to_string(config.root.join(BOT_TOKEN_FILE))?,
+        "old-token\n"
+    );
     Ok(())
 }

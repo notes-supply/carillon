@@ -120,7 +120,6 @@ struct DiscordState {
 pub(crate) struct ServeOptions<'a> {
     pub provider_id: &'a str,
     pub token_file: &'a Path,
-    pub discord_token_file: Option<&'a Path>,
     pub module: &'a Path,
     pub deterministic: bool,
 }
@@ -136,6 +135,7 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
         return Ok(());
     }
     let discord = DiscordConfig::load(&config, &provider.id)?;
+    let bot_token_file = discord.bot_token_path(&config.root);
     let token = read_token_file(options.token_file)?;
     if !token_matches(&provider.token_hash, &token) {
         bail!("Discord interface provider token does not match configuration");
@@ -199,14 +199,11 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
         axum::serve(listener, discord_router(state, true)).await?;
         return Ok(());
     }
-    let discord_token_path = options
-        .discord_token_file
-        .context("--discord-token-file is required outside deterministic mode")?;
     // Cosmetic: records that cannot be read turn cards off, not the provider.
     let cards = CardRecords::open(
         state_directory(&state.installation, &provider.id).join("activity-cards.json"),
     );
-    let discord_token = read_token_file(discord_token_path)?;
+    let discord_token = read_token_file(&bot_token_file)?;
     let http = Arc::new(DiscordHttp::new(discord_token.clone()));
     connect(state, listener, http, discord_token, reconciled, cards).await
 }

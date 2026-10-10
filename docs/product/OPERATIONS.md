@@ -193,9 +193,8 @@ carillon discord settings apply    # serve the file's live changes
 ```
 
 Users, routes, `typing`, `reactions` with their emoji, `activity_markers`
-and the [module](#discord-module) apply live. The guild, bot user, bot token, attachment limits and
-`activity` need a restart of the Discord provider, so setup that replaces the
-bot token asks for `carillon restart` instead of applying. A message keeps the
+and the [module](#discord-module) apply live. The guild, bot user, bot token file, attachment limits and
+`activity` need a restart of the Discord provider. A message keeps the
 settings it was admitted with.
 
 ### Parallel conversations
@@ -379,6 +378,14 @@ its own under `~/.carillon/pi`, separate from `~/.pi`). Loopback tokens in
 `credentials/` authenticate the services to each other; `operator` authorizes
 diagnostics and maintenance. None of them reach prompts, sessions or logs.
 Changing a credential takes a restart.
+
+Each provider's settings name its token's file: `bot_token_file` for Discord
+(by default `credentials/discord-bot.token`, for a token put there by hand)
+and `token_file` for T3. Setup writes a changed token to a new private file
+first and only then replaces the settings to name it, keeping the old file.
+Until that replacement the previous settings and their token stay in place.
+If its durability cannot be confirmed afterwards, a crash may keep either
+the old or the new settings, each naming its own durable token.
 
 ## Back up and restore
 

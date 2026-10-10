@@ -421,6 +421,11 @@ grep -F -- '--provider runtime-pi' "$XDG_CONFIG_HOME/systemd/user/carillon-runti
 grep -F -- '--provider runtime-t3' "$XDG_CONFIG_HOME/systemd/user/carillon-runtime-t3.service" >/dev/null
 grep -F -- "--module \"$CARILLON_HOME/app/lib/carillon_discord_module.wasm\"" \
   "$XDG_CONFIG_HOME/systemd/user/carillon-discord.service" >/dev/null
+# The bot token is the one the provider's settings name, not the unit's.
+if grep -Fq -- discord-bot "$XDG_CONFIG_HOME/systemd/user/carillon-discord.service"; then
+  echo "the Discord unit names a bot token" >&2
+  exit 1
+fi
 RUNTIME_TOKEN=$(cat "$CARILLON_HOME/credentials/runtime-pi.token")
 ENVIRONMENT=$(curl --fail --silent -H "authorization: Bearer $RUNTIME_TOKEN" \
   "http://127.0.0.1:$((BASE_PORT + 2))/v1/environment")

@@ -1,15 +1,18 @@
 //! Guided Discord setup: the bot token, read without echo and written only
-//! to the installation's credential file; the bot and its application,
-//! learned from that token; and the server, channels and people, offered by
-//! name and written as the provider's admission settings. Nobody is admitted
-//! who was not named here, and no channel is routed where the bot may not
-//! answer.
+//! to a private file the provider's settings name; the bot and its
+//! application, learned from that token; and the server, channels and
+//! people, offered by name and written as the provider's admission settings.
+//! Nobody is admitted who was not named here, and no channel is routed where
+//! the bot may not answer.
 
-use std::fmt::Display;
+use std::{fmt::Display, path::PathBuf};
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use carillon_installation::{
-    config::LoadedConfig, filesystem::atomic_write, maintenance::MaintenanceLock, prompt::Questions,
+    config::{LoadedConfig, ProviderRole, read_token_file},
+    filesystem::publish,
+    maintenance::MaintenanceLock,
+    prompt::Questions,
 };
 use twilight_http::{Client as DiscordHttp, error::ErrorType};
 use twilight_model::{
@@ -23,13 +26,11 @@ use twilight_model::{
     user::{CurrentUser, User},
 };
 use twilight_util::permission_calculator::PermissionCalculator;
+use uuid::Uuid;
 
 use crate::config::{
-    DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute, configure,
+    BOT_TOKEN_FILE, DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute, admitted,
 };
-
-/// The bot's credential, beside the installation's others.
-const TOKEN: &str = "discord-bot";
 
 /// Why the bot asks for a permission in its channels.
 #[derive(Clone, Copy)]
@@ -75,15 +76,6 @@ const PERMISSIONS: [(Permissions, &str, Need); 8] = [
     ),
 ];
 
-/// The bot token setup leaves for the provider.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Token {
-    /// The one the provider has, if any: the settings apply live.
-    Unchanged,
-    /// A new one, which the provider reads only when it starts.
-    Replaced,
-}
-
 /// When the agent answers in a routed channel.
 const MODES: [(&str, DiscordActivation, DiscordConversation); 4] = [
     (
@@ -109,28 +101,51 @@ const MODES: [(&str, DiscordActivation, DiscordConversation); 4] = [
 ];
 
 /// Asks for the bot token, then the server, channels and people, and writes
-/// the token and the provider's settings. `connect` gives a Discord client
-/// for a token. Keeping saved settings changes nothing.
+/// the provider's settings, naming the token's file. `connect` gives a
+/// Discord client for a token. Keeping saved settings changes nothing.
+///
+/// The settings are validated whole before anything is written. A token
+/// other than the one they name goes to a new private file first, and the
+/// settings naming it then replace the file in place at once: until then the
+/// previous settings and the token they name stay as they were. A new token
+/// file is a field only a restart applies.
 ///
 /// # Errors
 ///
-/// Returns an error when the input ends, Discord cannot be reached, or the
-/// files cannot be written; nothing is written before every answer is in.
+/// Returns an error when the provider is disabled or its settings do not
+/// read, the input ends, Discord cannot be reached, the settings would not be
+/// valid, or the files cannot be written; nothing is written before every
+/// answer is in.
 pub(crate) async fn setup(
     prompt: &mut impl Questions,
     loaded: &LoadedConfig,
     provider: &str,
     connect: impl Fn(String) -> DiscordHttp,
-) -> Result<Token> {
-    let saved = loaded
-        .credential(TOKEN)
-        .ok()
-        .filter(|token| !token.is_empty());
+) -> Result<()> {
+    if !loaded.provider(provider, ProviderRole::Interface)?.enabled {
+        bail!(
+            "{provider} is disabled in carillon.toml; enable it with `carillon provider \
+             {provider} enable`, then run setup again"
+        );
+    }
+    let existing = if loaded.provider_config_path(provider)?.exists() {
+        Some(DiscordConfig::read(loaded, provider)?)
+    } else {
+        None
+    };
+    let saved = read_token_file(&existing.as_ref().map_or_else(
+        || loaded.root.join(BOT_TOKEN_FILE),
+        |settings| settings.bot_token_path(&loaded.root),
+    ))
+    .ok()
+    .filter(|token| !token.is_empty());
     if saved.is_some()
-        && DiscordConfig::load(loaded, provider).is_ok()
+        && existing
+            .as_ref()
+            .is_some_and(|settings| settings.validate(loaded, provider).is_ok())
         && prompt.confirm("Keep the saved Discord bot and settings?", true)?
     {
-        return Ok(Token::Unchanged);
+        return Ok(());
     }
     prompt.say(
         "Paste the bot token from the Bot page of your application in the Discord Developer \
@@ -161,22 +176,36 @@ pub(crate) async fn setup(
     let users: Vec<String> = people.iter().map(|(id, _)| id.clone()).collect();
     // Only the writes hold the maintenance lock, never the questions; the
     // settings file is reread under it, keeping what was tuned meanwhile.
-    let maintenance = MaintenanceLock::acquire_unless_held(&loaded.root)
-        .context("the bot token and Discord settings were not changed")?;
-    let path = loaded
-        .root
-        .join("credentials")
-        .join(format!("{TOKEN}.token"));
-    atomic_write(&path, format!("{token}\n").as_bytes(), 0o600)
-        .with_context(|| format!("write {}", path.display()))?;
-    configure(
+    let unchanged = "the Discord settings and the bot token they name were not changed";
+    let maintenance = MaintenanceLock::acquire_unless_held(&loaded.root).context(unchanged)?;
+    let mut settings = admitted(
         loaded,
         provider,
         &guild_id.to_string(),
         &bot.id.to_string(),
         &users,
         &routes,
-    )?;
+    )
+    .context(unchanged)?;
+    // Another token gets a file of its own, so the file the settings in
+    // place name is never rewritten.
+    let changed = read_token_file(&settings.bot_token_path(&loaded.root))
+        .ok()
+        .is_none_or(|named| named != token);
+    if changed {
+        settings.bot_token_file = Some(PathBuf::from(format!(
+            "credentials/discord-bot.{}.token",
+            Uuid::now_v7().simple()
+        )));
+    }
+    settings.validate(loaded, provider).context(unchanged)?;
+    if changed {
+        let path = settings.bot_token_path(&loaded.root);
+        publish(&path, format!("{token}\n").as_bytes(), 0o600)
+            .with_context(|| format!("write {}", path.display()))
+            .context(unchanged)?;
+    }
+    settings.write(loaded, provider)?;
     drop(maintenance);
     prompt.say(&format!(
         "{} answers {} in {} on {guild}: {}.",
@@ -193,11 +222,7 @@ pub(crate) async fn setup(
             .join(", "),
         MODES[mode].0.to_lowercase()
     ))?;
-    Ok(if saved.is_some_and(|saved| saved != token) {
-        Token::Replaced
-    } else {
-        Token::Unchanged
-    })
+    Ok(())
 }
 
 /// The bot token, asked until Discord accepts it, with its client and user.

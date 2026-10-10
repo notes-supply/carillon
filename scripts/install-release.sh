@@ -233,7 +233,9 @@ else
 fi
 sync -f -- "$CARILLON_HOME"
 if [ "$MODE" = setup ]; then
-  [ -e "$CARILLON_HOME/credentials/discord-bot.token" ] || install -m 0600 /dev/null "$CARILLON_HOME/credentials/discord-bot.token"
+  # Guided setup names its own token file; otherwise the token goes here by hand.
+  [ "$GUIDED" -eq 1 ] || [ -e "$CARILLON_HOME/credentials/discord-bot.token" ] ||
+    install -m 0600 /dev/null "$CARILLON_HOME/credentials/discord-bot.token"
   chmod 0700 "$CARILLON_HOME" "$CARILLON_HOME/credentials" "$CARILLON_HOME/providers" \
     "$CARILLON_HOME/logs"
   chmod 0600 "$CARILLON_HOME/carillon.toml" "$CARILLON_HOME/providers"/*.toml \

@@ -324,6 +324,7 @@ pub(crate) fn discord_config(
         agent: "default".to_owned(),
         guild_id: "100".to_owned(),
         bot_user_id: "201".to_owned(),
+        bot_token_file: None,
         allowed_user_ids: vec!["200".to_owned()],
         routes: vec![DiscordRoute {
             channel_id: "300".to_owned(),

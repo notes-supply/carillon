@@ -63,12 +63,9 @@ enum Command {
         /// The provider's registry ID.
         #[arg(long)]
         provider: String,
-        /// The provider's core credential.
+        /// The provider's core credential; its settings name the bot token's.
         #[arg(long)]
         token_file: PathBuf,
-        /// The Discord bot token; required outside deterministic mode.
-        #[arg(long)]
-        discord_token_file: Option<PathBuf>,
         /// The release's bundled Discord module, served unless the settings
         /// enable a custom one.
         #[arg(long)]
@@ -215,7 +212,6 @@ pub(crate) async fn run() -> Result<()> {
             config,
             provider,
             token_file,
-            discord_token_file,
             module,
             deterministic,
         } => {
@@ -224,7 +220,6 @@ pub(crate) async fn run() -> Result<()> {
                 ServeOptions {
                     provider_id: &provider,
                     token_file: &token_file,
-                    discord_token_file: discord_token_file.as_deref(),
                     module: &module,
                     deterministic,
                 },
@@ -501,22 +496,15 @@ fn install_tools(config: &LoadedConfig, lib: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `carillon discord setup`, then has a running provider serve the settings,
-/// unless a new bot token needs it to start again.
+/// `carillon discord setup`, then has a running provider serve the settings
+/// as far as they apply live; a new bot token file is one only a restart
+/// applies.
 async fn set_up(loaded: &LoadedConfig, provider: Option<String>) -> Result<()> {
     let provider = match provider {
         Some(provider) => provider,
         None => only_interface(loaded)?,
     };
-    if setup::setup(&mut Terminal, loaded, &provider, DiscordHttp::new).await?
-        == setup::Token::Replaced
-    {
-        println!(
-            "{provider} reads a new bot token only when it starts; `carillon restart` serves it \
-             and the new settings."
-        );
-        return Ok(());
-    }
+    setup::setup(&mut Terminal, loaded, &provider, DiscordHttp::new).await?;
     let operator = Operator::new(loaded, &provider, "settings")?;
     match operator.apply_settings().await? {
         Applying::Applied(applied) => report_applied(&provider, &applied),

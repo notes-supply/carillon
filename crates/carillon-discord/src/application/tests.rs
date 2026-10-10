@@ -125,7 +125,6 @@ fn deterministic_options<'a>(token_file: &'a Path, module: &'a Path) -> ServeOpt
     ServeOptions {
         provider_id: "discord-private",
         token_file,
-        discord_token_file: None,
         module,
         deterministic: true,
     }
@@ -263,7 +262,6 @@ async fn occupied_listener_fails_before_touching_delivery_claims() -> anyhow::Re
             }),
         );
         let core = tokio::spawn(async move { axum::serve(core_listener, app).await });
-        let discord_token_file = directory.path().join("missing-discord.token");
         let failure = tokio::time::timeout(
             Duration::from_secs(2),
             super::serve(
@@ -271,7 +269,6 @@ async fn occupied_listener_fails_before_touching_delivery_claims() -> anyhow::Re
                 ServeOptions {
                     provider_id: "discord-private",
                     token_file: &token_file,
-                    discord_token_file: Some(&discord_token_file),
                     module: &module,
                     deterministic,
                 },

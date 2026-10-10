@@ -11,7 +11,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail};
-use carillon_installation::config::{LoadedConfig, ProviderRole, component_directory};
+use carillon_installation::config::{LoadedConfig, ProviderRole, absolutize, component_directory};
 use carillon_installation::{filesystem::atomic_write, maintenance::MaintenanceLock};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, watch};
@@ -28,6 +28,12 @@ pub struct DiscordConfig {
     pub guild_id: String,
     #[serde(default)]
     pub bot_user_id: String,
+    /// The bot token's file, relative to the installation unless absolute;
+    /// without it, `credentials/discord-bot.token`. Setup names a new file
+    /// whenever the token changes, so the file these settings name is never
+    /// rewritten.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_token_file: Option<PathBuf>,
     pub allowed_user_ids: Vec<String>,
     #[serde(default)]
     pub routes: Vec<DiscordRoute>,
@@ -73,6 +79,10 @@ impl ModuleSetting {
         *self == Self::default()
     }
 }
+
+/// The bot token's file when the settings name none, as for a token put
+/// there by hand.
+pub(crate) const BOT_TOKEN_FILE: &str = "credentials/discord-bot.token";
 
 const fn enabled() -> bool {
     true
@@ -320,6 +330,7 @@ impl DiscordConfig {
             agent,
             guild_id,
             bot_user_id,
+            bot_token_file: None,
             allowed_user_ids,
             routes,
             typing: enabled(),
@@ -333,6 +344,18 @@ impl DiscordConfig {
             uncertain_emoji: uncertain_emoji(),
             module: ModuleSetting::default(),
         }
+    }
+
+    /// The bot token's file these settings name, resolved against the
+    /// installation `root`.
+    #[must_use]
+    pub fn bot_token_path(&self, root: &Path) -> PathBuf {
+        absolutize(
+            root,
+            self.bot_token_file
+                .as_deref()
+                .unwrap_or(Path::new(BOT_TOKEN_FILE)),
+        )
     }
 
     /// The module these settings serve, with a custom path resolved against
@@ -385,6 +408,13 @@ impl DiscordConfig {
         }
         if !valid_snowflake(&self.bot_user_id) {
             bail!("Discord bot user ID must be an immutable snowflake ID");
+        }
+        if self
+            .bot_token_file
+            .as_ref()
+            .is_some_and(|path| path.as_os_str().is_empty())
+        {
+            bail!("bot_token_file must name the bot token's file");
         }
         if self.allowed_user_ids.is_empty() {
             bail!("Discord admission requires at least one allowlisted user ID");
@@ -453,6 +483,7 @@ impl Difference {
             agent,
             guild_id,
             bot_user_id,
+            bot_token_file,
             allowed_user_ids,
             routes,
             typing,
@@ -471,6 +502,11 @@ impl Difference {
             (*agent != serving.agent, "agent", false),
             (*guild_id != serving.guild_id, "guild_id", false),
             (*bot_user_id != serving.bot_user_id, "bot_user_id", false),
+            (
+                *bot_token_file != serving.bot_token_file,
+                "bot_token_file",
+                false,
+            ),
             (*activity != serving.activity, "activity", false),
             (*attachments != serving.attachments, "attachments", false),
             (
@@ -659,6 +695,27 @@ pub(crate) fn configure(
     allowed_user_ids: &[String],
     routes: &[DiscordRoute],
 ) -> Result<()> {
+    admitted(
+        config,
+        provider_id,
+        guild_id,
+        bot_user_id,
+        allowed_user_ids,
+        routes,
+    )?
+    .write(config, provider_id)
+}
+
+/// The settings [`configure`] writes, not yet validated: the existing file,
+/// or defaults, with these admission settings.
+pub(crate) fn admitted(
+    config: &LoadedConfig,
+    provider_id: &str,
+    guild_id: &str,
+    bot_user_id: &str,
+    allowed_user_ids: &[String],
+    routes: &[DiscordRoute],
+) -> Result<DiscordConfig> {
     let mut discord = if config.provider_config_path(provider_id)?.exists() {
         DiscordConfig::read(config, provider_id)?
     } else {
@@ -675,7 +732,7 @@ pub(crate) fn configure(
     bot_user_id.clone_into(&mut discord.bot_user_id);
     discord.allowed_user_ids = allowed_user_ids.to_vec();
     discord.routes = routes.to_vec();
-    discord.write(config, provider_id)
+    Ok(discord)
 }
 
 /// Changes the module an existing settings file declares, keeping the rest,
@@ -1108,6 +1165,37 @@ stopped = "■"
             assert!(refused.to_string().contains("module.path"), "{refused}");
         }
         assert!(toml::from_str::<super::ModuleSetting>("enable = true").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn the_bot_token_is_the_canonical_file_unless_the_settings_name_another() -> anyhow::Result<()>
+    {
+        let directory = tempfile::tempdir()?;
+        let config = installation(directory.path(), "discord-private", 45_330)?;
+        // Settings written before setup named a file, or for a token put
+        // there by hand, read the canonical one, and say nothing of it.
+        let mut discord = DiscordConfig::load(&config, "discord-private")?;
+        assert_eq!(
+            discord.bot_token_path(&config.root),
+            config.root.join("credentials/discord-bot.token")
+        );
+        assert!(
+            !fs::read_to_string(config.provider_config_path("discord-private")?)?
+                .contains("bot_token_file")
+        );
+        discord.bot_token_file = Some("credentials/discord-bot.new.token".into());
+        discord.write(&config, "discord-private")?;
+        assert_eq!(
+            DiscordConfig::load(&config, "discord-private")?.bot_token_path(&config.root),
+            config.root.join("credentials/discord-bot.new.token")
+        );
+        discord.bot_token_file = Some(std::path::PathBuf::new());
+        let refused = discord
+            .write(&config, "discord-private")
+            .err()
+            .context("named no bot token file")?;
+        assert!(refused.to_string().contains("bot_token_file"), "{refused}");
         Ok(())
     }
 
