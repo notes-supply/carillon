@@ -17,10 +17,11 @@ mod run;
 pub mod abi;
 
 /// Defines a Wasm module's entry points so the provider's host invokes
-/// `$handler`, a function of the same shape as [`handle`]. The bundled
-/// module exports [`handle`] itself; a custom module exports its own, which
-/// can delegate to [`handle`] for what it does not change. Use it once, in a
-/// `cdylib` that depends on this crate without its `bundled` feature.
+/// `$handler`, a function of the same shape as [`handle`]. This library
+/// defines none itself: the bundled module (`carillon-discord-bundled`)
+/// exports [`handle`], and a custom module exports its own, which can
+/// delegate to [`handle`] for what it does not change. Use it once, in a
+/// `cdylib`.
 #[macro_export]
 macro_rules! export {
     ($handler:path) => {
@@ -46,9 +47,6 @@ macro_rules! export {
         };
     };
 }
-
-#[cfg(feature = "bundled")]
-export!(handle);
 
 use contract::{HostReply, HostRequest, Intent, Invocation, Outcome};
 

@@ -6,15 +6,6 @@ rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
 
-[lib]
-crate-type = ["cdylib", "rlib"]
-
-[features]
-# Export `handle` as this crate's own Wasm entry points: the bundled module.
-# A custom module depends on the library without it and exports its own.
-default = ["bundled"]
-bundled = []
-
 [dependencies]
 carillon-protocol = { path = "../carillon-protocol" }
 serde.workspace = true
@@ -25,9 +16,9 @@ anyhow.workspace = true
 twilight-model.workspace = true
 twilight-validate = "0.17.0"
 
-# The guest ABI needs `unsafe extern` imports and `#[unsafe(no_mangle)]`
-# exports, which the workspace's `forbid` cannot admit. Everything else keeps
-# the workspace lint set.
+# The guest ABI needs `unsafe extern` imports, and the entry points `export!`
+# defines `#[unsafe(no_mangle)]`, which the workspace's `forbid` cannot admit.
+# Everything else keeps the workspace lint set.
 [lints.rust]
 unsafe_code = "deny"
 warnings = "deny"

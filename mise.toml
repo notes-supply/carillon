@@ -57,11 +57,7 @@ run = ["actionlint", "zizmor .github/workflows"]
 
 [tasks."build:module"]
 description = "Build the bundled and example Discord modules for the Wasm sandbox"
-# Separate builds: the example uses the module library without its exports.
-run = [
-  "cargo build --locked --profile wasm -p carillon-discord-module --target wasm32-unknown-unknown",
-  "cargo build --locked --profile wasm -p carillon-card-colours --target wasm32-unknown-unknown",
-]
+run = "cargo build --locked --profile wasm --target wasm32-unknown-unknown -p carillon-discord-bundled -p carillon-card-colours"
 
 [tasks."example:core"]
 description = "Run a durable conversation with temporary SQLite and an in-process test runtime"

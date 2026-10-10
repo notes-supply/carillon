@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/carillon-core",
     "crates/carillon-discord",
+    "crates/carillon-discord-bundled",
     "crates/carillon-discord-module",
     "crates/carillon-protocol",
     "crates/carillon-installation",

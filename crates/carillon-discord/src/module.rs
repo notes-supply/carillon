@@ -1112,7 +1112,7 @@ pub(crate) mod tests {
         let path = std::env::var_os("CARILLON_DISCORD_MODULE").map_or_else(
             || {
                 Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../target/wasm32-unknown-unknown/wasm/carillon_discord_module.wasm")
+                    .join("../../target/wasm32-unknown-unknown/wasm/carillon_discord_bundled.wasm")
             },
             PathBuf::from,
         );

@@ -11,8 +11,7 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Without `bundled`, the library exports nothing itself; this module does.
-carillon-discord-module = { path = "../../crates/carillon-discord-module", default-features = false }
+carillon-discord-module = { path = "../../crates/carillon-discord-module" }
 carillon-protocol = { path = "../../crates/carillon-protocol" }
 serde_json.workspace = true
 

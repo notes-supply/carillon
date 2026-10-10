@@ -70,7 +70,7 @@ a running installation:
 
 ```sh
 mise run build:module
-module=$PWD/target/wasm32-unknown-unknown/wasm/carillon_discord_module.wasm
+module=$PWD/target/wasm32-unknown-unknown/wasm/carillon_discord_bundled.wasm
 carillon discord module check "$module"
 carillon discord module enable "$module"
 # after the next build:

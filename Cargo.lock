@@ -329,6 +329,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "carillon-discord-bundled"
+version = "0.1.0-beta.2"
+dependencies = [
+ "carillon-discord-module",
+]
+
+[[package]]
 name = "carillon-discord-module"
 version = "0.1.0-beta.2"
 dependencies = [

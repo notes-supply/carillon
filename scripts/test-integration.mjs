@@ -31,7 +31,7 @@ const backup = join(tmpdir(), `carillon-backup-${crypto.randomUUID()}.tar.gz`);
 const binary = resolve(process.env.CARILLON_CORE_BINARY ?? "target/debug/carillon");
 const discordModule = resolve(
   process.env.CARILLON_DISCORD_MODULE ??
-    "target/wasm32-unknown-unknown/wasm/carillon_discord_module.wasm",
+    "target/wasm32-unknown-unknown/wasm/carillon_discord_bundled.wasm",
 );
 const exampleModule = resolve(
   process.env.CARILLON_EXAMPLE_MODULE ??
