@@ -89,7 +89,13 @@ pub(super) fn setup(home: &Path, options: &Options, questions: &mut impl Questio
                     "--workspace is for Pi; with T3, the agent works in the chosen project's folder"
                 );
             }
-            set_up_t3(home, options.base_port, existing, questions)?;
+            set_up_t3(
+                home,
+                options.base_port,
+                existing,
+                &provider_binary("runtime-t3")?,
+                questions,
+            )?;
         }
     }
     let discord = Command::new(provider_binary("discord")?)
@@ -178,27 +184,35 @@ fn sign_in_to_pi(home: &Path, existing: bool, questions: &mut impl Questions) ->
 }
 
 /// Asks for a T3 server, then one of its projects and models, creates the
-/// installation in that project's folder, and has the T3 runtime write its
-/// settings.
+/// installation in that project's folder, and has the T3 runtime `t3` write
+/// its settings. Saved settings are offered for keeping only when `t3`
+/// reads them and their token as its startup does.
 fn set_up_t3(
     home: &Path,
     base_port: u16,
     existing: bool,
+    t3: &Path,
     questions: &mut impl Questions,
 ) -> Result<()> {
-    if existing
-        && home.join("providers/runtime-t3.toml").exists()
-        && questions.confirm("Keep the T3 settings?", true)?
-    {
-        return Ok(());
+    if existing && home.join("providers/runtime-t3.toml").exists() {
+        let config = home.join("carillon.toml");
+        match run(t3, &["check", "--config", &config.to_string_lossy()], "") {
+            Ok(_) => {
+                if questions.confirm("Keep the T3 settings?", true)? {
+                    return Ok(());
+                }
+            }
+            Err(failure) => {
+                questions.say(&format!("The saved T3 settings cannot be kept: {failure}"))?;
+            }
+        }
     }
-    let t3 = provider_binary("runtime-t3")?;
     let (url, token, offer) = loop {
         let url = questions.answer("T3 Code's address:", Some("http://127.0.0.1:3773"))?;
         let token = questions.secret(
             "T3 token (`t3 auth session issue --label Carillon --token-only` prints one):",
         )?;
-        match run(&t3, &["discover", "--url", &url], &token) {
+        match run(t3, &["discover", "--url", &url], &token) {
             Ok(offer) => {
                 let offer: Offer = serde_json::from_str(&offer)
                     .context("read what carillon-runtime-t3 discovered")?;
@@ -264,7 +278,7 @@ fn set_up_t3(
     let _maintenance =
         MaintenanceLock::acquire_unless_held(home).context("the T3 settings were not changed")?;
     let configured = run(
-        &t3,
+        t3,
         &[
             "configure",
             "--config",
@@ -321,7 +335,7 @@ fn run(program: &Path, args: &[&str], secret: &str) -> Result<String, String> {
 mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 
-    use super::{Options, Runtime, initialize, registered_runtime, run, setup};
+    use super::{Options, Runtime, initialize, registered_runtime, run, set_up_t3, setup};
 
     #[test]
     fn a_secret_goes_on_standard_input_and_a_failure_is_its_one_line() -> anyhow::Result<()> {
@@ -413,6 +427,82 @@ mod tests {
                     )?
                     .enabled
             );
+        }
+        Ok(())
+    }
+
+    /// Questions answered up to the first that needs an answer, which ends
+    /// the run: confirmations take their default, and what was shown and
+    /// asked is kept.
+    #[derive(Default)]
+    struct Shown(Vec<String>);
+
+    impl carillon_installation::prompt::Questions for Shown {
+        fn say(&mut self, text: &str) -> anyhow::Result<()> {
+            self.0.push(text.to_owned());
+            Ok(())
+        }
+
+        fn answer(&mut self, question: &str, _: Option<&str>) -> anyhow::Result<String> {
+            self.0.push(question.to_owned());
+            anyhow::bail!("stopped at {question}")
+        }
+
+        fn secret(&mut self, question: &str) -> anyhow::Result<String> {
+            self.answer(question, None)
+        }
+
+        fn confirm(&mut self, question: &str, default: bool) -> anyhow::Result<bool> {
+            self.0.push(question.to_owned());
+            Ok(default)
+        }
+
+        fn choose(&mut self, question: &str, _: &[String], _: usize) -> anyhow::Result<usize> {
+            self.answer(question, None).map(|_| 0)
+        }
+
+        fn choose_many(
+            &mut self,
+            question: &str,
+            _: &[String],
+            _: &[usize],
+        ) -> anyhow::Result<Vec<usize>> {
+            self.answer(question, None).map(|_| Vec::new())
+        }
+    }
+
+    /// Saved T3 settings are offered for keeping only when the runtime's own
+    /// check reads them; otherwise setup says why and asks for T3 again, so
+    /// an unusable token can be replaced.
+    #[test]
+    fn saved_t3_settings_are_offered_only_when_the_runtime_reads_them() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let home = directory.path().join("home");
+        initialize(&home, directory.path(), 44_000, Runtime::T3)?;
+        std::fs::create_dir_all(home.join("providers"))?;
+        std::fs::write(home.join("providers/runtime-t3.toml"), "saved")?;
+        let program = directory.path().join("carillon-runtime-t3");
+        let expected = format!("check --config {}", home.join("carillon.toml").display());
+        for (check, shown) in [
+            ("exit 0", vec!["Keep the T3 settings?"]),
+            (
+                "echo 'error: credentials/t3.token: the T3 token file is empty' >&2; exit 1",
+                vec![
+                    "The saved T3 settings cannot be kept: credentials/t3.token: the T3 token \
+                     file is empty",
+                    "T3 Code's address:",
+                ],
+            ),
+        ] {
+            std::fs::write(
+                &program,
+                format!("#!/bin/sh\n[ \"$*\" = '{expected}' ] || exit 2\n{check}\n"),
+            )?;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))?;
+            let mut questions = Shown::default();
+            let result = set_up_t3(&home, 44_000, true, &program, &mut questions);
+            assert_eq!(questions.0, shown);
+            assert_eq!(result.is_ok(), check == "exit 0");
         }
         Ok(())
     }

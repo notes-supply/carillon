@@ -8,14 +8,15 @@ import {
   notServing,
   parseArguments,
   requiredArgument,
+  type Installation,
 } from "@carillon/runtime/installation";
 import { createT3Runtime } from "./runtime.ts";
 import packageInfo from "../package.json" with { type: "json" };
 import { join } from "node:path";
 import { text } from "node:stream/consumers";
 import { configure, discover } from "./setup.ts";
-import { loadSettings, origin } from "./settings.ts";
-import { connectT3, T3Failure } from "./t3.ts";
+import { loadSettings, origin, type T3Settings } from "./settings.ts";
+import { connectT3, T3Failure, type T3Endpoint } from "./t3.ts";
 
 async function serve(values: readonly string[]): Promise<void> {
   const args = parseArguments(values);
@@ -37,10 +38,7 @@ async function serve(values: readonly string[]): Promise<void> {
     requiredArgument(args, "token-file"),
     installation.runtime,
   );
-  const settings = await loadSettings(installation.providerFile, installation.root);
-  const t3Token = (await readFile(settings.tokenFile, "utf8")).trim();
-  if (t3Token.length === 0) throw new Error(`${settings.tokenFile}: the T3 token file is empty`);
-  const endpoint = { url: settings.url, token: t3Token };
+  const { settings, endpoint } = await saved(installation);
   // Fail closed before listening: the server must speak the verified
   // protocol and accept the credential, or this runtime does not start.
   (await connectT3(endpoint)).close();
@@ -83,6 +81,16 @@ async function serve(values: readonly string[]): Promise<void> {
   }
 }
 
+/** The saved settings and the T3 endpoint they name, as startup reads them before reaching T3. */
+async function saved(
+  installation: Installation,
+): Promise<{ settings: T3Settings; endpoint: T3Endpoint }> {
+  const settings = await loadSettings(installation.providerFile, installation.root);
+  const token = (await readFile(settings.tokenFile, "utf8")).trim();
+  if (token.length === 0) throw new Error(`${settings.tokenFile}: the T3 token file is empty`);
+  return { settings, endpoint: { url: settings.url, token } };
+}
+
 /** The T3 token, given on standard input rather than as an argument. */
 async function token(): Promise<string> {
   if (process.stdin.isTTY)
@@ -115,22 +123,11 @@ async function discoverCommand(values: readonly string[]): Promise<void> {
 async function configureCommand(values: readonly string[]): Promise<void> {
   const args = parseArguments(values);
   const url = originArgument(args);
-  const providerId = args.get("provider") ?? "runtime-t3";
-  const home = process.env["CARILLON_HOME"];
-  const config =
-    args.get("config") ?? (home === undefined ? undefined : join(home, "carillon.toml"));
-  if (config === undefined) throw new Error("--config is required outside `carillon runtime-t3`");
   const [instanceId = "", ...slug] = requiredArgument(args, "model").split("/");
   const model = slug.join("/");
   if (instanceId.length === 0 || model.length === 0)
     throw new Error("--model must be INSTANCE/MODEL, as T3 names them");
-  const installation = await loadInstallation(config, providerId);
-  if (installation === "unregistered")
-    throw new Error(
-      `${providerId} is not in carillon.toml; create the installation with \`carillon init --runtime t3\``,
-    );
-  if (installation === "disabled")
-    throw new Error(`${providerId} is disabled in carillon.toml; enable it first`);
+  const { providerId, installation } = await registered(args);
   const project = await configure(
     installation,
     { url, token: await token() },
@@ -142,6 +139,36 @@ async function configureCommand(values: readonly string[]): Promise<void> {
   );
 }
 
+/**
+ * `check`: whether the saved settings and T3 token read as startup reads
+ * them, for the installation `--config` names, or `CARILLON_HOME`'s. It
+ * reaches no T3 server and changes nothing.
+ */
+async function checkCommand(values: readonly string[]): Promise<void> {
+  const { providerId, installation } = await registered(parseArguments(values));
+  await saved(installation);
+  process.stdout.write(`${providerId}'s saved settings and T3 token read as startup reads them.\n`);
+}
+
+/** The enabled runtime `--provider` names, `runtime-t3` by default, in the installation `--config` names. */
+async function registered(
+  args: ReadonlyMap<string, string>,
+): Promise<{ providerId: string; installation: Installation }> {
+  const providerId = args.get("provider") ?? "runtime-t3";
+  const home = process.env["CARILLON_HOME"];
+  const config =
+    args.get("config") ?? (home === undefined ? undefined : join(home, "carillon.toml"));
+  if (config === undefined) throw new Error("--config is required outside `carillon runtime-t3`");
+  const installation = await loadInstallation(config, providerId);
+  if (installation === "unregistered")
+    throw new Error(
+      `${providerId} is not in carillon.toml; create the installation with \`carillon init --runtime t3\``,
+    );
+  if (installation === "disabled")
+    throw new Error(`${providerId} is disabled in carillon.toml; enable it first`);
+  return { providerId, installation };
+}
+
 /** A setup failure as one line, saying which side refused. */
 function explained(failure: unknown): string {
   if (failure instanceof T3Failure && failure.kind === "refused")
@@ -151,10 +178,11 @@ function explained(failure: unknown): string {
   return failure instanceof Error ? failure.message : String(failure);
 }
 
+const commands = { discover: discoverCommand, configure: configureCommand, check: checkCommand };
 const [command, ...rest] = process.argv.slice(2);
-if (command === "discover" || command === "configure") {
+if (command === "discover" || command === "configure" || command === "check") {
   try {
-    await (command === "discover" ? discoverCommand(rest) : configureCommand(rest));
+    await commands[command](rest);
   } catch (failure) {
     process.stderr.write(`error: ${explained(failure)}\n`);
     process.exitCode = 1;

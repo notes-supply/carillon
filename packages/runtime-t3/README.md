@@ -28,7 +28,9 @@ carillon runtime-t3 configure --url http://127.0.0.1:3773 \
 refuses while an update or backup runs. A token other than the one the
 settings name goes to a new private file in `credentials/` first, which the
 new settings then name; until they replace the old ones, those keep their
-token.
+token. `carillon runtime-t3 check` reads the saved settings and token as
+startup does, without reaching T3; setup offers to keep them only when it
+passes.
 The token is read from standard input only. Edit the settings file for a thread title prefix or the
 model's options:
 

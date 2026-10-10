@@ -279,6 +279,42 @@ it("gives a new token a file of its own and leaves settings naming a token writt
   expect((await readFile(first.tokenFile, "utf8")).trim()).toBe(fake.token);
 });
 
+it("checks the saved settings and T3 token as startup reads them, reaching no T3", async () => {
+  const { root, config } = await installation();
+  const providerFile = join(root, "providers", "runtime-t3.toml");
+  const tokenFile = join(root, "credentials", "t3.token");
+  // Nothing listens at this address: the check reads files only.
+  const settings = (token: string) =>
+    [
+      'url = "http://127.0.0.1:1"',
+      `token_file = "credentials/${token}"`,
+      'project_id = "agent"',
+      "[model]",
+      'instance_id = "claudeAgent"',
+      'model = "claude-sonnet-5"',
+    ].join("\n");
+  await writeFile(tokenFile, "saved-token\n");
+  await writeFile(providerFile, settings("t3.token"));
+  const usable = await cli(["check", "--config", config], "");
+  expect(usable.status, usable.stderr).toBe(0);
+
+  for (const [unusable, reason] of [
+    [() => writeFile(tokenFile, "\n"), /t3\.token: the T3 token file is empty/u],
+    [() => writeFile(providerFile, settings("missing.token")), /missing\.token/u],
+    [
+      () => writeFile(providerFile, 'url = "saved-token\nproject_id ='),
+      /runtime-t3\.toml: invalid TOML at line /u,
+    ],
+  ] as const) {
+    await unusable();
+    const refused = await cli(["check", "--config", config], "");
+    expect(refused.status).toBe(1);
+    // One short line, quoting nothing from the files.
+    expect(refused.stderr).toMatch(new RegExp(`^error: .*${reason.source}.*\\n$`, "u"));
+    expect(refused.stderr).not.toContain("saved-token");
+  }
+});
+
 /** The CLI with `input` on standard input; the fake T3 serves from this process meanwhile. */
 async function cli(
   args: readonly string[],
