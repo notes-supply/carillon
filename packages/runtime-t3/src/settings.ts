@@ -72,6 +72,11 @@ export async function readSettings(path: string): Promise<SettingsFile | undefin
       return undefined;
     throw failure;
   }
+  return parseSettings(path, text);
+}
+
+/** `text` as the settings file at `path`, checked strictly. */
+export function parseSettings(path: string, text: string): SettingsFile {
   let settings: unknown;
   try {
     settings = parseToml(text);

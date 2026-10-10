@@ -1,11 +1,11 @@
 /**
  * Setting the runtime up on an existing T3 server: what the server offers,
  * and the runtime's own files for a chosen project and model. The T3 token
- * is given as a value, never as an argument, and written only to the
- * installation's credential file.
+ * is given as a value, never as an argument, and written only to a private
+ * credential file the runtime's settings name.
  */
-import { open, realpath, rename, rm } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { open, readFile, realpath, rename, rm } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import type { AvailableModel } from "@carillon/protocol";
 import type { Installation } from "@carillon/runtime/installation";
 import { stringify } from "smol-toml";
@@ -13,7 +13,7 @@ import { Type } from "typebox";
 import { Check } from "typebox/value";
 import { ORCHESTRATION_PROTOCOL, RPC } from "./contracts.ts";
 import { catalog } from "./models.ts";
-import { loadSettings, readSettings } from "./settings.ts";
+import { parseSettings, readSettings } from "./settings.ts";
 import { connectT3, DEFAULT_TIMEOUT_MS, T3Failure, type Connect, type T3Endpoint } from "./t3.ts";
 
 /** A T3 project: the agent works in its workspace. */
@@ -94,13 +94,16 @@ async function projects(endpoint: T3Endpoint): Promise<Project[]> {
 }
 
 /**
- * Writes the runtime's files for `choice` on the server at `endpoint`: the
- * token to `credentials/t3.token` and the settings to the runtime's own
- * file, then reads the settings back as the runtime does. The server must
- * offer the project, rooted at the agent's workspace, and the model. Settings
- * already there keep their title, and their model's options while the model
- * stays the same; settings that do not read as valid are refused before
- * anything is written. Returns the project.
+ * Writes the runtime's settings for `choice` on the server at `endpoint`,
+ * naming the token's file. The server must offer the project, rooted at the
+ * agent's workspace, and the model. Settings already there keep their title,
+ * and their model's options while the model stays the same; settings that do
+ * not read as valid are refused before anything is written.
+ *
+ * The new settings are checked as the runtime reads them first. A token
+ * other than the one they name goes to a new private file, and the settings
+ * naming it then replace the file in place at once: until then the previous
+ * settings and the token they name stay as they were. Returns the project.
  */
 export async function configure(
   installation: Installation,
@@ -110,7 +113,7 @@ export async function configure(
 ): Promise<Project> {
   const existing = await readSettings(installation.providerFile).catch((failure: unknown) => {
     throw new Error(
-      `${failure instanceof Error ? failure.message : String(failure)}; nothing was changed: correct or remove it, then configure again`,
+      `${reason(failure)}; nothing was changed: correct or remove it, then configure again`,
     );
   });
   const offer = await discover(endpoint, connect);
@@ -128,30 +131,60 @@ export async function configure(
     )
   )
     throw new Error(`T3 offers no usable model ${choice.instanceId}/${choice.model}`);
-  await publish(join(installation.root, "credentials", "t3.token"), `${endpoint.token}\n`);
-  await publish(
-    installation.providerFile,
-    stringify({
-      url: endpoint.url,
-      token_file: "credentials/t3.token",
-      project_id: project.id,
-      title: existing?.title,
-      model: {
-        instance_id: choice.instanceId,
-        model: choice.model,
-        // Options are the model's own; another model starts from its defaults.
-        options:
-          existing?.model.instance_id === choice.instanceId && existing.model.model === choice.model
-            ? existing.model.options
-            : undefined,
+  // Another token gets a file of its own, so the file the settings in place
+  // name is never rewritten. One that cannot be read is not the same token.
+  const named =
+    existing === undefined
+      ? undefined
+      : await readFile(resolve(installation.root, existing.token_file), "utf8").then(
+          (text) => text.trim(),
+          () => undefined,
+        );
+  const tokenFile =
+    existing !== undefined && named === endpoint.token
+      ? existing.token_file
+      : `credentials/t3.${crypto.randomUUID()}.token`;
+  const unchanged = "the T3 settings and the token they name were not changed";
+  const settings = stringify({
+    url: endpoint.url,
+    token_file: tokenFile,
+    project_id: project.id,
+    title: existing?.title,
+    model: {
+      instance_id: choice.instanceId,
+      model: choice.model,
+      // Options are the model's own; another model starts from its defaults.
+      options:
+        existing?.model.instance_id === choice.instanceId && existing.model.model === choice.model
+          ? existing.model.options
+          : undefined,
+    },
+  });
+  try {
+    parseSettings(installation.providerFile, settings);
+  } catch (failure) {
+    throw new Error(`${unchanged}: ${reason(failure)}`);
+  }
+  if (tokenFile !== existing?.token_file)
+    await publish(resolve(installation.root, tokenFile), `${endpoint.token}\n`).catch(
+      (failure: unknown) => {
+        throw new Error(`${unchanged}: ${reason(failure)}`);
       },
-    }),
-  );
-  await loadSettings(installation.providerFile, installation.root);
+    );
+  await publish(installation.providerFile, settings).catch((failure: unknown) => {
+    throw failure instanceof Unsynced ? failure : new Error(`${unchanged}: ${reason(failure)}`);
+  });
   return project;
 }
 
-/** Replaces `path` with `text`, readable only by the owner, durably. */
+/** A publication in place whose directory did not sync, so a crash may still undo it. */
+class Unsynced extends Error {}
+
+/**
+ * Replaces `path` with `text`, readable only by the owner, durably. A failure
+ * before the rename leaves `path` as it was; {@link Unsynced} leaves the new
+ * text in place.
+ */
 async function publish(path: string, text: string): Promise<void> {
   const temporary = `${path}.${crypto.randomUUID()}.tmp`;
   const file = await open(temporary, "wx", 0o600);
@@ -167,10 +200,18 @@ async function publish(path: string, text: string): Promise<void> {
     await rm(temporary, { force: true });
     throw failure;
   }
-  const directory = await open(dirname(path), "r");
   try {
-    await directory.sync();
-  } finally {
-    await directory.close();
+    const directory = await open(dirname(path), "r");
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
+  } catch (failure) {
+    throw new Unsynced(`${path}: changed, but not confirmed durable: ${reason(failure)}`);
   }
+}
+
+function reason(failure: unknown): string {
+  return failure instanceof Error ? failure.message : String(failure);
 }

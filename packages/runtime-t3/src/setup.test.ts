@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadInstallation, type Installation } from "@carillon/runtime/installation";
@@ -152,13 +152,16 @@ it("keeps the title on a rerun, and the model's options while the model stays th
   });
   expect((await readFile(settings.tokenFile, "utf8")).trim()).toBe("rotated-token");
 
-  // Another model starts from its own defaults; the title stays.
+  // Another model starts from its own defaults; the title stays, and so does
+  // the token's file, the token being the same.
+  const tokenFile = settings.tokenFile;
   await configure(
     runtime,
     { url: moved.url, token: moved.token },
     { ...sonnet, model: "claude-haiku-4-5" },
   );
   settings = await loadSettings(runtime.providerFile, runtime.root);
+  expect(settings.tokenFile).toBe(tokenFile);
   expect(settings.title).toBe("Notes");
   expect(settings.selection).toEqual({
     instanceId: "claudeAgent",
@@ -210,6 +213,70 @@ it("refuses settings that do not read as valid before writing anything", async (
     expect(await readFile(runtime.providerFile, "utf8")).toBe(malformed);
     expect(await readdir(join(root, "credentials"))).toEqual([]);
   }
+});
+
+it("gives a new token a file of its own and leaves settings naming a token written before them", async () => {
+  const fake = await fakeT3();
+  const { root, workspace, config } = await installation();
+  const runtime = await loaded(config);
+  fake.projects = [{ id: "agent", title: "Agent", workspaceRoot: workspace }];
+  const choice = { projectId: "agent", instanceId: "claudeAgent", model: "claude-sonnet-5" };
+  await configure(runtime, { url: fake.url, token: fake.token }, choice);
+  const first = await loadSettings(runtime.providerFile, root);
+  const previous = await readFile(runtime.providerFile, "utf8");
+  const credentials = join(root, "credentials");
+  const providers = join(root, "providers");
+  const tokens = async () => (await readdir(credentials)).sort();
+  const kept = await tokens();
+  const moved = await fakeT3("rotated-token");
+  moved.projects = fake.projects;
+  const rotated = { url: moved.url, token: moved.token };
+  /** Configuring the rotated token with `directory` at `mode`: how it failed. */
+  const failing = async (directory: string, mode: number): Promise<string> => {
+    await chmod(directory, mode);
+    try {
+      return await configure(runtime, rotated, choice).then(
+        () => "configured",
+        (failure: unknown) => (failure instanceof Error ? failure.message : String(failure)),
+      );
+    } finally {
+      await chmod(directory, 0o700);
+    }
+  };
+
+  // Settings that would not be valid are refused before any token is written.
+  await expect(
+    configure(runtime, { url: `${moved.url}/t3`, token: moved.token }, choice),
+  ).rejects.toThrow(/^the T3 settings and the token they name were not changed: .*\/url must be/u);
+  expect(await readFile(runtime.providerFile, "utf8")).toBe(previous);
+  expect(await tokens()).toEqual(kept);
+
+  // A token file that cannot be written leaves the settings as they were.
+  expect(await failing(credentials, 0o500)).toMatch(
+    /^the T3 settings and the token they name were not changed: /u,
+  );
+  expect(await readFile(runtime.providerFile, "utf8")).toBe(previous);
+  expect(await tokens()).toEqual(kept);
+
+  // Settings that cannot replace the file leave it naming the old token; the
+  // new token's file is kept, named by nothing.
+  expect(await failing(providers, 0o500)).toMatch(
+    /^the T3 settings and the token they name were not changed: /u,
+  );
+  expect(await readFile(runtime.providerFile, "utf8")).toBe(previous);
+  expect((await tokens()).length).toBe(kept.length + 1);
+
+  // Settings that replace the file but whose directory cannot be synced are
+  // in place, naming the new token's file, which was synced first; a crash
+  // could bring back only the previous settings, naming the old token's file,
+  // which nothing changed.
+  expect(await failing(providers, 0o300)).toMatch(
+    /runtime-t3\.toml: changed, but not confirmed durable: /u,
+  );
+  const replaced = await loadSettings(runtime.providerFile, root);
+  expect(replaced.tokenFile).not.toBe(first.tokenFile);
+  expect((await readFile(replaced.tokenFile, "utf8")).trim()).toBe("rotated-token");
+  expect((await readFile(first.tokenFile, "utf8")).trim()).toBe(fake.token);
 });
 
 /** The CLI with `input` on standard input; the fake T3 serves from this process meanwhile. */
