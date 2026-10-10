@@ -58,14 +58,22 @@ async function main(values: readonly string[]): Promise<void> {
   // The check is the runtime's own startup check: Pi is signed in and its
   // default model is available. Nothing listens.
   if (args.has("check")) {
-    const runtime = await createPiRuntime({
-      workspace: config.workspace,
-      stateDirectory,
-      sessionDirectory,
-      allowModelNetwork: true,
-      inlineImages,
-    });
-    await runtime.close();
+    try {
+      const runtime = await createPiRuntime({
+        workspace: config.workspace,
+        stateDirectory,
+        sessionDirectory,
+        allowModelNetwork: true,
+        inlineImages,
+      });
+      await runtime.close();
+    } catch (failure) {
+      process.stderr.write(
+        `Pi is not ready: ${failure instanceof Error ? failure.message : String(failure)}\n`,
+      );
+      process.exitCode = 1;
+      return;
+    }
     process.stdout.write("Pi is signed in and has a default model.\n");
     return;
   }

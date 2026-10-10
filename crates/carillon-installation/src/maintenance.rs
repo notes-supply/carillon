@@ -59,6 +59,33 @@ impl MaintenanceLock {
     pub fn try_acquire(home: &Path) -> Result<Option<Self>> {
         Ok(try_lock(&Self::path(home))?.map(|file| Self { _file: file }))
     }
+
+    /// Take the lock for a short change, unless [`Self::HELD_FOR`] says the
+    /// caller already holds it for this installation, in which case nothing
+    /// is taken and `None` returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when another operation holds the lock or its file
+    /// cannot be opened.
+    pub fn acquire_unless_held(home: &Path) -> Result<Option<Self>> {
+        if held_for(home, std::env::var_os(Self::HELD_FOR).as_deref()) {
+            return Ok(None);
+        }
+        Self::acquire(home).map(Some)
+    }
+}
+
+/// Whether `held`, the value of [`MaintenanceLock::HELD_FOR`], names the
+/// installation at `home`.
+fn held_for(home: &Path, held: Option<&std::ffi::OsStr>) -> bool {
+    held.is_some_and(|held| {
+        let held = Path::new(held);
+        match (held.canonicalize(), home.canonicalize()) {
+            (Ok(held), Ok(home)) => held == home,
+            _ => held == home,
+        }
+    })
 }
 
 /// Exclusive, non-blocking lock over the owner's Carillon user units in
@@ -157,7 +184,21 @@ fn try_lock(path: &Path) -> Result<Option<fs::File>> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
+
     use super::MaintenanceLock;
+
+    #[test]
+    fn only_the_installation_named_holds_its_lock_for_a_child() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let home = directory.path();
+        assert!(super::held_for(home, Some(home.as_os_str())));
+        // The same installation, however the caller spelt it.
+        assert!(super::held_for(home, Some(home.join(".").as_os_str())));
+        assert!(!super::held_for(home, Some(OsStr::new("/elsewhere"))));
+        assert!(!super::held_for(home, None));
+        Ok(())
+    }
 
     #[test]
     fn one_holder_at_a_time_until_released() -> anyhow::Result<()> {

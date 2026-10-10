@@ -4,6 +4,7 @@ mod cli;
 mod drain;
 mod http;
 mod operations;
+mod setup;
 mod update;
 
 /// Run the installed application's command-line entry point.

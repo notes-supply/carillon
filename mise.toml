@@ -96,9 +96,9 @@ depends = ["install"]
 run = "scripts/package-release.sh"
 
 [tasks."test:install"]
-description = "Build and test the release installation in a temporary home"
+description = "Test the public installer, then build and test the release installation"
 depends = ["package"]
-run = "scripts/test-install.sh"
+run = ["scripts/test-bootstrap.sh", "scripts/test-install.sh"]
 
 [tasks."example:discord"]
 description = "Run Discord admission and model presentation without a gateway"

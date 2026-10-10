@@ -686,8 +686,8 @@ pub(crate) fn declare_module(
     provider_id: &str,
     change: impl FnOnce(&mut ModuleSetting),
 ) -> Result<()> {
-    let _maintenance =
-        MaintenanceLock::acquire(&config.root).context("the settings file was not changed")?;
+    let _maintenance = MaintenanceLock::acquire_unless_held(&config.root)
+        .context("the settings file was not changed")?;
     let mut discord = DiscordConfig::read(config, provider_id)?;
     change(&mut discord.module);
     discord.write(config, provider_id)

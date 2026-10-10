@@ -35,6 +35,8 @@ function lanesOf(path) {
     /^(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|tsconfig\.json)$/u.test(path)
   )
     return ["ts", "release"];
+  // The public installer, which the release lane tests.
+  if (path === "install.sh") return ["release"];
   if (path.startsWith("scripts/") || path.startsWith("deploy/")) {
     return /\.(json|mjs|ts)$/u.test(path) ? ["ts", "release"] : ["release"];
   }

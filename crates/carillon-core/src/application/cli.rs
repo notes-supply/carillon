@@ -15,6 +15,7 @@ use carillon_installation::{
     config::{LoadedConfig, RELEASE_VERSION},
     home,
     maintenance::MaintenanceLock,
+    prompt::Terminal,
 };
 use carillon_protocol::model::{TurnInspection, TurnSummary};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -31,6 +32,7 @@ use super::{
         Action, Activity, Applying, HeldUnits, Services, apply_registry, logs, operator_get,
         operator_url, print_health, registry_status, status, wait_until_healthy,
     },
+    setup::{Options as SetupOptions, setup},
     update::update,
 };
 
@@ -99,6 +101,19 @@ enum Command {
         /// The runtime the agent runs on; only it is registered.
         #[arg(long, value_enum, default_value_t = Runtime::Pi)]
         runtime: Runtime,
+    },
+    /// Set up an installation at the terminal: the runtime, then Discord.
+    /// A rerun keeps what is already set up when asked to.
+    Setup {
+        /// The agent's folder with Pi (default: your home). With T3, the
+        /// chosen project's folder.
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        #[arg(long, default_value_t = 43_800)]
+        base_port: u16,
+        /// The runtime, instead of asking.
+        #[arg(long, value_enum)]
+        runtime: Option<Runtime>,
     },
     /// Run the core service with an explicit registry.
     Core {
@@ -232,6 +247,19 @@ pub(crate) async fn run() -> Result<()> {
             let path = init(&home()?, &workspace, base_port, runtime)?;
             println!("{}", path.display());
         }
+        Command::Setup {
+            workspace,
+            base_port,
+            runtime,
+        } => setup(
+            &home()?,
+            &SetupOptions {
+                workspace,
+                base_port,
+                runtime,
+            },
+            &mut Terminal,
+        )?,
         Command::External(arguments) => forward(&arguments, &home()?)?,
         Command::Status => print_pretty(&status(&load(&home()?)?).await?)?,
         Command::Check => {
@@ -406,7 +434,7 @@ fn forward(arguments: &[OsString], home: &Path) -> Result<()> {
 /// The bundle's own providers sit beside this binary and take precedence; a
 /// provider installed independently is found on `PATH`, which replacing the
 /// bundle never touches.
-fn provider_binary(name: &str) -> Result<PathBuf> {
+pub(super) fn provider_binary(name: &str) -> Result<PathBuf> {
     let executable = std::env::current_exe()?;
     let own = executable
         .parent()

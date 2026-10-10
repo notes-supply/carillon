@@ -13,6 +13,8 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use carillon_installation::{
     config::{LoadedConfig, ProviderRole, RELEASE_VERSION},
     home, loopback,
+    maintenance::MaintenanceLock,
+    prompt::Terminal,
 };
 use clap::{Parser, Subcommand};
 use reqwest::{Method, StatusCode};
@@ -26,7 +28,9 @@ use crate::{
     operations::{
         self, ATTACHMENT_BYTES, ATTACHMENT_COUNT, Messages, Operation, OperationError, Upload,
     },
+    setup,
 };
+use twilight_http::Client as DiscordHttp;
 
 /// Status requests only read.
 const STATUS_TIMEOUT: Duration = Duration::from_secs(10);
@@ -72,6 +76,13 @@ enum Command {
         /// Serve local simulation endpoints instead of connecting to Discord.
         #[arg(long)]
         deterministic: bool,
+    },
+    /// Ask for the bot token, then the server, channels and people the agent
+    /// answers, and write the token and the provider's admission settings.
+    Setup {
+        /// Registry ID of the Discord instance; inferred when only one is registered.
+        #[arg(long)]
+        provider: Option<String>,
     },
     /// Write the provider's admission settings, keeping tuned feedback
     /// settings, then have a running provider serve them when they apply live.
@@ -220,6 +231,7 @@ pub(crate) async fn run() -> Result<()> {
             )
             .await?;
         }
+        Command::Setup { provider } => set_up(&installation()?, provider).await?,
         Command::Configure {
             provider,
             guild_id,
@@ -229,6 +241,8 @@ pub(crate) async fn run() -> Result<()> {
         } => {
             let loaded = installation()?;
             let provider = instance(&loaded, provider)?;
+            let maintenance = MaintenanceLock::acquire_unless_held(&loaded.root)
+                .context("the Discord settings were not changed")?;
             configure(
                 &loaded,
                 &provider,
@@ -237,6 +251,7 @@ pub(crate) async fn run() -> Result<()> {
                 &user_id,
                 &route,
             )?;
+            drop(maintenance);
             println!("{}", loaded.provider_config_path(&provider)?.display());
             serve_configured(&loaded, &provider).await?;
         }
@@ -445,7 +460,7 @@ fn install_workspace_skill(workspace: &Path, lib: &Path, invocation: Option<&str
 fn install_tools(config: &LoadedConfig, lib: &Path) -> Result<()> {
     use carillon_installation::{
         filesystem::{publish, sync_ancestors},
-        maintenance::{MaintenanceLock, ServiceLock},
+        maintenance::ServiceLock,
     };
     let _maintenance = MaintenanceLock::acquire(&config.root)?;
     // Core cannot start while this is held, nor serve while it is taken.
@@ -478,6 +493,45 @@ fn install_tools(config: &LoadedConfig, lib: &Path) -> Result<()> {
         root.display()
     );
     Ok(())
+}
+
+/// `carillon discord setup`, then has a running provider serve the settings.
+async fn set_up(loaded: &LoadedConfig, provider: Option<String>) -> Result<()> {
+    let provider = match provider {
+        Some(provider) => provider,
+        None => only_interface(loaded)?,
+    };
+    setup::setup(&mut Terminal, loaded, &provider, DiscordHttp::new).await?;
+    let operator = Operator::new(loaded, &provider, "settings")?;
+    match operator.apply_settings().await? {
+        Applying::Applied(applied) => report_applied(&provider, &applied),
+        Applying::Refused(refusal) => println!(
+            "{provider} keeps serving its earlier settings: {refusal}. `carillon restart` serves \
+             the new ones."
+        ),
+        // A stopped provider reads them when it starts.
+        Applying::Unreachable => {}
+    }
+    Ok(())
+}
+
+/// The only interface provider registered, which setup gives its first
+/// settings.
+fn only_interface(config: &LoadedConfig) -> Result<String> {
+    let interfaces: Vec<&str> = config
+        .value
+        .providers
+        .iter()
+        .filter(|provider| provider.role == ProviderRole::Interface)
+        .map(|provider| provider.id.as_str())
+        .collect();
+    match interfaces.as_slice() {
+        [only] => Ok((*only).to_owned()),
+        several => bail!(
+            "choose the Discord instance to set up with --provider from: {}",
+            several.join(", ")
+        ),
+    }
 }
 
 /// The Discord instance an operator action names, or the only interface

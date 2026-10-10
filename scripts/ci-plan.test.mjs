@@ -23,6 +23,7 @@ it("selects each language with the release it ships in", () => {
   expect(lanes(["packages/runtime-t3/src/runtime.ts"])).toEqual(["release", "ts"]);
   expect(lanes(["pnpm-lock.yaml"])).toEqual(["release", "ts"]);
   expect(lanes(["scripts/package-release.sh"])).toEqual(["release"]);
+  expect(lanes(["install.sh"])).toEqual(["release"]);
   expect(lanes(["scripts/test-integration.mjs"])).toEqual(["release", "ts"]);
   expect(lanes(["licenses/bun.md"])).toEqual(["release"]);
 });
