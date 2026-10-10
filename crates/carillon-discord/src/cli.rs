@@ -5,7 +5,7 @@
 use std::{
     fs,
     io::Read as _,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     time::Duration,
 };
 
@@ -690,7 +690,13 @@ async fn check_declared(
 /// it does: the application's own files are replaced by an update.
 fn in_application(loaded: &LoadedConfig, path: &Path) -> Option<PathBuf> {
     let application = loaded.root.join("app");
-    if let Ok(relative) = path.strip_prefix(&application) {
+    // A `..` can lead back out of the application, so only a path without
+    // one is decided by its spelling; otherwise the files themselves decide.
+    if let Ok(relative) = path.strip_prefix(&application)
+        && !relative
+            .components()
+            .any(|part| part == Component::ParentDir)
+    {
         return Some(relative.to_path_buf());
     }
     let (application, path) = (application.canonicalize().ok()?, path.canonicalize().ok()?);
@@ -1799,6 +1805,31 @@ mod tests {
         fs::remove_file(release.join(shipped))?;
         let refusal = check(declare(&installed)?).await.err().unwrap_or_default();
         assert!(refusal.contains("read Discord module"), "{refusal}");
+
+        // A detour that stays inside the application is still the release's.
+        fs::write(release.join(shipped), &usable)?;
+        fs::write(&installed, b"\0asm old contract")?;
+        check(declare(
+            &config
+                .root
+                .join("app/lib/../lib/examples/card-colours.wasm"),
+        )?)
+        .await
+        .map_err(anyhow::Error::msg)?;
+        // One that leads out of it is the owner's file, never the release's
+        // path spelt the same way.
+        let modules = config.root.join("modules");
+        fs::create_dir_all(&modules)?;
+        fs::create_dir_all(directory.path().join("modules"))?;
+        fs::write(modules.join("custom.wasm"), b"\0asm broken")?;
+        fs::write(directory.path().join("modules/custom.wasm"), &usable)?;
+        let escaping = Path::new("app/../modules/custom.wasm");
+        let refusal = check(declare(escaping)?).await.err().unwrap_or_default();
+        assert!(refusal.contains("cannot serve"), "{refusal}");
+        fs::write(modules.join("custom.wasm"), &usable)?;
+        check(declare(escaping)?)
+            .await
+            .map_err(anyhow::Error::msg)?;
 
         // A module of the owner's own is checked as it is, whatever the
         // release ships.
