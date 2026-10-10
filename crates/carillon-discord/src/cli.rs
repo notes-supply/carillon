@@ -776,8 +776,10 @@ impl Operator {
         bail!("the Discord provider refused the request ({status}): {message}")
     }
 
-    /// Asks the provider to serve its settings file. Only its answer says
-    /// what became of that; an apply is never sent twice.
+    /// Asks the provider to serve its settings file, waiting as for any
+    /// change, since the module it declares may need Discord to register
+    /// commands first. Only its answer says what became of that; an apply
+    /// is never sent twice.
     async fn apply_settings(&self) -> Result<Applying> {
         let unconfirmed = |error: &dyn std::fmt::Display| {
             anyhow!(
@@ -786,7 +788,7 @@ impl Operator {
                 self.url
             )
         };
-        let response = match self.send(Method::POST, None, STATUS_TIMEOUT).await {
+        let response = match self.send(Method::POST, None, CHANGE_TIMEOUT).await {
             Ok(response) => response,
             Err(error) if error.is_connect() => return Ok(Applying::Unreachable),
             Err(error) => return Err(unconfirmed(&error)),
@@ -1051,6 +1053,14 @@ mod tests {
     async fn applying_provider(
         answer: Option<&'static [u8]>,
     ) -> Result<(super::Operator, tokio::task::JoinHandle<usize>)> {
+        answering_after(answer.map(<[u8]>::to_vec), std::time::Duration::ZERO).await
+    }
+
+    /// [`applying_provider`], answering each request `delay` after reading it.
+    async fn answering_after(
+        answer: Option<Vec<u8>>,
+        delay: std::time::Duration,
+    ) -> Result<(super::Operator, tokio::task::JoinHandle<usize>)> {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await?;
         let operator = super::Operator {
@@ -1070,7 +1080,8 @@ mod tests {
                     };
                     request.push(byte);
                 }
-                if let Some(answer) = answer {
+                tokio::time::sleep(delay).await;
+                if let Some(answer) = &answer {
                     let _ = stream.write_all(answer).await;
                 }
             }
@@ -1113,6 +1124,34 @@ mod tests {
             unconfirmed.to_string().contains("did not confirm"),
             "{unconfirmed}"
         );
+        assert_eq!(server.await?, 1);
+        Ok(())
+    }
+
+    /// An apply that registers a changed module's commands can take longer
+    /// than a status read; it is waited for as a change, and sent once.
+    #[tokio::test]
+    async fn an_apply_slower_than_a_status_read_is_still_confirmed() -> Result<()> {
+        let summary =
+            |digest: &str| json!({"source": "bundled", "commands": ["model"], "digest": digest});
+        let body = json!({
+            "changed": ["module"],
+            "module": {"serving": summary("new"), "previous": summary("old"), "discord": "registered"},
+        })
+        .to_string();
+        let answer = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let (operator, server) = answering_after(
+            Some(answer.into_bytes()),
+            super::STATUS_TIMEOUT + std::time::Duration::from_secs(1),
+        )
+        .await?;
+        let super::Applying::Applied(applied) = operator.apply_settings().await? else {
+            anyhow::bail!("a slow apply was not confirmed");
+        };
+        assert_eq!(applied.changed, ["module"]);
         assert_eq!(server.await?, 1);
         Ok(())
     }
