@@ -13,7 +13,9 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use carillon_installation::{
-    config::LoadedConfig, maintenance::MaintenanceLock, prompt::Questions,
+    config::{LoadedConfig, ProviderRole},
+    maintenance::MaintenanceLock,
+    prompt::Questions,
 };
 use carillon_protocol::models::AvailableModel;
 use serde::Deserialize;
@@ -101,10 +103,12 @@ pub(super) fn setup(home: &Path, options: &Options, questions: &mut impl Questio
     Ok(())
 }
 
-/// The runtime an existing installation chose.
+/// The runtime an existing installation chose. A disabled one is refused
+/// before anything opens: its own checks could never pass, and enabling it
+/// is the operator's decision.
 fn registered_runtime(home: &Path) -> Result<Runtime> {
     let config = LoadedConfig::load(&home.join("carillon.toml"))?;
-    [Runtime::Pi, Runtime::T3]
+    let runtime = [Runtime::Pi, Runtime::T3]
         .into_iter()
         .find(|runtime| runtime.id() == config.value.agent.runtime_provider)
         .with_context(|| {
@@ -112,7 +116,18 @@ fn registered_runtime(home: &Path) -> Result<Runtime> {
                 "the agent runs on {}, which setup does not set up",
                 config.value.agent.runtime_provider
             )
-        })
+        })?;
+    if !config
+        .provider(runtime.id(), ProviderRole::Runtime)?
+        .enabled
+    {
+        let id = runtime.id();
+        bail!(
+            "{id} is disabled in carillon.toml; enable it with `carillon provider {id} enable`, \
+             then run setup again"
+        );
+    }
+    Ok(runtime)
 }
 
 /// Opens Pi until it is signed in and has a default model, as the Pi
@@ -306,7 +321,7 @@ fn run(program: &Path, args: &[&str], secret: &str) -> Result<String, String> {
 mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 
-    use super::{Runtime, initialize, registered_runtime, run};
+    use super::{Options, Runtime, initialize, registered_runtime, run, setup};
 
     #[test]
     fn a_secret_goes_on_standard_input_and_a_failure_is_its_one_line() -> anyhow::Result<()> {
@@ -325,6 +340,80 @@ mod tests {
             run(&program, &["discover"], "wrong"),
             Err("T3 refused the token".to_owned())
         );
+        Ok(())
+    }
+
+    /// Questions nobody should be asked: asking any is an error that names it.
+    struct Unasked;
+
+    impl carillon_installation::prompt::Questions for Unasked {
+        fn say(&mut self, _: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn answer(&mut self, question: &str, _: Option<&str>) -> anyhow::Result<String> {
+            anyhow::bail!("asked: {question}")
+        }
+
+        fn secret(&mut self, question: &str) -> anyhow::Result<String> {
+            anyhow::bail!("asked: {question}")
+        }
+
+        fn confirm(&mut self, question: &str, _: bool) -> anyhow::Result<bool> {
+            anyhow::bail!("asked: {question}")
+        }
+
+        fn choose(&mut self, question: &str, _: &[String], _: usize) -> anyhow::Result<usize> {
+            anyhow::bail!("asked: {question}")
+        }
+
+        fn choose_many(
+            &mut self,
+            question: &str,
+            _: &[String],
+            _: &[usize],
+        ) -> anyhow::Result<Vec<usize>> {
+            anyhow::bail!("asked: {question}")
+        }
+    }
+
+    /// A rerun with the chosen runtime disabled stops before opening Pi or
+    /// asking for T3, and says how to enable it; it does not enable it.
+    #[test]
+    fn a_disabled_runtime_stops_setup_before_it_opens_anything() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        for runtime in [Runtime::Pi, Runtime::T3] {
+            let home = directory.path().join(runtime.id());
+            let config = initialize(&home, directory.path(), 44_000, runtime)?;
+            crate::application::admin::set_provider(&config, runtime.id(), false)?;
+            let options = Options {
+                workspace: None,
+                base_port: 44_000,
+                runtime: None,
+            };
+            let refusal = setup(&home, &options, &mut Unasked)
+                .err()
+                .map(|error| format!("{error:#}"))
+                .unwrap_or_default();
+            assert_eq!(
+                refusal,
+                format!(
+                    "{id} is disabled in carillon.toml; enable it with `carillon provider {id} \
+                     enable`, then run setup again",
+                    id = runtime.id()
+                )
+            );
+            // Still disabled: enabling it is the operator's decision.
+            let registry = carillon_installation::config::LoadedConfig::load(&config)?;
+            assert!(
+                !registry
+                    .provider(
+                        runtime.id(),
+                        carillon_installation::config::ProviderRole::Runtime
+                    )?
+                    .enabled
+            );
+        }
         Ok(())
     }
 
