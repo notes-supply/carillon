@@ -226,14 +226,18 @@ async fn channels(headers: HeaderMap) -> Response {
     .into_response()
 }
 
-/// A server member: `200` (the owner) and `250`, and nobody else.
-async fn member(headers: HeaderMap, Segments((_, member)): Segments<(String, String)>) -> Response {
+/// A server member: `250` in either server, and `200` (the application's
+/// owner) only in Notes.
+async fn member(
+    headers: HeaderMap,
+    Segments((guild, member)): Segments<(String, String)>,
+) -> Response {
     if !authorized(&headers) {
         return refused();
     }
-    let name = match member.as_str() {
-        "200" => "owner",
-        "250" => "friend",
+    let name = match (guild.as_str(), member.as_str()) {
+        ("100", "200") => "owner",
+        (_, "250") => "friend",
         _ => {
             return (
                 StatusCode::NOT_FOUND,
@@ -295,18 +299,26 @@ async fn refused_tokens_and_unknown_people_are_asked_again_and_only_named_people
             "none",    // no channel: asked again
             "1 2",     // #general and #agent, listed by position
             "3",       // only when mentioned, each in its own thread
-            "",        // the application's owner
-            "999",     // not a member
-            "x",       // not an ID
-            "250 250", // friend, once
+            "",        // the application's owner, who is not in Other,
+            "",        //   and nobody else
+            "",        // the owner still,
+            "x",       //   and not an ID
+            "none",    // the owner corrected away,
+            "999 250", //   and someone not in Other
+            "none",    //
+            "250 250", //   friend, once
         ],
     )
     .await;
     result?;
     assert!(shown.contains("Discord refused this token."), "{shown}");
     assert!(shown.contains("Choose at least one channel."), "{shown}");
-    assert!(shown.contains("999 is not a member of Other."), "{shown}");
+    assert!(
+        shown.contains("owner (200) is not a member of Other."),
+        "{shown}"
+    );
     assert!(shown.contains("x is not a Discord user ID."), "{shown}");
+    assert!(shown.contains("999 is not a member of Other."), "{shown}");
     assert!(shown.contains("#general\n#agent\n"), "{shown}");
     assert!(
         !shown.contains(TOKEN) && !shown.contains("wrong-token"),
@@ -319,7 +331,7 @@ async fn refused_tokens_and_unknown_people_are_asked_again_and_only_named_people
     let settings = DiscordConfig::load(&config, "discord-private")?;
     assert_eq!(settings.guild_id, "101");
     assert_eq!(settings.bot_user_id, "201");
-    assert_eq!(settings.allowed_user_ids, ["200", "250"]);
+    assert_eq!(settings.allowed_user_ids, ["250"]);
     let route = |channel: &str| DiscordRoute {
         channel_id: channel.to_owned(),
         activation: DiscordActivation::Mention,

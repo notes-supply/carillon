@@ -330,13 +330,13 @@ async fn people(
             )
         })
         .collect();
-    let all: Vec<usize> = (0..owners.len()).collect();
-    let chosen = if owners.is_empty() {
-        Vec::new()
-    } else {
-        prompt.choose_many("People the agent answers", &labels, &all)?
-    };
+    // Every retry asks again from the last answers, so any of them can be
+    // corrected, an owner who is not in the server included.
+    let mut chosen: Vec<usize> = (0..owners.len()).collect();
     'ask: loop {
+        if !owners.is_empty() {
+            chosen = prompt.choose_many("People the agent answers", &labels, &chosen)?;
+        }
         let others = prompt.answer(
             "Anyone else, by Discord user ID (separated by spaces, Enter for nobody):",
             Some(""),
@@ -369,7 +369,16 @@ async fn people(
                 }
                 Err(failure) if matches!(failure.kind(), ErrorType::Response { status, .. } if status.get() == 404) =>
                 {
-                    prompt.say(&format!("{id} is not a member of {guild}."))?;
+                    let who = owners.iter().find(|owner| owner.id == id).map_or_else(
+                        || id.to_string(),
+                        |owner| {
+                            format!(
+                                "{} ({id})",
+                                owner.global_name.as_deref().unwrap_or(&owner.name)
+                            )
+                        },
+                    );
+                    prompt.say(&format!("{who} is not a member of {guild}."))?;
                     continue 'ask;
                 }
                 Err(failure) => {
