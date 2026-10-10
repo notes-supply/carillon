@@ -30,7 +30,8 @@ settings name goes to a new private file in `credentials/` first, which the
 new settings then name; until they replace the old ones, those keep their
 token. `carillon runtime-t3 check` reads the saved settings and token as
 startup does, without reaching T3; setup offers to keep them only when it
-passes.
+passes, and an update checks them before it stops anything. A disabled or
+unregistered runtime, which does not start, passes.
 The token is read from standard input only. Edit the settings file for a thread title prefix or the
 model's options:
 

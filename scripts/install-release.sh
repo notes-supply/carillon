@@ -149,9 +149,11 @@ if [ "$CHECK" -eq 1 ]; then
   fi
   rm -rf -- "$probe"
   # This release's own programs must accept the installation as it is now,
-  # read-only: the registry and core database, and the Discord settings.
+  # read-only: the registry and core database, the Discord settings, and the
+  # T3 runtime's settings and token when it is the one registered and enabled.
   "$SOURCE/bin/carillon" --home "$CARILLON_HOME" check
   "$SOURCE/bin/carillon" --home "$CARILLON_HOME" discord check --provider discord-private
+  "$SOURCE/bin/carillon" --home "$CARILLON_HOME" runtime-t3 check
   exit 0
 fi
 

@@ -128,6 +128,12 @@ async function configureCommand(values: readonly string[]): Promise<void> {
   if (instanceId.length === 0 || model.length === 0)
     throw new Error("--model must be INSTANCE/MODEL, as T3 names them");
   const { providerId, installation } = await registered(args);
+  if (installation === "unregistered")
+    throw new Error(
+      `${providerId} is not in carillon.toml; create the installation with \`carillon init --runtime t3\``,
+    );
+  if (installation === "disabled")
+    throw new Error(`${providerId} is disabled in carillon.toml; enable it first`);
   const project = await configure(
     installation,
     { url, token: await token() },
@@ -142,31 +148,29 @@ async function configureCommand(values: readonly string[]): Promise<void> {
 /**
  * `check`: whether the saved settings and T3 token read as startup reads
  * them, for the installation `--config` names, or `CARILLON_HOME`'s. It
- * reaches no T3 server and changes nothing.
+ * reaches no T3 server and changes nothing. A runtime that would not serve,
+ * disabled or not registered, starts from nothing, so it passes.
  */
 async function checkCommand(values: readonly string[]): Promise<void> {
   const { providerId, installation } = await registered(parseArguments(values));
+  if (typeof installation === "string") {
+    process.stdout.write(`${providerId} is ${notServing(installation)}; nothing to check\n`);
+    return;
+  }
   await saved(installation);
   process.stdout.write(`${providerId}'s saved settings and T3 token read as startup reads them.\n`);
 }
 
-/** The enabled runtime `--provider` names, `runtime-t3` by default, in the installation `--config` names. */
+/** The runtime `--provider` names, `runtime-t3` by default, as the installation `--config` names registers it. */
 async function registered(
   args: ReadonlyMap<string, string>,
-): Promise<{ providerId: string; installation: Installation }> {
+): Promise<{ providerId: string; installation: Installation | "disabled" | "unregistered" }> {
   const providerId = args.get("provider") ?? "runtime-t3";
   const home = process.env["CARILLON_HOME"];
   const config =
     args.get("config") ?? (home === undefined ? undefined : join(home, "carillon.toml"));
   if (config === undefined) throw new Error("--config is required outside `carillon runtime-t3`");
-  const installation = await loadInstallation(config, providerId);
-  if (installation === "unregistered")
-    throw new Error(
-      `${providerId} is not in carillon.toml; create the installation with \`carillon init --runtime t3\``,
-    );
-  if (installation === "disabled")
-    throw new Error(`${providerId} is disabled in carillon.toml; enable it first`);
-  return { providerId, installation };
+  return { providerId, installation: await loadInstallation(config, providerId) };
 }
 
 /** A setup failure as one line, saying which side refused. */

@@ -345,6 +345,48 @@ done
 snapshot
 printf 'update state preflight passed: incompatible core schema, provider settings and Discord module refused\n'
 
+# When T3 is the registered runtime, the release's own T3 runtime reads the
+# settings and token it would start from before anything stops. A token file
+# gone or emptied while the running runtime still holds its token, or
+# settings it rejects, are refused, as above.
+cp -p "$INSTALLATION/carillon.toml" "$TEST_ROOT/registry"
+sed -i 's/"runtime-pi"/"runtime-t3"/' "$INSTALLATION/carillon.toml"
+T3_SETTINGS=$INSTALLATION/providers/runtime-t3.toml
+T3_TOKEN=$INSTALLATION/credentials/t3.token
+t3_settings() {
+  printf '%s\n' 'url = "http://127.0.0.1:1"' 'token_file = "credentials/t3.token"' \
+    'project_id = "agent"' '[model]' 'instance_id = "claudeAgent"' 'model = "claude-sonnet-5"' \
+    >"$T3_SETTINGS"
+  printf '%s\n' t3-token >"$T3_TOKEN"
+  chmod 0600 "$T3_SETTINGS" "$T3_TOKEN"
+}
+for state in empty:'the T3 token file is empty' missing:'credentials/t3.token' \
+  settings:'runtime-t3.toml: /model'; do
+  t3_settings
+  case "${state%%:*}" in
+    empty) : >"$T3_TOKEN" ;;
+    missing) rm "$T3_TOKEN" ;;
+    settings) printf '%s\n' 'temperature = 2' >>"$T3_SETTINGS" ;;
+  esac
+  snapshot
+  refuse "incompatible-t3-${state%%:*}" carillon update "$TEST_ROOT/next.tar.gz"
+  grep -F "${state#*:}" "$TEST_ROOT/incompatible-t3-${state%%:*}.log" >/dev/null
+  grep -F 'nothing was changed' "$TEST_ROOT/incompatible-t3-${state%%:*}.log" >/dev/null
+  expect_trace '--user show --property=ActiveState --value carillon.target'
+  [ "$(stat -c %i "$INSTALLATION/app")" = "$app_inode" ]
+  running
+  assert_preserved
+done
+# Usable settings and token pass the release's preflight.
+t3_settings
+CARILLON_HOME=$INSTALLATION "$RELEASE/install.sh" --update --check >"$TEST_ROOT/t3-preflight.log"
+grep -Fx "runtime-t3's saved settings and T3 token read as startup reads them." \
+  "$TEST_ROOT/t3-preflight.log" >/dev/null
+cp -p "$TEST_ROOT/registry" "$INSTALLATION/carillon.toml"
+rm "$T3_SETTINGS" "$T3_TOKEN"
+snapshot
+printf 'update T3 preflight passed: missing or empty token and rejected settings refused, usable ones accepted\n'
+
 # An installer that cannot even be started after the services stopped leaves
 # the application unchanged and says how to resume it.
 refuse unrunnable-installer env FAKE_STOP=break-installer carillon update "$TEST_ROOT/next.tar.gz"
@@ -366,6 +408,8 @@ grep -Fx "It serves the custom Discord module $EXAMPLE: /model, /command." \
   "$TEST_ROOT/module-enable.log" >/dev/null
 snapshot
 carillon update "$TEST_ROOT/next.tar.gz" >"$TEST_ROOT/update.log"
+# A Pi installation has no T3 runtime to check.
+grep -Fx 'runtime-t3 is not in carillon.toml; nothing to check' "$TEST_ROOT/update.log" >/dev/null
 grep -F "custom Discord module $EXAMPLE, as this release ships it, is usable" "$TEST_ROOT/update.log" >/dev/null
 grep -Fx "Updated to Carillon $VERSION; services are running again:" "$TEST_ROOT/update.log" >/dev/null
 expect_trace '--user show --property=ActiveState --value carillon.target' \

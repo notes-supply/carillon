@@ -298,6 +298,22 @@ it("checks the saved settings and T3 token as startup reads them, reaching no T3
   const usable = await cli(["check", "--config", config], "");
   expect(usable.status, usable.stderr).toBe(0);
 
+  // A runtime that does not start, disabled or not registered as in a Pi
+  // installation, passes with no settings at all.
+  const registry = await readFile(config, "utf8");
+  await rm(providerFile);
+  for (const [changed, state] of [
+    [registry.replace("enabled = true", "enabled = false"), "disabled"],
+    [registry.replace('id = "runtime-t3"', 'id = "runtime-pi"'), "not in carillon.toml"],
+  ] as const) {
+    await writeFile(config, changed);
+    const idle = await cli(["check", "--config", config], "");
+    expect(idle.status, idle.stderr).toBe(0);
+    expect(idle.stdout).toBe(`runtime-t3 is ${state}; nothing to check\n`);
+  }
+  await writeFile(config, registry);
+  await writeFile(providerFile, settings("t3.token"));
+
   for (const [unusable, reason] of [
     [() => writeFile(tokenFile, "\n"), /t3\.token: the T3 token file is empty/u],
     [() => writeFile(providerFile, settings("missing.token")), /missing\.token/u],
