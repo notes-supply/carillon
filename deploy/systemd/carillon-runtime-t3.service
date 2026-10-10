@@ -1,5 +1,5 @@
 [Unit]
-Description=Carillon T3 runtime adapter (optional; enable only with a configured runtime-t3 provider)
+Description=Carillon T3 runtime adapter
 After=network-online.target
 Wants=network-online.target
 PartOf=carillon.target

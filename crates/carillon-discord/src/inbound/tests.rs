@@ -293,7 +293,11 @@ async fn a_queued_message_keeps_the_settings_it_arrived_with() -> anyhow::Result
     ingress
         .reactions
         .settings()
-        .apply(|| Ok(config))
+        .apply(
+            || Ok(config),
+            |_| std::future::ready(Ok(crate::module::tests::unchanged())),
+        )
+        .await
         .map_err(|refusal| anyhow!("{refusal:?}"))?;
     let mut later = hello(&ingress);
     "401".clone_into(&mut later.request.event_id);

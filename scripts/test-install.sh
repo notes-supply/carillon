@@ -4,7 +4,23 @@ set -eu
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 VERSION=$(cd "$ROOT" && bun -e 'import manifest from "./Cargo.toml"; console.log(manifest.workspace.package.version)')
 RELEASE=${1:-"$ROOT/target/package/carillon-$VERSION"}
-BASE_PORT=${CARILLON_TEST_BASE_PORT:-44800}
+# The installations tested here, and by the scripts this runs, take their
+# service ports from this base and up to 63 above it. Like the integration
+# test's, they lie below the kernel's ephemeral range: a port inside it can be
+# the source port of any outgoing connection, open or in TIME_WAIT, and then
+# a service cannot bind it. The range is read with awk: a shell's read builtin
+# may take this file a byte at a time, and the kernel ends it after one.
+EPHEMERAL=$(awk '{ print $1 }' /proc/sys/net/ipv4/ip_local_port_range)
+case "$EPHEMERAL" in
+  '' | *[!0-9]*) echo "cannot read the ephemeral port range: '$EPHEMERAL'" >&2; exit 1 ;;
+esac
+CARILLON_TEST_BASE_PORT=${CARILLON_TEST_BASE_PORT:-$((EPHEMERAL - 64))}
+if [ "$CARILLON_TEST_BASE_PORT" -lt 1024 ] || [ $((CARILLON_TEST_BASE_PORT + 64)) -gt "$EPHEMERAL" ]; then
+  echo "CARILLON_TEST_BASE_PORT must leave 64 ports from 1024 up to the ephemeral range at $EPHEMERAL" >&2
+  exit 1
+fi
+export CARILLON_TEST_BASE_PORT
+BASE_PORT=$CARILLON_TEST_BASE_PORT
 TEST_ROOT_T3_OUT=$(mktemp)
 
 # This tests the bundled Discord/Pi release, not a limit on provider extensibility.
@@ -15,6 +31,7 @@ for artifact in \
   bin/carillon \
   bin/carillon-discord \
   lib/carillon_discord_module.wasm \
+  lib/examples/card-colours.wasm \
   lib/carillon-discord-pi.js \
   bin/carillon-runtime-pi \
   bin/carillon-runtime-t3 \
@@ -35,14 +52,12 @@ done
 # Pi's command line is a mode of the runtime executable; nothing else is Pi.
 [ ! -e "$RELEASE/bin/pi" ] || { printf '%s\n' "the release ships a second Pi executable" >&2; exit 1; }
 [ "$(find "$RELEASE/systemd" -maxdepth 1 -type f | wc -l)" -eq 5 ] || {
-  printf '%s\n' "release must contain exactly the target, three default service units and the optional T3 unit" >&2
+  printf '%s\n' "release must contain exactly the target and four service units" >&2
   exit 1
 }
-# The optional T3 unit is shipped but not wanted by the default target.
-grep -F carillon-runtime-t3 "$RELEASE/systemd/carillon.target" >/dev/null && {
-  printf '%s\n' "the default target must not want the optional T3 unit" >&2
-  exit 1
-}
+# The target wants both bundled runtimes; the one an installation did not
+# choose finds itself absent from the registry and ends at once.
+grep -F 'carillon-runtime-pi.service carillon-runtime-t3.service' "$RELEASE/systemd/carillon.target" >/dev/null
 # The T3 executable is standalone: it starts without a source checkout and
 # fails closed on its arguments before touching anything.
 if "$RELEASE/bin/carillon-runtime-t3" --provider runtime-t3 >"$TEST_ROOT_T3_OUT" 2>&1; then
@@ -73,6 +88,11 @@ printf '%s\n' \
   --token-file "$T3_DISABLED/missing.token" --state-dir "$T3_DISABLED/state" >"$TEST_ROOT_T3_OUT" 2>&1
 grep -F 'runtime provider runtime-t3 is disabled; not serving' "$TEST_ROOT_T3_OUT" >/dev/null
 [ ! -e "$T3_DISABLED/state" ]
+# A registry without it, as in a Pi installation, ends it the same way.
+sed -i 's/"runtime-t3"/"runtime-other"/' "$T3_DISABLED/carillon.toml"
+"$RELEASE/bin/carillon-runtime-t3" --config "$T3_DISABLED/carillon.toml" --provider runtime-t3 \
+  --token-file "$T3_DISABLED/missing.token" >"$TEST_ROOT_T3_OUT" 2>&1
+grep -F 'runtime provider runtime-t3 is not in carillon.toml; not serving' "$TEST_ROOT_T3_OUT" >/dev/null
 rm -rf -- "$T3_DISABLED"
 rm -f "$TEST_ROOT_T3_OUT"
 
@@ -82,6 +102,7 @@ node "$ROOT/scripts/test-images.mjs" "$RELEASE"
 
 CARILLON_CORE_BINARY="$RELEASE/bin/carillon" CARILLON_RUNTIME_BINARY="$RELEASE/bin/carillon-runtime-pi" \
   CARILLON_DISCORD_MODULE="$RELEASE/lib/carillon_discord_module.wasm" \
+  CARILLON_EXAMPLE_MODULE="$RELEASE/lib/examples/card-colours.wasm" \
   node "$ROOT/scripts/test-integration.mjs"
 
 TEST_ROOT=$(mktemp -d)
@@ -133,14 +154,16 @@ grep -F 'requested release version 9.8.7 differs from the Carillon crate version
 [ ! -e "$VERSION_FIXTURE/target" ] && [ ! -e "$VERSION_FIXTURE/release.tar.gz" ]
 [ "$("$RELEASE/bin/carillon" --version)" = "carillon $VERSION" ]
 
+# install_release HOME WORKSPACE ROOT CONFIG_HOME PORT [VARIABLE=VALUE ...]
 install_release() {
   install_home=$1
   install_workspace=$2
   install_root=$3
   install_config_home=$4
   install_port=$5
+  shift 5
   env HOME="$install_home" XDG_CONFIG_HOME="$install_config_home" \
-    CARILLON_HOME="$install_root" CARILLON_SKIP_SYSTEMD_RELOAD=1 \
+    CARILLON_HOME="$install_root" CARILLON_SKIP_SYSTEMD_RELOAD=1 "$@" \
     "$RELEASE/install.sh" \
     --guild-id 100 --bot-user-id 201 --user-id 200 --route 300:always:channel \
     --workspace "$install_workspace" --base-port "$install_port"
@@ -149,12 +172,10 @@ install_release() {
 verify_units() {
   verify_dir=$1
   [ "$(find "$verify_dir" -maxdepth 1 -type f -name 'carillon*' | wc -l)" -eq 5 ] || {
-    printf '%s\n' "installation must contain exactly the target, three default service units and the optional T3 unit" >&2
+    printf '%s\n' "installation must contain exactly the target and four service units" >&2
     exit 1
   }
   systemd-analyze verify "$verify_dir"/carillon.target "$verify_dir"/carillon-*.service
-  # The optional T3 unit is registered but never wanted or enabled by default.
-  [ ! -e "$verify_dir/carillon.target.wants/carillon-runtime-t3.service" ]
 }
 
 assert_service_identity() {
@@ -212,6 +233,11 @@ mkdir "$REGISTER_COMMANDS"
 cat >"$REGISTER_COMMANDS/systemctl" <<'SYSTEMCTL'
 #!/bin/sh
 set -eu
+# Units registered here are never started, as setup over them is told; only
+# changes are traced.
+case "$*" in
+  '--user show --property=ActiveState --value '*) printf '%s\n' inactive; exit 0 ;;
+esac
 printf '%s\n' "$*" >>"$REGISTER_TRACE"
 SYSTEMCTL
 chmod 0755 "$REGISTER_COMMANDS/systemctl"
@@ -246,8 +272,9 @@ if "$ORDINARY_ROOT/app/bin/carillon" review serve >/dev/null 2>&1; then
   echo "forwarded to a provider that is not installed" >&2
   exit 1
 fi
+# Setup again over the stopped installation asks its service manager first.
 install_release "$ORDINARY_HOME" "$ORDINARY_WORKSPACE" "$ORDINARY_ROOT" \
-  "$ORDINARY_CONFIG_HOME" "$((BASE_PORT + 10))" >/dev/null
+  "$ORDINARY_CONFIG_HOME" "$((BASE_PORT + 10))" PATH="$REGISTER_COMMANDS:$PATH" >/dev/null
 [ ! -e "$ORDINARY_ROOT/app/upgrade-sentinel" ]
 [ "$(forward_review)" = "review-provider serve --flag" ]
 [ "$(sha256sum "$ORDINARY_ROOT/credentials/runtime-pi.token" | cut -d' ' -f1)" = "$ORDINARY_TOKEN_HASH" ]
@@ -415,12 +442,14 @@ cmp "$WORKSPACE/.claude/skills/discord/SKILL.md" "$WORKSPACE/.agents/skills/disc
 env CARILLON_HOME="$CARILLON_HOME" "$APP/carillon" discord call messages pin --help >/dev/null
 
 grep -F -- '--provider runtime-pi' "$XDG_CONFIG_HOME/systemd/user/carillon-runtime-pi.service" >/dev/null
-# The optional T3 unit is registered with the others but neither wanted by the
-# target nor enabled, so a default Pi installation never activates it.
 grep -F -- '--provider runtime-t3' "$XDG_CONFIG_HOME/systemd/user/carillon-runtime-t3.service" >/dev/null
-[ ! -e "$XDG_CONFIG_HOME/systemd/user/carillon.target.wants/carillon-runtime-t3.service" ]
 grep -F -- "--module \"$CARILLON_HOME/app/lib/carillon_discord_module.wasm\"" \
   "$XDG_CONFIG_HOME/systemd/user/carillon-discord.service" >/dev/null
+# The bot token is the one the provider's settings name, not the unit's.
+if grep -Fq -- discord-bot "$XDG_CONFIG_HOME/systemd/user/carillon-discord.service"; then
+  echo "the Discord unit names a bot token" >&2
+  exit 1
+fi
 RUNTIME_TOKEN=$(cat "$CARILLON_HOME/credentials/runtime-pi.token")
 ENVIRONMENT=$(curl --fail --silent -H "authorization: Bearer $RUNTIME_TOKEN" \
   "http://127.0.0.1:$((BASE_PORT + 2))/v1/environment")

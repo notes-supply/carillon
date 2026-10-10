@@ -1,7 +1,8 @@
 //! The byte-exchange ABI expected by `carillon-wasm`: the provider writes the
 //! invocation into `input`, calls `invoke`, and reads the result from
 //! `output`; the module reaches native operations through `carillon.call`
-//! and copies each reply with `carillon.take`.
+//! and copies each reply with `carillon.take`. [`export!`](crate::export)
+//! defines a module's entry points over these functions.
 
 use std::cell::RefCell;
 
@@ -26,9 +27,9 @@ unsafe extern "C" {
     safe fn take(pointer: u32, length: u32);
 }
 
-#[expect(unsafe_code, reason = "wasm export")]
-#[unsafe(no_mangle)]
-pub extern "C" fn input(length: u32) -> u32 {
+/// Room for an invocation of `length` bytes, at the address returned.
+#[must_use]
+pub fn input(length: u32) -> u32 {
     INPUT.with(|buffer| {
         let mut buffer = buffer.borrow_mut();
         buffer.clear();
@@ -37,19 +38,19 @@ pub extern "C" fn input(length: u32) -> u32 {
     })
 }
 
-#[expect(unsafe_code, reason = "wasm export")]
-#[unsafe(no_mangle)]
-pub extern "C" fn output() -> u32 {
+/// The address of the last outcome.
+#[must_use]
+pub fn output() -> u32 {
     OUTPUT.with(|buffer| buffer.borrow().as_ptr() as u32)
 }
 
-#[expect(unsafe_code, reason = "wasm export")]
-#[unsafe(no_mangle)]
-pub extern "C" fn invoke() -> u32 {
+/// Handles the invocation in `input` with `handle`, returning the length of
+/// the outcome at `output`.
+pub fn invoke(handle: impl FnOnce(&mut Provider, Invocation) -> Outcome) -> u32 {
     let outcome =
         INPUT.with(
             |buffer| match serde_json::from_slice::<Invocation>(&buffer.borrow()) {
-                Ok(invocation) => crate::handle(&mut Provider, invocation),
+                Ok(invocation) => handle(&mut Provider, invocation),
                 Err(error) => Outcome::Failure(format!("invalid invocation: {error}")),
             },
         );
@@ -61,7 +62,7 @@ pub extern "C" fn invoke() -> u32 {
 }
 
 /// Native operations performed by the provider process.
-struct Provider;
+pub struct Provider;
 
 impl HostCalls for Provider {
     fn call(&mut self, request: HostRequest) -> Result<HostReply, String> {

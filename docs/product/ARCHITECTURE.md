@@ -97,12 +97,13 @@ Slash commands, their controls and the cards come from one WebAssembly
 module, which the provider loads at start and can replace while running.
 Each invocation runs in a fresh instance with 16 MiB of linear memory and a
 deadline; durable state stays native. The provider keeps the gateway,
-admission, card records, every Discord and core call, and authority. An
-operator-installed module lives in the provider's state directory and
-survives updates; the release's module lives in `app/lib`. `install` and
-`reset` take the installation's maintenance lock, validate the module
-(including drawing sample cards), register commands if they changed, and
-only then swap it in. See the [Wasm host](../../crates/carillon-wasm/README.md).
+admission, card records, every Discord and core call, and authority. The
+provider's settings choose the module: a custom file they enable, otherwise
+the release's bundled module in `app/lib`. Applying the settings rereads that
+file; when the module changed, it takes the installation's maintenance lock,
+validates the module (including drawing sample cards), registers commands if
+they changed, and only then swaps it in, with the rest of the settings. See
+the [Wasm host](../../crates/carillon-wasm/README.md).
 
 ### Agent Discord operations
 
@@ -157,11 +158,19 @@ stands. See the [T3 guide](../../packages/runtime-t3/README.md).
 address, credential hash, expected version and whether it's enabled. Each
 provider owns `providers/ID.toml`. Both files reject unknown fields.
 
+Setup registers the Discord provider and the one runtime chosen, Pi or T3.
+Each provider's own program sets up its part: Pi signs in through its own
+interface, the T3 runtime checks a project and model with T3 and writes its
+settings, and the Discord provider learns the bot from its token and offers
+servers, channels and people by name. The user target wants every bundled
+runtime's unit; one the registry doesn't list ends at once, as a disabled
+one does.
+
 Services load their files at start. An explicit apply re-reads a file and
 serves it whole when every difference applies live, and otherwise refuses
 and names what needs a restart. Core applies runtime availability and
-concurrency live; Discord applies admission, typing, reactions and card
-markers live. Each admitted message keeps the settings it was admitted
+concurrency live; Discord applies admission, typing, reactions, card
+markers and its module live. Each admitted message keeps the settings it was admitted
 with.
 
 ## Agent resources
@@ -180,8 +189,9 @@ workspace (your home by default) with your authority.
 ## Packaging
 
 `scripts/package-release.sh` builds one archive per Linux host architecture:
-the Rust programs for the host target, the Discord module for
-`wasm32-unknown-unknown`, the runtimes compiled with Bun, the systemd units,
+the Rust programs for the host target, the Discord module and the
+card-colours example module for `wasm32-unknown-unknown`, the runtimes
+compiled with Bun, the systemd units,
 and `licenses/` with Carillon's licence and notices for the Rust crates, npm
 packages and Bun built into the programs. Every component reports the
 workspace version. A `MANIFEST` lists every file and which must be

@@ -18,15 +18,16 @@ function lanesOf(path) {
   // Root tools and their lock decide every lane's toolchain.
   if (path === "mise.toml" || path === "mise.lock") return LANES;
   // The Discord skill ships in the release; Rust reads protocol and
-  // operations fixtures, and core embeds runtime-pi's package version.
+  // operations fixtures, and core embeds each runtime's package version.
   if (path === "packages/discord-pi/skill/SKILL.md") return ["ts", "release"];
   if (/^packages\/(protocol|discord-pi)\/fixtures\//u.test(path)) return ["rust", "ts", "release"];
-  if (path === "packages/runtime-pi/package.json") return ["rust", "ts", "release"];
+  if (/^packages\/runtime-(pi|t3)\/package\.json$/u.test(path)) return ["rust", "ts", "release"];
   // The release's own licence and notices.
   if (path === "LICENSE" || path.startsWith("licenses/")) return ["release"];
   // Other documentation reaches no build or test.
   if (path.endsWith(".md")) return [];
-  if (/^(crates\/|Cargo\.(toml|lock)$|deny\.toml$)/u.test(path)) {
+  // Rust, including the example module the release ships built.
+  if (/^(crates\/|examples\/|Cargo\.(toml|lock)$|deny\.toml$)/u.test(path)) {
     return /\.(json|mjs|ts)$/u.test(path) ? ["rust", "ts", "release"] : ["rust", "release"];
   }
   if (
@@ -34,6 +35,8 @@ function lanesOf(path) {
     /^(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|tsconfig\.json)$/u.test(path)
   )
     return ["ts", "release"];
+  // The public installer, which the release lane tests.
+  if (path === "install.sh") return ["release"];
   if (path.startsWith("scripts/") || path.startsWith("deploy/")) {
     return /\.(json|mjs|ts)$/u.test(path) ? ["ts", "release"] : ["release"];
   }

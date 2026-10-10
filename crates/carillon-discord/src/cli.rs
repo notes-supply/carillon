@@ -5,7 +5,7 @@
 use std::{
     fs,
     io::Read as _,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     time::Duration,
 };
 
@@ -13,6 +13,8 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use carillon_installation::{
     config::{LoadedConfig, ProviderRole, RELEASE_VERSION},
     home, loopback,
+    maintenance::MaintenanceLock,
+    prompt::Terminal,
 };
 use clap::{Parser, Subcommand};
 use reqwest::{Method, StatusCode};
@@ -21,15 +23,14 @@ use tracing_subscriber::EnvFilter;
 
 use crate::{
     application::{ServeOptions, serve},
-    config::{self, Applied, DiscordConfig, DiscordRoute, FileState, configure},
-    module::{
-        self, Change, ModuleFiles, ModuleSummary, NextStart, Refusal, Registration, Saved, Source,
-        Status,
-    },
+    config::{self, Applied, DiscordConfig, DiscordRoute, FileState, configure, declare_module},
+    module::{self, Declared, Refusal, Registration, Source, Status},
     operations::{
         self, ATTACHMENT_BYTES, ATTACHMENT_COUNT, Messages, Operation, OperationError, Upload,
     },
+    setup,
 };
+use twilight_http::Client as DiscordHttp;
 
 /// Status requests only read.
 const STATUS_TIMEOUT: Duration = Duration::from_secs(10);
@@ -62,18 +63,23 @@ enum Command {
         /// The provider's registry ID.
         #[arg(long)]
         provider: String,
-        /// The provider's core credential.
+        /// The provider's core credential; its settings name the bot token's.
         #[arg(long)]
         token_file: PathBuf,
-        /// The Discord bot token; required outside deterministic mode.
-        #[arg(long)]
-        discord_token_file: Option<PathBuf>,
-        /// The release's Discord module; an installed module takes precedence.
+        /// The release's bundled Discord module, served unless the settings
+        /// enable a custom one.
         #[arg(long)]
         module: PathBuf,
         /// Serve local simulation endpoints instead of connecting to Discord.
         #[arg(long)]
         deterministic: bool,
+    },
+    /// Ask for the bot token, then the server, channels and people the agent
+    /// answers, and write the token and the provider's admission settings.
+    Setup {
+        /// Registry ID of the Discord instance; inferred when only one is registered.
+        #[arg(long)]
+        provider: Option<String>,
     },
     /// Write the provider's admission settings, keeping tuned feedback
     /// settings, then have a running provider serve them when they apply live.
@@ -129,15 +135,20 @@ any of them is not applied at all until then.")]
         #[command(subcommand)]
         action: Option<SettingsAction>,
     },
-    /// Show which Discord module the running provider serves, or change it.
+    /// Show which Discord module the running provider serves, or enable or
+    /// disable a custom one.
     #[command(after_help = "\
-Without a subcommand, shows the serving module and its commands.
+Without a subcommand, shows the serving module, its commands, and whether the
+settings file declares another.
 
-An installed module replaces the release's module without restarting the
-provider or reconnecting its gateway, and keeps serving after restarts and
-release updates. Changed command definitions are registered with Discord
-before the module serves. Interactions already running finish on the module
-they started with; each card update is drawn by the module serving then.")]
+The settings file's [module] table decides the module: a custom one while
+enabled, the release's bundled module otherwise. Applying the settings serves
+it without restarting the provider or reconnecting its gateway, rereading the
+file so a rebuilt module at the same path serves too. Changed command
+definitions are registered with Discord first. A module that cannot serve
+leaves the serving module and settings in place. Interactions already running
+finish on the module they started with; each card update is drawn by the
+module serving then.")]
     Module {
         /// Registry ID of the Discord instance; inferred when only one is configured.
         #[arg(long, global = true)]
@@ -172,10 +183,12 @@ enum ModuleAction {
     /// Check that FILE is a Discord module this program can serve, without
     /// serving it. Needs no installation or running provider.
     Check { file: PathBuf },
-    /// Serve FILE in the running provider and keep it for later starts.
-    Install { file: PathBuf },
-    /// Serve the release's Discord module again and remove the installed one.
-    Reset,
+    /// Enable a custom module in the settings file, FILE or the one it
+    /// already names, and apply the settings.
+    Enable { file: Option<PathBuf> },
+    /// Disable the custom module in the settings file and apply the
+    /// settings, so the bundled module serves.
+    Disable,
 }
 
 fn initialize_tracing() {
@@ -199,7 +212,6 @@ pub(crate) async fn run() -> Result<()> {
             config,
             provider,
             token_file,
-            discord_token_file,
             module,
             deterministic,
         } => {
@@ -208,13 +220,13 @@ pub(crate) async fn run() -> Result<()> {
                 ServeOptions {
                     provider_id: &provider,
                     token_file: &token_file,
-                    discord_token_file: discord_token_file.as_deref(),
                     module: &module,
                     deterministic,
                 },
             )
             .await?;
         }
+        Command::Setup { provider } => set_up(&installation()?, provider).await?,
         Command::Configure {
             provider,
             guild_id,
@@ -224,6 +236,8 @@ pub(crate) async fn run() -> Result<()> {
         } => {
             let loaded = installation()?;
             let provider = instance(&loaded, provider)?;
+            let maintenance = MaintenanceLock::acquire_unless_held(&loaded.root)
+                .context("the Discord settings were not changed")?;
             configure(
                 &loaded,
                 &provider,
@@ -232,13 +246,14 @@ pub(crate) async fn run() -> Result<()> {
                 &user_id,
                 &route,
             )?;
+            drop(maintenance);
             println!("{}", loaded.provider_config_path(&provider)?.display());
             serve_configured(&loaded, &provider).await?;
         }
         Command::Check { provider } => {
             let loaded = installation()?;
             let provider = instance(&loaded, provider)?;
-            DiscordConfig::load(&loaded, &provider).with_context(|| {
+            let discord = DiscordConfig::load(&loaded, &provider).with_context(|| {
                 format!("carillon-discord {RELEASE_VERSION} cannot use the settings of {provider}")
             })?;
             println!(
@@ -246,7 +261,7 @@ pub(crate) async fn run() -> Result<()> {
                 loaded.provider_config_path(&provider)?.display(),
                 RELEASE_VERSION
             );
-            check_installed(&loaded, &provider).await?;
+            check_declared(&loaded, &provider, &discord, &release()?).await?;
         }
         Command::Tools {
             action:
@@ -398,12 +413,18 @@ fn uploads(files: &[PathBuf]) -> Result<Vec<Upload>> {
 
 /// The release's `lib` directory, beside the directory of this program.
 fn release_library() -> Result<PathBuf> {
+    Ok(release()?.join("lib"))
+}
+
+/// The release this program belongs to, the directory holding its `bin`:
+/// the installed application, or a release an update is checking.
+fn release() -> Result<PathBuf> {
     let executable = std::env::current_exe()?.canonicalize()?;
-    Ok(executable
+    executable
         .parent()
         .and_then(Path::parent)
-        .context("cannot locate release library")?
-        .join("lib"))
+        .map(Path::to_path_buf)
+        .context("cannot locate this program's release")
 }
 
 /// Native harnesses own these resource directories and when changes are loaded.
@@ -440,7 +461,7 @@ fn install_workspace_skill(workspace: &Path, lib: &Path, invocation: Option<&str
 fn install_tools(config: &LoadedConfig, lib: &Path) -> Result<()> {
     use carillon_installation::{
         filesystem::{publish, sync_ancestors},
-        maintenance::{MaintenanceLock, ServiceLock},
+        maintenance::ServiceLock,
     };
     let _maintenance = MaintenanceLock::acquire(&config.root)?;
     // Core cannot start while this is held, nor serve while it is taken.
@@ -475,6 +496,70 @@ fn install_tools(config: &LoadedConfig, lib: &Path) -> Result<()> {
     Ok(())
 }
 
+/// `carillon discord setup`, then has a running provider serve the settings
+/// as far as they apply live; a new bot token file is one only a restart
+/// applies.
+async fn set_up(loaded: &LoadedConfig, provider: Option<String>) -> Result<()> {
+    let provider = match provider {
+        Some(provider) => provider,
+        None => only_interface(loaded)?,
+    };
+    setup::setup(&mut Terminal, loaded, &provider, DiscordHttp::new).await?;
+    let operator = Operator::new(loaded, &provider, "settings")?;
+    match operator.apply_settings().await? {
+        Applying::Applied(applied) => report_applied(&provider, &applied),
+        Applying::Refused(refused) => saved_but_refused(loaded, &provider, refused).await?,
+        // A stopped provider reads them when it starts.
+        Applying::Unreachable => {}
+    }
+    Ok(())
+}
+
+/// After setup or `configure` saved the settings file, what a running
+/// provider's refusal to serve it leaves. Fields only a restart applies are
+/// served by `carillon restart` once this release accepts the module the
+/// file declares, which the provider did not try. Any other refusal leaves
+/// the file saved but not served, an error.
+async fn saved_but_refused(loaded: &LoadedConfig, provider: &str, refused: Refused) -> Result<()> {
+    let Refused { reason, restart } = refused;
+    if restart.is_empty() {
+        bail!(
+            "the settings file is saved, but {provider} did not serve it: {reason}; it keeps \
+             serving the settings it has"
+        );
+    }
+    let discord = DiscordConfig::load(loaded, provider)?;
+    check_declared(loaded, provider, &discord, &release()?)
+        .await
+        .with_context(|| {
+            format!("the settings file is saved, but `carillon restart` would not start {provider}")
+        })?;
+    println!(
+        "{provider} keeps serving the settings it has: {reason}. `carillon restart` serves the \
+         saved file."
+    );
+    Ok(())
+}
+
+/// The only interface provider registered, which setup gives its first
+/// settings.
+fn only_interface(config: &LoadedConfig) -> Result<String> {
+    let interfaces: Vec<&str> = config
+        .value
+        .providers
+        .iter()
+        .filter(|provider| provider.role == ProviderRole::Interface)
+        .map(|provider| provider.id.as_str())
+        .collect();
+    match interfaces.as_slice() {
+        [only] => Ok((*only).to_owned()),
+        several => bail!(
+            "choose the Discord instance to set up with --provider from: {}",
+            several.join(", ")
+        ),
+    }
+}
+
 /// The Discord instance an operator action names, or the only interface
 /// provider with Discord settings. Anything else is a choice for the operator.
 fn instance(config: &LoadedConfig, explicit: Option<String>) -> Result<String> {
@@ -507,73 +592,141 @@ fn instance(config: &LoadedConfig, explicit: Option<String>) -> Result<String> {
     }
 }
 
-/// `carillon discord module …`: a file check needs no installation; the
-/// rest ask the running provider, which owns the module and its changes.
+/// `carillon discord module …`: a file check needs no installation; status
+/// asks the running provider; enabling and disabling change the settings
+/// file, then ask the running provider to apply it.
 async fn manage_module(
     installation: impl FnOnce() -> Result<LoadedConfig>,
     provider: Option<String>,
     action: Option<ModuleAction>,
 ) -> Result<()> {
-    let (method, body, requested) = match action {
-        Some(ModuleAction::Check { file }) => {
-            if let Some(provider) = provider {
-                bail!("`module check` examines a file and does not use --provider {provider}");
-            }
-            let module = check_file(&file).await?;
-            println!(
-                "{} is a usable Discord module for carillon-discord {RELEASE_VERSION}: {}.",
-                file.display(),
-                list(&module)
-            );
-            return Ok(());
+    if let Some(ModuleAction::Check { file }) = &action {
+        if let Some(provider) = provider {
+            bail!("`module check` examines a file and does not use --provider {provider}");
         }
-        None => (Method::GET, None, None),
-        Some(ModuleAction::Install { file }) => {
-            let bytes = fs::read(&file)
-                .with_context(|| format!("read Discord module {}", file.display()))?;
-            (Method::PUT, Some(bytes), Some(Source::Installed))
-        }
-        Some(ModuleAction::Reset) => (Method::DELETE, None, Some(Source::Release)),
-    };
+        let commands = check_file(file).await?;
+        println!(
+            "{} is a usable Discord module for carillon-discord {RELEASE_VERSION}: {}.",
+            file.display(),
+            list(&commands)
+        );
+        return Ok(());
+    }
     let loaded = installation()?;
     let provider = instance(&loaded, provider)?;
-    let operator = Operator::new(&loaded, &provider, "module")?;
-    match requested {
-        None => {
-            print_status(&provider, &operator.request(method, body).await?);
+    let settings = loaded.provider_config_path(&provider)?;
+    match action {
+        None | Some(ModuleAction::Check { .. }) => {
+            let operator = Operator::new(&loaded, &provider, "module")?;
+            print_status(&provider, &operator.request(Method::GET, None).await?);
+            return Ok(());
+        }
+        Some(ModuleAction::Enable { file }) => {
+            let declared = match file {
+                Some(file) => std::path::absolute(file)?,
+                None => DiscordConfig::read(&loaded, &provider)?
+                    .module
+                    .path
+                    .context("the settings name no custom module; give its file")?,
+            };
+            // Checked before the settings change, against this release.
+            let commands = check_file(&loaded.root.join(&declared)).await?;
+            declare_module(&loaded, &provider, |module| {
+                module.enabled = true;
+                module.path = Some(declared.clone());
+            })?;
+            println!(
+                "{} now declares the custom Discord module {}: {}.",
+                settings.display(),
+                declared.display(),
+                list(&commands)
+            );
+        }
+        Some(ModuleAction::Disable) => {
+            declare_module(&loaded, &provider, |module| module.enabled = false)?;
+            println!(
+                "{} now declares the bundled Discord module.",
+                settings.display()
+            );
+        }
+    }
+    let operator = Operator::new(&loaded, &provider, "settings")?;
+    match operator.apply_settings().await? {
+        Applying::Applied(applied) => {
+            report_applied(&provider, &applied);
             Ok(())
         }
-        Some(requested) => {
-            report_change(&provider, requested, &operator.request(method, body).await?)
+        Applying::Refused(refused) => bail!(
+            "{provider} did not apply the settings file: {}. What it serves is unchanged; \
+             `carillon discord module` shows which module that is",
+            refused.reason
+        ),
+        Applying::Unreachable => {
+            println!(
+                "The Discord provider does not answer at {}, so whether it serves the declared \
+                 module is not confirmed: a stopped provider serves it when it starts.",
+                operator.url
+            );
+            Ok(())
         }
     }
 }
 
-/// Validates an installed module against this program, as an update's
-/// preflight does before it stops the services.
-async fn check_installed(loaded: &LoadedConfig, provider: &str) -> Result<()> {
-    let installed = ModuleFiles::of(loaded, provider, PathBuf::new()).installed;
-    if !installed.exists() {
+/// Validates the custom module the settings enable against this program, as
+/// an update's preflight does before it stops the services. A module inside
+/// the installed application is replaced with it, so the copy in `release`,
+/// this program's own, is the one checked; any other is checked as it is.
+async fn check_declared(
+    loaded: &LoadedConfig,
+    provider: &str,
+    discord: &DiscordConfig,
+    release: &Path,
+) -> Result<()> {
+    let Source::Custom { path } = discord.module_source(&loaded.root) else {
         return Ok(());
-    }
-    let module = check_file(&installed).await.with_context(|| {
+    };
+    let shipped = in_application(loaded, &path).map(|relative| release.join(relative));
+    let checked = shipped.as_deref().unwrap_or(&path);
+    let commands = check_file(checked).await.with_context(|| {
         format!(
-            "{provider} has an installed Discord module this release cannot serve. Run \
-             `carillon discord module reset` (or remove the file while the provider is \
-             stopped), then install a module built for this release"
+            "the settings of {provider} enable a custom Discord module this release cannot \
+             serve. Run `carillon discord module disable`, then enable a module built for this \
+             release"
         )
     })?;
     println!(
-        "installed Discord module {} is usable by carillon-discord {RELEASE_VERSION}: {}.",
-        installed.display(),
-        list(&module)
+        "custom Discord module {}{} is usable by carillon-discord {RELEASE_VERSION}: {}.",
+        path.display(),
+        if shipped.is_some() {
+            ", as this release ships it,"
+        } else {
+            ""
+        },
+        list(&commands)
     );
     Ok(())
 }
 
-async fn check_file(file: &Path) -> Result<ModuleSummary> {
-    let bytes =
-        fs::read(file).with_context(|| format!("read Discord module {}", file.display()))?;
+/// Where `path` lies within the installation's application directory, if
+/// it does: the application's own files are replaced by an update.
+fn in_application(loaded: &LoadedConfig, path: &Path) -> Option<PathBuf> {
+    let application = loaded.root.join("app");
+    // A `..` can lead back out of the application, so only a path without
+    // one is decided by its spelling; otherwise the files themselves decide.
+    if let Ok(relative) = path.strip_prefix(&application)
+        && !relative
+            .components()
+            .any(|part| part == Component::ParentDir)
+    {
+        return Some(relative.to_path_buf());
+    }
+    let (application, path) = (application.canonicalize().ok()?, path.canonicalize().ok()?);
+    path.strip_prefix(application).ok().map(Path::to_path_buf)
+}
+
+async fn check_file(file: &Path) -> Result<Vec<String>> {
+    let bytes = module::read_module(file)
+        .with_context(|| format!("read Discord module {}", file.display()))?;
     module::check(&bytes).await.with_context(|| {
         format!(
             "{} is not a usable Discord module for carillon-discord {RELEASE_VERSION}",
@@ -592,13 +745,21 @@ struct Operator {
 /// What became of asking the running provider to serve its settings file.
 enum Applying {
     Applied(Applied),
-    /// The provider answered and serves what it served before, because of
-    /// this.
-    Refused(String),
+    /// The provider answered and serves what it served before.
+    Refused(Refused),
     /// Nothing answers at the provider's address: it may be stopped, or
     /// still serve at an address `carillon.toml` no longer gives, which only
     /// a restart changes. Whether it serves the file is not confirmed.
     Unreachable,
+}
+
+/// Why the provider did not serve its settings file.
+struct Refused {
+    reason: String,
+    /// The fields only a restart applies, when they are why; the rest of the
+    /// file was then not tried. A provider that does not say refused
+    /// otherwise.
+    restart: Vec<String>,
 }
 
 impl Operator {
@@ -659,11 +820,11 @@ impl Operator {
                 )
             });
         }
-        if let Ok(Refusal { error, serving }) = serde_json::from_slice(&bytes) {
+        if let Ok(Refusal { error, serving, .. }) = serde_json::from_slice(&bytes) {
             bail!(
-                "{error}.\nStill serving the {} Discord module: {}.",
+                "{error}.\nStill serving {}: {}.",
                 serving.source,
-                list(&serving)
+                list(&serving.commands)
             );
         }
         let message = refusal(&bytes);
@@ -677,8 +838,10 @@ impl Operator {
         bail!("the Discord provider refused the request ({status}): {message}")
     }
 
-    /// Asks the provider to serve its settings file. Only its answer says
-    /// what became of that; an apply is never sent twice.
+    /// Asks the provider to serve its settings file, waiting as for any
+    /// change, since the module it declares may need Discord to register
+    /// commands first. Only its answer says what became of that; an apply
+    /// is never sent twice.
     async fn apply_settings(&self) -> Result<Applying> {
         let unconfirmed = |error: &dyn std::fmt::Display| {
             anyhow!(
@@ -687,7 +850,7 @@ impl Operator {
                 self.url
             )
         };
-        let response = match self.send(Method::POST, None, STATUS_TIMEOUT).await {
+        let response = match self.send(Method::POST, None, CHANGE_TIMEOUT).await {
             Ok(response) => response,
             Err(error) if error.is_connect() => return Ok(Applying::Unreachable),
             Err(error) => return Err(unconfirmed(&error)),
@@ -704,13 +867,22 @@ impl Operator {
         }
         let message = refusal(&bytes);
         if status == StatusCode::NOT_FOUND {
-            return Ok(Applying::Refused(format!(
-                "it does not offer settings operations ({message}) and may be a different \
-                 release than this program"
-            )));
+            return Ok(Applying::Refused(Refused {
+                reason: format!(
+                    "it does not offer settings operations ({message}) and may be a different \
+                     release than this program"
+                ),
+                restart: Vec::new(),
+            }));
         }
         if status.is_client_error() {
-            return Ok(Applying::Refused(message));
+            let restart = serde_json::from_slice::<Refusal>(&bytes)
+                .map(|refusal| refusal.restart)
+                .unwrap_or_default();
+            return Ok(Applying::Refused(Refused {
+                reason: message,
+                restart,
+            }));
         }
         Err(unconfirmed(&format!("{status}: {message}")))
     }
@@ -720,7 +892,7 @@ impl Operator {
     fn unreachable(&self, error: &reqwest::Error, changing: bool) -> anyhow::Error {
         if error.is_timeout() {
             let outcome = if changing {
-                " The change may still complete; check with `carillon discord module`."
+                " The change may still complete; check with `carillon discord settings`."
             } else {
                 ""
             };
@@ -739,7 +911,7 @@ impl Operator {
                 "the request to the Discord provider at {} failed: {error}.{}",
                 self.url,
                 if changing {
-                    " Whether the change happened is unknown; check with `carillon discord module`."
+                    " Whether the change happened is unknown; check with `carillon discord settings`."
                 } else {
                     ""
                 }
@@ -772,8 +944,11 @@ async fn manage_settings(
             report_applied(provider, &applied);
             Ok(())
         }
-        Applying::Refused(refusal) => {
-            bail!("{refusal}; {provider} keeps serving the settings it has")
+        Applying::Refused(refused) => {
+            bail!(
+                "{}; {provider} keeps serving the settings it has",
+                refused.reason
+            )
         }
         Applying::Unreachable => bail!(
             "the Discord provider does not answer at {}, so it did not confirm serving the \
@@ -789,10 +964,7 @@ async fn serve_configured(loaded: &LoadedConfig, provider: &str) -> Result<()> {
     let operator = Operator::new(loaded, provider, "settings")?;
     match operator.apply_settings().await? {
         Applying::Applied(applied) => report_applied(provider, &applied),
-        Applying::Refused(refusal) => println!(
-            "{provider} keeps serving the settings it has: {refusal}. `carillon restart` serves \
-             the file."
-        ),
+        Applying::Refused(refused) => saved_but_refused(loaded, provider, refused).await?,
         Applying::Unreachable => println!(
             "The Discord provider does not answer at {}, so whether it serves these settings is \
              not confirmed: a stopped provider reads them when it starts, and \
@@ -804,13 +976,24 @@ async fn serve_configured(loaded: &LoadedConfig, provider: &str) -> Result<()> {
 }
 
 fn report_applied(provider: &str, applied: &Applied) {
-    if applied.changed.is_empty() {
+    let Applied { changed, module } = applied;
+    if changed.is_empty() {
         println!("{provider} already serves its settings file.");
     } else {
         println!(
             "{provider} now serves its settings file: {}.",
-            applied.changed.join(", ")
+            changed.join(", ")
         );
+    }
+    if module.serving != module.previous {
+        println!(
+            "It serves {}: {}.",
+            module.serving.source,
+            list(&module.serving.commands)
+        );
+    }
+    if module.discord == Registration::Registered {
+        println!("Registered its commands with Discord.");
     }
 }
 
@@ -859,12 +1042,11 @@ fn print_settings(provider: &str, status: &config::Status) {
     }
 }
 
-fn list(module: &ModuleSummary) -> String {
-    if module.commands.is_empty() {
+fn list(commands: &[String]) -> String {
+    if commands.is_empty() {
         return "no commands".to_owned();
     }
-    module
-        .commands
+    commands
         .iter()
         .map(|name| format!("/{name}"))
         .collect::<Vec<_>>()
@@ -874,79 +1056,32 @@ fn list(module: &ModuleSummary) -> String {
 fn print_status(provider: &str, status: &Status) {
     let Status {
         serving,
-        next_start,
+        declared,
         registered,
     } = status;
     println!(
-        "{provider} serves the {} Discord module: {}.",
+        "{provider} serves {}: {}.",
         serving.source,
-        list(serving)
+        list(&serving.commands)
     );
-    match next_start {
-        NextStart::Same => {}
-        NextStart::Different { source } => println!(
-            "The {source} module on disk is not the one serving, so a restart would select it; \
-             the last install or reset may not have finished saving. Run it again."
+    match declared {
+        Declared::Serving => {}
+        Declared::Other { source } if *source == serving.source => println!(
+            "Its file has changed since it was applied; `carillon discord settings apply` serves \
+             it as it is now."
         ),
-        NextStart::Unknown { error } => {
-            println!("The module for the next start cannot be read: {error}.");
+        Declared::Other { source } => println!(
+            "The settings file declares {source}; `carillon discord settings apply` serves it."
+        ),
+        Declared::Unknown { error } => {
+            println!("The module the settings file declares cannot be read: {error}.");
         }
     }
     if *registered == Some(false) {
         println!(
-            "Discord's registration of these commands is not confirmed; the next install, \
-             reset or provider restart registers them."
+            "Discord's registration of these commands is not confirmed; applying the settings \
+             or restarting the provider registers them."
         );
-    }
-}
-
-/// Short success output; an unconfirmed save is an error the operator must
-/// finish by repeating the command.
-fn report_change(provider: &str, requested: Source, change: &Change) -> Result<()> {
-    let Change {
-        serving,
-        previous,
-        discord,
-        saved,
-    } = change;
-    if previous == serving {
-        println!(
-            "{provider} was already serving the {} Discord module: {}.",
-            serving.source,
-            list(serving)
-        );
-    } else {
-        println!(
-            "{provider} now serves the {} Discord module: {}.",
-            serving.source,
-            list(serving)
-        );
-    }
-    if *discord == Registration::Registered {
-        println!("Registered its commands with Discord.");
-    }
-    let again = match requested {
-        Source::Installed => "Run the same install again",
-        Source::Release => "Run `carillon discord module reset` again",
-    };
-    match (saved, requested) {
-        (Saved::Durable, _) => Ok(()),
-        (Saved::Failed { error }, Source::Installed) => bail!(
-            "it serves now, but saving it failed: {error}. The saved state on disk is \
-             unchanged; restart selection still depends on that saved state. {again}."
-        ),
-        (Saved::Failed { error }, Source::Release) => bail!(
-            "it serves now, but saving the reset failed: {error}. The saved state on disk is \
-             unchanged; restart selection still depends on that saved state. {again}."
-        ),
-        (Saved::Unsynced { error }, Source::Installed) => bail!(
-            "it serves now and is written to disk, but the write is not confirmed durable: \
-             {error}. A system crash may undo it. {again}."
-        ),
-        (Saved::Unsynced { error }, Source::Release) => bail!(
-            "it serves now and the installed module is removed from disk, but the removal is \
-             not confirmed durable: {error}. A system crash may undo it. {again}."
-        ),
     }
 }
 
@@ -989,6 +1124,14 @@ mod tests {
     async fn applying_provider(
         answer: Option<&'static [u8]>,
     ) -> Result<(super::Operator, tokio::task::JoinHandle<usize>)> {
+        answering_after(answer.map(<[u8]>::to_vec), std::time::Duration::ZERO).await
+    }
+
+    /// [`applying_provider`], answering each request `delay` after reading it.
+    async fn answering_after(
+        answer: Option<Vec<u8>>,
+        delay: std::time::Duration,
+    ) -> Result<(super::Operator, tokio::task::JoinHandle<usize>)> {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await?;
         let operator = super::Operator {
@@ -1008,7 +1151,8 @@ mod tests {
                     };
                     request.push(byte);
                 }
-                if let Some(answer) = answer {
+                tokio::time::sleep(delay).await;
+                if let Some(answer) = &answer {
                     let _ = stream.write_all(answer).await;
                 }
             }
@@ -1030,14 +1174,33 @@ mod tests {
             operator.apply_settings().await?,
             super::Applying::Unreachable
         ));
-        // A refusal is the provider's answer.
+        // A refusal is the provider's answer. A conflict it does not mark as
+        // one a restart resolves, as when maintenance is busy, is not one.
         let refusal: &[u8] =
             b"HTTP/1.1 409 Conflict\r\nContent-Length: 25\r\n\r\n{\"error\":\"guild changed\"}";
         let (operator, server) = applying_provider(Some(refusal)).await?;
-        let super::Applying::Refused(message) = operator.apply_settings().await? else {
+        let super::Applying::Refused(refused) = operator.apply_settings().await? else {
             anyhow::bail!("a refusal was not reported as one");
         };
-        assert_eq!(message, "guild changed");
+        assert_eq!(refused.reason, "guild changed");
+        assert!(refused.restart.is_empty());
+        assert_eq!(server.await?, 1);
+        let body = json!({
+            "error": "only a restart applies (guild_id)",
+            "serving": {"source": "bundled", "commands": [], "digest": "d"},
+            "restart": ["guild_id"],
+        })
+        .to_string();
+        let answer = format!(
+            "HTTP/1.1 409 Conflict\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let (operator, server) =
+            answering_after(Some(answer.into_bytes()), std::time::Duration::ZERO).await?;
+        let super::Applying::Refused(refused) = operator.apply_settings().await? else {
+            anyhow::bail!("a refusal was not reported as one");
+        };
+        assert_eq!(refused.restart, ["guild_id"]);
         assert_eq!(server.await?, 1);
         // A request the provider received without answering may have been
         // applied: it is reported as unconfirmed and not sent again.
@@ -1051,6 +1214,34 @@ mod tests {
             unconfirmed.to_string().contains("did not confirm"),
             "{unconfirmed}"
         );
+        assert_eq!(server.await?, 1);
+        Ok(())
+    }
+
+    /// An apply that registers a changed module's commands can take longer
+    /// than a status read; it is waited for as a change, and sent once.
+    #[tokio::test]
+    async fn an_apply_slower_than_a_status_read_is_still_confirmed() -> Result<()> {
+        let summary =
+            |digest: &str| json!({"source": "bundled", "commands": ["model"], "digest": digest});
+        let body = json!({
+            "changed": ["module"],
+            "module": {"serving": summary("new"), "previous": summary("old"), "discord": "registered"},
+        })
+        .to_string();
+        let answer = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let (operator, server) = answering_after(
+            Some(answer.into_bytes()),
+            super::STATUS_TIMEOUT + std::time::Duration::from_secs(1),
+        )
+        .await?;
+        let super::Applying::Applied(applied) = operator.apply_settings().await? else {
+            anyhow::bail!("a slow apply was not confirmed");
+        };
+        assert_eq!(applied.changed, ["module"]);
         assert_eq!(server.await?, 1);
         Ok(())
     }
@@ -1547,35 +1738,241 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn failed_saves_do_not_infer_restart_selection() -> Result<()> {
-        use crate::module::{Change, ModuleSummary, Registration, Saved, Source};
+    #[tokio::test]
+    async fn a_module_declaration_changes_only_outside_other_maintenance() -> Result<()> {
+        use super::{ModuleAction, manage_module};
+        use carillon_installation::maintenance::MaintenanceLock;
 
-        // Retrying may request the same bytes already on disk, and a reset
-        // may fail before it even inspects an absent override. Neither error
-        // alone establishes what a restart would load.
-        for source in [Source::Installed, Source::Release] {
-            let summary = ModuleSummary {
-                source,
-                commands: vec!["model".to_owned()],
-                digest: "same-module".to_owned(),
-            };
-            let change = Change {
-                serving: summary.clone(),
-                previous: summary,
-                discord: Registration::Unchanged,
-                saved: Saved::Failed {
-                    error: "directory sync failed".to_owned(),
-                },
-            };
-            let message = super::report_change("discord", source, &change)
+        let directory = tempfile::tempdir()?;
+        let mut config =
+            crate::config::tests::installation(directory.path(), "discord-private", 46_500)?;
+        // Nothing answers at the provider's address.
+        let unused = tokio::net::TcpListener::bind("127.0.0.2:0").await?;
+        config
+            .value
+            .providers
+            .iter_mut()
+            .find(|provider| provider.id == "discord-private")
+            .context("missing provider")?
+            .url = format!("http://{}", unused.local_addr()?);
+        drop(unused);
+        let module = directory.path().join("custom.wasm");
+        crate::module::tests::write_module(
+            &module,
+            &crate::module::tests::describing(&[crate::module::tests::definition("model")]),
+            &crate::module::tests::replying("custom", &[]),
+        )?;
+        let settings = config.provider_config_path("discord-private")?;
+        let original = fs::read(&settings)?;
+        let held = MaintenanceLock::acquire(&config.root)?;
+        for action in [
+            ModuleAction::Enable {
+                file: Some(module.clone()),
+            },
+            ModuleAction::Disable,
+        ] {
+            let refused = manage_module(|| Ok(config.clone()), None, Some(action))
+                .await
                 .err()
-                .context("a failed save must exit with an error")?
-                .to_string();
-            assert!(message.contains("saved state on disk is unchanged"));
-            assert!(message.contains("restart selection still depends on that saved state"));
-            assert!(message.contains("again"));
+                .context("changed the declaration during other maintenance")?;
+            assert!(
+                format!("{refused:#}").contains("another Carillon maintenance operation"),
+                "{refused:#}"
+            );
+            assert_eq!(fs::read(&settings)?, original);
         }
+        drop(held);
+        // The declaration changes, and the lock is free again for the
+        // provider's own change.
+        manage_module(
+            || Ok(config.clone()),
+            None,
+            Some(ModuleAction::Enable {
+                file: Some(module.clone()),
+            }),
+        )
+        .await?;
+        let declared = crate::config::DiscordConfig::read(&config, "discord-private")?.module;
+        assert!(declared.enabled);
+        assert_eq!(declared.path, Some(module));
+        assert!(MaintenanceLock::try_acquire(&config.root)?.is_some());
+        manage_module(|| Ok(config.clone()), None, Some(ModuleAction::Disable)).await?;
+        assert!(
+            !crate::config::DiscordConfig::read(&config, "discord-private")?
+                .module
+                .enabled
+        );
+        Ok(())
+    }
+
+    /// After setup or `configure`, a refusal of what only a restart applies
+    /// waits for `carillon restart` only when this release would serve the
+    /// saved file; any other refusal is an error, the file saved.
+    #[tokio::test]
+    async fn saved_settings_wait_for_a_restart_only_when_it_would_serve_them() -> Result<()> {
+        use crate::module::tests::{definition, describing, module, replying};
+
+        let directory = tempfile::tempdir()?;
+        let config = crate::config::tests::installation(
+            &directory.path().join("installation"),
+            "discord-private",
+            46_720,
+        )?;
+        let refused = |restart: &[&str]| super::Refused {
+            reason: "the settings file changes what only a restart applies".to_owned(),
+            restart: restart.iter().map(|field| (*field).to_owned()).collect(),
+        };
+        let outcome = |restart: &[&str]| {
+            let config = config.clone();
+            let refused = refused(restart);
+            async move {
+                super::saved_but_refused(&config, "discord-private", refused)
+                    .await
+                    .map_err(|error| format!("{error:#}"))
+            }
+        };
+        let declare = |path: Option<&Path>| -> Result<()> {
+            let mut discord = crate::config::DiscordConfig::read(&config, "discord-private")?;
+            discord.module.enabled = path.is_some();
+            discord.module.path = path.map(Path::to_path_buf);
+            discord.write(&config, "discord-private")
+        };
+
+        // Fields only a restart applies, with the bundled module or a usable
+        // custom one: the saved file waits for `carillon restart`.
+        outcome(&["guild_id"]).await.map_err(anyhow::Error::msg)?;
+        let custom = directory.path().join("custom.wasm");
+        fs::write(
+            &custom,
+            module(&describing(&[definition("model")]), &replying("ok", &[]))?,
+        )?;
+        declare(Some(&custom))?;
+        outcome(&["guild_id"]).await.map_err(anyhow::Error::msg)?;
+        // The provider did not try the module: one rebuilt for another
+        // contract, or deleted, would keep a restart from starting it.
+        for broken in [Some(&b"\0asm old contract"[..]), None] {
+            match broken {
+                Some(bytes) => fs::write(&custom, bytes)?,
+                None => fs::remove_file(&custom)?,
+            }
+            let refusal = outcome(&["guild_id"])
+                .await
+                .err()
+                .context("a restart was advised for an unusable module")?;
+            assert!(
+                refusal.starts_with(
+                    "the settings file is saved, but `carillon restart` would not start \
+                     discord-private: "
+                ),
+                "{refusal}"
+            );
+        }
+        // Any other refusal leaves the file saved but not served.
+        declare(None)?;
+        let refusal = outcome(&[])
+            .await
+            .err()
+            .context("a refusal was reported as served")?;
+        assert_eq!(
+            refusal,
+            "the settings file is saved, but discord-private did not serve it: the settings \
+             file changes what only a restart applies; it keeps serving the settings it has"
+        );
+        Ok(())
+    }
+
+    /// An update's preflight runs the new release's program: a module the
+    /// installed application ships is checked as the new release ships it,
+    /// and any other module as it is.
+    #[tokio::test]
+    async fn a_declared_module_is_checked_where_the_update_takes_it_from() -> Result<()> {
+        use crate::{
+            config::DiscordConfig,
+            module::tests::{definition, describing, module, replying},
+        };
+
+        let directory = tempfile::tempdir()?;
+        let config = crate::config::tests::installation(
+            &directory.path().join("installation"),
+            "discord-private",
+            46_700,
+        )?;
+        let release = directory.path().join("release");
+        let shipped = Path::new("lib/examples/card-colours.wasm");
+        for root in [config.root.join("app"), release.clone()] {
+            fs::create_dir_all(root.join("lib/examples"))?;
+        }
+        let usable = module(&describing(&[definition("model")]), &replying("ok", &[]))?;
+        let declare = |path: &Path| -> Result<DiscordConfig> {
+            let mut discord = DiscordConfig::read(&config, "discord-private")?;
+            discord.module.enabled = true;
+            discord.module.path = Some(path.to_path_buf());
+            Ok(discord)
+        };
+        let check = |discord: DiscordConfig| {
+            let (config, release) = (config.clone(), release.clone());
+            async move {
+                super::check_declared(&config, "discord-private", &discord, &release)
+                    .await
+                    .map_err(|error| format!("{error:#}"))
+            }
+        };
+
+        // The installed copy is the old release's; the new release's serves.
+        let installed = config.root.join("app").join(shipped);
+        fs::write(&installed, b"\0asm old contract")?;
+        fs::write(release.join(shipped), &usable)?;
+        check(declare(&installed)?)
+            .await
+            .map_err(anyhow::Error::msg)?;
+        // A relative declaration starts at the installation, inside `app/` too.
+        check(declare(&Path::new("app").join(shipped))?)
+            .await
+            .map_err(anyhow::Error::msg)?;
+
+        // A usable installed copy does not hide a new release that cannot serve.
+        fs::write(&installed, &usable)?;
+        fs::write(release.join(shipped), b"\0asm broken")?;
+        let refusal = check(declare(&installed)?).await.err().unwrap_or_default();
+        assert!(refusal.contains("cannot serve"), "{refusal}");
+        fs::remove_file(release.join(shipped))?;
+        let refusal = check(declare(&installed)?).await.err().unwrap_or_default();
+        assert!(refusal.contains("read Discord module"), "{refusal}");
+
+        // A detour that stays inside the application is still the release's.
+        fs::write(release.join(shipped), &usable)?;
+        fs::write(&installed, b"\0asm old contract")?;
+        check(declare(
+            &config
+                .root
+                .join("app/lib/../lib/examples/card-colours.wasm"),
+        )?)
+        .await
+        .map_err(anyhow::Error::msg)?;
+        // One that leads out of it is the owner's file, never the release's
+        // path spelt the same way.
+        let modules = config.root.join("modules");
+        fs::create_dir_all(&modules)?;
+        fs::create_dir_all(directory.path().join("modules"))?;
+        fs::write(modules.join("custom.wasm"), b"\0asm broken")?;
+        fs::write(directory.path().join("modules/custom.wasm"), &usable)?;
+        let escaping = Path::new("app/../modules/custom.wasm");
+        let refusal = check(declare(escaping)?).await.err().unwrap_or_default();
+        assert!(refusal.contains("cannot serve"), "{refusal}");
+        fs::write(modules.join("custom.wasm"), &usable)?;
+        check(declare(escaping)?)
+            .await
+            .map_err(anyhow::Error::msg)?;
+
+        // A module of the owner's own is checked as it is, whatever the
+        // release ships.
+        fs::write(release.join(shipped), &usable)?;
+        let own = directory.path().join("own.wasm");
+        fs::write(&own, b"\0asm broken")?;
+        let refusal = check(declare(&own)?).await.err().unwrap_or_default();
+        assert!(refusal.contains("cannot serve"), "{refusal}");
+        fs::write(&own, &usable)?;
+        check(declare(&own)?).await.map_err(anyhow::Error::msg)?;
         Ok(())
     }
 

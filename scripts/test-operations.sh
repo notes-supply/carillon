@@ -81,12 +81,17 @@ stop() {
 case "$*" in
   '--user show --property=ActiveState --value carillon.target')
     if running; then echo active; else echo inactive; fi ;;
+  # Whether the target or any of its services runs, as setup asks; with
+  # FAKE_MEMBER, a service in that state follows the target's.
+  '--user show --property=ActiveState --value carillon.target carillon-core.service carillon-discord.service carillon-runtime-pi.service carillon-runtime-t3.service')
+    if running; then echo active; else echo inactive; fi
+    [ -z "${FAKE_MEMBER:-}" ] || printf '\n%s\n' "$FAKE_MEMBER" ;;
   # The services that are part of the target, which a stop names so that it
   # returns once they, not only the target, have stopped.
   '--user show --property=ConsistsOf --value carillon.target')
-    echo 'carillon-core.service carillon-discord.service carillon-runtime-pi.service' ;;
+    echo 'carillon-core.service carillon-discord.service carillon-runtime-pi.service carillon-runtime-t3.service' ;;
   '--user start carillon.target') running || start ;;
-  '--user stop carillon.target carillon-core.service carillon-discord.service carillon-runtime-pi.service') stop ;;
+  '--user stop carillon.target carillon-core.service carillon-discord.service carillon-runtime-pi.service carillon-runtime-t3.service') stop ;;
   # The test's own cleanup stops whatever is left.
   '--user stop carillon.target') stop ;;
   '--user daemon-reload') [ "${FAKE_RELOAD:-ok}" != fail ] || exit 1 ;;
@@ -189,15 +194,16 @@ printf '%s\n' 'not a registry' >"$TEST_ROOT/decoy/carillon.toml"
 case "$(simulate installed-1)" in *'Local provider response 1'*) ;; *) fail 'first turn failed' ;; esac
 
 # Provider commands receive the resolved installation and infer the only Discord instance.
-MODULE=$INSTALLATION/app/lib/carillon_discord_module.wasm
-INSTALLED=$INSTALLATION/state/components/discord-private/module.wasm
-carillon discord module | grep -Fx 'discord-private serves the release Discord module: /model, /command.' >/dev/null
-carillon discord module check "$MODULE" | grep -F 'is a usable Discord module' >/dev/null
-# The running provider takes the installation's maintenance lock for its own changes.
-refuse locked-install flock "$INSTALLATION/.maintenance.lock" carillon discord module install "$MODULE"
-grep -F 'another Carillon maintenance operation is running' "$TEST_ROOT/locked-install.log" >/dev/null
-grep -F 'Still serving the release Discord module: /model, /command.' "$TEST_ROOT/locked-install.log" >/dev/null
-[ ! -e "$INSTALLED" ]
+EXAMPLE=$INSTALLATION/app/lib/examples/card-colours.wasm
+SETTINGS=$INSTALLATION/providers/discord-private.toml
+carillon discord module | grep -Fx 'discord-private serves the bundled Discord module: /model, /command.' >/dev/null
+carillon discord module check "$EXAMPLE" | grep -F 'is a usable Discord module' >/dev/null
+# Another maintenance operation's lock leaves the declaration as it is.
+cp "$SETTINGS" "$TEST_ROOT/settings-before"
+refuse locked-enable flock "$INSTALLATION/.maintenance.lock" carillon discord module enable "$EXAMPLE"
+grep -F 'another Carillon maintenance operation is running' "$TEST_ROOT/locked-enable.log" >/dev/null
+cmp "$SETTINGS" "$TEST_ROOT/settings-before"
+carillon discord module | grep -Fx 'discord-private serves the bundled Discord module: /model, /command.' >/dev/null
 carillon discord configure --guild-id 100 --bot-user-id 201 --user-id 200 --user-id 250 \
   --route 300:always:channel >/dev/null
 grep -F '"250"' "$INSTALLATION/providers/discord-private.toml" >/dev/null
@@ -206,7 +212,7 @@ carillon restart >"$TEST_ROOT/restart.log"
 grep -Fx 'Core stopped with its runtime workers paused.' "$TEST_ROOT/restart.log" >/dev/null
 expect_trace '--user show --property=ActiveState --value carillon.target' \
   '--user show --property=ConsistsOf --value carillon.target' \
-  '--user stop carillon.target carillon-core.service carillon-discord.service carillon-runtime-pi.service' \
+  '--user stop carillon.target carillon-core.service carillon-discord.service carillon-runtime-pi.service carillon-runtime-t3.service' \
   '--user start carillon.target'
 grep -F 'runtime workers paused for maintenance' "$INSTALLATION/logs/core.log" >/dev/null
 # A runtime that cannot say whether a restart loses anything keeps the
@@ -247,6 +253,38 @@ grep -F 'another Carillon maintenance operation is running' "$TEST_ROOT/locked.l
 [ ! -e "$TRACE" ]
 running
 printf 'operations passed: entry point, resolution, start/drained restart, logs, provider commands, Discord module, lock\n'
+
+# Setup over this installation while it runs would leave its services running
+# the replaced release, so it is refused before it asks or writes anything:
+# with options or guided, with registration's reload skipped, and while only
+# one of its services runs.
+ACTIVE='--user show --property=ActiveState --value carillon.target carillon-core.service carillon-discord.service carillon-runtime-pi.service carillon-runtime-t3.service'
+app_inode=$(stat -c %i "$INSTALLATION/app")
+snapshot
+for setup in options guided skip-reload member; do
+  case "$setup" in
+    options) refuse "running-setup-$setup" install_release "$BASE_PORT" ;;
+    guided) refuse "running-setup-$setup" "$RELEASE/install.sh" ;;
+    skip-reload)
+      refuse "running-setup-$setup" install_release "$BASE_PORT" CARILLON_SKIP_SYSTEMD_RELOAD=1 ;;
+    member)
+      carillon stop >/dev/null
+      rm -f "$TRACE"
+      refuse "running-setup-$setup" install_release "$BASE_PORT" FAKE_MEMBER=activating ;;
+  esac
+  grep -F "Carillon at $INSTALLATION is running" "$TEST_ROOT/running-setup-$setup.log" >/dev/null
+  grep -F "Update it with 'carillon update /path/to/carillon-VERSION-linux-x86_64.tar.gz'" \
+    "$TEST_ROOT/running-setup-$setup.log" >/dev/null
+  expect_trace "$ACTIVE"
+  [ "$(stat -c %i "$INSTALLATION/app")" = "$app_inode" ]
+  [ "$setup" = member ] || running
+  assert_preserved
+done
+stopped
+carillon start >/dev/null
+rm -f "$TRACE"
+running
+printf 'running setup refused: with options, guided, reload skipped, and only a service running\n'
 
 # An independently installed provider survives application replacement.
 cat >"$HOME/.local/bin/carillon-review" <<'PROVIDER'
@@ -314,14 +352,16 @@ DISCORD_SETTINGS=$INSTALLATION/providers/discord-private.toml
 cp -p "$DISCORD_SETTINGS" "$TEST_ROOT/discord-settings"
 for state in schema:'database schema is not the current Carillon format' \
   discord:'cannot use the settings of discord-private' \
-  module:'has an installed Discord module this release cannot serve'; do
+  module:'enable a custom Discord module this release cannot serve'; do
   case "${state%%:*}" in
     schema)
       node -e 'new (require("node:sqlite").DatabaseSync)(process.argv[1]).exec("CREATE TABLE later_release (id INTEGER)")' \
         "$DATABASE" ;;
     discord) sed -i 's/^guild_id = .*/guild_id = "not-a-snowflake"/' "$DISCORD_SETTINGS" ;;
-    # An installed module the new release cannot serve, as after a contract change.
-    module) mkdir -p "${INSTALLED%/*}" && printf '%s\n' 'not a module' >"$INSTALLED" ;;
+    # An enabled module the new release cannot serve, as after a contract change.
+    module)
+      printf '%s\n' 'not a module' >"$TEST_ROOT/broken.wasm"
+      printf '\n[module]\nenabled = true\npath = "%s"\n' "$TEST_ROOT/broken.wasm" >>"$DISCORD_SETTINGS" ;;
   esac
   snapshot
   refuse "incompatible-${state%%:*}" carillon update "$TEST_ROOT/next.tar.gz"
@@ -336,11 +376,53 @@ for state in schema:'database schema is not the current Carillon format' \
       node -e 'new (require("node:sqlite").DatabaseSync)(process.argv[1]).exec("DROP TABLE later_release")' \
         "$DATABASE" ;;
     discord) cp -p "$TEST_ROOT/discord-settings" "$DISCORD_SETTINGS" ;;
-    module) rm "$INSTALLED" ;;
+    module) cp -p "$TEST_ROOT/discord-settings" "$DISCORD_SETTINGS" && rm "$TEST_ROOT/broken.wasm" ;;
   esac
 done
 snapshot
 printf 'update state preflight passed: incompatible core schema, provider settings and Discord module refused\n'
+
+# When T3 is the registered runtime, the release's own T3 runtime reads the
+# settings and token it would start from before anything stops. A token file
+# gone or emptied while the running runtime still holds its token, or
+# settings it rejects, are refused, as above.
+cp -p "$INSTALLATION/carillon.toml" "$TEST_ROOT/registry"
+sed -i 's/"runtime-pi"/"runtime-t3"/' "$INSTALLATION/carillon.toml"
+T3_SETTINGS=$INSTALLATION/providers/runtime-t3.toml
+T3_TOKEN=$INSTALLATION/credentials/t3.token
+t3_settings() {
+  printf '%s\n' 'url = "http://127.0.0.1:1"' 'token_file = "credentials/t3.token"' \
+    'project_id = "agent"' '[model]' 'instance_id = "claudeAgent"' 'model = "claude-sonnet-5"' \
+    >"$T3_SETTINGS"
+  printf '%s\n' t3-token >"$T3_TOKEN"
+  chmod 0600 "$T3_SETTINGS" "$T3_TOKEN"
+}
+for state in empty:'the T3 token file is empty' missing:'credentials/t3.token' \
+  settings:'runtime-t3.toml: /model'; do
+  t3_settings
+  case "${state%%:*}" in
+    empty) : >"$T3_TOKEN" ;;
+    missing) rm "$T3_TOKEN" ;;
+    settings) printf '%s\n' 'temperature = 2' >>"$T3_SETTINGS" ;;
+  esac
+  snapshot
+  refuse "incompatible-t3-${state%%:*}" carillon update "$TEST_ROOT/next.tar.gz"
+  grep -F "${state#*:}" "$TEST_ROOT/incompatible-t3-${state%%:*}.log" >/dev/null
+  grep -F 'nothing was changed' "$TEST_ROOT/incompatible-t3-${state%%:*}.log" >/dev/null
+  expect_trace '--user show --property=ActiveState --value carillon.target'
+  [ "$(stat -c %i "$INSTALLATION/app")" = "$app_inode" ]
+  running
+  assert_preserved
+done
+# Usable settings and token pass the release's preflight.
+t3_settings
+CARILLON_HOME=$INSTALLATION "$RELEASE/install.sh" --update --check >"$TEST_ROOT/t3-preflight.log"
+grep -Fx "runtime-t3's saved settings and T3 token read as startup reads them." \
+  "$TEST_ROOT/t3-preflight.log" >/dev/null
+cp -p "$TEST_ROOT/registry" "$INSTALLATION/carillon.toml"
+rm "$T3_SETTINGS" "$T3_TOKEN"
+snapshot
+printf 'update T3 preflight passed: missing or empty token and rejected settings refused, usable ones accepted\n'
 
 # An installer that cannot even be started after the services stopped leaves
 # the application unchanged and says how to resume it.
@@ -355,19 +437,21 @@ assert_preserved
 carillon start >/dev/null
 rm -f "$TRACE"
 
-# A running installation is stopped, replaced, restarted and checked. An
-# installed Discord module lives outside the replaced application and is
-# checked by the new release before anything stops.
-carillon discord module install "$MODULE" >"$TEST_ROOT/module-install.log"
-grep -Fx 'discord-private now serves the installed Discord module: /model, /command.' \
-  "$TEST_ROOT/module-install.log" >/dev/null
-cmp "$MODULE" "$INSTALLED"
+# A running installation is stopped, replaced, restarted and checked. The
+# custom module the settings enable is checked by the new release before
+# anything stops.
+carillon discord module enable "$EXAMPLE" >"$TEST_ROOT/module-enable.log"
+grep -Fx "It serves the custom Discord module $EXAMPLE: /model, /command." \
+  "$TEST_ROOT/module-enable.log" >/dev/null
+snapshot
 carillon update "$TEST_ROOT/next.tar.gz" >"$TEST_ROOT/update.log"
-grep -F "installed Discord module $INSTALLED is usable" "$TEST_ROOT/update.log" >/dev/null
+# A Pi installation has no T3 runtime to check.
+grep -Fx 'runtime-t3 is not in carillon.toml; nothing to check' "$TEST_ROOT/update.log" >/dev/null
+grep -F "custom Discord module $EXAMPLE, as this release ships it, is usable" "$TEST_ROOT/update.log" >/dev/null
 grep -Fx "Updated to Carillon $VERSION; services are running again:" "$TEST_ROOT/update.log" >/dev/null
 expect_trace '--user show --property=ActiveState --value carillon.target' \
   '--user show --property=ConsistsOf --value carillon.target' \
-  '--user stop carillon.target carillon-core.service carillon-discord.service carillon-runtime-pi.service' \
+  '--user stop carillon.target carillon-core.service carillon-discord.service carillon-runtime-pi.service carillon-runtime-t3.service' \
   '--user daemon-reload' '--user enable carillon.target' '--user start carillon.target'
 grep -Fx 'Core stopped with its runtime workers paused.' "$TEST_ROOT/update.log" >/dev/null
 [ "$(cat "$INSTALLATION/app/lib/release-sentinel")" = next ]
@@ -377,9 +461,9 @@ assert_preserved
 [ "$(carillon recent)" = "$recent_before" ]
 case "$(simulate installed-2)" in *'Local provider response 2'*) ;; *) fail 'conversation did not continue' ;; esac
 [ "$(carillon review check)" = "review $INSTALLATION check" ]
-carillon discord module | grep -Fx 'discord-private serves the installed Discord module: /model, /command.' >/dev/null
-carillon discord module reset | grep -Fx 'discord-private now serves the release Discord module: /model, /command.' >/dev/null
-[ ! -e "$INSTALLED" ]
+carillon discord module | grep -Fx "discord-private serves the custom Discord module $EXAMPLE: /model, /command." >/dev/null
+carillon discord module disable | grep -Fx 'It serves the bundled Discord module: /model, /command.' >/dev/null
+snapshot
 
 # A stopped installation stays stopped.
 carillon stop >/dev/null

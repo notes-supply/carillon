@@ -1,7 +1,7 @@
 # Carillon operations
 
 This guide covers installing, running, configuring, updating and backing up
-Carillon. The [README](../../README.md#install) has the download steps.
+Carillon.
 
 ## Requirements
 
@@ -26,42 +26,86 @@ migrations.
 
 ## Install
 
-Run `install.sh` from the extracted release as the user who will own
-Carillon (not root):
+The [README](../../README.md#install)'s command downloads the newest release
+and runs its installer as you, the user who will own Carillon (not root).
+Without Discord options, the installer asks at the terminal:
+
+1. **The runtime.** Pi, or a T3 Code server already running on this machine
+   (`--runtime pi` or `--runtime t3` answers it).
+2. **Pi** opens next: sign in with `/login`, choose the agent's model with
+   `/model` and press Ctrl+S on it, then leave with Ctrl+D. Setup checks
+   that Pi is ready and offers to open it again until it is. **T3** asks
+   for its address and a token (`t3 auth session issue --label Carillon
+   --token-only` prints one), then offers T3's projects and models; the
+   agent works in the project's folder.
+3. **Discord.** The bot token, not shown as you type. Setup learns the bot
+   from it, waits until Message Content Intent is on, prints the
+   invitation link if the bot is in no server yet, and offers the bot's
+   servers and text channels by name (with the ID where names repeat), then
+   when the agent answers (every message or only mentions; a thread per
+   conversation or the channel as one). It checks that the bot may answer
+   that way in each channel, and asks again until it may. Then who it
+   answers: the bot application's owners, and anyone else by Discord user
+   ID. Only those people can talk to the agent.
+4. Carillon starts.
+
+Ctrl+C or Esc cancels; run the installer again to finish, and it offers to
+keep what's already set up (the Discord bot once Discord confirms its saved
+token). The installer refuses while Carillon runs: stop it with `carillon
+stop` first, or update it with `carillon update ARCHIVE`. On an installed
+release, `carillon setup` asks the same questions, and `carillon discord
+setup` asks only Discord's. A rerun that changes the T3 settings or the bot
+token takes effect in a running Carillon at `carillon restart`.
+
+The installer creates `~/.carillon` (or `CARILLON_HOME`), registers the user
+services (`carillon.target` with core, Discord and both runtimes; the
+runtime you didn't choose ends at once) and links `~/.local/bin/carillon`.
+It never replaces an unrelated program there. If `~/.local/bin` isn't on
+your `PATH`, run `~/.local/bin/carillon` instead of `carillon`, or add that
+directory to your `PATH`. With Pi, `--workspace` sets the agent's folder
+(default: your home). `--base-port` moves the loopback ports (default 43800
+to 43802).
+
+To start Carillon at boot without logging in, an administrator can run
+`loginctl enable-linger USER`.
+
+### Without questions
+
+With the Discord options, the installer asks nothing:
 
 ```sh
-carillon-0.1.0-beta.1/install.sh --guild-id GUILD_ID --bot-user-id BOT_ID \
-  --user-id YOUR_DISCORD_ID --route CHANNEL_ID:always:thread --workspace "$HOME"
+curl -fsSL https://raw.githubusercontent.com/notes-supply/carillon/main/install.sh |
+  sh -s -- --guild-id GUILD_ID --bot-user-id BOT_ID \
+  --user-id YOUR_DISCORD_ID --route CHANNEL_ID:always:thread
 ```
 
 - `--user-id` may repeat; only these people can talk to the agent.
 - `--route CHANNEL:ACTIVATION:SCOPE` may repeat. `ACTIVATION` is `always` or
   `mention`; `SCOPE` is `thread` (each thread is a conversation) or `channel`.
-- `--workspace` is the agent's working directory (default: your home).
-- `--base-port` moves the loopback ports (default 43800 to 43802).
+- `--runtime t3` runs the agent on T3; set `--workspace` to the T3 project's
+  folder.
+- `--version VERSION`, first, installs that release instead of the newest.
 
-The installer creates `~/.carillon` (or `CARILLON_HOME`), registers the user
-services `carillon.target`, `carillon-core`, `carillon-discord` and
-`carillon-runtime-pi` and enables them without starting them, and links
-`~/.local/bin/carillon`. It never replaces an unrelated program there. If
-`~/.local/bin` isn't on your `PATH`, run `~/.local/bin/carillon` instead of
-`carillon`, or add that directory to your `PATH`; the installer prints the
-commands with the path to use.
+Then put the bot token in `~/.carillon/credentials/discord-bot.token` (mode
+0600), sign in to Pi with the printed `carillon-pi` command, or set T3 up
+with [`carillon runtime-t3 configure`](../../packages/runtime-t3/README.md),
+and run `carillon start`.
 
-Then:
+Rerunning the installer with options keeps the registry, credentials and
+state, but rewrites the Discord settings from them. Use `carillon update`
+for new releases.
 
-1. Put the bot token in the file the installer names
-   (`~/.carillon/credentials/discord-bot.token`, mode 0600).
-2. Sign in to a model provider with Pi: run the printed `carillon-pi` command,
-   authenticate, open `/model` and press Ctrl+S on the model to use.
-3. `carillon start`, then `carillon status`.
+### From the downloaded archive
 
-To start Carillon at boot without logging in, an administrator can run
-`loginctl enable-linger USER`.
-
-Rerunning `install.sh` retries a failed setup. It keeps the registry,
-credentials and state, but rewrites the Discord settings from its arguments.
-Use `carillon update` for new releases.
+```sh
+version=0.1.0-beta.2
+base=https://github.com/notes-supply/carillon/releases/download/v$version
+curl -fLO "$base/carillon-$version-linux-x86_64.tar.gz"
+curl -fLO "$base/SHA256SUMS"
+sha256sum -c SHA256SUMS
+tar -xzf "carillon-$version-linux-x86_64.tar.gz"
+"carillon-$version/install.sh"    # or with the options above
+```
 
 ## Everyday commands
 
@@ -70,7 +114,7 @@ carillon status              # health of core and each provider
 carillon start
 carillon stop
 carillon restart
-carillon logs -f core        # or discord, runtime-pi; without a name, all logs
+carillon logs -f core        # or discord, runtime-pi, runtime-t3; without a name, all logs
 carillon recent              # recent turns
 carillon inspect TURN_ID     # one turn's state, output or failure
 carillon check               # does this program accept the installation? (read-only)
@@ -140,7 +184,8 @@ starts an enabled runtime that isn't running. Everything else in
 needs `carillon restart`; an apply that meets such a change refuses the whole
 file and says which fields.
 
-Discord's admission settings apply live too:
+Discord's admission settings apply live too. `carillon discord setup` asks
+for them at the terminal; `configure` takes them as options:
 
 ```sh
 carillon discord configure --guild-id GUILD_ID --bot-user-id BOT_ID \
@@ -149,10 +194,12 @@ carillon discord settings          # what the provider serves vs. the file
 carillon discord settings apply    # serve the file's live changes
 ```
 
-Users, routes, `typing`, `reactions` with their emoji, and
-`activity_markers` apply live. The guild, bot user, attachment limits and
+Users, routes, `typing`, `reactions` with their emoji, `activity_markers`
+and the [module](#discord-module) apply live. The guild, bot user, bot token file, attachment limits and
 `activity` need a restart of the Discord provider. A message keeps the
-settings it was admitted with.
+settings it was admitted with. Setup and `configure` save the file, then
+have a running provider serve it; if it refuses, they fail, unless only a
+restart applies the file and this release accepts the module it declares.
 
 ### Parallel conversations
 
@@ -255,18 +302,36 @@ Use emote IDs that belong to your bot's application. After editing, run
 ### Discord module
 
 Slash commands, their controls and the cards come from a WebAssembly module.
-The release ships one; you can serve another without restarting Discord:
+The release bundles one, and an example that colours each card by its job's
+state. To try the example:
 
 ```sh
-carillon discord module                  # what serves now
-carillon discord module check FILE       # can this release serve FILE?
-carillon discord module install FILE     # serve FILE now and after restarts
-carillon discord module reset            # back to the release's module
+carillon discord module enable ~/.carillon/app/lib/examples/card-colours.wasm
+carillon discord module            # what serves, and what the settings declare
+carillon discord module disable    # back to the bundled module
 ```
 
-An installed module is kept outside `app/`, so it survives updates. An update
-refuses when the new release can't serve it; reset first, then install a
-module built for the new release.
+`enable` and `disable` change the `[module]` table of
+`providers/discord-private.toml` and apply the settings:
+
+```toml
+[module]
+enabled = true
+path = "/home/you/card-colours.wasm"   # a relative path starts at the installation
+```
+
+Applying the settings (`carillon discord settings apply`) rereads the file,
+so a module rebuilt at the same path serves after an apply. Discord gets the
+module's commands first. A module that can't serve, or whose commands
+Discord refuses, leaves the serving module and settings as they were.
+Commands already running finish on the module they started with.
+`carillon discord module check FILE` checks a module without serving it.
+
+An update checks the enabled module first: the example (or any module inside
+`app/`) as the new release ships it, any other file as it is. If the new
+release can't serve a module of your own, the update refuses; disable it,
+update, then enable one built for the new release. The example's
+source is in [examples/card-colours](../../examples/card-colours/README.md).
 
 ### Restarts and replay
 
@@ -318,6 +383,14 @@ its own under `~/.carillon/pi`, separate from `~/.pi`). Loopback tokens in
 diagnostics and maintenance. None of them reach prompts, sessions or logs.
 Changing a credential takes a restart.
 
+Each provider's settings name its token's file: `bot_token_file` for Discord
+(by default `credentials/discord-bot.token`, for a token put there by hand)
+and `token_file` for T3. Setup writes a changed token to a new private file
+first and only then replaces the settings to name it, keeping the old file.
+Until that replacement the previous settings and their token stay in place.
+If its durability cannot be confirmed afterwards, a crash may keep either
+the old or the new settings, each naming its own durable token.
+
 ## Back up and restore
 
 Stop Carillon first:
@@ -349,7 +422,7 @@ carillon update carillon-VERSION-linux-x86_64.tar.gz
 
 Before stopping anything, update unpacks the archive inside the installation,
 checks it against its `MANIFEST` and has the new release check your registry,
-database, Discord settings and installed module. It then drains, stops,
+database, Discord settings and the custom module they enable. It then drains, stops,
 swaps the application directory atomically, and starts what was running. It
 keeps configuration, credentials, state, sessions and logs. A refusal changes
 nothing. If a later step fails, the message says what changed; rerun the

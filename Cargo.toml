@@ -3,14 +3,16 @@ resolver = "3"
 members = [
     "crates/carillon-core",
     "crates/carillon-discord",
+    "crates/carillon-discord-bundled",
     "crates/carillon-discord-module",
     "crates/carillon-protocol",
     "crates/carillon-installation",
     "crates/carillon-wasm",
+    "examples/card-colours",
 ]
 
 [workspace.package]
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 edition = "2024"
 rust-version = "1.98"
 publish = false

@@ -224,6 +224,9 @@ impl ProviderRole {
 #[derive(Clone, Debug)]
 pub struct LoadedConfig {
     pub root: PathBuf,
+    /// The registry file as the caller named it, which [`Self::reload`]
+    /// reads again.
+    pub path: PathBuf,
     pub value: Config,
 }
 
@@ -233,6 +236,7 @@ impl LoadedConfig {
     /// Returns an error when the file cannot be read or parsed, or when the
     /// registry is inconsistent.
     pub fn load(path: &Path) -> Result<Self> {
+        let named = path.to_path_buf();
         let path = path
             .canonicalize()
             .with_context(|| format!("read config {}", path.display()))?;
@@ -248,7 +252,21 @@ impl LoadedConfig {
         value.agent.workspace = absolutize(&root, &value.agent.workspace);
         value.validate()?;
         value.validate_resource_state_separation()?;
-        Ok(Self { root, value })
+        Ok(Self {
+            root,
+            path: named,
+            value,
+        })
+    }
+
+    /// The registry as its file says now, read again from where it was
+    /// loaded.
+    ///
+    /// # Errors
+    ///
+    /// As for [`Self::load`].
+    pub fn reload(&self) -> Result<Self> {
+        Self::load(&self.path)
     }
 
     /// # Errors

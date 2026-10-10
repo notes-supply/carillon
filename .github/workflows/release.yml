@@ -11,7 +11,7 @@ on:
         description: ID of the successful CI run on main whose archive to publish
         required: true
       version:
-        description: Version the archive carries, such as 0.1.0-beta.1
+        description: Version the archive carries, such as 0.1.0-beta.2
         required: true
 
 permissions: {}

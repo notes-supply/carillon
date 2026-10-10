@@ -33,6 +33,7 @@ tracing-subscriber.workspace = true
 twilight-gateway = "0.17.1"
 twilight-http = "0.17.1"
 twilight-model.workspace = true
+twilight-util = { version = "0.17.0", features = ["permission-calculator"] }
 twilight-validate = "0.17.0"
 unicode-general-category = "1.1.0"
 uuid.workspace = true

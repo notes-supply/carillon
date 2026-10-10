@@ -23,8 +23,8 @@ use crate::{
     },
     delivery::{Feedback, PROMPT_FEEDBACK, Reactions, delivery_loop},
     module::{
-        Change, ChangeError, DiscordApp, InteractionCalls, MODULE_LIMIT, Module, ModuleFiles,
-        Refusal, Status, Submissions,
+        ChangeError, Declared, DiscordApp, InteractionCalls, Module, ModuleFiles, Refusal, Status,
+        Submissions,
     },
 };
 #[cfg(test)]
@@ -120,7 +120,6 @@ struct DiscordState {
 pub(crate) struct ServeOptions<'a> {
     pub provider_id: &'a str,
     pub token_file: &'a Path,
-    pub discord_token_file: Option<&'a Path>,
     pub module: &'a Path,
     pub deterministic: bool,
 }
@@ -136,6 +135,7 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
         return Ok(());
     }
     let discord = DiscordConfig::load(&config, &provider.id)?;
+    let bot_token_file = discord.bot_token_path(&config.root);
     let token = read_token_file(options.token_file)?;
     if !token_matches(&provider.token_hash, &token) {
         bail!("Discord interface provider token does not match configuration");
@@ -149,11 +149,10 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
         state_directory(&config, &provider.id).join("participation.json"),
     )?);
     let module = Arc::new(
-        Module::load(ModuleFiles::of(
-            &config,
-            &provider.id,
-            options.module.to_path_buf(),
-        ))
+        Module::load(
+            ModuleFiles::of(&config, &provider.id, options.module.to_path_buf()),
+            discord.module_source(&config.root),
+        )
         .await?,
     );
     let core = CoreClient::new(
@@ -200,14 +199,11 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
         axum::serve(listener, discord_router(state, true)).await?;
         return Ok(());
     }
-    let discord_token_path = options
-        .discord_token_file
-        .context("--discord-token-file is required outside deterministic mode")?;
     // Cosmetic: records that cannot be read turn cards off, not the provider.
     let cards = CardRecords::open(
         state_directory(&state.installation, &provider.id).join("activity-cards.json"),
     );
-    let discord_token = read_token_file(discord_token_path)?;
+    let discord_token = read_token_file(&bot_token_file)?;
     let http = Arc::new(DiscordHttp::new(discord_token.clone()));
     connect(state, listener, http, discord_token, reconciled, cards).await
 }
@@ -365,10 +361,7 @@ fn discord_router(state: DiscordState, deterministic: bool) -> Router {
     let router = Router::new()
         .route("/health", get(discord_health))
         .route("/v1/operations", post(discord_operation))
-        .route(
-            "/v1/module",
-            get(module_status).put(install_module).delete(reset_module),
-        )
+        .route("/v1/module", get(module_status))
         .route("/v1/settings", get(settings_status).post(apply_settings));
     if deterministic {
         router
@@ -462,152 +455,151 @@ async fn settings_status(
     headers: HeaderMap,
 ) -> Result<Json<config::Status>, InterfaceError> {
     authorize_operator(&state, &headers)?;
-    Ok(Json(state.settings.status(|| read_settings(&state))))
+    let root = &state.installation.root;
+    Ok(Json(state.settings.status(
+        || read_settings(&state),
+        |file| state.module.declared(file.module_source(root)) != Declared::Serving,
+    )))
 }
 
 /// Serves the provider's settings file in place of the serving settings,
-/// whole, when everything it changes applies live; otherwise the serving
-/// settings stay, and the answer says why.
+/// whole, when everything it changes applies live, the module it declares
+/// included; otherwise the serving settings and module stay, and the answer
+/// says why. The apply runs as its own task, so an operator who stops
+/// waiting cannot cancel it between Discord's confirmation and activation.
 async fn apply_settings(
     State(state): State<DiscordState>,
     headers: HeaderMap,
-) -> Result<Json<config::Applied>, InterfaceError> {
+) -> Result<Response, InterfaceError> {
     authorize_operator(&state, &headers)?;
-    match state.settings.apply(|| read_settings(&state)) {
-        Ok(changed) => {
-            if !changed.is_empty() {
-                info!(changed = changed.join(", "), "Discord settings applied");
+    let applying = state.clone();
+    let applied = tokio::spawn(async move {
+        let state = &applying;
+        state
+            .settings
+            .apply(
+                || read_settings(state),
+                |file| {
+                    let source = file.module_source(&state.installation.root);
+                    state.module.apply(source, state.app.as_deref())
+                },
+            )
+            .await
+    })
+    .await;
+    let refusal = match applied {
+        Ok(Ok(applied)) => {
+            if !applied.changed.is_empty() {
+                info!(
+                    changed = applied.changed.join(", "),
+                    "Discord settings applied"
+                );
             }
-            Ok(Json(config::Applied { changed }))
+            return Ok(Json(applied).into_response());
         }
-        Err(config::Refusal::Invalid(error)) => Err(InterfaceError {
-            status: StatusCode::UNPROCESSABLE_ENTITY,
-            message: format!("the settings file is not valid: {error:#}; nothing was applied"),
-        }),
-        Err(config::Refusal::Restart(difference)) => Err(InterfaceError {
-            status: StatusCode::CONFLICT,
-            message: format!(
+        Ok(Err(refusal)) => refusal,
+        Err(failure) => {
+            error!(error = %failure, "Discord settings apply failed");
+            return Err(InterfaceError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                message: format!(
+                    "applying the settings failed unexpectedly ({failure}); check \
+                     `carillon discord settings` and apply again"
+                ),
+            });
+        }
+    };
+    let (status, error, restart) = match refusal {
+        config::Refusal::Invalid(error) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("the settings file is not valid: {error:#}; nothing was applied"),
+            Vec::new(),
+        ),
+        config::Refusal::Restart(difference) => (
+            StatusCode::CONFLICT,
+            format!(
                 "the settings file changes what only a restart applies ({}); nothing was applied",
                 difference.restart.join(", ")
             ),
-        }),
-    }
-}
-
-async fn module_status(
-    State(state): State<DiscordState>,
-    headers: HeaderMap,
-) -> Result<Json<Status>, InterfaceError> {
-    authorize_operator(&state, &headers)?;
-    Ok(Json(state.module.status(state.app.as_deref())))
-}
-
-/// Serves the uploaded module and saves it as the installed module. When the
-/// provider has a Discord application, definitions the record does not show
-/// registered are registered first; the module serves only once Discord
-/// confirmed them. The body is read only after authentication.
-async fn install_module(
-    State(state): State<DiscordState>,
-    headers: HeaderMap,
-    body: Body,
-) -> Result<Response, InterfaceError> {
-    authorize_operator(&state, &headers)?;
-    let bytes = axum::body::to_bytes(body, MODULE_LIMIT)
-        .await
-        .map_err(|_| InterfaceError {
-            status: StatusCode::PAYLOAD_TOO_LARGE,
-            message: format!(
-                "a Discord module may have at most {MODULE_LIMIT} bytes (16 MiB); nothing was changed"
-            ),
-        })?;
-    let (module, app) = (state.module.clone(), state.app.clone());
-    let change = tokio::spawn(async move { module.install(&bytes, app.as_deref()).await });
-    Ok(changed(&state, change.await))
-}
-
-/// Serves the release's module again and removes the installed one.
-async fn reset_module(
-    State(state): State<DiscordState>,
-    headers: HeaderMap,
-) -> Result<Response, InterfaceError> {
-    authorize_operator(&state, &headers)?;
-    let (module, app) = (state.module.clone(), state.app.clone());
-    let change = tokio::spawn(async move { module.reset(app.as_deref()).await });
-    Ok(changed(&state, change.await))
-}
-
-/// A change, or why the serving module stayed in place and what the
-/// operator can do about it. Changes run as their own task, so an operator
-/// who stops waiting cannot cancel one between registration and activation.
-fn changed(
-    state: &DiscordState,
-    result: Result<Result<Change, ChangeError>, tokio::task::JoinError>,
-) -> Response {
-    let failure = match result {
-        Ok(Ok(change)) => return Json(change).into_response(),
-        Ok(Err(failure)) => failure,
-        Err(failure) => {
-            error!(error = %failure, "Discord module change failed");
-            return InterfaceError {
-                status: StatusCode::INTERNAL_SERVER_ERROR,
-                message: format!(
-                    "the Discord module change failed unexpectedly ({failure}); check \
-                     `carillon discord module` and run the same command again"
-                ),
-            }
-            .into_response();
+            difference.restart,
+        ),
+        config::Refusal::Module(failure) => {
+            let (status, error) = module_refusal(failure);
+            (status, error, Vec::new())
         }
     };
+    Ok((
+        status,
+        Json(Refusal {
+            error,
+            serving: state.module.serving(),
+            restart,
+        }),
+    )
+        .into_response())
+}
+
+/// Why the declared module could not serve, and what the operator can do.
+fn module_refusal(failure: ChangeError) -> (StatusCode, String) {
     error!(error = %failure, "Discord module change refused");
-    let (status, error) = match failure {
+    match failure {
         ChangeError::Busy(installation) => (
             StatusCode::CONFLICT,
             format!(
-                "another Carillon maintenance operation is running for {}; nothing was changed. \
-                 Run the same command again once it finishes",
+                "another Carillon maintenance operation is running for {}; nothing was applied. \
+                 Apply again once it finishes",
                 installation.display()
             ),
         ),
         ChangeError::Lock(failure) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("could not take the maintenance lock: {failure:#}; nothing was changed"),
+            format!("could not take the maintenance lock: {failure:#}; nothing was applied"),
         ),
         ChangeError::Unusable(failure) => (
             StatusCode::UNPROCESSABLE_ENTITY,
-            format!("not a usable Discord module: {failure:#}; nothing was changed"),
+            format!("not a usable Discord module: {failure:#}; nothing was applied"),
         ),
         ChangeError::Record(failure) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!(
                 "could not clear the command registration record ({failure}), so Discord was \
-                 not contacted and nothing was changed. Check the provider's state directory, \
-                 then run the same command again"
+                 not contacted and nothing was applied. Check the provider's state directory, \
+                 then apply again"
             ),
         ),
         ChangeError::Register(failure) if discord_failure_is_terminal(&failure) => (
             StatusCode::BAD_GATEWAY,
             format!(
-                "Discord rejected the commands: {failure:#}. The serving and saved modules are \
-                 unchanged; correct the module's command definitions and try again"
+                "Discord rejected the module's commands: {failure:#}. Nothing was applied; \
+                 correct the module's command definitions and apply again"
             ),
         ),
         ChangeError::Register(failure) => (
             StatusCode::GATEWAY_TIMEOUT,
             format!(
-                "Discord did not confirm the commands: {failure:#}. It may have applied them; \
-                 the serving and saved modules are unchanged. Run the same command again once \
-                 Discord answers"
+                "Discord did not confirm the module's commands: {failure:#}. It may have \
+                 applied them; nothing else was applied. Apply again once Discord answers"
             ),
         ),
+    }
+}
+
+/// The serving module, how the one the settings file declares compares,
+/// and whether its commands are registered.
+async fn module_status(
+    State(state): State<DiscordState>,
+    headers: HeaderMap,
+) -> Result<Json<Status>, InterfaceError> {
+    authorize_operator(&state, &headers)?;
+    let declared = match read_settings(&state) {
+        Ok(file) => state
+            .module
+            .declared(file.module_source(&state.installation.root)),
+        Err(error) => Declared::Unknown {
+            error: format!("the settings file is not valid: {error:#}"),
+        },
     };
-    (
-        status,
-        Json(Refusal {
-            error,
-            serving: state.module.serving(),
-        }),
-    )
-        .into_response()
+    Ok(Json(state.module.status(state.app.as_deref(), declared)))
 }
 
 async fn simulate(

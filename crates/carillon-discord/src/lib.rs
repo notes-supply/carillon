@@ -12,5 +12,6 @@ mod gateway;
 mod inbound;
 mod module;
 mod operations;
+mod setup;
 pub use client::CoreClient;
 pub use error::InterfaceError;

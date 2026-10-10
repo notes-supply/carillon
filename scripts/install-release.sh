@@ -3,14 +3,17 @@ set -eu
 umask 077
 
 usage() {
-  echo "usage: install.sh --guild-id ID --bot-user-id ID --user-id ID [--user-id ID ...] --route CHANNEL_ID:mention|always:thread|channel [--route ...] [--base-port PORT] [--workspace PATH]" >&2
+  echo "usage: install.sh [--runtime pi|t3] [--base-port PORT] [--workspace PATH]    (asks the rest at the terminal)" >&2
+  echo "       install.sh [--runtime pi|t3] --guild-id ID --bot-user-id ID --user-id ID [--user-id ID ...] --route CHANNEL_ID:mention|always:thread|channel [--route ...] [--base-port PORT] [--workspace PATH]" >&2
   echo "       install.sh --update [--check]    (run by 'carillon update'; --check changes nothing)" >&2
   exit 2
 }
 
-# First-time setup writes the registry and Discord settings from these
-# arguments. An update only publishes the application and service definitions;
-# it never rewrites configuration, credentials or state.
+# Setup without the Discord options asks for everything at the terminal
+# (`carillon setup`); with them it writes the registry and Discord settings
+# from these arguments and asks nothing. An update only publishes the
+# application and service definitions; it never rewrites configuration,
+# credentials or state.
 MODE=setup
 CHECK=0
 case "$#:$*" in
@@ -22,7 +25,8 @@ BOT_USER_ID=
 USER_IDS=
 ROUTES=
 BASE_PORT=43800
-WORKSPACE=${HOME:-}
+WORKSPACE=
+RUNTIME=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --guild-id) [ "$#" -ge 2 ] || usage; GUILD_ID=$2; shift 2 ;;
@@ -31,14 +35,24 @@ while [ "$#" -gt 0 ]; do
     --route) [ "$#" -ge 2 ] || usage; ROUTES="$ROUTES --route $2"; shift 2 ;;
     --base-port) [ "$#" -ge 2 ] || usage; BASE_PORT=$2; shift 2 ;;
     --workspace) [ "$#" -ge 2 ] || usage; WORKSPACE=$2; shift 2 ;;
+    --runtime)
+      [ "$#" -ge 2 ] || usage
+      case "$2" in pi | t3) RUNTIME=$2 ;; *) usage ;; esac
+      shift 2 ;;
     *) usage ;;
   esac
 done
+GUIDED=0
 if [ "$MODE" = setup ]; then
-  [ -n "$GUILD_ID" ] || usage
-  [ -n "$BOT_USER_ID" ] || usage
-  [ -n "$USER_IDS" ] || usage
-  [ -n "$ROUTES" ] || usage
+  if [ -z "$GUILD_ID$BOT_USER_ID$USER_IDS$ROUTES" ]; then
+    GUIDED=1
+  else
+    [ -n "$GUILD_ID" ] || usage
+    [ -n "$BOT_USER_ID" ] || usage
+    [ -n "$USER_IDS" ] || usage
+    [ -n "$ROUTES" ] || usage
+    WORKSPACE=${WORKSPACE:-${HOME:-}}
+  fi
 fi
 [ "$(id -u)" -ne 0 ] || { echo "installer must run as the intended non-root owner; root ownership is ambiguous" >&2; exit 1; }
 [ -n "${HOME:-}" ] && [ -d "$HOME" ] || { echo "HOME must name the installing user's existing home directory" >&2; exit 1; }
@@ -48,7 +62,7 @@ case "$HOME:$WORKSPACE:${CARILLON_HOME:-}" in
   *'
 '*) echo "HOME, workspace, and CARILLON_HOME must not contain newlines" >&2; exit 1 ;;
 esac
-if [ "$MODE" = setup ]; then
+if [ -n "$WORKSPACE" ]; then
   case "$WORKSPACE" in /*) ;; *) echo "workspace must be an absolute path" >&2; exit 1 ;; esac
   [ -d "$WORKSPACE" ] || { echo "workspace does not exist: $WORKSPACE" >&2; exit 1; }
 fi
@@ -124,6 +138,33 @@ verify_payload() {
 }
 verify_payload
 
+# Setup replaces the application under services that would keep running the
+# release they started from, so it refuses while this installation's target
+# or any of its services runs; `carillon update` drains and restarts them.
+# The service manager is asked whenever the units name this installation,
+# even when registration will skip its reload: skipping a reload stops
+# nothing that runs. Units in another installation's name run nothing of
+# this one.
+UNIT_DIR=${XDG_CONFIG_HOME:-"$HOME/.config"}/systemd/user
+unit_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/%/%%/g'
+}
+if [ "$MODE" = setup ] && [ -f "$UNIT_DIR/carillon-core.service" ] &&
+  grep -Fqx "Environment=\"CARILLON_HOME=$(unit_escape "$CARILLON_HOME")\"" \
+    "$UNIT_DIR/carillon-core.service"
+then
+  states=$(systemctl --user show --property=ActiveState --value carillon.target \
+    carillon-core.service carillon-discord.service carillon-runtime-pi.service \
+    carillon-runtime-t3.service) || {
+    echo "cannot tell whether Carillon at $CARILLON_HOME is running; nothing was changed" >&2
+    exit 1
+  }
+  if printf '%s\n' "$states" | grep -qvx -e inactive -e failed -e ''; then
+    echo "Carillon at $CARILLON_HOME is running, so setup would replace its application under it; nothing was changed. Update it with 'carillon update /path/to/carillon-VERSION-linux-x86_64.tar.gz', which drains and restarts it, or stop it with 'carillon stop' and run setup again." >&2
+    exit 1
+  fi
+fi
+
 if [ "$CHECK" -eq 1 ]; then
   # Application replacement needs an atomic directory exchange here.
   probe=$(mktemp -d "$CARILLON_HOME/.update-probe.XXXXXX")
@@ -135,24 +176,41 @@ if [ "$CHECK" -eq 1 ]; then
   fi
   rm -rf -- "$probe"
   # This release's own programs must accept the installation as it is now,
-  # read-only: the registry and core database, and the Discord settings.
+  # read-only: the registry and core database, the Discord settings, and the
+  # T3 runtime's settings and token when it is the one registered and enabled.
   "$SOURCE/bin/carillon" --home "$CARILLON_HOME" check
   "$SOURCE/bin/carillon" --home "$CARILLON_HOME" discord check --provider discord-private
+  "$SOURCE/bin/carillon" --home "$CARILLON_HOME" runtime-t3 check
   exit 0
 fi
 
-# Setup keeps an existing registry, credentials and durable state; only the
-# Discord provider's own settings file is (re)written from the arguments.
-if [ "$MODE" = setup ] && [ ! -f "$CARILLON_HOME/carillon.toml" ]; then
-  "$SOURCE/bin/carillon" --home "$CARILLON_HOME" init --workspace "$WORKSPACE" --base-port "$BASE_PORT"
+# Guided setup creates the installation for the chosen runtime and has each
+# provider's program set its part up, asking at the terminal; it takes the
+# maintenance lock only for its short writes. A rerun keeps what is set up
+# when asked to.
+if [ "$GUIDED" -eq 1 ]; then
+  set -- --base-port "$BASE_PORT"
+  [ -z "$RUNTIME" ] || set -- "$@" --runtime "$RUNTIME"
+  [ -z "$WORKSPACE" ] || set -- "$@" --workspace "$WORKSPACE"
+  "$SOURCE/bin/carillon" --home "$CARILLON_HOME" setup "$@"
+fi
+# Unattended setup keeps an existing registry, credentials and durable state;
+# only the Discord provider's own settings file is (re)written from the
+# arguments.
+if [ "$MODE" = setup ] && [ "$GUIDED" -eq 0 ] && [ ! -f "$CARILLON_HOME/carillon.toml" ]; then
+  "$SOURCE/bin/carillon" --home "$CARILLON_HOME" init --workspace "$WORKSPACE" \
+    --base-port "$BASE_PORT" --runtime "${RUNTIME:-pi}"
 fi
 # Serialize maintenance with `carillon update`, which holds this lock itself
 # while it runs `install.sh --update`, and with uninstallation.
 if [ "${CARILLON_MAINTENANCE_LOCK:-}" != "$CARILLON_HOME" ]; then
   exec 9>>"$CARILLON_HOME/.maintenance.lock"
   flock -n 9 || { echo "another Carillon maintenance operation is running for $CARILLON_HOME" >&2; exit 1; }
+  # The programs run below change the installation under this lock.
+  CARILLON_MAINTENANCE_LOCK=$CARILLON_HOME
+  export CARILLON_MAINTENANCE_LOCK
 fi
-if [ "$MODE" = setup ]; then
+if [ "$MODE" = setup ] && [ "$GUIDED" -eq 0 ]; then
   # USER_IDS and ROUTES intentionally expand into repeated, validated CLI arguments.
   # shellcheck disable=SC2086
   "$SOURCE/bin/carillon" --home "$CARILLON_HOME" discord configure --provider discord-private \
@@ -160,7 +218,7 @@ if [ "$MODE" = setup ]; then
 fi
 
 install -d -m 0700 "$CARILLON_HOME" "$CARILLON_HOME/credentials" "$CARILLON_HOME/providers" \
-  "$CARILLON_HOME/pi" "$CARILLON_HOME/logs"
+  "$CARILLON_HOME/logs"
 APP_NEW=$(mktemp -d "$CARILLON_HOME/.app-new.XXXXXX")
 CLEANUP_APP_NEW=1
 cleanup_staging() {
@@ -204,9 +262,11 @@ else
 fi
 sync -f -- "$CARILLON_HOME"
 if [ "$MODE" = setup ]; then
-  [ -e "$CARILLON_HOME/credentials/discord-bot.token" ] || install -m 0600 /dev/null "$CARILLON_HOME/credentials/discord-bot.token"
+  # Guided setup names its own token file; otherwise the token goes here by hand.
+  [ "$GUIDED" -eq 1 ] || [ -e "$CARILLON_HOME/credentials/discord-bot.token" ] ||
+    install -m 0600 /dev/null "$CARILLON_HOME/credentials/discord-bot.token"
   chmod 0700 "$CARILLON_HOME" "$CARILLON_HOME/credentials" "$CARILLON_HOME/providers" \
-    "$CARILLON_HOME/pi" "$CARILLON_HOME/logs"
+    "$CARILLON_HOME/logs"
   chmod 0600 "$CARILLON_HOME/carillon.toml" "$CARILLON_HOME/providers"/*.toml \
     "$CARILLON_HOME/credentials"/*.token
 fi
@@ -256,13 +316,28 @@ if [ "$MODE" = update ]; then
   printf '%s\n' "Published this release at $APP and registered its user units; configuration and state were not changed."
   exit 0
 fi
+if [ "$GUIDED" -eq 1 ]; then
+  # Starting takes the maintenance lock itself.
+  exec 9>&-
+  CARILLON_MAINTENANCE_LOCK=
+  "$COMMAND" --home "$CARILLON_HOME" start
+  cat <<EOF
+Carillon is installed at $CARILLON_HOME and running as $OWNER's user services.
+Everyday commands: $CARILLON status, $CARILLON logs, $CARILLON restart.
+To start it at boot without logging in, an administrator can run: loginctl enable-linger $OWNER
+EOF
+  exit 0
+fi
+if grep -Fqx 'runtime_provider = "runtime-t3"' "$CARILLON_HOME/carillon.toml"; then
+  RUNTIME_STEP="Set up T3 with: $CARILLON runtime-t3 configure --url URL --project PROJECT_ID --model INSTANCE/MODEL < t3-token-file"
+else
+  RUNTIME_STEP="Sign in to a model provider with: $APP/bin/carillon-pi --no-session --no-tools --no-approve
+   In Pi, run /login, then /model and press Ctrl+S on the agent's model to save it."
+fi
 cat <<EOF
 Carillon installed for $OWNER at $CARILLON_HOME and enabled for this user's service manager.
 1. Put the Discord bot token in $CARILLON_HOME/credentials/discord-bot.token (mode 0600).
-2. Authenticate packaged Pi state with:
-   $APP/bin/carillon-pi --no-session --no-tools --no-approve
-   In Pi, authenticate, then open /model and press Ctrl+S on the desired model to save the startup default.
-   Authentication alone is not enough: the runtime requires a saved, available default model.
+2. $RUNTIME_STEP
 3. Start deliberately with: $CARILLON start
 4. Inspect with: $CARILLON status   and   $CARILLON logs
 Update later with: $CARILLON update /path/to/carillon-VERSION-linux-ARCH.tar.gz

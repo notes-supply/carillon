@@ -121,7 +121,7 @@ fn memory() -> Value {
 
 async fn release(directory: &std::path::Path) -> anyhow::Result<Module> {
     std::fs::write(directory.join("release.wasm"), release_module_bytes()?)?;
-    Module::load(files(directory)).await
+    Module::load(files(directory), super::Source::Bundled).await
 }
 
 const SAMPLES: usize = 300;
@@ -317,7 +317,7 @@ async fn interact(module: Arc<Module>, stop: Arc<AtomicBool>, seen: Arc<Counters
 async fn round(
     module: &Arc<Module>,
     cases: &Cases,
-    modules: (&[u8], usize),
+    modules: (&super::Source, usize),
     seen: &Arc<Counters>,
 ) -> anyhow::Result<(Vec<Weak<super::Generation>>, Vec<Duration>)> {
     const RENDERERS: usize = 32;
@@ -341,11 +341,12 @@ async fn round(
     let (mut generations, mut changes) = (Vec::new(), Vec::new());
     for install in 0..installs {
         let started = Instant::now();
-        if install % 2 == 0 {
-            module.install(other, None).await?;
+        let source = if install % 2 == 0 {
+            other.clone()
         } else {
-            module.reset(None).await?;
-        }
+            super::Source::Bundled
+        };
+        module.apply(source, None).await?;
         changes.push(started.elapsed());
         generations.push(Arc::downgrade(&module.current()));
     }
@@ -368,8 +369,11 @@ async fn replacement_under_load() -> anyhow::Result<()> {
         .and_then(|rounds| rounds.parse().ok())
         .unwrap_or(1);
     let bytes = release_module_bytes()?;
-    let other = variant(&bytes);
     let directory = tempfile::tempdir()?;
+    let other = super::Source::Custom {
+        path: directory.path().join("other.wasm"),
+    };
+    std::fs::write(directory.path().join("other.wasm"), variant(&bytes))?;
     let module = Arc::new(release(directory.path()).await?);
     let before = memory();
     let cases: Cases = requests()?

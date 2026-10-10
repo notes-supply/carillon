@@ -1,6 +1,6 @@
 [Unit]
 Description=Carillon personal agent
-Wants=carillon-core.service carillon-runtime-pi.service carillon-discord.service
+Wants=carillon-core.service carillon-discord.service carillon-runtime-pi.service carillon-runtime-t3.service
 After=network-online.target
 
 [Install]

@@ -13,7 +13,40 @@ mod model;
 mod run;
 
 #[cfg(target_arch = "wasm32")]
-mod abi;
+#[doc(hidden)]
+pub mod abi;
+
+/// Defines a Wasm module's entry points so the provider's host invokes
+/// `$handler`, a function of the same shape as [`handle`]. This library
+/// defines none itself: the bundled module (`carillon-discord-bundled`)
+/// exports [`handle`], and a custom module exports its own, which can
+/// delegate to [`handle`] for what it does not change. Use it once, in a
+/// `cdylib`.
+#[macro_export]
+macro_rules! export {
+    ($handler:path) => {
+        #[cfg(target_arch = "wasm32")]
+        const _: () = {
+            #[expect(unsafe_code, reason = "wasm export")]
+            #[unsafe(no_mangle)]
+            extern "C" fn input(length: u32) -> u32 {
+                $crate::abi::input(length)
+            }
+
+            #[expect(unsafe_code, reason = "wasm export")]
+            #[unsafe(no_mangle)]
+            extern "C" fn output() -> u32 {
+                $crate::abi::output()
+            }
+
+            #[expect(unsafe_code, reason = "wasm export")]
+            #[unsafe(no_mangle)]
+            extern "C" fn invoke() -> u32 {
+                $crate::abi::invoke(|host, invocation| $handler(host, invocation))
+            }
+        };
+    };
+}
 
 use contract::{HostReply, HostRequest, Intent, Invocation, Outcome};
 

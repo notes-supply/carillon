@@ -32,7 +32,7 @@ async function registry(
 
 it("hands extensions only loopback interface endpoints, for every runtime", async () => {
   const loaded = await loadInstallation(await registry("http://127.0.0.1:3102"), "runtime-t3");
-  if (loaded === "disabled") throw new Error("an enabled runtime was reported disabled");
+  if (typeof loaded === "string") throw new Error(`an enabled runtime was reported ${loaded}`);
   expect(loaded.interfaces.map((provider) => provider.url)).toEqual(["http://127.0.0.1:3102"]);
   await expect(
     loadInstallation(await registry("http://192.0.2.1:8080"), "runtime-t3"),
@@ -42,16 +42,20 @@ it("hands extensions only loopback interface endpoints, for every runtime", asyn
     await registry("http://192.0.2.1:8080", false),
     "runtime-t3",
   );
-  if (disabled === "disabled") throw new Error("an enabled runtime was reported disabled");
+  if (typeof disabled === "string") throw new Error(`an enabled runtime was reported ${disabled}`);
   expect(disabled.interfaces).toEqual([]);
 });
 
-it("reports a disabled runtime instead of loading it, for every runtime", async () => {
+it("reports a disabled or unregistered runtime instead of loading it", async () => {
   await expect(
     loadInstallation(await registry("http://127.0.0.1:3102", true, false), "runtime-t3"),
   ).resolves.toBe("disabled");
-  // A runtime missing from the registry is still an error.
+  // The bundled runtime an installation did not choose has nothing to serve.
   await expect(
-    loadInstallation(await registry("http://127.0.0.1:3102"), "runtime-other"),
-  ).rejects.toThrow(/runtime provider runtime-other is not configured/u);
+    loadInstallation(await registry("http://127.0.0.1:3102"), "runtime-pi"),
+  ).resolves.toBe("unregistered");
+  // Another role's provider is not a runtime.
+  await expect(loadInstallation(await registry("http://127.0.0.1:3102"), "discord")).resolves.toBe(
+    "unregistered",
+  );
 });

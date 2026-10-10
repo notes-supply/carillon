@@ -1,0 +1,33 @@
+[package]
+name = "carillon-discord-bundled"
+description = "The bundled Discord module: the module library's own handling, exported"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+carillon-discord-module = { path = "../carillon-discord-module" }
+
+# The entry points `export!` defines need `#[unsafe(no_mangle)]`, which the
+# workspace's `forbid` cannot admit; the macro states why it expects them.
+[lints.rust]
+unsafe_code = "deny"
+warnings = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+future_incompatible = { level = "deny", priority = -1 }
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+allow_attributes = "deny"

@@ -56,8 +56,8 @@ description = "Lint the GitHub workflows"
 run = ["actionlint", "zizmor .github/workflows"]
 
 [tasks."build:module"]
-description = "Build the Discord module for the Wasm sandbox"
-run = "cargo build --locked --profile wasm -p carillon-discord-module --target wasm32-unknown-unknown"
+description = "Build the bundled and example Discord modules for the Wasm sandbox"
+run = "cargo build --locked --profile wasm --target wasm32-unknown-unknown -p carillon-discord-bundled -p carillon-card-colours"
 
 [tasks."example:core"]
 description = "Run a durable conversation with temporary SQLite and an in-process test runtime"
@@ -92,9 +92,9 @@ depends = ["install"]
 run = "scripts/package-release.sh"
 
 [tasks."test:install"]
-description = "Build and test the release installation in a temporary home"
+description = "Test the public installer, then build and test the release installation"
 depends = ["package"]
-run = "scripts/test-install.sh"
+run = ["scripts/test-bootstrap.sh", "scripts/test-install.sh"]
 
 [tasks."example:discord"]
 description = "Run Discord admission and model presentation without a gateway"

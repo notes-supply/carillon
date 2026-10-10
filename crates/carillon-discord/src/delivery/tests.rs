@@ -712,8 +712,13 @@ async fn an_outcome_replaces_the_processing_reaction_its_message_was_admitted_wi
         .await;
     // The operator serves other reactions while the message is answered.
     let changed = settings
-        .apply(|| Ok(other_reactions()))
-        .map_err(|refusal| anyhow::anyhow!("{refusal:?}"))?;
+        .apply(
+            || Ok(other_reactions()),
+            |_| std::future::ready(Ok(crate::module::tests::unchanged())),
+        )
+        .await
+        .map_err(|refusal| anyhow::anyhow!("{refusal:?}"))?
+        .changed;
     assert_eq!(changed, ["processing_emoji", "delivered_emoji"]);
     reactions.outcome("300:400", Feedback::Delivered).await;
     assert_eq!(reactions.stop(Duration::from_secs(10)).await, 0);
@@ -746,7 +751,11 @@ async fn a_skipped_outcome_leaves_a_replayed_message_to_the_settings_serving() -
     // The operator then serves other reactions, and the gateway replays the
     // message, which is admitted again and answered.
     settings
-        .apply(|| Ok(other_reactions()))
+        .apply(
+            || Ok(other_reactions()),
+            |_| std::future::ready(Ok(crate::module::tests::unchanged())),
+        )
+        .await
         .map_err(|refusal| anyhow::anyhow!("{refusal:?}"))?;
     reactions
         .admission(&event("400"), &settings.current())

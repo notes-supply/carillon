@@ -18,17 +18,21 @@ it("runs nothing for documentation alone", () => {
 it("selects each language with the release it ships in", () => {
   expect(lanes(["crates/carillon-core/src/db.rs"])).toEqual(["release", "rust"]);
   expect(lanes(["Cargo.lock"])).toEqual(["release", "rust"]);
+  // The release ships the example module built.
+  expect(lanes(["examples/card-colours/src/lib.rs"])).toEqual(["release", "rust"]);
   expect(lanes(["packages/runtime-t3/src/runtime.ts"])).toEqual(["release", "ts"]);
   expect(lanes(["pnpm-lock.yaml"])).toEqual(["release", "ts"]);
   expect(lanes(["scripts/package-release.sh"])).toEqual(["release"]);
+  expect(lanes(["install.sh"])).toEqual(["release"]);
   expect(lanes(["scripts/test-integration.mjs"])).toEqual(["release", "ts"]);
   expect(lanes(["licenses/bun.md"])).toEqual(["release"]);
 });
 
 it("follows inputs across languages", () => {
-  // Rust tests read the protocol fixtures; core embeds runtime-pi's version.
+  // Rust tests read the protocol fixtures; core embeds each runtime's version.
   expect(lanes(["packages/protocol/fixtures/turns.json"])).toEqual(["release", "rust", "ts"]);
   expect(lanes(["packages/runtime-pi/package.json"])).toEqual(["release", "rust", "ts"]);
+  expect(lanes(["packages/runtime-t3/package.json"])).toEqual(["release", "rust", "ts"]);
   // The shipped skill is documentation the release carries.
   expect(lanes(["packages/discord-pi/skill/SKILL.md"])).toEqual(["release", "ts"]);
   // TypeScript formatting covers JSON anywhere.

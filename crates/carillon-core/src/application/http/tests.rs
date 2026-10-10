@@ -85,6 +85,7 @@ fn installation(root: &Path) -> Result<Fixture> {
     value.validate()?;
     let config = LoadedConfig {
         root: root.to_path_buf(),
+        path: root.join("carillon.toml"),
         value,
     };
     Ok(Fixture {

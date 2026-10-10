@@ -25,7 +25,8 @@ PI_PACKAGE=${PI_DIST%/dist}
 BUNDLE="$ROOT/target/pi-bundle"
 
 rm -rf "$STAGE"
-mkdir -p "$STAGE/bin/theme" "$STAGE/bin/assets" "$STAGE/lib" "$STAGE/licenses" "$STAGE/systemd" "$(dirname -- "$OUTPUT")"
+mkdir -p "$STAGE/bin/theme" "$STAGE/bin/assets" "$STAGE/lib/examples" "$STAGE/licenses" \
+  "$STAGE/systemd" "$(dirname -- "$OUTPUT")"
 
 # One executable serves the runtime and, as `carillon-runtime-pi pi …`, Pi's own
 # command line. Each mode is imported only once chosen: Pi's Bun entry, which
@@ -54,9 +55,12 @@ bun build --target=bun packages/discord-pi/src/index.ts --outfile "$STAGE/lib/ca
 install -m 0644 packages/discord-pi/skill/SKILL.md "$STAGE/lib/carillon-discord-SKILL.md"
 
 cargo build --release --locked --target "$TARGET" --target-dir "$ROOT/target" --bin carillon --bin carillon-discord
-# The Discord module runs in the provider's Wasm sandbox; it is data,
-# not a native binary, and is built for the wasm32 target regardless of host.
-cargo build --locked --profile wasm --target wasm32-unknown-unknown --target-dir "$ROOT/target" -p carillon-discord-module
+# The Discord modules run in the provider's Wasm sandbox; they are data, not
+# native binaries, and are built for the wasm32 target regardless of host.
+# The example custom module ships built, to try without a toolchain; its
+# source is examples/card-colours.
+cargo build --locked --profile wasm --target wasm32-unknown-unknown --target-dir "$ROOT/target" \
+  -p carillon-discord-bundled -p carillon-card-colours
 # Compiled providers never load a bunfig.toml from where they are started.
 bun build --compile --target "$BUN_TARGET" --no-compile-autoload-bunfig \
   --root "$BUNDLE" "$BUNDLE/carillon-runtime-pi.ts" \
@@ -68,7 +72,8 @@ bun build --compile --target "$BUN_TARGET" --no-compile-autoload-bunfig \
   packages/runtime-t3/src/cli.ts --outfile "$STAGE/bin/carillon-runtime-t3"
 install -m 0755 "target/$TARGET/release/carillon" "$STAGE/bin/carillon"
 install -m 0755 "target/$TARGET/release/carillon-discord" "$STAGE/bin/carillon-discord"
-install -m 0644 target/wasm32-unknown-unknown/wasm/carillon_discord_module.wasm "$STAGE/lib/carillon_discord_module.wasm"
+install -m 0644 target/wasm32-unknown-unknown/wasm/carillon_discord_bundled.wasm "$STAGE/lib/carillon_discord_module.wasm"
+install -m 0644 target/wasm32-unknown-unknown/wasm/carillon_card_colours.wasm "$STAGE/lib/examples/card-colours.wasm"
 install -m 0755 scripts/carillon-pi.sh "$STAGE/bin/carillon-pi"
 install -m 0755 scripts/register-services.sh "$STAGE/bin/carillon-register-services"
 install -m 0755 scripts/install-release.sh "$STAGE/install.sh"

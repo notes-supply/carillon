@@ -11,8 +11,9 @@ mise run example:discord
 ## Components
 
 - [`config`](src/config.rs): the provider's settings file and the settings it
-  serves; `Settings::apply` serves a re-read file whole when every difference
-  applies live. Each admitted message keeps the snapshot it was admitted with.
+  serves; `Settings::apply` serves a re-read file whole, the module it
+  declares included, when every difference applies live. Each admitted
+  message keeps the snapshot it was admitted with.
 - [`conversations`](src/conversations.rs): admission, activation, thread
   participation and conversation identity. `prepare_conversation` creates or
   adopts threads; one provider process owns the participation file.
@@ -32,8 +33,12 @@ mise run example:discord
   and recorded in `activity-cards.json` so a restart carries on with the same
   card. Every Discord call is bounded, including rate-limit waits.
 - [`module`](src/module.rs): hosts the replaceable Discord module (commands,
-  controls and cards) and installs or resets it under the maintenance lock.
-  The guest library lives in [`carillon-discord-module`](../carillon-discord-module/src/).
+  controls and cards) and switches to the one the settings declare under the
+  maintenance lock. The guest library lives in
+  [`carillon-discord-module`](../carillon-discord-module/src/); its `export!`
+  macro gives a custom module, such as the
+  [card colours example](../../examples/card-colours/README.md), the same
+  entry points.
 - [`gateway`](src/gateway.rs): the gateway session, including the record a
   graceful stop leaves so the next start can resume and have Discord replay
   what it missed.
@@ -52,8 +57,9 @@ mise exec -- cargo test -p carillon-discord-module
 mise run test:integration
 ```
 
-Tests that draw cards run the built module through the Wasm host; build it
-first, or point `CARILLON_DISCORD_MODULE` at another file. Tests sit beside
+Tests that draw cards run the built modules through the Wasm host; build
+them first, or point `CARILLON_DISCORD_MODULE` and `CARILLON_EXAMPLE_MODULE`
+at other files. Tests sit beside
 their modules; [`tests/conversations.rs`](tests/conversations.rs) prepares
 threads against a local Discord HTTP stand-in.
 
@@ -64,8 +70,10 @@ a running installation:
 
 ```sh
 mise run build:module
-module=target/wasm32-unknown-unknown/wasm/carillon_discord_module.wasm
+module=$PWD/target/wasm32-unknown-unknown/wasm/carillon_discord_bundled.wasm
 carillon discord module check "$module"
-carillon discord module install "$module"
-carillon discord module reset    # back to the release's module
+carillon discord module enable "$module"
+# after the next build:
+carillon discord settings apply
+carillon discord module disable    # back to the bundled module
 ```

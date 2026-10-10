@@ -7,64 +7,57 @@ and stores nothing of its own.
 
 ## Set it up
 
-The release includes `app/bin/carillon-runtime-t3` and a user unit,
-`carillon-runtime-t3.service`, that Carillon's target doesn't start until you
-enable it.
+Guided setup (the installer, or `carillon setup`) offers T3 instead of Pi:
+it asks for T3's address and a token, lists T3's projects and models by
+name, creates the installation in the chosen project's folder and writes the
+files below. Issue a token in T3 with
+`t3 auth session issue --label Carillon --token-only`.
 
-1. Create its installation token and the file holding your T3 token:
+Without questions, create the installation with `--runtime t3` (installer
+option, or `carillon init --runtime t3`) and `--workspace` set to the T3
+project's folder, then:
 
-   ```sh
-   cd ~/.carillon
-   head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > credentials/runtime-t3.token
-   printf '%s' 'YOUR_T3_TOKEN' > credentials/t3.token
-   chmod 600 credentials/runtime-t3.token credentials/t3.token
-   sha256sum credentials/runtime-t3.token   # the token_hash below
-   ```
+```sh
+carillon runtime-t3 discover --url http://127.0.0.1:3773 < t3.token   # projects and models, as JSON
+carillon runtime-t3 configure --url http://127.0.0.1:3773 \
+  --project PROJECT_ID --model claudeAgent/claude-fable-5-1 < t3.token
+```
 
-2. Add it to `carillon.toml`, and make it the agent's runtime for new
-   conversations:
+`configure` checks the project, its folder and the model with T3, then writes
+`providers/runtime-t3.toml` under the installation's maintenance lock: it
+refuses while an update or backup runs. A token other than the one the
+settings name goes to a new private file in `credentials/` first, which the
+new settings then name; until they replace the old ones, those keep their
+token. `carillon runtime-t3 check` reads the saved settings and token as
+startup does, without reaching T3; setup offers to keep them only when it
+passes, and an update checks them before it stops anything. A disabled or
+unregistered runtime, which does not start, passes.
+The token is read from standard input only. Edit the settings file for a thread title prefix or the
+model's options:
 
-   ```toml
-   [agent]
-   runtime_provider = "runtime-t3"
+```toml
+url = "http://127.0.0.1:3773"
+token_file = "credentials/t3.token"
+project_id = "…"
+title = "Carillon"            # optional thread title prefix
 
-   [[providers]]
-   id = "runtime-t3"
-   role = "runtime"
-   version = "0.1.0-beta.1"
-   url = "http://127.0.0.1:43803"
-   token_hash = "SHA256_OF_THE_TOKEN_FILE"
-   enabled = true
-   parallel_turns = 4          # optional: conversations run at once (1 to 16)
-   ```
+[model]                       # the agent default, as T3 names it
+instance_id = "claudeAgent"
+model = "claude-fable-5-1"
 
-3. Write `providers/runtime-t3.toml`:
+[model.options]               # optional
+effort = "high"
+```
 
-   ```toml
-   url = "http://127.0.0.1:3773"           # T3's HTTP origin, without credentials or path
-   token_file = "credentials/t3.token"     # relative to the installation
-   project_id = "…"                        # the T3 project whose workspace the agent uses
-   title = "Carillon"                      # optional thread title prefix
+Rerunning `configure` keeps `title`, and keeps `[model.options]` while the
+model stays the same; another model starts from its own defaults.
 
-   [model]                                 # the agent default, as T3 names it
-   instance_id = "claudeAgent"
-   model = "claude-fable-5-1"
-
-   [model.options]
-   effort = "high"
-   ```
-
-4. Enable the unit and restart through the target:
-
-   ```sh
-   systemctl --user enable carillon-runtime-t3.service
-   carillon restart
-   ```
-
-Startup fails closed: the registry entry must exist and be enabled, the
-credential must match, the settings must be valid, and T3 must speak
-orchestration protocol 2 and accept the token. Conversations that already
-started stay with the runtime that took their first turn.
+Then `carillon start`. The runtime reads these files only when it starts, so
+after `configure` or a setup rerun changes them, a running Carillon needs
+`carillon restart`. Startup fails closed: the registry entry must exist and
+be enabled, the credential must match, the settings must be valid, and T3 must
+speak orchestration protocol 2 and accept the token. Conversations that
+already started stay with the runtime that took their first turn.
 
 The agent's instructions and skills on T3 are the project's own (`CLAUDE.md`
 and `.claude/skills`, or `AGENTS.md` and `.agents/skills`); Carillon's Pi

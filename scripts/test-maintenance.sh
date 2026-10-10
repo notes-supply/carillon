@@ -54,6 +54,11 @@ case "$command" in
   mv) exec "$REAL_MV" "$@" ;;
   sync) exec "$REAL_SYNC" "$@" ;;
   systemctl)
+    # Setup asks whether the units it replaces run; these never ran, and only
+    # changes are traced.
+    case "$*" in
+      '--user show --property=ActiveState --value '*) printf '%s\n' inactive; exit 0 ;;
+    esac
     printf '%s\n' "$*" >>"$MANAGER_TRACE"
     case "$*" in
       '--user daemon-reload') ;;
