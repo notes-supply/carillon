@@ -86,6 +86,7 @@ node "$ROOT/scripts/test-images.mjs" "$RELEASE"
 
 CARILLON_CORE_BINARY="$RELEASE/bin/carillon" CARILLON_RUNTIME_BINARY="$RELEASE/bin/carillon-runtime-pi" \
   CARILLON_DISCORD_MODULE="$RELEASE/lib/carillon_discord_module.wasm" \
+  CARILLON_EXAMPLE_MODULE="$RELEASE/lib/examples/card-colours.wasm" \
   node "$ROOT/scripts/test-integration.mjs"
 
 TEST_ROOT=$(mktemp -d)
