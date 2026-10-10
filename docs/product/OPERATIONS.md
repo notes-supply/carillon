@@ -195,7 +195,9 @@ carillon discord settings apply    # serve the file's live changes
 Users, routes, `typing`, `reactions` with their emoji, `activity_markers`
 and the [module](#discord-module) apply live. The guild, bot user, bot token file, attachment limits and
 `activity` need a restart of the Discord provider. A message keeps the
-settings it was admitted with.
+settings it was admitted with. Setup and `configure` save the file, then
+have a running provider serve it; if it refuses, they fail, unless only a
+restart applies the file and this release accepts the module it declares.
 
 ### Parallel conversations
 

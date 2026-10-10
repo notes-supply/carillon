@@ -508,13 +508,36 @@ async fn set_up(loaded: &LoadedConfig, provider: Option<String>) -> Result<()> {
     let operator = Operator::new(loaded, &provider, "settings")?;
     match operator.apply_settings().await? {
         Applying::Applied(applied) => report_applied(&provider, &applied),
-        Applying::Refused(refusal) => println!(
-            "{provider} keeps serving its earlier settings: {refusal}. `carillon restart` serves \
-             the new ones."
-        ),
+        Applying::Refused(refused) => saved_but_refused(loaded, &provider, refused).await?,
         // A stopped provider reads them when it starts.
         Applying::Unreachable => {}
     }
+    Ok(())
+}
+
+/// After setup or `configure` saved the settings file, what a running
+/// provider's refusal to serve it leaves. Fields only a restart applies are
+/// served by `carillon restart` once this release accepts the module the
+/// file declares, which the provider did not try. Any other refusal leaves
+/// the file saved but not served, an error.
+async fn saved_but_refused(loaded: &LoadedConfig, provider: &str, refused: Refused) -> Result<()> {
+    let Refused { reason, restart } = refused;
+    if restart.is_empty() {
+        bail!(
+            "the settings file is saved, but {provider} did not serve it: {reason}; it keeps \
+             serving the settings it has"
+        );
+    }
+    let discord = DiscordConfig::load(loaded, provider)?;
+    check_declared(loaded, provider, &discord, &release()?)
+        .await
+        .with_context(|| {
+            format!("the settings file is saved, but `carillon restart` would not start {provider}")
+        })?;
+    println!(
+        "{provider} keeps serving the settings it has: {reason}. `carillon restart` serves the \
+         saved file."
+    );
     Ok(())
 }
 
@@ -633,9 +656,10 @@ async fn manage_module(
             report_applied(&provider, &applied);
             Ok(())
         }
-        Applying::Refused(refusal) => bail!(
-            "{provider} did not apply the settings file: {refusal}. What it serves is unchanged; \
-             `carillon discord module` shows which module that is"
+        Applying::Refused(refused) => bail!(
+            "{provider} did not apply the settings file: {}. What it serves is unchanged; \
+             `carillon discord module` shows which module that is",
+            refused.reason
         ),
         Applying::Unreachable => {
             println!(
@@ -721,13 +745,21 @@ struct Operator {
 /// What became of asking the running provider to serve its settings file.
 enum Applying {
     Applied(Applied),
-    /// The provider answered and serves what it served before, because of
-    /// this.
-    Refused(String),
+    /// The provider answered and serves what it served before.
+    Refused(Refused),
     /// Nothing answers at the provider's address: it may be stopped, or
     /// still serve at an address `carillon.toml` no longer gives, which only
     /// a restart changes. Whether it serves the file is not confirmed.
     Unreachable,
+}
+
+/// Why the provider did not serve its settings file.
+struct Refused {
+    reason: String,
+    /// The fields only a restart applies, when they are why; the rest of the
+    /// file was then not tried. A provider that does not say refused
+    /// otherwise.
+    restart: Vec<String>,
 }
 
 impl Operator {
@@ -788,7 +820,7 @@ impl Operator {
                 )
             });
         }
-        if let Ok(Refusal { error, serving }) = serde_json::from_slice(&bytes) {
+        if let Ok(Refusal { error, serving, .. }) = serde_json::from_slice(&bytes) {
             bail!(
                 "{error}.\nStill serving {}: {}.",
                 serving.source,
@@ -835,13 +867,22 @@ impl Operator {
         }
         let message = refusal(&bytes);
         if status == StatusCode::NOT_FOUND {
-            return Ok(Applying::Refused(format!(
-                "it does not offer settings operations ({message}) and may be a different \
-                 release than this program"
-            )));
+            return Ok(Applying::Refused(Refused {
+                reason: format!(
+                    "it does not offer settings operations ({message}) and may be a different \
+                     release than this program"
+                ),
+                restart: Vec::new(),
+            }));
         }
         if status.is_client_error() {
-            return Ok(Applying::Refused(message));
+            let restart = serde_json::from_slice::<Refusal>(&bytes)
+                .map(|refusal| refusal.restart)
+                .unwrap_or_default();
+            return Ok(Applying::Refused(Refused {
+                reason: message,
+                restart,
+            }));
         }
         Err(unconfirmed(&format!("{status}: {message}")))
     }
@@ -903,8 +944,11 @@ async fn manage_settings(
             report_applied(provider, &applied);
             Ok(())
         }
-        Applying::Refused(refusal) => {
-            bail!("{refusal}; {provider} keeps serving the settings it has")
+        Applying::Refused(refused) => {
+            bail!(
+                "{}; {provider} keeps serving the settings it has",
+                refused.reason
+            )
         }
         Applying::Unreachable => bail!(
             "the Discord provider does not answer at {}, so it did not confirm serving the \
@@ -920,10 +964,7 @@ async fn serve_configured(loaded: &LoadedConfig, provider: &str) -> Result<()> {
     let operator = Operator::new(loaded, provider, "settings")?;
     match operator.apply_settings().await? {
         Applying::Applied(applied) => report_applied(provider, &applied),
-        Applying::Refused(refusal) => println!(
-            "{provider} keeps serving the settings it has: {refusal}. `carillon restart` serves \
-             the file."
-        ),
+        Applying::Refused(refused) => saved_but_refused(loaded, provider, refused).await?,
         Applying::Unreachable => println!(
             "The Discord provider does not answer at {}, so whether it serves these settings is \
              not confirmed: a stopped provider reads them when it starts, and \
@@ -1133,14 +1174,33 @@ mod tests {
             operator.apply_settings().await?,
             super::Applying::Unreachable
         ));
-        // A refusal is the provider's answer.
+        // A refusal is the provider's answer. A conflict it does not mark as
+        // one a restart resolves, as when maintenance is busy, is not one.
         let refusal: &[u8] =
             b"HTTP/1.1 409 Conflict\r\nContent-Length: 25\r\n\r\n{\"error\":\"guild changed\"}";
         let (operator, server) = applying_provider(Some(refusal)).await?;
-        let super::Applying::Refused(message) = operator.apply_settings().await? else {
+        let super::Applying::Refused(refused) = operator.apply_settings().await? else {
             anyhow::bail!("a refusal was not reported as one");
         };
-        assert_eq!(message, "guild changed");
+        assert_eq!(refused.reason, "guild changed");
+        assert!(refused.restart.is_empty());
+        assert_eq!(server.await?, 1);
+        let body = json!({
+            "error": "only a restart applies (guild_id)",
+            "serving": {"source": "bundled", "commands": [], "digest": "d"},
+            "restart": ["guild_id"],
+        })
+        .to_string();
+        let answer = format!(
+            "HTTP/1.1 409 Conflict\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let (operator, server) =
+            answering_after(Some(answer.into_bytes()), std::time::Duration::ZERO).await?;
+        let super::Applying::Refused(refused) = operator.apply_settings().await? else {
+            anyhow::bail!("a refusal was not reported as one");
+        };
+        assert_eq!(refused.restart, ["guild_id"]);
         assert_eq!(server.await?, 1);
         // A request the provider received without answering may have been
         // applied: it is reported as unconfirmed and not sent again.
@@ -1741,6 +1801,82 @@ mod tests {
             !crate::config::DiscordConfig::read(&config, "discord-private")?
                 .module
                 .enabled
+        );
+        Ok(())
+    }
+
+    /// After setup or `configure`, a refusal of what only a restart applies
+    /// waits for `carillon restart` only when this release would serve the
+    /// saved file; any other refusal is an error, the file saved.
+    #[tokio::test]
+    async fn saved_settings_wait_for_a_restart_only_when_it_would_serve_them() -> Result<()> {
+        use crate::module::tests::{definition, describing, module, replying};
+
+        let directory = tempfile::tempdir()?;
+        let config = crate::config::tests::installation(
+            &directory.path().join("installation"),
+            "discord-private",
+            46_720,
+        )?;
+        let refused = |restart: &[&str]| super::Refused {
+            reason: "the settings file changes what only a restart applies".to_owned(),
+            restart: restart.iter().map(|field| (*field).to_owned()).collect(),
+        };
+        let outcome = |restart: &[&str]| {
+            let config = config.clone();
+            let refused = refused(restart);
+            async move {
+                super::saved_but_refused(&config, "discord-private", refused)
+                    .await
+                    .map_err(|error| format!("{error:#}"))
+            }
+        };
+        let declare = |path: Option<&Path>| -> Result<()> {
+            let mut discord = crate::config::DiscordConfig::read(&config, "discord-private")?;
+            discord.module.enabled = path.is_some();
+            discord.module.path = path.map(Path::to_path_buf);
+            discord.write(&config, "discord-private")
+        };
+
+        // Fields only a restart applies, with the bundled module or a usable
+        // custom one: the saved file waits for `carillon restart`.
+        outcome(&["guild_id"]).await.map_err(anyhow::Error::msg)?;
+        let custom = directory.path().join("custom.wasm");
+        fs::write(
+            &custom,
+            module(&describing(&[definition("model")]), &replying("ok", &[]))?,
+        )?;
+        declare(Some(&custom))?;
+        outcome(&["guild_id"]).await.map_err(anyhow::Error::msg)?;
+        // The provider did not try the module: one rebuilt for another
+        // contract, or deleted, would keep a restart from starting it.
+        for broken in [Some(&b"\0asm old contract"[..]), None] {
+            match broken {
+                Some(bytes) => fs::write(&custom, bytes)?,
+                None => fs::remove_file(&custom)?,
+            }
+            let refusal = outcome(&["guild_id"])
+                .await
+                .err()
+                .context("a restart was advised for an unusable module")?;
+            assert!(
+                refusal.starts_with(
+                    "the settings file is saved, but `carillon restart` would not start \
+                     discord-private: "
+                ),
+                "{refusal}"
+            );
+        }
+        // Any other refusal leaves the file saved but not served.
+        declare(None)?;
+        let refusal = outcome(&[])
+            .await
+            .err()
+            .context("a refusal was reported as served")?;
+        assert_eq!(
+            refusal,
+            "the settings file is saved, but discord-private did not serve it: the settings \
+             file changes what only a restart applies; it keeps serving the settings it has"
         );
         Ok(())
     }

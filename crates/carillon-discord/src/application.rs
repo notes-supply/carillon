@@ -509,10 +509,11 @@ async fn apply_settings(
             });
         }
     };
-    let (status, error) = match refusal {
+    let (status, error, restart) = match refusal {
         config::Refusal::Invalid(error) => (
             StatusCode::UNPROCESSABLE_ENTITY,
             format!("the settings file is not valid: {error:#}; nothing was applied"),
+            Vec::new(),
         ),
         config::Refusal::Restart(difference) => (
             StatusCode::CONFLICT,
@@ -520,14 +521,19 @@ async fn apply_settings(
                 "the settings file changes what only a restart applies ({}); nothing was applied",
                 difference.restart.join(", ")
             ),
+            difference.restart,
         ),
-        config::Refusal::Module(failure) => module_refusal(failure),
+        config::Refusal::Module(failure) => {
+            let (status, error) = module_refusal(failure);
+            (status, error, Vec::new())
+        }
     };
     Ok((
         status,
         Json(Refusal {
             error,
             serving: state.module.serving(),
+            restart,
         }),
     )
         .into_response())

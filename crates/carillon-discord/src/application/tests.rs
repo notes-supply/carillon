@@ -1677,6 +1677,7 @@ async fn the_operator_alone_applies_a_settings_file_whole_or_not_at_all() -> any
         body["error"],
         "the settings file changes what only a restart applies (guild_id); nothing was applied"
     );
+    assert_eq!(body["restart"], json!(["guild_id"]));
     assert!(Arc::ptr_eq(&state.settings.current(), &serving));
     let (_, body) = settings(&state, Method::GET, "operator").await?;
     assert_eq!(
@@ -1694,6 +1695,8 @@ async fn the_operator_alone_applies_a_settings_file_whole_or_not_at_all() -> any
         "{error}"
     );
     assert!(error.ends_with("; nothing was applied"), "{error}");
+    // Only a refusal of what a restart applies says so.
+    assert!(body.get("restart").is_none(), "{body}");
     let (_, body) = settings(&state, Method::GET, "operator").await?;
     assert_eq!(body["file"]["state"], "invalid");
     std::fs::remove_file(&path)?;

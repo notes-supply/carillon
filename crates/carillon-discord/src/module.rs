@@ -533,6 +533,10 @@ pub enum Declared {
 pub struct Refusal {
     pub error: String,
     pub serving: ModuleSummary,
+    /// When the file was refused for changing what only a restart applies,
+    /// those fields; the rest of it, its module included, was not tried.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restart: Vec<String>,
 }
 
 /// Why an apply left the serving module in place.
