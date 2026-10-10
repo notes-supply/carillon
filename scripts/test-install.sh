@@ -4,7 +4,19 @@ set -eu
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 VERSION=$(cd "$ROOT" && bun -e 'import manifest from "./Cargo.toml"; console.log(manifest.workspace.package.version)')
 RELEASE=${1:-"$ROOT/target/package/carillon-$VERSION"}
-BASE_PORT=${CARILLON_TEST_BASE_PORT:-44800}
+# The installations tested here, and by the scripts this runs, take their
+# service ports from this base and up to 63 above it. Like the integration
+# test's, they lie below the kernel's ephemeral range: a port inside it can be
+# the source port of any outgoing connection, open or in TIME_WAIT, and then
+# a service cannot bind it.
+read -r EPHEMERAL _ </proc/sys/net/ipv4/ip_local_port_range
+CARILLON_TEST_BASE_PORT=${CARILLON_TEST_BASE_PORT:-$((EPHEMERAL - 64))}
+if [ "$CARILLON_TEST_BASE_PORT" -lt 1024 ] || [ $((CARILLON_TEST_BASE_PORT + 64)) -gt "$EPHEMERAL" ]; then
+  echo "CARILLON_TEST_BASE_PORT must leave 64 ports from 1024 up to the ephemeral range at $EPHEMERAL" >&2
+  exit 1
+fi
+export CARILLON_TEST_BASE_PORT
+BASE_PORT=$CARILLON_TEST_BASE_PORT
 TEST_ROOT_T3_OUT=$(mktemp)
 
 # This tests the bundled Discord/Pi release, not a limit on provider extensibility.
