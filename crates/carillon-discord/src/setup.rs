@@ -2,7 +2,10 @@
 //! to the installation's credential file; the bot and its application,
 //! learned from that token; and the server, channels and people, offered by
 //! name and written as the provider's admission settings. Nobody is admitted
-//! who was not named here.
+//! who was not named here, and no channel is routed where the bot may not
+//! answer.
+
+use std::fmt::Display;
 
 use anyhow::{Context as _, Result};
 use carillon_installation::{
@@ -14,11 +17,12 @@ use twilight_model::{
     guild::Permissions,
     id::{
         Id,
-        marker::{GuildMarker, UserMarker},
+        marker::{ChannelMarker, GuildMarker, RoleMarker, UserMarker},
     },
     oauth::{Application, ApplicationFlags, team::TeamMembershipState},
     user::{CurrentUser, User},
 };
+use twilight_util::permission_calculator::PermissionCalculator;
 
 use crate::config::{
     DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute, configure,
@@ -27,16 +31,58 @@ use crate::config::{
 /// The bot's credential, beside the installation's others.
 const TOKEN: &str = "discord-bot";
 
-/// What the bot needs in its channels: to read and answer messages, start
-/// and answer in threads, react, and show cards and files.
-const PERMISSIONS: Permissions = Permissions::VIEW_CHANNEL
-    .union(Permissions::SEND_MESSAGES)
-    .union(Permissions::SEND_MESSAGES_IN_THREADS)
-    .union(Permissions::CREATE_PUBLIC_THREADS)
-    .union(Permissions::READ_MESSAGE_HISTORY)
-    .union(Permissions::ADD_REACTIONS)
-    .union(Permissions::EMBED_LINKS)
-    .union(Permissions::ATTACH_FILES);
+/// Why the bot asks for a permission in its channels.
+#[derive(Clone, Copy)]
+enum Need {
+    /// To read and answer messages.
+    Answer,
+    /// To start and answer in a thread per conversation.
+    Threads,
+    /// To show what it names; without it the agent answers all the same.
+    Show(&'static str),
+}
+
+/// What the bot asks for in its channels, by the names Discord's settings
+/// give them.
+const PERMISSIONS: [(Permissions, &str, Need); 8] = [
+    (Permissions::VIEW_CHANNEL, "View Channel", Need::Answer),
+    (Permissions::SEND_MESSAGES, "Send Messages", Need::Answer),
+    (
+        Permissions::READ_MESSAGE_HISTORY,
+        "Read Message History",
+        Need::Answer,
+    ),
+    (
+        Permissions::CREATE_PUBLIC_THREADS,
+        "Create Public Threads",
+        Need::Threads,
+    ),
+    (
+        Permissions::SEND_MESSAGES_IN_THREADS,
+        "Send Messages in Threads",
+        Need::Threads,
+    ),
+    (Permissions::EMBED_LINKS, "Embed Links", Need::Show("cards")),
+    (
+        Permissions::ADD_REACTIONS,
+        "Add Reactions",
+        Need::Show("reactions"),
+    ),
+    (
+        Permissions::ATTACH_FILES,
+        "Attach Files",
+        Need::Show("files"),
+    ),
+];
+
+/// The bot token setup leaves for the provider.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Token {
+    /// The one the provider has, if any: the settings apply live.
+    Unchanged,
+    /// A new one, which the provider reads only when it starts.
+    Replaced,
+}
 
 /// When the agent answers in a routed channel.
 const MODES: [(&str, DiscordActivation, DiscordConversation); 4] = [
@@ -75,7 +121,7 @@ pub(crate) async fn setup(
     loaded: &LoadedConfig,
     provider: &str,
     connect: impl Fn(String) -> DiscordHttp,
-) -> Result<()> {
+) -> Result<Token> {
     let saved = loaded
         .credential(TOKEN)
         .ok()
@@ -84,13 +130,13 @@ pub(crate) async fn setup(
         && DiscordConfig::load(loaded, provider).is_ok()
         && prompt.confirm("Keep the saved Discord bot and settings?", true)?
     {
-        return Ok(());
+        return Ok(Token::Unchanged);
     }
     prompt.say(
         "Paste the bot token from the Bot page of your application in the Discord Developer \
          Portal. It is not shown as you type.",
     )?;
-    let (token, http, bot) = sign_in(prompt, saved, &connect).await?;
+    let (token, http, bot) = sign_in(prompt, saved.as_deref(), &connect).await?;
     let application = message_content(prompt, &http).await?;
     prompt.say(&format!("Signed in as {}.", bot.name))?;
     let (guild_id, guild) = server(prompt, &http, &application).await?;
@@ -101,12 +147,13 @@ pub(crate) async fn setup(
         0,
     )?;
     let (_, activation, conversation) = MODES[mode];
+    permitted(prompt, &http, guild_id, bot.id, &channels, conversation).await?;
     let people = people(prompt, &http, guild_id, &guild, &application, &bot).await?;
 
     let routes: Vec<DiscordRoute> = channels
         .iter()
         .map(|(id, _)| DiscordRoute {
-            channel_id: id.clone(),
+            channel_id: id.to_string(),
             activation,
             conversation,
         })
@@ -141,18 +188,22 @@ pub(crate) async fn setup(
             .join(", "),
         channels
             .iter()
-            .map(|(_, name)| format!("#{name}"))
+            .map(|(_, label)| label.as_str())
             .collect::<Vec<_>>()
             .join(", "),
         MODES[mode].0.to_lowercase()
     ))?;
-    Ok(())
+    Ok(if saved.is_some_and(|saved| saved != token) {
+        Token::Replaced
+    } else {
+        Token::Unchanged
+    })
 }
 
 /// The bot token, asked until Discord accepts it, with its client and user.
 async fn sign_in(
     prompt: &mut impl Questions,
-    saved: Option<String>,
+    saved: Option<&str>,
     connect: &impl Fn(String) -> DiscordHttp,
 ) -> Result<(String, DiscordHttp, CurrentUser)> {
     let question = if saved.is_some() {
@@ -162,9 +213,9 @@ async fn sign_in(
     };
     loop {
         let typed = prompt.secret(question)?;
-        let token = match (typed.is_empty(), &saved) {
+        let token = match (typed.is_empty(), saved) {
             (false, _) => typed,
-            (true, Some(saved)) => saved.clone(),
+            (true, Some(saved)) => saved.to_owned(),
             (true, None) => {
                 prompt.say("The bot token is required.")?;
                 continue;
@@ -221,8 +272,8 @@ async fn message_content(prompt: &mut impl Questions, http: &DiscordHttp) -> Res
     }
 }
 
-/// The server the agent serves, chosen by name from the bot's servers, once
-/// it is in one.
+/// The server the agent serves, by ID and label, chosen by name from the
+/// bot's servers once it is in one.
 async fn server(
     prompt: &mut impl Questions,
     http: &DiscordHttp,
@@ -236,7 +287,10 @@ async fn server(
                     "The bot is in no server yet. Invite it with this link:\n  \
                      https://discord.com/oauth2/authorize?client_id={}&scope=bot%20applications.commands&permissions={}",
                     application.id,
-                    PERMISSIONS.bits()
+                    PERMISSIONS
+                        .iter()
+                        .fold(Permissions::empty(), |all, (permission, ..)| all | *permission)
+                        .bits()
                 ))?;
                 prompt.answer("Press Enter once it has joined.", Some(""))?;
             }
@@ -246,22 +300,25 @@ async fn server(
                 return Ok((guild.id, guild.name));
             }
             _ => {
-                let names: Vec<String> = guilds.iter().map(|guild| guild.name.clone()).collect();
-                let index = prompt.choose("Which server should the agent serve?", &names, 0)?;
-                let guild = guilds.swap_remove(index);
-                return Ok((guild.id, guild.name));
+                let named: Vec<(Id<GuildMarker>, String)> = guilds
+                    .into_iter()
+                    .map(|guild| (guild.id, guild.name))
+                    .collect();
+                let mut labels = distinct(&named);
+                let index = prompt.choose("Which server should the agent serve?", &labels, 0)?;
+                return Ok((named[index].0, labels.swap_remove(index)));
             }
         }
     }
 }
 
-/// The text channels the agent answers in, by ID and name.
+/// The text channels the agent answers in, by ID and label.
 async fn channels(
     prompt: &mut impl Questions,
     http: &DiscordHttp,
     guild_id: Id<GuildMarker>,
     guild: &str,
-) -> Result<Vec<(String, String)>> {
+) -> Result<Vec<(Id<ChannelMarker>, String)>> {
     loop {
         let mut text: Vec<Channel> = http
             .guild_channels(guild_id)
@@ -279,21 +336,120 @@ async fn channels(
             prompt.answer("Press Enter to look again.", Some(""))?;
             continue;
         }
-        let named: Vec<(String, String)> = text
+        let named: Vec<(Id<ChannelMarker>, String)> = text
             .into_iter()
-            .map(|channel| (channel.id.to_string(), channel.name.unwrap_or_default()))
+            .map(|channel| (channel.id, format!("#{}", channel.name.unwrap_or_default())))
             .collect();
-        let labels: Vec<String> = named.iter().map(|(_, name)| format!("#{name}")).collect();
+        let labels = distinct(&named);
         loop {
             let chosen = prompt.choose_many("Channels the agent answers in", &labels, &[0])?;
             if !chosen.is_empty() {
                 return Ok(chosen
                     .into_iter()
-                    .map(|index| named[index].clone())
+                    .map(|index| (named[index].0, labels[index].clone()))
                     .collect());
             }
             prompt.say("Choose at least one channel.")?;
         }
+    }
+}
+
+/// Each name, followed by its ID where another has the same name.
+fn distinct<T: Display>(named: &[(T, String)]) -> Vec<String> {
+    named
+        .iter()
+        .map(|(id, name)| {
+            if named.iter().filter(|(_, other)| other == name).count() > 1 {
+                format!("{name} ({id})")
+            } else {
+                name.clone()
+            }
+        })
+        .collect()
+}
+
+/// Waits until the bot may answer in every chosen channel the way
+/// `conversation` needs, by its roles and each channel's overwrites as
+/// Discord applies them, then says where the agent answers without cards,
+/// reactions or files. Each check reads them from Discord again.
+async fn permitted(
+    prompt: &mut impl Questions,
+    http: &DiscordHttp,
+    guild_id: Id<GuildMarker>,
+    bot: Id<UserMarker>,
+    chosen: &[(Id<ChannelMarker>, String)],
+    conversation: DiscordConversation,
+) -> Result<()> {
+    loop {
+        let roles = http.roles(guild_id).await?.model().await?;
+        let member = http.guild_member(guild_id, bot).await?.model().await?;
+        let channels = http.guild_channels(guild_id).await?.model().await?;
+        let everyone = roles
+            .iter()
+            .find(|role| role.id.get() == guild_id.get())
+            .map_or(Permissions::empty(), |role| role.permissions);
+        let bot_roles: Vec<(Id<RoleMarker>, Permissions)> = roles
+            .iter()
+            .filter(|role| member.roles.contains(&role.id))
+            .map(|role| (role.id, role.permissions))
+            .collect();
+        let mut unusable = Vec::new();
+        let mut unshown = Vec::new();
+        for (id, label) in chosen {
+            let channel = channels
+                .iter()
+                .find(|channel| channel.id == *id)
+                .with_context(|| format!("{label} is gone from the server; run setup again"))?;
+            let held = PermissionCalculator::new(guild_id, bot, everyone, &bot_roles).in_channel(
+                channel.kind,
+                channel.permission_overwrites.as_deref().unwrap_or_default(),
+            );
+            let mut lacking = Vec::new();
+            let mut hidden = Vec::new();
+            for &(permission, name, need) in &PERMISSIONS {
+                if held.contains(permission) {
+                    continue;
+                }
+                match need {
+                    Need::Answer => lacking.push(name),
+                    Need::Threads if conversation == DiscordConversation::Thread => {
+                        lacking.push(name);
+                    }
+                    Need::Threads => {}
+                    Need::Show(what) => hidden.push((name, what)),
+                }
+            }
+            if !lacking.is_empty() {
+                unusable.push(format!(
+                    "The bot cannot answer in {label}: allow it {} in the channel's settings.",
+                    lacking.join(", ")
+                ));
+            } else if !hidden.is_empty() {
+                unshown.push(format!(
+                    "In {label} the bot lacks {}, so the agent answers there without {}.",
+                    hidden
+                        .iter()
+                        .map(|(name, _)| *name)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    hidden
+                        .iter()
+                        .map(|(_, what)| *what)
+                        .collect::<Vec<_>>()
+                        .join(" or ")
+                ));
+            }
+        }
+        if unusable.is_empty() {
+            for note in unshown {
+                prompt.say(&note)?;
+            }
+            return Ok(());
+        }
+        for problem in unusable {
+            prompt.say(&problem)?;
+        }
+        prompt.answer("Press Enter to check again.", Some(""))?;
     }
 }
 

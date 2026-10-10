@@ -501,13 +501,22 @@ fn install_tools(config: &LoadedConfig, lib: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `carillon discord setup`, then has a running provider serve the settings.
+/// `carillon discord setup`, then has a running provider serve the settings,
+/// unless a new bot token needs it to start again.
 async fn set_up(loaded: &LoadedConfig, provider: Option<String>) -> Result<()> {
     let provider = match provider {
         Some(provider) => provider,
         None => only_interface(loaded)?,
     };
-    setup::setup(&mut Terminal, loaded, &provider, DiscordHttp::new).await?;
+    if setup::setup(&mut Terminal, loaded, &provider, DiscordHttp::new).await?
+        == setup::Token::Replaced
+    {
+        println!(
+            "{provider} reads a new bot token only when it starts; `carillon restart` serves it \
+             and the new settings."
+        );
+        return Ok(());
+    }
     let operator = Operator::new(loaded, &provider, "settings")?;
     match operator.apply_settings().await? {
         Applying::Applied(applied) => report_applied(&provider, &applied),

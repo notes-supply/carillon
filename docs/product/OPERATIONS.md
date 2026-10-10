@@ -41,15 +41,19 @@ Without Discord options, the installer asks at the terminal:
 3. **Discord.** The bot token, not shown as you type. Setup learns the bot
    from it, waits until Message Content Intent is on, prints the
    invitation link if the bot is in no server yet, and offers the bot's
-   servers and text channels by name, then when the agent answers (every
-   message or only mentions; a thread per conversation or the channel as
-   one) and who it answers: the bot application's owners, and anyone else
-   by Discord user ID. Only those people can talk to the agent.
+   servers and text channels by name (with the ID where names repeat), then
+   when the agent answers (every message or only mentions; a thread per
+   conversation or the channel as one). It checks that the bot may answer
+   that way in each channel, and asks again until it may. Then who it
+   answers: the bot application's owners, and anyone else by Discord user
+   ID. Only those people can talk to the agent.
 4. Carillon starts.
 
 Ctrl+C or Esc cancels; run the installer again to finish, and it offers to
 keep what's already set up. On an installed release, `carillon setup` asks
-the same questions, and `carillon discord setup` asks only Discord's.
+the same questions, and `carillon discord setup` asks only Discord's. A
+rerun that changes the T3 settings or the bot token takes effect in a
+running Carillon at `carillon restart`.
 
 The installer creates `~/.carillon` (or `CARILLON_HOME`), registers the user
 services (`carillon.target` with core, Discord and both runtimes; the
@@ -189,8 +193,9 @@ carillon discord settings apply    # serve the file's live changes
 ```
 
 Users, routes, `typing`, `reactions` with their emoji, `activity_markers`
-and the [module](#discord-module) apply live. The guild, bot user, attachment limits and
-`activity` need a restart of the Discord provider. A message keeps the
+and the [module](#discord-module) apply live. The guild, bot user, bot token, attachment limits and
+`activity` need a restart of the Discord provider, so setup that replaces the
+bot token asks for `carillon restart` instead of applying. A message keeps the
 settings it was admitted with.
 
 ### Parallel conversations
