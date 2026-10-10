@@ -4,7 +4,7 @@
 
 use std::{
     ffi::OsString,
-    os::unix::process::CommandExt as _,
+    os::unix::process::{CommandExt as _, ExitStatusExt as _},
     path::{Path, PathBuf},
     process::Command as Process,
     time::Duration,
@@ -410,10 +410,15 @@ async fn report_running(config: &LoadedConfig, wait: &Wait) -> Result<()> {
     Ok(())
 }
 
+/// Provider commands that change installation files without a lock of their
+/// own: core runs them under the installation's maintenance lock.
+const LOCKED: [(&str, &str); 1] = [("runtime-t3", "configure")];
+
 /// Replaces this process with the `carillon-<name>` binary and the remaining
 /// arguments, so signals and the exit status are the provider's own. Only
 /// names that look like provider ids are forwarded. The provider receives the
-/// resolved installation as `CARILLON_HOME`.
+/// resolved installation as `CARILLON_HOME`. A [`LOCKED`] command instead
+/// runs as a child, and its exit status becomes this process's.
 fn forward(arguments: &[OsString], home: &Path) -> Result<()> {
     let (name, rest) = arguments
         .split_first()
@@ -424,11 +429,39 @@ fn forward(arguments: &[OsString], home: &Path) -> Result<()> {
     carillon_installation::config::validate_provider_identity(name)
         .with_context(|| format!("unknown command {name}"))?;
     let binary = provider_binary(name)?;
+    if LOCKED.iter().any(|&(provider, command)| {
+        provider == name && rest.first().is_some_and(|first| first == command)
+    }) {
+        let status = run_locked(&binary, rest, home)?;
+        std::process::exit(
+            status
+                .code()
+                .or_else(|| status.signal().map(|signal| 128 + signal))
+                .unwrap_or(1),
+        );
+    }
     let error = Process::new(&binary)
         .args(rest)
         .env("CARILLON_HOME", home)
         .exec();
     Err(error).with_context(|| format!("run {}", binary.display()))
+}
+
+/// Runs `binary` with `arguments` while holding the installation's
+/// maintenance lock, or under the caller's when it holds it already, and
+/// tells the child so. Its standard input stays this process's.
+fn run_locked(
+    binary: &Path,
+    arguments: &[OsString],
+    home: &Path,
+) -> Result<std::process::ExitStatus> {
+    let _maintenance = MaintenanceLock::acquire_unless_held(home).context("nothing was changed")?;
+    Process::new(binary)
+        .args(arguments)
+        .env("CARILLON_HOME", home)
+        .env(MaintenanceLock::HELD_FOR, home)
+        .status()
+        .with_context(|| format!("run {}", binary.display()))
 }
 
 /// The bundle's own providers sit beside this binary and take precedence; a
@@ -564,6 +597,80 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 
     use anyhow::{Context, Result};
+
+    /// A provider command that writes the installation's files runs under
+    /// its maintenance lock, and never while another operation holds it.
+    #[test]
+    fn a_locked_provider_command_runs_only_under_the_maintenance_lock() -> Result<()> {
+        use carillon_installation::maintenance::MaintenanceLock;
+
+        let directory = tempfile::tempdir()?;
+        let home = directory.path();
+        let program = home.join("carillon-runtime-t3");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\n\
+             read -r token\n\
+             if flock -n \"$CARILLON_HOME/.maintenance.lock\" true; then lock=free; else lock=held; fi\n\
+             echo \"$lock $CARILLON_MAINTENANCE_LOCK $* $token\" >\"$CARILLON_HOME/observed\"\n",
+        )?;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))?;
+        let arguments = ["configure".into(), "--url".into(), "x".into()];
+
+        let held = MaintenanceLock::acquire(home)?;
+        let refusal = super::run_locked(&program, &arguments, home)
+            .err()
+            .map(|error| format!("{error:#}"))
+            .unwrap_or_default();
+        assert!(
+            refusal.contains("another Carillon maintenance operation"),
+            "{refusal}"
+        );
+        assert!(
+            !home.join("observed").exists(),
+            "it ran during other maintenance"
+        );
+        drop(held);
+
+        // Standard input reaches it; the token is never an argument.
+        let input = home.join("token");
+        std::fs::write(&input, "t3-token\n")?;
+        let status = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "application::cli::tests::run_locked_child",
+                "--ignored",
+            ])
+            .env("RUN_LOCKED_PROGRAM", &program)
+            .env("RUN_LOCKED_HOME", home)
+            .stdin(std::fs::File::open(&input)?)
+            .stdout(std::process::Stdio::null())
+            .status()?;
+        assert!(status.success());
+        assert_eq!(
+            std::fs::read_to_string(home.join("observed"))?,
+            format!("held {} configure --url x t3-token\n", home.display())
+        );
+        assert!(MaintenanceLock::try_acquire(home)?.is_some());
+        Ok(())
+    }
+
+    /// [`super::run_locked`] in a process of its own, whose standard input
+    /// the test above gives.
+    #[test]
+    #[ignore = "run by a_locked_provider_command_runs_only_under_the_maintenance_lock"]
+    fn run_locked_child() -> Result<()> {
+        let program = std::env::var_os("RUN_LOCKED_PROGRAM").context("no program")?;
+        let home = std::env::var_os("RUN_LOCKED_HOME").context("no installation")?;
+        let arguments = ["configure".into(), "--url".into(), "x".into()];
+        let status = super::run_locked(
+            std::path::Path::new(&program),
+            &arguments,
+            std::path::Path::new(&home),
+        )?;
+        anyhow::ensure!(status.success(), "{status}");
+        Ok(())
+    }
 
     #[test]
     fn providers_are_found_beside_the_binary_then_on_path() -> Result<()> {

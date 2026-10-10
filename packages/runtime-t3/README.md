@@ -24,8 +24,9 @@ carillon runtime-t3 configure --url http://127.0.0.1:3773 \
 ```
 
 `configure` checks the project, its folder and the model with T3, then writes
-`credentials/t3.token` and `providers/runtime-t3.toml`. The token is read from
-standard input only. Edit the settings file for a thread title prefix or the
+`credentials/t3.token` and `providers/runtime-t3.toml` under the
+installation's maintenance lock: it refuses while an update or backup runs.
+The token is read from standard input only. Edit the settings file for a thread title prefix or the
 model's options:
 
 ```toml
