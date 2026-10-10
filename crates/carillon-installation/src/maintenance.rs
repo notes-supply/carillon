@@ -22,7 +22,7 @@ use fs2::FileExt as _;
 /// value, or ending the process, releases it.
 #[derive(Debug)]
 pub struct MaintenanceLock {
-    _file: fs::File,
+    _lock: Locked,
 }
 
 impl MaintenanceLock {
@@ -57,7 +57,7 @@ impl MaintenanceLock {
     /// Returns an error when the lock file cannot be opened or locked for a
     /// reason other than another holder.
     pub fn try_acquire(home: &Path) -> Result<Option<Self>> {
-        Ok(try_lock(&Self::path(home))?.map(|file| Self { _file: file }))
+        Ok(try_lock(&Self::path(home))?.map(|lock| Self { _lock: lock }))
     }
 
     /// Take the lock for a short change, unless [`Self::HELD_FOR`] says the
@@ -95,7 +95,7 @@ fn held_for(home: &Path, held: Option<&std::ffi::OsStr>) -> bool {
 /// [`UnitsLock::HELD_FOR`].
 #[derive(Debug)]
 pub struct UnitsLock {
-    _file: fs::File,
+    _lock: Locked,
 }
 
 impl UnitsLock {
@@ -115,13 +115,13 @@ impl UnitsLock {
     ///
     /// Returns an error when the lock is held or its file cannot be opened.
     pub fn acquire(units: &Path) -> Result<Self> {
-        let file = try_lock(&Self::path(units))?.with_context(|| {
+        let lock = try_lock(&Self::path(units))?.with_context(|| {
             format!(
                 "another Carillon operation is changing the user units in {}",
                 units.display()
             )
         })?;
-        Ok(Self { _file: file })
+        Ok(Self { _lock: lock })
     }
 }
 
@@ -130,7 +130,7 @@ impl UnitsLock {
 /// it to prove core is stopped and to keep it from starting meanwhile.
 #[derive(Debug)]
 pub struct ServiceLock {
-    _file: fs::File,
+    _lock: Locked,
 }
 
 impl ServiceLock {
@@ -162,12 +162,26 @@ impl ServiceLock {
     /// created, or the lock fails for a reason other than another holder.
     pub fn try_acquire(data_dir: &Path) -> Result<Option<Self>> {
         fs::create_dir_all(data_dir).with_context(|| format!("create {}", data_dir.display()))?;
-        Ok(try_lock(&Self::path(data_dir))?.map(|file| Self { _file: file }))
+        Ok(try_lock(&Self::path(data_dir))?.map(|lock| Self { _lock: lock }))
+    }
+}
+
+/// A file holding an exclusive `flock(2)` lock until dropped. The lock is
+/// its open file description's, which a child process spawned meanwhile
+/// shares until its exec closes its copy, so closing this descriptor alone
+/// may leave the lock held; dropping unlocks the description first.
+#[derive(Debug)]
+struct Locked(fs::File);
+
+impl Drop for Locked {
+    fn drop(&mut self) {
+        // A failed unlock leaves the close to release it, as before.
+        let _ = self.0.unlock();
     }
 }
 
 /// The exclusively locked file at `path`, or `None` while another holds it.
-fn try_lock(path: &Path) -> Result<Option<fs::File>> {
+fn try_lock(path: &Path) -> Result<Option<Locked>> {
     let file = fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -176,7 +190,7 @@ fn try_lock(path: &Path) -> Result<Option<fs::File>> {
         .open(path)
         .with_context(|| format!("open lock {}", path.display()))?;
     match file.try_lock_exclusive() {
-        Ok(()) => Ok(Some(file)),
+        Ok(()) => Ok(Some(Locked(file))),
         Err(error) if error.kind() == fs2::lock_contended_error().kind() => Ok(None),
         Err(error) => Err(error).with_context(|| format!("lock {}", path.display())),
     }
@@ -185,6 +199,8 @@ fn try_lock(path: &Path) -> Result<Option<fs::File>> {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
+
+    use anyhow::Context as _;
 
     use super::MaintenanceLock;
 
@@ -212,6 +228,21 @@ mod tests {
         assert!(refusal.starts_with("another Carillon maintenance operation is running"));
         drop(held);
         assert!(MaintenanceLock::try_acquire(directory.path())?.is_some());
+        Ok(())
+    }
+
+    /// The lock belongs to the open file description, which a child process
+    /// spawned meanwhile shares until its exec closes its copy. Dropping the
+    /// holder releases the lock even while such a copy remains.
+    #[test]
+    fn dropping_the_holder_releases_the_lock_a_pending_child_shares() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let held = super::try_lock(&MaintenanceLock::path(directory.path()))?
+            .context("the lock was not free")?;
+        let child = held.0.try_clone()?;
+        drop(held);
+        assert!(MaintenanceLock::try_acquire(directory.path())?.is_some());
+        drop(child);
         Ok(())
     }
 }
