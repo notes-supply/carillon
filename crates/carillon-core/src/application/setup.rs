@@ -264,11 +264,7 @@ fn set_up_t3(
         .collect();
     let project =
         projects[questions.choose("Which T3 project should the agent work in?", &labels, 0)?];
-    let labels: Vec<String> = offer
-        .models
-        .iter()
-        .map(|model| format!("{} ({})", model.name, model.provider))
-        .collect();
+    let labels = model_labels(&offer.models);
     let model = &offer.models[questions.choose("Which model should the agent use?", &labels, 0)?];
     if !existing {
         initialize(home, &project.workspace, base_port, Runtime::T3)?;
@@ -294,6 +290,27 @@ fn set_up_t3(
     )
     .map_err(|failure| anyhow!(failure))?;
     questions.say(configured.trim())
+}
+
+/// The model picker's labels: each model's name and T3 instance, and its
+/// slug, which is what is saved, when another model of that instance shares
+/// the name.
+fn model_labels(models: &[AvailableModel]) -> Vec<String> {
+    models
+        .iter()
+        .map(|model| {
+            let shared = models
+                .iter()
+                .filter(|other| other.provider == model.provider && other.name == model.name)
+                .count()
+                > 1;
+            if shared {
+                format!("{} ({}/{})", model.name, model.provider, model.model)
+            } else {
+                format!("{} ({})", model.name, model.provider)
+            }
+        })
+        .collect()
 }
 
 fn same(left: &Path, right: &Path) -> bool {
@@ -431,34 +448,64 @@ mod tests {
         Ok(())
     }
 
-    /// Questions answered up to the first that needs an answer, which ends
-    /// the run: confirmations take their default, and what was shown and
-    /// asked is kept.
+    /// Questions answered in order from `answers`; the first left without
+    /// one ends the run. Confirmations take their default, a choice is a
+    /// 0-based index, and what was shown and asked is kept, a choice's
+    /// options before its question.
     #[derive(Default)]
-    struct Shown(Vec<String>);
+    struct Shown {
+        shown: Vec<String>,
+        answers: std::collections::VecDeque<&'static str>,
+    }
+
+    impl Shown {
+        fn answering(answers: &[&'static str]) -> Self {
+            Self {
+                shown: Vec::new(),
+                answers: answers.iter().copied().collect(),
+            }
+        }
+
+        fn next(&mut self, question: &str) -> anyhow::Result<&'static str> {
+            self.shown.push(question.to_owned());
+            self.answers
+                .pop_front()
+                .ok_or_else(|| anyhow::anyhow!("stopped at {question}"))
+        }
+    }
 
     impl carillon_installation::prompt::Questions for Shown {
         fn say(&mut self, text: &str) -> anyhow::Result<()> {
-            self.0.push(text.to_owned());
+            self.shown.push(text.to_owned());
             Ok(())
         }
 
-        fn answer(&mut self, question: &str, _: Option<&str>) -> anyhow::Result<String> {
-            self.0.push(question.to_owned());
-            anyhow::bail!("stopped at {question}")
+        fn answer(&mut self, question: &str, default: Option<&str>) -> anyhow::Result<String> {
+            let answer = self.next(question)?;
+            Ok(if answer.is_empty() {
+                default.unwrap_or_default().to_owned()
+            } else {
+                answer.to_owned()
+            })
         }
 
         fn secret(&mut self, question: &str) -> anyhow::Result<String> {
-            self.answer(question, None)
+            Ok(self.next(question)?.to_owned())
         }
 
         fn confirm(&mut self, question: &str, default: bool) -> anyhow::Result<bool> {
-            self.0.push(question.to_owned());
+            self.shown.push(question.to_owned());
             Ok(default)
         }
 
-        fn choose(&mut self, question: &str, _: &[String], _: usize) -> anyhow::Result<usize> {
-            self.answer(question, None).map(|_| 0)
+        fn choose(
+            &mut self,
+            question: &str,
+            options: &[String],
+            _: usize,
+        ) -> anyhow::Result<usize> {
+            self.shown.extend(options.iter().cloned());
+            Ok(self.next(question)?.parse()?)
         }
 
         fn choose_many(
@@ -467,7 +514,7 @@ mod tests {
             _: &[String],
             _: &[usize],
         ) -> anyhow::Result<Vec<usize>> {
-            self.answer(question, None).map(|_| Vec::new())
+            self.next(question).map(|_| Vec::new())
         }
     }
 
@@ -501,9 +548,59 @@ mod tests {
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))?;
             let mut questions = Shown::default();
             let result = set_up_t3(&home, 44_000, true, &program, &mut questions);
-            assert_eq!(questions.0, shown);
+            assert_eq!(questions.shown, shown);
             assert_eq!(result.is_ok(), check == "exit 0");
         }
+        Ok(())
+    }
+
+    /// Models of one T3 instance that share a name are told apart by their
+    /// slugs, and the one chosen is the one configured.
+    #[test]
+    fn models_sharing_a_name_are_told_apart_and_the_one_chosen_is_configured() -> anyhow::Result<()>
+    {
+        let directory = tempfile::tempdir()?;
+        let home = directory.path().join("home");
+        initialize(&home, directory.path(), 44_000, Runtime::T3)?;
+        let model = |provider: &str, slug: &str, name: &str| serde_json::json!({"provider": provider, "model": slug, "name": name, "options": []});
+        let offer = serde_json::json!({
+            "projects": [{"id": "agent", "title": "Agent", "workspace": directory.path()}],
+            "models": [
+                model("claudeAgent", "sonnet-a", "Sonnet"),
+                model("claudeAgent", "sonnet-b", "Sonnet"),
+                model("other", "sonnet", "Sonnet"),
+            ],
+        });
+        let configured = directory.path().join("configured");
+        let program = directory.path().join("carillon-runtime-t3");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\ncat >/dev/null\ncase \"$1\" in\n  discover) printf '%s' '{offer}' ;;\n  \
+                 configure) echo \"$*\" >'{}'; echo saved ;;\n  *) exit 2 ;;\nesac\n",
+                configured.display()
+            ),
+        )?;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))?;
+        // The default address, a token, the only project, the second Sonnet.
+        let mut questions = Shown::answering(&["", "token", "0", "1"]);
+        set_up_t3(&home, 44_000, true, &program, &mut questions)?;
+        let options = [
+            "Sonnet (claudeAgent/sonnet-a)",
+            "Sonnet (claudeAgent/sonnet-b)",
+            "Sonnet (other)",
+            "Which model should the agent use?",
+        ];
+        assert!(
+            questions.shown.windows(4).any(|shown| shown == options),
+            "{:?}",
+            questions.shown
+        );
+        assert!(
+            std::fs::read_to_string(&configured)?.contains("--model claudeAgent/sonnet-b"),
+            "{}",
+            std::fs::read_to_string(&configured)?
+        );
         Ok(())
     }
 
