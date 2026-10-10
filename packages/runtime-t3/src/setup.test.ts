@@ -127,7 +127,7 @@ async function cli(
   return { status: child.exitCode, stdout, stderr };
 }
 
-it("takes the token on standard input and reports a refusal in one line", async () => {
+it("takes the token on standard input, says the settings are saved for a start, and reports a refusal in one line", async () => {
   const fake = await fakeT3();
   const discovered = await cli(["discover", "--url", fake.url], `${fake.token}\n`);
   expect(discovered.status, discovered.stderr).toBe(0);
@@ -139,7 +139,28 @@ it("takes the token on standard input and reports a refusal in one line", async 
   expect(refused.stderr).toMatch(/^error: T3 refused the token: /u);
   expect(refused.stderr).not.toContain("wrong");
 
-  const { config } = await installation();
+  const { workspace, config } = await installation();
+  fake.projects = [{ id: "agent", title: "Agent", workspaceRoot: workspace }];
+  const saved = await cli(
+    [
+      "configure",
+      "--config",
+      config,
+      "--url",
+      fake.url,
+      "--project",
+      "agent",
+      "--model",
+      "claudeAgent/claude-sonnet-5",
+    ],
+    `${fake.token}\n`,
+  );
+  expect(saved.status, saved.stderr).toBe(0);
+  // The files are startup settings: nothing claims a running runtime took them.
+  expect(saved.stdout).toBe(
+    `Saved runtime-t3's settings: project Agent (${workspace}) on ${fake.url}, with claudeAgent/claude-sonnet-5. It reads them when it starts, so a running Carillon needs \`carillon restart\`.\n`,
+  );
+
   const registry = await readFile(config, "utf8");
   await writeFile(config, registry.replace('id = "runtime-t3"', 'id = "runtime-other"'));
   const configured = await cli(

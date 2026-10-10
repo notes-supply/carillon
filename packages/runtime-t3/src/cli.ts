@@ -136,8 +136,9 @@ async function configureCommand(values: readonly string[]): Promise<void> {
     { url, token: await token() },
     { projectId: requiredArgument(args, "project"), instanceId, model },
   );
+  // The runtime reads its settings only when it starts.
   process.stdout.write(
-    `${providerId} runs on ${url} in project ${project.title} (${project.workspace}) with ${instanceId}/${model}.\n`,
+    `Saved ${providerId}'s settings: project ${project.title} (${project.workspace}) on ${url}, with ${instanceId}/${model}. It reads them when it starts, so a running Carillon needs \`carillon restart\`.\n`,
   );
 }
 

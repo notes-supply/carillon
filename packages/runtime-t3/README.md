@@ -43,7 +43,9 @@ model = "claude-fable-5-1"
 effort = "high"
 ```
 
-Then `carillon start`. Startup fails closed: the registry entry must exist and
+Then `carillon start`. The runtime reads these files only when it starts, so
+after `configure` or a setup rerun changes them, a running Carillon needs
+`carillon restart`. Startup fails closed: the registry entry must exist and
 be enabled, the credential must match, the settings must be valid, and T3 must
 speak orchestration protocol 2 and accept the token. Conversations that
 already started stay with the runtime that took their first turn.
