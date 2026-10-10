@@ -936,6 +936,8 @@ async function testPiModelReadiness() {
         JSON.stringify({ providers: { "readiness-fixture": configured } }),
       );
       assertStartupRefused("runtime", message, [], options);
+      // Setup's readiness check is the same startup check.
+      assertStartupRefused("runtime", message, ["--check"], options);
       assert.deepEqual(await readdir(sessions), [], "setup failure must not create a native turn");
     }
     // Core stays stopped throughout this runtime-only readiness check, so no
@@ -946,6 +948,14 @@ async function testPiModelReadiness() {
         providers: { "readiness-fixture": { ...provider, apiKey: "test-only" } },
       }),
     );
+    const [program, args] = serviceArguments("runtime", options);
+    const checked = spawnSync(program, [...args, "--check"], {
+      encoding: "utf8",
+      timeout: 30_000,
+      env: options.env,
+    });
+    assert.equal(checked.status, 0, checked.stderr);
+    assert.equal(checked.stdout, "Pi is signed in and has a default model.\n");
     await start("runtime", options);
     const response = await fetch(`http://${runtimeHost}:${String(basePort + 2)}/health`);
     assert.equal(response.status, 200);

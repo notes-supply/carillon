@@ -470,6 +470,7 @@ mod tests {
             &directory.path().join("installation"),
             directory.path(),
             44_000,
+            crate::application::admin::Runtime::Pi,
         )?;
         let config = super::LoadedConfig::load(&config_path)?;
         for partial_body in [false, true] {
@@ -523,6 +524,7 @@ mod tests {
             &directory.path().join("installation"),
             directory.path(),
             44_100,
+            crate::application::admin::Runtime::Pi,
         )?;
         let mut config = super::LoadedConfig::load(&config_path)?;
         let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await?;

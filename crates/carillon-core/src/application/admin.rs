@@ -47,10 +47,49 @@ const NATIVE_EXTENSION: &str = r#"export default function carillonContext(pi) {
 "#;
 const SKILL: &str = "---\nname: carillon-status\ndescription: Explain Carillon component and continuity status when the operator asks.\n---\n\nReport component identity, resource selection, and delivery certainty plainly.\n";
 
-/// Creates an installation with the bundled providers registered and
-/// credentialed. Provider-owned settings (such as Discord admission) are
-/// written afterwards by each provider's own `configure` command.
-pub fn initialize(root: &Path, workspace: &Path, base_port: u16) -> Result<PathBuf> {
+/// The bundled runtime an installation's agent runs on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum Runtime {
+    /// Pi, signed in to a model provider.
+    Pi,
+    /// An existing T3 Code server.
+    T3,
+}
+
+impl Runtime {
+    /// The runtime provider's registry ID.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Pi => "runtime-pi",
+            Self::T3 => "runtime-t3",
+        }
+    }
+
+    /// The version of the runtime this release bundles.
+    fn version(self) -> Result<String> {
+        #[derive(serde::Deserialize)]
+        struct Package {
+            version: String,
+        }
+        let package = match self {
+            Self::Pi => include_str!("../../../../packages/runtime-pi/package.json"),
+            Self::T3 => include_str!("../../../../packages/runtime-t3/package.json"),
+        };
+        Ok(serde_json::from_str::<Package>(package)?.version)
+    }
+}
+
+/// Creates an installation with the Discord provider and the chosen runtime
+/// registered and credentialed, and only those. Provider-owned settings
+/// (such as Discord admission or the T3 server) are written afterwards by
+/// each provider's own commands.
+pub fn initialize(
+    root: &Path,
+    workspace: &Path,
+    base_port: u16,
+    runtime: Runtime,
+) -> Result<PathBuf> {
     if !workspace.is_absolute() || !workspace.is_dir() {
         bail!("workspace must be an absolute path to an existing directory");
     }
@@ -69,13 +108,13 @@ pub fn initialize(root: &Path, workspace: &Path, base_port: u16) -> Result<PathB
             operator_token_hash: hash_token(&operator_token),
             attachments: AttachmentLimits::default(),
         },
-        providers: default_providers(base_port, &discord_token, &runtime_token)?,
+        providers: default_providers(base_port, &discord_token, runtime, &runtime_token)?,
         agent: AgentConfig {
             id: "default".to_owned(),
             name: "Default agent".to_owned(),
             resource_root: PathBuf::from("agents/default"),
             workspace: workspace.to_path_buf(),
-            runtime_provider: "runtime-pi".to_owned(),
+            runtime_provider: runtime.id().to_owned(),
         },
     };
     config.validate()?;
@@ -88,7 +127,7 @@ pub fn initialize(root: &Path, workspace: &Path, base_port: u16) -> Result<PathB
     fs::DirBuilder::new().mode(0o700).create(&staging)?;
     let result = (|| -> Result<()> {
         let root = &staging;
-        create_installation_directories(root)?;
+        create_installation_directories(root, runtime)?;
         let config_path = root.join("carillon.toml");
         atomic_write(
             &config_path,
@@ -100,7 +139,7 @@ pub fn initialize(root: &Path, workspace: &Path, base_port: u16) -> Result<PathB
             &[
                 ("operator", &operator_token),
                 ("discord-private", &discord_token),
-                ("runtime-pi", &runtime_token),
+                (runtime.id(), &runtime_token),
             ],
         )?;
         let agent = root.join("agents/default");
@@ -133,14 +172,9 @@ pub fn initialize(root: &Path, workspace: &Path, base_port: u16) -> Result<PathB
 fn default_providers(
     base_port: u16,
     discord_token: &str,
+    runtime: Runtime,
     runtime_token: &str,
 ) -> Result<Vec<Provider>> {
-    #[derive(serde::Deserialize)]
-    struct PiPackage {
-        version: String,
-    }
-    let pi: PiPackage =
-        serde_json::from_str(include_str!("../../../../packages/runtime-pi/package.json"))?;
     Ok(vec![
         Provider {
             id: "discord-private".to_owned(),
@@ -152,9 +186,9 @@ fn default_providers(
             parallel_turns: None,
         },
         Provider {
-            id: "runtime-pi".to_owned(),
+            id: runtime.id().to_owned(),
             role: ProviderRole::Runtime,
-            version: pi.version,
+            version: runtime.version()?,
             url: format!("http://127.0.0.1:{}", checked_port(base_port, 2)?),
             token_hash: hash_token(runtime_token),
             enabled: true,
@@ -163,22 +197,27 @@ fn default_providers(
     ])
 }
 
-fn create_installation_directories(root: &Path) -> Result<()> {
+fn create_installation_directories(root: &Path, runtime: Runtime) -> Result<()> {
     fs::create_dir_all(root)?;
     fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
+    let component = format!("state/components/{}", runtime.id());
+    // Pi keeps its sign-in and settings apart from the owner's ~/.pi.
+    let pi = (runtime == Runtime::Pi).then_some("pi");
     for directory in [
         "state",
         "credentials",
         "providers",
-        "pi",
         "logs",
         "state/components/discord-private",
-        "state/components/runtime-pi",
+        &component,
         "agents/default/extensions",
         "agents/default/skills",
         "agents/default/sessions",
         "examples",
-    ] {
+    ]
+    .into_iter()
+    .chain(pi)
+    {
         let path = root.join(directory);
         fs::create_dir_all(&path)?;
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
@@ -523,7 +562,9 @@ mod tests {
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
 
-    use carillon_installation::config::{Config, LoadedConfig, ProviderRole, RELEASE_VERSION};
+    use carillon_installation::config::{
+        Config, LoadedConfig, ProviderRole, RELEASE_VERSION, hash_token,
+    };
 
     use super::{backup, initialize, restore, set_provider};
     use crate::Lane;
@@ -533,7 +574,7 @@ mod tests {
         workspace: &Path,
         base_port: u16,
     ) -> Result<PathBuf> {
-        initialize(root, workspace, base_port)
+        initialize(root, workspace, base_port, super::Runtime::Pi)
     }
 
     /// A base port for backups that must find their services stopped, away
@@ -672,6 +713,47 @@ mod tests {
             fs::metadata(root.join("providers"))?.permissions().mode() & 0o777,
             0o700
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_t3_installation_registers_only_the_t3_runtime() -> Result<()> {
+        let directory = tempdir()?;
+        let root = directory.path().join("installation");
+        let config_path = initialize(&root, directory.path(), 44_000, super::Runtime::T3)?;
+        let config = LoadedConfig::load(&config_path)?;
+        assert_eq!(config.value.agent.runtime_provider, "runtime-t3");
+        let ids: Vec<&str> = config
+            .value
+            .providers
+            .iter()
+            .map(|provider| provider.id.as_str())
+            .collect();
+        assert_eq!(ids, ["discord-private", "runtime-t3"]);
+        let t3_package: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../packages/runtime-t3/package.json"))?;
+        let runtime = config.provider("runtime-t3", ProviderRole::Runtime)?;
+        assert_eq!(
+            runtime.version,
+            t3_package["version"]
+                .as_str()
+                .context("T3 package version")?
+        );
+        assert_eq!(runtime.url, "http://127.0.0.1:44002");
+        assert_eq!(
+            hash_token(&config.credential("runtime-t3")?),
+            runtime.token_hash
+        );
+        // Nothing of Pi's: no registration, credential or state directory.
+        assert!(
+            config
+                .provider("runtime-pi", ProviderRole::Runtime)
+                .is_err()
+        );
+        assert!(!root.join("credentials/runtime-pi.token").exists());
+        assert!(!root.join("pi").exists());
+        assert!(!root.join("state/components/runtime-pi").exists());
+        assert!(root.join("state/components/runtime-t3").is_dir());
         Ok(())
     }
 

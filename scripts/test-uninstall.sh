@@ -107,8 +107,8 @@ done
 ln -s "$ROOT/app/bin/carillon-uninstall" "$OWNER_HOME/remove-carillon"
 for failure in unset stale partial-term partial-kill sync-cleanup marker-kill rmdir-kill; do
   install_release "$ROOT"
-  # The operator explicitly enabled the optional T3 unit: its link lives in the
-  # target's wants directory, which disabling the target does not touch.
+  # An enabled unit's link lives in the target's wants directory, which
+  # disabling the target does not touch.
   mkdir -p "$UNIT_DIR/carillon.target.wants"
   ln -s ../carillon-runtime-t3.service "$UNIT_DIR/carillon.target.wants/carillon-runtime-t3.service"
   # The manager retains its loaded definition until a successful reload, even

@@ -28,9 +28,10 @@ it("selects each language with the release it ships in", () => {
 });
 
 it("follows inputs across languages", () => {
-  // Rust tests read the protocol fixtures; core embeds runtime-pi's version.
+  // Rust tests read the protocol fixtures; core embeds each runtime's version.
   expect(lanes(["packages/protocol/fixtures/turns.json"])).toEqual(["release", "rust", "ts"]);
   expect(lanes(["packages/runtime-pi/package.json"])).toEqual(["release", "rust", "ts"]);
+  expect(lanes(["packages/runtime-t3/package.json"])).toEqual(["release", "rust", "ts"]);
   // The shipped skill is documentation the release carries.
   expect(lanes(["packages/discord-pi/skill/SKILL.md"])).toEqual(["release", "ts"]);
   // TypeScript formatting covers JSON anywhere.

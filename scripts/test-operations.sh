@@ -84,9 +84,9 @@ case "$*" in
   # The services that are part of the target, which a stop names so that it
   # returns once they, not only the target, have stopped.
   '--user show --property=ConsistsOf --value carillon.target')
-    echo 'carillon-core.service carillon-discord.service carillon-runtime-pi.service' ;;
+    echo 'carillon-core.service carillon-discord.service carillon-runtime-pi.service carillon-runtime-t3.service' ;;
   '--user start carillon.target') running || start ;;
-  '--user stop carillon.target carillon-core.service carillon-discord.service carillon-runtime-pi.service') stop ;;
+  '--user stop carillon.target carillon-core.service carillon-discord.service carillon-runtime-pi.service carillon-runtime-t3.service') stop ;;
   # The test's own cleanup stops whatever is left.
   '--user stop carillon.target') stop ;;
   '--user daemon-reload') [ "${FAKE_RELOAD:-ok}" != fail ] || exit 1 ;;
@@ -207,7 +207,7 @@ carillon restart >"$TEST_ROOT/restart.log"
 grep -Fx 'Core stopped with its runtime workers paused.' "$TEST_ROOT/restart.log" >/dev/null
 expect_trace '--user show --property=ActiveState --value carillon.target' \
   '--user show --property=ConsistsOf --value carillon.target' \
-  '--user stop carillon.target carillon-core.service carillon-discord.service carillon-runtime-pi.service' \
+  '--user stop carillon.target carillon-core.service carillon-discord.service carillon-runtime-pi.service carillon-runtime-t3.service' \
   '--user start carillon.target'
 grep -F 'runtime workers paused for maintenance' "$INSTALLATION/logs/core.log" >/dev/null
 # A runtime that cannot say whether a restart loses anything keeps the
@@ -367,7 +367,7 @@ grep -F "custom Discord module $EXAMPLE is usable" "$TEST_ROOT/update.log" >/dev
 grep -Fx "Updated to Carillon $VERSION; services are running again:" "$TEST_ROOT/update.log" >/dev/null
 expect_trace '--user show --property=ActiveState --value carillon.target' \
   '--user show --property=ConsistsOf --value carillon.target' \
-  '--user stop carillon.target carillon-core.service carillon-discord.service carillon-runtime-pi.service' \
+  '--user stop carillon.target carillon-core.service carillon-discord.service carillon-runtime-pi.service carillon-runtime-t3.service' \
   '--user daemon-reload' '--user enable carillon.target' '--user start carillon.target'
 grep -Fx 'Core stopped with its runtime workers paused.' "$TEST_ROOT/update.log" >/dev/null
 [ "$(cat "$INSTALLATION/app/lib/release-sentinel")" = next ]

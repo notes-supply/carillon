@@ -112,6 +112,8 @@ export interface FakeT3 {
   protocolVersion: number;
   /** The provider instances `server.getConfig` and `server.refreshProviders` list, as T3 describes them. */
   providers: unknown[];
+  /** The projects T3's authenticated shell snapshot lists. */
+  projects: { id: string; title: string; workspaceRoot: string }[];
   /** Processes the command, then drops the socket before answering. */
   dropAnswer: (command: Command) => boolean;
   /** Drops the socket before processing the command. */
@@ -308,6 +310,28 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
       );
       return;
     }
+    if (request.method === "GET" && request.url === "/api/orchestration/shell") {
+      // As T3's route: the credential and the protocol header are required.
+      if (
+        request.headers.authorization !== `Bearer ${token}` ||
+        request.headers["x-t3-orchestration-protocol"] !== String(fake.protocolVersion)
+      ) {
+        response.writeHead(401);
+        response.end();
+        return;
+      }
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          schemaVersion: 1,
+          snapshotSequence: 0,
+          threads: [],
+          archivedThreads: [],
+          projects: fake.projects,
+        }),
+      );
+      return;
+    }
     const upload = /^\/api\/attachments\/upload\/([^.]+)\.signed$/u.exec(request.url ?? "");
     const granted = upload?.[1] === undefined ? undefined : uploads.get(upload[1]);
     if (request.method === "POST" && upload?.[1] !== undefined && granted !== undefined) {
@@ -386,6 +410,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
     uploadRedirect: undefined,
     protocolVersion: ORCHESTRATION_PROTOCOL,
     providers: [...FAKE_PROVIDERS],
+    projects: [{ id: "project-1", title: "Project", workspaceRoot: "/" }],
     dropAnswer: () => false,
     dropRequest: () => false,
     delayAnswer: () => 0,

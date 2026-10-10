@@ -45,13 +45,15 @@ const FileConfigSchema = Type.Object({
 });
 
 /**
- * The registry as it concerns the named runtime provider, or `"disabled"`
- * when the operator disabled it: the runtime then serves nothing.
+ * The registry as it concerns the named runtime provider; `"disabled"` when
+ * the operator disabled it, or `"unregistered"` when the registry has no such
+ * runtime, as for the bundled runtime an installation did not choose. Either
+ * way the runtime serves nothing.
  */
 export async function loadInstallation(
   path: string,
   providerId: string,
-): Promise<Installation | "disabled"> {
+): Promise<Installation | "disabled" | "unregistered"> {
   Parse(ProviderIdentitySchema, providerId);
   const configPath = await realpath(path);
   const root = resolve(configPath, "..");
@@ -64,7 +66,7 @@ export async function loadInstallation(
   const runtime = parsed.providers.find(
     (provider) => provider.id === providerId && provider.role === "runtime",
   );
-  if (runtime === undefined) throw new Error(`runtime provider ${providerId} is not configured`);
+  if (runtime === undefined) return "unregistered";
   if (!runtime.enabled) return "disabled";
   const interfaces = parsed.providers.filter(
     (provider) => provider.role === "interface" && provider.enabled,
@@ -80,6 +82,11 @@ export async function loadInstallation(
     operatorTokenHash: parsed.core.operator_token_hash,
     providerFile: join(root, "providers", `${providerId}.toml`),
   };
+}
+
+/** Why a runtime serves nothing, as its log says it. */
+export function notServing(state: "disabled" | "unregistered"): string {
+  return state === "disabled" ? "disabled" : "not in carillon.toml";
 }
 
 /** The runtime's installation credential, checked against the registry before anything listens. */

@@ -98,8 +98,8 @@ if [ "$OWN_UNITS" -eq 1 ]; then
   do
     rm -f "$UNIT_DIR/$unit"
   done
-  # Disabling the target removes links to it, not the optional T3 unit's own
-  # enablement link inside the target's wants directory.
+  # Disabling the target removes links to it, not a link a unit enabled by
+  # hand left inside the target's wants directory.
   rm -f "$UNIT_DIR/carillon.target.wants/carillon-runtime-t3.service"
   [ ! -d "$UNIT_DIR/carillon.target.wants" ] ||
     rmdir --ignore-fail-on-non-empty -- "$UNIT_DIR/carillon.target.wants"

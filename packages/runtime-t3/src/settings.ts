@@ -79,7 +79,7 @@ export async function loadSettings(path: string, root: string): Promise<T3Settin
 }
 
 /** `value` as an HTTP(S) origin, or undefined when it is not only one. */
-function origin(value: string): string | undefined {
+export function origin(value: string): string | undefined {
   let url: URL;
   try {
     url = new URL(value);

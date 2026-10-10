@@ -24,7 +24,7 @@ use tracing_subscriber::EnvFilter;
 use carillon_installation::maintenance::ServiceLock;
 
 use super::{
-    admin::{backup, enable_demo_resources, initialize as init, restore, set_provider},
+    admin::{Runtime, backup, enable_demo_resources, initialize as init, restore, set_provider},
     drain::{Pace, drain, stop},
     http::{Applied, RegistryStatus, check, serve},
     operations::{
@@ -96,6 +96,9 @@ enum Command {
         workspace: PathBuf,
         #[arg(long, default_value_t = 43_800)]
         base_port: u16,
+        /// The runtime the agent runs on; only it is registered.
+        #[arg(long, value_enum, default_value_t = Runtime::Pi)]
+        runtime: Runtime,
     },
     /// Run the core service with an explicit registry.
     Core {
@@ -224,8 +227,9 @@ pub(crate) async fn run() -> Result<()> {
         Command::Init {
             workspace,
             base_port,
+            runtime,
         } => {
-            let path = init(&home()?, &workspace, base_port)?;
+            let path = init(&home()?, &workspace, base_port, runtime)?;
             println!("{}", path.display());
         }
         Command::External(arguments) => forward(&arguments, &home()?)?,

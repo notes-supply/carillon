@@ -18,10 +18,10 @@ function lanesOf(path) {
   // Root tools and their lock decide every lane's toolchain.
   if (path === "mise.toml" || path === "mise.lock") return LANES;
   // The Discord skill ships in the release; Rust reads protocol and
-  // operations fixtures, and core embeds runtime-pi's package version.
+  // operations fixtures, and core embeds each runtime's package version.
   if (path === "packages/discord-pi/skill/SKILL.md") return ["ts", "release"];
   if (/^packages\/(protocol|discord-pi)\/fixtures\//u.test(path)) return ["rust", "ts", "release"];
-  if (path === "packages/runtime-pi/package.json") return ["rust", "ts", "release"];
+  if (/^packages\/runtime-(pi|t3)\/package\.json$/u.test(path)) return ["rust", "ts", "release"];
   // The release's own licence and notices.
   if (path === "LICENSE" || path.startsWith("licenses/")) return ["release"];
   // Other documentation reaches no build or test.
