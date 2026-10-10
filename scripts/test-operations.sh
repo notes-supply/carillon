@@ -189,15 +189,16 @@ printf '%s\n' 'not a registry' >"$TEST_ROOT/decoy/carillon.toml"
 case "$(simulate installed-1)" in *'Local provider response 1'*) ;; *) fail 'first turn failed' ;; esac
 
 # Provider commands receive the resolved installation and infer the only Discord instance.
-MODULE=$INSTALLATION/app/lib/carillon_discord_module.wasm
-INSTALLED=$INSTALLATION/state/components/discord-private/module.wasm
-carillon discord module | grep -Fx 'discord-private serves the release Discord module: /model, /command.' >/dev/null
-carillon discord module check "$MODULE" | grep -F 'is a usable Discord module' >/dev/null
-# The running provider takes the installation's maintenance lock for its own changes.
-refuse locked-install flock "$INSTALLATION/.maintenance.lock" carillon discord module install "$MODULE"
-grep -F 'another Carillon maintenance operation is running' "$TEST_ROOT/locked-install.log" >/dev/null
-grep -F 'Still serving the release Discord module: /model, /command.' "$TEST_ROOT/locked-install.log" >/dev/null
-[ ! -e "$INSTALLED" ]
+EXAMPLE=$INSTALLATION/app/lib/examples/card-colours.wasm
+SETTINGS=$INSTALLATION/providers/discord-private.toml
+carillon discord module | grep -Fx 'discord-private serves the bundled Discord module: /model, /command.' >/dev/null
+carillon discord module check "$EXAMPLE" | grep -F 'is a usable Discord module' >/dev/null
+# Another maintenance operation's lock leaves the declaration as it is.
+cp "$SETTINGS" "$TEST_ROOT/settings-before"
+refuse locked-enable flock "$INSTALLATION/.maintenance.lock" carillon discord module enable "$EXAMPLE"
+grep -F 'another Carillon maintenance operation is running' "$TEST_ROOT/locked-enable.log" >/dev/null
+cmp "$SETTINGS" "$TEST_ROOT/settings-before"
+carillon discord module | grep -Fx 'discord-private serves the bundled Discord module: /model, /command.' >/dev/null
 carillon discord configure --guild-id 100 --bot-user-id 201 --user-id 200 --user-id 250 \
   --route 300:always:channel >/dev/null
 grep -F '"250"' "$INSTALLATION/providers/discord-private.toml" >/dev/null
@@ -355,15 +356,14 @@ assert_preserved
 carillon start >/dev/null
 rm -f "$TRACE"
 
-# A running installation is stopped, replaced, restarted and checked. An
-# installed Discord module lives outside the replaced application and is
-# checked by the new release before anything stops.
-carillon discord module install "$MODULE" >"$TEST_ROOT/module-install.log"
-grep -Fx 'discord-private now serves the installed Discord module: /model, /command.' \
-  "$TEST_ROOT/module-install.log" >/dev/null
-cmp "$MODULE" "$INSTALLED"
+# A running installation is stopped, replaced, restarted and checked. The
+# custom module the settings enable is checked by the new release before
+# anything stops.
+carillon discord module enable "$EXAMPLE" >"$TEST_ROOT/module-enable.log"
+grep -Fx "It serves the custom Discord module $EXAMPLE: /model, /command." \
+  "$TEST_ROOT/module-enable.log" >/dev/null
 carillon update "$TEST_ROOT/next.tar.gz" >"$TEST_ROOT/update.log"
-grep -F "installed Discord module $INSTALLED is usable" "$TEST_ROOT/update.log" >/dev/null
+grep -F "custom Discord module $EXAMPLE is usable" "$TEST_ROOT/update.log" >/dev/null
 grep -Fx "Updated to Carillon $VERSION; services are running again:" "$TEST_ROOT/update.log" >/dev/null
 expect_trace '--user show --property=ActiveState --value carillon.target' \
   '--user show --property=ConsistsOf --value carillon.target' \
@@ -377,9 +377,8 @@ assert_preserved
 [ "$(carillon recent)" = "$recent_before" ]
 case "$(simulate installed-2)" in *'Local provider response 2'*) ;; *) fail 'conversation did not continue' ;; esac
 [ "$(carillon review check)" = "review $INSTALLATION check" ]
-carillon discord module | grep -Fx 'discord-private serves the installed Discord module: /model, /command.' >/dev/null
-carillon discord module reset | grep -Fx 'discord-private now serves the release Discord module: /model, /command.' >/dev/null
-[ ! -e "$INSTALLED" ]
+carillon discord module | grep -Fx "discord-private serves the custom Discord module $EXAMPLE: /model, /command." >/dev/null
+carillon discord module disable | grep -Fx 'It serves the bundled Discord module: /model, /command.' >/dev/null
 
 # A stopped installation stays stopped.
 carillon stop >/dev/null

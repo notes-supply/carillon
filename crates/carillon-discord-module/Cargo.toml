@@ -9,6 +9,12 @@ license.workspace = true
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Export `handle` as this crate's own Wasm entry points: the bundled module.
+# A custom module depends on the library without it and exports its own.
+default = ["bundled"]
+bundled = []
+
 [dependencies]
 carillon-protocol = { path = "../carillon-protocol" }
 serde.workspace = true

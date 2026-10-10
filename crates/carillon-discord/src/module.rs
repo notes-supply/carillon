@@ -1,18 +1,20 @@
 //! Hosting of the replaceable Discord module: choosing the module to serve,
 //! learning which commands it defines, registering those with Discord,
 //! running each interaction through it with the native operations it may ask
-//! for, rendering work cards through it without any, and installing or
-//! resetting the module while serving.
+//! for, rendering work cards through it without any, and switching modules
+//! while serving.
 //!
-//! Three facts have separate owners. Memory holds the generation serving now.
-//! The disk holds what the next start serves: the operator-installed module
-//! when one exists, otherwise the release's module. The registration record
-//! holds what Discord last confirmed. Changes serialize on the installation's
-//! maintenance lock, and every change converges these facts in one order:
-//! validate, register when the record does not match, activate, then save.
+//! Three facts have separate owners. The provider's settings file declares
+//! the module to serve: a custom one it enables, otherwise the release's
+//! bundled module. Memory holds the generation serving now. The registration
+//! record holds what Discord last confirmed. Changes serialize on the
+//! installation's maintenance lock, and every change converges these facts in
+//! one order: validate, register when the record does not match, then
+//! activate.
 
 use std::{
     fmt, fs,
+    io::Read as _,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
@@ -26,7 +28,7 @@ use carillon_discord_module::contract::{
 };
 use carillon_installation::{
     config::LoadedConfig,
-    filesystem::{PublishError, atomic_write, publish, remove, sync_ancestors},
+    filesystem::{PublishError, atomic_write, remove, sync_ancestors},
     maintenance::MaintenanceLock,
 };
 use carillon_protocol::model::{
@@ -65,7 +67,7 @@ const CARD_DEADLINE: Duration = Duration::from_secs(1);
 /// The largest card request sent to the module, well within its memory. A
 /// job core reads is far smaller unless a runtime's snapshot is not bounded.
 const CARD_REQUEST_LIMIT: usize = 1 << 20;
-/// The largest module an operator may install.
+/// The largest module the provider serves.
 pub const MODULE_LIMIT: usize = 16 << 20;
 
 /// The Discord application the provider acts as, once the token is known,
@@ -362,21 +364,24 @@ async fn submit(
 }
 
 /// Where a module comes from.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "source", rename_all = "snake_case")]
 pub enum Source {
-    /// The module shipped with the release, served when none is installed.
-    Release,
-    /// The module an operator installed, which takes precedence.
-    Installed,
+    /// The module shipped with the release, served unless the provider's
+    /// settings enable a custom one.
+    Bundled,
+    /// The module at `path`, which the provider's settings enable.
+    Custom { path: PathBuf },
 }
 
 impl fmt::Display for Source {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Release => "release",
-            Self::Installed => "installed",
-        })
+        match self {
+            Self::Bundled => formatter.write_str("the bundled Discord module"),
+            Self::Custom { path } => {
+                write!(formatter, "the custom Discord module {}", path.display())
+            }
+        }
     }
 }
 
@@ -384,9 +389,7 @@ impl fmt::Display for Source {
 #[derive(Clone, Debug)]
 pub struct ModuleFiles {
     /// The release's module; release updates replace it.
-    pub release: PathBuf,
-    /// The operator-installed module, outside the release's files.
-    pub installed: PathBuf,
+    pub bundled: PathBuf,
     /// What Discord last confirmed as registered.
     pub record: PathBuf,
     /// The installation whose maintenance lock serializes changes.
@@ -394,36 +397,45 @@ pub struct ModuleFiles {
 }
 
 impl ModuleFiles {
-    /// The files of a configured instance whose release module is `release`.
-    pub fn of(config: &LoadedConfig, provider_id: &str, release: PathBuf) -> Self {
-        let state = crate::config::state_directory(config, provider_id);
+    /// The files of a configured instance whose bundled module is `bundled`.
+    pub fn of(config: &LoadedConfig, provider_id: &str, bundled: PathBuf) -> Self {
         Self {
-            release,
-            installed: state.join("module.wasm"),
-            record: state.join("commands.json"),
+            bundled,
+            record: crate::config::state_directory(config, provider_id).join("commands.json"),
             installation: config.root.clone(),
         }
     }
 
-    /// The module the next start serves: the installed one when it exists.
+    /// The bytes of the module `source` names, read only one byte past the
+    /// size [`prepare`] refuses.
     ///
     /// # Errors
     ///
-    /// Returns an error when the chosen file cannot be read.
-    pub fn selected(&self) -> Result<(Source, Vec<u8>)> {
-        match fs::read(&self.installed) {
-            Ok(bytes) => Ok((Source::Installed, bytes)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let bytes = fs::read(&self.release).with_context(|| {
-                    format!("read release Discord module {}", self.release.display())
-                })?;
-                Ok((Source::Release, bytes))
-            }
-            Err(error) => Err(error).with_context(|| {
-                format!("read installed Discord module {}", self.installed.display())
-            }),
-        }
+    /// Returns an error when the file cannot be read.
+    pub fn read(&self, source: &Source) -> Result<Vec<u8>> {
+        let path = match source {
+            Source::Bundled => &self.bundled,
+            Source::Custom { path } => path,
+        };
+        read_module(path).with_context(|| match source {
+            Source::Bundled => format!("read the bundled Discord module {}", path.display()),
+            Source::Custom { .. } => format!("read the custom Discord module {}", path.display()),
+        })
     }
+}
+
+/// A module file's bytes, read only one byte past the size [`prepare`]
+/// refuses.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be read.
+pub fn read_module(path: &Path) -> std::io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take(MODULE_LIMIT as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// One immutable module and the definitions it described. In-flight calls
@@ -438,13 +450,8 @@ struct Generation {
 impl Generation {
     fn summary(&self) -> ModuleSummary {
         ModuleSummary {
-            source: self.source,
-            commands: self
-                .definitions
-                .iter()
-                .filter_map(|definition| definition["name"].as_str())
-                .map(str::to_owned)
-                .collect(),
+            source: self.source.clone(),
+            commands: command_names(&self.definitions),
             digest: self.digest.clone(),
         }
     }
@@ -453,6 +460,7 @@ impl Generation {
 /// A module as the operator sees it.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ModuleSummary {
+    #[serde(flatten)]
     pub source: Source,
     /// Command names, without the leading slash.
     pub commands: Vec<String>,
@@ -472,80 +480,56 @@ pub enum Registration {
     NotConnected,
 }
 
-/// Whether a change also holds for the next start.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
-pub enum Saved {
-    /// The next start serves the new module, even after a system crash.
-    Durable,
-    /// The saved file was not changed. The next start selects whatever was
-    /// saved before, which may already be this module or may be unusable.
-    Failed { error: String },
-    /// The saved file was changed, but a system crash may still undo that.
-    Unsynced { error: String },
-}
-
-impl Saved {
-    /// The outcome of publishing or removing `path`.
-    fn of(path: &Path, result: Result<(), PublishError>) -> Self {
-        match result {
-            Ok(()) => Self::Durable,
-            Err(PublishError::NotPublished(error)) => Self::Failed {
-                error: format!("{}: {error}", path.display()),
-            },
-            Err(PublishError::Unsynced(error)) => Self::Unsynced {
-                error: format!("sync the directory of {}: {error}", path.display()),
-            },
-        }
-    }
-}
-
-/// A completed install or reset: the new module serves.
+/// The module serving after an apply, the one before it, and what the
+/// change needed from Discord.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Change {
     pub serving: ModuleSummary,
     pub previous: ModuleSummary,
     pub discord: Registration,
-    pub saved: Saved,
 }
 
-/// What serves now, and what the next start would serve.
+/// What serves, how the module the settings file declares compares, and
+/// whether the record shows the serving definitions registered for this
+/// application and guild (absent without a Discord application).
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Status {
     pub serving: ModuleSummary,
-    pub next_start: NextStart,
-    /// Whether the record shows the serving definitions registered for this
-    /// application and guild; absent without a Discord application.
+    pub declared: Declared,
     pub registered: Option<bool>,
 }
 
+/// The module the settings file declares, as an apply would read it.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
-pub enum NextStart {
-    /// The module on disk is the one serving.
-    Same,
-    /// The next start would serve another module from this source.
-    Different { source: Source },
-    /// The module on disk could not be read.
+pub enum Declared {
+    /// It is the module serving, byte for byte.
+    Serving,
+    /// It is another module, or the serving one's file has changed.
+    Other {
+        #[serde(flatten)]
+        source: Source,
+    },
+    /// The settings file or the module's file could not be read.
     Unknown { error: String },
 }
 
-/// The operator's answer to a refused install or reset: why, with what to
-/// do next, and the module that still serves.
+/// The operator's answer to a refused apply: why, and the module that still
+/// serves.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Refusal {
     pub error: String,
     pub serving: ModuleSummary,
 }
 
-/// Why an install or reset left the serving module in place.
+/// Why an apply left the serving module in place.
 #[derive(Debug)]
 pub enum ChangeError {
     /// Another maintenance operation holds the installation's lock.
     Busy(PathBuf),
     /// The maintenance lock could not be taken.
     Lock(anyhow::Error),
-    /// The candidate is not a usable Discord module.
+    /// The declared module is not a usable Discord module.
     Unusable(anyhow::Error),
     /// The registration record could not be cleared durably, so Discord was
     /// not contacted.
@@ -585,8 +569,8 @@ struct Record {
     commands: Vec<Value>,
 }
 
-/// The module in use, its command definitions, and the files that decide
-/// what the next start serves and what Discord holds.
+/// The module in use, its command definitions, and the files that hold the
+/// bundled module and what Discord holds.
 pub struct Module {
     host: Host<Calls>,
     files: ModuleFiles,
@@ -597,28 +581,30 @@ pub struct Module {
 }
 
 impl Module {
-    /// Loads the module the next start serves and learns its commands.
+    /// Loads the module `source` names and learns its commands.
     ///
     /// # Errors
     ///
-    /// Returns an error when the selected module is unusable; an unusable
-    /// installed module is named so the operator can remove it.
-    pub async fn load(files: ModuleFiles) -> Result<Self> {
+    /// Returns an error when the module is unusable; an unusable custom
+    /// module is named, with how to serve the bundled one instead.
+    pub async fn load(files: ModuleFiles, source: Source) -> Result<Self> {
         let host = Host::new()?;
-        let (source, bytes) = files.selected()?;
-        let generation = prepare(&host, &bytes, source).await.map_err(|error| {
-            if source == Source::Installed {
-                error.context(format!(
-                    "installed Discord module {} is unusable; remove it to serve the release's module",
-                    files.installed.display()
-                ))
-            } else {
-                error.context(format!(
-                    "release Discord module {} is unusable",
-                    files.release.display()
-                ))
-            }
-        })?;
+        let bytes = files.read(&source)?;
+        let generation = prepare(&host, &bytes, source.clone())
+            .await
+            .map_err(|error| {
+                error.context(match &source {
+                    Source::Custom { path } => format!(
+                        "custom Discord module {} is unusable; fix it, or disable it in the \
+                         provider's settings to serve the bundled module",
+                        path.display()
+                    ),
+                    Source::Bundled => format!(
+                        "bundled Discord module {} is unusable",
+                        files.bundled.display()
+                    ),
+                })
+            })?;
         Ok(Self {
             host,
             files,
@@ -627,38 +613,61 @@ impl Module {
         })
     }
 
-    /// Serves `bytes` as the installed module and saves it for later starts.
-    /// Repeating an install of the serving module still reconciles the
-    /// registration and completes the save.
+    /// Serves the module `source` names unless it already serves, byte for
+    /// byte: validate, register when the record does not show its
+    /// definitions, then activate. A module that already serves has its
+    /// registration repeated when the record does not show it. Only a change
+    /// takes the maintenance lock.
     ///
     /// # Errors
     ///
     /// Returns why the serving module was left in place.
-    pub async fn install(
+    pub async fn apply(
         &self,
-        bytes: &[u8],
+        source: Source,
         app: Option<&DiscordApp>,
     ) -> Result<Change, ChangeError> {
-        let _exclusive = self.exclusive().await?;
-        self.apply(Source::Installed, bytes, app).await
-    }
-
-    /// Serves the release's module again and removes the installed one.
-    ///
-    /// # Errors
-    ///
-    /// Returns why the serving module was left in place.
-    pub async fn reset(&self, app: Option<&DiscordApp>) -> Result<Change, ChangeError> {
-        let _exclusive = self.exclusive().await?;
-        let bytes = fs::read(&self.files.release)
-            .with_context(|| {
-                format!(
-                    "read release Discord module {}",
-                    self.files.release.display()
-                )
-            })
+        let _changes = self.changes.lock().await;
+        let bytes = self.files.read(&source).map_err(ChangeError::Unusable)?;
+        let serving = self.current();
+        let unchanged = serving.source == source && serving.digest == digest(&bytes);
+        if unchanged && app.is_none_or(|app| self.registered(app, &serving.definitions)) {
+            return Ok(Change {
+                serving: serving.summary(),
+                previous: serving.summary(),
+                discord: if app.is_some() {
+                    Registration::Unchanged
+                } else {
+                    Registration::NotConnected
+                },
+            });
+        }
+        let _lock = MaintenanceLock::try_acquire(&self.files.installation)
+            .map_err(ChangeError::Lock)?
+            .ok_or_else(|| ChangeError::Busy(self.files.installation.clone()))?;
+        if unchanged {
+            let discord = self
+                .reconcile_definitions(app, &serving.definitions)
+                .await?;
+            return Ok(Change {
+                serving: serving.summary(),
+                previous: serving.summary(),
+                discord,
+            });
+        }
+        let candidate = prepare(&self.host, &bytes, source)
+            .await
             .map_err(ChangeError::Unusable)?;
-        self.apply(Source::Release, &bytes, app).await
+        let discord = self
+            .reconcile_definitions(app, &candidate.definitions)
+            .await?;
+        let serving = candidate.summary();
+        let previous = self.activate(candidate).summary();
+        Ok(Change {
+            serving,
+            previous,
+            discord,
+        })
     }
 
     /// Registers the serving definitions unless the record shows Discord
@@ -673,22 +682,30 @@ impl Module {
         self.reconcile_definitions(Some(app), &definitions).await
     }
 
-    /// The serving module, the one the next start would serve, and whether
-    /// the record shows the serving definitions registered.
-    pub fn status(&self, app: Option<&DiscordApp>) -> Status {
-        let serving = self.current();
-        let next_start = match self.files.selected() {
-            Ok((source, bytes)) if source == serving.source && digest(&bytes) == serving.digest => {
-                NextStart::Same
+    /// How the module `source` names compares with the one serving.
+    pub fn declared(&self, source: Source) -> Declared {
+        match self.files.read(&source) {
+            Ok(bytes) => {
+                let serving = self.current();
+                if serving.source == source && serving.digest == digest(&bytes) {
+                    Declared::Serving
+                } else {
+                    Declared::Other { source }
+                }
             }
-            Ok((source, _)) => NextStart::Different { source },
-            Err(error) => NextStart::Unknown {
+            Err(error) => Declared::Unknown {
                 error: format!("{error:#}"),
             },
-        };
+        }
+    }
+
+    /// The serving module, the declared one, and whether the record shows
+    /// the serving definitions registered.
+    pub fn status(&self, app: Option<&DiscordApp>, declared: Declared) -> Status {
+        let serving = self.current();
         Status {
             serving: serving.summary(),
-            next_start,
+            declared,
             registered: app.map(|app| self.registered(app, &serving.definitions)),
         }
     }
@@ -727,52 +744,6 @@ impl Module {
         card(&self.host, &generation.module, request).await
     }
 
-    async fn exclusive(
-        &self,
-    ) -> Result<(tokio::sync::MutexGuard<'_, ()>, MaintenanceLock), ChangeError> {
-        let changes = self.changes.lock().await;
-        let lock = MaintenanceLock::try_acquire(&self.files.installation)
-            .map_err(ChangeError::Lock)?
-            .ok_or_else(|| ChangeError::Busy(self.files.installation.clone()))?;
-        Ok((changes, lock))
-    }
-
-    /// Validate, register when needed, activate, then save. The caller holds
-    /// both locks.
-    async fn apply(
-        &self,
-        source: Source,
-        bytes: &[u8],
-        app: Option<&DiscordApp>,
-    ) -> Result<Change, ChangeError> {
-        let candidate = prepare(&self.host, bytes, source)
-            .await
-            .map_err(ChangeError::Unusable)?;
-        let discord = self
-            .reconcile_definitions(app, &candidate.definitions)
-            .await?;
-        let serving = candidate.summary();
-        let previous = self.activate(candidate).summary();
-        let saved = match source {
-            Source::Installed => publish_directory(&self.files.installed)
-                .map_err(PublishError::NotPublished)
-                .and_then(|()| publish(&self.files.installed, bytes, 0o600)),
-            Source::Release => publish_directory(&self.files.installed)
-                .map_err(PublishError::NotPublished)
-                .and_then(|()| remove(&self.files.installed)),
-        };
-        let saved = Saved::of(&self.files.installed, saved);
-        if saved != Saved::Durable {
-            warn!(?saved, path = %self.files.installed.display(), "Discord module serves but its saved state is not confirmed");
-        }
-        Ok(Change {
-            serving,
-            previous,
-            discord,
-            saved,
-        })
-    }
-
     async fn reconcile_definitions(
         &self,
         app: Option<&DiscordApp>,
@@ -790,7 +761,7 @@ impl Module {
 
     /// Replaces the module in use with the candidate, returning the previous one.
     fn activate(&self, candidate: Generation) -> Arc<Generation> {
-        let source = candidate.source;
+        let source = candidate.source.clone();
         let previous = std::mem::replace(
             &mut *self.current.lock().unwrap_or_else(PoisonError::into_inner),
             Arc::new(candidate),
@@ -859,15 +830,22 @@ impl Module {
 }
 
 /// Validates `bytes` as a Discord module this provider can serve, without
-/// serving it: the commands it defines, or why it is unusable.
+/// serving it: the names of the commands it defines, or why it is unusable.
 ///
 /// # Errors
 ///
 /// Returns why the module is unusable.
-pub async fn check(bytes: &[u8]) -> Result<ModuleSummary> {
-    Ok(prepare(&Host::new()?, bytes, Source::Installed)
-        .await?
-        .summary())
+pub async fn check(bytes: &[u8]) -> Result<Vec<String>> {
+    let generation = prepare(&Host::new()?, bytes, Source::Bundled).await?;
+    Ok(command_names(&generation.definitions))
+}
+
+fn command_names(definitions: &[Value]) -> Vec<String> {
+    definitions
+        .iter()
+        .filter_map(|definition| definition["name"].as_str())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Creates the directory holding `path` when needed, then syncs it and its
@@ -887,13 +865,13 @@ fn digest(bytes: &[u8]) -> String {
 }
 
 /// Validates a module for serving. Every path applies the same checks,
-/// including the size an operator may install, so `check` never accepts a
-/// module that installation or startup would refuse.
+/// including the size limit, so `check` never accepts a module that an
+/// apply or startup would refuse.
 async fn prepare(host: &Host<Calls>, bytes: &[u8], source: Source) -> Result<Generation> {
     if bytes.len() > MODULE_LIMIT {
         bail!(
-            "the module has {} bytes; a Discord module may have at most {MODULE_LIMIT} bytes (16 MiB)",
-            bytes.len()
+            "the module has more than {MODULE_LIMIT} bytes; a Discord module may have at most \
+             16 MiB"
         );
     }
     let module = host.load(bytes)?;
@@ -1074,7 +1052,7 @@ pub(crate) mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        ChangeError, DiscordApp, MODULE_LIMIT, Module, ModuleFiles, NextStart, Registration, Saved,
+        Change, ChangeError, Declared, DiscordApp, MODULE_LIMIT, Module, ModuleFiles, Registration,
         Source,
     };
 
@@ -1146,6 +1124,24 @@ pub(crate) mod tests {
         })
     }
 
+    /// The example module as built for this tree: the file
+    /// `CARILLON_EXAMPLE_MODULE` names, or `mise run build:module`'s output.
+    pub(crate) fn example_module_bytes() -> anyhow::Result<Vec<u8>> {
+        let path = std::env::var_os("CARILLON_EXAMPLE_MODULE").map_or_else(
+            || {
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../target/wasm32-unknown-unknown/wasm/carillon_card_colours.wasm")
+            },
+            PathBuf::from,
+        );
+        std::fs::read(&path).with_context(|| {
+            format!(
+                "read the built example module {}; build it with `mise run build:module`",
+                path.display()
+            )
+        })
+    }
+
     /// The release module, compiled once for the tests that draw real cards.
     pub(crate) async fn release_module() -> anyhow::Result<Arc<Module>> {
         static RELEASE: tokio::sync::OnceCell<Arc<Module>> = tokio::sync::OnceCell::const_new();
@@ -1156,7 +1152,9 @@ pub(crate) mod tests {
                     directory.path().join("release.wasm"),
                     release_module_bytes()?,
                 )?;
-                Ok::<_, anyhow::Error>(Arc::new(Module::load(files(directory.path())).await?))
+                Ok::<_, anyhow::Error>(Arc::new(
+                    Module::load(files(directory.path()), Source::Bundled).await?,
+                ))
             })
             .await
             .cloned()
@@ -1185,14 +1183,35 @@ pub(crate) mod tests {
         json!({"type": 1, "name": name, "description": "A test command"})
     }
 
-    /// Command files in `root`: the release module at `release.wasm`, state
-    /// under `state/`, and `root` as the installation.
+    /// Command files in `root`: the bundled module at `release.wasm`, the
+    /// record under `state/`, and `root` as the installation.
     pub(crate) fn files(root: &Path) -> ModuleFiles {
         ModuleFiles {
-            release: root.join("release.wasm"),
-            installed: root.join("state/module.wasm"),
+            bundled: root.join("release.wasm"),
             record: root.join("state/commands.json"),
             installation: root.to_path_buf(),
+        }
+    }
+
+    /// The custom module `name` in `root`.
+    pub(crate) fn custom(root: &Path, name: &str) -> Source {
+        Source::Custom {
+            path: root.join(name),
+        }
+    }
+
+    /// What an apply that changed no module reports, for tests of settings
+    /// alone.
+    pub(crate) fn unchanged() -> Change {
+        let summary = super::ModuleSummary {
+            source: Source::Bundled,
+            commands: Vec::new(),
+            digest: String::new(),
+        };
+        Change {
+            serving: summary.clone(),
+            previous: summary,
+            discord: Registration::NotConnected,
         }
     }
 
@@ -1208,7 +1227,7 @@ pub(crate) mod tests {
             &describing(&definitions),
             &replying(reply, &[]),
         )?;
-        Module::load(files(root)).await
+        Module::load(files(root), Source::Bundled).await
     }
 
     pub(crate) fn variant(names: &[&str], reply: &str) -> anyhow::Result<Vec<u8>> {
@@ -1316,82 +1335,103 @@ pub(crate) mod tests {
             assert!(super::check(&bytes).await.is_err(), "accepted {description}");
             std::fs::write(&release, bytes)?;
             assert!(
-                Module::load(files(directory.path())).await.is_err(),
+                Module::load(files(directory.path()), Source::Bundled)
+                    .await
+                    .is_err(),
                 "accepted {description}"
             );
         }
         assert!(super::check(b"\0asm broken").await.is_err());
-        let summary = super::check(&variant(&["model"], "unused")?).await?;
-        assert_eq!(summary.commands, ["model"]);
+        assert_eq!(
+            super::check(&variant(&["model"], "unused")?).await?,
+            ["model"]
+        );
         let commands = release_commands(directory.path(), &["model"], "unused").await?;
-        assert_eq!(commands.serving().source, Source::Release);
+        assert_eq!(commands.serving().source, Source::Bundled);
         assert_eq!(commands.serving().commands, ["model"]);
         assert!(!commands.registered(&app("127.0.0.1:1", 1, 100), &commands.current().definitions));
         Ok(())
     }
 
     #[tokio::test]
-    async fn installs_serve_only_usable_modules_and_start_from_the_saved_one() -> anyhow::Result<()>
-    {
+    async fn applying_serves_only_usable_modules_and_rereads_the_declared_file()
+    -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let root = directory.path();
         let commands = release_commands(root, &["model"], "release").await?;
-        let installed = files(root).installed;
+        let path = root.join("custom.wasm");
+        let declared = custom(root, "custom.wasm");
 
-        // A refused candidate changes neither memory nor disk.
+        // A missing or unusable candidate changes nothing, and takes no lock.
+        for bytes in [None, Some(b"\0asm broken".as_slice())] {
+            if let Some(bytes) = bytes {
+                std::fs::write(&path, bytes)?;
+            }
+            assert!(matches!(
+                commands.apply(declared.clone(), None).await,
+                Err(ChangeError::Unusable(_))
+            ));
+            assert_eq!(reply(&commands).await?, "release");
+            assert!(matches!(
+                commands.declared(declared.clone()),
+                Declared::Other { .. } | Declared::Unknown { .. }
+            ));
+        }
+        assert!(MaintenanceLock::try_acquire(root)?.is_some());
+
+        let first = variant(&["model"], "custom")?;
+        std::fs::write(&path, &first)?;
+        let change = commands.apply(declared.clone(), None).await?;
+        assert_eq!(change.previous.source, Source::Bundled);
+        assert_eq!(change.serving.source, declared);
+        assert_eq!(change.discord, Registration::NotConnected);
+        assert_eq!(reply(&commands).await?, "custom");
+        assert_eq!(commands.declared(declared.clone()), Declared::Serving);
+        let again = commands.apply(declared.clone(), None).await?;
+        assert_eq!(again.previous, again.serving);
+
+        // A rebuild at the same path is another module until it is applied.
+        std::fs::write(&path, variant(&["model", "other"], "rebuilt")?)?;
+        assert_eq!(
+            commands.declared(declared.clone()),
+            Declared::Other {
+                source: declared.clone()
+            }
+        );
+        assert_eq!(reply(&commands).await?, "custom");
+        let change = commands.apply(declared.clone(), None).await?;
+        assert_eq!(change.serving.commands, ["model", "other"]);
+        assert_ne!(change.serving.digest, change.previous.digest);
+        assert_eq!(reply(&commands).await?, "rebuilt");
+
+        // A start serves the declared module.
+        let restarted = Module::load(files(root), declared.clone()).await?;
+        assert_eq!(restarted.serving(), change.serving);
+        assert_eq!(reply(&restarted).await?, "rebuilt");
+
+        // A rebuild that breaks keeps the module serving, and refuses a start,
+        // naming the file and how to serve the bundled module instead.
+        std::fs::write(&path, b"\0asm broken")?;
         assert!(matches!(
-            commands.install(b"\0asm broken", None).await,
+            commands.apply(declared.clone(), None).await,
             Err(ChangeError::Unusable(_))
         ));
-        assert_eq!(reply(&commands).await?, "release");
-        assert!(!installed.exists());
-        assert!(
-            !root.join(".maintenance.lock").exists()
-                || MaintenanceLock::try_acquire(root)?.is_some()
-        );
-
-        // Behaviour-only and definition changes both serve and save.
-        let behaviour = variant(&["model"], "installed")?;
-        let change = commands.install(&behaviour, None).await?;
-        assert_eq!(change.previous.source, Source::Release);
-        assert_eq!(change.serving.source, Source::Installed);
-        assert_eq!(change.serving.commands, ["model"]);
-        assert_ne!(change.serving.digest, change.previous.digest);
-        assert_eq!(change.discord, Registration::NotConnected);
-        assert_eq!(change.saved, Saved::Durable);
-        assert_eq!(reply(&commands).await?, "installed");
-        assert_eq!(std::fs::read(&installed)?, behaviour);
-        assert_eq!(commands.status(None).next_start, NextStart::Same);
-
-        let wider = variant(&["model", "other"], "wider")?;
-        let change = commands.install(&wider, None).await?;
-        assert_eq!(change.serving.commands, ["model", "other"]);
-        assert_eq!(reply(&commands).await?, "wider");
-
-        // A restart serves the saved module, even though the release differs.
-        let restarted = Module::load(files(root)).await?;
-        assert_eq!(restarted.serving(), change.serving);
-        assert_eq!(reply(&restarted).await?, "wider");
-
-        // An unusable installed module refuses startup, naming the file.
-        std::fs::write(&installed, b"\0asm broken")?;
-        let failure = Module::load(files(root))
+        assert_eq!(reply(&commands).await?, "rebuilt");
+        let failure = Module::load(files(root), declared.clone())
             .await
             .err()
             .map(|error| format!("{error:#}"))
             .unwrap_or_default();
         assert!(
-            failure.contains("module.wasm is unusable; remove it"),
+            failure.contains(&format!("custom Discord module {}", path.display()))
+                && failure.contains("disable it"),
             "{failure}"
         );
 
-        // Reset serves the release and removes the installed module.
-        let change = commands.reset(None).await?;
-        assert_eq!(change.serving.source, Source::Release);
-        assert_eq!(change.saved, Saved::Durable);
-        assert!(!installed.exists());
+        // Disabled, the bundled module serves.
+        let change = commands.apply(Source::Bundled, None).await?;
+        assert_eq!(change.serving.source, Source::Bundled);
         assert_eq!(reply(&commands).await?, "release");
-        assert_eq!(Module::load(files(root)).await?.serving(), change.serving);
         Ok(())
     }
 
@@ -1403,21 +1443,23 @@ pub(crate) mod tests {
         let status = Arc::new(AtomicU16::new(200));
         let (address, server, requests) = counting_registration_server(status).await?;
         let target = app(&address.to_string(), 1, 100);
+        std::fs::write(root.join("custom.wasm"), variant(&["other"], "custom")?)?;
         let held = MaintenanceLock::acquire(root)?;
-        let candidate = variant(&["other"], "installed")?;
-        assert!(matches!(
-            commands.install(&candidate, Some(&target)).await,
-            Err(ChangeError::Busy(_))
-        ));
-        assert!(matches!(
-            commands.reset(Some(&target)).await,
-            Err(ChangeError::Busy(_))
-        ));
+        // An apply that changes nothing needs no lock.
+        let unchanged = commands.apply(Source::Bundled, None).await?;
+        assert_eq!(unchanged.previous, unchanged.serving);
+        for source in [custom(root, "custom.wasm"), Source::Bundled] {
+            assert!(matches!(
+                commands.apply(source, Some(&target)).await,
+                Err(ChangeError::Busy(_))
+            ));
+        }
         assert_eq!(requests.load(Ordering::SeqCst), 0);
-        assert!(!files(root).installed.exists());
         assert_eq!(reply(&commands).await?, "release");
         drop(held);
-        commands.install(&candidate, Some(&target)).await?;
+        commands
+            .apply(custom(root, "custom.wasm"), Some(&target))
+            .await?;
         assert_eq!(requests.load(Ordering::SeqCst), 1);
         // The provider releases the lock once its change is complete.
         assert!(MaintenanceLock::try_acquire(root)?.is_some());
@@ -1435,32 +1477,40 @@ pub(crate) mod tests {
         let target = app(&address.to_string(), 1, 100);
         assert_eq!(commands.reconcile(&target).await?, Registration::Registered);
         assert_eq!(commands.reconcile(&target).await?, Registration::Unchanged);
-        assert_eq!(commands.status(Some(&target)).registered, Some(true));
+        let registered =
+            |commands: &Module| commands.status(Some(&target), Declared::Serving).registered;
+        assert_eq!(registered(&commands), Some(true));
 
-        let candidate = variant(&["model", "other"], "installed")?;
+        std::fs::write(
+            root.join("custom.wasm"),
+            variant(&["model", "other"], "custom")?,
+        )?;
         for code in [400, 500] {
             status.store(code, Ordering::SeqCst);
             assert!(matches!(
-                commands.install(&candidate, Some(&target)).await,
+                commands
+                    .apply(custom(root, "custom.wasm"), Some(&target))
+                    .await,
                 Err(ChangeError::Register(_))
             ));
             assert_eq!(reply(&commands).await?, "release");
-            assert!(!files(root).installed.exists());
             // Discord may hold either definition set now, so the record
             // attests to neither and the next change or start registers.
             assert!(!files(root).record.exists());
-            assert_eq!(commands.status(Some(&target)).registered, Some(false));
+            assert_eq!(registered(&commands), Some(false));
         }
 
-        // Repeating a change reconciles Discord even when the requested
-        // module is already serving.
+        // Applying the serving module again reconciles Discord.
         status.store(200, Ordering::SeqCst);
         let before = requests.load(Ordering::SeqCst);
-        let change = commands.reset(Some(&target)).await?;
+        let change = commands.apply(Source::Bundled, Some(&target)).await?;
         assert_eq!(change.previous, change.serving);
         assert_eq!(change.discord, Registration::Registered);
         assert_eq!(requests.load(Ordering::SeqCst), before + 1);
-        assert_eq!(commands.status(Some(&target)).registered, Some(true));
+        assert_eq!(registered(&commands), Some(true));
+        let change = commands.apply(Source::Bundled, Some(&target)).await?;
+        assert_eq!(change.discord, Registration::Unchanged);
+        assert_eq!(requests.load(Ordering::SeqCst), before + 1);
         server.abort();
         Ok(())
     }
@@ -1473,11 +1523,12 @@ pub(crate) mod tests {
         let (address, server, requests) =
             counting_registration_server(Arc::new(AtomicU16::new(200))).await?;
         let target = app(&address.to_string(), 1, 100);
+        std::fs::write(root.join("custom.wasm"), variant(&["other"], "custom")?)?;
         // A directory where the record belongs cannot be removed as a file.
         std::fs::create_dir_all(files(root).record.join("occupied"))?;
         assert!(matches!(
             commands
-                .install(&variant(&["other"], "installed")?, Some(&target))
+                .apply(custom(root, "custom.wasm"), Some(&target))
                 .await,
             Err(ChangeError::Record(
                 carillon_installation::filesystem::PublishError::NotPublished(_)
@@ -1485,41 +1536,7 @@ pub(crate) mod tests {
         ));
         assert_eq!(requests.load(Ordering::SeqCst), 0);
         assert_eq!(reply(&commands).await?, "release");
-        assert!(!files(root).installed.exists());
         server.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn an_unsaved_module_serves_and_a_repeat_finishes_the_save() -> anyhow::Result<()> {
-        let directory = tempfile::tempdir()?;
-        let root = directory.path();
-        let commands = release_commands(root, &["model"], "release").await?;
-        let installed = files(root).installed;
-        // A directory where the module belongs cannot be replaced by a file.
-        std::fs::create_dir_all(installed.join("occupied"))?;
-        let candidate = variant(&["model"], "installed")?;
-        let change = commands.install(&candidate, None).await?;
-        assert!(matches!(change.saved, Saved::Failed { .. }), "{change:?}");
-        assert_eq!(reply(&commands).await?, "installed");
-        // Memory serves the installed module; the next start would not.
-        assert!(matches!(
-            commands.status(None).next_start,
-            NextStart::Unknown { .. }
-        ));
-
-        std::fs::remove_dir_all(&installed)?;
-        assert_eq!(
-            commands.status(None).next_start,
-            NextStart::Different {
-                source: Source::Release
-            }
-        );
-        let change = commands.install(&candidate, None).await?;
-        assert_eq!(change.previous, change.serving);
-        assert_eq!(change.saved, Saved::Durable);
-        assert_eq!(std::fs::read(&installed)?, candidate);
-        assert_eq!(commands.status(None).next_start, NextStart::Same);
         Ok(())
     }
 
@@ -1548,12 +1565,13 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn overlapping_installs_register_and_activate_in_order() -> anyhow::Result<()> {
+    async fn overlapping_applies_register_and_activate_in_order() -> anyhow::Result<()> {
         use std::time::Duration;
         use tokio::sync::{Semaphore, mpsc};
 
         let directory = tempfile::tempdir()?;
-        let commands = release_commands(directory.path(), &["initial"], "initial").await?;
+        let root = directory.path();
+        let commands = release_commands(root, &["initial"], "initial").await?;
         let retained = commands.current();
         let (sent, mut received) = mpsc::unbounded_channel();
         let release = Arc::new(Semaphore::new(0));
@@ -1561,22 +1579,22 @@ pub(crate) mod tests {
         let target = app(&listener.local_addr()?.to_string(), 1, 100);
         let router = gated_registration(sent, release.clone());
         let server = tokio::spawn(async move { axum::serve(listener, router).await });
-        let first_module = variant(&["first"], "first")?;
-        let first = commands.install(&first_module, Some(&target));
+        std::fs::write(root.join("first.wasm"), variant(&["first"], "first")?)?;
+        std::fs::write(root.join("second.wasm"), variant(&["second"], "second")?)?;
+        let first = commands.apply(custom(root, "first.wasm"), Some(&target));
         tokio::pin!(first);
         let registration = tokio::select! {
-            _ = &mut first => anyhow::bail!("install completed before confirmation"),
+            _ = &mut first => anyhow::bail!("apply completed before confirmation"),
             request = received.recv() => request.ok_or_else(|| anyhow::anyhow!("registration closed"))?,
         };
         assert_eq!(registration[0]["name"], "first");
-        let second_module = variant(&["second"], "second")?;
-        let second = commands.install(&second_module, Some(&target));
+        let second = commands.apply(custom(root, "second.wasm"), Some(&target));
         tokio::pin!(second);
         // Poll both operations while registration is blocked. The second
         // must not send a request or activate; ordinary invocations still work.
         tokio::select! {
             _ = &mut first => anyhow::bail!("first activated before confirmation"),
-            _ = &mut second => anyhow::bail!("second bypassed the first install"),
+            _ = &mut second => anyhow::bail!("second bypassed the first apply"),
             request = received.recv() => anyhow::bail!("overlapping registration: {request:?}"),
             () = tokio::time::sleep(Duration::from_millis(100)) => {},
         }
@@ -1595,10 +1613,6 @@ pub(crate) mod tests {
         assert_eq!(commands.serving().commands, ["second"]);
         assert!(commands.registered(&target, &commands.current().definitions));
         assert_eq!(reply(&commands).await?, "second");
-        assert_eq!(
-            std::fs::read(files(directory.path()).installed)?,
-            second_module
-        );
         // A previously captured generation keeps both its code and metadata.
         assert_eq!(retained.definitions, vec![definition("initial")]);
         let payload = serde_json::to_vec(
@@ -1660,10 +1674,12 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn confirmed_install_activates_even_when_recording_fails() -> anyhow::Result<()> {
+    async fn a_confirmed_module_activates_even_when_recording_fails() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
-        let commands = release_commands(directory.path(), &["old"], "old").await?;
-        let blocked = files(directory.path()).record;
+        let root = directory.path();
+        let commands = release_commands(root, &["old"], "old").await?;
+        std::fs::write(root.join("new.wasm"), variant(&["new"], "new")?)?;
+        let blocked = files(root).record;
         let router = Router::new().route(
             "/api/v10/applications/{application}/guilds/{guild}/commands",
             put(move || {
@@ -1680,10 +1696,9 @@ pub(crate) mod tests {
         let target = app(&listener.local_addr()?.to_string(), 1, 100);
         let server = tokio::spawn(async move { axum::serve(listener, router).await });
         let change = commands
-            .install(&variant(&["new"], "new")?, Some(&target))
+            .apply(custom(root, "new.wasm"), Some(&target))
             .await?;
         assert_eq!(change.discord, Registration::Registered);
-        assert_eq!(change.saved, Saved::Durable);
         assert_eq!(reply(&commands).await?, "new");
         assert!(!commands.registered(&target, &commands.current().definitions));
         server.abort();
@@ -1726,13 +1741,14 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn checking_installing_and_starting_share_one_size_limit() -> anyhow::Result<()> {
+    async fn checking_applying_and_starting_share_one_size_limit() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let root = directory.path();
         let commands = release_commands(root, &["model"], "release").await?;
         let base = variant(&["model"], "padded")?;
         let at_limit = padded(base.clone(), MODULE_LIMIT)?;
         let over = padded(base, MODULE_LIMIT + 1)?;
+        let declared = custom(root, "custom.wasm");
 
         let refusal = super::check(&over)
             .await
@@ -1740,62 +1756,68 @@ pub(crate) mod tests {
             .map(|error| format!("{error:#}"))
             .unwrap_or_default();
         assert!(
-            refusal.contains(&format!("has {} bytes", MODULE_LIMIT + 1))
-                && refusal.contains(&format!("at most {MODULE_LIMIT} bytes")),
+            refusal.contains(&format!("more than {MODULE_LIMIT} bytes")),
             "{refusal}"
         );
+        std::fs::write(root.join("custom.wasm"), &over)?;
         assert!(matches!(
-            commands.install(&over, None).await,
+            commands.apply(declared.clone(), None).await,
             Err(ChangeError::Unusable(_))
         ));
-        assert!(!files(root).installed.exists());
+        assert!(Module::load(files(root), declared.clone()).await.is_err());
         assert_eq!(reply(&commands).await?, "release");
 
-        assert_eq!(super::check(&at_limit).await?.commands, ["model"]);
-        assert_eq!(
-            commands.install(&at_limit, None).await?.saved,
-            Saved::Durable
-        );
+        assert_eq!(super::check(&at_limit).await?, ["model"]);
+        std::fs::write(root.join("custom.wasm"), &at_limit)?;
+        commands.apply(declared.clone(), None).await?;
         assert_eq!(reply(&commands).await?, "padded");
         assert_eq!(
-            Module::load(files(root)).await?.serving().commands,
+            Module::load(files(root), declared)
+                .await?
+                .serving()
+                .commands,
             ["model"]
         );
-
-        // A module placed on disk by other means obeys the same limit at startup.
-        std::fs::write(files(root).installed, &over)?;
-        assert!(Module::load(files(root)).await.is_err());
         Ok(())
     }
 
     /// Run under the persistence suite's syscall fault injection: the first
-    /// save creates the state directory, and a repeat must sync that
-    /// directory and its ancestors again rather than trust that it exists.
+    /// registration creates the state directory for its record, and a repeat
+    /// must sync that directory and its ancestors again rather than trust
+    /// that it exists.
     #[tokio::test]
     async fn a_new_state_directory_is_synced_again_by_a_repeat() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let root = directory.path();
         let commands = release_commands(root, &["model"], "release").await?;
         assert!(!root.join("state").exists());
-        let candidate = variant(&["model"], "installed")?;
-        let first = match commands.install(&candidate, None).await?.saved {
-            Saved::Durable => "durable".to_owned(),
-            Saved::Failed { error } => format!("failed ({error})"),
-            Saved::Unsynced { error } => format!("unsynced ({error})"),
+        let (address, server) = registration_server(Arc::new(AtomicU16::new(200))).await?;
+        let target = app(&address.to_string(), 1, 100);
+        std::fs::write(
+            root.join("custom.wasm"),
+            variant(&["model", "other"], "custom")?,
+        )?;
+        let declared = custom(root, "custom.wasm");
+        let first = match commands.apply(declared.clone(), Some(&target)).await {
+            Ok(change) => format!("{:?}", change.discord),
+            Err(ChangeError::Record(error)) => format!("refused: record ({error})"),
+            Err(error) => anyhow::bail!("unexpected refusal: {error}"),
         };
-        eprintln!("first save: {first}");
-        let change = commands.install(&candidate, None).await?;
-        assert_eq!(change.saved, Saved::Durable);
-        assert_eq!(std::fs::read(files(root).installed)?, candidate);
-        assert_eq!(commands.status(None).next_start, NextStart::Same);
-        eprintln!("repeat saved: durable");
+        eprintln!("first change: {first}");
+        commands.apply(declared, Some(&target)).await?;
+        assert!(commands.registered(&target, &commands.current().definitions));
+        assert_eq!(reply(&commands).await?, "custom");
+        eprintln!("repeat: registered");
+        server.abort();
         Ok(())
     }
 
-    /// Run under the persistence suite's syscall fault injection: one change
-    /// reports where its save stopped, then a repeat must confirm it.
+    /// Run under the persistence suite's syscall fault injection: a change
+    /// clears the record durably before it registers, reports where that
+    /// stopped, and a repeat must register.
     #[tokio::test]
-    async fn saving_reports_its_boundary_and_a_repeat_confirms_it() -> anyhow::Result<()> {
+    async fn clearing_the_record_reports_its_boundary_and_a_repeat_registers() -> anyhow::Result<()>
+    {
         let directory = tempfile::tempdir()?;
         let root = directory.path();
         let commands = release_commands(root, &["model"], "release").await?;
@@ -1804,13 +1826,13 @@ pub(crate) mod tests {
         let (address, server, requests) =
             counting_registration_server(Arc::new(AtomicU16::new(200))).await?;
         let target = app(&address.to_string(), 1, 100);
-        let candidate = variant(&["model", "other"], "installed")?;
-        let first = match commands.install(&candidate, Some(&target)).await {
-            Ok(change) => match change.saved {
-                Saved::Durable => "saved: durable".to_owned(),
-                Saved::Failed { error } => format!("saved: failed ({error})"),
-                Saved::Unsynced { error } => format!("saved: unsynced ({error})"),
-            },
+        std::fs::write(
+            root.join("custom.wasm"),
+            variant(&["model", "other"], "custom")?,
+        )?;
+        let declared = custom(root, "custom.wasm");
+        let first = match commands.apply(declared.clone(), Some(&target)).await {
+            Ok(change) => format!("{:?}", change.discord),
             Err(ChangeError::Record(error)) => format!("refused: record ({error})"),
             Err(error) => anyhow::bail!("unexpected refusal: {error}"),
         };
@@ -1818,13 +1840,10 @@ pub(crate) mod tests {
             "first change {first}; Discord requests {}",
             requests.load(Ordering::SeqCst)
         );
-        let change = commands.install(&candidate, Some(&target)).await?;
-        assert_eq!(change.saved, Saved::Durable);
-        assert_eq!(std::fs::read(files(root).installed)?, candidate);
+        commands.apply(declared, Some(&target)).await?;
         assert!(commands.registered(&target, &commands.current().definitions));
-        assert_eq!(commands.status(Some(&target)).next_start, NextStart::Same);
-        assert_eq!(reply(&commands).await?, "installed");
-        eprintln!("repeat saved: durable");
+        assert_eq!(reply(&commands).await?, "custom");
+        eprintln!("repeat: registered");
         server.abort();
         Ok(())
     }
@@ -2081,7 +2100,7 @@ pub(crate) mod tests {
             &describing(&[]),
             &replying("hello", std::slice::from_ref(&button)),
         )?;
-        let commands = Module::load(files(directory.path())).await?;
+        let commands = Module::load(files(directory.path()), Source::Bundled).await?;
         let reply = commands.invoke(calls()?, interaction()).await?;
         assert_eq!(reply.content, "hello");
         assert_eq!(reply.components, vec![button]);
@@ -2090,8 +2109,12 @@ pub(crate) mod tests {
             describing(&[]),
             "{broken".to_owned(),
         ] {
+            std::fs::write(
+                directory.path().join("custom.wasm"),
+                module(&describing(&[]), &output)?,
+            )?;
             commands
-                .install(&module(&describing(&[]), &output)?, None)
+                .apply(custom(directory.path(), "custom.wasm"), None)
                 .await?;
             assert!(
                 commands.invoke(calls()?, interaction()).await.is_err(),
@@ -2350,7 +2373,7 @@ pub(crate) mod tests {
         let (calls, reactions, server) = submitting(router, |config| config.typing = false).await?;
         let directory = tempfile::tempdir()?;
         std::fs::write(directory.path().join("release.wasm"), running_module()?)?;
-        let commands = Module::load(files(directory.path())).await?;
+        let commands = Module::load(files(directory.path()), Source::Bundled).await?;
         let started = std::time::Instant::now();
         let reply = commands.invoke(calls, interaction()).await?;
         let elapsed = started.elapsed();
@@ -2403,7 +2426,7 @@ pub(crate) mod tests {
         let (calls, reactions, server) = submitting(router, |config| config.typing = true).await?;
         let directory = tempfile::tempdir()?;
         std::fs::write(directory.path().join("release.wasm"), running_module()?)?;
-        let commands = Module::load(files(directory.path())).await?;
+        let commands = Module::load(files(directory.path()), Source::Bundled).await?;
         let started = std::time::Instant::now();
         let reply = commands.invoke(calls, interaction()).await?;
         let elapsed = started.elapsed();
@@ -2722,7 +2745,7 @@ pub(crate) mod tests {
         let (calls, preparing) = preparing(Duration::from_secs(2)).await?;
         let directory = tempfile::tempdir()?;
         std::fs::write(directory.path().join("release.wasm"), running_module()?)?;
-        let commands = Module::load(files(directory.path())).await?;
+        let commands = Module::load(files(directory.path()), Source::Bundled).await?;
         assert_eq!(commands.invoke(calls, interaction()).await?.content, "ran");
         // Core accepted the message before the command that followed it.
         assert_eq!(preparing.settled().await?, ["400", "901"]);
@@ -3344,7 +3367,8 @@ pub(crate) mod tests {
         "📬".clone_into(&mut other.delivered_emoji);
         reactions
             .settings()
-            .apply(|| Ok(other))
+            .apply(|| Ok(other), |_| std::future::ready(Ok(unchanged())))
+            .await
             .map_err(|refusal| anyhow::anyhow!("{refusal:?}"))?;
         assert_eq!(
             calls.answer(&submit_request()?, calls_until()).await,
@@ -3583,21 +3607,19 @@ pub(crate) mod tests {
             r#"{"Card":"Remove"}"#.to_owned(),
         ] {
             let candidate = module_with_card(&describe, &replying("candidate", &[]), &card)?;
-            let refused = module.install(&candidate, None).await;
+            std::fs::write(root.join("candidate.wasm"), &candidate)?;
+            let declared = custom(root, "candidate.wasm");
+            let refused = module.apply(declared.clone(), None).await;
             let Err(ChangeError::Unusable(error)) = refused else {
-                anyhow::bail!("a module answering cards with {card} was installed");
+                anyhow::bail!("a module answering cards with {card} was applied");
             };
             assert!(
                 format!("{error:#}").contains("render a card of"),
                 "{error:#}"
             );
             assert_eq!(reply(&module).await?, "release");
-            assert!(!files(root).installed.exists());
             // Nor does it serve at startup.
-            std::fs::create_dir_all(root.join("state"))?;
-            std::fs::write(&files(root).installed, &candidate)?;
-            assert!(Module::load(files(root)).await.is_err());
-            std::fs::remove_file(&files(root).installed)?;
+            assert!(Module::load(files(root), declared).await.is_err());
         }
         Ok(())
     }
@@ -3615,22 +3637,18 @@ pub(crate) mod tests {
                 &showing("release card"),
             )?,
         )?;
-        let module = Module::load(files(root)).await?;
+        let module = Module::load(files(root), Source::Bundled).await?;
         assert_eq!(drawn_by(&module).await?.as_deref(), Some("release card"));
-        let installed = module_with_card(
-            &describe,
-            &replying("installed", &[]),
-            &showing("installed card"),
+        std::fs::write(
+            root.join("custom.wasm"),
+            module_with_card(&describe, &replying("custom", &[]), &showing("custom card"))?,
         )?;
-        module.install(&installed, None).await?;
-        assert_eq!(drawn_by(&module).await?.as_deref(), Some("installed card"));
-        // A restart draws them with the module it saved.
-        let restarted = Module::load(files(root)).await?;
-        assert_eq!(
-            drawn_by(&restarted).await?.as_deref(),
-            Some("installed card")
-        );
-        module.reset(None).await?;
+        module.apply(custom(root, "custom.wasm"), None).await?;
+        assert_eq!(drawn_by(&module).await?.as_deref(), Some("custom card"));
+        // A start with the module declared draws them with it.
+        let restarted = Module::load(files(root), custom(root, "custom.wasm")).await?;
+        assert_eq!(drawn_by(&restarted).await?.as_deref(), Some("custom card"));
+        module.apply(Source::Bundled, None).await?;
         assert_eq!(drawn_by(&module).await?.as_deref(), Some("release card"));
         Ok(())
     }
@@ -3671,8 +3689,34 @@ pub(crate) mod tests {
                 case.name
             );
         }
-        let summary = super::check(&release_module_bytes()?).await?;
-        assert_eq!(summary.commands, ["model", "command"]);
+        assert_eq!(
+            super::check(&release_module_bytes()?).await?,
+            ["model", "command"]
+        );
+        Ok(())
+    }
+    #[tokio::test]
+    async fn the_example_module_colours_the_bundled_cards_through_the_host() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        std::fs::write(root.join("release.wasm"), release_module_bytes()?)?;
+        std::fs::write(root.join("custom.wasm"), example_module_bytes()?)?;
+        let module = Module::load(files(root), Source::Bundled).await?;
+        let bundled = module
+            .render_card(&working_card("Working"))
+            .await?
+            .context("the bundled module drew no card")?;
+        assert_eq!(bundled.color, None);
+
+        let change = module.apply(custom(root, "custom.wasm"), None).await?;
+        assert_eq!(change.serving.commands, ["model", "command"]);
+        let coloured = module
+            .render_card(&working_card("Working"))
+            .await?
+            .context("the example module drew no card")?;
+        assert_eq!(coloured.color, Some(0x58_65_F2));
+        assert_eq!(coloured.description, bundled.description);
+        assert_eq!(coloured.fields, bundled.fields);
         Ok(())
     }
 }

@@ -37,10 +37,10 @@ use crate::{
     client::test_client as core_client,
     config::{DiscordActivation, DiscordConfig, DiscordConversation, Settings},
     module::{
-        MODULE_LIMIT, Module, Source,
+        Module, Source,
         tests::{
-            app, definition, describing, files, gated_registration, module, padded,
-            registration_server, replying, showing, variant, write_module,
+            app, definition, describing, files, gated_registration, module, registration_server,
+            replying, showing, variant, write_module,
         },
     },
 };
@@ -53,7 +53,9 @@ async fn stub_module(directory: &Path, reply: &str) -> anyhow::Result<Arc<Module
         &describing(&[definition("model")]),
         reply,
     )?;
-    Ok(Arc::new(Module::load(files(directory)).await?))
+    Ok(Arc::new(
+        Module::load(files(directory), Source::Bundled).await?,
+    ))
 }
 
 /// The provider `discord`, in deterministic mode, serving the settings its
@@ -653,18 +655,17 @@ async fn deterministic_interactions_run_the_module_and_check_replies() -> anyhow
     Ok(())
 }
 
-async fn operate(
+/// The provider's module status, asked as `bearer`.
+async fn module_status(
     state: &DiscordState,
-    method: Method,
     bearer: Option<&str>,
-    body: Vec<u8>,
 ) -> anyhow::Result<(StatusCode, Value)> {
-    let mut request = Request::builder().method(method).uri("/v1/module");
+    let mut request = Request::builder().method(Method::GET).uri("/v1/module");
     if let Some(bearer) = bearer {
         request = request.header("authorization", format!("Bearer {bearer}"));
     }
     let response = discord_router(state.clone(), false)
-        .oneshot(request.body(Body::from(body))?)
+        .oneshot(request.body(Body::empty())?)
         .await?;
     let status = response.status();
     let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
@@ -713,83 +714,99 @@ fn names(module: &Value) -> Vec<&str> {
         .unwrap_or_default()
 }
 
+/// Saves the settings `state` serves with the custom module `custom.wasm`
+/// in `directory` enabled, after `change`.
+fn declare_custom(
+    state: &DiscordState,
+    directory: &Path,
+    change: impl FnOnce(&mut DiscordConfig),
+) -> anyhow::Result<()> {
+    edit_settings(state, |file| {
+        file.module.enabled = true;
+        file.module.path = Some(directory.join("custom.wasm"));
+        change(file);
+    })
+}
+
 #[tokio::test]
-async fn module_operations_require_the_operator_credential() -> anyhow::Result<()> {
+async fn a_declared_module_serves_only_through_an_operator_apply() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let state = discord_state(
         core_client("http://127.0.0.1:1".to_owned())?,
         directory.path(),
     )
     .await?;
-    let wider = module(
-        &describing(&[definition("model"), definition("other")]),
-        &replying("wider", &[]),
-    )?;
-    for method in [Method::GET, Method::PUT, Method::DELETE] {
-        for bearer in [None, Some("token"), Some("wrong")] {
-            let (status, _) = operate(&state, method.clone(), bearer, wider.clone()).await?;
-            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {bearer:?}");
-        }
+    let custom = directory.path().join("custom.wasm");
+    for bearer in [None, Some("token"), Some("wrong")] {
+        let (status, _) = module_status(&state, bearer).await?;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{bearer:?}");
     }
-    assert_eq!(state.module.serving().source, Source::Release);
-
-    let (status, body) = operate(&state, Method::GET, Some("operator"), Vec::new()).await?;
+    let (status, body) = module_status(&state, Some("operator")).await?;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["serving"]["source"], "release");
+    assert_eq!(body["serving"]["source"], "bundled");
     assert_eq!(names(&body["serving"]), ["model"]);
-    assert_eq!(body["next_start"], json!({"outcome": "same"}));
+    assert_eq!(body["declared"], json!({"outcome": "serving"}));
     assert_eq!(body["registered"], Value::Null);
 
-    let (status, body) = operate(&state, Method::PUT, Some("operator"), wider.clone()).await?;
+    // The file declares a custom module; only an operator's apply serves it.
+    std::fs::write(&custom, variant(&["model", "other"], "custom")?)?;
+    declare_custom(&state, directory.path(), |_| ())?;
+    let (_, body) = settings(&state, Method::GET, "operator").await?;
+    assert_eq!(
+        body["file"],
+        json!({"state": "read", "live": ["module"], "restart": []})
+    );
+    let (_, body) = module_status(&state, Some("operator")).await?;
+    assert_eq!(
+        body["declared"],
+        json!({"outcome": "other", "source": "custom", "path": custom})
+    );
+    for bearer in ["", "token", "wrong"] {
+        let (status, _) = settings(&state, Method::POST, bearer).await?;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+    assert_eq!(state.module.serving().source, Source::Bundled);
+    let (status, body) = settings(&state, Method::POST, "operator").await?;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["serving"]["source"], "installed");
-    assert_eq!(names(&body["serving"]), ["model", "other"]);
-    assert_eq!(names(&body["previous"]), ["model"]);
-    assert_eq!(body["discord"], "not_connected");
-    assert_eq!(body["saved"], json!({"outcome": "durable"}));
+    assert_eq!(body["changed"], json!(["module"]));
+    assert_eq!(body["module"]["serving"]["source"], "custom");
+    assert_eq!(names(&body["module"]["serving"]), ["model", "other"]);
+    assert_eq!(body["module"]["discord"], "not_connected");
+    let (_, reply) = interact(&state, Some("token"), &interaction("300", None)).await?;
+    assert_eq!(reply["content"], "custom");
 
-    // A refusal says why and what still serves.
-    let (status, body) = operate(
-        &state,
-        Method::PUT,
-        Some("operator"),
-        b"\0asm broken".to_vec(),
-    )
-    .await?;
+    // A rebuild at the same path serves when applied.
+    std::fs::write(&custom, variant(&["model", "other"], "rebuilt")?)?;
+    let (_, body) = settings(&state, Method::GET, "operator").await?;
+    assert_eq!(body["file"]["live"], json!(["module"]));
+    let (status, body) = settings(&state, Method::POST, "operator").await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["changed"], json!(["module"]));
+    let (_, reply) = interact(&state, Some("token"), &interaction("300", None)).await?;
+    assert_eq!(reply["content"], "rebuilt");
+
+    // A broken rebuild is refused with the rest of its file: the serving
+    // module and settings stay.
+    std::fs::write(&custom, b"\0asm broken")?;
+    declare_custom(&state, directory.path(), |file| {
+        file.allowed_user_ids.push("250".to_owned());
+    })?;
+    let (status, body) = settings(&state, Method::POST, "operator").await?;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let error = body["error"].as_str().unwrap_or_default();
     assert!(
-        body["error"]
-            .as_str()
-            .is_some_and(|error| error.starts_with("not a usable Discord module")
-                && error.ends_with("nothing was changed")),
+        error.starts_with("not a usable Discord module") && error.ends_with("nothing was applied"),
         "{body}"
     );
-    assert_eq!(body["serving"]["source"], "installed");
-    assert_eq!(names(&body["serving"]), ["model", "other"]);
+    assert_eq!(body["serving"]["source"], "custom");
+    assert_eq!(state.settings.current().allowed_user_ids, ["200"]);
+    let (_, reply) = interact(&state, Some("token"), &interaction("300", None)).await?;
+    assert_eq!(reply["content"], "rebuilt");
 
-    // The body limit refuses before reading more; a module at the limit installs.
-    let (status, body) = operate(
-        &state,
-        Method::PUT,
-        Some("operator"),
-        vec![0; MODULE_LIMIT + 1],
-    )
-    .await?;
-    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
-    assert_eq!(
-        body["error"],
-        format!(
-            "a Discord module may have at most {MODULE_LIMIT} bytes (16 MiB); nothing was changed"
-        )
-    );
-    let at_limit = padded(variant(&["model", "other"], "at limit")?, MODULE_LIMIT)?;
-    let (status, body) = operate(&state, Method::PUT, Some("operator"), at_limit).await?;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["saved"], json!({"outcome": "durable"}));
-
-    // Another maintenance operation refuses changes, not status.
+    // Another maintenance operation refuses a module change, not status.
+    std::fs::write(&custom, variant(&["model"], "locked out")?)?;
     let held = carillon_installation::maintenance::MaintenanceLock::acquire(directory.path())?;
-    let (status, body) = operate(&state, Method::DELETE, Some("operator"), Vec::new()).await?;
+    let (status, body) = settings(&state, Method::POST, "operator").await?;
     assert_eq!(status, StatusCode::CONFLICT);
     assert!(
         body["error"]
@@ -797,20 +814,28 @@ async fn module_operations_require_the_operator_credential() -> anyhow::Result<(
             .is_some_and(|error| error.contains("another Carillon maintenance operation")),
         "{body}"
     );
-    let (status, _) = operate(&state, Method::GET, Some("operator"), Vec::new()).await?;
+    let (status, _) = module_status(&state, Some("operator")).await?;
     assert_eq!(status, StatusCode::OK);
     drop(held);
 
-    let (status, body) = operate(&state, Method::DELETE, Some("operator"), Vec::new()).await?;
+    // Disabled, the bundled module serves again.
+    edit_settings(&state, |file| {
+        file.module.enabled = false;
+        file.allowed_user_ids.push("250".to_owned());
+    })?;
+    let (status, body) = settings(&state, Method::POST, "operator").await?;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["serving"]["source"], "release");
-    assert_eq!(names(&body["serving"]), ["model"]);
-    assert!(!files(directory.path()).installed.exists());
+    assert_eq!(body["changed"], json!(["allowed_user_ids", "module"]));
+    assert_eq!(body["module"]["serving"]["source"], "bundled");
+    let (_, reply) = interact(&state, Some("token"), &interaction("300", None)).await?;
+    assert_eq!(reply["content"], "stub reply");
+    let (_, body) = module_status(&state, Some("operator")).await?;
+    assert_eq!(body["declared"], json!({"outcome": "serving"}));
     Ok(())
 }
 
 #[tokio::test]
-async fn installs_serve_the_replacement_only_once_discord_confirmed_it() -> anyhow::Result<()> {
+async fn applies_serve_a_module_only_once_discord_confirmed_it() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let status = Arc::new(AtomicU16::new(200));
     let (address, server) = registration_server(status.clone()).await?;
@@ -820,62 +845,65 @@ async fn installs_serve_the_replacement_only_once_discord_confirmed_it() -> anyh
     )
     .await?;
     state.app = Some(Arc::new(app(&address.to_string(), 1, 100)));
-    let (_, body) = operate(&state, Method::GET, Some("operator"), Vec::new()).await?;
+    let (_, body) = module_status(&state, Some("operator")).await?;
     assert_eq!(body["registered"], false);
 
     // Nothing is recorded yet, so even the serving module's definitions
     // register; a repeat finds them recorded.
-    let release = std::fs::read(files(directory.path()).release)?;
     for expected in ["registered", "unchanged"] {
-        let (code, body) = operate(&state, Method::PUT, Some("operator"), release.clone()).await?;
+        let (code, body) = settings(&state, Method::POST, "operator").await?;
         assert_eq!(code, StatusCode::OK, "{body}");
-        assert_eq!(body["discord"], expected);
+        assert_eq!(body["module"]["discord"], expected);
     }
-    let (_, body) = operate(&state, Method::GET, Some("operator"), Vec::new()).await?;
+    let (_, body) = module_status(&state, Some("operator")).await?;
     assert_eq!(body["registered"], true);
 
-    let replacement = module(
-        &describing(&[definition("model"), definition("other")]),
-        &replying("replacement", &[]),
+    std::fs::write(
+        directory.path().join("custom.wasm"),
+        module(
+            &describing(&[definition("model"), definition("other")]),
+            &replying("replacement", &[]),
+        )?,
     )?;
+    declare_custom(&state, directory.path(), |_| ())?;
     for (code, expected, returned) in [
         (
             400,
-            "Discord rejected the commands",
+            "Discord rejected the module's commands",
             StatusCode::BAD_GATEWAY,
         ),
         (
             500,
-            "Discord did not confirm the commands",
+            "Discord did not confirm the module's commands",
             StatusCode::GATEWAY_TIMEOUT,
         ),
     ] {
         status.store(code, Ordering::SeqCst);
-        let (status, body) =
-            operate(&state, Method::PUT, Some("operator"), replacement.clone()).await?;
+        let (status, body) = settings(&state, Method::POST, "operator").await?;
         assert_eq!(status, returned, "{body}");
         let error = body["error"].as_str().unwrap_or_default();
         assert!(error.starts_with(expected), "{error}");
         assert_eq!(names(&body["serving"]), ["model"]);
+        assert!(!state.settings.current().module.enabled);
         let (_, reply) = interact(&state, Some("token"), &interaction("300", None)).await?;
         assert_eq!(reply["content"], "stub reply");
     }
 
     status.store(200, Ordering::SeqCst);
-    let (code, body) = operate(&state, Method::PUT, Some("operator"), replacement).await?;
+    let (code, body) = settings(&state, Method::POST, "operator").await?;
     assert_eq!(code, StatusCode::OK, "{body}");
-    assert_eq!(body["discord"], "registered");
+    assert_eq!(body["module"]["discord"], "registered");
     let (_, reply) = interact(&state, Some("token"), &interaction("300", None)).await?;
     assert_eq!(reply["content"], "replacement");
     server.abort();
     Ok(())
 }
 
-/// The operator's request only starts a change: abandoning it, as a CLI
+/// The operator's request only starts an apply: abandoning it, as a CLI
 /// that times out does, must neither cancel the change between Discord's
 /// confirmation and activation nor release the maintenance lock early.
 #[tokio::test]
-async fn an_abandoned_install_completes_while_holding_the_maintenance_lock() -> anyhow::Result<()> {
+async fn an_abandoned_apply_completes_while_holding_the_maintenance_lock() -> anyhow::Result<()> {
     use carillon_installation::maintenance::MaintenanceLock;
     use tokio::sync::{Semaphore, mpsc};
 
@@ -892,12 +920,16 @@ async fn an_abandoned_install_completes_while_holding_the_maintenance_lock() -> 
     )
     .await?;
     state.app = Some(Arc::new(target));
-    let replacement = variant(&["model", "other"], "replacement")?;
+    std::fs::write(
+        directory.path().join("custom.wasm"),
+        variant(&["model", "other"], "replacement")?,
+    )?;
+    declare_custom(&state, directory.path(), |_| ())?;
 
     // Drive the request until Discord has the registration, then drop it.
-    let request = operate(&state, Method::PUT, Some("operator"), replacement.clone());
+    let request = settings(&state, Method::POST, "operator");
     let registration = tokio::select! {
-        _ = request => anyhow::bail!("install answered before Discord confirmed"),
+        _ = request => anyhow::bail!("the apply answered before Discord confirmed"),
         registration = received.recv() => registration.context("registration closed")?,
     };
     assert_eq!(registration.len(), 2);
@@ -906,13 +938,12 @@ async fn an_abandoned_install_completes_while_holding_the_maintenance_lock() -> 
         MaintenanceLock::try_acquire(directory.path())?.is_none(),
         "the change must hold the maintenance lock while Discord is registering"
     );
-    assert_eq!(state.module.serving().source, Source::Release);
+    assert_eq!(state.module.serving().source, Source::Bundled);
     let (_, reply) = interact(&state, Some("token"), &interaction("300", None)).await?;
     assert_eq!(reply["content"], "stub reply");
-    assert!(!files(directory.path()).installed.exists());
 
     gate.add_permits(1);
-    // The lock is released only when the change has finished, save included.
+    // The lock is released only when the change has finished.
     tokio::time::timeout(Duration::from_secs(10), async {
         while MaintenanceLock::try_acquire(directory.path())?.is_none() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -920,17 +951,17 @@ async fn an_abandoned_install_completes_while_holding_the_maintenance_lock() -> 
         anyhow::Ok(())
     })
     .await
-    .context("the abandoned install did not finish")??;
-    assert_eq!(
-        std::fs::read(files(directory.path()).installed)?,
-        replacement
-    );
-    assert_eq!(state.module.serving().source, Source::Installed);
+    .context("the abandoned apply did not finish")??;
+    assert!(matches!(
+        state.module.serving().source,
+        Source::Custom { .. }
+    ));
+    assert!(state.settings.current().module.enabled);
     let (_, reply) = interact(&state, Some("token"), &interaction("300", None)).await?;
     assert_eq!(reply["content"], "replacement");
-    let (_, status) = operate(&state, Method::GET, Some("operator"), Vec::new()).await?;
+    let (_, status) = module_status(&state, Some("operator")).await?;
     assert_eq!(status["registered"], true);
-    assert_eq!(status["next_start"], json!({"outcome": "same"}));
+    assert_eq!(status["declared"], json!({"outcome": "serving"}));
     server.abort();
     Ok(())
 }
@@ -1088,7 +1119,7 @@ async fn an_acknowledged_interaction_is_answered_before_the_provider_returns() -
         directory.path().join("release.wasm"),
         calling_model("model state received", "the native call failed")?,
     )?;
-    state.module = Arc::new(Module::load(files(directory.path())).await?);
+    state.module = Arc::new(Module::load(files(directory.path()), Source::Bundled).await?);
     let target = Arc::new(app(&discord_address.to_string(), 2, 100));
     state.app = Some(target.clone());
     let event = model_command()?;
@@ -1167,7 +1198,7 @@ async fn a_replayed_interaction_discord_does_not_acknowledge_again_runs_nothing(
         directory.path().join("release.wasm"),
         calling_model("model state received", "the native call failed")?,
     )?;
-    state.module = Arc::new(Module::load(files(directory.path())).await?);
+    state.module = Arc::new(Module::load(files(directory.path()), Source::Bundled).await?);
     let target = Arc::new(app(&discord_address.to_string(), 2, 100));
     state.app = Some(target.clone());
     let mut interactions = tokio::task::JoinSet::new();
@@ -1680,14 +1711,14 @@ async fn the_operator_alone_applies_a_settings_file_whole_or_not_at_all() -> any
     let (status, body) = settings(&state, Method::POST, "operator").await?;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        body,
-        json!({"changed": ["allowed_user_ids", "processing_emoji"]})
+        body["changed"],
+        json!(["allowed_user_ids", "processing_emoji"])
     );
     let applied = state.settings.current();
     assert_eq!(applied.allowed_user_ids, ["200", "250"]);
     assert_eq!(applied.processing_emoji, "⏳");
     let (_, body) = settings(&state, Method::POST, "operator").await?;
-    assert_eq!(body, json!({"changed": []}));
+    assert_eq!(body["changed"], json!([]));
     // What the endpoint shows holds no credential.
     let (_, body) = settings(&state, Method::GET, "operator").await?;
     assert!(!body.to_string().contains("token"), "{body}");

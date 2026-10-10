@@ -33,6 +33,10 @@ const discordModule = resolve(
   process.env.CARILLON_DISCORD_MODULE ??
     "target/wasm32-unknown-unknown/wasm/carillon_discord_module.wasm",
 );
+const exampleModule = resolve(
+  process.env.CARILLON_EXAMPLE_MODULE ??
+    "target/wasm32-unknown-unknown/wasm/carillon_card_colours.wasm",
+);
 const runtimeEntry = resolve("packages/runtime-pi/src/cli.ts");
 const packagedRuntime = process.env.CARILLON_RUNTIME_BINARY;
 let installation = root;
@@ -704,51 +708,95 @@ async function testRuntimeCommands() {
 }
 
 /**
- * The operator replaces the running Discord module and returns to the
- * release's; every installed module keeps serving through the same Wasm host.
+ * The settings file declares the Discord module. The operator enables the
+ * example, has a rebuild at the same path served, and disables it; each
+ * apply goes through the running provider's Wasm host, and a module that
+ * cannot serve leaves what serves.
  */
 async function testModuleOperations() {
   const operate = (...args) => run("--home", installation, "discord", "module", ...args);
-  assert.equal(operate(), "discord-private serves the release Discord module: /model, /command.");
+  const attempt = (...args) =>
+    spawnSync(binary, ["--home", installation, "discord", ...args], { encoding: "utf8" });
+  const settingsFile = providerConfigPath();
+  const custom = join(workspace, "card-colours.wasm");
+  const commands = "/model, /command";
+  assert.equal(operate(), `discord-private serves the bundled Discord module: ${commands}.`);
   assert.match(
-    operate("check", discordModule),
+    operate("check", exampleModule),
     /is a usable Discord module .*: \/model, \/command\.$/u,
   );
-  assert.equal(
-    operate("install", discordModule),
-    "discord-private now serves the installed Discord module: /model, /command.",
-  );
-  assert.match((await interact("305", null, "command", "model")).content, /Agent default:/u);
-  // Repeating an install finishes its save; it serves the same module.
-  assert.equal(
-    operate("install", discordModule),
-    "discord-private was already serving the installed Discord module: /model, /command.",
-  );
+  // A broken candidate is refused before the settings file changes.
   const broken = join(workspace, "broken-module.wasm");
   await writeFile(broken, "\0asm broken");
+  const before = await readFile(settingsFile);
   for (const args of [
     ["check", broken],
-    ["install", broken],
+    ["enable", broken],
   ]) {
-    const refused = spawnSync(binary, ["--home", installation, "discord", "module", ...args], {
-      encoding: "utf8",
-    });
+    const refused = attempt("module", ...args);
     assert.notEqual(refused.status, 0, `${args[0]} accepted a broken module`);
     assert.match(refused.stderr, /^error: .*not a usable Discord module/u);
-    if (args[0] === "install") {
-      assert.match(
-        refused.stderr,
-        /Still serving the installed Discord module: \/model, \/command\.$/mu,
-      );
-    }
   }
   await rm(broken);
-  assert.equal(operate(), "discord-private serves the installed Discord module: /model, /command.");
+  assert.deepEqual(await readFile(settingsFile), before);
+
+  await writeFile(custom, await readFile(exampleModule));
   assert.equal(
-    operate("reset"),
-    "discord-private now serves the release Discord module: /model, /command.",
+    operate("enable", custom),
+    [
+      `${settingsFile} now declares the custom Discord module ${custom}: ${commands}.`,
+      "discord-private now serves its settings file: module.",
+      `It serves the custom Discord module ${custom}: ${commands}.`,
+    ].join("\n"),
+  );
+  assert.equal(
+    operate(),
+    `discord-private serves the custom Discord module ${custom}: ${commands}.`,
   );
   assert.match((await interact("305", null, "command", "model")).content, /Agent default:/u);
+
+  // A rebuild that breaks is declared, refused when applied, and the
+  // example keeps serving.
+  await writeFile(custom, "\0asm broken");
+  assert.equal(
+    operate(),
+    [
+      `discord-private serves the custom Discord module ${custom}: ${commands}.`,
+      "Its file has changed since it was applied; `carillon discord settings apply` serves it as it is now.",
+    ].join("\n"),
+  );
+  const refused = attempt("settings", "apply");
+  assert.notEqual(refused.status, 0, "an apply served a broken module");
+  assert.match(refused.stderr, /not a usable Discord module.*nothing was applied/u);
+  assert.match((await interact("305", null, "command", "model")).content, /Agent default:/u);
+
+  // A working rebuild at the same path serves once applied.
+  await writeFile(custom, await readFile(discordModule));
+  assert.equal(
+    run("--home", installation, "discord", "settings", "apply"),
+    [
+      "discord-private now serves its settings file: module.",
+      `It serves the custom Discord module ${custom}: ${commands}.`,
+    ].join("\n"),
+  );
+  assert.equal(
+    operate(),
+    `discord-private serves the custom Discord module ${custom}: ${commands}.`,
+  );
+
+  assert.equal(
+    operate("disable"),
+    [
+      `${settingsFile} now declares the bundled Discord module.`,
+      "discord-private now serves its settings file: module.",
+      `It serves the bundled Discord module: ${commands}.`,
+    ].join("\n"),
+  );
+  assert.equal(operate(), `discord-private serves the bundled Discord module: ${commands}.`);
+  assert.match((await interact("305", null, "command", "model")).content, /Agent default:/u);
+  await rm(custom);
+  await writeFile(settingsFile, before);
+  run("--home", installation, "discord", "settings", "apply");
 }
 
 /**
@@ -1189,6 +1237,7 @@ async function testT3ActivityThroughDelivery() {
   );
   const fake = await startFakeT3();
   const original = await readFile(configPath(), "utf8");
+  let discordSettings;
   const settings = join(installation, "providers/runtime-t3.toml");
   const t3Token = join(installation, "credentials/t3.token");
   const token = crypto.randomUUID();
@@ -1229,6 +1278,9 @@ effort = "low"
     );
     await restart("core");
     await start("runtime-t3");
+    // The example module draws these cards: the bundled text, coloured.
+    discordSettings = await readFile(providerConfigPath());
+    run("--home", installation, "discord", "module", "enable", exampleModule);
     const known = new Set();
     /** The next run T3 opens for a message, by thread. */
     const opened = async () => {
@@ -1279,6 +1331,7 @@ effort = "low"
     assert.equal(report.agent?.effort, "low");
     assert.match(embedText(card), /^✓ Done · answered \S+ after the request\n/u);
     assert.match(embedText(card), /✓ bash `make check`/u);
+    assert.equal(card.color, 0x57_f2_87);
 
     // A run T3 reports failed before any call ends the turn with core's
     // notice; the card says only that it stopped.
@@ -1293,7 +1346,13 @@ effort = "low"
     assert.equal(failure.agent?.model, "claude-sonnet-5");
     assert.match(embedText(failed.card), /^⏹️ Stopped before finishing\./u);
     assert.doesNotMatch(embedText(failed.card), /bash/u);
+    assert.equal(failed.card.color, 0xed_42_45);
   } finally {
+    if (discordSettings !== undefined) {
+      run("--home", installation, "discord", "module", "disable");
+      await writeFile(providerConfigPath(), discordSettings);
+      run("--home", installation, "discord", "settings", "apply");
+    }
     await stop("runtime-t3");
     await writeFile(configPath(), original);
     await rm(settings, { force: true });
@@ -1597,22 +1656,27 @@ async function testConfigurationRefusals() {
     }
     const brokenModule = join(workspace, "broken.wasm");
     await writeFile(brokenModule, "\0asm broken");
-    assertStartupRefused("discord", /read release Discord module/u, [], {
+    assertStartupRefused("discord", /read the bundled Discord module/u, [], {
       module: join(workspace, "missing.wasm"),
     });
-    assertStartupRefused("discord", /release Discord module .* is unusable/u, [], {
+    assertStartupRefused("discord", /bundled Discord module .* is unusable/u, [], {
       module: brokenModule,
     });
-    // An unusable installed module refuses startup, naming the file to remove,
-    // even though the release's module is usable.
-    const installed = join(installation, "state/components/discord-private/module.wasm");
-    await mkdir(join(installed, ".."), { recursive: true });
-    await rename(brokenModule, installed);
-    assertStartupRefused(
-      "discord",
-      /installed Discord module .*module\.wasm is unusable; remove it/u,
-    );
-    await rm(installed);
+    // An enabled custom module that cannot serve refuses startup, naming it
+    // and how to serve the bundled module, which is usable.
+    try {
+      await writeFile(
+        providerConfigPath(),
+        `${discordSettings}\n[module]\nenabled = true\npath = "${brokenModule}"\n`,
+      );
+      assertStartupRefused(
+        "discord",
+        /custom Discord module .*broken\.wasm is unusable; fix it, or disable it/u,
+      );
+    } finally {
+      await writeFile(providerConfigPath(), discordSettings);
+    }
+    await rm(brokenModule);
     for (const id of ["runtime-pi", "discord-private"]) {
       // Matching hashes must not turn a provider credential into operator identity;
       // differing hashes must not leave an impossible-to-authenticate provider.

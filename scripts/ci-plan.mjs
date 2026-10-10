@@ -26,7 +26,8 @@ function lanesOf(path) {
   if (path === "LICENSE" || path.startsWith("licenses/")) return ["release"];
   // Other documentation reaches no build or test.
   if (path.endsWith(".md")) return [];
-  if (/^(crates\/|Cargo\.(toml|lock)$|deny\.toml$)/u.test(path)) {
+  // Rust, including the example module the release ships built.
+  if (/^(crates\/|examples\/|Cargo\.(toml|lock)$|deny\.toml$)/u.test(path)) {
     return /\.(json|mjs|ts)$/u.test(path) ? ["rust", "ts", "release"] : ["rust", "release"];
   }
   if (

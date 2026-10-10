@@ -149,8 +149,8 @@ carillon discord settings          # what the provider serves vs. the file
 carillon discord settings apply    # serve the file's live changes
 ```
 
-Users, routes, `typing`, `reactions` with their emoji, and
-`activity_markers` apply live. The guild, bot user, attachment limits and
+Users, routes, `typing`, `reactions` with their emoji, `activity_markers`
+and the [module](#discord-module) apply live. The guild, bot user, attachment limits and
 `activity` need a restart of the Discord provider. A message keeps the
 settings it was admitted with.
 
@@ -255,18 +255,34 @@ Use emote IDs that belong to your bot's application. After editing, run
 ### Discord module
 
 Slash commands, their controls and the cards come from a WebAssembly module.
-The release ships one; you can serve another without restarting Discord:
+The release bundles one, and an example that colours each card by its job's
+state. To try the example:
 
 ```sh
-carillon discord module                  # what serves now
-carillon discord module check FILE       # can this release serve FILE?
-carillon discord module install FILE     # serve FILE now and after restarts
-carillon discord module reset            # back to the release's module
+carillon discord module enable ~/.carillon/app/lib/examples/card-colours.wasm
+carillon discord module            # what serves, and what the settings declare
+carillon discord module disable    # back to the bundled module
 ```
 
-An installed module is kept outside `app/`, so it survives updates. An update
-refuses when the new release can't serve it; reset first, then install a
-module built for the new release.
+`enable` and `disable` change the `[module]` table of
+`providers/discord-private.toml` and apply the settings:
+
+```toml
+[module]
+enabled = true
+path = "/home/you/card-colours.wasm"   # a relative path starts at the installation
+```
+
+Applying the settings (`carillon discord settings apply`) rereads the file,
+so a module rebuilt at the same path serves after an apply. Discord gets the
+module's commands first. A module that can't serve, or whose commands
+Discord refuses, leaves the serving module and settings as they were.
+Commands already running finish on the module they started with.
+`carillon discord module check FILE` checks a module without serving it.
+
+An update refuses when the new release can't serve the enabled module:
+disable it, update, then enable one built for the new release. The example's
+source is in [examples/card-colours](../../examples/card-colours/README.md).
 
 ### Restarts and replay
 
@@ -349,7 +365,7 @@ carillon update carillon-VERSION-linux-x86_64.tar.gz
 
 Before stopping anything, update unpacks the archive inside the installation,
 checks it against its `MANIFEST` and has the new release check your registry,
-database, Discord settings and installed module. It then drains, stops,
+database, Discord settings and the custom module they enable. It then drains, stops,
 swaps the application directory atomically, and starts what was running. It
 keeps configuration, credentials, state, sessions and logs. A refusal changes
 nothing. If a later step fails, the message says what changed; rerun the

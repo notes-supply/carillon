@@ -1,0 +1,36 @@
+[package]
+name = "carillon-card-colours"
+description = "A custom Discord module: the bundled one, with work cards coloured by state"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Without `bundled`, the library exports nothing itself; this module does.
+carillon-discord-module = { path = "../../crates/carillon-discord-module", default-features = false }
+carillon-protocol = { path = "../../crates/carillon-protocol" }
+serde_json.workspace = true
+
+# The entry points `export!` defines need `#[unsafe(no_mangle)]`, which the
+# workspace's `forbid` cannot admit; the macro states why it expects them.
+[lints.rust]
+unsafe_code = "deny"
+warnings = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+future_incompatible = { level = "deny", priority = -1 }
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+allow_attributes = "deny"

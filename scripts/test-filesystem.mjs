@@ -504,16 +504,15 @@ async function testParticipation() {
 }
 
 /**
- * Installing a Discord module clears the registration record durably before
- * contacting Discord, then saves the module with a synced file and directory.
- * A failure at each boundary must be reported as what it is, and repeating the
- * install must finish the change.
+ * A module change clears the registration record durably before contacting
+ * Discord. A failed sync there must be reported as a change that did not
+ * happen, before any request, and repeating the change must register.
  */
 async function testModule() {
   const args = [
     providerTestBinary(),
     "--exact",
-    "module::tests::saving_reports_its_boundary_and_a_repeat_confirms_it",
+    "module::tests::clearing_the_record_reports_its_boundary_and_a_repeat_registers",
     "--nocapture",
     "--test-threads=1",
   ];
@@ -527,7 +526,7 @@ async function testModule() {
     timeout: 60_000,
   });
   assert.equal(baseline.status, 0, `${baseline.stdout}\n${baseline.stderr}`);
-  assert.match(baseline.stderr, /first change saved: durable; Discord requests 1/u);
+  assert.match(baseline.stderr, /first change Registered; Discord requests 1/u);
   const lines = (await readFile(trace, "utf8")).split("\n");
   const invalidation = lines.findIndex((line) =>
     /unlink(at)?\(.*\/state\/commands\.json"/u.test(line),
@@ -538,68 +537,42 @@ async function testModule() {
     (line, position) =>
       position > invalidation && line.includes(" fsync(") && line.includes(`<${state}>`),
   );
-  const publication = lines.findIndex(
-    (line) => line.includes(" rename(") && line.includes(`, "${state}/module.wasm")`),
-  );
-  const firstRegistration = lines.findIndex(
+  const registration = lines.findIndex(
     (line) => line.includes(" rename(") && line.includes(`, "${state}/commands.json")`),
   );
   assert.ok(
-    recordSync > invalidation && firstRegistration > recordSync && publication > firstRegistration,
-    "record clearing must be synced before registering, and the module saved after",
+    recordSync > invalidation && registration > recordSync,
+    "record clearing must be synced before registering",
   );
-  const temporary = /rename\("([^"]+)",/u.exec(lines[publication])[1];
-  const fileSync = lines.findLastIndex(
-    (line, position) =>
-      position < publication && line.includes(" fsync(") && line.includes(`<${temporary}>`),
+  const tid = lines[recordSync].trim().split(/\s+/u)[0];
+  const ordinal = lines
+    .slice(0, recordSync + 1)
+    .filter((line) => line.trim().startsWith(`${tid} `) && line.includes(" fsync(")).length;
+  const log = join(scratch, "module-record.trace");
+  const result = spawnSync(
+    "strace",
+    [...options, "-o", log, "-e", `inject=fsync:error=EIO:when=${ordinal}`, ...args],
+    { encoding: "utf8", timeout: 60_000 },
   );
-  const directorySync = lines.findIndex(
-    (line, position) =>
-      position > publication && line.includes(" fsync(") && line.includes(`<${state}>`),
-  );
-  assert.ok(
-    fileSync >= 0 && directorySync > publication,
-    "module save must sync file and directory",
-  );
-  for (const [boundary, position, expected] of [
-    ["record", recordSync, /first change refused: record .*; Discord requests 0/u],
-    ["file", fileSync, /first change saved: failed/u],
-    ["directory", directorySync, /first change saved: unsynced/u],
-  ]) {
-    const tid = lines[position].trim().split(/\s+/u)[0];
-    const ordinal = lines
-      .slice(0, position + 1)
-      .filter((line) => line.trim().startsWith(`${tid} `) && line.includes(" fsync(")).length;
-    const log = join(scratch, `module-${boundary}.trace`);
-    const result = spawnSync(
-      "strace",
-      [...options, "-o", log, "-e", `inject=fsync:error=EIO:when=${ordinal}`, ...args],
-      { encoding: "utf8", timeout: 60_000 },
-    );
-    assert.ifError(result.error);
-    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
-    assert.match(result.stdout, /1 passed; 0 failed/u);
-    assert.match(result.stderr, expected, `wrong report for the ${boundary} boundary`);
-    assert.match(result.stderr, /repeat saved: durable/u);
-    const injected = (await readFile(log, "utf8"))
-      .split("\n")
-      .filter((line) => line.includes("INJECTED"));
-    assert.equal(injected.length, 1, "only the intended test-thread syscall may fail");
-    // Each run has its own temporary installation, so compare within it.
-    assert.match(
-      injected[0],
-      boundary === "file" ? /\/state\/\.tmp[^/>]*>\)/u : /\/state>\)/u,
-      `wrong Discord module boundary: ${injected[0]}`,
-    );
-    console.log(`Discord module durability failure passed: ${boundary}`);
-  }
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stdout, /1 passed; 0 failed/u);
+  assert.match(result.stderr, /first change refused: record .*; Discord requests 0/u);
+  assert.match(result.stderr, /repeat: registered/u);
+  const injected = (await readFile(log, "utf8"))
+    .split("\n")
+    .filter((line) => line.includes("INJECTED"));
+  assert.equal(injected.length, 1, "only the intended test-thread syscall may fail");
+  // Each run has its own temporary installation, so compare within it.
+  assert.match(injected[0], /\/state>\)/u, `wrong Discord record boundary: ${injected[0]}`);
+  console.log("Discord module record durability failure passed");
 }
 
 /**
- * The first install creates the provider's state directory. A failed sync of
- * that directory or its parent must be reported as a save that did not
- * happen, and a repeat must sync both again before publishing: an existing
- * directory does not show that its entry is durable.
+ * The first registration creates the provider's state directory for its
+ * record. A failed sync of that directory or its parent must be reported as
+ * a change that did not happen, and a repeat must sync both again before
+ * recording: an existing directory does not show that its entry is durable.
  */
 async function testModuleDirectory() {
   const args = [
@@ -615,11 +588,11 @@ async function testModuleDirectory() {
     timeout: 60_000,
   });
   assert.equal(baseline.status, 0, `${baseline.stdout}\n${baseline.stderr}`);
-  assert.match(baseline.stderr, /first save: durable/u);
+  assert.match(baseline.stderr, /first change: Registered/u);
   // Each run has its own temporary installation, so paths are read per trace.
   const created = (lines) => {
     const index = lines.findIndex((line) => / mkdir\("[^"]+\/state", /u.test(line));
-    assert.ok(index >= 0, "the first save must create the state directory");
+    assert.ok(index >= 0, "the first registration must create the state directory");
     const state = /mkdir\("([^"]+)"/u.exec(lines[index])[1];
     return { index, state, parent: dirname(state) };
   };
@@ -644,8 +617,12 @@ async function testModuleDirectory() {
     assert.ifError(result.error);
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     assert.match(result.stdout, /1 passed; 0 failed/u);
-    assert.match(result.stderr, /first save: failed/u, `wrong report for the ${boundary} sync`);
-    assert.match(result.stderr, /repeat saved: durable/u);
+    assert.match(
+      result.stderr,
+      /first change: refused: record/u,
+      `wrong report for the ${boundary} sync`,
+    );
+    assert.match(result.stderr, /repeat: registered/u);
     const observed = (await readFile(log, "utf8")).split("\n");
     const failures = observed.filter((line) => line.includes("INJECTED"));
     assert.equal(failures.length, 1, "only the intended test-thread syscall may fail");
@@ -657,9 +634,9 @@ async function testModuleDirectory() {
     );
     const publication = observed.findIndex(
       (line, index) =>
-        index > injected && line.includes(" rename(") && line.includes('/module.wasm")'),
+        index > injected && line.includes(" rename(") && line.includes('/commands.json")'),
     );
-    assert.ok(publication > injected, "the repeat must publish the module");
+    assert.ok(publication > injected, "the repeat must record the registration");
     for (const path of ["state", "parent"]) {
       assert.ok(
         observed.some(
@@ -669,7 +646,7 @@ async function testModuleDirectory() {
             synced(line, directory[path]) &&
             line.endsWith("= 0"),
         ),
-        `the repeat must sync the ${path} directory again before publishing`,
+        `the repeat must sync the ${path} directory again before recording`,
       );
     }
     console.log(`Discord module directory failure passed: ${boundary}`);

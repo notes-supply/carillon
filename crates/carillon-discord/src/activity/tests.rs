@@ -2004,8 +2004,13 @@ async fn new_jobs_type_and_cards_draw_as_the_settings_serving_then_say() -> anyh
     let mut next = with_markers()?;
     next.typing = true;
     let changed = settings
-        .apply(|| Ok(next))
-        .map_err(|refusal| anyhow::anyhow!("{refusal:?}"))?;
+        .apply(
+            || Ok(next),
+            |_| std::future::ready(Ok(crate::module::tests::unchanged())),
+        )
+        .await
+        .map_err(|refusal| anyhow::anyhow!("{refusal:?}"))?
+        .changed;
     assert_eq!(changed, ["typing", "activity_markers"]);
     discord.record(vec![
         first,
@@ -2529,7 +2534,11 @@ async fn trapping_module(directory: &Path) -> anyhow::Result<Arc<Module>> {
         crate::module::tests::other_cards("(unreachable)", &[])?,
     )?;
     Ok(Arc::new(
-        Module::load(crate::module::tests::files(directory)).await?,
+        Module::load(
+            crate::module::tests::files(directory),
+            crate::module::Source::Bundled,
+        )
+        .await?,
     ))
 }
 

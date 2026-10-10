@@ -15,6 +15,7 @@ for artifact in \
   bin/carillon \
   bin/carillon-discord \
   lib/carillon_discord_module.wasm \
+  lib/examples/card-colours.wasm \
   lib/carillon-discord-pi.js \
   bin/carillon-runtime-pi \
   bin/carillon-runtime-t3 \

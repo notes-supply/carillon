@@ -51,18 +51,19 @@ case "${0##*/}" in
       exit 0
     fi
     printf '%s\n' "$*" >>"$TRACE.cargo"
-    target= profile=release
+    target= profile=release package=
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --target) target=$2; shift ;;
         --profile) profile=$2; shift ;;
+        -p) package=$2; shift ;;
       esac
       shift
     done
     if [ "$target" = wasm32-unknown-unknown ]; then
       [ "$profile" = wasm ]
       mkdir -p "target/$target/$profile"
-      printf 'wasm\n' >"target/$target/$profile/carillon_discord_module.wasm"
+      printf '%s\n' "$package" >"target/$target/$profile/$(printf '%s' "$package" | tr - _).wasm"
     else
       [ "$target" = "$TEST_TARGET" ]
       mkdir -p "target/$target/release"
@@ -110,7 +111,8 @@ for arch in x86_64 aarch64; do
     echo 'the release ships a second Pi executable' >&2
     exit 1
   fi
-  [ "$(tar -xOf "$archive" carillon-1.2.3/lib/carillon_discord_module.wasm)" = wasm ]
+  [ "$(tar -xOf "$archive" carillon-1.2.3/lib/carillon_discord_module.wasm)" = carillon-discord-module ]
+  [ "$(tar -xOf "$archive" carillon-1.2.3/lib/examples/card-colours.wasm)" = carillon-card-colours ]
   # Carillon's licence and every notice ship in licenses/, which installation keeps.
   tar -xOf "$archive" carillon-1.2.3/licenses/Apache-2.0.txt | cmp - "$ROOT/LICENSE"
   [ "$(tar -xOf "$archive" carillon-1.2.3/licenses/rust.txt)" = 'rust notices' ]
@@ -122,7 +124,8 @@ for arch in x86_64 aarch64; do
   # The manifest lists exactly the shipped files, marking what must be executable.
   tar -xOf "$archive" carillon-1.2.3/MANIFEST >"$TEST_ROOT/$arch.manifest"
   for line in 'x install.sh' 'x bin/carillon' 'x bin/carillon-discord' 'x bin/carillon-register-services' \
-    'r lib/carillon_discord_module.wasm' 'r lib/carillon-discord-pi.js' 'r lib/carillon-discord-SKILL.md' \
+    'r lib/carillon_discord_module.wasm' 'r lib/examples/card-colours.wasm' \
+    'r lib/carillon-discord-pi.js' 'r lib/carillon-discord-SKILL.md' \
     'r bin/photon_rs_bg.wasm' 'r systemd/example.service' 'r licenses/Apache-2.0.txt' \
     'r licenses/MIT.txt' 'r licenses/bun.md' 'r licenses/pi-coding-agent.txt' \
     'r licenses/rust.txt' 'r licenses/npm.txt'; do
@@ -130,7 +133,7 @@ for arch in x86_64 aarch64; do
   done
   [ "$(wc -l <"$TEST_ROOT/$arch.manifest")" -eq \
     "$(tar -tzvf "$archive" | grep -c '^-' | awk '{ print $1 - 1 }')" ]
-  [ "$(wc -l <"$TEST_ROOT/$arch.cargo")" -eq 2 ]
+  [ "$(wc -l <"$TEST_ROOT/$arch.cargo")" -eq 3 ]
   [ "$(wc -l <"$TEST_ROOT/$arch.bun")" -eq 3 ]
   # No compiled provider loads a bunfig.toml from where it is started.
   [ "$(grep -c -- '--compile ' "$TEST_ROOT/$arch.bun")" -eq 2 ]

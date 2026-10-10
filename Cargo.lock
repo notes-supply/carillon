@@ -254,6 +254,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
+name = "carillon-card-colours"
+version = "0.1.0-beta.1"
+dependencies = [
+ "carillon-discord-module",
+ "carillon-protocol",
+ "serde_json",
+]
+
+[[package]]
 name = "carillon-core"
 version = "0.1.0-beta.1"
 dependencies = [

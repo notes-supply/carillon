@@ -7,6 +7,7 @@ members = [
     "crates/carillon-protocol",
     "crates/carillon-installation",
     "crates/carillon-wasm",
+    "examples/card-colours",
 ]
 
 [workspace.package]

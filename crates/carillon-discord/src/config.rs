@@ -5,17 +5,19 @@
 use std::{
     collections::BTreeSet,
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     str::FromStr,
-    sync::{Arc, Mutex, PoisonError},
+    sync::Arc,
 };
 
 use anyhow::{Context as _, Result, bail};
 use carillon_installation::config::{LoadedConfig, ProviderRole, component_directory};
-use carillon_installation::filesystem::atomic_write;
+use carillon_installation::{filesystem::atomic_write, maintenance::MaintenanceLock};
 use serde::{Deserialize, Serialize};
-use tokio::sync::watch;
+use tokio::sync::{Mutex, watch};
 use unicode_general_category::{GeneralCategory, get_general_category};
+
+use crate::module::{Change, ChangeError, Source};
 
 /// The provider's settings file. It rejects fields it does not define, so a
 /// misspelt setting fails validation instead of being dropped.
@@ -49,6 +51,27 @@ pub struct DiscordConfig {
     pub failed_emoji: String,
     #[serde(default = "uncertain_emoji")]
     pub uncertain_emoji: String,
+    /// The Discord module to serve instead of the bundled one.
+    #[serde(default, skip_serializing_if = "ModuleSetting::is_unset")]
+    pub module: ModuleSetting,
+}
+
+/// A custom Discord module: served while `enabled`, from `path`, relative to
+/// the installation unless absolute. Without it the release's bundled module
+/// serves.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ModuleSetting {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+}
+
+impl ModuleSetting {
+    fn is_unset(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 const fn enabled() -> bool {
@@ -308,6 +331,22 @@ impl DiscordConfig {
             delivered_emoji: delivered_emoji(),
             failed_emoji: failed_emoji(),
             uncertain_emoji: uncertain_emoji(),
+            module: ModuleSetting::default(),
+        }
+    }
+
+    /// The module these settings serve, with a custom path resolved against
+    /// the installation `root`.
+    #[must_use]
+    pub fn module_source(&self, root: &Path) -> Source {
+        match &self.module {
+            ModuleSetting {
+                enabled: true,
+                path: Some(path),
+            } => Source::Custom {
+                path: root.join(path),
+            },
+            ModuleSetting { .. } => Source::Bundled,
         }
     }
 
@@ -375,6 +414,15 @@ impl DiscordConfig {
             DiscordEmoji::parse(emoji)?;
         }
         validate_activity_markers(&self.activity_markers)?;
+        if self.module.enabled
+            && self
+                .module
+                .path
+                .as_ref()
+                .is_none_or(|path| path.as_os_str().is_empty())
+        {
+            bail!("module.enabled needs module.path, the custom Discord module to serve");
+        }
         self.attachments
             .validate()
             .context("invalid Discord attachments settings")?;
@@ -416,6 +464,7 @@ impl Difference {
             delivered_emoji,
             failed_emoji,
             uncertain_emoji,
+            module,
         } = file;
         let mut difference = Self::default();
         for (changed, field, live) in [
@@ -453,6 +502,7 @@ impl Difference {
                 "uncertain_emoji",
                 true,
             ),
+            (*module != serving.module, "module", true),
         ] {
             if changed {
                 if live {
@@ -496,11 +546,23 @@ impl Settings {
     }
 
     /// What serves, and how the file `read` returns differs from it.
+    /// `module_differs` says whether the module the file declares is not the
+    /// one serving, which its bytes decide as well as its declaration.
     #[must_use]
-    pub fn status(&self, read: impl FnOnce() -> Result<DiscordConfig>) -> Status {
+    pub fn status(
+        &self,
+        read: impl FnOnce() -> Result<DiscordConfig>,
+        module_differs: impl FnOnce(&DiscordConfig) -> bool,
+    ) -> Status {
         let serving = self.current();
         let file = match read() {
-            Ok(file) => FileState::Read(Difference::between(&serving, &file)),
+            Ok(file) => {
+                let mut difference = Difference::between(&serving, &file);
+                if module_differs(&file) && !difference.live.iter().any(|field| field == "module") {
+                    difference.live.push("module".to_owned());
+                }
+                FileState::Read(difference)
+            }
             Err(error) => FileState::Invalid {
                 error: format!("{error:#}"),
             },
@@ -512,30 +574,42 @@ impl Settings {
     }
 
     /// Serves the file `read` returns in place of what serves, whole, when
-    /// everything that differs applies live. Returns the fields it changed.
+    /// everything that differs applies live: first the module it declares,
+    /// through `module`, then the rest. Returns the fields it changed and
+    /// what became of the module.
     ///
     /// # Errors
     ///
     /// Returns why what serves stays in place: the file did not read as
-    /// valid settings, or it changes what only a restart applies.
-    pub fn apply(
+    /// valid settings, it changes what only a restart applies, or its module
+    /// could not serve.
+    pub async fn apply<F>(
         &self,
         read: impl FnOnce() -> Result<DiscordConfig>,
-    ) -> Result<Vec<String>, Refusal> {
-        let _one = self
-            .0
-            .applying
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        module: impl FnOnce(&DiscordConfig) -> F,
+    ) -> Result<Applied, Refusal>
+    where
+        F: Future<Output = Result<Change, ChangeError>>,
+    {
+        let _one = self.0.applying.lock().await;
         let file = read().map_err(Refusal::Invalid)?;
-        let difference = Difference::between(&self.current(), &file);
+        let mut difference = Difference::between(&self.current(), &file);
         if !difference.restart.is_empty() {
             return Err(Refusal::Restart(difference));
+        }
+        let module = module(&file).await.map_err(Refusal::Module)?;
+        if module.serving != module.previous
+            && !difference.live.iter().any(|field| field == "module")
+        {
+            difference.live.push("module".to_owned());
         }
         if !difference.live.is_empty() {
             self.0.current.send_replace(Arc::new(file));
         }
-        Ok(difference.live)
+        Ok(Applied {
+            changed: difference.live,
+            module,
+        })
     }
 }
 
@@ -556,19 +630,23 @@ pub enum FileState {
     Invalid { error: String },
 }
 
-/// The fields an apply changed; none when the file already served.
+/// The fields an apply changed, none when the file already served, and the
+/// module serving after it.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Applied {
     pub changed: Vec<String>,
+    pub module: Change,
 }
 
-/// Why an apply left the serving settings in place.
+/// Why an apply left the serving settings and module in place.
 #[derive(Debug)]
 pub enum Refusal {
     /// The file is not valid settings for this provider.
     Invalid(anyhow::Error),
     /// The file changes fields only a restart applies.
     Restart(Difference),
+    /// The module the file declares could not serve.
+    Module(ChangeError),
 }
 
 /// Replaces the admission settings of an existing file, or creates the file,
@@ -600,8 +678,23 @@ pub(crate) fn configure(
     discord.write(config, provider_id)
 }
 
-/// The instance's private state: participation, the installed command
-/// module, the command registration record and attachment staging.
+/// Changes the module an existing settings file declares, keeping the rest,
+/// under the installation's maintenance lock: while another maintenance
+/// operation holds it, the file is left as it is.
+pub(crate) fn declare_module(
+    config: &LoadedConfig,
+    provider_id: &str,
+    change: impl FnOnce(&mut ModuleSetting),
+) -> Result<()> {
+    let _maintenance =
+        MaintenanceLock::acquire(&config.root).context("the settings file was not changed")?;
+    let mut discord = DiscordConfig::read(config, provider_id)?;
+    change(&mut discord.module);
+    discord.write(config, provider_id)
+}
+
+/// The instance's private state: participation, the command registration
+/// record and attachment staging.
 pub(crate) fn state_directory(config: &LoadedConfig, provider_id: &str) -> PathBuf {
     component_directory(&config.value.data_dir, provider_id)
 }
@@ -973,6 +1066,48 @@ stopped = "■"
             .is_err()
         );
         assert!(!config.provider_config_path("unregistered")?.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn a_custom_module_needs_its_path_and_starts_at_the_installation() -> anyhow::Result<()> {
+        use crate::module::Source;
+
+        let directory = tempfile::tempdir()?;
+        let config = installation(directory.path(), "discord-private", 45_320)?;
+        let mut discord = DiscordConfig::load(&config, "discord-private")?;
+        assert_eq!(discord.module_source(&config.root), Source::Bundled);
+        // A path alone, or a disabled module, keeps the bundled one.
+        discord.module.path = Some("modules/custom.wasm".into());
+        assert_eq!(discord.module_source(&config.root), Source::Bundled);
+        discord.module.enabled = true;
+        assert_eq!(
+            discord.module_source(&config.root),
+            Source::Custom {
+                path: config.root.join("modules/custom.wasm")
+            }
+        );
+        discord.module.path = Some("/elsewhere/custom.wasm".into());
+        assert_eq!(
+            discord.module_source(&config.root),
+            Source::Custom {
+                path: "/elsewhere/custom.wasm".into()
+            }
+        );
+        discord.write(&config, "discord-private")?;
+        assert_eq!(
+            DiscordConfig::load(&config, "discord-private")?.module,
+            discord.module
+        );
+        for path in [None, Some(std::path::PathBuf::new())] {
+            discord.module.path = path;
+            let refused = discord
+                .write(&config, "discord-private")
+                .err()
+                .context("enabled a module without a path")?;
+            assert!(refused.to_string().contains("module.path"), "{refused}");
+        }
+        assert!(toml::from_str::<super::ModuleSetting>("enable = true").is_err());
         Ok(())
     }
 

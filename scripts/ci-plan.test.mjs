@@ -18,6 +18,8 @@ it("runs nothing for documentation alone", () => {
 it("selects each language with the release it ships in", () => {
   expect(lanes(["crates/carillon-core/src/db.rs"])).toEqual(["release", "rust"]);
   expect(lanes(["Cargo.lock"])).toEqual(["release", "rust"]);
+  // The release ships the example module built.
+  expect(lanes(["examples/card-colours/src/lib.rs"])).toEqual(["release", "rust"]);
   expect(lanes(["packages/runtime-t3/src/runtime.ts"])).toEqual(["release", "ts"]);
   expect(lanes(["pnpm-lock.yaml"])).toEqual(["release", "ts"]);
   expect(lanes(["scripts/package-release.sh"])).toEqual(["release"]);
