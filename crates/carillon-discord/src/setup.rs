@@ -523,14 +523,16 @@ async fn people(
     .filter(|user| !user.bot && user.id != bot.id)
     .collect();
     prompt.say("Only the people named here can talk to the agent.")?;
-    let labels: Vec<String> = owners
+    let named: Vec<(Id<UserMarker>, String)> = owners
         .iter()
         .map(|owner| {
-            format!(
-                "{} (owns the bot's application)",
-                owner.global_name.as_deref().unwrap_or(&owner.name)
-            )
+            let name = owner.global_name.as_deref().unwrap_or(&owner.name);
+            (owner.id, name.to_owned())
         })
+        .collect();
+    let labels: Vec<String> = distinct(&named)
+        .into_iter()
+        .map(|name| format!("{name} (owns the bot's application)"))
         .collect();
     // Every retry asks again from the last answers, so any of them can be
     // corrected, an owner who is not in the server included.

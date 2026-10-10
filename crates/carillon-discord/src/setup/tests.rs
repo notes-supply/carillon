@@ -31,13 +31,16 @@ const TOKEN: &str = "good-token";
 /// member, it has no role. Its role is then `400`, which may use threads and
 /// sees #agent, or with `admin` only the administrator role `401`. It is in
 /// `servers` more servers after its usual three, listed a page at a time;
-/// `pages` records each listing's `after` and `limit`.
+/// `pages` records each listing's `after` and `limit`. With `team`, a team
+/// owns the application: two accepted members shown as Sam (`200`, `210`),
+/// Kim (`230`), and Pat (`220`), who is only invited.
 #[derive(Default)]
 struct Discord {
     intent: AtomicUsize,
     invited: AtomicUsize,
     unroled: AtomicUsize,
     admin: bool,
+    team: bool,
     servers: u64,
     pages: Mutex<Vec<(Option<String>, Option<String>)>>,
 }
@@ -100,11 +103,24 @@ async fn discord(state: Arc<Discord>) -> anyhow::Result<std::net::SocketAddr> {
                         return refused();
                     }
                     let flags = if shown(&state.intent) { 1 << 19 } else { 0 };
+                    let member = |id: &str, name: &str, membership: u8| {
+                        let mut person = user(id, &format!("{name}-{id}"), false);
+                        person["global_name"] = json!(name);
+                        json!({"membership_state": membership, "permissions": ["*"],
+                               "team_id": "600", "user": person})
+                    };
+                    let team = if state.team {
+                        json!({"icon": null, "id": "600", "name": "Team", "owner_user_id": "200",
+                               "members": [member("200", "Sam", 2), member("210", "Sam", 2),
+                                           member("230", "Kim", 2), member("220", "Pat", 1)]})
+                    } else {
+                        Value::Null
+                    };
                     Json(json!({
                         "id": "500", "name": "Carillon", "icon": null, "description": "",
                         "bot_public": false, "bot_require_code_grant": false,
                         "verify_key": "key", "flags": flags,
-                        "owner": user("200", "owner", false), "team": null,
+                        "owner": user("200", "owner", false), "team": team,
                     }))
                     .into_response()
                 }
@@ -351,6 +367,7 @@ fn member(
     }
     let (name, bot) = match (guild.as_str(), member.as_str()) {
         ("100", "200") => ("owner", false),
+        ("100", "210") => ("Sam-210", false),
         (_, "250") => ("friend", false),
         (_, "260") => ("other-bot", true),
         _ => {
@@ -925,6 +942,34 @@ async fn bot_accounts_are_not_admitted_and_people_are_asked_for_again() -> anyho
     assert_eq!(
         DiscordConfig::load(&config, "discord-private")?.allowed_user_ids,
         ["250"]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn owners_sharing_a_name_are_told_apart_and_the_one_chosen_is_admitted() -> anyhow::Result<()>
+{
+    let directory = tempfile::tempdir()?;
+    let config = fresh(directory.path())?;
+    let address = discord(Arc::new(Discord {
+        team: true,
+        ..Discord::default()
+    }))
+    .await?;
+    // Only the second Sam, and nobody else.
+    let (result, shown) = run(&config, address, &[TOKEN, "", "", "", "2", ""]).await;
+    result?;
+    assert!(
+        shown.contains(
+            "Sam (200) (owns the bot's application)\nSam (210) (owns the bot's application)\n\
+             Kim (owns the bot's application)\n"
+        ),
+        "{shown}"
+    );
+    assert!(!shown.contains("Pat"), "{shown}");
+    assert_eq!(
+        DiscordConfig::load(&config, "discord-private")?.allowed_user_ids,
+        ["210"]
     );
     Ok(())
 }
