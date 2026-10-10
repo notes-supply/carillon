@@ -81,6 +81,11 @@ stop() {
 case "$*" in
   '--user show --property=ActiveState --value carillon.target')
     if running; then echo active; else echo inactive; fi ;;
+  # Whether the target or any of its services runs, as setup asks; with
+  # FAKE_MEMBER, a service in that state follows the target's.
+  '--user show --property=ActiveState --value carillon.target carillon-core.service carillon-discord.service carillon-runtime-pi.service carillon-runtime-t3.service')
+    if running; then echo active; else echo inactive; fi
+    [ -z "${FAKE_MEMBER:-}" ] || printf '\n%s\n' "$FAKE_MEMBER" ;;
   # The services that are part of the target, which a stop names so that it
   # returns once they, not only the target, have stopped.
   '--user show --property=ConsistsOf --value carillon.target')
@@ -248,6 +253,38 @@ grep -F 'another Carillon maintenance operation is running' "$TEST_ROOT/locked.l
 [ ! -e "$TRACE" ]
 running
 printf 'operations passed: entry point, resolution, start/drained restart, logs, provider commands, Discord module, lock\n'
+
+# Setup over this installation while it runs would leave its services running
+# the replaced release, so it is refused before it asks or writes anything:
+# with options or guided, with registration's reload skipped, and while only
+# one of its services runs.
+ACTIVE='--user show --property=ActiveState --value carillon.target carillon-core.service carillon-discord.service carillon-runtime-pi.service carillon-runtime-t3.service'
+app_inode=$(stat -c %i "$INSTALLATION/app")
+snapshot
+for setup in options guided skip-reload member; do
+  case "$setup" in
+    options) refuse "running-setup-$setup" install_release "$BASE_PORT" ;;
+    guided) refuse "running-setup-$setup" "$RELEASE/install.sh" ;;
+    skip-reload)
+      refuse "running-setup-$setup" install_release "$BASE_PORT" CARILLON_SKIP_SYSTEMD_RELOAD=1 ;;
+    member)
+      carillon stop >/dev/null
+      rm -f "$TRACE"
+      refuse "running-setup-$setup" install_release "$BASE_PORT" FAKE_MEMBER=activating ;;
+  esac
+  grep -F "Carillon at $INSTALLATION is running" "$TEST_ROOT/running-setup-$setup.log" >/dev/null
+  grep -F "Update it with 'carillon update /path/to/carillon-VERSION-linux-x86_64.tar.gz'" \
+    "$TEST_ROOT/running-setup-$setup.log" >/dev/null
+  expect_trace "$ACTIVE"
+  [ "$(stat -c %i "$INSTALLATION/app")" = "$app_inode" ]
+  [ "$setup" = member ] || running
+  assert_preserved
+done
+stopped
+carillon start >/dev/null
+rm -f "$TRACE"
+running
+printf 'running setup refused: with options, guided, reload skipped, and only a service running\n'
 
 # An independently installed provider survives application replacement.
 cat >"$HOME/.local/bin/carillon-review" <<'PROVIDER'

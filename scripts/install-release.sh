@@ -138,6 +138,33 @@ verify_payload() {
 }
 verify_payload
 
+# Setup replaces the application under services that would keep running the
+# release they started from, so it refuses while this installation's target
+# or any of its services runs; `carillon update` drains and restarts them.
+# The service manager is asked whenever the units name this installation,
+# even when registration will skip its reload: skipping a reload stops
+# nothing that runs. Units in another installation's name run nothing of
+# this one.
+UNIT_DIR=${XDG_CONFIG_HOME:-"$HOME/.config"}/systemd/user
+unit_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/%/%%/g'
+}
+if [ "$MODE" = setup ] && [ -f "$UNIT_DIR/carillon-core.service" ] &&
+  grep -Fqx "Environment=\"CARILLON_HOME=$(unit_escape "$CARILLON_HOME")\"" \
+    "$UNIT_DIR/carillon-core.service"
+then
+  states=$(systemctl --user show --property=ActiveState --value carillon.target \
+    carillon-core.service carillon-discord.service carillon-runtime-pi.service \
+    carillon-runtime-t3.service) || {
+    echo "cannot tell whether Carillon at $CARILLON_HOME is running; nothing was changed" >&2
+    exit 1
+  }
+  if printf '%s\n' "$states" | grep -qvx -e inactive -e failed -e ''; then
+    echo "Carillon at $CARILLON_HOME is running, so setup would replace its application under it; nothing was changed. Update it with 'carillon update /path/to/carillon-VERSION-linux-x86_64.tar.gz', which drains and restarts it, or stop it with 'carillon stop' and run setup again." >&2
+    exit 1
+  fi
+fi
+
 if [ "$CHECK" -eq 1 ]; then
   # Application replacement needs an atomic directory exchange here.
   probe=$(mktemp -d "$CARILLON_HOME/.update-probe.XXXXXX")

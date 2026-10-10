@@ -138,14 +138,16 @@ grep -F 'requested release version 9.8.7 differs from the Carillon crate version
 [ ! -e "$VERSION_FIXTURE/target" ] && [ ! -e "$VERSION_FIXTURE/release.tar.gz" ]
 [ "$("$RELEASE/bin/carillon" --version)" = "carillon $VERSION" ]
 
+# install_release HOME WORKSPACE ROOT CONFIG_HOME PORT [VARIABLE=VALUE ...]
 install_release() {
   install_home=$1
   install_workspace=$2
   install_root=$3
   install_config_home=$4
   install_port=$5
+  shift 5
   env HOME="$install_home" XDG_CONFIG_HOME="$install_config_home" \
-    CARILLON_HOME="$install_root" CARILLON_SKIP_SYSTEMD_RELOAD=1 \
+    CARILLON_HOME="$install_root" CARILLON_SKIP_SYSTEMD_RELOAD=1 "$@" \
     "$RELEASE/install.sh" \
     --guild-id 100 --bot-user-id 201 --user-id 200 --route 300:always:channel \
     --workspace "$install_workspace" --base-port "$install_port"
@@ -215,6 +217,11 @@ mkdir "$REGISTER_COMMANDS"
 cat >"$REGISTER_COMMANDS/systemctl" <<'SYSTEMCTL'
 #!/bin/sh
 set -eu
+# Units registered here are never started, as setup over them is told; only
+# changes are traced.
+case "$*" in
+  '--user show --property=ActiveState --value '*) printf '%s\n' inactive; exit 0 ;;
+esac
 printf '%s\n' "$*" >>"$REGISTER_TRACE"
 SYSTEMCTL
 chmod 0755 "$REGISTER_COMMANDS/systemctl"
@@ -249,8 +256,9 @@ if "$ORDINARY_ROOT/app/bin/carillon" review serve >/dev/null 2>&1; then
   echo "forwarded to a provider that is not installed" >&2
   exit 1
 fi
+# Setup again over the stopped installation asks its service manager first.
 install_release "$ORDINARY_HOME" "$ORDINARY_WORKSPACE" "$ORDINARY_ROOT" \
-  "$ORDINARY_CONFIG_HOME" "$((BASE_PORT + 10))" >/dev/null
+  "$ORDINARY_CONFIG_HOME" "$((BASE_PORT + 10))" PATH="$REGISTER_COMMANDS:$PATH" >/dev/null
 [ ! -e "$ORDINARY_ROOT/app/upgrade-sentinel" ]
 [ "$(forward_review)" = "review-provider serve --flag" ]
 [ "$(sha256sum "$ORDINARY_ROOT/credentials/runtime-pi.token" | cut -d' ' -f1)" = "$ORDINARY_TOKEN_HASH" ]

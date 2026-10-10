@@ -50,10 +50,12 @@ Without Discord options, the installer asks at the terminal:
 4. Carillon starts.
 
 Ctrl+C or Esc cancels; run the installer again to finish, and it offers to
-keep what's already set up. On an installed release, `carillon setup` asks
-the same questions, and `carillon discord setup` asks only Discord's. A
-rerun that changes the T3 settings or the bot token takes effect in a
-running Carillon at `carillon restart`.
+keep what's already set up (the Discord bot once Discord confirms its saved
+token). The installer refuses while Carillon runs: stop it with `carillon
+stop` first, or update it with `carillon update ARCHIVE`. On an installed
+release, `carillon setup` asks the same questions, and `carillon discord
+setup` asks only Discord's. A rerun that changes the T3 settings or the bot
+token takes effect in a running Carillon at `carillon restart`.
 
 The installer creates `~/.carillon` (or `CARILLON_HOME`), registers the user
 services (`carillon.target` with core, Discord and both runtimes; the
