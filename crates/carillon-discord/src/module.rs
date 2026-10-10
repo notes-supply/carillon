@@ -14,7 +14,7 @@
 
 use std::{
     fmt, fs,
-    io::Read as _,
+    io::{self, Read as _},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
@@ -425,16 +425,29 @@ impl ModuleFiles {
 }
 
 /// A module file's bytes, read only one byte past the size [`prepare`]
-/// refuses.
+/// refuses. Only a regular file, or a link to one, is opened, since a FIFO
+/// or device could block or never end; the opened file is checked again.
 ///
 /// # Errors
 ///
-/// Returns an error when the file cannot be read.
-pub fn read_module(path: &Path) -> std::io::Result<Vec<u8>> {
+/// Returns an error when the path is not a regular file or the file cannot
+/// be read.
+pub fn read_module(path: &Path) -> io::Result<Vec<u8>> {
+    let regular = |metadata: fs::Metadata| {
+        if metadata.is_file() {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "not a regular file",
+            ))
+        }
+    };
+    regular(fs::metadata(path)?)?;
+    let file = fs::File::open(path)?;
+    regular(file.metadata()?)?;
     let mut bytes = Vec::new();
-    fs::File::open(path)?
-        .take(MODULE_LIMIT as u64 + 1)
-        .read_to_end(&mut bytes)?;
+    file.take(MODULE_LIMIT as u64 + 1).read_to_end(&mut bytes)?;
     Ok(bytes)
 }
 
@@ -1059,6 +1072,49 @@ pub(crate) mod tests {
     /// `text` as the contents of a WAT string.
     fn escape(text: &str) -> String {
         text.replace('\\', "\\\\").replace('"', "\\\"")
+    }
+
+    /// A module is read from a regular file or a link to one. A directory,
+    /// a device or a FIFO is refused without waiting on it.
+    #[test]
+    fn only_a_regular_module_file_is_read() -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let file = directory.path().join("module.wasm");
+        std::fs::write(&file, b"module")?;
+        let link = directory.path().join("link.wasm");
+        std::os::unix::fs::symlink(&file, &link)?;
+        assert_eq!(super::read_module(&file)?, b"module");
+        assert_eq!(super::read_module(&link)?, b"module");
+        let fifo = directory.path().join("fifo.wasm");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()?
+                .success()
+        );
+        for path in [
+            fifo,
+            directory.path().to_owned(),
+            PathBuf::from("/dev/null"),
+        ] {
+            // Bounded from outside: a read that waited would fail the test,
+            // not hold up the gate.
+            let (sent, received) = std::sync::mpsc::channel();
+            let read = path.clone();
+            std::thread::spawn(move || {
+                sent.send(super::read_module(&read).map_err(|error| error.kind()))
+            });
+            let outcome = received
+                .recv_timeout(Duration::from_secs(5))
+                .with_context(|| format!("reading {} did not return", path.display()))?;
+            assert_eq!(
+                outcome,
+                Err(std::io::ErrorKind::InvalidInput),
+                "{}",
+                path.display()
+            );
+        }
+        Ok(())
     }
 
     /// A module that answers `Describe` with `description`, a card with an
