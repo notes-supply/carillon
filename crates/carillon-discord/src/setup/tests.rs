@@ -180,11 +180,16 @@ async fn discord(state: Arc<Discord>) -> anyhow::Result<std::net::SocketAddr> {
     Ok(address)
 }
 
+/// A change someone else makes while the questions are open.
+type Meanwhile = Box<dyn FnOnce() -> anyhow::Result<()>>;
+
 /// Answers given in order, as a person would give them; when none is left,
-/// the question goes unanswered and setup ends.
+/// the question goes unanswered and setup ends. `meanwhile` is done once,
+/// when the question it names is asked.
 struct Scripted {
     answers: VecDeque<&'static str>,
     shown: String,
+    meanwhile: Option<(&'static str, Meanwhile)>,
 }
 
 impl Scripted {
@@ -192,10 +197,19 @@ impl Scripted {
         Self {
             answers: answers.iter().copied().collect(),
             shown: String::new(),
+            meanwhile: None,
         }
     }
 
     fn next(&mut self, question: &str) -> anyhow::Result<&'static str> {
+        if self
+            .meanwhile
+            .as_ref()
+            .is_some_and(|(at, _)| question.starts_with(at))
+            && let Some((_, change)) = self.meanwhile.take()
+        {
+            change()?;
+        }
         self.shown.push_str(question);
         self.shown.push('\n');
         self.answers
@@ -411,7 +425,15 @@ async fn run(
     address: std::net::SocketAddr,
     answers: &[&'static str],
 ) -> (anyhow::Result<()>, String) {
-    let mut questions = Scripted::new(answers);
+    run_with(Scripted::new(answers), config, address).await
+}
+
+/// Runs setup asking `questions`, returning what it showed.
+async fn run_with(
+    mut questions: Scripted,
+    config: &LoadedConfig,
+    address: std::net::SocketAddr,
+) -> (anyhow::Result<()>, String) {
     let result = super::setup(&mut questions, config, "discord-private", |token| {
         twilight_http::Client::builder()
             .token(token)
@@ -1059,5 +1081,72 @@ async fn saved_settings_are_offered_for_keeping_only_while_their_bot_signs_in() 
     );
     assert!(shown.is_empty(), "{shown}");
     assert_eq!(saved_files(&config)?, before);
+    Ok(())
+}
+
+#[tokio::test]
+async fn publication_follows_the_registry_as_it_is_when_the_questions_end() -> anyhow::Result<()> {
+    use carillon_installation::config::Config;
+
+    let address = discord(Arc::new(Discord::default())).await?;
+    // Setting an installation [`by_hand`] up again while `carillon.toml` is
+    // changed, as another operator would, before the last question.
+    let edited = |change: fn(&mut Config)| async move {
+        let directory = tempfile::tempdir()?;
+        let config = by_hand(directory.path())?;
+        let before = saved_files(&config)?;
+        let path = config.path.clone();
+        let mut questions = Scripted::new(REPLACE);
+        questions.meanwhile = Some((
+            "Anyone else",
+            Box::new(move || {
+                let mut registry = LoadedConfig::load(&path)?.value;
+                change(&mut registry);
+                std::fs::write(&path, toml::to_string(&registry)?)?;
+                Ok(())
+            }),
+        ));
+        let (result, _) = run_with(questions, &config, address).await;
+        anyhow::Ok((directory, config, before, result))
+    };
+
+    // An interface disabled or removed meanwhile is refused, with nothing
+    // written.
+    let disable: fn(&mut Config) = |registry| {
+        for provider in &mut registry.providers {
+            if provider.id == "discord-private" {
+                provider.enabled = false;
+            }
+        }
+    };
+    let remove: fn(&mut Config) = |registry| {
+        registry
+            .providers
+            .retain(|provider| provider.id != "discord-private");
+    };
+    for (change, reason) in [
+        (disable, "discord-private is disabled in carillon.toml"),
+        (remove, "discord-private"),
+    ] {
+        let (_directory, config, before, result) = edited(change).await?;
+        let refusal = format!("{:#}", result.err().context("setup ignored the registry")?);
+        assert!(
+            refusal
+                .starts_with("the Discord settings and the bot token they name were not changed: ")
+                && refusal.contains(reason),
+            "{refusal}"
+        );
+        assert_eq!(saved_files(&config)?, before);
+    }
+
+    // Another agent meanwhile is the one the saved settings select, so the
+    // registry as it is accepts them.
+    let (_directory, config, _, result) = edited(|registry| {
+        "other".clone_into(&mut registry.agent.id);
+    })
+    .await?;
+    result?;
+    let settings = DiscordConfig::load(&config.reload()?, "discord-private")?;
+    assert_eq!(settings.agent, "other");
     Ok(())
 }

@@ -125,12 +125,7 @@ pub(crate) async fn setup(
     provider: &str,
     connect: impl Fn(String) -> DiscordHttp,
 ) -> Result<()> {
-    if !loaded.provider(provider, ProviderRole::Interface)?.enabled {
-        bail!(
-            "{provider} is disabled in carillon.toml; enable it with `carillon provider \
-             {provider} enable`, then run setup again"
-        );
-    }
+    enabled(loaded, provider)?;
     let existing = if loaded.provider_config_path(provider)?.exists() {
         Some(DiscordConfig::read(loaded, provider)?)
     } else {
@@ -178,10 +173,13 @@ pub(crate) async fn setup(
         })
         .collect();
     let users: Vec<String> = people.iter().map(|(id, _)| id.clone()).collect();
-    // Only the writes hold the maintenance lock, never the questions; the
-    // settings file is reread under it, keeping what was tuned meanwhile.
+    // Only the writes hold the maintenance lock, never the questions. The
+    // registry and the settings file are read again under it, so what is
+    // written follows what changed meanwhile, or is refused.
     let unchanged = "the Discord settings and the bot token they name were not changed";
     let maintenance = MaintenanceLock::acquire_unless_held(&loaded.root).context(unchanged)?;
+    let loaded = &loaded.reload().context(unchanged)?;
+    enabled(loaded, provider).context(unchanged)?;
     let mut settings = admitted(
         loaded,
         provider,
@@ -226,6 +224,18 @@ pub(crate) async fn setup(
             .join(", "),
         MODES[mode].0.to_lowercase()
     ))?;
+    Ok(())
+}
+
+/// Refuses an interface provider the registry does not have, or has
+/// disabled.
+fn enabled(loaded: &LoadedConfig, provider: &str) -> Result<()> {
+    if !loaded.provider(provider, ProviderRole::Interface)?.enabled {
+        bail!(
+            "{provider} is disabled in carillon.toml; enable it with `carillon provider \
+             {provider} enable`, then run setup again"
+        );
+    }
     Ok(())
 }
 
