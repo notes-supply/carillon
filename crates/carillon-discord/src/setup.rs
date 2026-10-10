@@ -142,10 +142,11 @@ pub(crate) async fn setup(
     ))
     .ok()
     .filter(|token| !token.is_empty());
-    if saved.is_some()
-        && existing
-            .as_ref()
-            .is_some_and(|settings| settings.validate(loaded, provider).is_ok())
+    let keepable = existing
+        .as_ref()
+        .filter(|settings| settings.validate(loaded, provider).is_ok());
+    if let (Some(token), Some(settings)) = (&saved, keepable)
+        && signs_in_as_saved(prompt, &connect, token, settings).await?
         && prompt.confirm("Keep the saved Discord bot and settings?", true)?
     {
         return Ok(());
@@ -263,6 +264,41 @@ async fn sign_in(
                 return Err(anyhow::Error::from(failure).context("ask Discord who the bot is"));
             }
         }
+    }
+}
+
+/// Whether the saved token still signs in as the bot the saved settings
+/// name, as the provider's startup requires. A token Discord refuses, or
+/// another bot's, is said and cannot be kept; Discord not answering is an
+/// error, with nothing changed.
+async fn signs_in_as_saved(
+    prompt: &mut impl Questions,
+    connect: &impl Fn(String) -> DiscordHttp,
+    token: &str,
+    settings: &DiscordConfig,
+) -> Result<bool> {
+    match connect(token.to_owned()).current_user().await {
+        Ok(response) => {
+            let bot = response.model().await.context("read the bot's user")?;
+            if bot.id.to_string() == settings.bot_user_id {
+                return Ok(true);
+            }
+            prompt.say(&format!(
+                "The saved bot token signs in as {} ({}), not the bot the saved settings name \
+                 ({}), so they cannot be kept.",
+                bot.name, bot.id, settings.bot_user_id
+            ))?;
+            Ok(false)
+        }
+        Err(failure) if refused(&failure) => {
+            prompt.say(
+                "Discord refuses the saved bot token, so the saved settings cannot be kept.",
+            )?;
+            Ok(false)
+        }
+        Err(failure) => Err(anyhow::Error::from(failure).context(
+            "Discord did not say whether the saved bot token still works; nothing was changed",
+        )),
     }
 }
 

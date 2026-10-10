@@ -401,9 +401,9 @@ fn by_hand(root: &Path) -> anyhow::Result<LoadedConfig> {
     Ok(config)
 }
 
-/// Setting an installation [`by_hand`] up again with `TOKEN`: declining to
-/// keep it, the refused saved token, then every default.
-const REPLACE: &[&str] = &["n", "", TOKEN, "", "", "", "", ""];
+/// Setting an installation [`by_hand`] up again with `TOKEN`: the refused
+/// saved token, which is not offered for keeping, then every default.
+const REPLACE: &[&str] = &["", TOKEN, "", "", "", "", ""];
 
 /// Runs setup with `answers`, returning what it showed.
 async fn run(
@@ -434,6 +434,22 @@ fn bot_tokens(config: &LoadedConfig) -> anyhow::Result<Vec<String>> {
     }
     names.sort();
     Ok(names)
+}
+
+/// The settings file and every bot token file, by name, as they are.
+fn saved_files(
+    config: &LoadedConfig,
+) -> anyhow::Result<std::collections::BTreeMap<String, Vec<u8>>> {
+    let mut files = std::collections::BTreeMap::new();
+    files.insert(
+        "settings".to_owned(),
+        std::fs::read(config.provider_config_path("discord-private")?)?,
+    );
+    for name in bot_tokens(config)? {
+        let bytes = std::fs::read(config.root.join("credentials").join(&name))?;
+        files.insert(name, bytes);
+    }
+    Ok(files)
 }
 
 /// The bot token in the file the saved settings name.
@@ -503,9 +519,9 @@ async fn refused_tokens_and_unknown_people_are_asked_again_and_only_named_people
         !std::fs::read_to_string(config.provider_config_path("discord-private")?)?.contains(TOKEN)
     );
 
-    // Saved settings are kept when asked, and nothing is asked of Discord.
+    // Saved settings whose token Discord still accepts are kept when asked.
     let before = std::fs::read(config.provider_config_path("discord-private")?)?;
-    let (result, _) = run(&config, "127.0.0.1:1".parse()?, &[""]).await;
+    let (result, _) = run(&config, address, &[""]).await;
     result?;
     assert_eq!(
         std::fs::read(config.provider_config_path("discord-private")?)?,
@@ -787,8 +803,7 @@ async fn a_failed_setup_leaves_settings_that_name_a_token_written_before_them() 
     let mode = |path: &Path, mode: u32| fs::set_permissions(path, fs::Permissions::from_mode(mode));
 
     // Settings that would not be valid, here a tuned emoji kept from the
-    // file, are refused before any token is written. Without valid settings
-    // to keep, nothing asks to keep them.
+    // file, are refused before any token is written.
     let directory = tempfile::tempdir()?;
     let config = by_hand(directory.path())?;
     let file = config.provider_config_path("discord-private")?;
@@ -798,7 +813,7 @@ async fn a_failed_setup_leaves_settings_that_name_a_token_written_before_them() 
             .replace("processing_emoji = \"👀\"", "processing_emoji = \"eyes\""),
     )?;
     let previous = fs::read(&file)?;
-    let (result, _) = run(&config, address, &REPLACE[1..]).await;
+    let (result, _) = run(&config, address, REPLACE).await;
     let refusal = format!(
         "{:#}",
         result.err().context("invalid settings were written")?
@@ -971,5 +986,78 @@ async fn owners_sharing_a_name_are_told_apart_and_the_one_chosen_is_admitted() -
         DiscordConfig::load(&config, "discord-private")?.allowed_user_ids,
         ["210"]
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn saved_settings_are_offered_for_keeping_only_while_their_bot_signs_in() -> anyhow::Result<()>
+{
+    let address = discord(Arc::new(Discord::default())).await?;
+    // Settings for bot `bot`, saved with `token` in the canonical file.
+    let installation = |root: &Path, bot: &str, token: &str| -> anyhow::Result<LoadedConfig> {
+        let config = crate::config::tests::installation(root, "discord-private", 46_600)?;
+        let mut settings = DiscordConfig::read(&config, "discord-private")?;
+        bot.clone_into(&mut settings.bot_user_id);
+        settings.write(&config, "discord-private")?;
+        std::fs::write(config.root.join(BOT_TOKEN_FILE), format!("{token}\n"))?;
+        Ok(config)
+    };
+    let keep = "Keep the saved Discord bot and settings?";
+
+    // The token signs in as the saved bot: kept as it is.
+    let directory = tempfile::tempdir()?;
+    let config = installation(directory.path(), "201", TOKEN)?;
+    let before = saved_files(&config)?;
+    let (result, shown) = run(&config, address, &[""]).await;
+    result?;
+    assert!(shown.contains(keep), "{shown}");
+    assert_eq!(saved_files(&config)?, before);
+
+    // Revoked, or another bot's: said, not offered, and a token asked for;
+    // nothing is written while the question goes unanswered.
+    for (bot, token, said) in [
+        (
+            "201",
+            "old-token",
+            "Discord refuses the saved bot token, so the saved settings cannot be kept.",
+        ),
+        (
+            "101",
+            TOKEN,
+            "The saved bot token signs in as carillon-bot (201), not the bot the saved settings \
+             name (101), so they cannot be kept.",
+        ),
+    ] {
+        let directory = tempfile::tempdir()?;
+        let config = installation(directory.path(), bot, token)?;
+        let before = saved_files(&config)?;
+        let (result, shown) = run(&config, address, &[]).await;
+        assert!(result.is_err());
+        assert!(shown.contains(said), "{shown}");
+        assert!(!shown.contains(keep), "{shown}");
+        assert!(
+            shown.contains("Bot token (Enter keeps the saved one):"),
+            "{shown}"
+        );
+        assert_eq!(saved_files(&config)?, before);
+    }
+
+    // Discord not answering says so, asks nothing and changes nothing.
+    let directory = tempfile::tempdir()?;
+    let config = installation(directory.path(), "201", TOKEN)?;
+    let before = saved_files(&config)?;
+    let (result, shown) = run(&config, "127.0.0.1:1".parse()?, &[]).await;
+    let failure = result
+        .err()
+        .map(|error| format!("{error:#}"))
+        .unwrap_or_default();
+    assert!(
+        failure.starts_with(
+            "Discord did not say whether the saved bot token still works; nothing was changed: "
+        ),
+        "{failure}"
+    );
+    assert!(shown.is_empty(), "{shown}");
+    assert_eq!(saved_files(&config)?, before);
     Ok(())
 }
