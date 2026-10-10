@@ -25,7 +25,7 @@ env:
 
 jobs:
   plan:
-    runs-on: ubuntu-26.04
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     permissions:
       contents: read
       actions: read # earlier successful runs, to compare with
@@ -76,14 +76,14 @@ jobs:
   rust:
     needs: plan
     if: needs.plan.outputs.rust == 'true'
-    runs-on: ubuntu-26.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # /tmp is memory-backed on this image.
+      # Test scratch goes to the runner's work disk, whatever /tmp is.
       - run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
         with:
@@ -101,7 +101,7 @@ jobs:
   ts:
     needs: plan
     if: needs.plan.outputs.ts == 'true'
-    runs-on: ubuntu-26.04
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     permissions:
       contents: read
     steps:
@@ -133,7 +133,7 @@ jobs:
   release:
     needs: plan
     if: needs.plan.outputs.release == 'true'
-    runs-on: ubuntu-26.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     permissions:
       contents: read
     steps:
@@ -141,26 +141,52 @@ jobs:
         with:
           persist-credentials: false
       - run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
-      - name: Install strace and GNU coreutils for the installation tests
-        # Updates exchange directories with GNU mv --exchange (coreutils 9.5+).
+      - name: Install strace for the persistence tests
         run: |
-          packages=strace
-          mv --version | head -n 1 | grep -q 'GNU coreutils' || packages="$packages coreutils-from-gnu"
           sudo apt-get update -q
-          # shellcheck disable=SC2086 # one word per package
-          sudo apt-get install -y --no-install-recommends $packages
-          mv --version | head -n 1
+          sudo apt-get install -y --no-install-recommends strace
       - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
         with:
           version: ${{ env.MISE_VERSION }}
-          install_args: rust node bun pnpm github:EmbarkStudios/cargo-about
+          install_args: rust node bun pnpm github:EmbarkStudios/cargo-about conda:coreutils
           cache_key_prefix: mise-release
+      - name: Check mv can exchange directories
+        # Installer updates exchange application directories with GNU mv
+        # --exchange (coreutils 9.5+); the tests run with the pinned coreutils.
+        run: |
+          mise exec -- mv --version | head -n 1
+          probe=$(mktemp -d)
+          mkdir "$probe/a" "$probe/b"
+          mise exec -- mv --exchange --no-copy -T "$probe/a" "$probe/b"
+          rm -r "$probe"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: release
           # Dependency builds are kept even when a test fails: rust-cache
           # saves no workspace crates, and the next run needn't start cold.
           cache-on-failure: true
+      - id: package-key
+        name: Key the package by everything it is built from
+        # Every tracked file counts except those no packaging step reads: the
+        # release tests, the CI planner, and TypeScript tests, which Bun never
+        # bundles. The OS release and architecture decide what the binaries
+        # link against.
+        run: |
+          . /etc/os-release
+          inputs=$(git ls-files -s -- . ':(exclude)scripts/test-*' ':(exclude)scripts/ci-plan*' \
+            ':(glob,exclude)packages/**/*.test.ts' | sha256sum | cut -d' ' -f1)
+          echo "key=package-$ID-$VERSION_ID-$(uname -m)-$inputs" >> "$GITHUB_OUTPUT"
+          version=$(bun -e 'import manifest from "./Cargo.toml"; console.log(manifest.workspace.package.version)')
+          echo "archive=dist/carillon-$version-linux-$(uname -m).tar.gz" >> "$GITHUB_OUTPUT"
+      # Main builds and tests its own release candidates, and only looks up
+      # whether to save one; pull requests and the merge queue reuse a package
+      # built from identical inputs.
+      - id: package-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.package-key.outputs.archive }}
+          key: ${{ steps.package-key.outputs.key }}
+          lookup-only: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
       - id: store
         run: echo "path=$(pnpm store path)" >> "$GITHUB_OUTPUT"
       - id: pnpm
@@ -169,9 +195,28 @@ jobs:
           path: ${{ steps.store.outputs.path }}
           key: pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
           restore-keys: pnpm-store-
-      - name: Build the release once, then test its installation and persistence
+      - name: Install JavaScript dependencies
+        # The release tests run source fixtures too, whether or not the
+        # package is rebuilt.
+        run: mise run install
+      - id: package
+        name: Build the release package, or unpack the identical one restored
+        env:
+          ARCHIVE: ${{ steps.package-key.outputs.archive }}
+          RESTORED: ${{ steps.package-cache.outputs.cache-hit == 'true' && github.event_name != 'push' && github.event_name != 'workflow_dispatch' }}
         run: |
-          mise run --jobs 1 test:install ::: test:persistence
+          if [ "$RESTORED" = true ]; then
+            mkdir -p target/package
+            tar -C target/package -xzf "$ARCHIVE"
+            echo "unpacked $ARCHIVE, built from identical inputs"
+          else
+            mise run --skip-deps package
+          fi
+      - name: Test the package's installation and persistence
+        # The two suites share only the package and take their own ports below
+        # the ephemeral range, so they run side by side.
+        run: |
+          mise run --skip-deps --jobs 2 test:install ::: test:persistence
       - name: Check the glibc the binaries need
         # The documented floor for the x86_64 release is glibc 2.39.
         run: |
@@ -196,11 +241,18 @@ jobs:
         with:
           path: ${{ steps.store.outputs.path }}
           key: pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+      # A package this run built is saved whatever its tests found, so a fix to
+      # the tests reuses it; a pull request's saves stay its own.
+      - if: ${{ !cancelled() && steps.package.outcome == 'success' && steps.package-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.package-key.outputs.archive }}
+          key: ${{ steps.package-key.outputs.key }}
 
   workflows:
     needs: plan
     if: needs.plan.outputs.workflows == 'true'
-    runs-on: ubuntu-26.04
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     permissions:
       contents: read
     steps:
@@ -222,7 +274,7 @@ jobs:
   ci-ok:
     needs: [plan, rust, ts, release, workflows]
     if: always()
-    runs-on: ubuntu-26.04
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     permissions: {}
     steps:
       - env:

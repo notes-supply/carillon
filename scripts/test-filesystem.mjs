@@ -19,7 +19,14 @@ const binary = resolve(mode === "init" ? join(artifact, "bin/carillon") : artifa
 const release = mode === "init" ? resolve(artifact) : null;
 execFileSync("strace", ["--version"], { stdio: "ignore" });
 const scratch = await mkdtemp(join(tmpdir(), "carillon-filesystem-"));
-const port = 40_000 + (process.pid % 10_000);
+// Below the kernel's ephemeral range, where no outgoing connection's source
+// port can hold it, and below the 64 ports the installer tests, which may run
+// at the same time, take under that range.
+const ephemeral = Number(
+  (await readFile("/proc/sys/net/ipv4/ip_local_port_range", "utf8")).trim().split(/\s+/u)[0],
+);
+assert.ok(ephemeral >= 1024 + 128, `no ports below the ephemeral range ${String(ephemeral)}`);
+const port = ephemeral - 128;
 // `init` takes only installation-wide settings; the installer additionally
 // writes the Discord provider's own admission file.
 const initOptions = ["--base-port", String(port)];
