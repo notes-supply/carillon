@@ -23,7 +23,7 @@ use twilight_model::{
         marker::{ChannelMarker, GuildMarker, RoleMarker, UserMarker},
     },
     oauth::{Application, ApplicationFlags, team::TeamMembershipState},
-    user::{CurrentUser, User},
+    user::{CurrentUser, CurrentUserGuild, User},
 };
 use twilight_util::permission_calculator::PermissionCalculator;
 use uuid::Uuid;
@@ -75,6 +75,9 @@ const PERMISSIONS: [(Permissions, &str, Need); 8] = [
         Need::Show("files"),
     ),
 ];
+
+/// The most servers Discord lists at once.
+const GUILD_PAGE: u16 = 200;
 
 /// When the agent answers in a routed channel.
 const MODES: [(&str, DiscordActivation, DiscordConversation); 4] = [
@@ -305,7 +308,7 @@ async fn server(
     application: &Application,
 ) -> Result<(Id<GuildMarker>, String)> {
     loop {
-        let mut guilds = http.current_user_guilds().await?.model().await?;
+        let mut guilds = joined(http).await?;
         match guilds.len() {
             0 => {
                 prompt.say(&format!(
@@ -333,6 +336,24 @@ async fn server(
                 let index = prompt.choose("Which server should the agent serve?", &labels, 0)?;
                 return Ok((named[index].0, labels.swap_remove(index)));
             }
+        }
+    }
+}
+
+/// Every server the bot is in. Discord lists them in ID order a page at a
+/// time, each after the last ID asked for, until a page is not full.
+async fn joined(http: &DiscordHttp) -> Result<Vec<CurrentUserGuild>> {
+    let mut guilds: Vec<CurrentUserGuild> = Vec::new();
+    loop {
+        let mut request = http.current_user_guilds().limit(GUILD_PAGE);
+        if let Some(last) = guilds.last() {
+            request = request.after(last.id);
+        }
+        let page = request.await?.model().await?;
+        let full = page.len() == usize::from(GUILD_PAGE);
+        guilds.extend(page);
+        if !full {
+            return Ok(guilds);
         }
     }
 }
@@ -542,6 +563,15 @@ async fn people(
             match http.guild_member(guild_id, id).await {
                 Ok(response) => {
                     let member = response.model().await?;
+                    // The provider drops what bots send, so a bot could
+                    // never be answered.
+                    if member.user.bot {
+                        prompt.say(&format!(
+                            "{} ({id}) is a bot; name the people the agent answers.",
+                            member.user.name
+                        ))?;
+                        continue 'ask;
+                    }
                     let name = member
                         .nick
                         .or(member.user.global_name)

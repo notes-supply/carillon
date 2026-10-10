@@ -1,8 +1,8 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     path::Path,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
 };
@@ -10,7 +10,7 @@ use std::{
 use anyhow::{Context as _, anyhow};
 use axum::{
     Json, Router,
-    extract::Path as Segments,
+    extract::{Path as Segments, Query},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse as _, Response},
     routing::get,
@@ -29,13 +29,17 @@ const TOKEN: &str = "good-token";
 /// application lacks Message Content Intent; for its first `invited` reads,
 /// the bot is in no server; for its first `unroled` reads of the bot as a
 /// member, it has no role. Its role is then `400`, which may use threads and
-/// sees #agent, or with `admin` only the administrator role `401`.
+/// sees #agent, or with `admin` only the administrator role `401`. It is in
+/// `servers` more servers after its usual three, listed a page at a time;
+/// `pages` records each listing's `after` and `limit`.
 #[derive(Default)]
 struct Discord {
     intent: AtomicUsize,
     invited: AtomicUsize,
     unroled: AtomicUsize,
     admin: bool,
+    servers: u64,
+    pages: Mutex<Vec<(Option<String>, Option<String>)>>,
 }
 
 /// Counts a read of what `pending` holds back, saying whether it is shown.
@@ -71,7 +75,7 @@ fn refused() -> Response {
 
 /// A Discord API answering the bot token `TOKEN` only, for a bot `201` in
 /// servers `100` (Notes), `101` (Other) and `102` (Notes again) whose members
-/// are `200` and `250`.
+/// are `200`, `250` and another bot, `260`.
 async fn discord(state: Arc<Discord>) -> anyhow::Result<std::net::SocketAddr> {
     let application = state.clone();
     let guilds = state.clone();
@@ -108,28 +112,42 @@ async fn discord(state: Arc<Discord>) -> anyhow::Result<std::net::SocketAddr> {
         )
         .route(
             "/api/v10/users/@me/guilds",
-            get(move |headers: HeaderMap| {
-                let state = guilds.clone();
-                async move {
-                    if !authorized(&headers) {
-                        return refused();
+            get(
+                move |headers: HeaderMap, Query(query): Query<HashMap<String, String>>| {
+                    let state = guilds.clone();
+                    async move {
+                        if !authorized(&headers) {
+                            return refused();
+                        }
+                        let (after, limit) = (query.get("after"), query.get("limit"));
+                        if let Ok(mut pages) = state.pages.lock() {
+                            pages.push((after.cloned(), limit.cloned()));
+                        }
+                        if !shown(&state.invited) {
+                            return Json(json!([])).into_response();
+                        }
+                        let mut all = vec![
+                            (100, "Notes".to_owned()),
+                            (101, "Other".to_owned()),
+                            (102, "Notes".to_owned()),
+                        ];
+                        all.extend((0..state.servers).map(|n| (1000 + n, format!("Server {n}"))));
+                        let after: u64 = after.map_or(Ok(0), |after| after.parse()).unwrap_or(0);
+                        let limit: usize =
+                            limit.map_or(Ok(200), |limit| limit.parse()).unwrap_or(200);
+                        let page: Vec<Value> = all
+                            .into_iter()
+                            .filter(|(id, _)| *id > after)
+                            .take(limit)
+                            .map(|(id, name)| {
+                                json!({"id": id.to_string(), "name": name, "icon": null,
+                                       "owner": false, "permissions": "0", "features": []})
+                            })
+                            .collect();
+                        Json(page).into_response()
                     }
-                    let guild = |id: &str, name: &str| {
-                        json!({"id": id, "name": name, "icon": null, "owner": false,
-                               "permissions": "0", "features": []})
-                    };
-                    Json(if shown(&state.invited) {
-                        json!([
-                            guild("100", "Notes"),
-                            guild("101", "Other"),
-                            guild("102", "Notes")
-                        ])
-                    } else {
-                        json!([])
-                    })
-                    .into_response()
-                }
-            }),
+                },
+            ),
         )
         .route("/api/v10/guilds/{guild}/channels", get(channels))
         .route("/api/v10/guilds/{guild}/roles", get(roles))
@@ -331,9 +349,10 @@ fn member(
         }))
         .into_response();
     }
-    let name = match (guild.as_str(), member.as_str()) {
-        ("100", "200") => "owner",
-        (_, "250") => "friend",
+    let (name, bot) = match (guild.as_str(), member.as_str()) {
+        ("100", "200") => ("owner", false),
+        (_, "250") => ("friend", false),
+        (_, "260") => ("other-bot", true),
         _ => {
             return (
                 StatusCode::NOT_FOUND,
@@ -343,7 +362,7 @@ fn member(
         }
     };
     Json(json!({
-        "user": user(&member, name, false), "nick": null, "roles": [],
+        "user": user(&member, name, bot), "nick": null, "roles": [],
         "joined_at": "2026-01-01T00:00:00.000000+00:00",
         "deaf": false, "mute": false, "flags": 0,
     }))
@@ -833,6 +852,79 @@ async fn a_failed_setup_leaves_settings_that_name_a_token_written_before_them() 
     assert_eq!(
         fs::read_to_string(config.root.join(BOT_TOKEN_FILE))?,
         "old-token\n"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn every_server_is_offered_page_after_page() -> anyhow::Result<()> {
+    let pages = |state: &Discord| {
+        state
+            .pages
+            .lock()
+            .map(|pages| pages.clone())
+            .map_err(|_| anyhow!("the recorded pages are poisoned"))
+    };
+    let page = |after: Option<&str>| (after.map(str::to_owned), Some("200".to_owned()));
+
+    // The last of 253 servers, on the second page, with someone in it.
+    let directory = tempfile::tempdir()?;
+    let config = fresh(directory.path())?;
+    let state = Arc::new(Discord {
+        servers: 250,
+        ..Discord::default()
+    });
+    let address = discord(state.clone()).await?;
+    let (result, shown) = run(&config, address, &[TOKEN, "253", "", "", "none", "250"]).await;
+    result?;
+    assert!(shown.contains("Notes (102)\nServer 0\n"), "{shown}");
+    assert!(shown.contains("Server 249\n"), "{shown}");
+    assert_eq!(
+        DiscordConfig::load(&config, "discord-private")?.guild_id,
+        "1249"
+    );
+    // The second page starts after the 200th server's ID.
+    assert_eq!(pages(&state)?, [page(None), page(Some("1196"))]);
+
+    // Servers that fit one page take one request.
+    let directory = tempfile::tempdir()?;
+    let config = fresh(directory.path())?;
+    let state = Arc::new(Discord::default());
+    let address = discord(state.clone()).await?;
+    let (result, _) = run(&config, address, &[TOKEN, "", "", "", "", ""]).await;
+    result?;
+    assert_eq!(pages(&state)?, [page(None)]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn bot_accounts_are_not_admitted_and_people_are_asked_for_again() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let config = fresh(directory.path())?;
+    let address = discord(Arc::new(Discord::default())).await?;
+    let (result, shown) = run(
+        &config,
+        address,
+        &[
+            TOKEN, "", "", "", //
+            "none", "201", // this bot,
+            "none", "250 260", // a person and another bot,
+            "none", "250", // then the person alone
+        ],
+    )
+    .await;
+    result?;
+    assert!(
+        shown.contains("carillon-bot (201) is a bot; name the people the agent answers."),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("other-bot (260) is a bot; name the people the agent answers."),
+        "{shown}"
+    );
+    assert_eq!(
+        DiscordConfig::load(&config, "discord-private")?.allowed_user_ids,
+        ["250"]
     );
     Ok(())
 }
