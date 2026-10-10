@@ -12,11 +12,13 @@ UNIT_DIR=$OWNER_HOME/.config/systemd/user
 COMMANDS=$TEST_ROOT/commands
 mkdir -p "$OWNER_HOME/workspace" "$COMMANDS"
 
+# Its own loopback ports, so setup never reaches a provider serving this host.
 install_release() {
   env HOME="$OWNER_HOME" XDG_CONFIG_HOME="$OWNER_HOME/.config" \
     CARILLON_HOME="$1" CARILLON_SKIP_SYSTEMD_RELOAD=1 \
     "$RELEASE/install.sh" --guild-id 100 --bot-user-id 201 --user-id 200 \
-    --route 300:always:channel --workspace "$OWNER_HOME/workspace" >/dev/null
+    --route 300:always:channel --workspace "$OWNER_HOME/workspace" \
+    --base-port "$((${CARILLON_TEST_BASE_PORT:-44800} + 50))" >/dev/null
 }
 install_release "$DECOY"
 printf '%s\n' unrelated-owner-data >"$OWNER_HOME/unrelated"
