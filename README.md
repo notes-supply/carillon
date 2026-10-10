@@ -17,34 +17,34 @@ migrations.
 
 - x86_64 Linux with glibc 2.39 or newer and systemd
 - GNU coreutils 9.5 or newer, for updates
-- A Discord bot in your server, with the `applications.commands` scope
-- A model provider account that Pi supports, or a T3 Code server
+- A Discord application with a bot, and Message Content Intent turned on
+  for it in the Discord Developer Portal
+- A model provider account that Pi supports, or a T3 Code server on the
+  same machine
 
 ## Install
 
-```sh
-version=0.1.0-beta.1
-base=https://github.com/notes-supply/carillon/releases/download/v$version
-curl -fLO "$base/carillon-$version-linux-x86_64.tar.gz"
-curl -fLO "$base/SHA256SUMS"
-sha256sum -c SHA256SUMS
-tar -xzf "carillon-$version-linux-x86_64.tar.gz"
-"carillon-$version/install.sh" --guild-id GUILD_ID --bot-user-id BOT_ID \
-  --user-id YOUR_DISCORD_ID --route CHANNEL_ID:always:thread
-```
-
-The installer links `carillon` into `~/.local/bin` and prints the next steps.
-Put the bot token where it says. With the printed `carillon-pi` command, sign
-in, choose a model with `/model` and save it with Ctrl+S. Then start Carillon:
+In a terminal, as the user who will own Carillon:
 
 ```sh
-~/.local/bin/carillon start    # or just `carillon start` if ~/.local/bin is on your PATH
+curl -fsSL https://raw.githubusercontent.com/notes-supply/carillon/main/install.sh | sh
 ```
 
-The [operations guide](docs/product/OPERATIONS.md) covers the options,
-everyday commands, configuration, updates and backups.
-The agent's [Discord tools](packages/discord-pi/README.md) are optional.
-[T3 Code](packages/runtime-t3/README.md) is optional.
+It checks your machine, downloads the newest release (betas included),
+checks it against its published checksum, and asks you:
+
+- **Pi or T3 Code.** Pi opens its own sign-in and model picker. For T3, give
+  its address and a token, then pick one of its projects and a model.
+- **Discord.** Paste the bot token (it isn't shown), then pick the server,
+  the channels, how the agent answers and who may talk to it.
+
+Then it starts Carillon and links `carillon` into `~/.local/bin`. For a
+particular release, run `sh -s -- --version 0.1.0-beta.2` instead of `sh`.
+
+The [operations guide](docs/product/OPERATIONS.md) covers installing without
+questions or from the downloaded archive, everyday commands, configuration,
+updates and backups. The agent's [Discord tools](packages/discord-pi/README.md)
+are optional.
 
 ## Development
 
@@ -57,6 +57,9 @@ mise run check            # format, lint, types and tests; or check:rust / check
 mise run test:integration # the services together
 mise run test:install     # build the release archive and test installing it
 ```
+
+`mise run build:module` builds the Discord module and the
+[card colours example](examples/card-colours/README.md).
 
 `mise run package` writes the archive to `dist/`. The
 [architecture](docs/product/ARCHITECTURE.md) and

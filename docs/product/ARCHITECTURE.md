@@ -158,6 +158,14 @@ stands. See the [T3 guide](../../packages/runtime-t3/README.md).
 address, credential hash, expected version and whether it's enabled. Each
 provider owns `providers/ID.toml`. Both files reject unknown fields.
 
+Setup registers the Discord provider and the one runtime chosen, Pi or T3.
+Each provider's own program sets up its part: Pi signs in through its own
+interface, the T3 runtime checks a project and model with T3 and writes its
+settings, and the Discord provider learns the bot from its token and offers
+servers, channels and people by name. The user target wants every bundled
+runtime's unit; one the registry doesn't list ends at once, as a disabled
+one does.
+
 Services load their files at start. An explicit apply re-reads a file and
 serves it whole when every difference applies live, and otherwise refuses
 and names what needs a restart. Core applies runtime availability and
@@ -181,8 +189,9 @@ workspace (your home by default) with your authority.
 ## Packaging
 
 `scripts/package-release.sh` builds one archive per Linux host architecture:
-the Rust programs for the host target, the Discord module for
-`wasm32-unknown-unknown`, the runtimes compiled with Bun, the systemd units,
+the Rust programs for the host target, the Discord module and the
+card-colours example module for `wasm32-unknown-unknown`, the runtimes
+compiled with Bun, the systemd units,
 and `licenses/` with Carillon's licence and notices for the Rust crates, npm
 packages and Bun built into the programs. Every component reports the
 workspace version. A `MANIFEST` lists every file and which must be

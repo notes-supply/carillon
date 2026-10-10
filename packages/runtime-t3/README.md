@@ -7,9 +7,15 @@ and stores nothing of its own.
 
 ## Set it up
 
-Create the installation with `carillon init --runtime t3`, with
-`--workspace` set to the T3 project's folder; the agent works there. Issue a
-token in T3 with `t3 auth session issue --label Carillon --token-only`, then:
+Guided setup (the installer, or `carillon setup`) offers T3 instead of Pi:
+it asks for T3's address and a token, lists T3's projects and models by
+name, creates the installation in the chosen project's folder and writes the
+files below. Issue a token in T3 with
+`t3 auth session issue --label Carillon --token-only`.
+
+Without questions, create the installation with `--runtime t3` (installer
+option, or `carillon init --runtime t3`) and `--workspace` set to the T3
+project's folder, then:
 
 ```sh
 carillon runtime-t3 discover --url http://127.0.0.1:3773 < t3.token   # projects and models, as JSON
