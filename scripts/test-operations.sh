@@ -315,14 +315,16 @@ DISCORD_SETTINGS=$INSTALLATION/providers/discord-private.toml
 cp -p "$DISCORD_SETTINGS" "$TEST_ROOT/discord-settings"
 for state in schema:'database schema is not the current Carillon format' \
   discord:'cannot use the settings of discord-private' \
-  module:'has an installed Discord module this release cannot serve'; do
+  module:'enable a custom Discord module this release cannot serve'; do
   case "${state%%:*}" in
     schema)
       node -e 'new (require("node:sqlite").DatabaseSync)(process.argv[1]).exec("CREATE TABLE later_release (id INTEGER)")' \
         "$DATABASE" ;;
     discord) sed -i 's/^guild_id = .*/guild_id = "not-a-snowflake"/' "$DISCORD_SETTINGS" ;;
-    # An installed module the new release cannot serve, as after a contract change.
-    module) mkdir -p "${INSTALLED%/*}" && printf '%s\n' 'not a module' >"$INSTALLED" ;;
+    # An enabled module the new release cannot serve, as after a contract change.
+    module)
+      printf '%s\n' 'not a module' >"$TEST_ROOT/broken.wasm"
+      printf '\n[module]\nenabled = true\npath = "%s"\n' "$TEST_ROOT/broken.wasm" >>"$DISCORD_SETTINGS" ;;
   esac
   snapshot
   refuse "incompatible-${state%%:*}" carillon update "$TEST_ROOT/next.tar.gz"
@@ -337,7 +339,7 @@ for state in schema:'database schema is not the current Carillon format' \
       node -e 'new (require("node:sqlite").DatabaseSync)(process.argv[1]).exec("DROP TABLE later_release")' \
         "$DATABASE" ;;
     discord) cp -p "$TEST_ROOT/discord-settings" "$DISCORD_SETTINGS" ;;
-    module) rm "$INSTALLED" ;;
+    module) cp -p "$TEST_ROOT/discord-settings" "$DISCORD_SETTINGS" && rm "$TEST_ROOT/broken.wasm" ;;
   esac
 done
 snapshot
@@ -362,6 +364,7 @@ rm -f "$TRACE"
 carillon discord module enable "$EXAMPLE" >"$TEST_ROOT/module-enable.log"
 grep -Fx "It serves the custom Discord module $EXAMPLE: /model, /command." \
   "$TEST_ROOT/module-enable.log" >/dev/null
+snapshot
 carillon update "$TEST_ROOT/next.tar.gz" >"$TEST_ROOT/update.log"
 grep -F "custom Discord module $EXAMPLE is usable" "$TEST_ROOT/update.log" >/dev/null
 grep -Fx "Updated to Carillon $VERSION; services are running again:" "$TEST_ROOT/update.log" >/dev/null
@@ -379,6 +382,7 @@ case "$(simulate installed-2)" in *'Local provider response 2'*) ;; *) fail 'con
 [ "$(carillon review check)" = "review $INSTALLATION check" ]
 carillon discord module | grep -Fx "discord-private serves the custom Discord module $EXAMPLE: /model, /command." >/dev/null
 carillon discord module disable | grep -Fx 'It serves the bundled Discord module: /model, /command.' >/dev/null
+snapshot
 
 # A stopped installation stays stopped.
 carillon stop >/dev/null

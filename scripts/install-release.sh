@@ -307,7 +307,7 @@ cat <<EOF
 Carillon installed for $OWNER at $CARILLON_HOME and enabled for this user's service manager.
 1. Put the Discord bot token in $CARILLON_HOME/credentials/discord-bot.token (mode 0600).
 2. $RUNTIME_STEP
-3. Start with: $CARILLON start
+3. Start deliberately with: $CARILLON start
 4. Inspect with: $CARILLON status   and   $CARILLON logs
 Update later with: $CARILLON update /path/to/carillon-VERSION-linux-ARCH.tar.gz
 For boot without an interactive login, an administrator may run: loginctl enable-linger $OWNER
