@@ -366,7 +366,7 @@ grep -Fx "It serves the custom Discord module $EXAMPLE: /model, /command." \
   "$TEST_ROOT/module-enable.log" >/dev/null
 snapshot
 carillon update "$TEST_ROOT/next.tar.gz" >"$TEST_ROOT/update.log"
-grep -F "custom Discord module $EXAMPLE is usable" "$TEST_ROOT/update.log" >/dev/null
+grep -F "custom Discord module $EXAMPLE, as this release ships it, is usable" "$TEST_ROOT/update.log" >/dev/null
 grep -Fx "Updated to Carillon $VERSION; services are running again:" "$TEST_ROOT/update.log" >/dev/null
 expect_trace '--user show --property=ActiveState --value carillon.target' \
   '--user show --property=ConsistsOf --value carillon.target' \

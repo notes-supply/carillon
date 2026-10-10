@@ -319,8 +319,10 @@ Discord refuses, leaves the serving module and settings as they were.
 Commands already running finish on the module they started with.
 `carillon discord module check FILE` checks a module without serving it.
 
-An update refuses when the new release can't serve the enabled module:
-disable it, update, then enable one built for the new release. The example's
+An update checks the enabled module first: the example (or any module inside
+`app/`) as the new release ships it, any other file as it is. If the new
+release can't serve a module of your own, the update refuses; disable it,
+update, then enable one built for the new release. The example's
 source is in [examples/card-colours](../../examples/card-colours/README.md).
 
 ### Restarts and replay

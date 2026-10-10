@@ -266,7 +266,7 @@ pub(crate) async fn run() -> Result<()> {
                 loaded.provider_config_path(&provider)?.display(),
                 RELEASE_VERSION
             );
-            check_declared(&loaded, &provider, &discord).await?;
+            check_declared(&loaded, &provider, &discord, &release()?).await?;
         }
         Command::Tools {
             action:
@@ -418,12 +418,18 @@ fn uploads(files: &[PathBuf]) -> Result<Vec<Upload>> {
 
 /// The release's `lib` directory, beside the directory of this program.
 fn release_library() -> Result<PathBuf> {
+    Ok(release()?.join("lib"))
+}
+
+/// The release this program belongs to, the directory holding its `bin`:
+/// the installed application, or a release an update is checking.
+fn release() -> Result<PathBuf> {
     let executable = std::env::current_exe()?.canonicalize()?;
-    Ok(executable
+    executable
         .parent()
         .and_then(Path::parent)
-        .context("cannot locate release library")?
-        .join("lib"))
+        .map(Path::to_path_buf)
+        .context("cannot locate this program's release")
 }
 
 /// Native harnesses own these resource directories and when changes are loaded.
@@ -646,16 +652,21 @@ async fn manage_module(
 }
 
 /// Validates the custom module the settings enable against this program, as
-/// an update's preflight does before it stops the services.
+/// an update's preflight does before it stops the services. A module inside
+/// the installed application is replaced with it, so the copy in `release`,
+/// this program's own, is the one checked; any other is checked as it is.
 async fn check_declared(
     loaded: &LoadedConfig,
     provider: &str,
     discord: &DiscordConfig,
+    release: &Path,
 ) -> Result<()> {
     let Source::Custom { path } = discord.module_source(&loaded.root) else {
         return Ok(());
     };
-    let commands = check_file(&path).await.with_context(|| {
+    let shipped = in_application(loaded, &path).map(|relative| release.join(relative));
+    let checked = shipped.as_deref().unwrap_or(&path);
+    let commands = check_file(checked).await.with_context(|| {
         format!(
             "the settings of {provider} enable a custom Discord module this release cannot \
              serve. Run `carillon discord module disable`, then enable a module built for this \
@@ -663,11 +674,27 @@ async fn check_declared(
         )
     })?;
     println!(
-        "custom Discord module {} is usable by carillon-discord {RELEASE_VERSION}: {}.",
+        "custom Discord module {}{} is usable by carillon-discord {RELEASE_VERSION}: {}.",
         path.display(),
+        if shipped.is_some() {
+            ", as this release ships it,"
+        } else {
+            ""
+        },
         list(&commands)
     );
     Ok(())
+}
+
+/// Where `path` lies within the installation's application directory, if
+/// it does: the application's own files are replaced by an update.
+fn in_application(loaded: &LoadedConfig, path: &Path) -> Option<PathBuf> {
+    let application = loaded.root.join("app");
+    if let Ok(relative) = path.strip_prefix(&application) {
+        return Some(relative.to_path_buf());
+    }
+    let (application, path) = (application.canonicalize().ok()?, path.canonicalize().ok()?);
+    path.strip_prefix(application).ok().map(Path::to_path_buf)
 }
 
 async fn check_file(file: &Path) -> Result<Vec<String>> {
@@ -1712,6 +1739,76 @@ mod tests {
                 .module
                 .enabled
         );
+        Ok(())
+    }
+
+    /// An update's preflight runs the new release's program: a module the
+    /// installed application ships is checked as the new release ships it,
+    /// and any other module as it is.
+    #[tokio::test]
+    async fn a_declared_module_is_checked_where_the_update_takes_it_from() -> Result<()> {
+        use crate::{
+            config::DiscordConfig,
+            module::tests::{definition, describing, module, replying},
+        };
+
+        let directory = tempfile::tempdir()?;
+        let config = crate::config::tests::installation(
+            &directory.path().join("installation"),
+            "discord-private",
+            46_700,
+        )?;
+        let release = directory.path().join("release");
+        let shipped = Path::new("lib/examples/card-colours.wasm");
+        for root in [config.root.join("app"), release.clone()] {
+            fs::create_dir_all(root.join("lib/examples"))?;
+        }
+        let usable = module(&describing(&[definition("model")]), &replying("ok", &[]))?;
+        let declare = |path: &Path| -> Result<DiscordConfig> {
+            let mut discord = DiscordConfig::read(&config, "discord-private")?;
+            discord.module.enabled = true;
+            discord.module.path = Some(path.to_path_buf());
+            Ok(discord)
+        };
+        let check = |discord: DiscordConfig| {
+            let (config, release) = (config.clone(), release.clone());
+            async move {
+                super::check_declared(&config, "discord-private", &discord, &release)
+                    .await
+                    .map_err(|error| format!("{error:#}"))
+            }
+        };
+
+        // The installed copy is the old release's; the new release's serves.
+        let installed = config.root.join("app").join(shipped);
+        fs::write(&installed, b"\0asm old contract")?;
+        fs::write(release.join(shipped), &usable)?;
+        check(declare(&installed)?)
+            .await
+            .map_err(anyhow::Error::msg)?;
+        // A relative declaration starts at the installation, inside `app/` too.
+        check(declare(&Path::new("app").join(shipped))?)
+            .await
+            .map_err(anyhow::Error::msg)?;
+
+        // A usable installed copy does not hide a new release that cannot serve.
+        fs::write(&installed, &usable)?;
+        fs::write(release.join(shipped), b"\0asm broken")?;
+        let refusal = check(declare(&installed)?).await.err().unwrap_or_default();
+        assert!(refusal.contains("cannot serve"), "{refusal}");
+        fs::remove_file(release.join(shipped))?;
+        let refusal = check(declare(&installed)?).await.err().unwrap_or_default();
+        assert!(refusal.contains("read Discord module"), "{refusal}");
+
+        // A module of the owner's own is checked as it is, whatever the
+        // release ships.
+        fs::write(release.join(shipped), &usable)?;
+        let own = directory.path().join("own.wasm");
+        fs::write(&own, b"\0asm broken")?;
+        let refusal = check(declare(&own)?).await.err().unwrap_or_default();
+        assert!(refusal.contains("cannot serve"), "{refusal}");
+        fs::write(&own, &usable)?;
+        check(declare(&own)?).await.map_err(anyhow::Error::msg)?;
         Ok(())
     }
 
