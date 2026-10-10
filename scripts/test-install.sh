@@ -8,8 +8,12 @@ RELEASE=${1:-"$ROOT/target/package/carillon-$VERSION"}
 # service ports from this base and up to 63 above it. Like the integration
 # test's, they lie below the kernel's ephemeral range: a port inside it can be
 # the source port of any outgoing connection, open or in TIME_WAIT, and then
-# a service cannot bind it.
-read -r EPHEMERAL _ </proc/sys/net/ipv4/ip_local_port_range
+# a service cannot bind it. The range is read with awk: a shell's read builtin
+# may take this file a byte at a time, and the kernel ends it after one.
+EPHEMERAL=$(awk '{ print $1 }' /proc/sys/net/ipv4/ip_local_port_range)
+case "$EPHEMERAL" in
+  '' | *[!0-9]*) echo "cannot read the ephemeral port range: '$EPHEMERAL'" >&2; exit 1 ;;
+esac
 CARILLON_TEST_BASE_PORT=${CARILLON_TEST_BASE_PORT:-$((EPHEMERAL - 64))}
 if [ "$CARILLON_TEST_BASE_PORT" -lt 1024 ] || [ $((CARILLON_TEST_BASE_PORT + 64)) -gt "$EPHEMERAL" ]; then
   echo "CARILLON_TEST_BASE_PORT must leave 64 ports from 1024 up to the ephemeral range at $EPHEMERAL" >&2
