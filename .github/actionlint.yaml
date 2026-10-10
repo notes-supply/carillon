@@ -1,4 +1,5 @@
 self-hosted-runner:
-  # GitHub-hosted, but newer than the pinned actionlint's list of labels.
+  # Blacksmith's runners.
   labels:
-    - ubuntu-26.04
+    - blacksmith-2vcpu-ubuntu-2404
+    - blacksmith-8vcpu-ubuntu-2404
