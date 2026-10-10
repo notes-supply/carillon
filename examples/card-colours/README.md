@@ -24,5 +24,5 @@ carillon discord module enable "$PWD/target/wasm32-unknown-unknown/wasm/carillon
 carillon discord settings apply
 ```
 
-A module that fails to build or to draw cards never replaces the one serving;
-`carillon discord module disable` returns to the bundled module at any time.
+Enabling validates the module before switching. A rejected candidate leaves
+the current module serving; disabling returns to the bundled module.
