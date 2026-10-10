@@ -298,6 +298,27 @@ it("checks the saved settings and T3 token as startup reads them, reaching no T3
   const usable = await cli(["check", "--config", config], "");
   expect(usable.status, usable.stderr).toBe(0);
 
+  // The agent's workspace, apart from the installation, must be a directory
+  // for the runtime to start, whatever its settings and token say.
+  const workspace = await mkdtemp(join(tmpdir(), "carillon-t3-workspace-"));
+  cleanups.push(() => rm(workspace, { recursive: true, force: true }));
+  const saved = await readFile(config, "utf8");
+  await writeFile(config, saved.replace(/^workspace = ".*"$/mu, `workspace = "${workspace}"`));
+  expect((await cli(["check", "--config", config], "")).status).toBe(0);
+  for (const unusable of [
+    () => rm(workspace, { recursive: true }),
+    () => writeFile(workspace, ""),
+  ]) {
+    await unusable();
+    const refused = await cli(["check", "--config", config], "");
+    expect(refused.status).toBe(1);
+    expect(refused.stderr).toBe(
+      `error: ${workspace}: the agent's workspace must be an existing directory\n`,
+    );
+  }
+  await rm(workspace);
+  await writeFile(config, saved);
+
   // A runtime that does not start, disabled or not registered as in a Pi
   // installation, passes with no settings at all.
   const registry = await readFile(config, "utf8");

@@ -31,8 +31,6 @@ async function serve(values: readonly string[]): Promise<void> {
     );
     return;
   }
-  if (!(await stat(installation.workspace)).isDirectory())
-    throw new Error("workspace must be an existing directory");
   const listenAddress = providerAddress(installation.runtime.url);
   const token = await loadRuntimeCredential(
     requiredArgument(args, "token-file"),
@@ -81,10 +79,21 @@ async function serve(values: readonly string[]): Promise<void> {
   }
 }
 
-/** The saved settings and the T3 endpoint they name, as startup reads them before reaching T3. */
+/**
+ * The saved settings and the T3 endpoint they name, as startup reads them
+ * before reaching T3, for an agent whose workspace is an existing directory.
+ */
 async function saved(
   installation: Installation,
 ): Promise<{ settings: T3Settings; endpoint: T3Endpoint }> {
+  const workspace = await stat(installation.workspace).then(
+    (entry) => entry.isDirectory(),
+    () => false,
+  );
+  if (!workspace)
+    throw new Error(
+      `${installation.workspace}: the agent's workspace must be an existing directory`,
+    );
   const settings = await loadSettings(installation.providerFile, installation.root);
   const token = (await readFile(settings.tokenFile, "utf8")).trim();
   if (token.length === 0) throw new Error(`${settings.tokenFile}: the T3 token file is empty`);
