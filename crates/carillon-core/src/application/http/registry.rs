@@ -146,30 +146,7 @@ impl Difference {
         restart(*attachments != serving.core.attachments, "core.attachments");
         // Core admits for the agents it started with, and runtimes and
         // interfaces read theirs at start: any change is a restart's.
-        let serving_agents = serving
-            .agents
-            .iter()
-            .map(|agent| (agent.id.as_str(), agent))
-            .collect::<BTreeMap<_, _>>();
-        let file_agents = agents
-            .iter()
-            .map(|agent| (agent.id.as_str(), agent))
-            .collect::<BTreeMap<_, _>>();
-        for id in serving_agents
-            .keys()
-            .filter(|id| !file_agents.contains_key(*id))
-        {
-            difference.restart.push(format!("agents.{id} (removed)"));
-        }
-        for (id, agent) in &file_agents {
-            match serving_agents.get(id) {
-                None => difference.restart.push(format!("agents.{id} (added)")),
-                Some(serving) if serving != agent => {
-                    difference.restart.push(format!("agents.{id}"));
-                }
-                Some(_) => {}
-            }
-        }
+        restart(*agents != serving.agents, "agents");
         let before = serving
             .providers
             .iter()

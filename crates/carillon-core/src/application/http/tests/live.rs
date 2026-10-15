@@ -263,8 +263,7 @@ fn only_runtime_availability_and_concurrency_apply_live() -> Result<()> {
         difference.restart,
         [
             "core.listen",
-            "agents.added-agent (added)",
-            "agents.test-agent",
+            "agents",
             "providers.another (added)",
             "providers.test-interface.enabled",
             "providers.test-runtime.url",
