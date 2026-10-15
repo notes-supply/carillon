@@ -104,13 +104,13 @@ it("composes native Pi directly, retains history and isolates independently cons
   const settings = () =>
     SettingsManager.inMemory({ defaultProvider: model.provider, defaultModel: model.id });
   const first = await createPiRuntime({
-    workspace: root,
+    agents: [{ id: "example", workspace: root }],
     stateDirectory: join(root, "one"),
     modelRuntime: models,
     settings: settings(),
   });
   const second = await createPiRuntime({
-    workspace: root,
+    agents: [{ id: "example", workspace: root }],
     stateDirectory: join(root, "two"),
     modelRuntime: models,
     settings: settings(),
@@ -187,7 +187,7 @@ it("keeps a running turn's model when an update commits while its catalogue is r
     return stream;
   });
   const runtime = await createPiRuntime({
-    workspace: root,
+    agents: [{ id: "test", workspace: root }],
     stateDirectory: join(root, "state"),
     modelRuntime: models,
     settings: SettingsManager.inMemory({ defaultProvider: model.provider, defaultModel: model.id }),
@@ -232,7 +232,7 @@ it("close waits for accepted operations and prevents queued execution from start
   });
   const catalogue = vi.spyOn(models, "getAvailable").mockResolvedValue([model]);
   const runtime = await createPiRuntime({
-    workspace: root,
+    agents: [{ id: "test", workspace: root }],
     stateDirectory: join(root, "state"),
     modelRuntime: models,
     settings: SettingsManager.inMemory({ defaultProvider: model.provider, defaultModel: model.id }),
@@ -283,7 +283,7 @@ it("refuses a follow-up it never offered, and says a restart loses a turn it exe
   });
   const catalogue = vi.spyOn(models, "getAvailable").mockResolvedValue([model]);
   const runtime = await createPiRuntime({
-    workspace: root,
+    agents: [{ id: "test", workspace: root }],
     stateDirectory: join(root, "state"),
     modelRuntime: models,
     settings: SettingsManager.inMemory({ defaultProvider: model.provider, defaultModel: model.id }),

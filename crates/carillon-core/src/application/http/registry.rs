@@ -8,9 +8,7 @@
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use anyhow::Result;
-use carillon_installation::config::{
-    AgentConfig, Config, CoreConfig, LoadedConfig, Provider, ProviderRole,
-};
+use carillon_installation::config::{Config, CoreConfig, LoadedConfig, Provider, ProviderRole};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, watch};
 
@@ -127,20 +125,13 @@ impl Difference {
             data_dir,
             core,
             providers,
-            agent,
+            agents,
         } = file;
         let CoreConfig {
             listen,
             operator_token_hash,
             attachments,
         } = core;
-        let AgentConfig {
-            id,
-            name,
-            resource_root,
-            workspace,
-            runtime_provider,
-        } = agent;
         let mut restart = |changed: bool, field: &str| {
             if changed {
                 difference.restart.push(field.to_owned());
@@ -153,17 +144,32 @@ impl Difference {
             "core.operator_token_hash",
         );
         restart(*attachments != serving.core.attachments, "core.attachments");
-        restart(*id != serving.agent.id, "agent.id");
-        restart(*name != serving.agent.name, "agent.name");
-        restart(
-            *resource_root != serving.agent.resource_root,
-            "agent.resource_root",
-        );
-        restart(*workspace != serving.agent.workspace, "agent.workspace");
-        restart(
-            *runtime_provider != serving.agent.runtime_provider,
-            "agent.runtime_provider",
-        );
+        // Core admits for the agents it started with, and runtimes and
+        // interfaces read theirs at start: any change is a restart's.
+        let serving_agents = serving
+            .agents
+            .iter()
+            .map(|agent| (agent.id.as_str(), agent))
+            .collect::<BTreeMap<_, _>>();
+        let file_agents = agents
+            .iter()
+            .map(|agent| (agent.id.as_str(), agent))
+            .collect::<BTreeMap<_, _>>();
+        for id in serving_agents
+            .keys()
+            .filter(|id| !file_agents.contains_key(*id))
+        {
+            difference.restart.push(format!("agents.{id} (removed)"));
+        }
+        for (id, agent) in &file_agents {
+            match serving_agents.get(id) {
+                None => difference.restart.push(format!("agents.{id} (added)")),
+                Some(serving) if serving != agent => {
+                    difference.restart.push(format!("agents.{id}"));
+                }
+                Some(_) => {}
+            }
+        }
         let before = serving
             .providers
             .iter()

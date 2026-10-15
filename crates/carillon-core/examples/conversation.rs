@@ -1,6 +1,8 @@
 //! A complete durable conversation with no HTTP, Discord or model account.
 use anyhow::{Context as _, Result, ensure};
-use carillon_core::{Core, CoreOptions, Lane, RuntimeProvider, TurnFailure, WorkerStep};
+use carillon_core::{
+    AgentOptions, Core, CoreOptions, Lane, RuntimeProvider, TurnFailure, WorkerStep,
+};
 use carillon_installation::config::AttachmentLimits;
 use carillon_protocol::model::{
     DeliveryAck, DeliveryOutcome, ExternalEvent, RuntimeTurnRequest, RuntimeTurnResponse,
@@ -20,9 +22,11 @@ async fn conversation() -> Result<()> {
     std::fs::write(resources.join("SYSTEM.md"), "Captured instructions")?;
     let core = Core::create(CoreOptions {
         data_directory: directory.path().join("state"),
-        agent_id: "example".to_owned(),
-        resource_root: resources.clone(),
-        default_runtime: "echo".to_owned(),
+        agents: vec![AgentOptions {
+            id: "example".to_owned(),
+            runtime: "echo".to_owned(),
+            resources: Some(resources.clone()),
+        }],
         runtimes: vec![RuntimeProvider {
             id: "echo".to_owned(),
             version: "example".to_owned(),

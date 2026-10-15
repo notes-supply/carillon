@@ -1,4 +1,4 @@
-use carillon_core::{Core, CoreOptions};
+use carillon_core::{AgentOptions, Core, CoreOptions};
 use std::{
     fs,
     os::unix::fs::{PermissionsExt, symlink},
@@ -8,9 +8,11 @@ use std::{
 fn options(root: &std::path::Path) -> CoreOptions {
     CoreOptions {
         data_directory: root.join("data"),
-        agent_id: "test".into(),
-        resource_root: root.into(),
-        default_runtime: "test".into(),
+        agents: vec![AgentOptions {
+            id: "test".into(),
+            runtime: "test".into(),
+            resources: Some(root.into()),
+        }],
         runtimes: vec![],
         attachments: carillon_installation::config::AttachmentLimits::default(),
     }

@@ -28,7 +28,8 @@ interface RuntimeServerOptions {
   /** The runtime's own build version, which core compares with the registry's expectation. */
   readonly version: string;
   readonly features: readonly string[];
-  readonly workspace: string;
+  /** Each agent the runtime serves, with the workspace it works in. */
+  readonly agents: readonly { readonly id: string; readonly workspace: string }[];
 }
 
 export function createRuntimeServer(options: RuntimeServerOptions) {
@@ -79,7 +80,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
         home: process.env["HOME"],
         shell: process.env["SHELL"],
         path: process.env["PATH"],
-        workspace: options.workspace,
+        agents: options.agents.map(({ id, workspace }) => ({ id, workspace })),
       });
       return;
     }

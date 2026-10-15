@@ -4,7 +4,7 @@ umask 077
 
 usage() {
   echo "usage: install.sh [--runtime pi|t3] [--base-port PORT] [--workspace PATH]    (asks the rest at the terminal)" >&2
-  echo "       install.sh [--runtime pi|t3] --guild-id ID --bot-user-id ID --user-id ID [--user-id ID ...] --route CHANNEL_ID:mention|always:thread|channel [--route ...] [--base-port PORT] [--workspace PATH]" >&2
+  echo "       install.sh [--runtime pi|t3] --guild-id ID --bot-user-id ID --user-id ID [--user-id ID ...] --route CHANNEL_ID:mention|always:thread|channel:AGENT_ID [--route ...] [--base-port PORT] [--workspace PATH]" >&2
   echo "       install.sh --update [--check]    (run by 'carillon update'; --check changes nothing)" >&2
   exit 2
 }
@@ -328,8 +328,8 @@ To start it at boot without logging in, an administrator can run: loginctl enabl
 EOF
   exit 0
 fi
-if grep -Fqx 'runtime_provider = "runtime-t3"' "$CARILLON_HOME/carillon.toml"; then
-  RUNTIME_STEP="Set up T3 with: $CARILLON runtime-t3 configure --url URL --project PROJECT_ID --model INSTANCE/MODEL < t3-token-file"
+if grep -Fqx 'runtime = "runtime-t3"' "$CARILLON_HOME/carillon.toml"; then
+  RUNTIME_STEP="Set up T3 with: $CARILLON setup, which makes Carillon's own T3 profile and signs it in"
 else
   RUNTIME_STEP="Sign in to a model provider with: $APP/bin/carillon-pi --no-session --no-tools --no-approve
    In Pi, run /login, then /model and press Ctrl+S on the agent's model to save it."

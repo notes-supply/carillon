@@ -131,7 +131,7 @@ async function setup(
     }),
   );
   const runtime = await createPiRuntime({
-    workspace,
+    agents: [{ id: "default", workspace }],
     stateDirectory: state,
     inlineImages: policy,
   });

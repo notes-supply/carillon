@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Type } from "typebox";
 import { Parse } from "typebox/value";
 import { capturedPath } from "@carillon/runtime/attachments";
-import { ModelSelections } from "./model.ts";
+import { ModelSelections } from "@carillon/runtime/selections";
 import { Serial } from "@carillon/runtime/serial";
 import { conversationDirectory } from "./namespace.ts";
 import type { RuntimeOperations, TurnRequest, TurnResponse } from "@carillon/runtime/operations";

@@ -102,8 +102,9 @@ enum Command {
         #[arg(long, value_enum, default_value_t = Runtime::Pi)]
         runtime: Runtime,
     },
-    /// Set up an installation at the terminal: the runtime, then Discord.
-    /// A rerun keeps what is already set up when asked to.
+    /// Set up an installation at the terminal: the runtimes and what runs
+    /// Carillon's assistant, then Discord. A rerun keeps what is already set
+    /// up when asked to.
     Setup {
         /// The agent's folder with Pi (default: your home). With T3, the
         /// chosen project's folder.
@@ -111,9 +112,9 @@ enum Command {
         workspace: Option<PathBuf>,
         #[arg(long, default_value_t = 43_800)]
         base_port: u16,
-        /// The runtime, instead of asking.
+        /// A runtime to use, instead of asking; repeat it for both.
         #[arg(long, value_enum)]
-        runtime: Option<Runtime>,
+        runtime: Vec<Runtime>,
     },
     /// Run the core service with an explicit registry.
     Core {
@@ -256,7 +257,7 @@ pub(crate) async fn run() -> Result<()> {
             &SetupOptions {
                 workspace,
                 base_port,
-                runtime,
+                runtimes: runtime,
             },
             &mut Terminal,
         )?,

@@ -37,6 +37,7 @@ import {
   ContextTransferSchema,
   DelegatedNotificationSchema,
   MessageSchema,
+  NativeSelectionSchema,
   ProviderSessionDetachedSchema,
   ProviderSessionSchema,
   ProviderThreadSchema,
@@ -50,6 +51,7 @@ import {
   type BackgroundTask,
   type ContextTransfer,
   type Message,
+  type NativeSelection,
   type Projection,
   type ProviderSession,
   type ProviderThread,
@@ -126,6 +128,8 @@ export interface TurnWatch {
   sessionShared(): boolean;
   /** Whether the thread has any message yet. */
   empty(): boolean;
+  /** The thread's own model selection, as last seen: the one its next run uses unless a dispatch names another. */
+  selection(): NativeSelection | undefined;
   outcome(): Outcome | undefined;
   /** Nothing of the turn still executes: no active run, no background work, and no report its live process still owes. */
   quiet(): boolean;
@@ -274,6 +278,7 @@ export function watchTurn(
 ): TurnWatch {
   let seen = false;
   let lastSequence: number | undefined;
+  let threadSelection: NativeSelection | undefined;
   /** The turn's run as last seen: its identity, kept through snapshots and reconnections. */
   let anchor: Run | undefined;
   /** Runs from the turn's onward, by ID, with the greatest ordinal tracked. */
@@ -1410,6 +1415,7 @@ export function watchTurn(
           // Nothing of another thread is folded as this turn's.
           if (projection.thread.id !== threadId)
             throw new T3Failure("malformed", "T3 sent the snapshot of another thread");
+          threadSelection = projection.thread.modelSelection;
           for (const run of projection.runs) ofThread(run);
           // A snapshot lists the thread's runs whole: one that omits a run
           // this turn already observed, its own or a follow-up's parent, is
@@ -1613,6 +1619,13 @@ export function watchTurn(
             case "turn-item.updated":
               foldItem(payload);
               break;
+            case "thread.model-selection-updated":
+            case "thread.provider-switched": {
+              const selection = isRecord(payload) ? payload["modelSelection"] : undefined;
+              if (Check(NativeSelectionSchema, selection)) threadSelection = selection;
+              lastSequence = sequence;
+              return;
+            }
             default:
               lastSequence = sequence;
               return;
@@ -1647,6 +1660,7 @@ export function watchTurn(
     busy,
     sessionShared: () => busy() || otherTasks.size > 0,
     empty: () => !hasMessages,
+    selection: () => threadSelection,
     quiet,
     providerSession() {
       if (last?.providerThreadId == null) return undefined;

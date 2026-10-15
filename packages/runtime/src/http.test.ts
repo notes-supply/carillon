@@ -57,7 +57,7 @@ async function serve() {
     provider: "deterministic-local-substitute",
     version: "9.9.9-test",
     features: [],
-    workspace: "/unused",
+    agents: [{ id: "agent", workspace: "/unused" }],
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");

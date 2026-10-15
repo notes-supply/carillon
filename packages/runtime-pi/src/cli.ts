@@ -47,20 +47,22 @@ async function main(values: readonly string[]): Promise<void> {
     return;
   }
   const inlineImages = await loadInlineImages(config.providerFile);
-  if (!(await stat(config.workspace)).isDirectory())
-    throw new Error("workspace must be an existing directory");
-  if (!(await stat(config.resourceRoot)).isDirectory())
-    throw new Error("resource root must be an existing directory");
+  for (const agent of config.agents) {
+    const workspace = await stat(agent.workspace).catch(() => undefined);
+    if (workspace?.isDirectory() !== true)
+      throw new Error(`agent ${agent.id}: workspace must be an existing directory`);
+  }
   const deterministic = args.has("deterministic");
   const stateDirectory = resolve(requiredArgument(args, "state-dir"));
-  const sessionDirectory = join(config.resourceRoot, "sessions");
+  // Sessions of every agent, apart by their conversation's identity.
+  const sessionDirectory = join(config.componentDirectory, "sessions");
   if (!deterministic) registerBunOAuthFlows();
   // The check is the runtime's own startup check: Pi is signed in and its
   // default model is available. Nothing listens.
   if (args.has("check")) {
     try {
       const runtime = await createPiRuntime({
-        workspace: config.workspace,
+        agents: config.agents,
         stateDirectory,
         sessionDirectory,
         allowModelNetwork: true,
@@ -82,7 +84,7 @@ async function main(values: readonly string[]): Promise<void> {
   const runtime = deterministic
     ? await createDeterministicRuntime(stateDirectory, sessionDirectory)
     : await createPiRuntime({
-        workspace: config.workspace,
+        agents: config.agents,
         stateDirectory,
         sessionDirectory,
         allowModelNetwork: true,
@@ -110,7 +112,7 @@ async function main(values: readonly string[]): Promise<void> {
     provider: deterministic ? "deterministic-local-substitute" : "pi",
     version: packageInfo.version,
     features: ["native-continuations", "native-extensions", "skills"],
-    workspace: config.workspace,
+    agents: config.agents,
   });
   try {
     server.listen(listenAddress);

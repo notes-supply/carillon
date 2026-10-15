@@ -217,7 +217,7 @@ fn resolve_message(
         message_id: request.event_id,
         guild_id: request.guild_id.unwrap_or_default(),
         user_id: request.user_id,
-        agent_id: config.agent.clone(),
+        agent_id: route.agent.clone(),
         channel_id: request.channel_id,
         route_channel_id: route.channel_id.clone(),
         content,
@@ -491,6 +491,8 @@ pub struct InteractionSource {
 /// happened in when the agent participates there, and where it came from.
 pub struct AdmittedInteraction {
     pub interaction: Interaction,
+    /// The agent of the route that admitted it.
+    pub agent_id: String,
     pub audience_id: Option<String>,
     pub origin: InteractionOrigin,
 }
@@ -518,7 +520,7 @@ pub fn admit_interaction(
 ) -> Result<AdmittedInteraction, InterfaceError> {
     admit_identity(config, source.guild_id.as_deref(), &source.user_id)?;
     let guild_id = source.guild_id.unwrap_or_default();
-    let (audience_id, route_channel_id) = if let Some(route) = config
+    let (audience_id, route) = if let Some(route) = config
         .routes
         .iter()
         .find(|route| route.channel_id == source.channel_id)
@@ -526,7 +528,7 @@ pub fn admit_interaction(
         (
             (route.conversation == DiscordConversation::Channel)
                 .then(|| format!("discord-{guild_id}-{}", source.channel_id)),
-            route.channel_id.clone(),
+            route,
         )
     } else if let Some(route) = source.parent_channel_id.as_deref().and_then(|parent| {
         config.routes.iter().find(|route| {
@@ -535,7 +537,7 @@ pub fn admit_interaction(
     }) {
         (
             Some(format!("discord-{guild_id}-{}", source.channel_id)),
-            route.channel_id.clone(),
+            route,
         )
     } else {
         return Err(InterfaceError {
@@ -551,12 +553,13 @@ pub fn admit_interaction(
             options: source.options,
             conversation: audience_id.is_some(),
         },
+        agent_id: route.agent.clone(),
         audience_id,
         origin: InteractionOrigin {
             guild_id,
             user_id: source.user_id,
             channel_id: source.channel_id,
-            route_channel_id,
+            route_channel_id: route.channel_id.clone(),
         },
     })
 }

@@ -124,7 +124,7 @@ try {
   await writeFile(tokenFile, token, { mode: 0o600 });
   await writeFile(
     config,
-    `data_dir = "state"\n[core]\noperator_token_hash = "${hash}"\n[agent]\nresource_root = "resources"\nworkspace = ${JSON.stringify(root)}\n[[providers]]\nid = "runtime-pi"\nrole = "runtime"\nversion = "0.0.0"\nurl = "${url}"\ntoken_hash = "${hash}"\nenabled = true\n`,
+    `data_dir = "state"\n[core]\noperator_token_hash = "${hash}"\n[[agents]]\nid = "default"\nname = "Fixture"\nruntime = "runtime-pi"\nworkspace = ${JSON.stringify(root)}\nresources = "resources"\n[[providers]]\nid = "runtime-pi"\nrole = "runtime"\nversion = "0.0.0"\nurl = "${url}"\ntoken_hash = "${hash}"\nenabled = true\n`,
   );
   let logs = "";
   const program = [

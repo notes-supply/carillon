@@ -1,7 +1,7 @@
 # Discord agent access
 
-An optional Pi extension and skill that let the agent read and manage the
-Discord server through Carillon's Discord provider. It is separate from the
+An optional Pi extension and skill that let Carillon's assistant read and
+manage the Discord server through Carillon's Discord provider. It is separate from the
 Wasm module behind slash commands, and importing it starts nothing.
 
 ## Install
@@ -12,8 +12,11 @@ carillon discord tools install
 carillon start
 ```
 
-This copies the release's extension and skill into the agent's resources,
-replacing only `extensions/carillon-discord.js` and `skills/discord/SKILL.md`.
+This copies the release's extension and skill into the resources of every
+agent that has them (the assistant's), replacing only
+`extensions/carillon-discord.js` and `skills/discord/SKILL.md`. Carillon's
+T3 profiles link to those resources, so the assistant on T3 has the skill
+too, at its next session; T3 Code channels and your own sessions never do.
 Core must be stopped while it runs; if it fails, run it again before starting.
 Run it again after an update. Remove the two files to turn it off for new
 turns. The regular installer doesn't enable these tools.
@@ -25,20 +28,17 @@ already has your Unix authority.
 
 ## Other local agents
 
-With the provider running, other harnesses (T3, Claude Code, Codex) can use
-the same operations:
+With the provider running, other harnesses (the assistant on T3, Claude
+Code, Codex) use the same operations through the CLI, as the skill tells
+them:
 
 ```sh
 carillon discord call --help
 carillon discord call messages list --channel-id CHANNEL_ID --limit 20
-carillon discord tools install --workspace /path/to/workspace
 ```
 
-The workspace install writes the skill to `.claude/skills/discord/` and
-`.agents/skills/discord/`. The CLI prints JSON, needs explicit IDs, and reads
-the operator credential itself, so credentials never pass through model
-arguments. If the harness runs as another Unix user, `--invocation 'COMMAND'`
-records a command that user can already run; it changes no permissions.
+The CLI prints JSON, needs explicit IDs, and reads the operator credential
+itself, so credentials never pass through model arguments.
 
 ## What it can do
 

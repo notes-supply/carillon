@@ -731,7 +731,8 @@ pub struct TurnSummary {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StatusReport {
     pub release: String,
-    pub agent_id: String,
+    /// The configured agents' IDs, in registry order.
+    pub agents: Vec<String>,
     pub providers: Vec<Health>,
     pub turns: StateCounts,
     pub deliveries: StateCounts,

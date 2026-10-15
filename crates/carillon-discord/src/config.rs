@@ -11,7 +11,9 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail};
-use carillon_installation::config::{LoadedConfig, ProviderRole, absolutize, component_directory};
+use carillon_installation::config::{
+    LoadedConfig, ProviderRole, absolutize, component_directory, validate_agent_identity,
+};
 use carillon_installation::{filesystem::atomic_write, maintenance::MaintenanceLock};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, watch};
@@ -24,7 +26,6 @@ use crate::module::{Change, ChangeError, Source};
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiscordConfig {
-    pub agent: String,
     pub guild_id: String,
     #[serde(default)]
     pub bot_user_id: String,
@@ -239,6 +240,8 @@ impl AttachmentPolicy {
 #[serde(deny_unknown_fields)]
 pub struct DiscordRoute {
     pub channel_id: String,
+    /// The agent the channel's conversations belong to.
+    pub agent: String,
     pub activation: DiscordActivation,
     pub conversation: DiscordConversation,
 }
@@ -273,11 +276,16 @@ impl FromStr for DiscordRoute {
             Some("channel") => DiscordConversation::Channel,
             _ => bail!("route conversation must be thread or channel"),
         };
-        if fields.next().is_some() || !valid_snowflake(channel_id) {
-            bail!("route must be CHANNEL_ID:mention|always:thread|channel");
+        let agent = fields.next().unwrap_or_default();
+        if fields.next().is_some()
+            || !valid_snowflake(channel_id)
+            || validate_agent_identity(agent).is_err()
+        {
+            bail!("route must be CHANNEL_ID:mention|always:thread|channel:AGENT_ID");
         }
         Ok(Self {
             channel_id: channel_id.to_owned(),
+            agent: agent.to_owned(),
             activation,
             conversation,
         })
@@ -320,14 +328,12 @@ impl DiscordConfig {
     /// deserialization applies.
     #[must_use]
     pub fn with_defaults(
-        agent: String,
         guild_id: String,
         bot_user_id: String,
         allowed_user_ids: Vec<String>,
         routes: Vec<DiscordRoute>,
     ) -> Self {
         Self {
-            agent,
             guild_id,
             bot_user_id,
             bot_token_file: None,
@@ -457,8 +463,11 @@ impl DiscordConfig {
             .validate()
             .context("invalid Discord attachments settings")?;
         config.provider(provider_id, ProviderRole::Interface)?;
-        if self.agent != config.value.agent.id {
-            bail!("Discord interface selects an unknown agent");
+        for route in &self.routes {
+            config
+                .value
+                .agent(&route.agent)
+                .with_context(|| format!("route {} names an unknown agent", route.channel_id))?;
         }
         Ok(())
     }
@@ -480,7 +489,6 @@ impl Difference {
     #[must_use]
     pub fn between(serving: &DiscordConfig, file: &DiscordConfig) -> Self {
         let DiscordConfig {
-            agent,
             guild_id,
             bot_user_id,
             bot_token_file,
@@ -499,7 +507,6 @@ impl Difference {
         } = file;
         let mut difference = Self::default();
         for (changed, field, live) in [
-            (*agent != serving.agent, "agent", false),
             (*guild_id != serving.guild_id, "guild_id", false),
             (*bot_user_id != serving.bot_user_id, "bot_user_id", false),
             (
@@ -719,15 +726,8 @@ pub(crate) fn admitted(
     let mut discord = if config.provider_config_path(provider_id)?.exists() {
         DiscordConfig::read(config, provider_id)?
     } else {
-        DiscordConfig::with_defaults(
-            config.value.agent.id.clone(),
-            String::new(),
-            String::new(),
-            Vec::new(),
-            Vec::new(),
-        )
+        DiscordConfig::with_defaults(String::new(), String::new(), Vec::new(), Vec::new())
     };
-    discord.agent.clone_from(&config.value.agent.id);
     guild_id.clone_into(&mut discord.guild_id);
     bot_user_id.clone_into(&mut discord.bot_user_id);
     discord.allowed_user_ids = allowed_user_ids.to_vec();
@@ -823,23 +823,22 @@ pub(crate) mod tests {
                 attachments: carillon_installation::config::AttachmentLimits::default(),
             },
             providers,
-            agent: AgentConfig {
+            agents: vec![AgentConfig {
                 id: "default".to_owned(),
                 name: "Test agent".to_owned(),
-                resource_root: resources,
+                runtime: "test-runtime".to_owned(),
                 workspace: root.join("workspace"),
-                runtime_provider: "test-runtime".to_owned(),
-            },
+                resources: Some(resources),
+            }],
         };
         let path = root.join("carillon.toml");
         fs::write(&path, toml::to_string(&value)?)?;
         let config = LoadedConfig::load(&path)?;
         DiscordConfig::with_defaults(
-            "default".to_owned(),
             "100".to_owned(),
             "101".to_owned(),
             vec!["200".to_owned()],
-            vec!["300:always:channel".parse()?],
+            vec!["300:always:channel:default".parse()?],
         )
         .write(&config, interface_id)?;
         Ok(config)
@@ -849,7 +848,6 @@ pub(crate) mod tests {
     fn discord_feedback_defaults_leave_admission_unconfigured() -> anyhow::Result<()> {
         let config: DiscordConfig = toml::from_str(
             r#"
-agent = "default"
 guild_id = "100"
 allowed_user_ids = ["200"]
 "#,
@@ -1077,7 +1075,7 @@ stopped = "■"
             "110",
             "111",
             &["210".to_owned()],
-            &["310:mention:thread".parse()?],
+            &["310:mention:thread:default".parse()?],
         )?;
         let reloaded = DiscordConfig::load(&config, "discord-private")?;
         assert_eq!(reloaded.guild_id, "110");
@@ -1107,7 +1105,7 @@ stopped = "■"
                 "110",
                 "111",
                 &["210".to_owned()],
-                &["310:mention:thread".parse()?],
+                &["310:mention:thread:default".parse()?],
             )
             .is_err()
         );
@@ -1118,7 +1116,7 @@ stopped = "■"
                 "110",
                 "111",
                 &["210".to_owned()],
-                &["310:mention:thread".parse()?],
+                &["310:mention:thread:default".parse()?],
             )
             .is_err()
         );
@@ -1201,12 +1199,16 @@ stopped = "■"
 
     #[test]
     fn route_requires_all_explicit_fields() -> anyhow::Result<()> {
-        let route = DiscordRoute::from_str("300:mention:thread")?;
+        let route = DiscordRoute::from_str("300:mention:thread:assistant")?;
         assert_eq!(route.channel_id, "300");
+        assert_eq!(route.agent, "assistant");
         assert_eq!(route.activation, DiscordActivation::Mention);
         assert_eq!(route.conversation, DiscordConversation::Thread);
+        assert!(DiscordRoute::from_str("300:mention:thread").is_err());
         assert!(DiscordRoute::from_str("300:mention").is_err());
-        assert!(DiscordRoute::from_str("300:free:thread").is_err());
+        assert!(DiscordRoute::from_str("300:free:thread:assistant").is_err());
+        assert!(DiscordRoute::from_str("300:mention:thread:not/an/agent").is_err());
+        assert!(DiscordRoute::from_str("300:mention:thread:assistant:more").is_err());
         Ok(())
     }
 

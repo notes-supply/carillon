@@ -10,11 +10,13 @@ import {
   requiredArgument,
   type Installation,
 } from "@carillon/runtime/installation";
-import { createT3Runtime } from "./runtime.ts";
+import { ModelSelections } from "@carillon/runtime/selections";
+import { createT3Runtime, type T3Agent } from "./runtime.ts";
 import packageInfo from "../package.json" with { type: "json" };
+import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { text } from "node:stream/consumers";
-import { configure, discover } from "./setup.ts";
+import { configure, discover, HARNESSES, profile, type Harness } from "./setup.ts";
 import { loadSettings, origin, type T3Settings } from "./settings.ts";
 import { connectT3, T3Failure, type T3Endpoint } from "./t3.ts";
 
@@ -36,15 +38,18 @@ async function serve(values: readonly string[]): Promise<void> {
     requiredArgument(args, "token-file"),
     installation.runtime,
   );
-  const { settings, endpoint } = await saved(installation);
+  const { settings, endpoint, agents } = await saved(installation);
   // Fail closed before listening: the server must speak the verified
   // protocol and accept the credential, or this runtime does not start.
   (await connectT3(endpoint)).close();
+  await mkdir(installation.componentDirectory, { recursive: true, mode: 0o700 });
   const runtime = createT3Runtime({
     endpoint,
-    projectId: settings.projectId,
-    selection: settings.selection,
-    workspace: installation.workspace,
+    agents,
+    profiles: settings.profiles,
+    selections: await ModelSelections.open(
+      join(installation.componentDirectory, "model-selection.json"),
+    ),
     title: settings.title,
   });
   const server = createRuntimeServer({
@@ -54,13 +59,13 @@ async function serve(values: readonly string[]): Promise<void> {
     provider: "t3",
     version: packageInfo.version,
     features: ["native-continuations"],
-    workspace: installation.workspace,
+    agents: installation.agents,
   });
   try {
     server.listen(listenAddress);
     await once(server, "listening");
     process.stdout.write(
-      `runtime-t3 ready at ${installation.runtime.url}, executing on ${settings.url} project ${settings.projectId} as ${settings.selection.instanceId}/${settings.selection.model}\n`,
+      `runtime-t3 ready at ${installation.runtime.url}, executing on ${settings.url} for ${[...agents.keys()].join(", ") || "no agent"}\n`,
     );
     await new Promise<void>((done) => {
       const stop = () => {
@@ -80,33 +85,56 @@ async function serve(values: readonly string[]): Promise<void> {
 }
 
 /**
- * The saved settings and the T3 endpoint they name, as startup reads them
- * before reaching T3, for an agent whose workspace is an existing directory.
+ * The saved settings, the T3 endpoint they name and the agents as the
+ * runtime runs them, as startup reads them before reaching T3. Every agent
+ * of this runtime in `carillon.toml` works in an existing directory and has
+ * settings here, which name no other agent.
  */
-async function saved(
-  installation: Installation,
-): Promise<{ settings: T3Settings; endpoint: T3Endpoint }> {
-  const workspace = await stat(installation.workspace).then(
-    (entry) => entry.isDirectory(),
-    () => false,
-  );
-  if (!workspace)
-    throw new Error(
-      `${installation.workspace}: the agent's workspace must be an existing directory`,
-    );
+async function saved(installation: Installation): Promise<{
+  settings: T3Settings;
+  endpoint: T3Endpoint;
+  agents: ReadonlyMap<string, T3Agent>;
+}> {
   const settings = await loadSettings(installation.providerFile, installation.root);
+  const agents = new Map<string, T3Agent>();
+  for (const agent of installation.agents) {
+    const workspace = await stat(agent.workspace).then(
+      (entry) => entry.isDirectory(),
+      () => false,
+    );
+    if (!workspace)
+      throw new Error(
+        `${agent.workspace}: ${agent.name}'s workspace must be an existing directory`,
+      );
+    const configured = settings.agents.get(agent.id);
+    if (configured === undefined)
+      throw new Error(
+        `${installation.providerFile}: ${agent.id} has no T3 settings; set its project and model with \`carillon runtime-t3 configure --agent ${agent.id}\``,
+      );
+    agents.set(agent.id, { ...configured, workspace: agent.workspace });
+  }
+  for (const id of settings.agents.keys())
+    if (!agents.has(id))
+      throw new Error(
+        `${installation.providerFile}: /agents/${id} is not an agent of ${installation.runtime.id} in carillon.toml`,
+      );
   const token = (await readFile(settings.tokenFile, "utf8")).trim();
   if (token.length === 0) throw new Error(`${settings.tokenFile}: the T3 token file is empty`);
-  return { settings, endpoint: { url: settings.url, token } };
+  return { settings, endpoint: { url: settings.url, token }, agents };
 }
 
 /** The T3 token, given on standard input rather than as an argument. */
 async function token(): Promise<string> {
-  if (process.stdin.isTTY)
-    throw new Error("give the T3 token on standard input, for example `< t3.token`");
-  const value = (await text(process.stdin)).trim();
+  const value = (await input()).trim();
   if (value.length === 0) throw new Error("the T3 token on standard input is empty");
   return value;
+}
+
+/** Standard input, which carries secrets: never a terminal's. */
+async function input(): Promise<string> {
+  if (process.stdin.isTTY)
+    throw new Error("give the T3 token on standard input, for example `< t3.token`");
+  return text(process.stdin);
 }
 
 function originArgument(args: ReadonlyMap<string, string>): string {
@@ -118,24 +146,102 @@ function originArgument(args: ReadonlyMap<string, string>): string {
   return url;
 }
 
-/** `discover --url URL`: the server's projects and models, as JSON. */
+/**
+ * `discover --url URL [--refresh INSTANCE,…]`: the server's projects and
+ * models, as JSON, once T3 has checked the `--refresh` instances again.
+ */
 async function discoverCommand(values: readonly string[]): Promise<void> {
   const args = parseArguments(values);
-  const offer = await discover({ url: originArgument(args), token: await token() });
+  const refresh =
+    args
+      .get("refresh")
+      ?.split(",")
+      .filter((id) => id.length > 0) ?? [];
+  const offer = await discover(
+    { url: originArgument(args), token: await token() },
+    undefined,
+    refresh,
+  );
   process.stdout.write(`${JSON.stringify(offer)}\n`);
 }
 
 /**
- * `configure --url URL --project ID --model INSTANCE/MODEL`: the runtime's
- * files for the installation `--config` names, or `CARILLON_HOME`'s.
+ * `configure --url URL --agent ID --project ID --model INSTANCE/MODEL
+ * [--assistant]`: an agent's settings, for the installation `--config`
+ * names, or `CARILLON_HOME`'s.
  */
 async function configureCommand(values: readonly string[]): Promise<void> {
-  const args = parseArguments(values);
+  const args = parseArguments(values, ["assistant"]);
   const url = originArgument(args);
   const [instanceId = "", ...slug] = requiredArgument(args, "model").split("/");
   const model = slug.join("/");
   if (instanceId.length === 0 || model.length === 0)
     throw new Error("--model must be INSTANCE/MODEL, as T3 names them");
+  const { providerId, installation } = await serving(args);
+  const agentId = requiredArgument(args, "agent");
+  const project = await configure(
+    installation,
+    { url, token: await token() },
+    {
+      agentId,
+      projectId: requiredArgument(args, "project"),
+      instanceId,
+      model,
+      assistant: args.has("assistant"),
+    },
+  );
+  // The runtime reads its settings only when it starts.
+  process.stdout.write(
+    `Saved ${providerId}'s settings for ${agentId}: project ${project.title} (${project.workspace}) on ${url}, with ${instanceId}/${model}. It reads them when it starts, so a running Carillon needs \`carillon restart\`.\n`,
+  );
+}
+
+/**
+ * `profile --url URL --agent ID --harness claude|codex [--instance ID]
+ * [--home PATH] [--with-key [--endpoint URL]]`: a Carillon profile in T3
+ * sharing the agent's resources, printed as JSON. With `--with-key`, a second
+ * line of standard input is the harness's API key, for its own service or
+ * the compatible `--endpoint`.
+ */
+async function profileCommand(values: readonly string[]): Promise<void> {
+  const args = parseArguments(values, ["with-key"]);
+  const url = originArgument(args);
+  const harness = requiredArgument(args, "harness");
+  if (!isHarness(harness))
+    throw new Error(`--harness must be one of ${Object.keys(HARNESSES).join(", ")}`);
+  const { installation } = await serving(args);
+  const [secret = "", key] = (await input()).split("\n").map((line) => line.trim());
+  if (secret.length === 0) throw new Error("the T3 token on standard input is empty");
+  if (args.has("with-key") && (key === undefined || key.length === 0))
+    throw new Error("--with-key needs the API key on the second line of standard input");
+  const instance = args.get("instance");
+  const home = args.get("home");
+  const endpoint = args.get("endpoint");
+  if (endpoint !== undefined && !args.has("with-key"))
+    throw new Error("--endpoint is for a key: give --with-key too");
+  const made = await profile(
+    installation,
+    { url, token: secret },
+    {
+      harness,
+      agentId: requiredArgument(args, "agent"),
+      ...(instance === undefined ? {} : { instanceId: instance }),
+      ...(home === undefined ? {} : { home }),
+      ...(args.has("with-key") && key !== undefined ? { key } : {}),
+      ...(endpoint === undefined ? {} : { endpoint }),
+    },
+  );
+  process.stdout.write(`${JSON.stringify(made)}\n`);
+}
+
+function isHarness(value: string): value is Harness {
+  return Object.hasOwn(HARNESSES, value);
+}
+
+/** The runtime `--provider` names, as the installation registers it and serving. */
+async function serving(
+  args: ReadonlyMap<string, string>,
+): Promise<{ providerId: string; installation: Installation }> {
   const { providerId, installation } = await registered(args);
   if (installation === "unregistered")
     throw new Error(
@@ -143,15 +249,7 @@ async function configureCommand(values: readonly string[]): Promise<void> {
     );
   if (installation === "disabled")
     throw new Error(`${providerId} is disabled in carillon.toml; enable it first`);
-  const project = await configure(
-    installation,
-    { url, token: await token() },
-    { projectId: requiredArgument(args, "project"), instanceId, model },
-  );
-  // The runtime reads its settings only when it starts.
-  process.stdout.write(
-    `Saved ${providerId}'s settings: project ${project.title} (${project.workspace}) on ${url}, with ${instanceId}/${model}. It reads them when it starts, so a running Carillon needs \`carillon restart\`.\n`,
-  );
+  return { providerId, installation };
 }
 
 /**
@@ -191,9 +289,19 @@ function explained(failure: unknown): string {
   return failure instanceof Error ? failure.message : String(failure);
 }
 
-const commands = { discover: discoverCommand, configure: configureCommand, check: checkCommand };
+const commands = {
+  discover: discoverCommand,
+  configure: configureCommand,
+  profile: profileCommand,
+  check: checkCommand,
+};
 const [command, ...rest] = process.argv.slice(2);
-if (command === "discover" || command === "configure" || command === "check") {
+if (
+  command === "discover" ||
+  command === "configure" ||
+  command === "profile" ||
+  command === "check"
+) {
   try {
     await commands[command](rest);
   } catch (failure) {

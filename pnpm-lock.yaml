@@ -154,6 +154,9 @@ importers:
       image-size:
         specifier: 2.0.4
         version: 2.0.4
+      proper-lockfile:
+        specifier: 4.1.2
+        version: 4.1.2
       smol-toml:
         specifier: 1.6.0
         version: 1.6.0
@@ -175,9 +178,6 @@ importers:
       '@earendil-works/pi-coding-agent':
         specifier: 1.0.0
         version: 1.0.0(@aws-sdk/credential-provider-node@3.972.83)(@smithy/signature-v4@5.7.3)(ws@8.21.3)
-      proper-lockfile:
-        specifier: 4.1.2
-        version: 4.1.2
       smol-toml:
         specifier: 1.6.0
         version: 1.6.0

@@ -251,7 +251,10 @@ fn only_runtime_availability_and_concurrency_apply_live() -> Result<()> {
     file.providers[1].url = "http://127.0.0.1:9".to_owned();
     file.providers[1].token_hash = "0".repeat(64);
     file.core.listen.set_port(9);
-    file.agent.runtime_provider = "elsewhere".to_owned();
+    file.agents[0].runtime = "elsewhere".to_owned();
+    let mut added = file.agents[0].clone();
+    "added-agent".clone_into(&mut added.id);
+    file.agents.push(added);
     let mut extra = file.providers[1].clone();
     "another".clone_into(&mut extra.id);
     file.providers.push(extra);
@@ -260,7 +263,8 @@ fn only_runtime_availability_and_concurrency_apply_live() -> Result<()> {
         difference.restart,
         [
             "core.listen",
-            "agent.runtime_provider",
+            "agents.added-agent (added)",
+            "agents.test-agent",
             "providers.another (added)",
             "providers.test-interface.enabled",
             "providers.test-runtime.url",

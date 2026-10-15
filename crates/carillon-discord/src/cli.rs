@@ -103,7 +103,7 @@ enum Command {
         #[arg(long)]
         provider: Option<String>,
     },
-    /// Install Discord tools for Pi or a skill for Claude Code and Codex.
+    /// Install the Discord tools and skill into the agents' resources.
     Tools {
         #[command(subcommand)]
         action: ToolsAction,
@@ -160,15 +160,9 @@ module serving then.")]
 
 #[derive(Debug, Subcommand)]
 enum ToolsAction {
-    /// Install Pi tools, or only the common skill in a native T3 workspace.
-    Install {
-        /// Install the skill for Claude Code and Codex in this workspace, without Pi tools.
-        #[arg(long, value_name = "PATH")]
-        workspace: Option<PathBuf>,
-        /// Operator-provided invocation to use instead of `carillon discord call`.
-        #[arg(long, requires = "workspace", value_name = "COMMAND")]
-        invocation: Option<String>,
-    },
+    /// Install the Pi tools and the skill into every agent's resources,
+    /// which Carillon's T3 profiles share.
+    Install,
 }
 
 #[derive(Debug, Subcommand)]
@@ -264,19 +258,8 @@ pub(crate) async fn run() -> Result<()> {
             check_declared(&loaded, &provider, &discord, &release()?).await?;
         }
         Command::Tools {
-            action:
-                ToolsAction::Install {
-                    workspace,
-                    invocation,
-                },
-        } => {
-            let lib = release_library()?;
-            if let Some(workspace) = workspace {
-                install_workspace_skill(&workspace, &lib, invocation.as_deref())?;
-            } else {
-                install_tools(&installation()?, &lib)?;
-            }
-        }
+            action: ToolsAction::Install,
+        } => install_tools(&installation()?, &release_library()?)?,
         Command::Call {
             provider,
             operation,
@@ -427,34 +410,6 @@ fn release() -> Result<PathBuf> {
         .context("cannot locate this program's release")
 }
 
-/// Native harnesses own these resource directories and when changes are loaded.
-fn install_workspace_skill(workspace: &Path, lib: &Path, invocation: Option<&str>) -> Result<()> {
-    use carillon_installation::filesystem::{publish, sync_ancestors};
-    // Syncing reaches every ancestor, which a relative path does not name.
-    let workspace = &std::path::absolute(workspace)?;
-    if !workspace.is_dir() {
-        bail!("workspace must be an existing directory");
-    }
-    let mut skill = fs::read_to_string(lib.join("carillon-discord-SKILL.md"))?;
-    if let Some(invocation) = invocation {
-        skill
-            .push_str("\n## Local installation\n\nThe operator-provided invocation is:\n\n```sh\n");
-        skill.push_str(invocation);
-        skill.push_str("\n```\n\nUse it in place of `carillon discord call` in the examples and help commands. This does not grant additional OS authority.\n");
-    }
-    for root in [".claude", ".agents"] {
-        let directory = workspace.join(root).join("skills/discord");
-        fs::create_dir_all(&directory)?;
-        sync_ancestors(&directory)?;
-        publish(&directory.join("SKILL.md"), skill.as_bytes(), 0o644)?;
-    }
-    println!(
-        "Installed Discord skill for Claude Code and Codex in {}",
-        workspace.display()
-    );
-    Ok(())
-}
-
 /// Copy the release's tools and skill from `lib` into the agent resources,
 /// with core stopped: core captures resources as it accepts turns, so it
 /// must not see one file without the other.
@@ -474,24 +429,39 @@ fn install_tools(config: &LoadedConfig, lib: &Path) -> Result<()> {
     let extension = fs::read(lib.join("carillon-discord-pi.js"))
         .context("release has no bundled Discord Pi tools; use a packaged installation")?;
     let skill = fs::read(lib.join("carillon-discord-SKILL.md"))?;
-    let root = &config.value.agent.resource_root;
-    let extensions = root.join("extensions");
-    let skills = root.join("skills/discord");
-    (|| -> Result<()> {
-        fs::create_dir_all(&extensions)?;
-        fs::create_dir_all(&skills)?;
-        sync_ancestors(&extensions)?;
-        sync_ancestors(&skills)?;
-        publish(&extensions.join("carillon-discord.js"), &extension, 0o600)?;
-        publish(&skills.join("SKILL.md"), &skill, 0o600)?;
-        Ok(())
-    })()
-    .context(
-        "the Discord tools may be partly installed: run `carillon discord tools install` again until it succeeds before starting Carillon core",
-    )?;
+    let mut roots: Vec<&Path> = Vec::new();
+    for root in config
+        .value
+        .agents
+        .iter()
+        .filter_map(|agent| agent.resources.as_deref())
+    {
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    if roots.is_empty() {
+        bail!("no agent has Carillon resources to install the Discord tools into");
+    }
+    for root in &roots {
+        let extensions = root.join("extensions");
+        let skills = root.join("skills/discord");
+        (|| -> Result<()> {
+            fs::create_dir_all(&extensions)?;
+            fs::create_dir_all(&skills)?;
+            sync_ancestors(&extensions)?;
+            sync_ancestors(&skills)?;
+            publish(&extensions.join("carillon-discord.js"), &extension, 0o600)?;
+            publish(&skills.join("SKILL.md"), &skill, 0o600)?;
+            Ok(())
+        })()
+        .context(
+            "the Discord tools may be partly installed: run `carillon discord tools install` again until it succeeds before starting Carillon core",
+        )?;
+        println!("Installed Discord tools and skill in {}.", root.display());
+    }
     println!(
-        "Installed Discord tools and skill in {}. Start Carillon core (`carillon start`) to serve them: turns it accepts from then on capture them, and turns already accepted keep their resources.",
-        root.display()
+        "Start Carillon core (`carillon start`) to serve them: turns it accepts from then on capture them, and turns already accepted keep their resources. Carillon's T3 profiles share the skill at once."
     );
     Ok(())
 }
@@ -1001,11 +971,10 @@ fn print_settings(provider: &str, status: &config::Status) {
     let config::Status { serving, file } = status;
     let on = |enabled: bool| if enabled { "on" } else { "off" };
     println!(
-        "{provider} serves guild {} as bot {} for agent {}: {} allowed users, {} routes; \
+        "{provider} serves guild {} as bot {}: {} allowed users, {} routes; \
          typing {}, reactions {}, activity cards {}.",
         serving.guild_id,
         serving.bot_user_id,
-        serving.agent,
         serving.allowed_user_ids.len(),
         serving.routes.len(),
         on(serving.typing),
@@ -1095,7 +1064,7 @@ mod tests {
         maintenance::ServiceLock,
     };
 
-    use super::{Cli, Command, call, install_tools, install_workspace_skill, instance, uploads};
+    use super::{Cli, Command, call, install_tools, instance, uploads};
     use crate::operations::{Messages, Operation};
     use axum::{
         Router,
@@ -1572,58 +1541,12 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn workspace_install_uses_both_native_skill_locations_without_touching_other_resources()
-    -> Result<()> {
-        let directory = tempfile::tempdir()?;
-        let (config, lib) = tools_fixture(directory.path())?;
-        let workspace = directory.path().join("workspace");
-        fs::create_dir(&workspace)?;
-        let personal = workspace.join("CLAUDE.md");
-        fs::write(&personal, "personal instructions")?;
-        // Native workspace skills do not participate in Pi's resource capture.
-        let _serving = ServiceLock::acquire(&config.value.data_dir)?;
-        install_workspace_skill(&workspace, &lib, Some("owner-cli discord call"))?;
-        for root in [".claude", ".agents"] {
-            let installed =
-                fs::read_to_string(workspace.join(root).join("skills/discord/SKILL.md"))?;
-            assert!(installed.starts_with("Discord skill\n"));
-            assert!(installed.contains("owner-cli discord call"));
-        }
-        assert_eq!(fs::read_to_string(personal)?, "personal instructions");
-        assert!(!workspace.join("extensions").exists());
-        install_workspace_skill(&workspace, &lib, None)?;
-        assert_eq!(
-            fs::read_to_string(workspace.join(".agents/skills/discord/SKILL.md"))?,
-            "Discord skill\n"
-        );
-        assert!(install_workspace_skill(&workspace.join("missing"), &lib, None).is_err());
-        assert!(!workspace.join("missing").exists());
-        // A workspace named relative to the current directory, as people type it.
-        let relative = std::env::current_dir()?
-            .components()
-            .skip(1)
-            .map(|_| Path::new(".."))
-            .collect::<std::path::PathBuf>()
-            .join(workspace.strip_prefix("/")?);
-        assert!(relative.is_relative());
-        fs::remove_dir_all(workspace.join(".claude"))?;
-        install_workspace_skill(&relative, &lib, None)?;
-        assert_eq!(
-            fs::read_to_string(workspace.join(".claude/skills/discord/SKILL.md"))?,
-            "Discord skill\n"
-        );
-        assert!(
-            Cli::try_parse_from([
-                "carillon-discord",
-                "tools",
-                "install",
-                "--invocation",
-                "owner-cli"
-            ])
-            .is_err()
-        );
-        Ok(())
+    /// The test agent's resources.
+    fn test_resources(config: &LoadedConfig) -> Result<std::path::PathBuf> {
+        config.value.agents[0]
+            .resources
+            .clone()
+            .context("the test agent has resources")
     }
 
     /// An installation whose agent resources already hold a file of the
@@ -1641,7 +1564,7 @@ mod tests {
             "export default function tools() {}\n",
         )?;
         fs::write(lib.join("carillon-discord-SKILL.md"), "Discord skill\n")?;
-        let extensions = config.value.agent.resource_root.join("extensions");
+        let extensions = test_resources(&config)?.join("extensions");
         fs::create_dir_all(&extensions)?;
         fs::write(extensions.join("custom.js"), "the owner's own")?;
         Ok((config, lib))
@@ -1651,7 +1574,7 @@ mod tests {
     fn tools_install_refuses_while_core_serves() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let (config, lib) = tools_fixture(directory.path())?;
-        let resources = &config.value.agent.resource_root;
+        let resources = &test_resources(&config)?;
         // Core holds its lock while it serves.
         let serving = ServiceLock::acquire(&config.value.data_dir)?;
         let refused = install_tools(&config, &lib)
@@ -1671,7 +1594,7 @@ mod tests {
     fn tools_install_keeps_core_from_starting_until_both_files_are_in_place() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let (config, lib) = tools_fixture(directory.path())?;
-        let resources = &config.value.agent.resource_root;
+        let resources = &test_resources(&config)?;
         // The release skill is a FIFO, so the install waits while reading it.
         let skill = lib.join("carillon-discord-SKILL.md");
         fs::remove_file(&skill)?;
@@ -1711,7 +1634,7 @@ mod tests {
     fn a_failed_tools_install_says_it_may_be_partial_and_a_retry_completes_it() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let (config, lib) = tools_fixture(directory.path())?;
-        let resources = &config.value.agent.resource_root;
+        let resources = &test_resources(&config)?;
         // The skill cannot be written, so only the extension can change.
         let skills = resources.join("skills/discord");
         fs::create_dir_all(&skills)?;

@@ -75,7 +75,7 @@ for command in sed mv sync systemctl; do ln -s command "$COMMANDS/$command"; don
 
 install_release() {
   "$RELEASE/install.sh" --guild-id 100 --bot-user-id 201 --user-id 200 \
-    --route 300:always:channel --workspace "$HOME/workspace" \
+    --route 300:always:channel:assistant --workspace "$HOME/workspace" \
     --base-port "${CARILLON_TEST_BASE_PORT:-44800}" >"$TEST_ROOT/install.log" 2>&1
 }
 

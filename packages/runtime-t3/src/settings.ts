@@ -6,30 +6,50 @@ import { Check, Errors } from "typebox/value";
 import { parse as parseToml, TomlError } from "smol-toml";
 import type { NativeSelection } from "./contracts.ts";
 
+const SelectionSchema = Type.Object(
+  {
+    instance_id: Type.String({ minLength: 1 }),
+    model: Type.String({ minLength: 1 }),
+    /** Option values by ID: a select choice's ID, or a boolean. */
+    options: Type.Optional(
+      Type.Record(
+        Type.String({ minLength: 1 }),
+        Type.Union([Type.String({ minLength: 1 }), Type.Boolean()]),
+      ),
+    ),
+  },
+  { additionalProperties: false },
+);
+
+const AgentSettingsSchema = Type.Object(
+  {
+    /** The T3 project the agent works in, rooted at its workspace. */
+    project_id: Type.String({ minLength: 1 }),
+    /**
+     * Carillon's assistant: it runs on the profile instances alone, and its
+     * turns carry where the person wrote them. Any other agent is plain T3
+     * Code, on every other instance, given the person's text as written.
+     */
+    assistant: Type.Optional(Type.Boolean()),
+    /** The selection a new conversation thread starts with, as T3 names it. */
+    model: SelectionSchema,
+  },
+  { additionalProperties: false },
+);
+
 const SettingsSchema = Type.Object(
   {
     /** The T3 server's HTTP origin, checked by {@link origin}. */
     url: Type.String({ minLength: 1 }),
     /** A file holding a bearer token T3 issued, relative to the installation. */
     token_file: Type.String({ minLength: 1 }),
-    /** The T3 project whose workspace is the agent's workspace. */
-    project_id: Type.String({ minLength: 1 }),
-    /** Prefix of the T3 thread titles this runtime opens. */
+    /** Prefix of the titles of the assistant's T3 threads. */
     title: Type.Optional(Type.String({ minLength: 1, maxLength: 60 })),
-    /** The native selection a new conversation thread starts with, as T3 names it. */
-    model: Type.Object(
-      {
-        instance_id: Type.String({ minLength: 1 }),
-        model: Type.String({ minLength: 1 }),
-        /** Option values by ID: a select choice's ID, or a boolean. */
-        options: Type.Optional(
-          Type.Record(
-            Type.String({ minLength: 1 }),
-            Type.Union([Type.String({ minLength: 1 }), Type.Boolean()]),
-          ),
-        ),
-      },
-      { additionalProperties: false },
+    /** Carillon's own T3 instances, whose homes hold its profile. */
+    profiles: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { uniqueItems: true })),
+    /** Each agent of this runtime, by its ID in `carillon.toml`. */
+    agents: Type.Optional(
+      Type.Record(Type.String({ pattern: "^[A-Za-z0-9_-]{1,128}$" }), AgentSettingsSchema),
     ),
   },
   { additionalProperties: false },
@@ -37,13 +57,22 @@ const SettingsSchema = Type.Object(
 
 /** The settings file as written, its URL an origin. */
 export type SettingsFile = Static<typeof SettingsSchema>;
+export type AgentSettingsFile = Static<typeof AgentSettingsSchema>;
+
+/** An agent as the runtime runs it. */
+export interface AgentSettings {
+  readonly projectId: string;
+  readonly assistant: boolean;
+  /** The agent default from the settings: what new threads start with until `/model` changes it. */
+  readonly selection: NativeSelection;
+}
 
 export interface T3Settings {
   readonly url: string;
   readonly tokenFile: string;
-  readonly projectId: string;
   readonly title: string;
-  readonly selection: NativeSelection;
+  readonly profiles: ReadonlySet<string>;
+  readonly agents: ReadonlyMap<string, AgentSettings>;
 }
 
 export async function loadSettings(path: string, root: string): Promise<T3Settings> {
@@ -52,14 +81,39 @@ export async function loadSettings(path: string, root: string): Promise<T3Settin
   return {
     url: settings.url,
     tokenFile: resolve(root, settings.token_file),
-    projectId: settings.project_id,
     title: settings.title ?? "Carillon",
-    selection: {
-      instanceId: settings.model.instance_id,
-      model: settings.model.model,
-      options: Object.entries(settings.model.options ?? {}).map(([id, value]) => ({ id, value })),
-    },
+    profiles: new Set(settings.profiles ?? []),
+    agents: new Map(
+      Object.entries(settings.agents ?? {}).map(([id, agent]) => [
+        id,
+        {
+          projectId: agent.project_id,
+          assistant: agent.assistant === true,
+          selection: nativeSelection(agent.model),
+        },
+      ]),
+    ),
   };
+}
+
+function nativeSelection(selection: AgentSettingsFile["model"]): NativeSelection {
+  return {
+    instanceId: selection.instance_id,
+    model: selection.model,
+    options: Object.entries(selection.options ?? {}).map(([id, value]) => ({ id, value })),
+  };
+}
+
+/**
+ * Whether `instanceId` is one the agent runs on: Carillon's profiles for its
+ * assistant, every other instance for plain T3 Code.
+ */
+export function offers(
+  profiles: ReadonlySet<string>,
+  agent: { readonly assistant: boolean },
+  instanceId: string,
+): boolean {
+  return profiles.has(instanceId) === agent.assistant;
 }
 
 /** The settings file at `path`, checked strictly, or undefined when there is none. */
@@ -100,6 +154,18 @@ export function parseSettings(path: string, text: string): SettingsFile {
     throw new Error(
       `${path}: /url must be an HTTP or HTTPS origin, without credentials, a path, a query or a fragment`,
     );
+  const profiles = new Set(settings.profiles ?? []);
+  for (const [id, agent] of Object.entries(settings.agents ?? {})) {
+    const assistant = agent.assistant === true;
+    if (assistant && profiles.size === 0)
+      throw new Error(`${path}: /agents/${id} is the assistant, which runs on /profiles: name one`);
+    if (!offers(profiles, { assistant }, agent.model.instance_id))
+      throw new Error(
+        assistant
+          ? `${path}: /agents/${id}/model must be on one of /profiles`
+          : `${path}: /agents/${id}/model must not be on one of /profiles, which are the assistant's`,
+      );
+  }
   return { ...settings, url };
 }
 

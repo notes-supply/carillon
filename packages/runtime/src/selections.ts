@@ -1,7 +1,7 @@
 // Model selection: what the runtime offers, what each scope has chosen, and
-// the ledger that keeps those choices. The runtime default is Pi's own
-// setting; the agent default and conversation overrides are Carillon's, kept
-// beside Pi's private state and resolved when a turn starts.
+// the ledger that keeps those choices. The runtime default is the runtime's
+// own setting; the agent default and conversation overrides are Carillon's,
+// kept beside the runtime's private state and resolved when a turn starts.
 
 import { open, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
@@ -18,9 +18,9 @@ import {
   type ScopeState,
 } from "@carillon/protocol";
 import { Parse } from "typebox/value";
-import { ExplainedFailure } from "@carillon/runtime/failure";
-import { resolved, validated } from "@carillon/runtime/models";
-import { Serial } from "@carillon/runtime/serial";
+import { ExplainedFailure } from "./failure.ts";
+import { resolved, validated } from "./models.ts";
+import { Serial } from "./serial.ts";
 
 const LedgerSchema = Type.Object({
   agents: Type.Array(Type.Object({ agent_id: Type.String(), selection: SelectionSchema })),

@@ -18,12 +18,12 @@ use std::sync::{
 
 fn config() -> DiscordConfig {
     DiscordConfig::with_defaults(
-        "agent".into(),
         "1".into(),
         "9".into(),
         vec!["2".into()],
         vec![DiscordRoute {
             channel_id: "100".into(),
+            agent: "agent".into(),
             activation: DiscordActivation::Mention,
             conversation: DiscordConversation::Thread,
         }],

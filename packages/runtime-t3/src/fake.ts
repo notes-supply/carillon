@@ -112,6 +112,8 @@ export interface FakeT3 {
   protocolVersion: number;
   /** The provider instances `server.getConfig` and `server.refreshProviders` list, as T3 describes them. */
   providers: unknown[];
+  /** The provider instances T3's settings hold, by ID, as `server.getSettings` lists them. */
+  readonly instances: Map<string, unknown>;
   /** The projects T3's authenticated shell snapshot lists. */
   projects: { id: string; title: string; workspaceRoot: string }[];
   /** Processes the command, then drops the socket before answering. */
@@ -233,7 +235,7 @@ const BACKGROUND_ITEMS: ReadonlySet<string> = new Set([
 ]);
 const RUNNING_ITEMS: ReadonlySet<string> = new Set(["pending", "running", "waiting"]);
 
-/** A catalogue shaped like the serving build's: one usable instance and one disabled. */
+/** A catalogue shaped like the serving build's: two usable instances and one disabled. */
 export const FAKE_PROVIDERS: readonly unknown[] = [
   {
     instanceId: "claudeAgent",
@@ -263,6 +265,14 @@ export const FAKE_PROVIDERS: readonly unknown[] = [
       },
       { slug: "claude-haiku-4-5", name: "Claude Haiku 4.5", isCustom: false, capabilities: null },
     ],
+  },
+  {
+    instanceId: "codex",
+    driver: "codex",
+    enabled: true,
+    installed: true,
+    status: "ready",
+    models: [{ slug: "gpt-6-astra", name: "GPT-6 Astra", isCustom: false, capabilities: null }],
   },
   {
     instanceId: "cursor",
@@ -410,6 +420,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
     uploadRedirect: undefined,
     protocolVersion: ORCHESTRATION_PROTOCOL,
     providers: [...FAKE_PROVIDERS],
+    instances: new Map(),
     projects: [{ id: "project-1", title: "Project", workspaceRoot: "/" }],
     dropAnswer: () => false,
     dropRequest: () => false,
@@ -860,6 +871,31 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
         refreshes.push(payload);
         exit(socket, id, { _tag: "Success", value: { providers: fake.providers } });
         return;
+      case "server.getSettings":
+        exit(socket, id, {
+          _tag: "Success",
+          value: { providerInstances: Object.fromEntries(fake.instances) },
+        });
+        return;
+      case "server.updateSettings": {
+        // As T3: a created instance must be new; it applies at once.
+        const mutation = isRecord(payload) ? payload["providerInstanceMutation"] : undefined;
+        if (
+          !isRecord(mutation) ||
+          mutation["operation"] !== "create" ||
+          typeof mutation["instanceId"] !== "string" ||
+          fake.instances.has(mutation["instanceId"])
+        ) {
+          rejectRequest(socket, id, "ServerSettingsError", "create-provider-instance");
+          return;
+        }
+        fake.instances.set(mutation["instanceId"], mutation["instance"]);
+        exit(socket, id, {
+          _tag: "Success",
+          value: { providerInstances: Object.fromEntries(fake.instances) },
+        });
+        return;
+      }
       default:
         rejectRequest(socket, id, "RpcNotFound", String(frame["tag"]));
     }
@@ -901,6 +937,14 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
       }
       case "message.dispatch": {
         const thread = threadOf(command.threadId);
+        // As T3: a message's selection is its run's, and the thread's from then on.
+        if (command["modelSelection"] !== undefined) {
+          thread.modelSelection = selectionOf(command);
+          emit(thread, "thread.model-selection-updated", {
+            id: thread.id,
+            modelSelection: thread.modelSelection,
+          });
+        }
         startRun(thread, String(command["messageId"]), String(command["text"]));
         receipts.set(command.commandId, thread.sequence);
         return thread.sequence;

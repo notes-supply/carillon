@@ -34,7 +34,9 @@ use tokio::{net::TcpListener, sync::watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::{Core, CoreError, CoreOptions, Lane, RuntimeClient, TurnFailure, WorkerStep};
+use crate::{
+    AgentOptions, Core, CoreError, CoreOptions, Lane, RuntimeClient, TurnFailure, WorkerStep,
+};
 pub(super) use maintenance::{Drain, Lease};
 pub(super) use registry::{Applied, FileState, RegistryStatus, ServingRuntime};
 use registry::{Refusal, Registry, runtime_facts};
@@ -63,9 +65,16 @@ impl AppState {
 fn core_options(config: &LoadedConfig) -> CoreOptions {
     CoreOptions {
         data_directory: config.value.data_dir.clone(),
-        agent_id: config.value.agent.id.clone(),
-        resource_root: config.value.agent.resource_root.clone(),
-        default_runtime: config.value.agent.runtime_provider.clone(),
+        agents: config
+            .value
+            .agents
+            .iter()
+            .map(|agent| AgentOptions {
+                id: agent.id.clone(),
+                runtime: agent.runtime.clone(),
+                resources: agent.resources.clone(),
+            })
+            .collect(),
         attachments: config.value.core.attachments,
         runtimes: runtime_facts(config),
     }
@@ -706,7 +715,12 @@ async fn status(
     let providers = provider_health(&state.client, &config).await;
     Ok(Json(StatusReport {
         release: RELEASE_VERSION.to_owned(),
-        agent_id: config.value.agent.id.clone(),
+        agents: config
+            .value
+            .agents
+            .iter()
+            .map(|agent| agent.id.clone())
+            .collect(),
         providers,
         turns: state.core.turn_counts()?,
         deliveries: state.core.delivery_counts()?,

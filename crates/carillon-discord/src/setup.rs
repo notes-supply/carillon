@@ -155,23 +155,14 @@ pub(crate) async fn setup(
     prompt.say(&format!("Signed in as {}.", bot.name))?;
     let (guild_id, guild) = server(prompt, &http, &application).await?;
     let channels = channels(prompt, &http, guild_id, &guild).await?;
-    let mode = prompt.choose(
-        "When should the agent answer?",
-        &MODES.map(|(label, _, _)| label.to_owned()),
-        0,
-    )?;
-    let (_, activation, conversation) = MODES[mode];
-    permitted(prompt, &http, guild_id, bot.id, &channels, conversation).await?;
+    let chosen = agents(prompt, loaded, &channels)?;
+    let routes = routes(prompt, loaded, &channels, &chosen)?;
+    let threads = routes
+        .iter()
+        .any(|route| route.conversation == DiscordConversation::Thread);
+    permitted(prompt, &http, guild_id, bot.id, &channels, threads).await?;
     let people = people(prompt, &http, guild_id, &guild, &application, &bot).await?;
 
-    let routes: Vec<DiscordRoute> = channels
-        .iter()
-        .map(|(id, _)| DiscordRoute {
-            channel_id: id.to_string(),
-            activation,
-            conversation,
-        })
-        .collect();
     let users: Vec<String> = people.iter().map(|(id, _)| id.clone()).collect();
     // Only the writes hold the maintenance lock, never the questions. The
     // registry and the settings file are read again under it, so what is
@@ -210,7 +201,7 @@ pub(crate) async fn setup(
     settings.write(loaded, provider)?;
     drop(maintenance);
     prompt.say(&format!(
-        "{} answers {} in {} on {guild}: {}.",
+        "{} answers {} in {} on {guild}.",
         bot.name,
         people
             .iter()
@@ -219,12 +210,67 @@ pub(crate) async fn setup(
             .join(", "),
         channels
             .iter()
-            .map(|(_, label)| label.as_str())
+            .zip(&chosen)
+            .map(|((_, label), agent)| format!("{label} ({})", loaded.value.agents[*agent].name))
             .collect::<Vec<_>>()
             .join(", "),
-        MODES[mode].0.to_lowercase()
     ))?;
     Ok(())
+}
+
+/// Which agent answers in each chosen channel, as indexes into the
+/// registry's agents. With one agent, it answers everywhere.
+fn agents(
+    prompt: &mut impl Questions,
+    loaded: &LoadedConfig,
+    channels: &[(Id<ChannelMarker>, String)],
+) -> Result<Vec<usize>> {
+    let agents = &loaded.value.agents;
+    let names: Vec<String> = agents.iter().map(|agent| agent.name.clone()).collect();
+    match names.len() {
+        0 => bail!("carillon.toml has no agent to answer in Discord; run `carillon setup`"),
+        1 => Ok(vec![0; channels.len()]),
+        _ => channels
+            .iter()
+            .map(|(_, label)| prompt.choose(&format!("Who answers in {label}?"), &names, 0))
+            .collect(),
+    }
+}
+
+/// The routes for the chosen channels: one answer mode for each agent that
+/// answers somewhere, asked once per agent.
+fn routes(
+    prompt: &mut impl Questions,
+    loaded: &LoadedConfig,
+    channels: &[(Id<ChannelMarker>, String)],
+    chosen: &[usize],
+) -> Result<Vec<DiscordRoute>> {
+    let agents = &loaded.value.agents;
+    let labels = MODES.map(|(label, _, _)| label.to_owned());
+    let mut modes = std::collections::BTreeMap::new();
+    for &agent in chosen {
+        if let std::collections::btree_map::Entry::Vacant(entry) = modes.entry(agent) {
+            let question = if agents.len() == 1 {
+                "When should the agent answer?".to_owned()
+            } else {
+                format!("When should {} answer?", agents[agent].name)
+            };
+            entry.insert(MODES[prompt.choose(&question, &labels, 0)?]);
+        }
+    }
+    Ok(channels
+        .iter()
+        .zip(chosen)
+        .map(|((id, _), agent)| {
+            let (_, activation, conversation) = modes[agent];
+            DiscordRoute {
+                channel_id: id.to_string(),
+                agent: agents[*agent].id.clone(),
+                activation,
+                conversation,
+            }
+        })
+        .collect())
 }
 
 /// Refuses an interface provider the registry does not have, or has
@@ -470,7 +516,7 @@ async fn permitted(
     guild_id: Id<GuildMarker>,
     bot: Id<UserMarker>,
     chosen: &[(Id<ChannelMarker>, String)],
-    conversation: DiscordConversation,
+    threads: bool,
 ) -> Result<()> {
     loop {
         let roles = http.roles(guild_id).await?.model().await?;
@@ -504,7 +550,7 @@ async fn permitted(
                 }
                 match need {
                     Need::Answer => lacking.push(name),
-                    Need::Threads if conversation == DiscordConversation::Thread => {
+                    Need::Threads if threads => {
                         lacking.push(name);
                     }
                     Need::Threads => {}

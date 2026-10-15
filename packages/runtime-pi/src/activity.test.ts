@@ -83,7 +83,7 @@ async function piRuntime(root: string) {
   vi.spyOn(models, "getAuth").mockResolvedValue({ auth: { apiKey: "test-only" } });
   vi.spyOn(models, "hasConfiguredAuth").mockReturnValue(true);
   const runtime = await createPiRuntime({
-    workspace: root,
+    agents: [{ id: "default", workspace: root }],
     stateDirectory: join(root, "state"),
     modelRuntime: models,
     settings: SettingsManager.inMemory({ defaultProvider: model.provider, defaultModel: model.id }),

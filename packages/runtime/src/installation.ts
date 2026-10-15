@@ -13,10 +13,21 @@ export interface RegisteredProvider {
   readonly token_hash: string;
 }
 
+/** An agent whose conversations start on this runtime. */
+export interface Agent {
+  readonly id: string;
+  readonly name: string;
+  readonly workspace: string;
+  /** Carillon's resources for the agent; absent when it runs with the runtime's own alone. */
+  readonly resources?: string;
+}
+
 export interface Installation {
   readonly root: string;
-  readonly resourceRoot: string;
-  readonly workspace: string;
+  /** The runtime's private state directory, `<data_dir>/components/<id>`. */
+  readonly componentDirectory: string;
+  /** The agents whose new conversations run on this runtime, in registry order. */
+  readonly agents: readonly Agent[];
   readonly runtime: RegisteredProvider;
   readonly interfaces: RegisteredProvider[];
   readonly operatorTokenHash: string;
@@ -40,7 +51,17 @@ const ProviderSchema = Type.Object({
 const FileConfigSchema = Type.Object({
   data_dir: Type.String(),
   core: Type.Object({ operator_token_hash: Type.String({ pattern: "^[a-f0-9]{64}$" }) }),
-  agent: Type.Object({ resource_root: Type.String(), workspace: Type.String() }),
+  agents: Type.Optional(
+    Type.Array(
+      Type.Object({
+        id: ProviderIdentitySchema,
+        name: Type.String({ minLength: 1 }),
+        runtime: ProviderIdentitySchema,
+        workspace: Type.String({ minLength: 1 }),
+        resources: Type.Optional(Type.String({ minLength: 1 })),
+      }),
+    ),
+  ),
   providers: Type.Array(ProviderSchema),
 });
 
@@ -75,8 +96,15 @@ export async function loadInstallation(
   for (const provider of interfaces) providerAddress(provider.url);
   return {
     root,
-    resourceRoot: resolve(root, parsed.agent.resource_root),
-    workspace: resolve(root, parsed.agent.workspace),
+    componentDirectory: join(resolve(root, parsed.data_dir), "components", providerId),
+    agents: (parsed.agents ?? [])
+      .filter((agent) => agent.runtime === providerId)
+      .map(({ id, name, workspace, resources }) => ({
+        id,
+        name,
+        workspace: resolve(root, workspace),
+        ...(resources === undefined ? {} : { resources: resolve(root, resources) }),
+      })),
     runtime,
     interfaces,
     operatorTokenHash: parsed.core.operator_token_hash,

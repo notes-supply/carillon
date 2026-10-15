@@ -19,8 +19,9 @@ async function settings(url: string): Promise<{ path: string; root: string }> {
     [
       `url = ${JSON.stringify(url)}`,
       'token_file = "credentials/t3.token"',
+      "[agents.code]",
       'project_id = "project"',
-      "[model]",
+      "[agents.code.model]",
       'instance_id = "claudeAgent"',
       'model = "claude-fable-5-1"',
     ].join("\n"),
@@ -54,5 +55,49 @@ it("takes T3's address only as an HTTP origin, before anything connects or logs 
   ] as const) {
     const { path, root } = await settings(url);
     expect((await loadSettings(path, root)).url, url).toBe(origin);
+  }
+});
+
+it("keeps Carillon's profiles for its assistant, and every other instance for plain T3 Code", async () => {
+  const root = await mkdtemp(join(tmpdir(), "carillon-t3-settings-"));
+  directories.push(root);
+  const path = join(root, "runtime-t3.toml");
+  const agent = (id: string, instance: string, ...more: string[]) => [
+    `[agents.${id}]`,
+    'project_id = "project"',
+    ...more,
+    `[agents.${id}.model]`,
+    `instance_id = "${instance}"`,
+    'model = "m"',
+  ];
+  const file = (...lines: string[]) =>
+    writeFile(
+      path,
+      ['url = "http://127.0.0.1:3773"', 'token_file = "credentials/t3.token"', ...lines].join("\n"),
+    );
+  await file(
+    'profiles = ["carillon_claude", "carillon_codex"]',
+    ...agent("assistant", "carillon_codex", "assistant = true"),
+    ...agent("code", "claudeAgent"),
+  );
+  const loaded = await loadSettings(path, root);
+  expect(loaded.profiles).toEqual(new Set(["carillon_claude", "carillon_codex"]));
+  expect(loaded.agents.get("assistant")).toMatchObject({ assistant: true, projectId: "project" });
+  expect(loaded.agents.get("code")?.assistant).toBe(false);
+  for (const [lines, refusal] of [
+    [agent("assistant", "carillon_claude", "assistant = true"), /runs on \/profiles: name one/u],
+    [
+      ['profiles = ["carillon_claude"]', ...agent("assistant", "claudeAgent", "assistant = true")],
+      /\/agents\/assistant\/model must be on one of \/profiles/u,
+    ],
+    [
+      ['profiles = ["carillon_claude"]', ...agent("code", "carillon_claude")],
+      /\/agents\/code\/model must not be on one of \/profiles/u,
+    ],
+    [['profiles = ["a", "a"]'], /\/profiles/u],
+    [agent("not/an/agent", "claudeAgent"), /invalid TOML|\/agents/u],
+  ] as const) {
+    await file(...lines);
+    await expect(loadSettings(path, root)).rejects.toThrow(refusal);
   }
 });

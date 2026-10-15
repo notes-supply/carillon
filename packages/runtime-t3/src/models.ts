@@ -1,11 +1,12 @@
 /**
  * A T3 conversation's model, as T3 holds it. The thread's own selection is
- * the conversation's: every run of the thread uses it, and a change made
- * here or in T3's own UI is the thread's next selection, the last change
- * winning. The catalogue is T3's, for the provider instances it offers. The
- * agent default is the selection the runtime's settings open a new thread
- * with, changed there rather than through Carillon. Nothing is stored on the
- * Carillon side.
+ * the conversation's while it is on an instance the agent runs on: every run
+ * of the thread uses it, and a change made here or in T3's own UI is the
+ * thread's next selection, the last change winning. One on another
+ * instance, as T3's UI may move a thread to, gives way to the agent default
+ * at the next run. The catalogue is T3's, for the provider instances the
+ * agent runs on. The agent default is the one `/model` chose for it, else the
+ * one its settings name.
  */
 import type { AvailableModel, ModelState, ScopeState, Selection } from "@carillon/protocol";
 import { resolved } from "@carillon/runtime/models";
@@ -31,8 +32,14 @@ export interface Catalog {
   readonly booleans: ReadonlySet<string>;
 }
 
-/** The models of the provider instances T3 reports enabled, installed and usable. */
-export function catalog(config: unknown): Catalog {
+/**
+ * The models of the provider instances T3 reports enabled, installed and
+ * usable, among those `offered` names.
+ */
+export function catalog(
+  config: unknown,
+  offered: (instanceId: string) => boolean = () => true,
+): Catalog {
   if (!Check(ServerConfigSchema, config))
     throw new T3Failure(
       "malformed",
@@ -41,7 +48,8 @@ export function catalog(config: unknown): Catalog {
   const available: AvailableModel[] = [];
   const booleans = new Set<string>();
   for (const provider of config.providers) {
-    if (!Check(ProviderSchema, provider) || !usable(provider)) continue;
+    if (!Check(ProviderSchema, provider) || !usable(provider) || !offered(provider.instanceId))
+      continue;
     for (const model of provider.models) {
       const options = (model.capabilities?.optionDescriptors ?? []).filter(
         (descriptor): descriptor is OptionDescriptor => Check(OptionDescriptorSchema, descriptor),
@@ -119,27 +127,53 @@ export function toNative(catalog: Catalog, selection: Selection): NativeSelectio
   };
 }
 
+/** Which provider instances an agent runs on. */
+export type RunsOn = (instanceId: string) => boolean;
+
 /**
- * The model state of an agent and, with a conversation, of its thread. A
- * conversation whose thread does not exist yet will start with the agent
- * default; one whose thread holds another selection overrides it.
+ * The selection a conversation's next run takes: its thread's, while it is
+ * on an instance the agent runs on, else the agent default. A model of such
+ * an instance the catalogue no longer lists stays the thread's, and its run
+ * fails rather than another model being substituted.
+ */
+export function routed(
+  catalog: Catalog,
+  runsOn: RunsOn,
+  agentDefault: Selection,
+  thread: NativeSelection | undefined,
+): NativeSelection {
+  if (thread !== undefined && runsOn(thread.instanceId)) return thread;
+  return toNative(catalog, resolved(catalog.available, agentDefault));
+}
+
+/**
+ * The model state of an agent, whose default `agent` the ledger resolved,
+ * and, with a conversation, of its thread. A conversation whose thread does
+ * not exist yet, or is on an instance the agent does not run on, runs with
+ * the agent default.
  */
 export function modelState(
   catalog: Catalog,
-  agentDefault: NativeSelection,
+  runsOn: RunsOn,
+  agent: ScopeState,
   conversation: { readonly thread: NativeSelection | undefined } | undefined,
 ): ModelState {
-  const fallback = resolved(catalog.available, fromNative(agentDefault));
-  const agent: ScopeState = { selection: fallback, overridden: false, read_only: true };
   if (conversation === undefined) return { available: [...catalog.available], agent };
-  const selection =
-    conversation.thread === undefined
-      ? fallback
-      : resolved(catalog.available, fromNative(conversation.thread));
+  const thread = conversation.thread;
+  if (thread === undefined || !runsOn(thread.instanceId))
+    return {
+      available: [...catalog.available],
+      agent,
+      conversation: { selection: agent.selection, overridden: false },
+    };
+  const selection = resolved(catalog.available, fromNative(thread));
   return {
     available: [...catalog.available],
     agent,
-    conversation: { selection, overridden: !sameSelection(selection, fallback) },
+    conversation: {
+      selection,
+      overridden: agent.selection === null || !sameSelection(selection, agent.selection),
+    },
   };
 }
 

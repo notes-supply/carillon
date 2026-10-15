@@ -27,13 +27,22 @@ pub struct RuntimeProvider {
     pub enabled: bool,
 }
 
-/// Application-supplied policy and owned storage locations for one agent.
+/// An agent conversations are admitted for: the runtime its new
+/// conversations run on and the resources its turns capture.
+#[derive(Clone, Debug)]
+pub struct AgentOptions {
+    pub id: String,
+    pub runtime: String,
+    /// `None` captures an empty resource snapshot: the runtime's own
+    /// resources alone apply.
+    pub resources: Option<PathBuf>,
+}
+
+/// Application-supplied policy and owned storage locations.
 #[derive(Clone, Debug)]
 pub struct CoreOptions {
     pub data_directory: PathBuf,
-    pub agent_id: String,
-    pub resource_root: PathBuf,
-    pub default_runtime: String,
+    pub agents: Vec<AgentOptions>,
     /// The runtimes core starts with; [`Core::set_runtimes`] replaces them
     /// while it serves.
     pub runtimes: Vec<RuntimeProvider>,
@@ -283,8 +292,10 @@ impl Core {
                 audience_id: Some(event.audience_id.clone()),
             },
         )?;
-        let resources =
-            resources::materialize(&self.options.resource_root, &self.snapshot_store())?;
+        let resources = resources::materialize(
+            self.agent(&event.agent_id)?.resources.as_deref(),
+            &self.snapshot_store(),
+        )?;
         let selected = SelectedProvider {
             id: runtime.id.clone(),
             role: "runtime".to_owned(),
@@ -327,7 +338,8 @@ impl Core {
             .map_or(EventStatus::Unknown, EventStatus::Accepted))
     }
 
-    /// Resolve the pinned conversation owner, or the default for a new conversation.
+    /// Resolve the pinned conversation owner, or the agent's runtime for a
+    /// new conversation.
     /// # Errors
     /// Returns an unknown agent, missing/disabled owner or storage error.
     pub fn runtime_for(
@@ -335,9 +347,7 @@ impl Core {
         interface_id: &str,
         query: &ModelQuery,
     ) -> Result<RuntimeProvider, CoreError> {
-        if query.agent_id != self.options.agent_id {
-            return Err(CoreError::InvalidInput("unknown agent".to_owned()));
-        }
+        let agent = self.agent(&query.agent_id)?;
         let owner = match &query.audience_id {
             Some(audience) => {
                 self.database
@@ -345,7 +355,7 @@ impl Core {
             }
             None => None,
         };
-        let id = owner.as_deref().unwrap_or(&self.options.default_runtime);
+        let id = owner.as_deref().unwrap_or(&agent.runtime);
         let runtime = self.runtime(id)?;
         if !runtime.enabled {
             return Err(CoreError::Conflict(
@@ -353,6 +363,14 @@ impl Core {
             ));
         }
         Ok(runtime)
+    }
+
+    fn agent(&self, id: &str) -> Result<&AgentOptions, CoreError> {
+        self.options
+            .agents
+            .iter()
+            .find(|agent| agent.id == id)
+            .ok_or_else(|| CoreError::InvalidInput("unknown agent".to_owned()))
     }
 
     fn runtime(&self, id: &str) -> Result<RuntimeProvider, CoreError> {
@@ -788,9 +806,7 @@ impl Core {
                 crate::db::FOLLOW_UP_EVENT_PREFIX
             )));
         }
-        if event.agent_id != self.options.agent_id {
-            return Err(CoreError::InvalidInput("unknown agent".to_owned()));
-        }
+        self.agent(&event.agent_id)?;
         if let Some(staged) = &event.attachments {
             crate::intake::admit(&self.options.attachments, staged)?;
         }
@@ -879,10 +895,13 @@ pub(crate) fn validate_response(
 }
 
 fn validate_options(options: &CoreOptions) -> Result<()> {
-    anyhow::ensure!(
-        !options.agent_id.is_empty() && !options.default_runtime.is_empty(),
-        "agent identity and default runtime are required"
-    );
+    let mut ids = std::collections::BTreeSet::new();
+    for agent in &options.agents {
+        anyhow::ensure!(
+            !agent.id.is_empty() && ids.insert(&agent.id) && !agent.runtime.is_empty(),
+            "agent identities must be nonempty and unique, each with a runtime"
+        );
+    }
     validate_runtimes(&options.runtimes)
 }
 

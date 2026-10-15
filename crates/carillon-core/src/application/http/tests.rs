@@ -74,13 +74,13 @@ fn installation(root: &Path) -> Result<Fixture> {
             },
         },
         providers,
-        agent: AgentConfig {
+        agents: vec![AgentConfig {
             id: "test-agent".to_owned(),
             name: "Test agent".to_owned(),
-            resource_root: resources,
+            runtime: "test-runtime".to_owned(),
             workspace: root.to_path_buf(),
-            runtime_provider: "test-runtime".to_owned(),
-        },
+            resources: Some(resources),
+        }],
     };
     value.validate()?;
     let config = LoadedConfig {
@@ -148,6 +148,15 @@ async fn run_next_observation(
 }
 
 async fn accept(state: &Fixture, id: &str, audience: &str) -> Result<EventReceipt> {
+    accept_for(state, &state.config.value.agents[0].id, id, audience).await
+}
+
+async fn accept_for(
+    state: &Fixture,
+    agent: &str,
+    id: &str,
+    audience: &str,
+) -> Result<EventReceipt> {
     let mut headers = HeaderMap::new();
     headers.insert(PROVIDER_HEADER, "test-interface".parse()?);
     headers.insert(
@@ -159,7 +168,7 @@ async fn accept(state: &Fixture, id: &str, audience: &str) -> Result<EventReceip
         headers,
         Json(ExternalEvent {
             event_id: id.to_owned(),
-            agent_id: state.config.value.agent.id.clone(),
+            agent_id: agent.to_owned(),
             user_id: "test-user".to_owned(),
             audience_id: audience.to_owned(),
             delivery_target_id: "test-destination".to_owned(),
@@ -542,7 +551,7 @@ async fn model_fixture(
         services.spawn(async move { axum::serve(listener, app).await });
     }
     accept(&state, "one", "pinned").await?;
-    state.config.value.agent.runtime_provider = "replacement".to_owned();
+    state.config.value.agents[0].runtime = "replacement".to_owned();
     Ok((state, received, services))
 }
 
@@ -929,7 +938,7 @@ async fn duplicate_events_share_one_accepted_turn_without_reexecution() -> Resul
     );
     let snapshot = state.snapshot_store();
     fs::write(
-        state.config.value.agent.resource_root.join("SYSTEM.md"),
+        resource_root(&state.config)?.join("SYSTEM.md"),
         "changed after acceptance",
     )?;
     let step = run_next_turn(&state, "test-runtime", async |runtime, _, request| {
@@ -1120,7 +1129,7 @@ async fn an_interface_cannot_pose_as_cores_follow_up() -> Result<()> {
         headers,
         Json(ExternalEvent {
             event_id: "forged".to_owned(),
-            agent_id: state.config.value.agent.id.clone(),
+            agent_id: state.config.value.agents[0].id.clone(),
             user_id: "test-user".to_owned(),
             audience_id: "conversation".to_owned(),
             delivery_target_id: "test-destination".to_owned(),
@@ -1295,7 +1304,7 @@ async fn missing_resource_root_refuses_new_acceptance_without_losing_receipts() 
     let directory = tempdir()?;
     let state = installation(directory.path())?;
     let first = accept(&state, "one", "conversation").await?;
-    let root = &state.config.value.agent.resource_root;
+    let root = &resource_root(&state.config)?.to_path_buf();
     let saved = directory.path().join("saved-resources");
     fs::rename(root, &saved)?;
     for missing in [true, false] {
@@ -1346,10 +1355,7 @@ async fn duplicate_receipts_do_not_read_mutable_resources() -> Result<()> {
     let state = installation(directory.path())?;
     let first = accept(&state, "one", "conversation").await?;
     // A resource change after acceptance must affect new work, not receipt recovery.
-    std::os::unix::fs::symlink(
-        "SYSTEM.md",
-        state.config.value.agent.resource_root.join("AGENTS.md"),
-    )?;
+    std::os::unix::fs::symlink("SYSTEM.md", resource_root(&state.config)?.join("AGENTS.md"))?;
     let duplicate = accept(&state, "one", "conversation").await?;
     assert!(duplicate.duplicate);
     assert_eq!(duplicate.turn_id, first.turn_id);
@@ -1377,7 +1383,7 @@ async fn unavailable_conversation_owner_rejects_input_as_configuration_conflict(
     let mut replacement = state.config.value.providers[1].clone();
     replacement.id = "replacement".to_owned();
     state.config.value.providers.push(replacement);
-    state.config.value.agent.runtime_provider = "replacement".to_owned();
+    state.config.value.agents[0].runtime = "replacement".to_owned();
     state.config.value.providers[1].enabled = false;
     for id in ["disabled", "removed"] {
         let router = Router::new()
@@ -1448,7 +1454,7 @@ async fn runtime_ownership_survives_default_changes() -> Result<()> {
     )?;
     state.config.value.providers.push(replacement);
     let first = accept(&state, "one", "conversation").await?;
-    state.config.value.agent.runtime_provider = "replacement".to_owned();
+    state.config.value.agents[0].runtime = "replacement".to_owned();
     state.core.database = Database::open(&state.config.value.data_dir.join("carillon.sqlite3"))?;
     let second = accept(&state, "two", "conversation").await?;
     let fresh = accept(&state, "fresh", "new-conversation").await?;
@@ -1524,7 +1530,7 @@ async fn startup_drains_queued_nondefault_runtime_without_replaying_running_work
         );
         services.spawn(async move { axum::serve(listener, app).await });
     }
-    state.config.value.agent.runtime_provider = "replacement".to_owned();
+    state.config.value.agents[0].runtime = "replacement".to_owned();
     let fresh = accept(&state, "fresh", "new-conversation").await?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     state.config.value.core.listen = listener.local_addr()?;
@@ -2613,7 +2619,7 @@ async fn job_reads_answer_promptly_when_several_runtimes_cannot_describe_their_t
         )?;
         state.config.value.providers.push(provider);
         // New conversations belong to the runtime that is the default when they start.
-        state.config.value.agent.runtime_provider.clone_from(&id);
+        state.config.value.agents[0].runtime.clone_from(&id);
         let receipt = accept(
             &state,
             &format!("event-{index}"),
@@ -3142,4 +3148,64 @@ async fn a_failed_turns_report_crosses_the_runtime_boundary_with_or_without_an_e
     );
     server.abort();
     Ok(())
+}
+
+#[tokio::test]
+async fn each_agent_runs_on_its_own_runtime_with_its_own_resources() -> Result<()> {
+    let directory = tempdir()?;
+    let mut state = installation(directory.path())?;
+    let mut replacement = state
+        .config
+        .provider("test-runtime", ProviderRole::Runtime)?
+        .clone();
+    replacement.id = "replacement".to_owned();
+    replacement.url = "http://127.0.0.1:59".to_owned();
+    fs::write(
+        directory.path().join("credentials/replacement.token"),
+        "test-only",
+    )?;
+    state.config.value.providers.push(replacement);
+    let mut plain = state.config.value.agents[0].clone();
+    "plain".clone_into(&mut plain.id);
+    "replacement".clone_into(&mut plain.runtime);
+    plain.resources = None;
+    state.config.value.agents.push(plain);
+    state.config.value.validate()?;
+    fs::write(resource_root(&state.config)?.join("SYSTEM.md"), "assistant")?;
+
+    // One audience, two agents: two conversations, each on its agent's runtime.
+    let assistant = accept(&state, "assistant-turn", "conversation").await?;
+    let plain = accept_for(&state, "plain", "plain-turn", "conversation").await?;
+    run_next_turn(&state, "replacement", async |runtime, _, request| {
+        assert_eq!(runtime.id, "replacement");
+        assert_eq!(request.correlation_id, plain.turn_id);
+        assert_eq!(request.agent_id, "plain");
+        let snapshot = fs::read_dir(&request.resource_root)
+            .map_err(|error| TurnFailure::Uncertain(error.into()))?;
+        assert_eq!(snapshot.count(), 0);
+        Ok(completed(request))
+    })
+    .await?;
+    run_next_turn(&state, "test-runtime", async |_, _, request| {
+        assert_eq!(request.correlation_id, assistant.turn_id);
+        let system = fs::read_to_string(Path::new(&request.resource_root).join("SYSTEM.md"))
+            .map_err(|error| TurnFailure::Uncertain(error.into()))?;
+        assert_eq!(system, "assistant");
+        Ok(completed(request))
+    })
+    .await?;
+    assert!(
+        accept_for(&state, "unknown", "unknown-turn", "conversation")
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+/// The test agent's resource root.
+fn resource_root(config: &LoadedConfig) -> Result<&Path> {
+    config.value.agents[0]
+        .resources
+        .as_deref()
+        .context("the test agent has resources")
 }

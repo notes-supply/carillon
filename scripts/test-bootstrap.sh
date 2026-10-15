@@ -85,7 +85,7 @@ install() {
     CARILLON_RELEASES="http://127.0.0.1:$PORT" CARILLON_RELEASES_API="http://127.0.0.1:$PORT/api" \
     "$@"
 }
-OPTIONS='--guild-id 100 --bot-user-id 201 --user-id 200 --route 300:always:thread'
+OPTIONS='--guild-id 100 --bot-user-id 201 --user-id 200 --route 300:always:thread:assistant'
 
 refused() {
   expected=$1

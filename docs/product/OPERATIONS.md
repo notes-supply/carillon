@@ -30,24 +30,34 @@ The [README](../../README.md#install)'s command downloads the newest release
 and runs its installer as you, the user who will own Carillon (not root).
 Without Discord options, the installer asks at the terminal:
 
-1. **The runtime.** Pi, or a T3 Code server already running on this machine
-   (`--runtime pi` or `--runtime t3` answers it).
-2. **Pi** opens next: sign in with `/login`, choose the agent's model with
-   `/model` and press Ctrl+S on it, then leave with Ctrl+D. Setup checks
-   that Pi is ready and offers to open it again until it is. **T3** asks
-   for its address and a token (`t3 auth session issue --label Carillon
-   --token-only` prints one), then offers T3's projects and models; the
-   agent works in the project's folder.
-3. **Discord.** The bot token, not shown as you type. Setup learns the bot
+1. **The runtimes.** Pi, a T3 Code server already running on this machine,
+   or both (`--runtime pi` and `--runtime t3` answer it).
+2. **The assistant.** What runs Carillon's assistant, the agent with
+   Discord's context and Carillon's resources: Pi, or T3 with Claude, Codex
+   or both, each signed in for Carillon alone. With T3 there may be no
+   assistant at all, and only T3 Code channels.
+3. **Pi** opens next when it runs the assistant: sign in with `/login`,
+   choose the agent's model with `/model` and press Ctrl+S on it, then
+   leave with Ctrl+D. Setup checks that Pi is ready and offers to open it
+   again until it is.
+4. **T3** asks for its address and a token (`t3 auth session issue --label
+   Carillon --token-only` prints one), the project the assistant works in,
+   and the projects T3 Code channels work in: each becomes an agent that
+   is plain T3 Code through Discord. For each harness of the assistant it
+   makes Carillon's profile, a T3 instance whose home is
+   `~/.local/share/carillon/profiles/HARNESS`, and signs it in: with the
+   harness's own login in that home, an API key, or a compatible endpoint
+   and its token. Then it asks each agent's default model.
+5. **Discord.** The bot token, not shown as you type. Setup learns the bot
    from it, waits until Message Content Intent is on, prints the
    invitation link if the bot is in no server yet, and offers the bot's
-   servers and text channels by name (with the ID where names repeat), then
-   when the agent answers (every message or only mentions; a thread per
-   conversation or the channel as one). It checks that the bot may answer
-   that way in each channel, and asks again until it may. Then who it
-   answers: the bot application's owners, and anyone else by Discord user
-   ID. Only those people can talk to the agent.
-4. Carillon starts.
+   servers and text channels by name (with the ID where names repeat), who
+   answers in each channel, and when each agent answers (every message or
+   only mentions; a thread per conversation or the channel as one). It
+   checks that the bot may answer that way in each channel, and asks again
+   until it may. Then who it answers: the bot application's owners, and
+   anyone else by Discord user ID. Only those people can talk to the agent.
+6. Carillon starts.
 
 Ctrl+C or Esc cancels; run the installer again to finish, and it offers to
 keep what's already set up (the Discord bot once Discord confirms its saved
@@ -58,13 +68,13 @@ setup` asks only Discord's. A rerun that changes the T3 settings or the bot
 token takes effect in a running Carillon at `carillon restart`.
 
 The installer creates `~/.carillon` (or `CARILLON_HOME`), registers the user
-services (`carillon.target` with core, Discord and both runtimes; the
+services (`carillon.target` with core, Discord and both runtimes; a
 runtime you didn't choose ends at once) and links `~/.local/bin/carillon`.
 It never replaces an unrelated program there. If `~/.local/bin` isn't on
 your `PATH`, run `~/.local/bin/carillon` instead of `carillon`, or add that
-directory to your `PATH`. With Pi, `--workspace` sets the agent's folder
-(default: your home). `--base-port` moves the loopback ports (default 43800
-to 43802).
+directory to your `PATH`. With Pi, `--workspace` sets the assistant's
+folder (default: your home). `--base-port` moves the loopback ports
+(default 43800, up to 43803).
 
 To start Carillon at boot without logging in, an administrator can run
 `loginctl enable-linger USER`.
@@ -76,19 +86,21 @@ With the Discord options, the installer asks nothing:
 ```sh
 curl -fsSL https://raw.githubusercontent.com/notes-supply/carillon/main/install.sh |
   sh -s -- --guild-id GUILD_ID --bot-user-id BOT_ID \
-  --user-id YOUR_DISCORD_ID --route CHANNEL_ID:always:thread
+  --user-id YOUR_DISCORD_ID --route CHANNEL_ID:always:thread:assistant
 ```
 
 - `--user-id` may repeat; only these people can talk to the agent.
-- `--route CHANNEL:ACTIVATION:SCOPE` may repeat. `ACTIVATION` is `always` or
-  `mention`; `SCOPE` is `thread` (each thread is a conversation) or `channel`.
-- `--runtime t3` runs the agent on T3; set `--workspace` to the T3 project's
-  folder.
+- `--route CHANNEL:ACTIVATION:SCOPE:AGENT` may repeat. `ACTIVATION` is
+  `always` or `mention`; `SCOPE` is `thread` (each thread is a conversation)
+  or `channel`; `AGENT` is the agent that answers there, `assistant` in a new
+  installation.
+- `--runtime t3` runs the assistant on T3; set `--workspace` to the T3
+  project's folder.
 - `--version VERSION`, first, installs that release instead of the newest.
 
 Then put the bot token in `~/.carillon/credentials/discord-bot.token` (mode
 0600), sign in to Pi with the printed `carillon-pi` command, or set T3 up
-with [`carillon runtime-t3 configure`](../../packages/runtime-t3/README.md),
+with `carillon setup` (see the [T3 guide](../../packages/runtime-t3/README.md)),
 and run `carillon start`.
 
 Rerunning the installer with options keeps the registry, credentials and
@@ -189,7 +201,7 @@ for them at the terminal; `configure` takes them as options:
 
 ```sh
 carillon discord configure --guild-id GUILD_ID --bot-user-id BOT_ID \
-  --user-id YOUR_DISCORD_ID --route CHANNEL_ID:always:thread
+  --user-id YOUR_DISCORD_ID --route CHANNEL_ID:always:thread:assistant
 carillon discord settings          # what the provider serves vs. the file
 carillon discord settings apply    # serve the file's live changes
 ```
@@ -346,9 +358,10 @@ send them again.
 ### Agent Discord tools
 
 An optional [Pi extension and skill](../../packages/discord-pi/README.md) let
-the agent read and manage the Discord server with the bot's permissions.
-Setup doesn't install them, because they can administer the server; install
-them yourself:
+the assistant read and manage the Discord server with the bot's permissions.
+They go into the assistant's resources, which Carillon's T3 profiles share,
+so T3 Code channels never see them. Setup doesn't install them, because they
+can administer the server; install them yourself:
 
 ```sh
 carillon stop

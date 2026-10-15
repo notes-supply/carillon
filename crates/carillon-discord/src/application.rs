@@ -959,7 +959,7 @@ async fn run_interaction(
     let mut calls = InteractionCalls::new(
         state.core.clone(),
         ModelQuery {
-            agent_id: settings.agent.clone(),
+            agent_id: admitted.agent_id,
             audience_id: admitted.audience_id,
         },
     );

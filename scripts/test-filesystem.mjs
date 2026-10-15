@@ -38,7 +38,7 @@ const installOptions = [
   "--user-id",
   "200",
   "--route",
-  "300:always:channel",
+  "300:always:channel:assistant",
   ...initOptions,
 ];
 const discordOptions = [
@@ -93,7 +93,7 @@ async function testConfiguration() {
     "--user-id",
     "200",
     "--route",
-    "300:always:channel",
+    "300:always:channel:assistant",
   );
   await chmod(config, 0o640);
   const token = await readFile(join(root, "credentials/operator.token"));
@@ -108,7 +108,7 @@ async function testConfiguration() {
         "--user-id",
         "999",
         "--route",
-        "301:mention:thread",
+        "301:mention:thread:assistant",
       ],
       discord,
       0o600,
@@ -763,7 +763,7 @@ async function resourceAttempt(name, fault) {
         },
         body: JSON.stringify({
           event_id: "durability",
-          agent_id: "default",
+          agent_id: "assistant",
           user_id: "200",
           audience_id: "test",
           delivery_target_id: "300",
@@ -905,7 +905,7 @@ async function attachmentAttempt(name, fault) {
       },
       body: JSON.stringify({
         event_id: "attached",
-        agent_id: "default",
+        agent_id: "assistant",
         user_id: "200",
         audience_id: "test",
         delivery_target_id: "300",

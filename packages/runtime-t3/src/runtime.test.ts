@@ -8,6 +8,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { RuntimeOperations } from "@carillon/runtime/operations";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { reportOf } from "@carillon/runtime/failure";
+import { ModelSelections } from "@carillon/runtime/selections";
 import { derivedId, type Run } from "./contracts.ts";
 import { startFakeT3, type FakeT3 } from "./fake.ts";
 import { createT3Runtime } from "./runtime.ts";
@@ -27,12 +28,14 @@ const attachment = {
 };
 let fake: FakeT3;
 let resources: string;
+let selections: ModelSelections;
 let runtime: RuntimeOperations;
 
 beforeEach(async () => {
   fake = await startFakeT3();
   resources = await mkdtemp(join(tmpdir(), "carillon-t3-"));
   await writeFile(join(resources, "SYSTEM.md"), "You are the Carillon agent.\n");
+  selections = await ModelSelections.open(join(resources, "model-selection.json"));
   vi.spyOn(console, "log").mockImplementation(() => undefined);
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   runtime = build();
@@ -50,9 +53,20 @@ function build(
 ) {
   return createT3Runtime({
     endpoint: { url: overrides.url ?? fake.url, token: overrides.token ?? fake.token },
-    projectId: PROJECT,
-    selection,
-    workspace: resources,
+    agents: new Map([
+      ["default", { projectId: PROJECT, workspace: resources, assistant: true, selection }],
+      [
+        "code",
+        {
+          projectId: PROJECT,
+          workspace: resources,
+          assistant: false,
+          selection: { instanceId: "codex", model: "gpt-6-astra", options: [] },
+        },
+      ],
+    ]),
+    profiles: new Set(["claudeAgent"]),
+    selections,
     ...(overrides.connect === undefined ? {} : { connect: overrides.connect }),
     reconnect: { attempts: 5, delayMs: overrides.reconnectDelayMs ?? 50 },
     settleMs: 500,
@@ -192,12 +206,13 @@ it("keeps a conversation's turns in one T3 thread and sends the person's text as
   expect(thread().runs.map((run) => run.ordinal)).toEqual([1, 2]);
   // The agent's instructions are the T3 project's own configuration, not a preamble.
   expect(userTexts()).toEqual(["Remember carillon.", "Which word?"]);
-  // The thread was opened with the configured selection; messages carry none, so the
-  // thread's own selection (which the native UI may change) runs them.
+  // The thread was opened with the agent default; each message names the thread's own
+  // selection, which the agent offers, so its run takes it.
   expect(fake.commands.find((command) => command.type === "thread.create")).toMatchObject({
     modelSelection: { instanceId: "claudeAgent", model: "claude-sonnet-5" },
   });
-  for (const dispatch of dispatches()) expect(dispatch).not.toHaveProperty("modelSelection");
+  for (const dispatch of dispatches())
+    expect(dispatch["modelSelection"]).toEqual(thread().modelSelection);
   // The thread is opened by the same command each turn, replayed under its receipt.
   expect(fake.commands.filter((command) => command.type === "thread.create")).toHaveLength(2);
   // Each turn asks T3 for a bounded snapshot and a completion marker.
@@ -825,9 +840,10 @@ it("reads the conversation's model from its native thread against T3's catalogue
     },
     { provider: "claudeAgent", model: "claude-haiku-4-5", name: "Claude Haiku 4.5", options: [] },
   ]);
-  // The agent default is the settings' selection, changed there; a conversation
-  // without a thread yet will start with it. Reading creates nothing.
-  expect(state.agent).toEqual({ selection: agentDefault, overridden: false, read_only: true });
+  // The agent default is the settings' selection until `/model` changes it; a
+  // conversation without a thread yet will start with it. Reading creates nothing.
+  // The assistant runs on Carillon's profiles alone: no other instance is offered.
+  expect(state.agent).toEqual({ selection: agentDefault, overridden: false });
   expect(state.conversation).toEqual({ selection: agentDefault, overridden: false });
   expect(fake.threads.size).toBe(0);
   expect(
@@ -853,7 +869,7 @@ it("changes the thread's own selection, which later messages inherit, and reads 
       .conversation,
   ).toEqual({ selection: { ...haiku, options: {} }, overridden: true });
   expect(fake.commands.find((command) => command.type === "thread.create")).toMatchObject({
-    modelSelection: selection,
+    modelSelection: { instanceId: "claudeAgent", model: "claude-sonnet-5" },
   });
   expect(thread().modelSelection).toEqual({
     instanceId: "claudeAgent",
@@ -864,7 +880,9 @@ it("changes the thread's own selection, which later messages inherit, and reads 
   const reply = runtime.executeTurn(turn("turn-1", "Which model?"));
   answer(await started("turn-1"), "Haiku.");
   await reply;
-  expect(dispatches()[0]).not.toHaveProperty("modelSelection");
+  expect(dispatches()[0]).toMatchObject({
+    modelSelection: { instanceId: "claudeAgent", model: "claude-haiku-4-5" },
+  });
   expect(thread().modelSelection.model).toBe("claude-haiku-4-5");
 
   // A setting changes against the selection the panel showed; booleans reach T3 as booleans.
@@ -918,10 +936,13 @@ it("changes the thread's own selection, which later messages inherit, and reads 
   ).rejects.toMatchObject({ status: 409, message: "The model settings changed." });
   expect(thread().modelSelection.model).toBe("claude-retired");
 
-  // Returning to the agent default sets the settings' selection on the thread.
+  // Returning to the agent default sets it on the thread, every setting resolved.
   const reset = await runtime.setModel({ ...conversation, scope: "conversation", selection: null });
   expect(reset.conversation).toEqual({ selection: agentDefault, overridden: false });
-  expect(thread().modelSelection).toEqual(selection);
+  expect(thread().modelSelection).toEqual({
+    ...selection,
+    options: [...selection.options, { id: "fastMode", value: false }],
+  });
 });
 
 it("reports no model when T3 no longer lists the thread whose model it changed", async () => {
@@ -947,15 +968,106 @@ it("reports no model when T3 no longer lists the thread whose model it changed",
   expect(modelSets()).toHaveLength(1);
 });
 
+it("keeps the channel default `/model` chooses, which new threads start with", async () => {
+  const haiku = { provider: "claudeAgent", model: "claude-haiku-4-5" };
+  const channel = { interface_id: "discord-private", agent_id: "default" };
+  const changed = await runtime.setModel({ ...channel, scope: "agent", selection: haiku });
+  expect(changed.agent).toEqual({ selection: { ...haiku, options: {} }, overridden: true });
+  // A new conversation's thread opens with it, and its message names it.
+  const reply = runtime.executeTurn(turn("turn-1", "hi"));
+  answer(await started("turn-1"), "Hello.");
+  await reply;
+  expect(thread().modelSelection).toMatchObject({
+    instanceId: "claudeAgent",
+    model: "claude-haiku-4-5",
+  });
+  // The ledger keeps it: a restarted runtime reads it back.
+  await runtime.close();
+  selections = await ModelSelections.open(join(resources, "model-selection.json"));
+  runtime = build();
+  expect((await runtime.modelState(channel)).agent).toEqual({
+    selection: { ...haiku, options: {} },
+    overridden: true,
+  });
+  // An instance the assistant does not run on is refused here too.
+  await expect(
+    runtime.setModel({
+      ...channel,
+      scope: "agent",
+      selection: { provider: "codex", model: "gpt-6-astra" },
+    }),
+  ).rejects.toMatchObject({ status: 422 });
+  // Returning to the default restores the settings'.
+  expect((await runtime.setModel({ ...channel, scope: "agent", selection: null })).agent).toEqual({
+    selection: agentDefault,
+    overridden: false,
+  });
+});
+
+it("routes a thread T3's UI moved onto an instance the assistant does not run on back to its default", async () => {
+  const first = runtime.executeTurn(turn("turn-1", "hi"));
+  answer(await started("turn-1"), "Hello.");
+  await first;
+  // An ordinary account's instance, chosen in T3's own picker.
+  thread().modelSelection = { instanceId: "codex", model: "gpt-6-astra", options: [] };
+  expect((await runtime.modelState(conversation)).conversation).toEqual({
+    selection: agentDefault,
+    overridden: false,
+  });
+  const second = runtime.executeTurn(turn("turn-2", "again"));
+  const run = await started("turn-2");
+  expect(run.modelSelection).toMatchObject({ instanceId: "claudeAgent", model: "claude-sonnet-5" });
+  expect(thread().modelSelection.instanceId).toBe("claudeAgent");
+  answer(run, "Back.");
+  await second;
+});
+
+it("runs plain T3 Code on the other instances, with the person's text as written and T3's own title", async () => {
+  const plainThread = derivedId("thread", PROJECT, "discord-private", "code", "conversation-1");
+  const code = { ...conversation, agent_id: "code" };
+  // Never on Carillon's profiles, which are the assistant's.
+  expect((await runtime.modelState(code)).available.map((model) => model.provider)).toEqual([
+    "codex",
+  ]);
+  const native = { origin: { guild_id: "100", channel_id: "300", user_id: "200" } };
+  const reply = runtime.executeTurn({
+    ...turn("turn-1", "Fix the  flaky\ntest", { native }),
+    agent_id: "code",
+  });
+  await fake.waitFor(() => fake.threads.get(plainThread)?.runs.length === 1);
+  const plain = fake.threads.get(plainThread);
+  const run = plain?.runs[0];
+  if (plain === undefined || run === undefined) throw new Error("the plain thread did not run");
+  expect(run.modelSelection).toMatchObject({ instanceId: "codex", model: "gpt-6-astra" });
+  expect(plain.messages.filter((message) => message.role === "user").map((m) => m.text)).toEqual([
+    "Fix the  flaky\ntest",
+  ]);
+  expect(fake.commands.find((command) => command.type === "thread.create")).toMatchObject({
+    threadId: plainThread,
+    title: "New thread",
+  });
+  expect(dispatches()[0]).toMatchObject({ titleSeed: "Fix the flaky test" });
+  fake.assistant(plainThread, run.id, "Fixed.");
+  fake.complete(plainThread, run.id);
+  expect((await reply).output).toBe("Fixed.");
+  // A conversation of an agent the runtime does not serve is refused before T3.
+  await expect(
+    runtime.executeTurn({ ...turn("turn-2", "hi"), agent_id: "elsewhere" }),
+  ).rejects.toMatchObject({ status: 422 });
+});
+
 it("refuses changes it cannot make, without sending them to T3", async () => {
   const change = (selection: {
     provider: string;
     model: string;
     options?: Record<string, string>;
   }) => runtime.setModel({ ...conversation, scope: "conversation", selection });
-  await expect(
-    runtime.setModel({ ...conversation, scope: "agent", selection: agentDefault }),
-  ).rejects.toMatchObject({ status: 422 });
+  // An instance the assistant does not run on, an ordinary account's, is not
+  // offered to it, though T3 offers it to plain T3 Code.
+  await expect(change({ provider: "codex", model: "gpt-6-astra" })).rejects.toMatchObject({
+    status: 422,
+    message: "That model is not available.",
+  });
   // T3 accepts any model name or setting value, so the catalogue decides.
   await expect(change({ provider: "claudeAgent", model: "no-such-model" })).rejects.toMatchObject({
     status: 422,
@@ -995,7 +1107,10 @@ it("refuses changes it cannot make, without sending them to T3", async () => {
   await expect(refused).rejects.toThrow(
     /^T3 refused the model change: .*The target provider instance is unavailable\.$/u,
   );
-  expect(thread().modelSelection).toEqual(selection);
+  expect(thread().modelSelection).toEqual({
+    ...selection,
+    options: [...selection.options, { id: "fastMode", value: false }],
+  });
 });
 
 it("stops the native run when the runtime closes mid-turn", async () => {
@@ -2167,12 +2282,16 @@ it("lists the commands and user-invocable skills T3 offers the conversation's pr
   expect(fake.threads.size).toBe(0);
   expect(fake.refreshes).toEqual([{ instanceId: "claudeAgent", cwd: resources }]);
 
-  // Once the thread runs on another instance, that instance's commands are offered.
+  // A thread T3's UI moved onto an instance the assistant does not run on gives
+  // way to the agent's at its next run, whose commands are still the ones offered.
   const reply = runtime.executeTurn(turn("turn-1", "hi"));
   answer(await started("turn-1"), "Hello.");
   await reply;
   thread().modelSelection = { instanceId: "codex", model: "gpt-6-astra", options: [] };
-  expect((await runtime.commands(conversation)).commands.map((command) => command.name)).toEqual([
+  expect((await runtime.commands(conversation)).commands).toHaveLength(32);
+  // Plain T3 Code runs on the other instances: its commands are theirs.
+  const code = { ...conversation, agent_id: "code" };
+  expect((await runtime.commands(code)).commands.map((command) => command.name)).toEqual([
     "status",
     "deploy-notes",
     "only-person",

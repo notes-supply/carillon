@@ -49,10 +49,10 @@ const services = new Map();
  * other conversations.
  */
 const DISCORD_ROUTES = [
-  "300:always:channel",
-  "301:mention:thread",
-  "302:always:thread",
-  "305:always:channel",
+  "300:always:channel:assistant",
+  "301:mention:thread:assistant",
+  "302:always:thread:assistant",
+  "305:always:channel:assistant",
 ];
 
 try {
@@ -284,12 +284,15 @@ try {
     // startup if it disappears, before binding or touching native session state.
     await start("core");
     await rename(workspace, `${workspace}-saved`);
-    const sessions = join(installation, "agents/default/sessions");
+    const sessions = join(installation, "state/components/runtime-pi/sessions");
     await rename(sessions, `${sessions}-saved`);
     try {
       for (const missing of [true, false]) {
         if (!missing) await writeFile(workspace, "not a directory");
-        assertStartupRefused("runtime", missing ? /ENOENT/u : /existing directory/u);
+        assertStartupRefused(
+          "runtime",
+          /agent assistant: workspace must be an existing directory/u,
+        );
         await assert.rejects(stat(sessions), { code: "ENOENT" });
         // Dispatch is paused, so startup refusals must leave accepted work queued.
         assert.equal(
@@ -461,9 +464,9 @@ async function testModelPicker() {
   assert.match(shown.content, /^\*\*Model settings\*\*\n/u);
   assert.match(
     shown.content,
-    /This conversation: Local echo \(`local\/echo`\) \(follows the agent default\)/u,
+    /This conversation: Local echo \(`local\/echo`\) \(follows the channel default\)/u,
   );
-  assert.match(shown.content, /Agent default: Local echo \(`local\/echo`\) \(runtime default\)/u);
+  assert.match(shown.content, /Channel default: Local echo \(`local\/echo`\) \(runtime default\)/u);
   assert.deepEqual(customIds(shown), [
     providerControl(shown, "conversation"),
     "model:model:conversation",
@@ -491,7 +494,7 @@ async function testModelPicker() {
   );
   assert.equal(selectedLabel(shown, "model:model:conversation"), "Local echo");
   assert.equal(control(shown, "model:default:conversation").disabled, true);
-  // Outside a conversation only the agent default is offered.
+  // Outside a conversation only the channel default is offered.
   const outside = await interact("301", null, "command", "model");
   assert.match(outside.content, /Use `\/model` inside a conversation to set a model for it\./u);
   assert.deepEqual(customIds(outside), [
@@ -511,8 +514,8 @@ async function testModelPicker() {
     ["substitute/fixed"],
   );
   assert.match(browsed.content, /This conversation: Local echo/u);
-  assert.match(browsed.content, /follows the agent default/u);
-  assert.match(browsed.content, /Agent default: Local echo/u);
+  assert.match(browsed.content, /follows the channel default/u);
+  assert.match(browsed.content, /Channel default: Local echo/u);
   const stillActive = await simulateRoute("model-browse", "305", null, "which model");
   assert.match(stillActive.delivery.content, /model local\/echo\.$/u);
   const reopened = await interact("305", null, "command", "model");
@@ -567,7 +570,7 @@ async function testModelPicker() {
       "content-type": "application/json",
     },
     body: JSON.stringify({
-      agent_id: "default",
+      agent_id: "assistant",
       audience_id: conversation,
       scope: "conversation",
       selection: { provider: "local", model: "echo", options: {} },
@@ -578,9 +581,9 @@ async function testModelPicker() {
   const unchanged = await interact("305", null, "command", "model");
   assert.match(unchanged.content, reasoner);
 
-  // The agent default reaches conversations without a choice of their own.
+  // The channel default reaches conversations without a choice of their own.
   const agentScope = await interact("305", null, "component", "model:scope:agent");
-  assert.match(agentScope.content, /Changing the agent selection:/u);
+  assert.match(agentScope.content, /Changing the channel default:/u);
   assert.deepEqual(customIds(agentScope), [
     providerControl(agentScope, "agent"),
     "model:model:agent",
@@ -591,13 +594,13 @@ async function testModelPicker() {
     value(agentScope, agentProvider, "substitute"),
   ]);
   assert.match(agentBrowse.content, reasoner);
-  assert.match(agentBrowse.content, /Agent default: Local echo/u);
+  assert.match(agentBrowse.content, /Channel default: Local echo/u);
   const agentSet = await interact("305", null, "component", "model:model:agent", [
     value(agentBrowse, "model:model:agent", "substitute/fixed"),
   ]);
   assert.match(
     agentSet.content,
-    /Agent default: Substitute fixed \(`substitute\/fixed`\) \(set for this agent\)/u,
+    /Channel default: Substitute fixed \(`substitute\/fixed`\) \(set for this channel\)/u,
   );
   assert.match(agentSet.content, reasoner);
   const elsewhere = await simulateRoute("model-2", "406", "302", "which model");
@@ -612,23 +615,23 @@ async function testModelPicker() {
   assert.match(persisted.content, reasoner);
   assert.match(
     persisted.content,
-    /Agent default: Substitute fixed \(`substitute\/fixed`\) \(set for this agent\)/u,
+    /Channel default: Substitute fixed \(`substitute\/fixed`\) \(set for this channel\)/u,
   );
 
   // Each scope returns to its default separately.
   const followsAgent = await interact("305", null, "component", "model:default:conversation");
   assert.match(
     followsAgent.content,
-    /This conversation: Substitute fixed \(`substitute\/fixed`\) \(follows the agent default\)/u,
+    /This conversation: Substitute fixed \(`substitute\/fixed`\) \(follows the channel default\)/u,
   );
   const runtimeDefault = await interact("305", null, "component", "model:default:agent");
   assert.match(
     runtimeDefault.content,
-    /Agent default: Local echo \(`local\/echo`\) \(runtime default\)/u,
+    /Channel default: Local echo \(`local\/echo`\) \(runtime default\)/u,
   );
   assert.match(
     runtimeDefault.content,
-    /This conversation: Local echo \(`local\/echo`\) \(follows the agent default\)/u,
+    /This conversation: Local echo \(`local\/echo`\) \(follows the channel default\)/u,
   );
   const reset = await simulateRoute("model-4", "305", null, "which model");
   assert.match(reset.delivery.content, /model local\/echo\.$/u);
@@ -641,11 +644,11 @@ async function testModelPicker() {
   ]);
   assert.match(
     during.content,
-    /Agent default: Local reasoner \(`local\/reasoner`\), Thinking: medium \(set for this agent\)/u,
+    /Channel default: Local reasoner \(`local\/reasoner`\), Thinking: medium \(set for this channel\)/u,
   );
   assert.match(
     (await interact("305", null, "command", "model")).content,
-    /Agent default: Local reasoner \(`local\/reasoner`\), Thinking: medium \(set for this agent\)/u,
+    /Channel default: Local reasoner \(`local\/reasoner`\), Thinking: medium \(set for this channel\)/u,
   );
   const released = await held.release();
   assert.match(released.output, /model local\/echo\.$/u, "the running turn keeps its selection");
@@ -753,7 +756,7 @@ async function testModuleOperations() {
     operate(),
     `discord-private serves the custom Discord module ${custom}: ${commands}.`,
   );
-  assert.match((await interact("305", null, "command", "model")).content, /Agent default:/u);
+  assert.match((await interact("305", null, "command", "model")).content, /Channel default:/u);
 
   // A rebuild that breaks is declared, refused when applied, and the
   // example keeps serving.
@@ -768,7 +771,7 @@ async function testModuleOperations() {
   const refused = attempt("settings", "apply");
   assert.notEqual(refused.status, 0, "an apply served a broken module");
   assert.match(refused.stderr, /not a usable Discord module.*nothing was applied/u);
-  assert.match((await interact("305", null, "command", "model")).content, /Agent default:/u);
+  assert.match((await interact("305", null, "command", "model")).content, /Channel default:/u);
 
   // A working rebuild at the same path serves once applied.
   await writeFile(custom, await readFile(discordModule));
@@ -793,7 +796,7 @@ async function testModuleOperations() {
     ].join("\n"),
   );
   assert.equal(operate(), `discord-private serves the bundled Discord module: ${commands}.`);
-  assert.match((await interact("305", null, "command", "model")).content, /Agent default:/u);
+  assert.match((await interact("305", null, "command", "model")).content, /Channel default:/u);
   await rm(custom);
   await writeFile(settingsFile, before);
   run("--home", installation, "discord", "settings", "apply");
@@ -818,7 +821,7 @@ async function holdTurn(correlationId) {
     body: JSON.stringify({
       correlation_id: correlationId,
       interface_id: "discord-private",
-      agent_id: "default",
+      agent_id: "assistant",
       audience_id: `discord-100-${correlationId}`,
       input: "held",
       resource_root: fixture,
@@ -872,7 +875,10 @@ async function testResourceStateSeparation(turnId) {
           original.replace('data_dir = "state"', `data_dir = "${path}"`),
         );
         for (const service of ["core", "discord"])
-          assertStartupRefused(service, /data_dir must not be inside selected agent resources/u);
+          assertStartupRefused(
+            service,
+            /data_dir must not be inside the resources of agent assistant/u,
+          );
         assert.deepEqual(await readFile(join(nested, "carillon.sqlite3")), database);
         await assert.rejects(stat(state), { code: "ENOENT" });
       }
@@ -902,7 +908,7 @@ async function testResourceStateSeparation(turnId) {
 
 async function testPiModelReadiness() {
   const privateState = join(installation, "pi");
-  const sessions = join(installation, "agents/default/sessions");
+  const sessions = join(installation, "state/components/runtime-pi/sessions");
   await rename(privateState, `${privateState}-saved`);
   await rename(sessions, `${sessions}-saved`);
   await mkdir(privateState);
@@ -978,7 +984,7 @@ async function testPiModelReadiness() {
  */
 async function testProviderFailure() {
   const privateState = join(installation, "pi");
-  const sessions = join(installation, "agents/default/sessions");
+  const sessions = join(installation, "state/components/runtime-pi/sessions");
   const key = `sk-proj-${"Ab1".repeat(20)}`;
   const failures = [
     {
@@ -1111,7 +1117,7 @@ async function testProviderFailure() {
  */
 async function testActivityVisibility() {
   const privateState = join(installation, "pi");
-  const sessions = join(installation, "agents/default/sessions");
+  const sessions = join(installation, "state/components/runtime-pi/sessions");
   const marker = "activity-release";
   const command = `until [ -e ${marker} ]; do sleep 0.1; done; echo released`;
   let requests = 0;
@@ -1252,10 +1258,7 @@ async function testT3ActivityThroughDelivery() {
   const t3Token = join(installation, "credentials/t3.token");
   const token = crypto.randomUUID();
   const { version } = JSON.parse(await readFile("packages/runtime-t3/package.json", "utf8"));
-  const registered = original.replace(
-    'runtime_provider = "runtime-pi"',
-    'runtime_provider = "runtime-t3"',
-  );
+  const registered = original.replace('runtime = "runtime-pi"', 'runtime = "runtime-t3"');
   assert.notEqual(registered, original);
   try {
     await writeFile(
@@ -1276,13 +1279,17 @@ enabled = true
       settings,
       `url = "${fake.url}"
 token_file = "credentials/t3.token"
-project_id = "project-1"
+profiles = ["claudeAgent"]
 
-[model]
+[agents.assistant]
+project_id = "project-1"
+assistant = true
+
+[agents.assistant.model]
 instance_id = "claudeAgent"
 model = "claude-sonnet-5"
 
-[model.options]
+[agents.assistant.model.options]
 effort = "low"
 `,
     );
@@ -1393,20 +1400,18 @@ async function jobs(authorization, query = "") {
   return { status: response.status, body: await response.json() };
 }
 
+// The assistant's resources are core's to capture: without them it accepts
+// nothing for the agent, and leaves accepted work queued.
 async function testMissingResourceRoot(turnId) {
   const resources = join(installation, "agents/default");
-  const privateState = join(installation, "pi");
   await rename(resources, `${resources}-saved`);
-  await rename(privateState, `${privateState}-saved`);
   await start("core");
   const before = JSON.parse(run("--home", installation, "recent"));
   try {
     for (const missing of [true, false]) {
       if (!missing) await writeFile(resources, "not a directory");
-      assertStartupRefused("runtime", missing ? /ENOENT/u : /existing directory/u);
       if (missing) await assert.rejects(stat(resources), { code: "ENOENT" });
       else assert.equal(await readFile(resources, "utf8"), "not a directory");
-      await assert.rejects(stat(privateState), { code: "ENOENT" });
       assert.equal(JSON.parse(run("--home", installation, "inspect", turnId)).state, "queued");
       const response = await fetch(`http://127.0.0.1:${String(basePort)}/v1/events`, {
         method: "POST",
@@ -1417,7 +1422,7 @@ async function testMissingResourceRoot(turnId) {
         },
         body: JSON.stringify({
           event_id: "missing-resources",
-          agent_id: "default",
+          agent_id: "assistant",
           user_id: "200",
           audience_id: "new-conversation",
           delivery_target_id: "300",
@@ -1431,15 +1436,13 @@ async function testMissingResourceRoot(turnId) {
   } finally {
     await stop("core");
     await rm(resources, { recursive: true, force: true });
-    await rm(privateState, { recursive: true, force: true });
     await rename(`${resources}-saved`, resources);
-    await rename(`${privateState}-saved`, privateState);
   }
 }
 
 async function testRuntimeStartupRefusals(turnId) {
   const original = await readFile(configPath(), "utf8");
-  const sessions = join(installation, "agents/default/sessions");
+  const sessions = join(installation, "state/components/runtime-pi/sessions");
   const privateState = join(installation, "pi");
   const alternateToken = join(workspace, "alternate-runtime.token");
   await rename(sessions, `${sessions}-saved`);
@@ -1587,14 +1590,14 @@ async function testConfigurationSymlinkUpdates() {
       await stop("core");
     }
     // Provider settings live in the provider's own file; the registry is untouched.
-    configureDiscord(link, "101", "202", "203", "304:mention:thread");
+    configureDiscord(link, "101", "202", "203", "304:mention:thread:assistant");
     await assertUpdated();
     assert.equal(await readFile(configPath(), "utf8"), original);
     const configured = await readFile(providerConfigPath(), "utf8");
     assert.match(configured, /^guild_id = "101"$/mu);
     assert.equal((await stat(providerConfigPath())).mode & 0o777, 0o600);
     assert.throws(
-      () => configureDiscord(link, "invalid", "202", "203", "304:mention:thread"),
+      () => configureDiscord(link, "invalid", "202", "203", "304:mention:thread:assistant"),
       /snowflake/u,
     );
     await assertUpdated();
@@ -1756,11 +1759,11 @@ async function testConfigurationRefusals() {
           .replace(runtimeUrl, `http://[0:0:0:0:0:0:0:1]:${String(basePort + 1)}`),
         collision,
       ],
+      [original.replace('id = "assistant"', 'id = ""'), /agent identity must be 1-128 bytes/u],
       [
-        original.replace('id = "default"', 'id = ""').replace('agent = "default"', 'agent = ""'),
-        /agent identity must not be empty/u,
+        original.replace('id = "assistant"', 'id = "two words"'),
+        /agent identity must be 1-128 bytes/u,
       ],
-      [original.replace('id = "default"', 'id = "  "'), /agent identity must not be empty/u],
     ]) {
       assert.notEqual(text, original);
       await writeFile(configPath(), text);
@@ -1992,7 +1995,7 @@ async function postCoreEvent(eventId, content, attachments) {
     },
     body: JSON.stringify({
       event_id: eventId,
-      agent_id: "default",
+      agent_id: "assistant",
       user_id: "200",
       audience_id: "discord-100-306",
       delivery_target_id: "306",
@@ -2013,7 +2016,7 @@ async function submitCoreEvent(eventId, content) {
     },
     body: JSON.stringify({
       event_id: eventId,
-      agent_id: "default",
+      agent_id: "assistant",
       user_id: "200",
       audience_id: "discord-100-300",
       delivery_target_id: "300",

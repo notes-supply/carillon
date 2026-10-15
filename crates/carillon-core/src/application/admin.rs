@@ -109,13 +109,7 @@ pub fn initialize(
             attachments: AttachmentLimits::default(),
         },
         providers: default_providers(base_port, &discord_token, runtime, &runtime_token)?,
-        agent: AgentConfig {
-            id: "default".to_owned(),
-            name: "Default agent".to_owned(),
-            resource_root: PathBuf::from("agents/default"),
-            workspace: workspace.to_path_buf(),
-            runtime_provider: runtime.id().to_owned(),
-        },
+        agents: vec![assistant(runtime, workspace)],
     };
     config.validate()?;
     let target = absolute_destination(root)?;
@@ -167,6 +161,83 @@ pub fn initialize(
         return Err(error);
     }
     Ok(target.join("carillon.toml"))
+}
+
+/// The ID of the agent a new installation starts with: Carillon's own
+/// assistant, with the installation's resources.
+pub const ASSISTANT: &str = "assistant";
+
+/// Carillon's assistant on `runtime`, working in `workspace`.
+#[must_use]
+pub fn assistant(runtime: Runtime, workspace: &Path) -> AgentConfig {
+    AgentConfig {
+        id: ASSISTANT.to_owned(),
+        name: "Carillon".to_owned(),
+        runtime: runtime.id().to_owned(),
+        workspace: workspace.to_path_buf(),
+        resources: Some(PathBuf::from(RESOURCES)),
+    }
+}
+
+/// The installation's own agent resources, relative to its root.
+const RESOURCES: &str = "agents/default";
+
+/// Registers the bundled `runtime` beside the installation's providers, on
+/// the first loopback port after theirs, with a credential of its own; it
+/// does nothing when the runtime is registered already. The registry is
+/// rewritten whole, under the caller's maintenance lock.
+pub fn register_runtime(config_path: &Path, runtime: Runtime) -> Result<()> {
+    let config_path = config_path
+        .canonicalize()
+        .context("resolve configuration path")?;
+    let root = config_path
+        .parent()
+        .context("configuration path has no parent")?;
+    let mut config: Config = toml::from_str(&fs::read_to_string(&config_path)?)?;
+    if config
+        .providers
+        .iter()
+        .any(|provider| provider.id == runtime.id())
+    {
+        return Ok(());
+    }
+    let mut port = config.core.listen.port();
+    for provider in &config.providers {
+        port = port.max(provider.listen_address()?.port());
+    }
+    let token = new_token();
+    config.providers.push(Provider {
+        id: runtime.id().to_owned(),
+        role: ProviderRole::Runtime,
+        version: runtime.version()?,
+        url: format!("http://127.0.0.1:{}", checked_port(port, 1)?),
+        token_hash: hash_token(&token),
+        enabled: true,
+        parallel_turns: None,
+    });
+    config.validate()?;
+    let component = root.join("state/components").join(runtime.id());
+    fs::create_dir_all(&component)?;
+    fs::set_permissions(&component, fs::Permissions::from_mode(0o700))?;
+    if runtime == Runtime::Pi {
+        let pi = root.join("pi");
+        fs::create_dir_all(&pi)?;
+        fs::set_permissions(&pi, fs::Permissions::from_mode(0o700))?;
+    }
+    write_credentials(root, &[(runtime.id(), &token)])?;
+    write_config(&config_path, &config)
+}
+
+/// Replaces the installation's agents with `agents`, validated with the
+/// rest of the registry before anything is written.
+pub fn set_agents(config_path: &Path, agents: Vec<AgentConfig>) -> Result<()> {
+    let config_path = config_path
+        .canonicalize()
+        .context("resolve configuration path")?;
+    let mut config: Config = toml::from_str(&fs::read_to_string(&config_path)?)?;
+    config.agents = agents;
+    config.validate()?;
+    write_config(&config_path, &config)
 }
 
 fn default_providers(
@@ -263,18 +334,36 @@ fn write_config(config_path: &Path, config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Copies the example extension and skill into the resources of every agent
+/// that has them.
 pub fn enable_demo_resources(config: &LoadedConfig) -> Result<()> {
     let extension = config.root.join("examples/carillon-context.js");
     let skill = config.root.join("examples/SKILL.md");
     if !extension.exists() || !skill.exists() {
         bail!("installation does not contain the first-release example resources");
     }
-    let root = &config.value.agent.resource_root;
-    fs::create_dir_all(root.join("extensions"))?;
-    fs::create_dir_all(root.join("skills/carillon-status"))?;
-    fs::copy(extension, root.join("extensions/carillon-context.js"))?;
-    fs::copy(skill, root.join("skills/carillon-status/SKILL.md"))?;
+    for root in agent_resources(&config.value) {
+        fs::create_dir_all(root.join("extensions"))?;
+        fs::create_dir_all(root.join("skills/carillon-status"))?;
+        fs::copy(&extension, root.join("extensions/carillon-context.js"))?;
+        fs::copy(&skill, root.join("skills/carillon-status/SKILL.md"))?;
+    }
     Ok(())
+}
+
+/// Each distinct resource directory the agents name, in registry order.
+fn agent_resources(config: &Config) -> Vec<&Path> {
+    let mut roots: Vec<&Path> = Vec::new();
+    for root in config
+        .agents
+        .iter()
+        .filter_map(|agent| agent.resources.as_deref())
+    {
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    roots
 }
 
 pub fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
@@ -303,10 +392,7 @@ pub fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
     }
     // Only installation-owned state is archived; the user's workspace may
     // deliberately live elsewhere.
-    for (field, path) in [
-        ("data_dir", &config.value.data_dir),
-        ("agent.resource_root", &config.value.agent.resource_root),
-    ] {
+    for (field, path) in installation_paths(&config.value) {
         let path = path
             .canonicalize()
             .with_context(|| format!("resolve backup {field}"))?;
@@ -444,10 +530,7 @@ fn validate_portable_paths(root: &Path) -> Result<()> {
     // LoadedConfig resolves paths for services; check the stored spelling before
     // allowing it into an archive that must work under a different root.
     let config: Config = toml::from_str(&fs::read_to_string(root.join("carillon.toml"))?)?;
-    for (field, path) in [
-        ("data_dir", &config.data_dir),
-        ("agent.resource_root", &config.agent.resource_root),
-    ] {
+    for (field, path) in installation_paths(&config) {
         if path.as_os_str().is_empty()
             || path.is_absolute()
             || path
@@ -460,9 +543,25 @@ fn validate_portable_paths(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The registry paths of installation-owned state a backup archives: the
+/// data directory and each agent's resources, named as their fields.
+fn installation_paths(config: &Config) -> Vec<(String, &Path)> {
+    std::iter::once(("data_dir".to_owned(), config.data_dir.as_path()))
+        .chain(config.agents.iter().filter_map(|agent| {
+            agent
+                .resources
+                .as_deref()
+                .map(|resources| (format!("agents.{}.resources", agent.id), resources))
+        }))
+        .collect()
+}
+
 fn validate_installation(config: &LoadedConfig) -> Result<()> {
-    if !config.value.agent.resource_root.is_dir() {
-        bail!("backup is missing the configured agent resource directory");
+    if agent_resources(&config.value)
+        .iter()
+        .any(|resources| !resources.is_dir())
+    {
+        bail!("backup is missing a configured agent resource directory");
     }
     for (id, expected) in std::iter::once(("operator", &config.value.core.operator_token_hash))
         .chain(
@@ -577,6 +676,16 @@ mod tests {
         initialize(root, workspace, base_port, super::Runtime::Pi)
     }
 
+    /// The resources of the assistant a new installation starts with.
+    fn test_resources(config: &LoadedConfig) -> Result<&Path> {
+        config
+            .value
+            .agents
+            .iter()
+            .find_map(|agent| agent.resources.as_deref())
+            .context("a new installation's assistant has resources")
+    }
+
     /// A base port for backups that must find their services stopped, away
     /// from 44800-44842, where the install, maintenance and operations tests
     /// run real services by default, and below Linux's default ephemeral
@@ -639,7 +748,7 @@ mod tests {
         }
         let config = initialize_test_installation(&root, directory.path(), 44_000)?;
         assert_eq!(
-            LoadedConfig::load(&config)?.value.agent.workspace,
+            LoadedConfig::load(&config)?.value.agents[0].workspace,
             directory.path()
         );
         Ok(())
@@ -722,7 +831,7 @@ mod tests {
         let root = directory.path().join("installation");
         let config_path = initialize(&root, directory.path(), 44_000, super::Runtime::T3)?;
         let config = LoadedConfig::load(&config_path)?;
-        assert_eq!(config.value.agent.runtime_provider, "runtime-t3");
+        assert_eq!(config.value.agents[0].runtime, "runtime-t3");
         let ids: Vec<&str> = config
             .value
             .providers
@@ -889,7 +998,7 @@ mod tests {
 
     #[test]
     fn backup_rejects_external_configured_owned_paths() -> Result<()> {
-        for field in ["data_dir", "agent.resource_root"] {
+        for field in ["data_dir", "agents.assistant.resources"] {
             let directory = tempdir()?;
             let root = directory.path().join("installation");
             let config_path = initialize_test_installation(&root, directory.path(), 44_500)?;
@@ -909,7 +1018,7 @@ mod tests {
             ] {
                 match field {
                     "data_dir" => config.data_dir = path,
-                    _ => config.agent.resource_root = path,
+                    _ => config.agents[0].resources = Some(path),
                 }
                 fs::write(&config_path, toml::to_string_pretty(&config)?)?;
                 let loaded = LoadedConfig::load(&config_path)?;
@@ -934,14 +1043,14 @@ mod tests {
 
     #[test]
     fn backup_and_restore_reject_absolute_managed_paths_inside_source() -> Result<()> {
-        for field in ["data_dir", "agent.resource_root"] {
+        for field in ["data_dir", "agents.assistant.resources"] {
             let directory = tempdir()?;
             let root = directory.path().join("installation");
             let config_path = initialize_test_installation(&root, directory.path(), 44_700)?;
             let mut config: Config = toml::from_str(&fs::read_to_string(&config_path)?)?;
             match field {
                 "data_dir" => config.data_dir = root.join("state"),
-                _ => config.agent.resource_root = root.join("agents/default"),
+                _ => config.agents[0].resources = Some(root.join("agents/default")),
             }
             fs::write(&config_path, toml::to_string_pretty(&config)?)?;
             let destination = directory.path().join("backup.tar.gz");
@@ -1100,7 +1209,8 @@ mod tests {
                     initialize_test_installation(&source, directory.path(), OFFLINE_BACKUP_PORT)?;
                 let config = LoadedConfig::load(&config_path)?;
                 let store = config.value.data_dir.join("resource-snapshots");
-                let snapshot = resources::materialize(&config.value.agent.resource_root, &store)?;
+                let snapshot =
+                    resources::materialize(config.value.agents[0].resources.as_deref(), &store)?;
                 let db_path = config.value.data_dir.join("carillon.sqlite3");
                 let db = Database::open(&db_path)?;
                 let receipt = db.accept_event(
@@ -1108,7 +1218,7 @@ mod tests {
                     "runtime-pi",
                     &ExternalEvent {
                         event_id: "captured".to_owned(),
-                        agent_id: "default".to_owned(),
+                        agent_id: super::ASSISTANT.to_owned(),
                         audience_id: "audience".to_owned(),
                         user_id: "user".to_owned(),
                         delivery_target_id: "target".to_owned(),
@@ -1133,7 +1243,7 @@ mod tests {
                 };
                 // Valid capture remains independent of subsequent live-root edits.
                 fs::write(
-                    config.value.agent.resource_root.join("SYSTEM.md"),
+                    test_resources(&config)?.join("SYSTEM.md"),
                     "new live prompt",
                 )?;
                 let valid = directory.path().join("valid.tar.gz");
@@ -1194,9 +1304,11 @@ mod tests {
 
         crate::Core::open(crate::CoreOptions {
             data_directory: config.value.data_dir.clone(),
-            agent_id: config.value.agent.id.clone(),
-            resource_root: config.value.agent.resource_root.clone(),
-            default_runtime: "runtime-pi".to_owned(),
+            agents: vec![crate::AgentOptions {
+                id: super::ASSISTANT.to_owned(),
+                runtime: "runtime-pi".to_owned(),
+                resources: config.value.agent(super::ASSISTANT)?.resources.clone(),
+            }],
             runtimes: vec![crate::RuntimeProvider {
                 id: "runtime-pi".to_owned(),
                 version: "test".to_owned(),
@@ -1250,7 +1362,7 @@ mod tests {
                     &interface,
                     &ExternalEvent {
                         event_id: event_id.to_owned(),
-                        agent_id: "default".to_owned(),
+                        agent_id: super::ASSISTANT.to_owned(),
                         user_id: "user".to_owned(),
                         audience_id: event_id.to_owned(),
                         delivery_target_id: "target".to_owned(),
@@ -1395,7 +1507,7 @@ mod tests {
             .providers
             .retain(|provider| provider.role == ProviderRole::Runtime);
         config.providers[0].id = "other-runtime".to_owned();
-        config.agent.runtime_provider = "other-runtime".to_owned();
+        config.agents[0].runtime = "other-runtime".to_owned();
         fs::rename(
             root.join("credentials/runtime-pi.token"),
             root.join("credentials/other-runtime.token"),
@@ -1466,10 +1578,10 @@ mod tests {
         );
         assert!(restored.value.data_dir.join("carillon.sqlite3").is_file());
         assert_eq!(
-            fs::read(restored.value.agent.resource_root.join("SYSTEM.md"))?,
+            fs::read(test_resources(&restored)?.join("SYSTEM.md"))?,
             b"agent instructions"
         );
-        assert_eq!(restored.value.agent.workspace, workspace);
+        assert_eq!(restored.value.agents[0].workspace, workspace);
         assert_eq!(fs::read(workspace.join("user-file"))?, b"user-owned");
         assert!(!target.join("workspace").exists());
         Ok(())

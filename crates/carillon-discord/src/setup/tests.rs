@@ -533,6 +533,7 @@ async fn refused_tokens_and_unknown_people_are_asked_again_and_only_named_people
     assert_eq!(settings.allowed_user_ids, ["250"]);
     let route = |channel: &str| DiscordRoute {
         channel_id: channel.to_owned(),
+        agent: "default".to_owned(),
         activation: DiscordActivation::Mention,
         conversation: DiscordConversation::Thread,
     };
@@ -580,6 +581,7 @@ async fn setup_waits_for_message_content_and_an_invitation() -> anyhow::Result<(
         settings.routes,
         [DiscordRoute {
             channel_id: "300".to_owned(),
+            agent: "default".to_owned(),
             activation: DiscordActivation::Always,
             conversation: DiscordConversation::Thread,
         }]
@@ -1110,8 +1112,8 @@ async fn publication_follows_the_registry_as_it_is_when_the_questions_end() -> a
         anyhow::Ok((directory, config, before, result))
     };
 
-    // An interface disabled or removed meanwhile is refused, with nothing
-    // written.
+    // An interface disabled or removed, or the agent renamed, meanwhile is
+    // refused, with nothing written: the routes name the agent as asked.
     let disable: fn(&mut Config) = |registry| {
         for provider in &mut registry.providers {
             if provider.id == "discord-private" {
@@ -1124,9 +1126,13 @@ async fn publication_follows_the_registry_as_it_is_when_the_questions_end() -> a
             .providers
             .retain(|provider| provider.id != "discord-private");
     };
+    let rename: fn(&mut Config) = |registry| {
+        "other".clone_into(&mut registry.agents[0].id);
+    };
     for (change, reason) in [
         (disable, "discord-private is disabled in carillon.toml"),
         (remove, "discord-private"),
+        (rename, "route 300 names an unknown agent"),
     ] {
         let (_directory, config, before, result) = edited(change).await?;
         let refusal = format!("{:#}", result.err().context("setup ignored the registry")?);
@@ -1138,15 +1144,5 @@ async fn publication_follows_the_registry_as_it_is_when_the_questions_end() -> a
         );
         assert_eq!(saved_files(&config)?, before);
     }
-
-    // Another agent meanwhile is the one the saved settings select, so the
-    // registry as it is accepts them.
-    let (_directory, config, _, result) = edited(|registry| {
-        "other".clone_into(&mut registry.agent.id);
-    })
-    .await?;
-    result?;
-    let settings = DiscordConfig::load(&config.reload()?, "discord-private")?;
-    assert_eq!(settings.agent, "other");
     Ok(())
 }

@@ -12,12 +12,15 @@ new interface or runtime doesn't mean rebuilding the rest.
 3. Talk to the agent in channels or threads, with files and images.
 4. Let the agent use its runtime's native tools, extensions and skills with
    the owner's authority, and watch a running turn on a Discord card.
-5. Choose models and their settings for a conversation or the agent with
-   `/model`, and run the runtime's own commands with `/command`.
-6. Change users, routes, runtime availability and concurrency while Carillon
+5. Route each channel to an agent: Carillon's assistant, on Pi or on T3
+   with Carillon's own profiles, or plain T3 Code in a project.
+6. Choose models and their settings for a conversation, or a channel's
+   default, with `/model`, and run the runtime's own commands with
+   `/command`.
+7. Change users, routes, runtime availability and concurrency while Carillon
    runs; other settings apply on restart.
-7. Replace the Discord module (slash commands and cards) without restarting.
-8. Restart and update without interrupting running work, inspect recent
+8. Replace the Discord module (slash commands and cards) without restarting.
+9. Restart and update without interrupting running work, inspect recent
    turns, and back up and restore the installation.
 
 ## Providers
@@ -28,8 +31,9 @@ Carillon turns into a native agent engine and owns its sessions, models,
 tools and settings. Core keeps only what they share: admission, conversation
 identity, turn state, the runtime that owns each conversation, and delivery.
 
-A conversation is pinned to the runtime that took its first turn. Changing
-the agent's default runtime affects new conversations only. A conversation
+A conversation belongs to the agent of the route it began in, and is
+pinned to the runtime that took its first turn. Changing an agent's runtime
+affects new conversations only. A conversation
 whose runtime is disabled or removed is refused rather than moved; nothing
 translates native state between engines.
 

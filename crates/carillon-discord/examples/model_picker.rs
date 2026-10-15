@@ -35,12 +35,12 @@ async fn example() -> Result<Value> {
     let directory = tempfile::tempdir()?;
     let participation = Participation::load(directory.path().join("participation.json"))?;
     let config = DiscordConfig::with_defaults(
-        "default".to_owned(),
         "100".to_owned(),
         "900".to_owned(),
         vec!["200".to_owned()],
         vec![DiscordRoute {
             channel_id: "300".to_owned(),
+            agent: "default".to_owned(),
             activation: DiscordActivation::Always,
             conversation: DiscordConversation::Channel,
         }],

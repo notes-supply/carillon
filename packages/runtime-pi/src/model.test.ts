@@ -9,7 +9,7 @@ import { DETERMINISTIC_DEFAULT, DETERMINISTIC_MODELS, describeSelection } from "
 import { ModelStateSchema } from "@carillon/protocol";
 import { ExplainedFailure } from "@carillon/runtime/failure";
 import { resolved } from "@carillon/runtime/models";
-import { ModelSelections } from "./model.ts";
+import { ModelSelections } from "@carillon/runtime/selections";
 import { type AvailableModel } from "@carillon/protocol";
 
 const conversation = {
@@ -365,7 +365,7 @@ it("independent objects serialize file writes and see each other's committed sta
 it("serializes selection updates across processes", async () => {
   await withLedger(async (path) => {
     const script = `
-      import { ModelSelections } from ${JSON.stringify(new URL("./model.ts", import.meta.url).href)};
+      import { ModelSelections } from ${JSON.stringify(new URL("../../runtime/src/selections.ts", import.meta.url).href)};
       const [path, agent] = process.argv.slice(1);
       const store = await ModelSelections.open(path);
       process.on("message", async () => {
