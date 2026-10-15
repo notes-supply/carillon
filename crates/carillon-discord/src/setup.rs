@@ -5,11 +5,15 @@
 //! Nobody is admitted who was not named here, and no channel is routed where
 //! the bot may not answer.
 
-use std::{fmt::Display, path::PathBuf};
+use std::{
+    collections::{BTreeMap, btree_map::Entry},
+    fmt::Display,
+    path::PathBuf,
+};
 
 use anyhow::{Context as _, Result, bail};
 use carillon_installation::{
-    config::{LoadedConfig, ProviderRole, read_token_file},
+    config::{AgentConfig, LoadedConfig, ProviderRole, read_token_file},
     filesystem::publish,
     maintenance::MaintenanceLock,
     prompt::Questions,
@@ -155,12 +159,8 @@ pub(crate) async fn setup(
     prompt.say(&format!("Signed in as {}.", bot.name))?;
     let (guild_id, guild) = server(prompt, &http, &application).await?;
     let channels = channels(prompt, &http, guild_id, &guild).await?;
-    let chosen = agents(prompt, loaded, &channels)?;
-    let routes = routes(prompt, loaded, &channels, &chosen)?;
-    let threads = routes
-        .iter()
-        .any(|route| route.conversation == DiscordConversation::Thread);
-    permitted(prompt, &http, guild_id, bot.id, &channels, threads).await?;
+    let routes = routes(prompt, loaded, &channels)?;
+    permitted(prompt, &http, guild_id, bot.id, &channels, &routes).await?;
     let people = people(prompt, &http, guild_id, &guild, &application, &bot).await?;
 
     let users: Vec<String> = people.iter().map(|(id, _)| id.clone()).collect();
@@ -200,6 +200,16 @@ pub(crate) async fn setup(
     }
     settings.write(loaded, provider)?;
     drop(maintenance);
+    let answered = channels
+        .iter()
+        .zip(&routes)
+        .map(|((_, label), route)| {
+            Ok(format!(
+                "{label} ({})",
+                loaded.value.agent(&route.agent)?.name
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
     prompt.say(&format!(
         "{} answers {} in {} on {guild}.",
         bot.name,
@@ -208,69 +218,58 @@ pub(crate) async fn setup(
             .map(|(_, name)| name.as_str())
             .collect::<Vec<_>>()
             .join(", "),
-        channels
-            .iter()
-            .zip(&chosen)
-            .map(|((_, label), agent)| format!("{label} ({})", loaded.value.agents[*agent].name))
-            .collect::<Vec<_>>()
-            .join(", "),
+        answered.join(", "),
     ))?;
     Ok(())
 }
 
-/// Which agent answers in each chosen channel, as indexes into the
-/// registry's agents. With one agent, it answers everywhere.
-fn agents(
-    prompt: &mut impl Questions,
-    loaded: &LoadedConfig,
-    channels: &[(Id<ChannelMarker>, String)],
-) -> Result<Vec<usize>> {
-    let agents = &loaded.value.agents;
-    let names: Vec<String> = agents.iter().map(|agent| agent.name.clone()).collect();
-    match names.len() {
-        0 => bail!("carillon.toml has no agent to answer in Discord; run `carillon setup`"),
-        1 => Ok(vec![0; channels.len()]),
-        _ => channels
-            .iter()
-            .map(|(_, label)| prompt.choose(&format!("Who answers in {label}?"), &names, 0))
-            .collect(),
-    }
-}
-
-/// The routes for the chosen channels: one answer mode for each agent that
-/// answers somewhere, asked once per agent.
+/// A route per chosen channel, in their order. Who answers is asked for each
+/// channel, unless one agent is all there is; when it answers is asked once
+/// for each agent that answers somewhere.
 fn routes(
     prompt: &mut impl Questions,
     loaded: &LoadedConfig,
     channels: &[(Id<ChannelMarker>, String)],
-    chosen: &[usize],
 ) -> Result<Vec<DiscordRoute>> {
     let agents = &loaded.value.agents;
-    let labels = MODES.map(|(label, _, _)| label.to_owned());
-    let mut modes = std::collections::BTreeMap::new();
-    for &agent in chosen {
-        if let std::collections::btree_map::Entry::Vacant(entry) = modes.entry(agent) {
-            let question = if agents.len() == 1 {
-                "When should the agent answer?".to_owned()
-            } else {
-                format!("When should {} answer?", agents[agent].name)
-            };
-            entry.insert(MODES[prompt.choose(&question, &labels, 0)?]);
-        }
+    if agents.is_empty() {
+        bail!("carillon.toml has no agent to answer in Discord; run `carillon setup`");
     }
-    Ok(channels
+    let names: Vec<String> = agents.iter().map(|agent| agent.name.clone()).collect();
+    let answering = channels
         .iter()
-        .zip(chosen)
-        .map(|((id, _), agent)| {
-            let (_, activation, conversation) = modes[agent];
-            DiscordRoute {
+        .map(|(id, label)| {
+            let agent = match agents.as_slice() {
+                [only] => only,
+                _ => &agents[prompt.choose(&format!("Who answers in {label}?"), &names, 0)?],
+            };
+            Ok((id, agent))
+        })
+        .collect::<Result<Vec<(_, &AgentConfig)>>>()?;
+    let labels = MODES.map(|(label, _, _)| label.to_owned());
+    let mut modes = BTreeMap::new();
+    answering
+        .into_iter()
+        .map(|(id, agent)| {
+            let (_, activation, conversation) = match modes.entry(agent.id.as_str()) {
+                Entry::Occupied(mode) => *mode.get(),
+                Entry::Vacant(mode) => {
+                    let question = if agents.len() == 1 {
+                        "When should the agent answer?".to_owned()
+                    } else {
+                        format!("When should {} answer?", agent.name)
+                    };
+                    *mode.insert(MODES[prompt.choose(&question, &labels, 0)?])
+                }
+            };
+            Ok(DiscordRoute {
                 channel_id: id.to_string(),
-                agent: agents[*agent].id.clone(),
+                agent: agent.id.clone(),
                 activation,
                 conversation,
-            }
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// Refuses an interface provider the registry does not have, or has
@@ -506,17 +505,17 @@ fn distinct<T: Display>(named: &[(T, String)]) -> Vec<String> {
         .collect()
 }
 
-/// Waits until the bot may answer in every chosen channel the way
-/// `conversation` needs, by its roles and each channel's overwrites as
-/// Discord applies them, then says where the agent answers without cards,
-/// reactions or files. Each check reads them from Discord again.
+/// Waits until the bot may answer in every chosen channel the way its route
+/// needs, by its roles and each channel's overwrites as Discord applies
+/// them, then says where the agent answers without cards, reactions or
+/// files. Each check reads them from Discord again.
 async fn permitted(
     prompt: &mut impl Questions,
     http: &DiscordHttp,
     guild_id: Id<GuildMarker>,
     bot: Id<UserMarker>,
     chosen: &[(Id<ChannelMarker>, String)],
-    threads: bool,
+    routes: &[DiscordRoute],
 ) -> Result<()> {
     loop {
         let roles = http.roles(guild_id).await?.model().await?;
@@ -533,7 +532,7 @@ async fn permitted(
             .collect();
         let mut unusable = Vec::new();
         let mut unshown = Vec::new();
-        for (id, label) in chosen {
+        for ((id, label), route) in chosen.iter().zip(routes) {
             let channel = channels
                 .iter()
                 .find(|channel| channel.id == *id)
@@ -550,7 +549,7 @@ async fn permitted(
                 }
                 match need {
                     Need::Answer => lacking.push(name),
-                    Need::Threads if threads => {
+                    Need::Threads if route.conversation == DiscordConversation::Thread => {
                         lacking.push(name);
                     }
                     Need::Threads => {}
