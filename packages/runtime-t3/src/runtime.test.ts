@@ -204,7 +204,6 @@ it("keeps a conversation's turns in one T3 thread and sends the person's text as
 
   expect(fake.threads.size).toBe(1);
   expect(thread().runs.map((run) => run.ordinal)).toEqual([1, 2]);
-  // The agent's instructions are the T3 project's own configuration, not a preamble.
   expect(userTexts()).toEqual(["Remember carillon.", "Which word?"]);
   // The thread was opened with the agent default; each message names the thread's own
   // selection, which the agent offers, so its run takes it.
@@ -827,7 +826,8 @@ const modelSets = () =>
 
 it("reads the conversation's model from its native thread against T3's catalogue", async () => {
   const state = await runtime.modelState(conversation);
-  // Only usable provider instances are offered; a boolean setting is on or off.
+  // Only usable provider instances are offered, and only the assistant's
+  // profiles, no other instance; a boolean setting is on or off.
   expect(state.available).toEqual([
     {
       provider: "claudeAgent",
@@ -842,7 +842,6 @@ it("reads the conversation's model from its native thread against T3's catalogue
   ]);
   // The agent default is the settings' selection until `/model` changes it; a
   // conversation without a thread yet will start with it. Reading creates nothing.
-  // The assistant runs on Carillon's profiles alone: no other instance is offered.
   expect(state.agent).toEqual({ selection: agentDefault, overridden: false });
   expect(state.conversation).toEqual({ selection: agentDefault, overridden: false });
   expect(fake.threads.size).toBe(0);
@@ -2288,7 +2287,7 @@ it("lists the commands and user-invocable skills T3 offers the conversation's pr
   answer(await started("turn-1"), "Hello.");
   await reply;
   thread().modelSelection = { instanceId: "codex", model: "gpt-6-astra", options: [] };
-  expect((await runtime.commands(conversation)).commands).toHaveLength(32);
+  expect((await runtime.commands(conversation)).commands).toEqual(listed);
   // Plain T3 Code runs on the other instances: its commands are theirs.
   const code = { ...conversation, agent_id: "code" };
   expect((await runtime.commands(code)).commands.map((command) => command.name)).toEqual([

@@ -30,16 +30,15 @@ export interface Catalog {
   readonly available: readonly AvailableModel[];
   /** Boolean settings by model, keyed by `optionKey`. */
   readonly booleans: ReadonlySet<string>;
+  /** Which provider instances the agent runs on: the catalogue lists theirs. */
+  readonly runsOn: (instanceId: string) => boolean;
 }
 
 /**
  * The models of the provider instances T3 reports enabled, installed and
- * usable, among those `offered` names.
+ * usable, among those the agent `runsOn`.
  */
-export function catalog(
-  config: unknown,
-  offered: (instanceId: string) => boolean = () => true,
-): Catalog {
+export function catalog(config: unknown, runsOn: Catalog["runsOn"] = () => true): Catalog {
   if (!Check(ServerConfigSchema, config))
     throw new T3Failure(
       "malformed",
@@ -48,7 +47,7 @@ export function catalog(
   const available: AvailableModel[] = [];
   const booleans = new Set<string>();
   for (const provider of config.providers) {
-    if (!Check(ProviderSchema, provider) || !usable(provider) || !offered(provider.instanceId))
+    if (!Check(ProviderSchema, provider) || !usable(provider) || !runsOn(provider.instanceId))
       continue;
     for (const model of provider.models) {
       const options = (model.capabilities?.optionDescriptors ?? []).filter(
@@ -83,7 +82,7 @@ export function catalog(
       });
     }
   }
-  return { available, booleans };
+  return { available, booleans, runsOn };
 }
 
 function usable(provider: Provider): boolean {
@@ -127,9 +126,6 @@ export function toNative(catalog: Catalog, selection: Selection): NativeSelectio
   };
 }
 
-/** Which provider instances an agent runs on. */
-export type RunsOn = (instanceId: string) => boolean;
-
 /**
  * The selection a conversation's next run takes: its thread's, while it is
  * on an instance the agent runs on, else the agent default. A model of such
@@ -138,11 +134,10 @@ export type RunsOn = (instanceId: string) => boolean;
  */
 export function routed(
   catalog: Catalog,
-  runsOn: RunsOn,
   agentDefault: Selection,
   thread: NativeSelection | undefined,
 ): NativeSelection {
-  if (thread !== undefined && runsOn(thread.instanceId)) return thread;
+  if (thread !== undefined && catalog.runsOn(thread.instanceId)) return thread;
   return toNative(catalog, resolved(catalog.available, agentDefault));
 }
 
@@ -154,13 +149,12 @@ export function routed(
  */
 export function modelState(
   catalog: Catalog,
-  runsOn: RunsOn,
   agent: ScopeState,
   conversation: { readonly thread: NativeSelection | undefined } | undefined,
 ): ModelState {
   if (conversation === undefined) return { available: [...catalog.available], agent };
   const thread = conversation.thread;
-  if (thread === undefined || !runsOn(thread.instanceId))
+  if (thread === undefined || !catalog.runsOn(thread.instanceId))
     return {
       available: [...catalog.available],
       agent,
