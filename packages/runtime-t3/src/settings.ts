@@ -43,7 +43,9 @@ const SettingsSchema = Type.Object(
     profiles: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { uniqueItems: true })),
     /** Each agent of this runtime, by its ID in `carillon.toml`. */
     agents: Type.Optional(
-      Type.Record(Type.String({ pattern: "^[A-Za-z0-9_-]{1,128}$" }), AgentSettingsSchema),
+      Type.Record(Type.String({ pattern: "^[A-Za-z0-9_-]{1,128}$" }), AgentSettingsSchema, {
+        additionalProperties: false,
+      }),
     ),
   },
   { additionalProperties: false },
