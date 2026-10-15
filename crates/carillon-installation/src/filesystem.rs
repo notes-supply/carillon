@@ -124,7 +124,7 @@ pub fn remove(path: &Path) -> Result<(), PublishError> {
 fn parent(path: &Path) -> &Path {
     path.parent()
         .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or(Path::new("."))
+        .unwrap_or_else(|| Path::new("."))
 }
 
 fn sync_directory(directory: &Path) -> Result<(), PublishError> {
