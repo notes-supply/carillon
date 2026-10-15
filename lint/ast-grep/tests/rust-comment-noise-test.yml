@@ -1,0 +1,9 @@
+id: rust-comment-noise
+valid:
+  - "// Discord counts UTF-16 units, not bytes.\nfn f() {}"
+  - "/// The archive's SHA-256.\nfn f() {}"
+invalid:
+  - "// TODO: handle retries\nfn f() {}"
+  - "// FIXME\nfn f() {}"
+  - "// ---------- helpers ----------\nfn f() {}"
+  - "/* ==== */\nfn f() {}"

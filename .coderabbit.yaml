@@ -1,0 +1,132 @@
+# yaml-language-server: $schema=https://www.coderabbit.ai/integrations/schema.v2.json
+language: en-GB
+tone_instructions: >-
+  Be direct and brief. Lead with the defect and what it breaks. Skip praise and
+  restating what the code does. Prefer deleting code to adding it.
+early_access: false
+
+reviews:
+  profile: assertive
+  request_changes_workflow: true
+  high_level_summary: true
+  poem: false
+  in_progress_fortune: false
+  sequence_diagrams: false
+  path_filters:
+    - "!**/pnpm-lock.yaml"
+    - "!Cargo.lock"
+    - "!mise.lock"
+    - "!licenses/**"
+    - "!dist/**"
+  path_instructions:
+    - path: "**/*"
+      instructions: >-
+        AGENTS.md is the bar. Ask for the smallest coherent design: one
+        authoritative owner per fact, no mirrored models, no wrapper or trait
+        with one caller or implementation, no compatibility shims, deprecated
+        aliases or migrations for old shapes (Carillon is an early beta and
+        cuts over cleanly). Code, tests and docs change together. Comments
+        explain only a non-obvious why; flag comments that narrate the code,
+        restate a name, have gone stale, or justify a workaround instead of
+        fixing it.
+    - path: "**/*.rs"
+      instructions: >-
+        Idiomatic Rust: ownership, structs and enums express the design.
+        Shared ownership (Arc), clones, locks, trait objects and stringly
+        state each need a real domain reason. Errors keep their source:
+        flag `map_err(|_| ...)` that drops a cause and logs that print an
+        error without its chain (`{err:#}`). Prefer exhaustive matches over
+        wildcard arms on our own enums. Flag `pub` items that only their
+        crate uses.
+    - path: "packages/**/*.ts"
+      instructions: >-
+        Idiomatic TypeScript: validate unknown input once at its boundary
+        (TypeBox), then trust the types. Prefer discriminated unions and
+        ordinary functions to classes and wrappers; a class is for an Error
+        subclass or state it owns. No repeated casts, no `any`, no
+        non-null assertions. Keep useful library types.
+    - path: "**/{tests.rs,tests/**,*.test.ts,*.test.mjs}"
+      instructions: >-
+        A test must fail when the behavior it names breaks and keep passing
+        when only internals change. Flag tests that only check that a result
+        is an error, `toThrow()` without the expected error, assertions on
+        data the test built itself, expected values computed by the code
+        under test, assertions on private helpers or internal call order,
+        sleeps used to wait for an effect, and tests that duplicate another
+        test's assertion.
+    - path: "lint/size-budget.txt"
+      instructions: >-
+        This budget may only shrink. A raised entry or a new file needs a
+        stated reason that splitting the file would not serve; ask for the
+        split first.
+    - path: "docs/**/*.md"
+      instructions: >-
+        The docs describe what is implemented today. Check every claim
+        against the code in this pull request. Short declarative sentences.
+  tools:
+    ast-grep:
+      enabled: true
+      rule_dirs:
+        - lint/ast-grep/rules
+      essential_rules: false
+    clippy:
+      enabled: true
+    oxc:
+      enabled: true
+    shellcheck:
+      enabled: true
+    actionlint:
+      enabled: true
+    zizmor:
+      enabled: true
+    gitleaks:
+      enabled: true
+    osvScanner:
+      enabled: true
+    biome:
+      enabled: false
+    eslint:
+      enabled: false
+    languagetool:
+      enabled: false
+    markdownlint:
+      enabled: false
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
+  pre_merge_checks:
+    docstrings:
+      mode: "off"
+    title:
+      mode: warning
+      requirements: >-
+        A conventional commit subject: `type(scope): summary`, imperative,
+        lower case, no trailing period.
+    custom_checks:
+      - name: No compatibility scaffolding
+        mode: error
+        instructions: >-
+          Fail if the pull request adds a compatibility shim, a deprecated
+          alias, a re-export kept only for old callers, migration code for an
+          old configuration or state shape, or old and new code paths side by
+          side. Pass otherwise.
+      - name: Tests assert behavior
+        mode: warning
+        instructions: >-
+          Fail if a test added or changed here would still pass when the
+          behavior it names broke, or would fail when only private internals
+          changed. Pass otherwise.
+      - name: No growth without need
+        mode: warning
+        instructions: >-
+          Fail if the pull request raises an entry in lint/size-budget.txt,
+          adds a trait, wrapper or layer with a single implementation or
+          caller, or adds comments that narrate code. Pass otherwise.
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - AGENTS.md

@@ -1,0 +1,9 @@
+id: rust-comment-noise
+language: rust
+severity: error
+message: Track unfinished work in an issue, and let modules divide the code instead of banners.
+rule:
+  any:
+    - kind: line_comment
+    - kind: block_comment
+  regex: "\\b(TODO|FIXME|XXX|HACK)\\b|^/[/*!]+\\s*[-=#*~]{4,}"

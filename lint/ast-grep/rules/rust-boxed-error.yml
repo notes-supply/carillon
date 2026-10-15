@@ -1,0 +1,10 @@
+id: rust-boxed-error
+language: rust
+severity: error
+message: A boxed dyn Error erases the cause.
+note: Use a typed error, or anyhow::Error where only a message and its sources are needed.
+rule:
+  kind: generic_type
+  all:
+    - has: { field: type, regex: "^Box$" }
+    - has: { field: type_arguments, has: { kind: dynamic_type, regex: "Error", stopBy: end } }

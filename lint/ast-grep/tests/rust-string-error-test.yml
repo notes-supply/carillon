@@ -1,0 +1,7 @@
+id: rust-string-error
+valid:
+  - "fn parse(text: &str) -> Result<Config, ConfigError> { todo() }"
+  - "fn name() -> Result<String, Error> { todo() }"
+invalid:
+  - "fn run(program: &Path) -> Result<String, String> { todo() }"
+  - "fn discover(&self) -> Result<Offer, String> { todo() }"

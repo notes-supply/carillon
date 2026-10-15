@@ -1,0 +1,17 @@
+id: rust-string-error
+language: rust
+severity: error
+message: A String error gives callers nothing to match on.
+note: Return a typed error, or anyhow::Error, and format it where it is shown. Strings are the payload only across the Discord module's Wasm boundary.
+rule:
+  kind: generic_type
+  all:
+    - has: { field: type, regex: "^Result$" }
+    - has: { field: type_arguments, has: { nthChild: 2, regex: "^String$" } }
+ignores:
+  - crates/carillon-discord-module/**
+  - crates/carillon-discord/src/client.rs
+  - crates/carillon-discord/src/module.rs
+  - crates/carillon-discord/src/module/**
+  - crates/carillon-discord/examples/**
+  - examples/**

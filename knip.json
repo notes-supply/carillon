@@ -1,0 +1,12 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "ignoreBinaries": ["mkfifo", "strace", "unshare"],
+  "workspaces": {
+    ".": {
+      "entry": ["scripts/*.mjs"]
+    },
+    "packages/runtime-pi": {
+      "ignoreDependencies": ["ws"]
+    }
+  }
+}

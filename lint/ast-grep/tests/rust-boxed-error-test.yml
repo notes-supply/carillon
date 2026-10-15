@@ -1,0 +1,7 @@
+id: rust-boxed-error
+valid:
+  - "fn run() -> anyhow::Result<()> { Ok(()) }"
+  - "fn handler() -> Box<dyn Fn()> { todo() }"
+invalid:
+  - "fn run() -> Result<(), Box<dyn std::error::Error>> { Ok(()) }"
+  - "fn run() -> Result<(), Box<dyn Error + Send + Sync>> { Ok(()) }"

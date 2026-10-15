@@ -1,0 +1,6 @@
+ruleDirs:
+  - lint/ast-grep/rules
+testConfigs:
+  - testDir: lint/ast-grep/tests
+languageGlobs:
+  typescript: ["*.mjs"]

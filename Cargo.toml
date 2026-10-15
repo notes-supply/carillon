@@ -51,6 +51,13 @@ unsafe_code = "forbid"
 warnings = "deny"
 rust_2018_idioms = { level = "deny", priority = -1 }
 future_incompatible = { level = "deny", priority = -1 }
+# Visibility says who uses an item, so dead code surfaces.
+unreachable_pub = "deny"
+unnameable_types = "deny"
+redundant_imports = "deny"
+redundant_lifetimes = "deny"
+unused_lifetimes = "deny"
+unused_qualifications = "deny"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
@@ -62,3 +69,16 @@ todo = "deny"
 unimplemented = "deny"
 dbg_macro = "deny"
 allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+assertions_on_result_states = "deny"
+collection_is_never_read = "deny"
+iter_with_drain = "deny"
+mod_module_files = "deny"
+needless_collect = "deny"
+or_fun_call = "deny"
+redundant_clone = "deny"
+return_and_then = "deny"
+str_to_string = "deny"
+string_slice = "deny"
+use_self = "deny"
+useless_let_if_seq = "deny"

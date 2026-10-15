@@ -1,0 +1,8 @@
+id: ts-comment-noise
+valid:
+  - "// T3 reports the turn before its items.\nconst a = 1;"
+  - "/** The archive's SHA-256. */\nconst a = 1;"
+invalid:
+  - "// TODO: retry\nconst a = 1;"
+  - "// XXX\nconst a = 1;"
+  - "// ===== helpers =====\nconst a = 1;"

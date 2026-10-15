@@ -6,7 +6,7 @@
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
-export const LANES = ["rust", "ts", "release", "workflows"];
+export const LANES = ["rust", "ts", "release", "lint", "workflows"];
 
 /**
  * The lanes one changed path needs, or undefined when no rule knows it.
@@ -17,6 +17,10 @@ function lanesOf(path) {
   if (/^\.github\/|^scripts\/ci-plan(\.test)?\.mjs$/u.test(path)) return LANES;
   // Root tools and their lock decide every lane's toolchain.
   if (path === "mise.toml" || path === "mise.lock") return LANES;
+  if (path === "sgconfig.yml" || path.startsWith("lint/")) return ["lint"];
+  if (path === ".oxlintrc.json" || path === "knip.json") return ["ts"];
+  // Read only by CodeRabbit's own review.
+  if (path === ".coderabbit.yaml") return [];
   // The Discord skill ships in the release; Rust reads protocol and
   // operations fixtures, and core embeds each runtime's package version.
   if (path === "packages/discord-pi/skill/SKILL.md") return ["ts", "release"];
@@ -51,6 +55,8 @@ export function plan(paths) {
     if (lanes === undefined) return all(`no rule for ${path}`);
     for (const lane of lanes) selected.add(lane);
   }
+  // Every source a lane builds is linted too.
+  if (["rust", "ts", "release"].some((lane) => selected.has(lane))) selected.add("lint");
   return {
     ...Object.fromEntries(LANES.map((lane) => [lane, selected.has(lane)])),
     reason: `${String(paths.length)} changed path(s)`,

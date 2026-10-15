@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["eslint", "typescript"],
+  "plugins": ["eslint", "typescript", "unicorn", "vitest", "import"],
   "options": {
     "typeAware": true
   },
@@ -10,9 +10,17 @@
   "rules": {
     "typescript/consistent-type-imports": [
       "error",
-      { "fixStyle": "inline-type-imports", "prefer": "type-imports" }
+      {
+        "fixStyle": "inline-type-imports",
+        "prefer": "type-imports"
+      }
     ],
-    "typescript/no-confusing-void-expression": ["error", { "ignoreArrowShorthand": true }],
+    "typescript/no-confusing-void-expression": [
+      "error",
+      {
+        "ignoreArrowShorthand": true
+      }
+    ],
     "typescript/no-deprecated": "error",
     "typescript/no-explicit-any": "error",
     "typescript/no-misused-promises": "error",
@@ -27,6 +35,25 @@
     "typescript/prefer-readonly": "error",
     "typescript/strict-boolean-expressions": "error",
     "typescript/switch-exhaustiveness-check": "error",
-    "typescript/unbound-method": "error"
+    "typescript/unbound-method": "error",
+    "eslint/preserve-caught-error": "error",
+    "import/no-cycle": "error",
+    "typescript/consistent-return": "error",
+    "unicorn/no-array-reverse": "error",
+    "unicorn/no-array-sort": "error",
+    "unicorn/no-useless-spread": "error",
+    "vitest/expect-expect": "error",
+    "vitest/no-conditional-expect": "error",
+    "vitest/no-disabled-tests": "error",
+    "vitest/no-focused-tests": "error",
+    "vitest/no-identical-title": "error",
+    "vitest/no-standalone-expect": "error",
+    "vitest/require-to-throw-message": "error",
+    "vitest/valid-expect": [
+      "error",
+      {
+        "maxArgs": 2
+      }
+    ]
   }
 }
