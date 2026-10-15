@@ -206,24 +206,11 @@ pub fn register_runtime(config_path: &Path, runtime: Runtime) -> Result<()> {
         port = port.max(provider.listen_address()?.port());
     }
     let token = new_token();
-    config.providers.push(Provider {
-        id: runtime.id().to_owned(),
-        role: ProviderRole::Runtime,
-        version: runtime.version()?,
-        url: format!("http://127.0.0.1:{}", checked_port(port, 1)?),
-        token_hash: hash_token(&token),
-        enabled: true,
-        parallel_turns: None,
-    });
+    config
+        .providers
+        .push(runtime_provider(runtime, checked_port(port, 1)?, &token)?);
     config.validate()?;
-    let component = root.join("state/components").join(runtime.id());
-    fs::create_dir_all(&component)?;
-    fs::set_permissions(&component, fs::Permissions::from_mode(0o700))?;
-    if runtime == Runtime::Pi {
-        let pi = root.join("pi");
-        fs::create_dir_all(&pi)?;
-        fs::set_permissions(&pi, fs::Permissions::from_mode(0o700))?;
-    }
+    create_runtime_directories(root, runtime)?;
     write_credentials(root, &[(runtime.id(), &token)])?;
     write_config(&config_path, &config)
 }
@@ -256,43 +243,55 @@ fn default_providers(
             enabled: true,
             parallel_turns: None,
         },
-        Provider {
-            id: runtime.id().to_owned(),
-            role: ProviderRole::Runtime,
-            version: runtime.version()?,
-            url: format!("http://127.0.0.1:{}", checked_port(base_port, 2)?),
-            token_hash: hash_token(runtime_token),
-            enabled: true,
-            parallel_turns: None,
-        },
+        runtime_provider(runtime, checked_port(base_port, 2)?, runtime_token)?,
     ])
 }
 
+/// The bundled `runtime` as the registry lists it, on `port`, with `token`.
+fn runtime_provider(runtime: Runtime, port: u16, token: &str) -> Result<Provider> {
+    Ok(Provider {
+        id: runtime.id().to_owned(),
+        role: ProviderRole::Runtime,
+        version: runtime.version()?,
+        url: format!("http://127.0.0.1:{port}"),
+        token_hash: hash_token(token),
+        enabled: true,
+        parallel_turns: None,
+    })
+}
+
 fn create_installation_directories(root: &Path, runtime: Runtime) -> Result<()> {
-    fs::create_dir_all(root)?;
-    fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
-    let component = format!("state/components/{}", runtime.id());
-    // Pi keeps its sign-in and settings apart from the owner's ~/.pi.
-    let pi = (runtime == Runtime::Pi).then_some("pi");
+    private_directory(root)?;
     for directory in [
         "state",
         "credentials",
         "providers",
         "logs",
         "state/components/discord-private",
-        &component,
         "agents/default/extensions",
         "agents/default/skills",
         "agents/default/sessions",
         "examples",
-    ]
-    .into_iter()
-    .chain(pi)
-    {
-        let path = root.join(directory);
-        fs::create_dir_all(&path)?;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    ] {
+        private_directory(&root.join(directory))?;
     }
+    create_runtime_directories(root, runtime)
+}
+
+/// The directories the bundled `runtime` keeps its state in.
+fn create_runtime_directories(root: &Path, runtime: Runtime) -> Result<()> {
+    private_directory(&root.join("state/components").join(runtime.id()))?;
+    // Pi keeps its sign-in and settings apart from the owner's ~/.pi.
+    if runtime == Runtime::Pi {
+        private_directory(&root.join("pi"))?;
+    }
+    Ok(())
+}
+
+/// Creates `path`, with any missing parent, readable by the owner alone.
+fn private_directory(path: &Path) -> Result<()> {
+    fs::create_dir_all(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     Ok(())
 }
 
