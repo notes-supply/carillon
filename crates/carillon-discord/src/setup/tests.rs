@@ -15,7 +15,10 @@ use axum::{
     response::{IntoResponse as _, Response},
     routing::get,
 };
-use carillon_installation::{config::LoadedConfig, prompt::Questions};
+use carillon_installation::{
+    config::{AgentConfig, LoadedConfig},
+    prompt::Questions,
+};
 use serde_json::{Value, json};
 use twilight_model::guild::Permissions;
 
@@ -407,6 +410,22 @@ fn fresh(root: &Path) -> anyhow::Result<LoadedConfig> {
     Ok(config)
 }
 
+/// An installation without Discord settings whose registry has a second
+/// agent, plain T3 Code, beside the test agent.
+fn with_two_agents(root: &Path) -> anyhow::Result<LoadedConfig> {
+    let config = fresh(root)?;
+    let mut registry = config.value.clone();
+    registry.agents.push(AgentConfig {
+        id: "code".to_owned(),
+        name: "T3 Code · Notes".to_owned(),
+        runtime: "test-runtime".to_owned(),
+        workspace: config.root.join("workspace"),
+        resources: None,
+    });
+    std::fs::write(&config.path, toml::to_string(&registry)?)?;
+    config.reload()
+}
+
 /// An installation set up by hand: settings naming no token file, and in the
 /// canonical one a bot token Discord no longer accepts.
 fn by_hand(root: &Path) -> anyhow::Result<LoadedConfig> {
@@ -755,6 +774,86 @@ async fn a_route_is_saved_only_once_the_bot_may_answer_there_as_its_mode_needs()
             .routes
             .len(),
         2
+    );
+    Ok(())
+}
+
+/// With several agents, setup asks who answers in each channel, then how
+/// each answering agent answers, once; each route gets its agent and that
+/// agent's mode, and a channel needs the permissions of its own mode.
+#[tokio::test]
+async fn each_channel_is_routed_to_the_agent_chosen_for_it_with_that_agents_mode()
+-> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let config = with_two_agents(directory.path())?;
+    // The bot has its role only from the second look at it.
+    let address = discord(Arc::new(Discord {
+        unroled: AtomicUsize::new(1),
+        ..Discord::default()
+    }))
+    .await?;
+    let (result, shown) = run(
+        &config,
+        address,
+        &[
+            TOKEN, "",      // Notes
+            "1 2 3", // every channel;
+            "1",     // the test agent answers in #general (300),
+            "2",     //   T3 Code in #agent,
+            "1",     //   the test agent in #general (303);
+            "",      // the test agent every message, each in its own thread,
+            "2",     //   T3 Code every message, the channel as one conversation;
+            "",      // the role, granted meanwhile, is checked again;
+            "",      // the application's owner,
+            "",      //   and nobody else
+        ],
+    )
+    .await;
+    result?;
+    assert!(
+        shown.contains(
+            "Test agent\nT3 Code · Notes\nWho answers in #general (300)?\n\
+             Test agent\nT3 Code · Notes\nWho answers in #agent?\n\
+             Test agent\nT3 Code · Notes\nWho answers in #general (303)?\n"
+        ),
+        "{shown}"
+    );
+    assert_eq!(shown.matches("When should Test agent answer?").count(), 1);
+    assert_eq!(
+        shown.matches("When should T3 Code · Notes answer?").count(),
+        1
+    );
+    // The thread permissions are asked only where conversations are threads.
+    assert!(
+        shown.contains(
+            "The bot cannot answer in #general (300): allow it Create Public Threads, Send \
+             Messages in Threads in the channel's settings.\nThe bot cannot answer in #agent: \
+             allow it View Channel in the channel's settings.\nThe bot cannot answer in \
+             #general (303): allow it Create Public Threads, Send Messages in Threads in the \
+             channel's settings.\nPress Enter to check again.\n"
+        ),
+        "{shown}"
+    );
+    assert!(
+        shown.contains(
+            "carillon-bot answers owner in #general (300) (Test agent), #agent (T3 Code · \
+             Notes), #general (303) (Test agent) on Notes (100)."
+        ),
+        "{shown}"
+    );
+    let route = |channel: &str, agent: &str, conversation| DiscordRoute {
+        channel_id: channel.to_owned(),
+        agent: agent.to_owned(),
+        activation: DiscordActivation::Always,
+        conversation,
+    };
+    assert_eq!(
+        DiscordConfig::load(&config, "discord-private")?.routes,
+        [
+            route("300", "default", DiscordConversation::Thread),
+            route("301", "code", DiscordConversation::Channel),
+            route("303", "default", DiscordConversation::Thread),
+        ]
     );
     Ok(())
 }
