@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, bail};
 use carillon_installation::{
     config::{AgentConfig, LoadedConfig, ProviderRole},
     maintenance::MaintenanceLock,
@@ -65,6 +65,17 @@ enum Harness {
     Codex,
 }
 
+/// A harness's own program, whose sign-in finishes in a browser on any
+/// device, as on a headless machine.
+struct Program {
+    command: &'static str,
+    /// The variable naming the home the sign-in is kept in.
+    home: &'static str,
+    login: &'static [&'static str],
+    /// Its check that it is signed in.
+    status: &'static [&'static str],
+}
+
 impl Harness {
     const ALL: [Self; 2] = [Self::Claude, Self::Codex];
 
@@ -83,32 +94,60 @@ impl Harness {
         }
     }
 
-    /// The harness's own command, and the variable naming the home its
-    /// sign-in is kept in.
-    const fn program(self) -> (&'static str, &'static str) {
+    const fn program(self) -> Program {
         match self {
-            Self::Claude => ("claude", "CLAUDE_CONFIG_DIR"),
-            Self::Codex => ("codex", "CODEX_HOME"),
+            Self::Claude => Program {
+                command: "claude",
+                home: "CLAUDE_CONFIG_DIR",
+                login: &["auth", "login"],
+                status: &["auth", "status"],
+            },
+            Self::Codex => Program {
+                command: "codex",
+                home: "CODEX_HOME",
+                login: &["login", "--device-auth"],
+                status: &["login", "status"],
+            },
+        }
+    }
+}
+
+/// The harnesses the assistant runs on: one, or both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Harnesses {
+    Claude,
+    Codex,
+    Both,
+}
+
+impl Harnesses {
+    /// Those chosen among [`Harness::ALL`], by index; none chosen is no
+    /// assistant on T3.
+    fn chosen(indexes: &[usize]) -> Option<Self> {
+        match (indexes.contains(&0), indexes.contains(&1)) {
+            (true, true) => Some(Self::Both),
+            (true, false) => Some(Self::Claude),
+            (false, true) => Some(Self::Codex),
+            (false, false) => None,
         }
     }
 
-    /// The harness's own sign-in, and its check that it is signed in. Both
-    /// sign-ins finish in a browser on any device, as on a headless machine.
-    const fn login(self) -> (&'static [&'static str], &'static [&'static str]) {
+    const fn each(self) -> &'static [Harness] {
         match self {
-            Self::Claude => (&["auth", "login"], &["auth", "status"]),
-            Self::Codex => (&["login", "--device-auth"], &["login", "status"]),
+            Self::Claude => &[Harness::Claude],
+            Self::Codex => &[Harness::Codex],
+            Self::Both => &Harness::ALL,
         }
     }
 }
 
 /// What runs Carillon's assistant, the agent with Discord's context and
 /// Carillon's own resources.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Assistant {
     Pi,
     /// On T3, with a profile for each harness.
-    T3(Vec<Harness>),
+    T3(Harnesses),
     /// Channels are only ever plain T3 Code.
     None,
 }
@@ -128,12 +167,17 @@ pub(super) fn setup(home: &Path, options: &Options, questions: &mut impl Questio
     } else {
         ask_runtimes(questions)?
     };
-    if options.workspace.is_some() && !runtimes.contains(&Runtime::Pi) {
+    let pi = runtimes.contains(&Runtime::Pi);
+    let t3 = runtimes.contains(&Runtime::T3);
+    if options.workspace.is_some() && !pi {
         bail!("--workspace is for Pi; on T3, an agent works in its project's folder");
     }
-    let t3 = runtimes.contains(&Runtime::T3);
-    let kept = existing && t3 && keep_t3(home, &provider_binary("runtime-t3")?, questions)?;
-    if !kept {
+    if existing && t3 && keep_t3(home, &provider_binary("runtime-t3")?, questions)? {
+        // The kept settings and the registry say what runs the assistant.
+        if pi {
+            sign_in_to_pi(home, existing, questions)?;
+        }
+    } else {
         let assistant = ask_assistant(&runtimes, questions)?;
         if assistant == Assistant::Pi {
             if !existing {
@@ -151,13 +195,11 @@ pub(super) fn setup(home: &Path, options: &Options, questions: &mut impl Questio
             set_up_t3(
                 home,
                 options.base_port,
-                &assistant,
+                assistant,
                 &provider_binary("runtime-t3")?,
                 questions,
             )?;
         }
-    } else if runtimes.contains(&Runtime::Pi) {
-        sign_in_to_pi(home, existing, questions)?;
     }
     let discord = Command::new(provider_binary("discord")?)
         .arg("setup")
@@ -208,21 +250,13 @@ fn ask_assistant(runtimes: &[Runtime], questions: &mut impl Questions) -> Result
         .iter()
         .map(|harness| harness.name().to_owned())
         .collect();
-    let harnesses: Vec<Harness> = questions
-        .choose_many(
-            "Carillon's assistant, with Discord's context, runs on T3 with a sign-in of its own. \
-             Which should it use? Choose none for T3 Code channels only.",
-            &names,
-            &[0],
-        )?
-        .into_iter()
-        .map(|index| Harness::ALL[index])
-        .collect();
-    Ok(if harnesses.is_empty() {
-        Assistant::None
-    } else {
-        Assistant::T3(harnesses)
-    })
+    let chosen = questions.choose_many(
+        "Carillon's assistant, with Discord's context, runs on T3 with a sign-in of its own. \
+         Which should it use? Choose none for T3 Code channels only.",
+        &names,
+        &[0],
+    )?;
+    Ok(Harnesses::chosen(&chosen).map_or(Assistant::None, Assistant::T3))
 }
 
 /// The bundled runtimes an existing installation registers. A disabled one
@@ -307,7 +341,9 @@ fn keep_t3(home: &Path, t3: &Path, questions: &mut impl Questions) -> Result<boo
     match run(t3, &["check", "--config", &config.to_string_lossy()], "") {
         Ok(_) => questions.confirm("Keep the T3 settings and agents?", true),
         Err(failure) => {
-            questions.say(&format!("The saved T3 settings cannot be kept: {failure}"))?;
+            questions.say(&format!(
+                "The saved T3 settings cannot be kept: {failure:#}"
+            ))?;
             Ok(false)
         }
     }
@@ -323,39 +359,38 @@ struct Server<'a> {
 impl Server<'_> {
     /// What the server offers now, once T3 has checked the `refresh`
     /// instances again.
-    fn discover(&self, refresh: &[&str]) -> Result<Offer, String> {
+    fn discover(&self, refresh: &[&str]) -> Result<Offer> {
         let refresh = refresh.join(",");
         let mut args = vec!["discover", "--url", &self.url];
         if !refresh.is_empty() {
             args.extend(["--refresh", &refresh]);
         }
         let offer = run(self.t3, &args, &self.token)?;
-        serde_json::from_str(&offer)
-            .map_err(|_| "carillon-runtime-t3 discovered something unreadable".to_owned())
+        serde_json::from_str(&offer).context("carillon-runtime-t3 discovered something unreadable")
     }
 
-    /// `t3` with `args` for the installation at `home`, the token on its
-    /// standard input, followed by `secret` when there is one, under the
-    /// maintenance lock, which no question waits behind.
-    fn run(&self, home: &Path, args: &[&str], secret: Option<&str>) -> Result<String> {
+    /// `t3`'s `command` with `args` for the installation at `home`, the
+    /// token on its standard input, followed by `secret` when there is one,
+    /// under the maintenance lock, which no question waits behind.
+    fn run(
+        &self,
+        home: &Path,
+        command: &str,
+        args: &[&str],
+        secret: Option<&str>,
+    ) -> Result<String> {
         let _maintenance = MaintenanceLock::acquire_unless_held(home)
             .context("the T3 settings were not changed")?;
         let config = home.join("carillon.toml");
-        let mut all = vec![
-            args[0],
-            "--config",
-            config
-                .to_str()
-                .context("carillon.toml has a path that is not UTF-8")?,
-            "--url",
-            &self.url,
-        ];
-        all.extend_from_slice(&args[1..]);
+        let config = config
+            .to_str()
+            .context("carillon.toml has a path that is not UTF-8")?;
+        let all = [&[command, "--config", config, "--url", &self.url][..], args].concat();
         let input = match secret {
             Some(secret) => format!("{}\n{secret}", self.token),
             None => self.token.clone(),
         };
-        run(self.t3, &all, &input).map_err(|failure| anyhow!(failure))
+        run(self.t3, &all, &input)
     }
 }
 
@@ -367,7 +402,7 @@ impl Server<'_> {
 fn set_up_t3(
     home: &Path,
     base_port: u16,
-    assistant: &Assistant,
+    assistant: Assistant,
     t3: &Path,
     questions: &mut impl Questions,
 ) -> Result<()> {
@@ -379,7 +414,7 @@ fn set_up_t3(
         let server = Server { t3, url, token };
         match server.discover(&[]) {
             Ok(offer) => break (server, offer),
-            Err(failure) => questions.say(&failure)?,
+            Err(failure) => questions.say(&format!("{failure:#}"))?,
         }
     };
     let projects: Vec<Project> = offer
@@ -394,20 +429,18 @@ fn set_up_t3(
         .iter()
         .map(|project| format!("{} ({})", project.title, project.workspace.display()))
         .collect();
-    let harnesses = match assistant {
-        Assistant::T3(harnesses) => harnesses.as_slice(),
-        Assistant::Pi | Assistant::None => &[],
-    };
-    let assistant_project = if harnesses.is_empty() {
-        None
-    } else {
-        Some(
-            &projects[questions.choose(
-                "Which T3 project should Carillon's assistant work in?",
-                &labels,
-                0,
-            )?],
-        )
+    let (harnesses, assistant_project) = match assistant {
+        Assistant::T3(harnesses) => (
+            harnesses.each(),
+            Some(
+                &projects[questions.choose(
+                    "Which T3 project should Carillon's assistant work in?",
+                    &labels,
+                    0,
+                )?],
+            ),
+        ),
+        Assistant::Pi | Assistant::None => (&[][..], None),
     };
     let code: Vec<&Project> = questions
         .choose_many(
@@ -420,7 +453,7 @@ fn set_up_t3(
         .map(|index| &projects[index])
         .collect();
     if assistant_project.is_none() && code.is_empty() {
-        if *assistant == Assistant::Pi {
+        if assistant == Assistant::Pi {
             questions.say("T3 Code is not used, so it was not set up.")?;
             return Ok(());
         }
@@ -432,9 +465,7 @@ fn set_up_t3(
         .map(|&harness| make_profile(home, &server, harness, questions))
         .collect::<Result<Vec<_>>>()?;
     let offer = ready(&server, &profiles, questions)?;
-    configure_agents(
-        home, &server, &agents, &projects, &profiles, offer, questions,
-    )
+    configure_agents(home, &server, &agents, &profiles, offer, questions)
 }
 
 /// Has the T3 runtime write each of `agents`' settings, with its project and
@@ -443,8 +474,7 @@ fn set_up_t3(
 fn configure_agents(
     home: &Path,
     server: &Server<'_>,
-    agents: &[AgentConfig],
-    projects: &[Project],
+    agents: &[(AgentConfig, &Project)],
     profiles: &[Profile],
     offer: Offer,
     questions: &mut impl Questions,
@@ -457,7 +487,7 @@ fn configure_agents(
         .models
         .into_iter()
         .partition(|model| instances.contains(&model.provider.as_str()));
-    for agent in agents {
+    for (agent, project) in agents {
         let assistant = agent.resources.is_some();
         let models = if assistant { &theirs } else { &others };
         if models.is_empty() {
@@ -474,13 +504,8 @@ fn configure_agents(
             &model_labels(models),
             0,
         )?];
-        let project = projects
-            .iter()
-            .find(|project| same(&project.workspace, &agent.workspace))
-            .context("an agent's project went missing")?;
         let model = format!("{}/{}", model.provider, model.model);
         let args = [
-            "configure",
             "--agent",
             &agent.id,
             "--project",
@@ -488,20 +513,21 @@ fn configure_agents(
             "--model",
             &model,
         ];
-        questions.say(server.run(home, &args, None)?.trim())?;
+        questions.say(server.run(home, "configure", &args, None)?.trim())?;
     }
     Ok(())
 }
 
-/// The installation's agents after T3's are added: the assistant, on Pi or
-/// in `assistant`'s project, then one T3 Code agent per project in `code`.
-/// A new installation is created first, around the first agent's folder.
-fn agents(
+/// The installation's agents after T3's are added, each with its project:
+/// the assistant, in `assistant`'s project, then one T3 Code agent per
+/// project in `code`. An assistant on Pi stays, and is not among them. A
+/// new installation is created first, around the first agent's folder.
+fn agents<'a>(
     home: &Path,
     base_port: u16,
-    assistant: Option<&Project>,
-    code: &[&Project],
-) -> Result<Vec<AgentConfig>> {
+    assistant: Option<&'a Project>,
+    code: &[&'a Project],
+) -> Result<Vec<(AgentConfig, &'a Project)>> {
     let config_path = home.join("carillon.toml");
     if !config_path.exists() {
         let folder = assistant
@@ -514,51 +540,55 @@ fn agents(
         .context("the installation's agents were not changed")?;
     register_runtime(&config_path, Runtime::T3)?;
     let config = LoadedConfig::load(&config_path)?;
-    let mut agents: Vec<AgentConfig> = match assistant {
-        Some(project) => vec![AgentConfig {
-            runtime: Runtime::T3.id().to_owned(),
-            workspace: project.workspace.clone(),
-            ..config
-                .value
-                .agent(ASSISTANT)
-                .cloned()
-                .unwrap_or_else(|_| self::assistant(Runtime::T3, &project.workspace))
-        }],
-        None => config
-            .value
-            .agents
-            .iter()
-            .filter(|agent| agent.id == ASSISTANT && agent.runtime == Runtime::Pi.id())
-            .cloned()
-            .collect(),
-    };
+    let existing = config.value.agent(ASSISTANT).ok();
+    let on_pi = existing
+        .filter(|agent| assistant.is_none() && agent.runtime == Runtime::Pi.id())
+        .cloned();
+    // On T3, the assistant keeps its name and resources.
+    let mut t3: Vec<(AgentConfig, &Project)> = assistant
+        .map(|project| {
+            let agent = AgentConfig {
+                runtime: Runtime::T3.id().to_owned(),
+                workspace: project.workspace.clone(),
+                ..existing
+                    .cloned()
+                    .unwrap_or_else(|| self::assistant(Runtime::T3, &project.workspace))
+            };
+            (agent, project)
+        })
+        .into_iter()
+        .collect();
     for project in code {
-        let id = unique(&agents, &format!("t3-{}", slug(&project.title)));
-        agents.push(AgentConfig {
+        let taken: Vec<&str> = t3.iter().map(|(agent, _)| agent.id.as_str()).collect();
+        let id = unique(&taken, &format!("t3-{}", slug(&project.title)));
+        let agent = AgentConfig {
             id,
             name: format!("T3 Code · {}", project.title),
             runtime: Runtime::T3.id().to_owned(),
             workspace: project.workspace.clone(),
             resources: None,
-        });
+        };
+        t3.push((agent, project));
     }
-    set_agents(&config_path, agents.clone())?;
-    Ok(agents
-        .into_iter()
-        .filter(|agent| agent.runtime == Runtime::T3.id())
-        .collect())
+    set_agents(
+        &config_path,
+        on_pi
+            .into_iter()
+            .chain(t3.iter().map(|(agent, _)| agent.clone()))
+            .collect(),
+    )?;
+    Ok(t3)
 }
 
-/// `base`, or the first of `base-2`, `base-3` and so on no agent has.
-fn unique(agents: &[AgentConfig], base: &str) -> String {
-    let taken = |id: &str| agents.iter().any(|agent| agent.id == id);
-    if !taken(base) {
+/// `base`, or the first of `base-2`, `base-3` and so on not in `taken`.
+fn unique(taken: &[&str], base: &str) -> String {
+    if !taken.contains(&base) {
         return base.to_owned();
     }
-    // Among one more name than there are agents, one is free.
-    (2..=agents.len() + 1)
+    // Among one more name than are taken, one is free.
+    (2..=taken.len() + 1)
         .map(|suffix| format!("{base}-{suffix}"))
-        .find(|id| !taken(id))
+        .find(|id| !taken.contains(&id.as_str()))
         .unwrap_or_else(|| base.to_owned())
 }
 
@@ -596,7 +626,7 @@ fn make_profile(
         &choices,
         0,
     )?;
-    let mut args = vec!["profile", "--harness", harness.id()];
+    let mut args = vec!["--harness", harness.id()];
     let (endpoint, key) = match method {
         0 => (None, None),
         1 => (None, Some(questions.secret(&format!("{name} API key:"))?)),
@@ -611,7 +641,7 @@ fn make_profile(
     if let Some(endpoint) = &endpoint {
         args.extend(["--endpoint", endpoint]);
     }
-    let made = server.run(home, &args, key.as_deref())?;
+    let made = server.run(home, "profile", &args, key.as_deref())?;
     let profile: Profile =
         serde_json::from_str(&made).context("read the profile carillon-runtime-t3 made")?;
     questions.say(&format!(
@@ -629,17 +659,16 @@ fn make_profile(
 /// Runs the harness's own sign-in into its profile's home until it says it
 /// is signed in.
 fn sign_in(harness: Harness, home: &Path, questions: &mut impl Questions) -> Result<()> {
-    let (program, variable) = harness.program();
-    let (login, status) = harness.login();
+    let program = harness.program();
     let signed_in = || -> Result<bool> {
-        Ok(Command::new(program)
-            .args(status)
-            .env(variable, home)
+        Ok(Command::new(program.command)
+            .args(program.status)
+            .env(program.home, home)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
-            .with_context(|| format!("run {program}; install {} first", harness.name()))?
+            .with_context(|| format!("run {}; install {} first", program.command, harness.name()))?
             .success())
     };
     if signed_in()? {
@@ -652,11 +681,13 @@ fn sign_in(harness: Harness, home: &Path, questions: &mut impl Questions) -> Res
         ))?;
         questions.answer("Press Enter to sign in.", Some(""))?;
         // The harness's own sign-in owns the terminal until it ends.
-        Command::new(program)
-            .args(login)
-            .env(variable, home)
+        Command::new(program.command)
+            .args(program.login)
+            .env(program.home, home)
             .status()
-            .with_context(|| format!("run {program}; install {} first", harness.name()))?;
+            .with_context(|| {
+                format!("run {}; install {} first", program.command, harness.name())
+            })?;
         if signed_in()? {
             return Ok(());
         }
@@ -691,9 +722,7 @@ fn ready(
             } else {
                 &[]
             };
-            let offer = server
-                .discover(refresh)
-                .map_err(|failure| anyhow!(failure))?;
+            let offer = server.discover(refresh)?;
             if profiles.iter().all(|profile| {
                 offer
                     .models
@@ -735,39 +764,29 @@ fn model_labels(models: &[AvailableModel]) -> Vec<String> {
         .collect()
 }
 
-fn same(left: &Path, right: &Path) -> bool {
-    match (left.canonicalize(), right.canonicalize()) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => left == right,
-    }
-}
-
 /// Runs `program` with `secret` on its standard input, never as an
 /// argument: what it printed, or the one line it gave as its error.
-fn run(program: &Path, args: &[&str], secret: &str) -> Result<String, String> {
+fn run(program: &Path, args: &[&str], secret: &str) -> Result<String> {
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|failure| format!("could not run {}: {failure}", program.display()))?;
+        .with_context(|| format!("could not run {}", program.display()))?;
     if let Some(mut stdin) = child.stdin.take() {
         // A program that ends without reading still reports why.
         let _ = writeln!(stdin, "{secret}");
     }
     let output = child
         .wait_with_output()
-        .map_err(|failure| format!("{} did not finish: {failure}", program.display()))?;
+        .with_context(|| format!("{} did not finish", program.display()))?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
     }
     let error = String::from_utf8_lossy(&output.stderr);
-    Err(error
-        .trim()
-        .strip_prefix("error: ")
-        .unwrap_or_else(|| error.trim())
-        .to_owned())
+    let error = error.trim();
+    bail!("{}", error.strip_prefix("error: ").unwrap_or(error))
 }
 
 #[cfg(test)]
