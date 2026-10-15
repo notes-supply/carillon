@@ -938,7 +938,7 @@ async fn duplicate_events_share_one_accepted_turn_without_reexecution() -> Resul
     );
     let snapshot = state.snapshot_store();
     fs::write(
-        resource_root(&state.config)?.join("SYSTEM.md"),
+        state.config.value.resource_roots()[0].join("SYSTEM.md"),
         "changed after acceptance",
     )?;
     let step = run_next_turn(&state, "test-runtime", async |runtime, _, request| {
@@ -1304,7 +1304,7 @@ async fn missing_resource_root_refuses_new_acceptance_without_losing_receipts() 
     let directory = tempdir()?;
     let state = installation(directory.path())?;
     let first = accept(&state, "one", "conversation").await?;
-    let root = &resource_root(&state.config)?.to_path_buf();
+    let root = &state.config.value.resource_roots()[0].to_path_buf();
     let saved = directory.path().join("saved-resources");
     fs::rename(root, &saved)?;
     for missing in [true, false] {
@@ -1355,7 +1355,10 @@ async fn duplicate_receipts_do_not_read_mutable_resources() -> Result<()> {
     let state = installation(directory.path())?;
     let first = accept(&state, "one", "conversation").await?;
     // A resource change after acceptance must affect new work, not receipt recovery.
-    std::os::unix::fs::symlink("SYSTEM.md", resource_root(&state.config)?.join("AGENTS.md"))?;
+    std::os::unix::fs::symlink(
+        "SYSTEM.md",
+        state.config.value.resource_roots()[0].join("AGENTS.md"),
+    )?;
     let duplicate = accept(&state, "one", "conversation").await?;
     assert!(duplicate.duplicate);
     assert_eq!(duplicate.turn_id, first.turn_id);
@@ -3171,7 +3174,10 @@ async fn each_agent_runs_on_its_own_runtime_with_its_own_resources() -> Result<(
     plain.resources = None;
     state.config.value.agents.push(plain);
     state.config.value.validate()?;
-    fs::write(resource_root(&state.config)?.join("SYSTEM.md"), "assistant")?;
+    fs::write(
+        state.config.value.resource_roots()[0].join("SYSTEM.md"),
+        "assistant",
+    )?;
 
     // One audience, two agents: two conversations, each on its agent's runtime.
     let assistant = accept(&state, "assistant-turn", "conversation").await?;
@@ -3200,12 +3206,4 @@ async fn each_agent_runs_on_its_own_runtime_with_its_own_resources() -> Result<(
             .is_err()
     );
     Ok(())
-}
-
-/// The test agent's resource root.
-fn resource_root(config: &LoadedConfig) -> Result<&Path> {
-    config.value.agents[0]
-        .resources
-        .as_deref()
-        .context("the test agent has resources")
 }

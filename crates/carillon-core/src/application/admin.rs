@@ -136,7 +136,7 @@ pub fn initialize(
                 (runtime.id(), &runtime_token),
             ],
         )?;
-        let agent = root.join("agents/default");
+        let agent = root.join(RESOURCES);
         atomic_write(&agent.join("SYSTEM.md"), DEFAULT_SYSTEM.as_bytes(), 0o640)?;
         atomic_write(&agent.join("AGENTS.md"), DEFAULT_CONTEXT.as_bytes(), 0o640)?;
         atomic_write(&agent.join("settings.json"), b"{}\n", 0o640)?;
@@ -268,12 +268,12 @@ fn create_installation_directories(root: &Path, runtime: Runtime) -> Result<()> 
         "providers",
         "logs",
         "state/components/discord-private",
-        "agents/default/extensions",
-        "agents/default/skills",
-        "agents/default/sessions",
         "examples",
     ] {
         private_directory(&root.join(directory))?;
+    }
+    for subtree in ["extensions", "skills", "sessions"] {
+        private_directory(&root.join(RESOURCES).join(subtree))?;
     }
     create_runtime_directories(root, runtime)
 }
@@ -341,28 +341,13 @@ pub fn enable_demo_resources(config: &LoadedConfig) -> Result<()> {
     if !extension.exists() || !skill.exists() {
         bail!("installation does not contain the first-release example resources");
     }
-    for root in agent_resources(&config.value) {
+    for root in config.value.resource_roots() {
         fs::create_dir_all(root.join("extensions"))?;
         fs::create_dir_all(root.join("skills/carillon-status"))?;
         fs::copy(&extension, root.join("extensions/carillon-context.js"))?;
         fs::copy(&skill, root.join("skills/carillon-status/SKILL.md"))?;
     }
     Ok(())
-}
-
-/// Each distinct resource directory the agents name, in registry order.
-fn agent_resources(config: &Config) -> Vec<&Path> {
-    let mut roots: Vec<&Path> = Vec::new();
-    for root in config
-        .agents
-        .iter()
-        .filter_map(|agent| agent.resources.as_deref())
-    {
-        if !roots.contains(&root) {
-            roots.push(root);
-        }
-    }
-    roots
 }
 
 pub fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
@@ -556,7 +541,9 @@ fn installation_paths(config: &Config) -> Vec<(String, &Path)> {
 }
 
 fn validate_installation(config: &LoadedConfig) -> Result<()> {
-    if agent_resources(&config.value)
+    if config
+        .value
+        .resource_roots()
         .iter()
         .any(|resources| !resources.is_dir())
     {
@@ -673,16 +660,6 @@ mod tests {
         base_port: u16,
     ) -> Result<PathBuf> {
         initialize(root, workspace, base_port, super::Runtime::Pi)
-    }
-
-    /// The resources of the assistant a new installation starts with.
-    fn test_resources(config: &LoadedConfig) -> Result<&Path> {
-        config
-            .value
-            .agents
-            .iter()
-            .find_map(|agent| agent.resources.as_deref())
-            .context("a new installation's assistant has resources")
     }
 
     /// A base port for backups that must find their services stopped, away
@@ -1242,7 +1219,7 @@ mod tests {
                 };
                 // Valid capture remains independent of subsequent live-root edits.
                 fs::write(
-                    test_resources(&config)?.join("SYSTEM.md"),
+                    config.value.resource_roots()[0].join("SYSTEM.md"),
                     "new live prompt",
                 )?;
                 let valid = directory.path().join("valid.tar.gz");
@@ -1577,7 +1554,7 @@ mod tests {
         );
         assert!(restored.value.data_dir.join("carillon.sqlite3").is_file());
         assert_eq!(
-            fs::read(test_resources(&restored)?.join("SYSTEM.md"))?,
+            fs::read(restored.value.resource_roots()[0].join("SYSTEM.md"))?,
             b"agent instructions"
         );
         assert_eq!(restored.value.agents[0].workspace, workspace);

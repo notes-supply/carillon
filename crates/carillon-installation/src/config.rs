@@ -343,6 +343,22 @@ impl Config {
             .with_context(|| format!("agent {id} is not configured"))
     }
 
+    /// Each distinct resource directory the agents name, in registry order.
+    #[must_use]
+    pub fn resource_roots(&self) -> Vec<&Path> {
+        let mut roots: Vec<&Path> = Vec::new();
+        for root in self
+            .agents
+            .iter()
+            .filter_map(|agent| agent.resources.as_deref())
+        {
+            if !roots.contains(&root) {
+                roots.push(root);
+            }
+        }
+        roots
+    }
+
     fn validate_resource_state_separation(&self) -> Result<()> {
         // Core requires existing state; capture requires an existing resource
         // root. Let those boundaries diagnose absent paths, so diagnostics and

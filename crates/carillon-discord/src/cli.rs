@@ -429,17 +429,7 @@ fn install_tools(config: &LoadedConfig, lib: &Path) -> Result<()> {
     let extension = fs::read(lib.join("carillon-discord-pi.js"))
         .context("release has no bundled Discord Pi tools; use a packaged installation")?;
     let skill = fs::read(lib.join("carillon-discord-SKILL.md"))?;
-    let mut roots: Vec<&Path> = Vec::new();
-    for root in config
-        .value
-        .agents
-        .iter()
-        .filter_map(|agent| agent.resources.as_deref())
-    {
-        if !roots.contains(&root) {
-            roots.push(root);
-        }
-    }
+    let roots = config.value.resource_roots();
     if roots.is_empty() {
         bail!("no agent has Carillon resources to install the Discord tools into");
     }
@@ -1541,14 +1531,6 @@ mod tests {
         Ok(())
     }
 
-    /// The test agent's resources.
-    fn test_resources(config: &LoadedConfig) -> Result<std::path::PathBuf> {
-        config.value.agents[0]
-            .resources
-            .clone()
-            .context("the test agent has resources")
-    }
-
     /// An installation whose agent resources already hold a file of the
     /// owner's own, and a release library with the Discord tools.
     fn tools_fixture(root: &Path) -> Result<(LoadedConfig, std::path::PathBuf)> {
@@ -1564,7 +1546,7 @@ mod tests {
             "export default function tools() {}\n",
         )?;
         fs::write(lib.join("carillon-discord-SKILL.md"), "Discord skill\n")?;
-        let extensions = test_resources(&config)?.join("extensions");
+        let extensions = config.value.resource_roots()[0].join("extensions");
         fs::create_dir_all(&extensions)?;
         fs::write(extensions.join("custom.js"), "the owner's own")?;
         Ok((config, lib))
@@ -1574,7 +1556,7 @@ mod tests {
     fn tools_install_refuses_while_core_serves() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let (config, lib) = tools_fixture(directory.path())?;
-        let resources = &test_resources(&config)?;
+        let resources = config.value.resource_roots()[0];
         // Core holds its lock while it serves.
         let serving = ServiceLock::acquire(&config.value.data_dir)?;
         let refused = install_tools(&config, &lib)
@@ -1594,7 +1576,7 @@ mod tests {
     fn tools_install_keeps_core_from_starting_until_both_files_are_in_place() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let (config, lib) = tools_fixture(directory.path())?;
-        let resources = &test_resources(&config)?;
+        let resources = config.value.resource_roots()[0];
         // The release skill is a FIFO, so the install waits while reading it.
         let skill = lib.join("carillon-discord-SKILL.md");
         fs::remove_file(&skill)?;
@@ -1634,7 +1616,7 @@ mod tests {
     fn a_failed_tools_install_says_it_may_be_partial_and_a_retry_completes_it() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let (config, lib) = tools_fixture(directory.path())?;
-        let resources = &test_resources(&config)?;
+        let resources = config.value.resource_roots()[0];
         // The skill cannot be written, so only the extension can change.
         let skills = resources.join("skills/discord");
         fs::create_dir_all(&skills)?;
