@@ -967,7 +967,7 @@ it("reports no model when T3 no longer lists the thread whose model it changed",
   expect(modelSets()).toHaveLength(1);
 });
 
-it("keeps the channel default `/model` chooses, which new threads start with", async () => {
+it("keeps the agent default `/model` chooses, which new threads start with", async () => {
   const haiku = { provider: "claudeAgent", model: "claude-haiku-4-5" };
   const channel = { interface_id: "discord-private", agent_id: "default" };
   const changed = await runtime.setModel({ ...channel, scope: "agent", selection: haiku });

@@ -464,9 +464,12 @@ async function testModelPicker() {
   assert.match(shown.content, /^\*\*Model settings\*\*\n/u);
   assert.match(
     shown.content,
-    /This conversation: Local echo \(`local\/echo`\) \(follows the channel default\)/u,
+    /This conversation: Local echo \(`local\/echo`\) \(follows the default for new conversations\)/u,
   );
-  assert.match(shown.content, /Channel default: Local echo \(`local\/echo`\) \(runtime default\)/u);
+  assert.match(
+    shown.content,
+    /Default for new conversations: Local echo \(`local\/echo`\) \(runtime default\)/u,
+  );
   assert.deepEqual(customIds(shown), [
     providerControl(shown, "conversation"),
     "model:model:conversation",
@@ -494,7 +497,7 @@ async function testModelPicker() {
   );
   assert.equal(selectedLabel(shown, "model:model:conversation"), "Local echo");
   assert.equal(control(shown, "model:default:conversation").disabled, true);
-  // Outside a conversation only the channel default is offered.
+  // Outside a conversation only the default for new conversations is offered.
   const outside = await interact("301", null, "command", "model");
   assert.match(outside.content, /Use `\/model` inside a conversation to set a model for it\./u);
   assert.deepEqual(customIds(outside), [
@@ -514,8 +517,8 @@ async function testModelPicker() {
     ["substitute/fixed"],
   );
   assert.match(browsed.content, /This conversation: Local echo/u);
-  assert.match(browsed.content, /follows the channel default/u);
-  assert.match(browsed.content, /Channel default: Local echo/u);
+  assert.match(browsed.content, /follows the default for new conversations/u);
+  assert.match(browsed.content, /Default for new conversations: Local echo/u);
   const stillActive = await simulateRoute("model-browse", "305", null, "which model");
   assert.match(stillActive.delivery.content, /model local\/echo\.$/u);
   const reopened = await interact("305", null, "command", "model");
@@ -581,9 +584,9 @@ async function testModelPicker() {
   const unchanged = await interact("305", null, "command", "model");
   assert.match(unchanged.content, reasoner);
 
-  // The channel default reaches conversations without a choice of their own.
+  // The default for new conversations also reaches those without a choice of their own.
   const agentScope = await interact("305", null, "component", "model:scope:agent");
-  assert.match(agentScope.content, /Changing the channel default:/u);
+  assert.match(agentScope.content, /Changing the default for new conversations:/u);
   assert.deepEqual(customIds(agentScope), [
     providerControl(agentScope, "agent"),
     "model:model:agent",
@@ -594,13 +597,13 @@ async function testModelPicker() {
     value(agentScope, agentProvider, "substitute"),
   ]);
   assert.match(agentBrowse.content, reasoner);
-  assert.match(agentBrowse.content, /Channel default: Local echo/u);
+  assert.match(agentBrowse.content, /Default for new conversations: Local echo/u);
   const agentSet = await interact("305", null, "component", "model:model:agent", [
     value(agentBrowse, "model:model:agent", "substitute/fixed"),
   ]);
   assert.match(
     agentSet.content,
-    /Channel default: Substitute fixed \(`substitute\/fixed`\) \(set for this channel\)/u,
+    /Default for new conversations: Substitute fixed \(`substitute\/fixed`\) \(set with \/model\)/u,
   );
   assert.match(agentSet.content, reasoner);
   const elsewhere = await simulateRoute("model-2", "406", "302", "which model");
@@ -615,23 +618,23 @@ async function testModelPicker() {
   assert.match(persisted.content, reasoner);
   assert.match(
     persisted.content,
-    /Channel default: Substitute fixed \(`substitute\/fixed`\) \(set for this channel\)/u,
+    /Default for new conversations: Substitute fixed \(`substitute\/fixed`\) \(set with \/model\)/u,
   );
 
   // Each scope returns to its default separately.
   const followsAgent = await interact("305", null, "component", "model:default:conversation");
   assert.match(
     followsAgent.content,
-    /This conversation: Substitute fixed \(`substitute\/fixed`\) \(follows the channel default\)/u,
+    /This conversation: Substitute fixed \(`substitute\/fixed`\) \(follows the default for new conversations\)/u,
   );
   const runtimeDefault = await interact("305", null, "component", "model:default:agent");
   assert.match(
     runtimeDefault.content,
-    /Channel default: Local echo \(`local\/echo`\) \(runtime default\)/u,
+    /Default for new conversations: Local echo \(`local\/echo`\) \(runtime default\)/u,
   );
   assert.match(
     runtimeDefault.content,
-    /This conversation: Local echo \(`local\/echo`\) \(follows the channel default\)/u,
+    /This conversation: Local echo \(`local\/echo`\) \(follows the default for new conversations\)/u,
   );
   const reset = await simulateRoute("model-4", "305", null, "which model");
   assert.match(reset.delivery.content, /model local\/echo\.$/u);
@@ -644,11 +647,11 @@ async function testModelPicker() {
   ]);
   assert.match(
     during.content,
-    /Channel default: Local reasoner \(`local\/reasoner`\), Thinking: medium \(set for this channel\)/u,
+    /Default for new conversations: Local reasoner \(`local\/reasoner`\), Thinking: medium \(set with \/model\)/u,
   );
   assert.match(
     (await interact("305", null, "command", "model")).content,
-    /Channel default: Local reasoner \(`local\/reasoner`\), Thinking: medium \(set for this channel\)/u,
+    /Default for new conversations: Local reasoner \(`local\/reasoner`\), Thinking: medium \(set with \/model\)/u,
   );
   const released = await held.release();
   assert.match(released.output, /model local\/echo\.$/u, "the running turn keeps its selection");
@@ -756,7 +759,10 @@ async function testModuleOperations() {
     operate(),
     `discord-private serves the custom Discord module ${custom}: ${commands}.`,
   );
-  assert.match((await interact("305", null, "command", "model")).content, /Channel default:/u);
+  assert.match(
+    (await interact("305", null, "command", "model")).content,
+    /Default for new conversations:/u,
+  );
 
   // A rebuild that breaks is declared, refused when applied, and the
   // example keeps serving.
@@ -771,7 +777,10 @@ async function testModuleOperations() {
   const refused = attempt("settings", "apply");
   assert.notEqual(refused.status, 0, "an apply served a broken module");
   assert.match(refused.stderr, /not a usable Discord module.*nothing was applied/u);
-  assert.match((await interact("305", null, "command", "model")).content, /Channel default:/u);
+  assert.match(
+    (await interact("305", null, "command", "model")).content,
+    /Default for new conversations:/u,
+  );
 
   // A working rebuild at the same path serves once applied.
   await writeFile(custom, await readFile(discordModule));
@@ -796,7 +805,10 @@ async function testModuleOperations() {
     ].join("\n"),
   );
   assert.equal(operate(), `discord-private serves the bundled Discord module: ${commands}.`);
-  assert.match((await interact("305", null, "command", "model")).content, /Channel default:/u);
+  assert.match(
+    (await interact("305", null, "command", "model")).content,
+    /Default for new conversations:/u,
+  );
   await rm(custom);
   await writeFile(settingsFile, before);
   run("--home", installation, "discord", "settings", "apply");

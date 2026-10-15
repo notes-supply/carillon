@@ -161,9 +161,10 @@ first turn.
     is on one of the agent's instances, otherwise the agent default. So a
     thread moved in T3's UI onto an ordinary account comes back at
     Carillon's next turn.
-  - The agent default is the channel's, which `/model` in the channel
-    changes. The runtime keeps that choice in its component directory, and
-    `[model]` above applies until then.
+  - The agent default is what the agent's new conversations start with, in
+    every channel routed to it. `/model` outside a thread changes it. The
+    runtime keeps that choice in its component directory, and the agent's
+    `model` in the settings above applies until then.
   - A change is refused while the conversation is busy.
 - **Commands.** `/command` lists what T3's composer offers in the agent's
   workspace and sends an invocation verbatim.

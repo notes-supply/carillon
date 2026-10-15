@@ -378,14 +378,7 @@ fn render(state: &ModelState, scope: Scope, view: &View) -> Reply {
                     .find(|provider| selection.is_some_and(|s| s.provider == **provider))
             })
             .unwrap_or(&providers[0]);
-        let _ = writeln!(
-            content,
-            "Changing {}:",
-            match scope {
-                Scope::Agent => "the channel default",
-                Scope::Conversation => "the conversation selection",
-            }
-        );
+        let _ = writeln!(content, "Changing the {}:", scope_label(scope));
         let _ = write!(
             content,
             "Browsing provider: {}. Choose a model to apply it.",
@@ -409,18 +402,18 @@ fn summary(state: &ModelState) -> String {
             if conversation.overridden {
                 "set for this conversation"
             } else {
-                "follows the channel default"
+                "follows the default for new conversations"
             }
         );
     }
     let _ = writeln!(
         content,
-        "Channel default: {} ({})",
+        "Default for new conversations: {} ({})",
         describe(state, state.agent.selection.as_ref()),
         if state.agent.read_only {
             "set by the runtime"
         } else if state.agent.overridden {
-            "set for this channel"
+            "set with /model"
         } else {
             "runtime default"
         }
@@ -431,11 +424,11 @@ fn summary(state: &ModelState) -> String {
     content
 }
 
-/// The scope as the panel names it: the agent's default is the default of
-/// the channels routed to it.
+/// The scope as the panel names it. Every channel routed to an agent shares
+/// its default, so the panel never calls it a channel's.
 const fn scope_label(scope: Scope) -> &'static str {
     match scope {
-        Scope::Agent => "channel default",
+        Scope::Agent => "default for new conversations",
         Scope::Conversation => "conversation's model",
     }
 }
@@ -556,7 +549,7 @@ fn actions(state: &ModelState, scope: Scope, provider: &str, page: usize, pages:
         &format!("model:default:{name}"),
         match scope {
             Scope::Agent => "Use runtime default",
-            Scope::Conversation => "Use channel default",
+            Scope::Conversation => "Use default for new conversations",
         },
         SECONDARY,
         !current.is_some_and(|scope| scope.overridden),
@@ -572,7 +565,7 @@ fn scope_buttons(state: &ModelState, scope: Scope) -> Vec<Value> {
     }
     [
         (Scope::Conversation, "This conversation"),
-        (Scope::Agent, "Channel default"),
+        (Scope::Agent, "Default for new conversations"),
     ]
     .into_iter()
     .map(|(target, label)| {
@@ -913,7 +906,7 @@ mod tests {
         host.state.conversation = Some(scope);
         let reply = expect_reply(interact(&mut host, &command(true)))?;
         assert!(reply.content.contains("This conversation:"));
-        assert!(reply.content.contains("Channel default:"));
+        assert!(reply.content.contains("Default for new conversations:"));
         assert!(reply.content.contains('…'));
         assert!(!reply.components.is_empty());
         host.refusal = Some(long.clone());
@@ -922,7 +915,7 @@ mod tests {
             &component("model:default:conversation", &[]),
         ))?;
         assert!(reply.content.contains("Your change was not confirmed:"));
-        assert!(reply.content.contains("Channel default:"));
+        assert!(reply.content.contains("Default for new conversations:"));
         assert!(!reply.components.is_empty());
         host.failure = Some(long);
         let reply = expect_reply(interact(&mut host, &command(true)))?;
@@ -935,16 +928,19 @@ mod tests {
         let mut host = runtime(true);
         host.state.agent.read_only = true;
         let reply = expect_reply(interact(&mut host, &command(true)))?;
-        assert!(reply.content.contains("Channel default: sonnet name"));
+        assert!(
+            reply
+                .content
+                .contains("Default for new conversations: sonnet name")
+        );
         assert!(reply.content.contains("(set by the runtime)"));
         assert!(custom_ids(&reply).contains(&"model:model:conversation".to_owned()));
 
         let reply = expect_reply(interact(&mut host, &component("model:scope:agent", &[])))?;
-        assert!(
-            reply
-                .content
-                .ends_with("The channel default is set by the runtime and cannot be changed here.")
-        );
+        assert!(reply.content.ends_with(
+            "The default for new conversations is set by the runtime and cannot be \
+             changed here."
+        ));
         assert_eq!(
             custom_ids(&reply),
             ["model:scope:conversation", "model:scope:agent"]
@@ -1104,8 +1100,16 @@ mod tests {
         let reply = expect_reply(interact(&mut host, &command(true)))?;
         assert!(reply.content.contains("This conversation: sonnet name"));
         assert!(reply.content.contains("Thinking: medium"));
-        assert!(reply.content.contains("follows the channel default"));
-        assert!(reply.content.contains("Channel default: sonnet name"));
+        assert!(
+            reply
+                .content
+                .contains("follows the default for new conversations")
+        );
+        assert!(
+            reply
+                .content
+                .contains("Default for new conversations: sonnet name")
+        );
         assert_eq!(
             custom_ids(&reply),
             [
@@ -1130,7 +1134,7 @@ mod tests {
         assert_eq!(model["options"][0]["label"], "opus name");
         assert_eq!(model["options"][0]["description"], "anthropic/opus");
         // The displayed scope is highlighted; nothing to undo while the
-        // conversation follows the channel default.
+        // conversation follows the default for new conversations.
         assert_eq!(
             component_by_id(&reply, "model:scope:conversation")["style"],
             1
@@ -1257,7 +1261,11 @@ mod tests {
             assert_eq!(host.state, before);
             assert_eq!(&host.requests[calls..], &[HostRequest::ModelState]);
             assert!(browsed.content.contains("This conversation: sonnet name"));
-            assert!(browsed.content.contains("Channel default: sonnet name"));
+            assert!(
+                browsed
+                    .content
+                    .contains("Default for new conversations: sonnet name")
+            );
             assert!(browsed.content.contains("Browsing provider: openai"));
             assert_eq!(
                 values(&browsed, &format!("model:model:{name}")),
@@ -1447,10 +1455,16 @@ mod tests {
         let reply = expect_reply(interact(&mut host, &component("model:scope:agent", &[])))?;
         assert!(custom_ids(&reply).contains(&"model:default:agent".to_owned()));
         assert_eq!(component_by_id(&reply, "model:scope:agent")["style"], 1);
-        interact(
+        let reply = expect_reply(interact(
             &mut host,
             &component("model:model:agent", &[&key("anthropic", "opus")]),
+        ))?;
+        assert!(
+            reply
+                .content
+                .contains("Default for new conversations: opus name")
         );
+        assert!(reply.content.contains("(set with /model)"));
         let reply = expect_reply(interact(&mut host, &component("model:default:agent", &[])))?;
         assert_eq!(
             host.requests[3],
@@ -1460,7 +1474,7 @@ mod tests {
                 expected: None,
             }
         );
-        assert!(reply.content.contains("runtime default"));
+        assert!(reply.content.contains("(runtime default)"));
         Ok(())
     }
 
@@ -1813,7 +1827,11 @@ mod tests {
         ] {
             let reply = expect_reply(interact(&mut host, &control))?;
             assert!(reply.content.contains("Your change was not confirmed"));
-            assert!(reply.content.contains("Changing the channel default"));
+            assert!(
+                reply
+                    .content
+                    .contains("Changing the default for new conversations:")
+            );
             assert!(custom_ids(&reply).contains(&"model:default:agent".to_owned()));
         }
         Ok(())

@@ -223,8 +223,9 @@ it unset there.
 ## Discord
 
 `/model` shows the models the runtime offers and lets an allowlisted user
-change the conversation's model and settings, or the agent default (outside a
-conversation it changes only the default). `/command` runs one of the
+change the conversation's model and settings, or the agent's default for new
+conversations. Every channel routed to the agent shares that default. Outside
+a conversation `/model` changes only the default. `/command` runs one of the
 runtime's own commands or skills in the conversation, exactly as written:
 `/command invocation:compact keep the decisions` sends `/compact keep the
 decisions`. Plain `/command` lists them.

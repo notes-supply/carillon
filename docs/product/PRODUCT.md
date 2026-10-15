@@ -14,9 +14,9 @@ new interface or runtime doesn't mean rebuilding the rest.
    the owner's authority, and watch a running turn on a Discord card.
 5. Route each channel to an agent: Carillon's assistant, on Pi or on T3
    with Carillon's own profiles, or plain T3 Code in a project.
-6. Choose models and their settings for a conversation, or a channel's
-   default, with `/model`, and run the runtime's own commands with
-   `/command`.
+6. Choose models and their settings for a conversation, or an agent's
+   default for new conversations, with `/model`, and run the runtime's own
+   commands with `/command`.
 7. Change users, routes, runtime availability and concurrency while Carillon
    runs; other settings apply on restart.
 8. Replace the Discord module (slash commands and cards) without restarting.
