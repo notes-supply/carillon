@@ -25,12 +25,6 @@ const AgentSettingsSchema = Type.Object(
   {
     /** The T3 project the agent works in, rooted at its workspace. */
     project_id: Type.String({ minLength: 1 }),
-    /**
-     * Carillon's assistant: it runs on the profile instances alone, and its
-     * turns carry where the person wrote them. Any other agent is plain T3
-     * Code, on every other instance, given the person's text as written.
-     */
-    assistant: Type.Optional(Type.Boolean()),
     /** The selection a new conversation thread starts with, as T3 names it. */
     model: SelectionSchema,
   },
@@ -62,7 +56,6 @@ export type AgentSettingsFile = Static<typeof AgentSettingsSchema>;
 /** An agent as the runtime runs it. */
 export interface AgentSettings {
   readonly projectId: string;
-  readonly assistant: boolean;
   /** The agent default from the settings: what new threads start with until `/model` changes it. */
   readonly selection: NativeSelection;
 }
@@ -86,11 +79,7 @@ export async function loadSettings(path: string, root: string): Promise<T3Settin
     agents: new Map(
       Object.entries(settings.agents ?? {}).map(([id, agent]) => [
         id,
-        {
-          projectId: agent.project_id,
-          assistant: agent.assistant === true,
-          selection: nativeSelection(agent.model),
-        },
+        { projectId: agent.project_id, selection: nativeSelection(agent.model) },
       ]),
     ),
   };
@@ -110,10 +99,10 @@ function nativeSelection(selection: AgentSettingsFile["model"]): NativeSelection
  */
 export function offers(
   profiles: ReadonlySet<string>,
-  agent: { readonly assistant: boolean },
+  assistant: boolean,
   instanceId: string,
 ): boolean {
-  return profiles.has(instanceId) === agent.assistant;
+  return profiles.has(instanceId) === assistant;
 }
 
 /** The settings file at `path`, checked strictly, or undefined when there is none. */
@@ -154,18 +143,6 @@ export function parseSettings(path: string, text: string): SettingsFile {
     throw new Error(
       `${path}: /url must be an HTTP or HTTPS origin, without credentials, a path, a query or a fragment`,
     );
-  const profiles = new Set(settings.profiles ?? []);
-  for (const [id, agent] of Object.entries(settings.agents ?? {})) {
-    const assistant = agent.assistant === true;
-    if (assistant && profiles.size === 0)
-      throw new Error(`${path}: /agents/${id} is the assistant, which runs on /profiles: name one`);
-    if (!offers(profiles, { assistant }, agent.model.instance_id))
-      throw new Error(
-        assistant
-          ? `${path}: /agents/${id}/model must be on one of /profiles`
-          : `${path}: /agents/${id}/model must not be on one of /profiles, which are the assistant's`,
-      );
-  }
   return { ...settings, url };
 }
 

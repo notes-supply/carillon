@@ -101,8 +101,8 @@ export interface T3Agent {
   readonly projectId: string;
   readonly workspace: string;
   /**
-   * Carillon's assistant, on the profile instances; any other agent is
-   * plain T3 Code, on every other instance.
+   * Carillon's assistant, the agent with resources, on the profile
+   * instances; any other agent is plain T3 Code, on every other instance.
    */
   readonly assistant: boolean;
   /** The agent default from the settings, until `/model` chooses another. */
@@ -225,7 +225,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
 
   /** The instances the agent runs on: the profiles for the assistant, the others for plain T3 Code. */
   function runsOn(agent: T3Agent): RunsOn {
-    return (instanceId) => offers(options.profiles, agent, instanceId);
+    return (instanceId) => offers(options.profiles, agent.assistant, instanceId);
   }
 
   /** T3's catalogue of the instances the agent runs on. */

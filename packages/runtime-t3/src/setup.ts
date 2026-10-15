@@ -53,8 +53,6 @@ export interface Choice {
   readonly projectId: string;
   readonly instanceId: string;
   readonly model: string;
-  /** Carillon's assistant, on the profiles, rather than plain T3 Code. */
-  readonly assistant: boolean;
 }
 
 const ShellSchema = Type.Object({
@@ -137,10 +135,10 @@ function agentOf(installation: Installation, id: string): Agent {
  * Writes the runtime's settings for `choice` on the server at `endpoint`,
  * naming the token's file. The server must offer the project, rooted at the
  * agent's workspace, and the model, among the instances of the agent's kind:
- * the profiles for the assistant, the others for plain T3 Code. Other agents'
- * settings and the profiles are kept, as are the title and the agent's model
- * options while its model stays the same; settings that do not read as valid
- * are refused before anything is written.
+ * the profiles for the assistant, the agent with resources, the others for
+ * plain T3 Code. Other agents' settings and the profiles are kept, as are the
+ * title and the agent's model options while its model stays the same;
+ * settings that do not read as valid are refused before anything is written.
  *
  * The new settings are checked as the runtime reads them first. A token
  * other than the one they name goes to a new private file, and the settings
@@ -164,23 +162,22 @@ export async function configure(
       `T3 project ${project.title} works in ${project.workspace}, but ${agent.name} works in ` +
         `${agent.workspace}; choose a project rooted there`,
     );
-  const profiles = new Set(existing?.profiles ?? []);
+  const assistant = agent.resources !== undefined;
   if (
-    !offers(profiles, choice, choice.instanceId) ||
+    !offers(new Set(existing?.profiles ?? []), assistant, choice.instanceId) ||
     !offer.models.some(
       ({ provider, model }) => provider === choice.instanceId && model === choice.model,
     )
   )
     throw new Error(
       `T3 offers ${agent.name} no usable model ${choice.instanceId}/${choice.model}` +
-        (choice.assistant ? ", among Carillon's profiles" : ""),
+        (assistant ? ", among Carillon's profiles" : ""),
     );
   const before = existing?.agents?.[choice.agentId];
   return publishSettings(installation, endpoint, existing, {
     ...existing?.agents,
     [choice.agentId]: {
       project_id: project.id,
-      ...(choice.assistant ? { assistant: true } : {}),
       model: {
         instance_id: choice.instanceId,
         model: choice.model,

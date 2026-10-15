@@ -458,7 +458,7 @@ fn configure_agents(
         .into_iter()
         .partition(|model| instances.contains(&model.provider.as_str()));
     for agent in agents {
-        let assistant = agent.id == ASSISTANT;
+        let assistant = agent.resources.is_some();
         let models = if assistant { &theirs } else { &others };
         if models.is_empty() {
             bail!(
@@ -479,7 +479,7 @@ fn configure_agents(
             .find(|project| same(&project.workspace, &agent.workspace))
             .context("an agent's project went missing")?;
         let model = format!("{}/{}", model.provider, model.model);
-        let mut args = vec![
+        let args = [
             "configure",
             "--agent",
             &agent.id,
@@ -488,9 +488,6 @@ fn configure_agents(
             "--model",
             &model,
         ];
-        if assistant {
-            args.push("--assistant");
-        }
         questions.say(server.run(home, &args, None)?.trim())?;
     }
     Ok(())

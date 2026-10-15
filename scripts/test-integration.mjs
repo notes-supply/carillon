@@ -1283,7 +1283,6 @@ profiles = ["claudeAgent"]
 
 [agents.assistant]
 project_id = "project-1"
-assistant = true
 
 [agents.assistant.model]
 instance_id = "claudeAgent"

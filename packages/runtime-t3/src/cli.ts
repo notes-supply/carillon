@@ -17,7 +17,7 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { text } from "node:stream/consumers";
 import { configure, discover, HARNESSES, profile, type Harness } from "./setup.ts";
-import { loadSettings, origin, type T3Settings } from "./settings.ts";
+import { loadSettings, offers, origin, type T3Settings } from "./settings.ts";
 import { connectT3, T3Failure, type T3Endpoint } from "./t3.ts";
 
 async function serve(values: readonly string[]): Promise<void> {
@@ -88,7 +88,9 @@ async function serve(values: readonly string[]): Promise<void> {
  * The saved settings, the T3 endpoint they name and the agents as the
  * runtime runs them, as startup reads them before reaching T3. Every agent
  * of this runtime in `carillon.toml` works in an existing directory and has
- * settings here, which name no other agent.
+ * settings here, which name no other agent. The agent with resources is
+ * Carillon's assistant, whose model is on one of the profiles; any other
+ * agent's is not.
  */
 async function saved(installation: Installation): Promise<{
   settings: T3Settings;
@@ -111,7 +113,12 @@ async function saved(installation: Installation): Promise<{
       throw new Error(
         `${installation.providerFile}: ${agent.id} has no T3 settings; set its project and model with \`carillon runtime-t3 configure --agent ${agent.id}\``,
       );
-    agents.set(agent.id, { ...configured, workspace: agent.workspace });
+    const assistant = agent.resources !== undefined;
+    if (!offers(settings.profiles, assistant, configured.selection.instanceId))
+      throw new Error(
+        `${installation.providerFile}: /agents/${agent.id}/model must ${assistant ? "be" : "not be"} on one of /profiles, which are the assistant's`,
+      );
+    agents.set(agent.id, { ...configured, workspace: agent.workspace, assistant });
   }
   for (const id of settings.agents.keys())
     if (!agents.has(id))
@@ -166,12 +173,12 @@ async function discoverCommand(values: readonly string[]): Promise<void> {
 }
 
 /**
- * `configure --url URL --agent ID --project ID --model INSTANCE/MODEL
- * [--assistant]`: an agent's settings, for the installation `--config`
- * names, or `CARILLON_HOME`'s.
+ * `configure --url URL --agent ID --project ID --model INSTANCE/MODEL`: an
+ * agent's settings, for the installation `--config` names, or
+ * `CARILLON_HOME`'s.
  */
 async function configureCommand(values: readonly string[]): Promise<void> {
-  const args = parseArguments(values, ["assistant"]);
+  const args = parseArguments(values);
   const url = originArgument(args);
   const [instanceId = "", ...slug] = requiredArgument(args, "model").split("/");
   const model = slug.join("/");
@@ -187,7 +194,6 @@ async function configureCommand(values: readonly string[]): Promise<void> {
       projectId: requiredArgument(args, "project"),
       instanceId,
       model,
-      assistant: args.has("assistant"),
     },
   );
   // The runtime reads its settings only when it starts.

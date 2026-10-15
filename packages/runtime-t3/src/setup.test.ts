@@ -108,8 +108,6 @@ it("has T3 check instances signed in since it last looked before listing models"
   expect(fake.refreshes).toEqual([{ instanceId: "carillon_codex" }]);
 });
 
-const plain = { agentId: "code", assistant: false } as const;
-
 it("writes the runtime's files only for a project rooted at the agent's workspace and a model T3 offers", async () => {
   const fake = await fakeT3();
   const { root, workspace, config } = await installation();
@@ -119,27 +117,32 @@ it("writes the runtime's files only for a project rooted at the agent's workspac
     { id: "elsewhere", title: "Elsewhere", workspaceRoot: tmpdir() },
     { id: "agent", title: "Agent", workspaceRoot: workspace },
   ];
-  const sonnet = { projectId: "agent", instanceId: "claudeAgent", model: "claude-sonnet-5" };
+  const sonnet = {
+    agentId: "code",
+    projectId: "agent",
+    instanceId: "claudeAgent",
+    model: "claude-sonnet-5",
+  };
   for (const [choice, refusal] of [
-    [{ ...plain, ...sonnet, projectId: "missing" }, /no project/u],
-    [{ ...plain, ...sonnet, projectId: "elsewhere" }, /rooted/u],
-    [{ ...plain, projectId: "agent", instanceId: "cursor", model: "auto" }, /no usable model/u],
-    [{ ...plain, ...sonnet, agentId: "elsewhere" }, /not an agent of runtime-t3/u],
-    // The assistant runs on Carillon's profiles alone, and there are none yet.
-    [{ ...sonnet, agentId: "assistant", assistant: true }, /among Carillon's profiles/u],
+    [{ ...sonnet, projectId: "missing" }, /no project/u],
+    [{ ...sonnet, projectId: "elsewhere" }, /rooted/u],
+    [{ ...sonnet, instanceId: "cursor", model: "auto" }, /no usable model/u],
+    [{ ...sonnet, agentId: "elsewhere" }, /not an agent of runtime-t3/u],
+    // The assistant, the agent with resources, runs on Carillon's profiles
+    // alone, and there are none yet.
+    [{ ...sonnet, agentId: "assistant" }, /among Carillon's profiles/u],
   ] as const) {
     await expect(configure(runtime, endpoint, choice)).rejects.toThrow(refusal);
     expect(await readdir(join(root, "credentials"))).toEqual([]);
     expect(await readdir(join(root, "providers"))).toEqual([]);
   }
 
-  const project = await configure(runtime, endpoint, { ...plain, ...sonnet });
+  const project = await configure(runtime, endpoint, sonnet);
   expect(project.title).toBe("Agent");
   const settings = await loadSettings(runtime.providerFile, root);
   expect(settings.url).toBe(fake.url);
   expect(settings.agents.get("code")).toEqual({
     projectId: "agent",
-    assistant: false,
     selection: { instanceId: "claudeAgent", model: "claude-sonnet-5", options: [] },
   });
   expect((await readFile(settings.tokenFile, "utf8")).trim()).toBe(fake.token);
@@ -153,7 +156,7 @@ it("keeps the title on a rerun, and the model's options while the model stays th
   const { workspace, config } = await installation();
   const runtime = await loaded(config);
   const sonnet = {
-    ...plain,
+    agentId: "code",
     projectId: "agent",
     instanceId: "claudeAgent",
     model: "claude-sonnet-5",
@@ -236,15 +239,18 @@ it("refuses settings that do not read as valid before writing anything", async (
     // TOML, but not the runtime's settings.
     ['title = ""', ...valid].join("\n"),
     [...valid, "[agents.code.model.options]", "effort = 3"].join("\n"),
-    // Plain T3 Code on one of the assistant's profiles.
-    ['profiles = ["claudeAgent"]', ...valid].join("\n"),
   ]) {
     await writeFile(runtime.providerFile, malformed);
     await expect(
       configure(
         runtime,
         { url: fake.url, token: fake.token },
-        { ...plain, projectId: "agent", instanceId: "claudeAgent", model: "claude-sonnet-5" },
+        {
+          agentId: "code",
+          projectId: "agent",
+          instanceId: "claudeAgent",
+          model: "claude-sonnet-5",
+        },
       ),
     ).rejects.toSatisfy(
       (failure) =>
@@ -266,7 +272,7 @@ it("gives a new token a file of its own and leaves settings naming a token writt
   const runtime = await loaded(config);
   fake.projects = [{ id: "agent", title: "Agent", workspaceRoot: workspace }];
   const choice = {
-    ...plain,
+    agentId: "code",
     projectId: "agent",
     instanceId: "claudeAgent",
     model: "claude-sonnet-5",
@@ -334,26 +340,29 @@ it("checks the saved settings and T3 token as startup reads them, reaching no T3
   const providerFile = join(root, "providers", "runtime-t3.toml");
   const tokenFile = join(root, "credentials", "t3.token");
   // Nothing listens at this address: the check reads files only.
-  const agent = (id: string, instance: string, ...more: string[]) => [
+  const agent = (id: string, instance: string) => [
     `[agents.${id}]`,
     'project_id = "agent"',
-    ...more,
     `[agents.${id}.model]`,
     `instance_id = "${instance}"`,
     'model = "m"',
   ];
-  const settings = (token: string) =>
+  const settings = (token: string, ...agents: string[][]) =>
     [
       'url = "http://127.0.0.1:1"',
       `token_file = "credentials/${token}"`,
       'profiles = ["carillon_claude"]',
-      ...agent("assistant", "carillon_claude", "assistant = true"),
-      ...agent("code", "claudeAgent"),
+      ...agents.flat(),
     ].join("\n");
+  const usable = settings(
+    "t3.token",
+    agent("assistant", "carillon_claude"),
+    agent("code", "claudeAgent"),
+  );
   await writeFile(tokenFile, "saved-token\n");
-  await writeFile(providerFile, settings("t3.token"));
-  const usable = await cli(["check", "--config", config], "");
-  expect(usable.status, usable.stderr).toBe(0);
+  await writeFile(providerFile, usable);
+  const passed = await cli(["check", "--config", config], "");
+  expect(passed.status, passed.stderr).toBe(0);
 
   // An agent's workspace, apart from the installation, must be a directory
   // for the runtime to start, whatever its settings and token say.
@@ -391,6 +400,25 @@ it("checks the saved settings and T3 token as startup reads them, reaching no T3
   }
   await writeFile(config, saved);
 
+  // The assistant, the agent with resources, runs on the profiles alone,
+  // and plain T3 Code never does.
+  for (const [swapped, reason] of [
+    [
+      settings("t3.token", agent("assistant", "claudeAgent"), agent("code", "codex")),
+      /\/agents\/assistant\/model must be on one of \/profiles/u,
+    ],
+    [
+      settings("t3.token", agent("assistant", "carillon_claude"), agent("code", "carillon_claude")),
+      /\/agents\/code\/model must not be on one of \/profiles/u,
+    ],
+  ] as const) {
+    await writeFile(providerFile, swapped);
+    const refused = await cli(["check", "--config", config], "");
+    expect(refused.status).toBe(1);
+    expect(refused.stderr).toMatch(reason);
+  }
+  await writeFile(providerFile, usable);
+
   // A runtime that does not start, disabled or not registered as in a Pi
   // installation, passes with no settings at all.
   const registry = await readFile(config, "utf8");
@@ -405,11 +433,22 @@ it("checks the saved settings and T3 token as startup reads them, reaching no T3
     expect(idle.stdout).toBe(`runtime-t3 is ${state}; nothing to check\n`);
   }
   await writeFile(config, registry);
-  await writeFile(providerFile, settings("t3.token"));
+  await writeFile(providerFile, usable);
 
   for (const [unusable, reason] of [
     [() => writeFile(tokenFile, "\n"), /t3\.token: the T3 token file is empty/u],
-    [() => writeFile(providerFile, settings("missing.token")), /missing\.token/u],
+    [
+      () =>
+        writeFile(
+          providerFile,
+          settings(
+            "missing.token",
+            agent("assistant", "carillon_claude"),
+            agent("code", "claudeAgent"),
+          ),
+        ),
+      /missing\.token/u,
+    ],
     [
       () => writeFile(providerFile, 'url = "saved-token\ntitle ='),
       /runtime-t3\.toml: invalid TOML at line /u,
@@ -574,11 +613,10 @@ it("makes a Carillon profile: a T3 instance whose home links to the assistant's 
   await configure(runtime, endpoint, {
     ...sonnet,
     agentId: "assistant",
-    assistant: true,
     instanceId: "carillon_claude",
   });
   await expect(
-    configure(runtime, endpoint, { ...sonnet, ...plain, instanceId: "carillon_claude" }),
+    configure(runtime, endpoint, { ...sonnet, agentId: "code", instanceId: "carillon_claude" }),
   ).rejects.toThrow(/no usable model/u);
 
   // What is not this profile is refused, with T3 left as it was.

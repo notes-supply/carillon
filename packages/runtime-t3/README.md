@@ -56,7 +56,7 @@ edited, or moved and named elsewhere, by hand.
 carillon runtime-t3 discover --url http://127.0.0.1:3773 < t3.token   # projects and models, as JSON
 carillon runtime-t3 profile --url http://127.0.0.1:3773 --agent assistant \
   --harness claude < t3.token                                         # then: CLAUDE_CONFIG_DIR=HOME claude auth login
-carillon runtime-t3 configure --url http://127.0.0.1:3773 --agent assistant --assistant \
+carillon runtime-t3 configure --url http://127.0.0.1:3773 --agent assistant \
   --project PROJECT_ID --model carillon_claude/claude-fable-5-1 < t3.token
 carillon runtime-t3 configure --url http://127.0.0.1:3773 --agent t3-notes \
   --project PROJECT_ID --model codex/gpt-6.1-sol < t3.token
@@ -68,7 +68,9 @@ and `--endpoint URL` gives the endpoint it is for.
 `configure` checks two things with T3:
 
 - the project is rooted at the agent's workspace in `carillon.toml`;
-- the model is one the agent may run on.
+- the model is one the agent may run on: a profile's for the assistant, the
+  agent with resources in `carillon.toml`, and any other instance's for
+  plain T3 Code.
 
 It then writes `providers/runtime-t3.toml` under the installation's
 maintenance lock, refusing while an update or backup runs. A token other
@@ -88,9 +90,8 @@ token_file = "credentials/t3.token"
 title = "Carillon"                 # optional prefix of the assistant's thread titles
 profiles = ["carillon_claude"]     # Carillon's own instances: the assistant's alone
 
-[agents.assistant]                 # by its ID in carillon.toml
+[agents.assistant]                 # by its ID in carillon.toml; its resources there make it the assistant
 project_id = "…"
-assistant = true
 
 [agents.assistant.model]           # the agent default until /model changes it
 instance_id = "carillon_claude"
@@ -147,8 +148,9 @@ first turn.
   agents goes on. Its report arrives later as its own message, read from T3's
   records, even across restarts.
 - **Two kinds of agent.**
-  - **The assistant** runs only on the profiles. Its messages carry where
-    the person wrote them, as Carillon's origin metadata.
+  - **The assistant**, the agent with resources in `carillon.toml`, runs
+    only on the profiles. Its messages carry where the person wrote them,
+    as Carillon's origin metadata.
   - **Plain T3 Code** runs on every other instance. It is given the person's
     text as written, with a note only of files T3 could not take, and T3
     titles its threads from their first message.

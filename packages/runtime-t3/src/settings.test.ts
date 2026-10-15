@@ -58,14 +58,13 @@ it("takes T3's address only as an HTTP origin, before anything connects or logs 
   }
 });
 
-it("keeps Carillon's profiles for its assistant, and every other instance for plain T3 Code", async () => {
+it("reads the profiles and each agent's settings, refusing a repeated profile", async () => {
   const root = await mkdtemp(join(tmpdir(), "carillon-t3-settings-"));
   directories.push(root);
   const path = join(root, "runtime-t3.toml");
-  const agent = (id: string, instance: string, ...more: string[]) => [
+  const agent = (id: string, instance: string) => [
     `[agents.${id}]`,
     'project_id = "project"',
-    ...more,
     `[agents.${id}.model]`,
     `instance_id = "${instance}"`,
     'model = "m"',
@@ -77,27 +76,15 @@ it("keeps Carillon's profiles for its assistant, and every other instance for pl
     );
   await file(
     'profiles = ["carillon_claude", "carillon_codex"]',
-    ...agent("assistant", "carillon_codex", "assistant = true"),
+    ...agent("assistant", "carillon_codex"),
     ...agent("code", "claudeAgent"),
   );
   const loaded = await loadSettings(path, root);
   expect(loaded.profiles).toEqual(new Set(["carillon_claude", "carillon_codex"]));
-  expect(loaded.agents.get("assistant")).toMatchObject({ assistant: true, projectId: "project" });
-  expect(loaded.agents.get("code")?.assistant).toBe(false);
-  for (const [lines, refusal] of [
-    [agent("assistant", "carillon_claude", "assistant = true"), /runs on \/profiles: name one/u],
-    [
-      ['profiles = ["carillon_claude"]', ...agent("assistant", "claudeAgent", "assistant = true")],
-      /\/agents\/assistant\/model must be on one of \/profiles/u,
-    ],
-    [
-      ['profiles = ["carillon_claude"]', ...agent("code", "carillon_claude")],
-      /\/agents\/code\/model must not be on one of \/profiles/u,
-    ],
-    [['profiles = ["a", "a"]'], /\/profiles/u],
-    [agent("not/an/agent", "claudeAgent"), /invalid TOML|\/agents/u],
-  ] as const) {
-    await file(...lines);
-    await expect(loadSettings(path, root)).rejects.toThrow(refusal);
-  }
+  expect(loaded.agents.get("assistant")).toEqual({
+    projectId: "project",
+    selection: { instanceId: "carillon_codex", model: "m", options: [] },
+  });
+  await file('profiles = ["a", "a"]');
+  await expect(loadSettings(path, root)).rejects.toThrow(/\/profiles/u);
 });

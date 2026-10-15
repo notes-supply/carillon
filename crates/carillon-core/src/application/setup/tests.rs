@@ -307,7 +307,7 @@ fn t3_gets_the_assistant_with_its_profile_and_a_t3_code_agent_per_project() -> a
         ),
         format!(
             "configure --config {config_arg} --url http://127.0.0.1:3773 --agent assistant \
-             --project p-assistant --model carillon_claude/sonnet --assistant\n"
+             --project p-assistant --model carillon_claude/sonnet\n"
         ),
         // Plain T3 Code is offered only the instances that are not the profile.
         format!(
