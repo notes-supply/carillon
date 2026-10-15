@@ -47,15 +47,15 @@ A profile signs in in one of three ways:
 - with an API key;
 - with a compatible endpoint and its token.
 
-T3 keeps a key in its secret store. Settings and profile homes can be
-edited, or moved and named elsewhere, by hand.
+T3 keeps a key in its secret store. The settings and a profile's home can
+be edited by hand.
 
 ### Without questions
 
 ```sh
 carillon runtime-t3 discover --url http://127.0.0.1:3773 < t3.token   # projects and models, as JSON
-carillon runtime-t3 profile --url http://127.0.0.1:3773 --agent assistant \
-  --harness claude < t3.token                                         # then: CLAUDE_CONFIG_DIR=HOME claude auth login
+carillon runtime-t3 profile --url http://127.0.0.1:3773 --harness claude < t3.token
+                                        # then: CLAUDE_CONFIG_DIR=HOME claude auth login
 carillon runtime-t3 configure --url http://127.0.0.1:3773 --agent assistant \
   --project PROJECT_ID --model carillon_claude/claude-fable-5-1 < t3.token
 carillon runtime-t3 configure --url http://127.0.0.1:3773 --agent t3-notes \

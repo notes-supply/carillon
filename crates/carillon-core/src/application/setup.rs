@@ -596,7 +596,7 @@ fn make_profile(
         &choices,
         0,
     )?;
-    let mut args = vec!["profile", "--agent", ASSISTANT, "--harness", harness.id()];
+    let mut args = vec!["profile", "--harness", harness.id()];
     let (endpoint, key) = match method {
         0 => (None, None),
         1 => (None, Some(questions.secret(&format!("{name} API key:"))?)),

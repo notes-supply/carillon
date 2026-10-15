@@ -548,9 +548,15 @@ it("makes a Carillon profile: a T3 instance whose home links to the assistant's 
   const { root, workspace, config } = await installation();
   const runtime = await loaded(config);
   const endpoint = { url: fake.url, token: fake.token };
-  const home = join(root, "profiles", "claude");
-  const choice = { harness: "claude", agentId: "assistant", home, key: "sk-test" } as const;
-  expect(await profile(runtime, endpoint, choice)).toEqual({
+  // Profiles live under the XDG data directory, by harness.
+  const data = process.env["XDG_DATA_HOME"];
+  process.env["XDG_DATA_HOME"] = join(root, "data");
+  cleanups.push(async () => {
+    if (data === undefined) delete process.env["XDG_DATA_HOME"];
+    else process.env["XDG_DATA_HOME"] = data;
+  });
+  const home = join(root, "data", "carillon", "profiles", "claude");
+  expect(await profile(runtime, endpoint, { harness: "claude", key: "sk-test" })).toEqual({
     instanceId: "carillon_claude",
     home,
   });
@@ -575,25 +581,23 @@ it("makes a Carillon profile: a T3 instance whose home links to the assistant's 
   // A compatible endpoint's address is the harness's, its token a secret.
   const proxied = await profile(runtime, endpoint, {
     harness: "codex",
-    agentId: "assistant",
-    home: join(root, "profiles", "codex"),
     key: "proxy-token",
     endpoint: "https://proxy.example",
   });
-  expect(fake.instances.get(proxied.instanceId)).toMatchObject({
+  const codexHome = join(root, "data", "carillon", "profiles", "codex");
+  expect(proxied).toEqual({ instanceId: "carillon_codex", home: codexHome });
+  expect(fake.instances.get("carillon_codex")).toMatchObject({
     driver: "codex",
     environment: [
       { name: "OPENAI_BASE_URL", value: "https://proxy.example", sensitive: false },
       { name: "OPENAI_API_KEY", value: "proxy-token", sensitive: true },
     ],
   });
-  expect(await readlink(join(root, "profiles", "codex", "AGENTS.md"))).toBe(
-    join(root, "agent", "AGENTS.md"),
-  );
-  fake.instances.delete(proxied.instanceId);
+  expect(await readlink(join(codexHome, "AGENTS.md"))).toBe(join(root, "agent", "AGENTS.md"));
+  fake.instances.delete("carillon_codex");
 
   // Making it again keeps what is there.
-  await profile(runtime, endpoint, { harness: "claude", agentId: "assistant", home });
+  await profile(runtime, endpoint, { harness: "claude" });
   expect(fake.instances.size).toBe(1);
 
   // The assistant then runs on it, and plain T3 Code no longer may.
@@ -621,23 +625,26 @@ it("makes a Carillon profile: a T3 instance whose home links to the assistant's 
 
   // What is not this profile is refused, with T3 left as it was.
   fake.instances.set("carillon_codex", { driver: "codex", config: { homePath: "/elsewhere" } });
-  await expect(
-    profile(runtime, endpoint, { harness: "codex", agentId: "assistant", home: join(root, "x") }),
-  ).rejects.toThrow(/not this profile/u);
-  const taken = join(root, "profiles", "taken");
-  await mkdir(taken, { recursive: true });
-  await writeFile(join(taken, "AGENTS.md"), "the owner's own");
-  await expect(
-    profile(runtime, endpoint, {
-      harness: "codex",
-      agentId: "assistant",
-      instanceId: "other",
-      home: taken,
-    }),
-  ).rejects.toThrow(/is not a link to/u);
-  expect((await lstat(join(taken, "AGENTS.md"))).isFile()).toBe(true);
+  await expect(profile(runtime, endpoint, { harness: "codex" })).rejects.toThrow(
+    /not this profile/u,
+  );
+  expect(fake.instances.get("carillon_codex")).toEqual({
+    driver: "codex",
+    config: { homePath: "/elsewhere" },
+  });
+  // So is a home holding the owner's own file where the link should be.
+  await rm(join(codexHome, "AGENTS.md"));
+  await writeFile(join(codexHome, "AGENTS.md"), "the owner's own");
+  await expect(profile(runtime, endpoint, { harness: "codex" })).rejects.toThrow(
+    /is not a link to/u,
+  );
+  expect((await lstat(join(codexHome, "AGENTS.md"))).isFile()).toBe(true);
   // Only an agent with resources has something to share.
-  await expect(
-    profile(runtime, endpoint, { harness: "claude", agentId: "code", home }),
-  ).rejects.toThrow(/has no resources/u);
+  await writeFile(
+    config,
+    (await readFile(config, "utf8")).replace(/\[\[agents\]\]\nid = "assistant"[^[]*/u, ""),
+  );
+  await expect(profile(await loaded(config), endpoint, { harness: "claude" })).rejects.toThrow(
+    /has resources/u,
+  );
 });

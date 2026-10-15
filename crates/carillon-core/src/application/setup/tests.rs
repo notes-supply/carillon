@@ -302,8 +302,8 @@ fn t3_gets_the_assistant_with_its_profile_and_a_t3_code_agent_per_project() -> a
     let config_arg = config_arg.display();
     for expected in [
         format!(
-            "profile --config {config_arg} --url http://127.0.0.1:3773 --agent assistant --harness \
-             claude --with-key\n  stdin: token\n  stdin: sk-test\n"
+            "profile --config {config_arg} --url http://127.0.0.1:3773 --harness claude \
+             --with-key\n  stdin: token\n  stdin: sk-test\n"
         ),
         format!(
             "configure --config {config_arg} --url http://127.0.0.1:3773 --agent assistant \

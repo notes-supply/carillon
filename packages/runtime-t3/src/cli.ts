@@ -203,11 +203,11 @@ async function configureCommand(values: readonly string[]): Promise<void> {
 }
 
 /**
- * `profile --url URL --agent ID --harness claude|codex [--instance ID]
- * [--home PATH] [--with-key [--endpoint URL]]`: a Carillon profile in T3
- * sharing the agent's resources, printed as JSON. With `--with-key`, a second
- * line of standard input is the harness's API key, for its own service or
- * the compatible `--endpoint`.
+ * `profile --url URL --harness claude|codex [--with-key [--endpoint URL]]`:
+ * Carillon's profile for the harness in T3, sharing the assistant's
+ * resources, printed as JSON. With `--with-key`, a second line of standard
+ * input is the harness's API key, for its own service or the compatible
+ * `--endpoint`.
  */
 async function profileCommand(values: readonly string[]): Promise<void> {
   const args = parseArguments(values, ["with-key"]);
@@ -220,8 +220,6 @@ async function profileCommand(values: readonly string[]): Promise<void> {
   if (secret.length === 0) throw new Error("the T3 token on standard input is empty");
   if (args.has("with-key") && (key === undefined || key.length === 0))
     throw new Error("--with-key needs the API key on the second line of standard input");
-  const instance = args.get("instance");
-  const home = args.get("home");
   const endpoint = args.get("endpoint");
   if (endpoint !== undefined && !args.has("with-key"))
     throw new Error("--endpoint is for a key: give --with-key too");
@@ -230,9 +228,6 @@ async function profileCommand(values: readonly string[]): Promise<void> {
     { url, token: secret },
     {
       harness,
-      agentId: requiredArgument(args, "agent"),
-      ...(instance === undefined ? {} : { instanceId: instance }),
-      ...(home === undefined ? {} : { home }),
       ...(args.has("with-key") && key !== undefined ? { key } : {}),
       ...(endpoint === undefined ? {} : { endpoint }),
     },

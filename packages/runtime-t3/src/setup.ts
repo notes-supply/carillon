@@ -218,20 +218,16 @@ export type Harness = keyof typeof HARNESSES;
 /** A Carillon profile: a T3 instance of its own for one harness. */
 export interface ProfileChoice {
   readonly harness: Harness;
-  /** The agent whose resources the profile shares: the assistant. */
-  readonly agentId: string;
-  readonly instanceId?: string;
-  readonly home?: string;
   /** An API key the harness signs in with instead of its own login. */
   readonly key?: string;
   /** A compatible endpoint the key belongs to, instead of the harness's own. */
   readonly endpoint?: string;
 }
 
-/** Where a new profile lives: the harness's home, under the XDG data directory. */
-export function defaultHome(harness: Harness): string {
+/** Where the harness's profile lives: its home, under the XDG data directory. */
+function profileHome(harness: Harness): string {
   const data = process.env["XDG_DATA_HOME"];
-  return join(
+  return resolve(
     data === undefined || data === "" ? join(homedir(), ".local", "share") : data,
     "carillon",
     "profiles",
@@ -240,13 +236,14 @@ export function defaultHome(harness: Harness): string {
 }
 
 /**
- * Makes a Carillon profile on the server at `endpoint`. Its home holds the
- * harness's own state, with links to the assistant's resources: its
- * instructions to their `AGENTS.md`, its user skills to their `skills`, so
- * Carillon's instructions and skills have one copy, its resources. T3 then
- * gets an instance whose home this is, created live, and the runtime's
- * settings name it a profile. Each step keeps what an earlier run made as it
- * should be, and refuses what is otherwise. Returns the instance and home.
+ * Makes Carillon's profile for a harness on the server at `endpoint`: the T3
+ * instance `carillon_HARNESS`, whose home holds the harness's own state,
+ * with links to the assistant's resources: its instructions to their
+ * `AGENTS.md`, its user skills to their `skills`, so Carillon's instructions
+ * and skills have one copy, its resources. T3 then gets the instance, created
+ * live, and the runtime's settings name it a profile. Each step keeps what an
+ * earlier run made as it should be, and refuses what is otherwise. Returns
+ * the instance and home.
  */
 export async function profile(
   installation: Installation,
@@ -256,11 +253,13 @@ export async function profile(
 ): Promise<{ readonly instanceId: string; readonly home: string }> {
   const existing = await readExisting(installation);
   const harness = HARNESSES[choice.harness];
-  const resources = agentOf(installation, choice.agentId).resources;
+  const resources = installation.agents.find((agent) => agent.resources !== undefined)?.resources;
   if (resources === undefined)
-    throw new Error(`${choice.agentId} has no resources in carillon.toml for a profile to share`);
-  const instanceId = choice.instanceId ?? `carillon_${choice.harness}`;
-  const home = resolve(choice.home ?? defaultHome(choice.harness));
+    throw new Error(
+      `no agent of ${installation.runtime.id} in carillon.toml has resources for a profile to share`,
+    );
+  const instanceId = `carillon_${choice.harness}`;
+  const home = profileHome(choice.harness);
   await mkdir(home, { recursive: true, mode: 0o700 });
   await mkdir(join(resources, "skills"), { recursive: true, mode: 0o700 });
   await link(join(home, harness.instructions), join(resources, "AGENTS.md"));
@@ -289,7 +288,7 @@ export async function profile(
       resolve(instance.config?.homePath ?? "") !== home
     )
       throw new Error(
-        `T3 already has an instance ${instanceId} that is not this profile; choose another --instance`,
+        `T3 already has an instance ${instanceId} that is not this profile; remove or rename it in T3, then set the profile up again`,
       );
   } finally {
     connection.close();
