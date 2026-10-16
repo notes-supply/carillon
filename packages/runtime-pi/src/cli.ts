@@ -46,6 +46,10 @@ async function main(values: readonly string[]): Promise<void> {
     process.stdout.write(`runtime provider ${providerId} is ${notServing(config)}; not serving\n`);
     return;
   }
+  if (config.agents.length === 0) {
+    process.stdout.write(`runtime provider ${providerId} serves no agent; not serving\n`);
+    return;
+  }
   const inlineImages = await loadInlineImages(config.providerFile);
   for (const agent of config.agents) {
     const workspace = await stat(agent.workspace).catch(() => undefined);

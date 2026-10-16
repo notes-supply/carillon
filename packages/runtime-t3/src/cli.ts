@@ -33,6 +33,10 @@ async function serve(values: readonly string[]): Promise<void> {
     );
     return;
   }
+  if (installation.agents.length === 0) {
+    process.stdout.write(`runtime provider ${providerId} serves no agent; not serving\n`);
+    return;
+  }
   const listenAddress = providerAddress(installation.runtime.url);
   const token = await loadRuntimeCredential(
     requiredArgument(args, "token-file"),
@@ -269,6 +273,10 @@ async function checkCommand(values: readonly string[]): Promise<void> {
   const { providerId, installation } = await registered(parseArguments(values));
   if (typeof installation === "string") {
     process.stdout.write(`${providerId} is ${notServing(installation)}; nothing to check\n`);
+    return;
+  }
+  if (installation.agents.length === 0) {
+    process.stdout.write(`${providerId} serves no agent; nothing to check\n`);
     return;
   }
   await saved(installation);
