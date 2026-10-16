@@ -221,7 +221,6 @@ export const TurnActivitySchema = Type.Object({
 });
 export type TurnActivity = Static<typeof TurnActivitySchema>;
 
-/** A configured provider's registry identity. */
 export const ProviderIdentitySchema = Type.String({
   minLength: 1,
   maxLength: 128,
