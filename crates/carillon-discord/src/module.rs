@@ -1,7 +1,6 @@
-//! Hosting of the replaceable Discord module: choosing the module to serve,
-//! learning which commands it defines, registering those with Discord,
-//! running each interaction through it with the native operations it may ask
-//! for, rendering work cards through it without any, and switching modules
+//! Hosting the replaceable Discord module, registering its commands,
+//! running interactions with native calls, rendering work cards without
+//! native calls, and switching modules
 //! while serving.
 //!
 //! Three facts have separate owners. The provider's settings file declares
@@ -940,6 +939,7 @@ async fn card(
     }
 }
 
+/// Serializes exactly as `carillon_discord_module::contract::Invocation::Card`, which the guest decodes.
 #[derive(Serialize)]
 enum InvocationRef<'a> {
     Card(&'a CardRequest),
