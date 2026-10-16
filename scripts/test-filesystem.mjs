@@ -519,7 +519,7 @@ async function testModule() {
   const args = [
     providerTestBinary(),
     "--exact",
-    "module::tests::clearing_the_record_reports_its_boundary_and_a_repeat_registers",
+    "module::tests::registration::clearing_the_record_reports_its_boundary_and_a_repeat_registers",
     "--nocapture",
     "--test-threads=1",
   ];
@@ -585,7 +585,7 @@ async function testModuleDirectory() {
   const args = [
     providerTestBinary(),
     "--exact",
-    "module::tests::a_new_state_directory_is_synced_again_by_a_repeat",
+    "module::tests::registration::a_new_state_directory_is_synced_again_by_a_repeat",
     "--nocapture",
     "--test-threads=1",
   ];
