@@ -152,6 +152,9 @@ it("reconciles skill links through startup checks, preserves harness skills, and
   await writeFile(join(resources, "skills", "first", "SKILL.md"), "First skill");
   await mkdir(home, { recursive: true });
   await symlink(join(resources, "AGENTS.md"), join(home, "CLAUDE.md"));
+  await mkdir(join(resources, "skills", ".system"));
+  await writeFile(join(resources, "skills", ".system", "native"), "Old leaked harness data");
+  await writeFile(join(resources, "skills", "marker"), "Old leaked harness marker");
   await symlink(join(resources, "skills"), join(home, "skills"));
   const check = async () => {
     const checked = await cli(["check", "--config", config], "");
@@ -164,7 +167,10 @@ it("reconciles skill links through startup checks, preserves harness skills, and
   await mkdir(join(skills, ".system"));
   await writeFile(join(skills, ".system", "native"), "The harness's own");
   await symlink(join(root, "workspace"), join(skills, "external"));
-  expect(await lstat(join(resources, "skills", ".system")).catch(() => undefined)).toBeUndefined();
+  expect(await readFile(join(resources, "skills", ".system", "native"), "utf8")).toBe(
+    "Old leaked harness data",
+  );
+  expect(await lstat(join(skills, "marker")).catch(() => undefined)).toBeUndefined();
   await rm(join(resources, "skills", "first"), { recursive: true });
   await mkdir(join(resources, "skills", "second"));
   await writeFile(join(resources, "skills", "second", "SKILL.md"), "Second skill");
@@ -186,10 +192,14 @@ it("reconciles skill links through startup checks, preserves harness skills, and
   expect(await readFile(join(skills, ".system", "native"), "utf8")).toBe("The harness's own");
   expect(await readlink(join(skills, "external"))).toBe(join(root, "workspace"));
 
-  await mkdir(join(restored, "skills", ".system"));
+  await mkdir(join(skills, "conflict"));
+  await writeFile(join(skills, "conflict", "native"), "Keep this skill");
+  await mkdir(join(restored, "skills", "conflict"));
+  await writeFile(join(restored, "skills", "conflict", "SKILL.md"), "Carillon's skill");
   const conflict = await cli(["check", "--config", config], "");
   expect(conflict.status).toBe(1);
   expect(conflict.stderr).toContain("is not a link to");
+  expect(await readFile(join(skills, "conflict", "native"), "utf8")).toBe("Keep this skill");
   expect(await readFile(join(skills, ".system", "native"), "utf8")).toBe("The harness's own");
 });
 

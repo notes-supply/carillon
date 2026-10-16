@@ -76,7 +76,12 @@ export async function reconcileProfile(harness: Harness, resources: string): Pro
       `${skills} must be the harness's own skills directory; move it away, then retry`,
     );
   await mkdir(skills, { recursive: true, mode: 0o700 });
-  const names = new Set(await readdir(source));
+  const names = new Set<string>();
+  for (const directory of await readdir(source, { withFileTypes: true })) {
+    if (!directory.isDirectory()) continue;
+    const skill = await entry(join(source, directory.name, "SKILL.md"));
+    if (skill?.isFile() === true) names.add(directory.name);
+  }
   for (const name of await readdir(skills)) {
     const path = join(skills, name);
     const target = await targetOf(path);
