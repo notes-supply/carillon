@@ -24,7 +24,7 @@ import type {
   ModelState,
 } from "@carillon/protocol";
 import { existsSync } from "node:fs";
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { trackActivity, type ActivityTracker } from "./activity.ts";
 import {
@@ -50,7 +50,7 @@ import {
 } from "@carillon/runtime/operations";
 
 export interface PiRuntimeOptions {
-  /** The agents the runtime serves, each with the workspace its sessions work in. */
+  /** The agents the runtime serves, each with the existing directory its sessions work in. */
   readonly agents: readonly { readonly id: string; readonly workspace: string }[];
   readonly stateDirectory: string;
   /** Defaults to sessions under stateDirectory. The service supplies its installation path. */
@@ -70,13 +70,7 @@ export interface PiRuntimeOptions {
  * Supplied collaborators remain caller-owned. close() cancels/settles work, but does not destroy them.
  */
 export async function createPiRuntime(options: PiRuntimeOptions): Promise<RuntimeOperations> {
-  const workspaces = new Map<string, string>();
-  for (const agent of options.agents) {
-    const workspace = resolve(agent.workspace);
-    if (!(await stat(workspace)).isDirectory())
-      throw new Error(`agent ${agent.id}: workspace must be an existing directory`);
-    workspaces.set(agent.id, workspace);
-  }
+  const workspaces = new Map(options.agents.map((agent) => [agent.id, resolve(agent.workspace)]));
   const stateDirectory = resolve(options.stateDirectory);
   const sessionDirectory = resolve(options.sessionDirectory ?? join(stateDirectory, "sessions"));
   await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
