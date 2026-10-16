@@ -74,7 +74,9 @@ endpoint. Its environment is changed in T3 settings.
 
 `discover --agent ID` returns only models the agent may use. The persisted
 `profiles` list owns that choice, including profiles from earlier setup runs.
-Without `--agent`, discovery returns T3's full offer.
+Without `--agent`, discovery returns T3's full offer. The `profiles` list
+reports Carillon instances present in T3 settings, even if they have no usable
+models. Setup uses this list to ask for sign-in when an instance is missing.
 
 `configure` checks two things with T3:
 

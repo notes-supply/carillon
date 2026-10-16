@@ -225,6 +225,10 @@ fn a_rerun_keeps_the_runtimes_the_installation_registers() -> anyhow::Result<()>
 /// A fake `carillon-runtime-t3` that records its arguments and standard
 /// input, discovers `offer`, and makes profiles in `profiles/`.
 fn fake_t3(directory: &Path, offer: &serde_json::Value) -> anyhow::Result<std::path::PathBuf> {
+    let mut offer = offer.clone();
+    if offer.get("profiles").is_none() {
+        offer["profiles"] = serde_json::json!([]);
+    }
     let program = directory.join("carillon-runtime-t3");
     let calls = directory.join("calls");
     let profiles = directory.join("profiles");
@@ -236,7 +240,7 @@ fn fake_t3(directory: &Path, offer: &serde_json::Value) -> anyhow::Result<std::p
             std::fs::write(
                 directory.join(format!("offer-{id}.json")),
                 serde_json::to_vec(
-                    &serde_json::json!({"projects": offer["projects"], "models": models}),
+                    &serde_json::json!({"projects": offer["projects"], "models": models, "profiles": offer["profiles"]}),
                 )?,
             )?;
         }

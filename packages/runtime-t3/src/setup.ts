@@ -37,10 +37,11 @@ export interface Project {
   readonly workspace: string;
 }
 
-/** What a T3 server offers the runtime: its projects and usable models. */
+/** A T3 server's projects, usable models and existing Carillon profiles. */
 export interface Offer {
   readonly projects: readonly Project[];
   readonly models: readonly AvailableModel[];
+  readonly profiles: readonly string[];
 }
 
 /** An agent's project and default model, the model as T3 names its provider instance and slug. */
@@ -84,7 +85,13 @@ export async function discover(
   try {
     for (const instanceId of refresh) await connection.call(RPC.refreshProviders, { instanceId });
     const { available } = catalog(await connection.call(RPC.getConfig, {}));
+    const settings: unknown = await connection.call(RPC.getSettings, {});
+    if (!Check(ServerSettingsSchema, settings))
+      throw new T3Failure("malformed", "T3 described unreadable provider settings");
     return {
+      profiles: Object.keys(settings.providerInstances ?? {}).filter((id) =>
+        Object.keys(HARNESSES).some((harness) => id === `carillon_${harness}`),
+      ),
       projects: await projects(endpoint),
       models:
         agent === undefined

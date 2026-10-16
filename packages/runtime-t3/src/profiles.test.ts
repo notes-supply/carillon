@@ -12,7 +12,7 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { configure, profile } from "./setup.ts";
+import { configure, discover, profile } from "./setup.ts";
 import { reconcileProfile } from "./profiles.ts";
 import { loadSettings } from "./settings.ts";
 import { cli, fakeT3, installation, loaded } from "./setup-fixtures.ts";
@@ -303,4 +303,18 @@ it("shares linked skill directories and linked manifests at their source names",
     expect(await readlink(join(home, "skills", name))).toBe(join(source, name));
     expect(await readFile(join(home, "skills", name, "SKILL.md"), "utf8")).toBe("External skill");
   }
+});
+
+it("discovers profile existence from T3 even when the saved list disagrees", async () => {
+  const fake = await fakeT3();
+  const { config } = await installation();
+  const runtime = await loaded(config);
+  const endpoint = { url: fake.url, token: fake.token };
+  await profile(runtime, endpoint, { harness: "claude", key: "original-key" });
+  expect((await discover(endpoint)).profiles).toEqual(["carillon_claude"]);
+  fake.instances.delete("carillon_claude");
+  expect((await loadSettings(runtime.providerFile, runtime.root)).profiles).toEqual(
+    new Set(["carillon_claude"]),
+  );
+  expect((await discover(endpoint)).profiles).toEqual([]);
 });

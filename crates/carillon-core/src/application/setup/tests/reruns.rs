@@ -161,7 +161,10 @@ fn an_existing_key_based_profile_is_reconciled_without_asking_to_sign_in() -> an
     let settings = home.join("providers/runtime-t3.toml");
     let saved = "profiles = [\"carillon_claude\"]\n";
     std::fs::write(&settings, saved)?;
-    let program = fake_t3(directory.path(), &serde_json::json!({}))?;
+    let program = fake_t3(
+        directory.path(),
+        &serde_json::json!({"projects": [], "models": [], "profiles": ["carillon_claude"]}),
+    )?;
     let server = super::super::Server {
         t3: &program,
         url: "http://127.0.0.1:3773".to_owned(),
@@ -171,13 +174,53 @@ fn an_existing_key_based_profile_is_reconciled_without_asking_to_sign_in() -> an
         super::super::make_profile(&home, &server, super::super::Harness::Claude, &mut Unasked)?;
     assert_eq!(profile.instance_id, "carillon_claude");
     assert_eq!(profile.home, directory.path().join("profiles/claude"));
-    assert_eq!(std::fs::read_to_string(settings)?, saved);
+    assert_eq!(std::fs::read_to_string(&settings)?, saved);
     assert_eq!(
         std::fs::read_to_string(directory.path().join("calls"))?,
         format!(
-            "profile --config {} --url http://127.0.0.1:3773 --harness claude\n  stdin: saved-token\n",
+            "discover --url http://127.0.0.1:3773\n  stdin: saved-token\nprofile --config {} --url http://127.0.0.1:3773 --harness claude\n  stdin: saved-token\n",
             home.join("carillon.toml").display()
         )
+    );
+    std::fs::remove_file(settings)?;
+    let recovered =
+        super::super::make_profile(&home, &server, super::super::Harness::Claude, &mut Unasked)?;
+    assert_eq!(recovered.instance_id, "carillon_claude");
+    Ok(())
+}
+
+#[test]
+fn a_saved_profile_missing_from_t3_asks_how_to_sign_in_again() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let home = directory.path().join("home");
+    initialize(&home, directory.path(), 44_000, Runtime::T3)?;
+    std::fs::write(
+        home.join("providers/runtime-t3.toml"),
+        "profiles = [\"carillon_claude\"]\n",
+    )?;
+    let program = fake_t3(
+        directory.path(),
+        &serde_json::json!({"projects": [], "models": [], "profiles": []}),
+    )?;
+    let server = super::super::Server {
+        t3: &program,
+        url: "http://127.0.0.1:3773".to_owned(),
+        token: "saved-token".to_owned(),
+    };
+    let mut questions = Shown::answering(&["1", "replacement-key"]);
+    let profile = super::super::make_profile(
+        &home,
+        &server,
+        super::super::Harness::Claude,
+        &mut questions,
+    )?;
+    assert_eq!(profile.instance_id, "carillon_claude");
+    let calls = std::fs::read_to_string(directory.path().join("calls"))?;
+    assert!(
+        calls.contains(
+            "--harness claude --with-key\n  stdin: saved-token\n  stdin: replacement-key\n"
+        ),
+        "{calls}"
     );
     Ok(())
 }
