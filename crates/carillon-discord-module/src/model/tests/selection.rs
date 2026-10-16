@@ -617,7 +617,7 @@ fn a_refused_change_without_current_state_says_both() -> Result<(), String> {
     let reply = expect_reply(interact(&mut host, &component("model:default:agent", &[])))?;
     assert!(reply.content.starts_with("Your change was not confirmed: "));
     assert!(reply.content.contains("Model settings are unavailable: "));
-    assert!(reply.content.ends_with("Reopen /model to refresh."));
+    assert!(reply.content.ends_with("…"));
     assert!(reply.components.is_empty());
     Ok(())
 }
@@ -629,7 +629,7 @@ fn unavailable_settings_and_unknown_controls_are_reported() -> Result<(), String
     let reply = expect_reply(interact(&mut host, &command(true)))?;
     assert_eq!(
         reply.content,
-        "Model settings are unavailable: runtime provider is unavailable Reopen /model to refresh."
+        "Model settings are unavailable: runtime provider is unavailable"
     );
     assert!(reply.components.is_empty());
 
@@ -645,5 +645,18 @@ fn unavailable_settings_and_unknown_controls_are_reported() -> Result<(), String
             Outcome::Failure(_)
         ));
     }
+    Ok(())
+}
+
+#[test]
+fn stranded_model_settings_only_tell_people_to_start_a_new_conversation() -> Result<(), String> {
+    let mut host = runtime(true);
+    host.failure = Some("This conversation ran on old-runtime, which no longer runs assistant. Start a new conversation.".to_owned());
+    let reply = expect_reply(interact(&mut host, &command(true)))?;
+    assert_eq!(
+        reply.content,
+        "Model settings are unavailable: This conversation ran on old-runtime, which no longer runs assistant. Start a new conversation."
+    );
+    assert!(reply.components.is_empty());
     Ok(())
 }

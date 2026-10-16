@@ -179,10 +179,10 @@ enum Unavailable {
     Write(String),
 }
 
-/// A reply without controls, telling the user how to continue.
+/// A reply without controls, explaining why model settings are unavailable.
 fn unavailable(explanation: &str) -> Outcome {
     Outcome::Reply(Reply {
-        content: format!("{explanation} Reopen /model to refresh."),
+        content: explanation.to_owned(),
         embeds: Vec::new(),
         components: Vec::new(),
     })

@@ -1,4 +1,6 @@
 //! Admission, runtime ownership, execution and delivery over one SQLite authority.
+mod ownership;
+
 use crate::{
     attachments::{self, Capture, Reconciled, Unusable},
     db::{ClaimedTurn, Database, JobPage, TurnFiles},
@@ -13,6 +15,7 @@ use carillon_protocol::model::{
     RuntimeTurnResponse, SelectedProvider, StateCounts, TurnActivity, TurnInspection, TurnSummary,
     UnansweredTurn,
 };
+use ownership::stranded;
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::watch;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -336,49 +339,6 @@ impl Core {
             .database
             .event_receipt(interface, event_id)?
             .map_or(EventStatus::Unknown, EventStatus::Accepted))
-    }
-
-    /// Resolve the pinned conversation owner, or the agent's runtime for a
-    /// new conversation. Admission keeps a former owner so the worker can
-    /// deliver an explained failure instead of rerouting the conversation.
-    /// # Errors
-    /// Returns an unknown agent, missing/disabled owner or storage error.
-    pub fn runtime_for(
-        &self,
-        interface_id: &str,
-        query: &ModelQuery,
-    ) -> Result<RuntimeProvider, CoreError> {
-        let agent = self.agent(&query.agent_id)?;
-        let owner = match &query.audience_id {
-            Some(audience) => {
-                self.database
-                    .conversation_runtime(interface_id, &query.agent_id, audience)?
-            }
-            None => None,
-        };
-        let id = owner.as_deref().unwrap_or(&agent.runtime);
-        self.enabled_runtime(id)
-    }
-
-    /// Refuses an interactive request for a conversation whose agent changed runtimes.
-    /// Messages are still admitted for the worker to deliver their interruption notice.
-    /// # Errors
-    /// Returns an unknown agent, stranded conversation or storage error.
-    pub(crate) fn query_runtime(
-        &self,
-        interface_id: &str,
-        query: &ModelQuery,
-    ) -> Result<RuntimeProvider, CoreError> {
-        let agent = self.agent(&query.agent_id)?;
-        if let Some(audience) = &query.audience_id
-            && let Some(id) =
-                self.database
-                    .conversation_runtime(interface_id, &query.agent_id, audience)?
-            && id != agent.runtime
-        {
-            return Err(CoreError::Conflict(stranded(&id, &query.agent_id)));
-        }
-        self.enabled_runtime(&agent.runtime)
     }
 
     /// Ends a turn whose agent no longer runs on the runtime that owns its
@@ -893,12 +853,6 @@ pub enum TurnFailure {
     /// The runtime answered that the turn failed. As with `Uncertain`,
     /// model work may have run and is not automatically replayed.
     Reported(Box<Reported>),
-}
-
-fn stranded(runtime_id: &str, agent_id: &str) -> String {
-    format!(
-        "This conversation ran on {runtime_id}, which no longer runs {agent_id}. Start a new conversation."
-    )
 }
 
 /// What the conversation is told when a turn did not complete, with the
