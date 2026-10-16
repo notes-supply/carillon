@@ -3,8 +3,8 @@
 //! from what core recorded of the job, and whether a settled job keeps its
 //! card as a summary. The provider owns the card's lifecycle and every
 //! Discord call. Markers are the provider's validated configuration, shown
-//! on status/model rows; section names stay plain. Text a model wrote cannot
-//! format, mention or link anything.
+//! on status/model rows; section names stay plain. Model text permits inline
+//! emphasis and code, but cannot mention, link or add block formatting.
 use crate::{
     contract::{ActivityMarkers, Card, CardRequest, Seen},
     embed::{Embed, Field, marked, model_line},

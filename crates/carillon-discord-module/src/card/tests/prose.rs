@@ -35,6 +35,31 @@ fn a_models_emphasis_and_inline_code_render() {
 }
 
 #[test]
+fn code_inside_emphasis_keeps_its_literal_markers() {
+    let (headline, reasoning) = shown(
+        "**Checking `**/*.rs` files**",
+        &["*Compare `a*b` with `a_b`* and **keep `**` literal**".to_owned()],
+    );
+    assert_eq!(headline, "**Checking `**/*.rs` files**");
+    assert_eq!(
+        reasoning,
+        "*Compare `a*b` with `a_b`* and **keep `**` literal**"
+    );
+}
+
+#[test]
+fn carriage_returns_cannot_extend_spans_or_start_lists() {
+    let (_, reasoning) = shown(
+        "Working",
+        &["**one\rtwo**\r- item\r\n`three\rfour`".to_owned()],
+    );
+    assert_eq!(
+        reasoning,
+        "\\*\\*one\ntwo\\*\\*\n\\- item\n\\`three\nfour\\`"
+    );
+}
+
+#[test]
 fn model_text_cannot_mention_link_or_structure_anything() {
     let (headline, reasoning) = shown(
         "**bold** <@200> @everyone",

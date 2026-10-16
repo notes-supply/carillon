@@ -18,7 +18,11 @@ enum Part<'a> {
 }
 
 pub fn prose(text: &str) -> String {
-    text.split('\n').map(line).collect::<Vec<_>>().join("\n")
+    text.replace("\r\n", "\n")
+        .split(['\r', '\n'])
+        .map(line)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn line(text: &str) -> String {
@@ -128,13 +132,17 @@ fn italic(text: &str, at: usize, marker: char) -> Option<(Part<'_>, usize)> {
         .then(|| (Part::Italic(marker, parse(inner)), close + 1))
 }
 
-/// Where `marker` next closes a span from `from`. A marker the model escaped
-/// with a backslash closes nothing.
+/// Where `marker` next closes a span from `from`. Escaped markers and
+/// markers inside inline code close nothing.
 fn closing(text: &str, from: usize, marker: &str) -> Option<usize> {
     let mut at = from;
     while let Some(next) = text[at..].chars().next() {
         if next == '\\' {
             at += escape(text, at);
+        } else if next == '`'
+            && let Some((_, end)) = code(text, at)
+        {
+            at = end;
         } else if text[at..].starts_with(marker) {
             return Some(at);
         } else {
