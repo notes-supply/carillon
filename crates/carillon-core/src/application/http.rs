@@ -293,8 +293,8 @@ async fn relay_query(
 ) -> Result<Response, ApiError> {
     let config = state.config();
     let interface = interface_provider(headers, &config)?;
-    let runtime = model_runtime(state, &interface.id, &query)?;
-    let token = runtime_token(&config, &runtime)?;
+    let runtime = model_runtime(&state.core, &config, &interface.id, &query)?;
+    let token = runtime_token(&config, runtime)?;
     let query = RuntimeModelQuery {
         interface_id: interface.id.clone(),
         query,
@@ -320,14 +320,15 @@ async fn set_model(
     let config = state.config();
     let interface = interface_provider(&headers, &config)?;
     let runtime = model_runtime(
-        &state,
+        &state.core,
+        &config,
         &interface.id,
         &ModelQuery {
             agent_id: update.agent_id.clone(),
             audience_id: update.audience_id.clone(),
         },
     )?;
-    let token = runtime_token(&config, &runtime)?;
+    let token = runtime_token(&config, runtime)?;
     let update = RuntimeModelUpdate {
         interface_id: interface.id.clone(),
         update,
@@ -344,16 +345,14 @@ async fn set_model(
 
 /// Model calls address the runtime that owns the conversation, so a
 /// selection follows the conversation rather than the current default.
-fn model_runtime(
-    state: &AppState,
+fn model_runtime<'a>(
+    core: &Core,
+    config: &'a LoadedConfig,
     interface_id: &str,
     query: &ModelQuery,
-) -> Result<Provider, ApiError> {
-    let runtime = state.core.runtime_for(interface_id, query)?;
-    Ok(state
-        .config()
-        .provider(&runtime.id, ProviderRole::Runtime)?
-        .clone())
+) -> Result<&'a Provider, ApiError> {
+    let runtime = core.runtime_for(interface_id, query)?;
+    Ok(config.provider(&runtime.id, ProviderRole::Runtime)?)
 }
 
 /// Forwards a model call and relays the runtime's answer. Runtimes phrase
@@ -451,10 +450,11 @@ async fn jobs(
         else {
             continue;
         };
-        let (state, runtime_id) = (state.clone(), runtime_id.clone());
+        let (client, config, runtime_id) =
+            (state.client.clone(), config.clone(), runtime_id.clone());
         let (interface_id, turn_id) = (interface.id.clone(), turn.turn_id.clone());
         snapshots.spawn(async move {
-            let activity = runtime_activity(&state, &runtime_id, &interface_id, &turn_id);
+            let activity = runtime_activity(&client, &config, &runtime_id, &interface_id, &turn_id);
             (index, activity.await)
         });
     }
@@ -470,23 +470,22 @@ async fn jobs(
 }
 
 async fn runtime_activity(
-    state: &AppState,
+    client: &Client,
+    config: &LoadedConfig,
     runtime_id: &str,
     interface_id: &str,
     turn_id: &str,
 ) -> Option<TurnActivity> {
     let snapshot = async {
-        let config = state.config();
         let runtime = config.provider(runtime_id, ProviderRole::Runtime)?;
-        let token = runtime_token(&config, runtime)?;
+        let token = runtime_token(config, runtime)?;
         let mut url = Url::parse(&runtime.url)?;
         url.path_segments_mut()
             .map_err(|()| anyhow!("runtime provider URL cannot have a path"))?
             .extend(["v1", "turns", turn_id, "activity"]);
         url.query_pairs_mut()
             .append_pair("interface_id", interface_id);
-        let response = state
-            .client
+        let response = client
             .get(url)
             .bearer_auth(token)
             .timeout(ACTIVITY_TIMEOUT)
@@ -736,7 +735,7 @@ async fn registry_status(
     Ok(Json(RegistryStatus::of(
         &config,
         &state.workers.borrow(),
-        state.registry.compare(),
+        state.registry.compare(&config),
     )))
 }
 

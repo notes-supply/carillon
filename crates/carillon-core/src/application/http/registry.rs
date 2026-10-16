@@ -241,9 +241,9 @@ impl Registry {
 
     /// # Errors
     /// Returns why the file is not a valid registry.
-    pub(super) fn compare(&self) -> Result<Difference> {
+    pub(super) fn compare(&self, serving: &LoadedConfig) -> Result<Difference> {
         let file = LoadedConfig::load(&self.path)?;
-        Ok(Difference::between(&self.current().value, &file.value))
+        Ok(Difference::between(&serving.value, &file.value))
     }
 
     /// Serves the file in place of the registry serving now, when they
