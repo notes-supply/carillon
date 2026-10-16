@@ -15,8 +15,8 @@ mise run example:core
 - `Core::create(CoreOptions)` creates fresh private storage and refuses to
   adopt existing files; `Core::open` opens storage of the current format only.
 - `accept(interface, event)` returns a durable receipt. Authenticate external
-  ingress before passing an interface identity. An event with files is
-  accepted only once core has its own verified copy.
+  ingress before passing an interface identity. An executable event with files
+  is accepted only once core has its own verified copy.
 - `event_status(interface, event_id)` says whether an event was accepted, is
   still being captured, or is unknown, for an interface settling a lost answer.
 - `run_next(runtime, lane, stopping, operation)` claims one turn of a lane
@@ -43,10 +43,11 @@ Conversations remain pinned to their original runtime. If the agent moves to
 another runtime or is removed, core accepts further messages as interrupted
 turns and commits their explanation and delivery intent with the receipt.
 This needs no enabled or configured former runtime and captures no new agent
-resources. Duplicate events keep their original turn. Model and command
-queries instead return the explanation as a conflict. New conversations use
-the agent's configured runtime. Agent assignments change only on restart;
-`set_runtimes` changes runtime availability live.
+resources or attachments. An unknown agent cannot start a conversation or
+begin attachment capture. Duplicate events keep their original turn. Model
+and command queries instead return the explanation as a conflict. New
+conversations use the agent's configured runtime. Agent assignments change
+only on restart; `set_runtimes` changes runtime availability live.
 
 A runtime operation's failure decides what happens next.
 `TurnFailure::Retry` means the runtime provably never received the turn, so

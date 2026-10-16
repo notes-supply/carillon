@@ -30,7 +30,7 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, watch};
 use tracing::warn;
 
 use crate::{
-    Core, CoreError,
+    AgentOptions, Core, CoreError,
     attachments::{self, Cancel, CaptureError},
 };
 
@@ -167,6 +167,7 @@ impl Intake {
         core: &Core,
         interface: &SelectedProvider,
         event: &ExternalEvent,
+        agent: &AgentOptions,
     ) -> Result<EventReceipt, CoreError> {
         let key = (interface.id.clone(), event.event_id.clone());
         let mut outcome = {
@@ -211,6 +212,7 @@ impl Intake {
                     core: core.clone(),
                     interface: interface.clone(),
                     event: event.clone(),
+                    agent: agent.clone(),
                     key,
                 };
                 tokio::spawn(run.capture(permit, reservation, sources, sender));
@@ -326,6 +328,7 @@ struct Run {
     core: Core,
     interface: SelectedProvider,
     event: ExternalEvent,
+    agent: AgentOptions,
     key: Key,
 }
 
@@ -385,10 +388,14 @@ impl Run {
                 .ok_or_else(late);
         }
         let committed = {
-            let (interface, event, capture) =
-                (self.interface.clone(), self.event.clone(), capture.clone());
+            let (interface, event, agent, capture) = (
+                self.interface.clone(),
+                self.event.clone(),
+                self.agent.clone(),
+                capture.clone(),
+            );
             self.core
-                .blocking(move |core| core.commit(&interface, &event, Some(&capture)))
+                .blocking(move |core| core.commit(&interface, &event, &agent, Some(&capture)))
                 .await
         };
         match committed {

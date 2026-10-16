@@ -263,10 +263,11 @@ impl Core {
     /// Admit an event from an already authenticated interface, before acknowledging it.
     /// Duplicate receipts do not recapture mutable resources or reconsider runtime ownership.
     ///
-    /// An event with attachments is accepted only once all its staged files
-    /// are captured and published. The capture belongs to core, not to the
-    /// caller: it continues if the caller goes away, a retry of the same
-    /// event waits for it instead of copying again, and at most the
+    /// An executable event with attachments is accepted only once all its
+    /// staged files are captured and published. Stranded conversations settle
+    /// with their explanation without capturing attachments. The capture
+    /// belongs to core: it continues if the caller goes away, a retry of
+    /// the same event waits for it instead of copying again, and at most the
     /// configured number run at once.
     /// # Errors
     /// Returns invalid input, unavailable runtime ownership, busy or full
@@ -282,11 +283,48 @@ impl Core {
                 "an interface identity is required".to_owned(),
             ));
         }
-        // Capture checks for an earlier acceptance itself.
-        if event.attachments.is_some() {
-            return self.intake.accept(self, interface, event).await;
+        if let Some(receipt) = self
+            .database
+            .event_receipt(&interface.id, &event.event_id)?
+        {
+            return Ok(receipt);
         }
-        let (interface, event) = (interface.clone(), event.clone());
+        let agent = match self.conversation_owner(
+            &interface.id,
+            &ModelQuery {
+                agent_id: event.agent_id.clone(),
+                audience_id: Some(event.audience_id.clone()),
+            },
+        )? {
+            Owner::Current(agent) => agent,
+            Owner::Stranded(runtime_id) => {
+                let (interface, event) = (interface.clone(), event.clone());
+                return self
+                    .blocking(move |core| {
+                        if let Some(receipt) = core
+                            .database
+                            .event_receipt(&interface.id, &event.event_id)?
+                        {
+                            return Ok(receipt);
+                        }
+                        core.intake.ensure_in_order(&interface.id, &event)?;
+                        Ok(core.database.accept_event(
+                            &interface.id,
+                            &runtime_id,
+                            &event,
+                            Admission::Stranded {
+                                explanation: &stranded(&runtime_id, &event.agent_id),
+                            },
+                            None,
+                        )?)
+                    })
+                    .await;
+            }
+        };
+        if event.attachments.is_some() {
+            return self.intake.accept(self, interface, event, agent).await;
+        }
+        let (interface, event, agent) = (interface.clone(), event.clone(), agent.clone());
         self.blocking(move |core| {
             if let Some(receipt) = core
                 .database
@@ -295,7 +333,7 @@ impl Core {
                 return Ok(receipt);
             }
             core.intake.ensure_in_order(&interface.id, &event)?;
-            core.commit(&interface, &event, None)
+            core.commit(&interface, &event, &agent, None)
         })
         .await
     }
@@ -305,29 +343,9 @@ impl Core {
         &self,
         interface: &SelectedProvider,
         event: &ExternalEvent,
+        agent: &AgentOptions,
         capture: Option<&Capture>,
     ) -> Result<EventReceipt, CoreError> {
-        let owner = self.conversation_owner(
-            &interface.id,
-            &ModelQuery {
-                agent_id: event.agent_id.clone(),
-                audience_id: Some(event.audience_id.clone()),
-            },
-        )?;
-        let agent = match owner {
-            Owner::Current(agent) => agent,
-            Owner::Stranded(runtime_id) => {
-                return Ok(self.database.accept_event(
-                    &interface.id,
-                    &runtime_id,
-                    event,
-                    Admission::Stranded {
-                        explanation: &stranded(&runtime_id, &event.agent_id),
-                    },
-                    capture,
-                )?);
-            }
-        };
         let runtime = self.enabled_runtime(&agent.runtime)?;
         let resources = resources::materialize(agent.resources.as_deref(), &self.snapshot_store())?;
         let selected = SelectedProvider {
