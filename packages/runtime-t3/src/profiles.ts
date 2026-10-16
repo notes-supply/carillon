@@ -1,4 +1,14 @@
-import { lstat, mkdir, readdir, readlink, rename, rm, symlink, unlink } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  readdir,
+  readlink,
+  rename,
+  rm,
+  stat,
+  symlink,
+  unlink,
+} from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import type { Installation } from "@carillon/runtime/installation";
@@ -88,8 +98,16 @@ export async function reconcileProfile(harness: Harness, resources: string): Pro
   await mkdir(skills, { recursive: true, mode: 0o700 });
   const names = new Set<string>();
   for (const directory of await readdir(source, { withFileTypes: true })) {
-    if (!directory.isDirectory()) continue;
-    const skill = await entry(join(source, directory.name, "SKILL.md"));
+    if (!directory.isDirectory() && !directory.isSymbolicLink()) continue;
+    const skill = await stat(join(source, directory.name, "SKILL.md")).catch((failure: unknown) => {
+      if (
+        failure instanceof Error &&
+        "code" in failure &&
+        (failure.code === "ENOENT" || failure.code === "ENOTDIR")
+      )
+        return undefined;
+      throw failure;
+    });
     if (skill?.isFile() === true) names.add(directory.name);
   }
   for (const name of await readdir(skills)) {

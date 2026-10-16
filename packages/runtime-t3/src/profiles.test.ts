@@ -286,3 +286,21 @@ it("concurrent reconciles create and replace shared links without losing native 
   for (const checked of checks) expect(checked.status, checked.stderr).toBe(0);
   expect((await readdir(home)).toSorted()).toEqual(["CLAUDE.md", "skills"]);
 });
+
+it("shares linked skill directories and linked manifests at their source names", async () => {
+  const { root, config, home } = await savedProfile();
+  const source = join(root, "agent", "skills");
+  const external = join(root, "external-skill");
+  await mkdir(external);
+  await writeFile(join(external, "SKILL.md"), "External skill");
+  await mkdir(source);
+  await symlink(external, join(source, "linked-directory"));
+  await mkdir(join(source, "linked-manifest"));
+  await symlink(join(external, "SKILL.md"), join(source, "linked-manifest", "SKILL.md"));
+  const checked = await cli(["check", "--config", config], "");
+  expect(checked.status, checked.stderr).toBe(0);
+  for (const name of ["linked-directory", "linked-manifest"]) {
+    expect(await readlink(join(home, "skills", name))).toBe(join(source, name));
+    expect(await readFile(join(home, "skills", name, "SKILL.md"), "utf8")).toBe("External skill");
+  }
+});
