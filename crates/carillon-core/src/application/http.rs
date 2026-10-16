@@ -801,23 +801,25 @@ async fn apply_registry(
 async fn provider_health(client: &Client, config: &LoadedConfig) -> Vec<Health> {
     let providers = &config.value.providers;
     let mut probes = tokio::task::JoinSet::new();
+    let mut reports = Vec::with_capacity(providers.len());
     for (index, provider) in providers.iter().enumerate() {
-        if provider.enabled {
+        let status = if !provider.enabled {
+            "disabled"
+        } else if provider.role == ProviderRole::Runtime
+            && !config
+                .value
+                .agents
+                .iter()
+                .any(|agent| agent.runtime == provider.id)
+        {
+            "idle"
+        } else {
             let (client, provider) = (client.clone(), provider.clone());
             probes.spawn(async move { (index, fetch_health(&client, &provider).await) });
-        }
+            "unavailable"
+        };
+        reports.push(provider_status(provider, status));
     }
-    let mut reports = providers
-        .iter()
-        .map(|provider| {
-            let status = if provider.enabled {
-                "unavailable"
-            } else {
-                "disabled"
-            };
-            provider_status(provider, status)
-        })
-        .collect::<Vec<_>>();
     while let Some(probe) = probes.join_next().await {
         if let Ok((index, health)) = probe {
             reports[index] = health;

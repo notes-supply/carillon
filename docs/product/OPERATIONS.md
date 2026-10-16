@@ -146,8 +146,11 @@ carillon inspect TURN_ID     # one turn's state, output or failure
 carillon check               # does this program accept the installation? (read-only)
 ```
 
+An enabled runtime with no assigned agents is `idle`. Core does not probe it,
+and it does not delay `start`, `restart`, or `update` readiness.
+
 `start` and `restart` wait up to `--timeout` seconds (default 60) for every
-provider to answer. A provider whose version differs from the one recorded in
+interface and runtime serving an agent to answer. A provider whose version differs from the one recorded in
 `carillon.toml` shows `version_mismatch`; that's informational.
 
 `carillon --home PATH` (or `CARILLON_HOME`) picks an installation; otherwise

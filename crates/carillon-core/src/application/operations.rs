@@ -258,8 +258,8 @@ fn registered_home(unit: &str) -> Option<PathBuf> {
     Some(PathBuf::from(value))
 }
 
-/// Poll core until every enabled provider answers with its configured
-/// identity. A version mismatch is reachable, not a failure; it is returned
+/// Poll core until every enabled provider serving an agent or interface answers
+/// with its configured identity. A version mismatch is reachable, not a failure; it is returned
 /// for the caller to report.
 pub(super) async fn wait_until_healthy(
     config: &LoadedConfig,
