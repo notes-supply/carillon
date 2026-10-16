@@ -263,6 +263,10 @@ export async function profile(
       throw new Error(
         `T3 already has an instance ${instanceId} that is not this profile; remove or rename it in T3, then set the profile up again`,
       );
+    else if (choice.key !== undefined || choice.endpoint !== undefined)
+      throw new Error(
+        `T3 already has profile ${instanceId}; change its environment in T3 settings. The supplied key or endpoint was not applied`,
+      );
   } finally {
     connection.close();
   }

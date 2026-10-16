@@ -203,3 +203,39 @@ it("refuses more than one assistant on the runtime before startup", async () => 
   expect(checked.status).toBe(1);
   expect(checked.stderr).toContain("runtime-t3 may serve only one agent with resources");
 });
+
+it("refuses supplied credentials on an existing profile without reporting success or changing its environment", async () => {
+  const fake = await fakeT3();
+  const { config } = await installation();
+  const runtime = await loaded(config);
+  await profile(
+    runtime,
+    { url: fake.url, token: fake.token },
+    { harness: "claude", key: "original-key" },
+  );
+  const before = await readFile(runtime.providerFile, "utf8");
+  for (const extra of [[], ["--endpoint", "https://proxy.example"]]) {
+    const refused = await cli(
+      [
+        "profile",
+        "--config",
+        config,
+        "--url",
+        fake.url,
+        "--harness",
+        "claude",
+        "--with-key",
+        ...extra,
+      ],
+      `${fake.token}\nreplacement-key\n`,
+    );
+    expect(refused.status).toBe(1);
+    expect(refused.stdout).toBe("");
+    expect(refused.stderr).toContain("change its environment in T3 settings");
+    expect(refused.stderr).not.toContain("replacement-key");
+    expect(fake.instances.get("carillon_claude")).toMatchObject({
+      environment: [{ name: "ANTHROPIC_API_KEY", value: "original-key", sensitive: true }],
+    });
+    expect(await readFile(runtime.providerFile, "utf8")).toBe(before);
+  }
+});
