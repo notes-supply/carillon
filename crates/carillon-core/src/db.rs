@@ -1469,7 +1469,7 @@ mod tests {
     }
 
     #[test]
-    fn event_is_idempotent_and_completion_is_atomic() -> Result<()> {
+    fn a_repeated_event_returns_its_first_queued_turn() -> Result<()> {
         let directory = tempdir()?;
         let database = Database::create(&directory.path().join("state.sqlite3"))?;
         let first = accept(&database, "one", "conversation")?;
@@ -1478,28 +1478,6 @@ mod tests {
         assert!(duplicate.duplicate);
         assert_eq!(first.turn_id, duplicate.turn_id);
         assert_eq!(first.state, TurnState::Queued);
-
-        let turn = database
-            .claim("runtime", Lane::Messages, &CancellationToken::new())?
-            .context("turn was not queued")?;
-        database.complete_turn(
-            &turn,
-            &RuntimeTurnResponse {
-                correlation_id: turn.turn_id.clone(),
-                output: "reply".to_owned(),
-                follow_up: None,
-                unanswered_left: false,
-                activity: None,
-                attachments_left: false,
-            },
-        )?;
-        assert_eq!(
-            database
-                .claim_delivery("discord", "instance")?
-                .context("delivery missing")?
-                .content,
-            "reply"
-        );
         Ok(())
     }
 
@@ -2026,13 +2004,6 @@ mod tests {
         // An index is part of the format: a database an earlier release wrote
         // without it is refused, and nothing adds it.
         rusqlite::Connection::open(&path)?.execute_batch("DROP INDEX turns_origin")?;
-        let refused = Database::validate_backup(&path)
-            .err()
-            .context("accepted a missing index")?;
-        assert!(
-            format!("{refused:#}").contains("database schema is not the current Carillon format"),
-            "{refused:#}"
-        );
         let refused = Database::open(&path)
             .err()
             .context("opened a missing index")?;

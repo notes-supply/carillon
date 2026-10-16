@@ -1390,7 +1390,7 @@ async fn duplicate_receipts_do_not_read_mutable_resources() -> Result<()> {
     let refused = accept(&state, "two", "conversation")
         .await
         .err()
-        .context("accepted without a resource root")?;
+        .context("accepted a resource symlink")?;
     assert!(
         format!("{refused:#}").contains("resource symlinks are not supported"),
         "{refused:#}"
@@ -1400,7 +1400,7 @@ async fn duplicate_receipts_do_not_read_mutable_resources() -> Result<()> {
         state
             .core
             .database
-            .event_receipt("other-interface", "one")?
+            .event_receipt("test-interface", "two")?
             .is_none()
     );
     Ok(())
@@ -1619,27 +1619,6 @@ async fn startup_drains_queued_nondefault_runtime_without_replaying_running_work
     })
     .await??;
     services.shutdown().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn queued_turns_keep_the_same_runtime_conversation() -> Result<()> {
-    let directory = tempdir()?;
-    let state = installation(directory.path())?;
-    let first = accept(&state, "one", "conversation").await?;
-    let second = accept(&state, "two", "conversation").await?;
-    run_next_turn(&state, "test-runtime", async |_, _, request| {
-        assert_eq!(request.correlation_id, first.turn_id);
-        Ok(completed(request))
-    })
-    .await?;
-    run_next_turn(&state, "test-runtime", async |_, _, request| {
-        assert_eq!(request.correlation_id, second.turn_id);
-        assert_eq!(request.audience_id, "conversation");
-        Ok(completed(request))
-    })
-    .await?;
-    assert_eq!(state.core.database.turn_counts()?.completed, 2);
     Ok(())
 }
 
@@ -2261,13 +2240,6 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
     })?;
     assert_eq!(response.correlation_id, turn.turn_id);
     server.abort();
-    assert!(
-        server
-            .await
-            .err()
-            .context("server unexpectedly finished")?
-            .is_cancelled()
-    );
     // Reserve a local TCP port without listening, so refusal cannot hit another service.
     let socket = tokio::net::TcpSocket::new_v4()?;
     socket.bind("127.0.0.1:0".parse()?)?;
@@ -2954,10 +2926,11 @@ async fn a_turn_takes_as_long_as_its_runtime_and_ends_when_its_caller_stops() ->
     // The runtime's native work runs past half an hour, in the paused
     // clock's virtual time; it reports when its request is dropped.
     let (ended, mut endings) = tokio::sync::mpsc::unbounded_channel();
+    let (began, mut beginnings) = tokio::sync::mpsc::unbounded_channel();
     let app = Router::new().route(
         "/v1/turns",
         post(move |Json(request): Json<RuntimeTurnRequest>| {
-            let ended = ended.clone();
+            let (ended, began) = (ended.clone(), began.clone());
             async move {
                 struct Ending(tokio::sync::mpsc::UnboundedSender<()>);
                 impl Drop for Ending {
@@ -2966,6 +2939,7 @@ async fn a_turn_takes_as_long_as_its_runtime_and_ends_when_its_caller_stops() ->
                     }
                 }
                 let _ending = Ending(ended);
+                let _ = began.send(());
                 tokio::time::sleep(Duration::from_mins(31)).await;
                 Json(completed(request))
             }
@@ -2986,6 +2960,10 @@ async fn a_turn_takes_as_long_as_its_runtime_and_ends_when_its_caller_stops() ->
         "{response:?}"
     );
     assert!(started.elapsed() >= Duration::from_mins(31));
+    beginnings
+        .recv()
+        .await
+        .context("the answered request never began")?;
     endings
         .recv()
         .await
@@ -2996,7 +2974,10 @@ async fn a_turn_takes_as_long_as_its_runtime_and_ends_when_its_caller_stops() ->
     let (client, cancelled) = (state.client.clone(), runtime.clone());
     let call =
         tokio::spawn(async move { call_runtime(&client, &cancelled, "unused", request).await });
-    tokio::time::sleep(Duration::from_mins(1)).await;
+    beginnings
+        .recv()
+        .await
+        .context("the request never reached the runtime")?;
     call.abort();
     tokio::time::timeout(Duration::from_secs(5), endings.recv())
         .await

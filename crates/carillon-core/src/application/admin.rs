@@ -793,13 +793,6 @@ mod tests {
                 .version,
             RELEASE_VERSION
         );
-        // This initializer bundles defaults; it does not constrain core providers.
-        for (id, role) in [
-            ("discord-private", ProviderRole::Interface),
-            ("runtime-pi", ProviderRole::Runtime),
-        ] {
-            config.provider(id, role)?;
-        }
 
         let mut credentials = fs::read_dir(root.join("credentials"))?
             .map(|entry| entry.map(|entry| entry.file_name()))

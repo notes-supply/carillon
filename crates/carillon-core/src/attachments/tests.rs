@@ -199,7 +199,7 @@ fn staged_sources_are_confined_regular_files_of_the_declared_length() -> Result<
 }
 
 #[test]
-fn cancellation_stops_between_chunks_and_leaves_nothing() -> Result<()> {
+fn a_cancelled_capture_is_refused_and_leaves_nothing() -> Result<()> {
     let data = tempfile::tempdir()?;
     let staged = stage(data.path(), "batch", &[&vec![7; 3 * super::CHUNK]])?;
     let cancel = Cancel::default();
