@@ -11,6 +11,7 @@ mod components;
 pub mod contract;
 mod embed;
 mod model;
+mod prose;
 mod run;
 
 #[cfg(target_arch = "wasm32")]

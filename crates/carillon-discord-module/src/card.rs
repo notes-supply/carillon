@@ -7,7 +7,8 @@
 //! format, mention or link anything.
 use crate::{
     contract::{ActivityMarkers, Card, CardRequest, Seen},
-    embed::{Embed, Field, escaped, marked, model_line},
+    embed::{Embed, Field, marked, model_line},
+    prose::prose,
 };
 use carillon_protocol::model::{
     ActivityPhase, AgentInfo, DeliveryOutcome, FinishedTool, Job, TurnActivity, TurnState,
@@ -163,7 +164,7 @@ fn card(shown: &Shown<'_>, markers: &ActivityMarkers) -> Embed {
     let merged = Merged::of(&shown.reports, shown.live);
     let mut description = vec![status_line(shown, markers)];
     if let Some(headline) = shown.live.and_then(|live| live.headline.as_deref()) {
-        description.push(format!("> {}", escaped(&cut(headline, HEADLINE_LIMIT))));
+        description.push(format!("> {}", prose(&cut(headline, HEADLINE_LIMIT))));
     }
     if merged.partial || shown.partial {
         description.push(marked(
@@ -172,27 +173,32 @@ fn card(shown: &Shown<'_>, markers: &ActivityMarkers) -> Embed {
         ));
     }
     let mut fields = Vec::new();
-    let mut field = |name: &str, lines: Vec<String>| {
+    let mut field = |name: &str, lines: Vec<String>, show: fn(&str) -> String| {
         if !lines.is_empty() {
             fields.push(Field {
                 inline: false,
                 name: name.to_owned(),
-                value: fitted(&lines, FIELD_VALUE_LENGTH),
+                value: fitted(&lines, FIELD_VALUE_LENGTH, show),
             });
         }
     };
     field(
         "Reasoning",
-        merged.notes.iter().map(|note| escaped(note)).collect(),
+        merged.notes.iter().map(|note| (*note).to_owned()).collect(),
+        prose,
     );
-    field("Calls", call_lines(&merged, shown.live, markers));
-    field("Work", work_lines(&merged, markers));
+    field(
+        "Calls",
+        call_lines(&merged, shown.live, markers),
+        ToOwned::to_owned,
+    );
+    field("Work", work_lines(&merged, markers), ToOwned::to_owned);
     // Metadata that states no fact shows no section.
     let agent = merged
         .agent
         .map(|agent| agent_line(agent, markers))
         .filter(|line| !line.is_empty());
-    field("Agent", agent.into_iter().collect());
+    field("Agent", agent.into_iter().collect(), ToOwned::to_owned);
     Embed {
         kind: "rich",
         description: cut(&description.join("\n"), DESCRIPTION_LENGTH),
@@ -517,17 +523,21 @@ fn tokens(count: u64) -> String {
     }
 }
 
-/// Lines within `limit` characters, newest kept: older lines give way to
-/// one saying how many went.
-fn fitted(lines: &[String], limit: usize) -> String {
-    let joined = lines.join("\n");
+/// Lines within `limit` characters as `show` renders them, newest kept:
+/// older lines give way to one saying how many went.
+fn fitted(lines: &[String], limit: usize, show: fn(&str) -> String) -> String {
+    let joined = lines
+        .iter()
+        .map(|line| show(line))
+        .collect::<Vec<_>>()
+        .join("\n");
     if joined.chars().count() <= limit {
         return joined;
     }
     let mut kept = Vec::new();
     let mut length = 0;
     for line in lines.iter().rev() {
-        let line = cut(line, limit / 2);
+        let line = within(line, limit / 2, show);
         let added = line.chars().count() + 1;
         if length + added > limit - 20 {
             break;
@@ -539,6 +549,21 @@ fn fitted(lines: &[String], limit: usize) -> String {
     kept.push(format!("… {left} more above"));
     kept.reverse();
     kept.join("\n")
+}
+
+/// The line as `show` renders it within `limit` characters. It is cut before
+/// it is rendered, so a cut never splits what rendering made of it, and cut
+/// further while what it renders to is too long.
+fn within(line: &str, limit: usize, show: fn(&str) -> String) -> String {
+    let mut keep = limit.min(line.chars().count()).max(1);
+    loop {
+        let shown = show(&cut(line, keep));
+        let length = shown.chars().count();
+        if length <= limit || keep == 1 {
+            return shown;
+        }
+        keep = keep.saturating_sub(length - limit).max(1);
+    }
 }
 
 /// Text that cannot format, mention or link anything: letters, digits and
