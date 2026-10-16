@@ -23,7 +23,7 @@ use carillon_protocol::models::AvailableModel;
 use serde::Deserialize;
 
 use super::{
-    admin::{ASSISTANT, Runtime, assistant, initialize, register_runtime, set_agents},
+    admin::{Runtime, assistant, initialize, register_runtime, set_agents},
     cli::provider_binary,
 };
 
@@ -114,27 +114,36 @@ impl Harness {
 
 /// The harnesses the assistant runs on, of which there is at least one.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Harnesses(Vec<Harness>);
+struct Harnesses {
+    first: Harness,
+    rest: Vec<Harness>,
+}
 
 impl Harnesses {
     /// Those chosen among [`Harness::ALL`], by index; none chosen is no
     /// assistant on T3.
     fn chosen(indexes: &[usize]) -> Option<Self> {
-        let chosen: Vec<Harness> = indexes
+        let mut chosen = indexes
             .iter()
-            .filter_map(|&index| Harness::ALL.get(index).copied())
-            .collect();
-        (!chosen.is_empty()).then_some(Self(chosen))
+            .filter_map(|&index| Harness::ALL.get(index).copied());
+        Some(Self {
+            first: chosen.next()?,
+            rest: chosen.collect(),
+        })
+    }
+
+    fn iter(&self) -> impl Iterator<Item = Harness> + '_ {
+        std::iter::once(self.first).chain(self.rest.iter().copied())
     }
 }
 
 /// What runs Carillon's assistant, the agent with Discord's context and
 /// Carillon's own resources.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Assistant {
+enum Assistant<T = Harnesses> {
     Pi,
     /// On T3, with a profile for each harness.
-    T3(Harnesses),
+    T3(T),
     /// Channels are only ever plain T3 Code.
     None,
 }
@@ -145,47 +154,39 @@ enum Assistant {
 /// fails, or the installation cannot be created; what was finished stays.
 pub(super) fn setup(home: &Path, options: &Options, questions: &mut impl Questions) -> Result<()> {
     let existing = home.join("carillon.toml").exists();
-    let runtimes = if existing {
-        registered_runtimes(home)?
-    } else if !options.runtimes.is_empty() {
-        options.runtimes.clone()
-    } else {
+    let runtimes = runtimes(home, options)?;
+    let runtimes = if runtimes.is_empty() {
         ask_runtimes(questions)?
+    } else {
+        runtimes
     };
     let pi = runtimes.contains(&Runtime::Pi);
     let t3 = runtimes.contains(&Runtime::T3);
     if options.workspace.is_some() && !pi {
         bail!("--workspace is for Pi; on T3, an agent works in its project's folder");
     }
-    if existing && t3 && keep_t3(home, &provider_binary("runtime-t3")?, questions)? {
-        // The kept settings and the registry say what runs the assistant.
-        if pi {
-            sign_in_to_pi(home, existing, questions)?;
-        }
-    } else {
+    let kept = existing && t3 && keep_t3(home, &provider_binary("runtime-t3")?, questions)?;
+    if !kept {
         let assistant = ask_assistant(&runtimes, questions)?;
-        if assistant == Assistant::Pi {
-            if !existing {
-                let workspace = match &options.workspace {
-                    Some(workspace) => workspace.clone(),
-                    None => std::env::var_os("HOME")
-                        .map(PathBuf::from)
-                        .context("HOME names no folder for the agent; give --workspace")?,
-                };
-                initialize(home, &workspace, options.base_port, Runtime::Pi)?;
-            }
-            sign_in_to_pi(home, existing, questions)?;
-        }
         if t3 {
             set_up_t3(
                 home,
-                options.base_port,
+                options,
                 &assistant,
                 &provider_binary("runtime-t3")?,
                 questions,
             )?;
+        } else {
+            agents(home, options, Assistant::Pi, &[])?;
         }
     }
+    {
+        let _maintenance = MaintenanceLock::acquire_unless_held(home)?;
+        for runtime in runtimes {
+            register_runtime(&home.join("carillon.toml"), runtime)?;
+        }
+    }
+    sign_in_to_pi(home, existing, questions)?;
     let discord = Command::new(provider_binary("discord")?)
         .arg("setup")
         .env("CARILLON_HOME", home)
@@ -195,6 +196,20 @@ pub(super) fn setup(home: &Path, options: &Options, questions: &mut impl Questio
         bail!("Discord setup did not finish; run setup again to finish it");
     }
     Ok(())
+}
+
+fn runtimes(home: &Path, options: &Options) -> Result<Vec<Runtime>> {
+    let mut runtimes = if home.join("carillon.toml").exists() {
+        registered_runtimes(home)?
+    } else {
+        Vec::new()
+    };
+    for &runtime in &options.runtimes {
+        if !runtimes.contains(&runtime) {
+            runtimes.push(runtime);
+        }
+    }
+    Ok(runtimes)
 }
 
 fn ask_runtimes(questions: &mut impl Questions) -> Result<Vec<Runtime>> {
@@ -272,6 +287,15 @@ fn registered_runtimes(home: &Path) -> Result<Vec<Runtime>> {
 /// Opens Pi until it is signed in and has a default model, as the Pi
 /// runtime's own startup check says.
 fn sign_in_to_pi(home: &Path, existing: bool, questions: &mut impl Questions) -> Result<()> {
+    let config = LoadedConfig::load(&home.join("carillon.toml"))?;
+    if !config
+        .value
+        .agents
+        .iter()
+        .any(|agent| agent.runtime == Runtime::Pi.id())
+    {
+        return Ok(());
+    }
     let pi = provider_binary("runtime-pi")?;
     let state = home.join("pi");
     let check = || -> Result<Output> {
@@ -386,7 +410,7 @@ impl Server<'_> {
 /// the default model chosen for it.
 fn set_up_t3(
     home: &Path,
-    base_port: u16,
+    options: &Options,
     assistant: &Assistant,
     t3: &Path,
     questions: &mut impl Questions,
@@ -414,18 +438,16 @@ fn set_up_t3(
         .iter()
         .map(|project| format!("{} ({})", project.title, project.workspace.display()))
         .collect();
-    let (harnesses, assistant_project) = match assistant {
-        Assistant::T3(Harnesses(harnesses)) => (
-            harnesses.as_slice(),
-            Some(
-                &projects[questions.choose(
-                    "Which T3 project should Carillon's assistant work in?",
-                    &labels,
-                    0,
-                )?],
-            ),
+    let plan = match assistant {
+        Assistant::T3(_) => Assistant::T3(
+            &projects[questions.choose(
+                "Which T3 project should Carillon's assistant work in?",
+                &labels,
+                0,
+            )?],
         ),
-        Assistant::Pi | Assistant::None => (&[][..], None),
+        Assistant::Pi => Assistant::Pi,
+        Assistant::None => Assistant::None,
     };
     let code: Vec<&Project> = questions
         .choose_many(
@@ -437,18 +459,21 @@ fn set_up_t3(
         .into_iter()
         .map(|index| &projects[index])
         .collect();
-    if assistant_project.is_none() && code.is_empty() {
-        if *assistant == Assistant::Pi {
-            questions.say("T3 Code is not used, so it was not set up.")?;
-            return Ok(());
-        }
+    if matches!(plan, Assistant::None) && code.is_empty() {
         bail!("nothing runs on T3: choose a harness for the assistant, or a T3 Code project");
     }
-    let agents = agents(home, base_port, assistant_project, &code)?;
-    let profiles = harnesses
-        .iter()
-        .map(|&harness| make_profile(home, &server, harness, questions))
-        .collect::<Result<Vec<_>>>()?;
+    let agents = agents(home, options, plan, &code)?;
+    if agents.is_empty() {
+        questions.say("T3 Code has no agents to configure.")?;
+        return Ok(());
+    }
+    let profiles = match assistant {
+        Assistant::T3(harnesses) => harnesses
+            .iter()
+            .map(|harness| make_profile(home, &server, harness, questions))
+            .collect::<Result<Vec<_>>>()?,
+        Assistant::Pi | Assistant::None => Vec::new(),
+    };
     let offer = ready(&server, &profiles, questions)?;
     configure_agents(home, &server, &agents, &profiles, offer, questions)
 }
@@ -503,48 +528,75 @@ fn configure_agents(
     Ok(())
 }
 
-/// The installation's agents after T3's are added, each with its project:
-/// the assistant, in `assistant`'s project, then one T3 Code agent per
-/// project in `code`. An assistant on Pi stays, and is not among them. A
-/// new installation is created first, around the first agent's folder.
+/// Replaces T3's agents and places the assistant on the chosen runtime.
+/// Existing resource paths keep their stored spelling and identify the
+/// assistant even when its ID was changed. Other runtimes' plain agents stay.
 fn agents<'a>(
     home: &Path,
-    base_port: u16,
-    assistant: Option<&'a Project>,
+    options: &Options,
+    plan: Assistant<&'a Project>,
     code: &[&'a Project],
 ) -> Result<Vec<(AgentConfig, &'a Project)>> {
     let config_path = home.join("carillon.toml");
+    let workspace = match &plan {
+        Assistant::Pi => options.workspace.clone().map_or_else(
+            || {
+                if config_path.exists() {
+                    let config: Config = toml::from_str(&std::fs::read_to_string(&config_path)?)?;
+                    if let Some(agent) = config
+                        .agents
+                        .into_iter()
+                        .find(|agent| agent.resources.is_some())
+                    {
+                        return Ok(agent.workspace);
+                    }
+                }
+                std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .context("HOME names no folder for the agent; give --workspace")
+            },
+            Ok,
+        )?,
+        Assistant::T3(project) => project.workspace.clone(),
+        Assistant::None => code
+            .first()
+            .context("no agent to create the installation for")?
+            .workspace
+            .clone(),
+    };
+    let runtime = if matches!(plan, Assistant::Pi) {
+        Runtime::Pi
+    } else {
+        Runtime::T3
+    };
     if !config_path.exists() {
-        let folder = assistant
-            .or_else(|| code.first().copied())
-            .map(|project| project.workspace.as_path())
-            .context("no agent to create the installation for")?;
-        initialize(home, folder, base_port, Runtime::T3)?;
+        initialize(home, &workspace, options.base_port, runtime)?;
     }
     let _maintenance = MaintenanceLock::acquire_unless_held(home)
         .context("the installation's agents were not changed")?;
-    register_runtime(&config_path, Runtime::T3)?;
+    register_runtime(&config_path, runtime)?;
     let config: Config = toml::from_str(&std::fs::read_to_string(&config_path)?)?;
-    let existing = config.agent(ASSISTANT).ok();
-    let on_pi = existing
-        .filter(|agent| assistant.is_none() && agent.runtime == Runtime::Pi.id())
-        .cloned();
-    // On T3, the assistant keeps its name and resources.
-    let mut t3: Vec<(AgentConfig, &Project)> = assistant
-        .map(|project| {
-            let agent = AgentConfig {
-                runtime: Runtime::T3.id().to_owned(),
-                workspace: project.workspace.clone(),
-                ..existing
-                    .cloned()
-                    .unwrap_or_else(|| self::assistant(Runtime::T3, &project.workspace))
-            };
-            (agent, project)
-        })
-        .into_iter()
+    let existing = config.agents.iter().find(|agent| agent.resources.is_some());
+    let mut registry: Vec<AgentConfig> = config
+        .agents
+        .iter()
+        .filter(|agent| agent.resources.is_none() && agent.runtime != Runtime::T3.id())
+        .cloned()
         .collect();
-    for project in code {
-        let taken: Vec<&str> = t3.iter().map(|(agent, _)| agent.id.as_str()).collect();
+    let mut t3 = Vec::new();
+    if !matches!(plan, Assistant::None) {
+        let mut agent = existing
+            .cloned()
+            .unwrap_or_else(|| assistant(runtime, &workspace));
+        agent.runtime = runtime.id().to_owned();
+        agent.workspace = workspace;
+        if let Assistant::T3(project) = plan {
+            t3.push((agent.clone(), project));
+        }
+        registry.push(agent);
+    }
+    for &project in code {
+        let taken: Vec<&str> = registry.iter().map(|agent| agent.id.as_str()).collect();
         let id = unique(&taken, &format!("t3-{}", slug(&project.title)));
         let agent = AgentConfig {
             id,
@@ -553,15 +605,13 @@ fn agents<'a>(
             workspace: project.workspace.clone(),
             resources: None,
         };
+        registry.push(agent.clone());
         t3.push((agent, project));
     }
-    set_agents(
-        &config_path,
-        on_pi
-            .into_iter()
-            .chain(t3.iter().map(|(agent, _)| agent.clone()))
-            .collect(),
-    )?;
+    if !t3.is_empty() {
+        register_runtime(&config_path, Runtime::T3)?;
+    }
+    set_agents(&config_path, registry)?;
     Ok(t3)
 }
 

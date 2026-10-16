@@ -3,7 +3,7 @@ use std::{os::unix::fs::PermissionsExt as _, path::Path};
 use carillon_installation::config::{Config, LoadedConfig, ProviderRole};
 
 use super::{
-    Assistant, Harness, Harnesses, Options, Runtime, initialize, keep_t3, registered_runtimes, run,
+    Assistant, Harnesses, Options, Runtime, initialize, keep_t3, registered_runtimes, run,
     set_up_t3, setup,
 };
 use crate::application::admin::{ASSISTANT, backup, register_runtime, set_provider};
@@ -274,8 +274,8 @@ fn t3_gets_the_assistant_with_its_profile_and_a_t3_code_agent_per_project() -> a
     let mut questions = Shown::answering(&["", "token", "0", "1", "1", "sk-test", "0", "1"]);
     set_up_t3(
         &home,
-        44_000,
-        &Assistant::T3(Harnesses(vec![Harness::Claude])),
+        &options(),
+        &Assistant::T3(Harnesses::chosen(&[0]).expect("Claude was chosen")),
         &program,
         &mut questions,
     )?;
@@ -351,7 +351,13 @@ fn models_sharing_a_name_are_told_apart_and_the_one_chosen_is_configured() -> an
     let program = fake_t3(directory.path(), &offer)?;
     // The default address, a token, the only project for T3 Code, the second Sonnet.
     let mut questions = Shown::answering(&["", "token", "0", "1"]);
-    set_up_t3(&home, 44_000, &Assistant::None, &program, &mut questions)?;
+    set_up_t3(
+        &home,
+        &options(),
+        &Assistant::None,
+        &program,
+        &mut questions,
+    )?;
     let options = [
         "Sonnet (claudeAgent/sonnet-a)",
         "Sonnet (claudeAgent/sonnet-b)",
@@ -388,7 +394,7 @@ fn t3_with_nothing_to_run_is_refused_or_left_out() -> anyhow::Result<()> {
     let program = fake_t3(directory.path(), &offer)?;
     let refused = set_up_t3(
         &home,
-        44_000,
+        &options(),
         &Assistant::None,
         &program,
         &mut Shown::answering(&["", "token", ""]),
@@ -400,11 +406,11 @@ fn t3_with_nothing_to_run_is_refused_or_left_out() -> anyhow::Result<()> {
     assert!(refusal.contains("nothing runs on T3"), "{refusal}");
     assert!(!home.exists());
     let mut questions = Shown::answering(&["", "token", ""]);
-    set_up_t3(&home, 44_000, &Assistant::Pi, &program, &mut questions)?;
+    set_up_t3(&home, &options(), &Assistant::Pi, &program, &mut questions)?;
     assert!(
         questions
             .shown
-            .contains(&"T3 Code is not used, so it was not set up.".to_owned())
+            .contains(&"T3 Code has no agents to configure.".to_owned())
     );
     Ok(())
 }
@@ -428,7 +434,13 @@ fn t3_code_agents_are_named_from_their_projects_without_clashing() -> anyhow::Re
     // The default address, a token, every project for T3 Code, then each
     // agent's only model.
     let mut questions = Shown::answering(&["", "token", "0,1,2", "0", "0", "0"]);
-    set_up_t3(&home, 44_000, &Assistant::None, &program, &mut questions)?;
+    set_up_t3(
+        &home,
+        &options(),
+        &Assistant::None,
+        &program,
+        &mut questions,
+    )?;
     let config = LoadedConfig::load(&home.join("carillon.toml"))?;
     let agents: Vec<(&str, &str)> = config
         .value
@@ -446,3 +458,13 @@ fn t3_code_agents_are_named_from_their_projects_without_clashing() -> anyhow::Re
     );
     Ok(())
 }
+
+fn options() -> Options {
+    Options {
+        workspace: None,
+        base_port: 44_000,
+        runtimes: Vec::new(),
+    }
+}
+
+mod reruns;
