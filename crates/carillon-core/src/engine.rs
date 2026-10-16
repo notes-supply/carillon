@@ -366,21 +366,25 @@ impl Core {
         Ok(runtime)
     }
 
-    fn check_runtime_owner(&self, turn: &ClaimedTurn) -> Result<(), TurnFailure> {
-        let agent = self
-            .agent(&turn.agent_id)
-            .map_err(|error| TurnFailure::Uncertain(error.into()))?;
-        if agent.runtime != turn.runtime_id {
-            return Err(TurnFailure::Reported(Box::new(Reported {
-                status: 409,
-                explanation: Some(format!(
-                    "This conversation ran on {}, which no longer runs {}. Start a new conversation.",
-                    turn.runtime_id, turn.agent_id
-                )),
-                activity: None,
-            })));
+    /// Ends a turn whose agent no longer runs on the runtime that owns its
+    /// conversation, telling the conversation why, before the runtime
+    /// receives it. Returns whether it did.
+    async fn refuse_stranded(&self, turn: &ClaimedTurn) -> Result<bool> {
+        let Ok(agent) = self.agent(&turn.agent_id) else {
+            return Ok(false);
+        };
+        if agent.runtime == turn.runtime_id {
+            return Ok(false);
         }
-        Ok(())
+        let explanation = format!(
+            "This conversation ran on {}, which no longer runs {}. Start a new conversation.",
+            turn.runtime_id, turn.agent_id
+        );
+        self.interrupt(turn, explanation.clone(), explanation, None)
+            .await
+            .with_context(|| format!("record failure of turn {}", turn.turn_id))?;
+        warn!(turn_id = %turn.turn_id, "turn refused: its agent moved to another runtime");
+        Ok(true)
     }
 
     fn agent(&self, id: &str) -> Result<&AgentOptions, CoreError> {
@@ -472,7 +476,7 @@ impl Core {
                     Unusable::Altered(message) => (message.clone(), ALTERED_ATTACHMENT),
                     Unusable::Unreadable(error) => (format!("{error:#}"), UNREADABLE_ATTACHMENT),
                 };
-                self.interrupt(turn, message.clone(), Some(explanation.to_owned()), None)
+                self.interrupt(turn, message.clone(), interrupted(Some(explanation)), None)
                     .await
                     .with_context(|| format!("record unrunnable turn {}", turn.turn_id))?;
                 warn!(turn_id = %turn.turn_id, error = %message, "captured attachment is not usable; turn not run");
@@ -495,8 +499,10 @@ impl Core {
                 .collect();
             (unanswered, carried)
         };
+        if self.refuse_stranded(turn).await? {
+            return Ok(WorkerStep::Advanced);
+        }
         let outcome = async {
-            self.check_runtime_owner(turn)?;
             let request = self.runtime_request(turn, unanswered);
             let correlation_id = request.correlation_id.clone();
             let mut response = submit(request).await?;
@@ -518,7 +524,7 @@ impl Core {
         // `running`, which blocks only its conversation and is never claimed
         // again; startup recovery then records it as interrupted, or asks an
         // observation again.
-        let (error, explanation, activity) = match outcome {
+        let (error, notice, activity) = match outcome {
             Ok((follow_up, unanswered_left, attachments_left)) => {
                 if follow_up {
                     self.wake(Lane::Observations);
@@ -548,7 +554,7 @@ impl Core {
                 return self.requeue(turn, &failure).await;
             }
             Err(TurnFailure::Uncertain(failure) | TurnFailure::Unanswered(failure)) => {
-                (failure.to_string(), None, None)
+                (failure.to_string(), interrupted(None), None)
             }
             Err(TurnFailure::Reported(reported)) => {
                 let error = reported.diagnostic();
@@ -557,10 +563,14 @@ impl Core {
                     activity,
                     ..
                 } = *reported;
-                (error, explanation, kept_report(&turn.turn_id, activity))
+                (
+                    error,
+                    interrupted(explanation.as_deref()),
+                    kept_report(&turn.turn_id, activity),
+                )
             }
         };
-        self.interrupt(turn, error.clone(), explanation, activity)
+        self.interrupt(turn, error.clone(), notice, activity)
             .await
             .with_context(|| format!("record failure of turn {}", turn.turn_id))?;
         warn!(turn_id = %turn.turn_id, observation, %error, "turn did not complete");
@@ -571,13 +581,13 @@ impl Core {
         &self,
         turn: &ClaimedTurn,
         error: String,
-        explanation: Option<String>,
+        notice: String,
         activity: Option<TurnActivity>,
     ) -> Result<()> {
         let turn = turn.clone();
         self.blocking(move |core| {
             core.database
-                .interrupt_turn(&turn, &error, explanation.as_deref(), activity.as_ref())
+                .interrupt_turn(&turn, &error, &notice, activity.as_ref())
         })
         .await
     }
@@ -854,6 +864,16 @@ pub enum TurnFailure {
     /// The runtime answered that the turn failed. As with `Uncertain`,
     /// model work may have run and is not automatically replayed.
     Reported(Box<Reported>),
+}
+
+/// What the conversation is told when a turn did not complete, with the
+/// runtime's explanation when it gave one.
+fn interrupted(explanation: Option<&str>) -> String {
+    const CONTINUE: &str = "Send another message to continue in this conversation. Actions already taken may have had effects.";
+    match explanation {
+        Some(explanation) => format!("That turn was interrupted: {explanation}\n{CONTINUE}"),
+        None => format!("That turn was interrupted. {CONTINUE}"),
+    }
 }
 
 /// What a runtime answered when it failed a turn.

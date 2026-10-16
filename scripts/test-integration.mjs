@@ -1070,12 +1070,15 @@ async function testProviderFailure() {
 
     const explained = await simulate("provider-failure-explained", "use the provider");
     assert.equal(explained.delivery.turn_state, "interrupted");
-    const [reason, effects] = explained.delivery.content.split("\n");
+    const [reason, next] = explained.delivery.content.split("\n");
     assert.match(
       reason,
       /^That turn was interrupted: .*The usage limit has been reached for @everyone and <@200> \(request \[redacted\]\)\. See \[link\]$/u,
     );
-    assert.equal(effects, "Actions already taken may have had effects.");
+    assert.equal(
+      next,
+      "Send another message to continue in this conversation. Actions already taken may have had effects.",
+    );
     const inspection = JSON.parse(
       run("--home", installation, "inspect", explained.receipt.turn_id),
     );

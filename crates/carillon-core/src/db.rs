@@ -627,16 +627,16 @@ impl Database {
         Ok(())
     }
 
-    /// Ends a running turn with a delivery. `error` is the operator diagnostic;
-    /// `explanation` is safe for the conversation and `activity` is the final report.
+    /// Records that a running turn did not complete, and queues `notice` to
+    /// tell its conversation. `error` is the operator's diagnostic; `activity`
+    /// is the runtime's final report of the failed turn, when it gave one.
     pub(crate) fn interrupt_turn(
         &self,
         turn: &ClaimedTurn,
         error: &str,
-        explanation: Option<&str>,
+        notice: &str,
         activity: Option<&TurnActivity>,
     ) -> Result<()> {
-        const CONTINUE: &str = "Send another message to continue in this conversation. Actions already taken may have had effects.";
         let mut connection = self.connect()?;
         let transaction = write_transaction(&mut connection)?;
         let now = timestamp()?;
@@ -655,13 +655,7 @@ impl Database {
         if changed != 1 {
             bail!("turn {} was not running", turn.turn_id);
         }
-        let notice = match explanation {
-            Some(explanation) => format!(
-                "That turn was interrupted: {explanation}\nActions already taken may have had effects."
-            ),
-            None => format!("That turn was interrupted. {CONTINUE}"),
-        };
-        enqueue_delivery(&transaction, turn, &notice, now)?;
+        enqueue_delivery(&transaction, turn, notice, now)?;
         transaction.commit()?;
         Ok(())
     }
@@ -1314,7 +1308,12 @@ mod tests {
         let turn = database
             .claim("runtime", Lane::Messages, &CancellationToken::new())?
             .context("missing turn")?;
-        database.interrupt_turn(&turn, "runtime disconnected", None, None)?;
+        database.interrupt_turn(
+            &turn,
+            "runtime disconnected",
+            "That turn was interrupted.",
+            None,
+        )?;
         let claim = database
             .claim_delivery("discord", "live")?
             .context("missing notice")?;
@@ -1789,7 +1788,7 @@ mod tests {
         database.interrupt_turn(
             &failed,
             "runtime failed",
-            Some("It broke."),
+            "That turn was interrupted: It broke.",
             Some(&report(1)?),
         )?;
         let notice = database
@@ -2087,7 +2086,7 @@ mod tests {
                     .claim("runtime", Lane::Messages, &CancellationToken::new())?
                     .is_none()
             );
-            database.interrupt_turn(&first, "interrupted", None, None)?;
+            database.interrupt_turn(&first, "interrupted", "That turn was interrupted.", None)?;
             let second = database
                 .claim("runtime", Lane::Messages, &CancellationToken::new())?
                 .context("second missing")?;
@@ -2252,9 +2251,9 @@ mod tests {
         let uncertain = database
             .claim("runtime", Lane::Messages, &CancellationToken::new())?
             .context("uncertain turn was not queued")?;
-        database.interrupt_turn(&uncertain, "ambiguous", None, None)?;
+        database.interrupt_turn(&uncertain, "ambiguous", "That turn was interrupted.", None)?;
         crate::assert_refused(
-            database.interrupt_turn(&uncertain, "ambiguous", None, None),
+            database.interrupt_turn(&uncertain, "ambiguous", "That turn was interrupted.", None),
             "was not running",
         )?;
         crate::assert_refused(database.requeue_turn(&uncertain), "was not running")?;
@@ -2266,7 +2265,7 @@ mod tests {
         database.requeue_turn(&requeued)?;
         crate::assert_refused(database.requeue_turn(&requeued), "was not running")?;
         crate::assert_refused(
-            database.interrupt_turn(&requeued, "ambiguous", None, None),
+            database.interrupt_turn(&requeued, "ambiguous", "That turn was interrupted.", None),
             "was not running",
         )?;
 
@@ -2288,7 +2287,7 @@ mod tests {
         )?;
         crate::assert_refused(database.requeue_turn(&requeued), "was not running")?;
         crate::assert_refused(
-            database.interrupt_turn(&requeued, "ambiguous", None, None),
+            database.interrupt_turn(&requeued, "ambiguous", "That turn was interrupted.", None),
             "was not running",
         )?;
         let inspection = database

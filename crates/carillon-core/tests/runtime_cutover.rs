@@ -107,7 +107,8 @@ async fn changed_agent_runtime_explains_old_conversations_without_dispatching() 
             WorkerStep::Advanced
         );
     }
-    let explanation = "That turn was interrupted: This conversation ran on old, which no longer runs agent. Start a new conversation.\nActions already taken may have had effects.";
+    let explanation =
+        "This conversation ran on old, which no longer runs agent. Start a new conversation.";
     for (state, content) in [
         (TurnState::Completed, "answer"),
         (TurnState::Interrupted, explanation),

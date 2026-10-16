@@ -1828,7 +1828,7 @@ async fn runtime_explanation_reaches_the_conversation_once_and_it_continues() ->
             StatusCode::BAD_GATEWAY,
             json!({"error": explanation}),
             format!(
-                "That turn was interrupted: {explanation}\nActions already taken may have had effects."
+                "That turn was interrupted: {explanation}\nSend another message to continue in this conversation. Actions already taken may have had effects."
             ),
         ),
         // An internal runtime failure carries no explanation, so the
