@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Contract version the module speaks; the provider refuses others.
-pub const CONTRACT: u32 = 4;
+pub const CONTRACT: u32 = 5;
 
 /// Provider to module: the invocation payload.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -22,7 +22,7 @@ pub enum Invocation {
     Describe,
     /// Handle an admitted interaction. Replies are ephemeral; a component
     /// interaction's reply updates the message carrying the component.
-    Interaction(Interaction),
+    Interaction(Box<Interaction>),
     /// Show a job on its card. The module may make no native call.
     Card(Box<CardRequest>),
 }
@@ -41,6 +41,8 @@ pub struct Interaction {
     /// Whether the interaction happened inside a conversation the agent
     /// participates in, so a conversation scope exists.
     pub conversation: bool,
+    /// The provider's markers, as cards are drawn with them.
+    pub markers: ActivityMarkers,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -71,6 +73,10 @@ pub struct Description {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Reply {
     pub content: String,
+    /// Embeds in Discord's own JSON, validated by the host as a card's embed
+    /// is and sent without mentions.
+    #[serde(default)]
+    pub embeds: Vec<Value>,
     /// Discord message components in Discord's own JSON.
     #[serde(default)]
     pub components: Vec<Value>,

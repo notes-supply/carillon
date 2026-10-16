@@ -30,7 +30,7 @@ fn working_card(headline: &str) -> CardRequest {
             earlier: false,
         },
         seen: None,
-        markers: carillon_discord_module::contract::ActivityMarkers::default(),
+        markers: ActivityMarkers::default(),
     }
 }
 
@@ -88,12 +88,12 @@ async fn a_card_the_module_cannot_give_is_a_bounded_failure() -> anyhow::Result<
         (
             "not an embed",
             embed(json!({"description": "no type"})),
-            "decode the card's embed: ",
+            "the card's embed is unusable: not Discord embeds: ",
         ),
         (
             "over Discord's limits",
             embed(json!({"type": "rich", "description": "x".repeat(4_097)})),
-            "the card's embed is unusable: ",
+            "the card's embed is unusable: beyond Discord's limits: ",
         ),
         (
             "a removal while the job works",

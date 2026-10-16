@@ -539,52 +539,6 @@ async fn interact(
     Ok((status, serde_json::from_slice(&body)?))
 }
 
-#[test]
-fn oversized_reply_content_is_rejected_before_the_discord_edit() -> anyhow::Result<()> {
-    let mut reply = Reply {
-        content: "🦀".repeat(2000),
-        components: vec![],
-    };
-    super::validate_reply(&reply)?;
-    reply.content.push('x');
-    assert_eq!(refusal(&reply), "Discord module reply has unusable content");
-    Ok(())
-}
-
-fn refusal(reply: &Reply) -> String {
-    super::validate_reply(reply).map_or_else(|error| error.to_string(), |_| "accepted".to_owned())
-}
-
-#[test]
-fn native_selects_need_no_string_options() -> anyhow::Result<()> {
-    for kind in [5, 6, 7, 8] {
-        let reply = Reply {
-            content: "Choose".to_owned(),
-            components: vec![json!({
-                "type": 1,
-                "components": [{"type": kind, "custom_id": "native", "min_values": 1, "max_values": 1}]
-            })],
-        };
-        assert_eq!(super::validate_reply(&reply)?.len(), 1, "type {kind}");
-    }
-    for (options, refused) in [
-        (Value::Null, "Discord module reply has invalid components"),
-        (
-            json!([]),
-            "Discord module reply has a select menu without options",
-        ),
-    ] {
-        let reply = Reply {
-            content: "Choose".to_owned(),
-            components: vec![json!({
-                "type": 1, "components": [{"type": 3, "custom_id": "string", "options": options}]
-            })],
-        };
-        assert_eq!(refusal(&reply), refused, "options {options}");
-    }
-    Ok(())
-}
-
 #[tokio::test]
 async fn deterministic_interactions_run_the_module_and_check_replies() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;

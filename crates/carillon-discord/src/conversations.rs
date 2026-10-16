@@ -552,6 +552,7 @@ pub fn admit_interaction(
             values: source.values,
             options: source.options,
             conversation: audience_id.is_some(),
+            markers: config.activity_markers.clone(),
         },
         agent_id: route.agent.clone(),
         audience_id,

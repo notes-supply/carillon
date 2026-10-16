@@ -98,8 +98,10 @@ async fn example() -> Result<Value> {
             "conversation": { "selection": { "provider": "example", "model": "small", "options": {} }, "overridden": false }
         }))?,
     };
-    let Outcome::Reply(reply) = handle(&mut host, Invocation::Interaction(interaction.interaction))
-    else {
+    let Outcome::Reply(reply) = handle(
+        &mut host,
+        Invocation::Interaction(Box::new(interaction.interaction)),
+    ) else {
         bail!("the model command did not return a reply");
     };
     assert!(reply.content.contains("example"));

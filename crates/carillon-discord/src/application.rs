@@ -25,6 +25,7 @@ use crate::{
     module::{
         ChangeError, Declared, DiscordApp, InteractionCalls, Module, ModuleFiles, Refusal, Status,
         Submissions,
+        answer::{Answer, answer},
     },
 };
 #[cfg(test)]
@@ -68,11 +69,10 @@ use twilight_model::{
     application::interaction::{
         Interaction as DiscordInteraction, InteractionData, InteractionType,
     },
-    channel::message::{Component, Embed, MessageFlags, MessageType, component::SelectMenuType},
+    channel::message::{AllowedMentions, Embed, MessageFlags, MessageType},
     http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
     id::Id,
 };
-use twilight_validate::component::{COMPONENT_COUNT, component_v1};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct SimulateResponse {
@@ -756,8 +756,8 @@ async fn settle_own_delivery(
 }
 
 /// Runs an interaction exactly as the gateway would, returning the reply the
-/// user would see. Replies are checked against Discord's component model so
-/// a module producing unusable components fails here, not in production.
+/// user would see. Replies are checked as the gateway checks them, so a
+/// module producing an unusable reply fails here, not in production.
 async fn simulate_interaction(
     State(state): State<DiscordState>,
     headers: HeaderMap,
@@ -772,7 +772,7 @@ async fn simulate_interaction(
             status: StatusCode::BAD_GATEWAY,
             message: error.to_string(),
         })?;
-    validate_reply(&reply).map_err(|error| InterfaceError {
+    answer(&reply).map_err(|error| InterfaceError {
         status: StatusCode::BAD_GATEWAY,
         message: error.to_string(),
     })?;
@@ -975,43 +975,6 @@ async fn run_interaction(
     state.module.invoke(calls, admitted.interaction).await
 }
 
-/// The reply's components as Discord accepts them: at most five action rows
-/// of buttons and select menus within Discord's limits, checked here so a
-/// module that exceeds them is reported instead of discovered as a rejected
-/// edit that leaves the acknowledgement hanging.
-fn validate_reply(reply: &Reply) -> Result<Vec<Component>> {
-    twilight_validate::message::content(&reply.content)
-        .context("Discord module reply has unusable content")?;
-    let components: Vec<Component> = serde_json::from_value(Value::Array(reply.components.clone()))
-        .context("Discord module reply has invalid components")?;
-    if components.len() > COMPONENT_COUNT {
-        bail!(
-            "Discord module reply has {} action rows; Discord allows {COMPONENT_COUNT}",
-            components.len()
-        );
-    }
-    for component in &components {
-        component_v1(component).context("Discord module reply has an unusable component")?;
-        // twilight checks the maxima; Discord also refuses an empty row or an
-        // empty select menu.
-        let Component::ActionRow(row) = component else {
-            bail!("Discord module reply has a component outside an action row");
-        };
-        if row.components.is_empty() {
-            bail!("Discord module reply has an empty action row");
-        }
-        for inner in &row.components {
-            if let Component::SelectMenu(menu) = inner
-                && menu.kind == SelectMenuType::Text
-                && menu.options.as_ref().is_none_or(Vec::is_empty)
-            {
-                bail!("Discord module reply has a select menu without options");
-            }
-        }
-    }
-    Ok(components)
-}
-
 /// Answers one gateway interaction: acknowledge within Discord's window,
 /// run the module, then edit the acknowledgement into the reply. Refusals
 /// and failures are told to the user in general terms and logged in full.
@@ -1043,32 +1006,28 @@ async fn handle_interaction(state: DiscordState, interaction: DiscordInteraction
     }
     // The interaction keeps the settings it is admitted with.
     let settings = state.settings.current();
-    let (content, components) = match admit_interaction(&settings, source) {
+    let answer = match admit_interaction(&settings, source) {
         Ok(admitted) => match run_interaction(&state, admitted, settings).await {
-            Ok(reply) => match validate_reply(&reply) {
-                Ok(components) => (reply.content, components),
-                Err(error) => {
-                    error!(%error, "Discord module reply was unusable");
-                    (
-                        "The command produced an unusable reply.".to_owned(),
-                        Vec::new(),
-                    )
-                }
-            },
+            Ok(reply) => answer(&reply).unwrap_or_else(|error| {
+                error!(%error, "Discord module reply was unusable");
+                Answer::notice("The command produced an unusable reply.")
+            }),
             Err(error) => {
                 error!(%error, "Discord module invocation failed");
-                ("The command could not be completed.".to_owned(), Vec::new())
+                Answer::notice("The command could not be completed.")
             }
         },
         Err(refusal) => {
             info!(reason = %refusal.message, "Discord interaction refused");
-            ("This command is not available here.".to_owned(), Vec::new())
+            Answer::notice("This command is not available here.")
         }
     };
     if let Err(error) = client
         .update_response(&interaction.token)
-        .content(Some(&content))
-        .components(Some(&components))
+        .content(Some(&answer.content))
+        .embeds(Some(&answer.embeds))
+        .components(Some(&answer.components))
+        .allowed_mentions(Some(&AllowedMentions::default()))
         .await
     {
         warn!(%error, "Discord interaction reply failed");

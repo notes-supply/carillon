@@ -9,7 +9,9 @@ use std::{
 
 use anyhow::Context as _;
 use axum::{Router, http::StatusCode, routing::put};
-use carillon_discord_module::contract::{CardRequest, Interaction, InteractionKind};
+use carillon_discord_module::contract::{
+    ActivityMarkers, CardRequest, Interaction, InteractionKind,
+};
 use carillon_installation::maintenance::MaintenanceLock;
 use serde_json::{Value, json};
 
@@ -317,6 +319,7 @@ fn interaction() -> Interaction {
         values: Vec::new(),
         options: Value::Null,
         conversation: false,
+        markers: ActivityMarkers::default(),
     }
 }
 

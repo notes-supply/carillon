@@ -182,6 +182,7 @@ enum Unavailable {
 fn unavailable(explanation: &str) -> Outcome {
     Outcome::Reply(Reply {
         content: format!("{explanation} Reopen /model to refresh."),
+        embeds: Vec::new(),
         components: Vec::new(),
     })
 }
@@ -388,6 +389,7 @@ fn render(state: &ModelState, scope: Scope, view: &View) -> Reply {
     };
     Reply {
         content,
+        embeds: Vec::new(),
         components,
     }
 }

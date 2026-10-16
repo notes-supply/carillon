@@ -22,7 +22,8 @@ use anyhow::Context as _;
 use carillon_discord_module::{
     HostCalls,
     contract::{
-        Card, CardRequest, HostReply, HostRequest, Interaction, InteractionKind, Invocation,
+        ActivityMarkers, Card, CardRequest, HostReply, HostRequest, Interaction, InteractionKind,
+        Invocation,
     },
 };
 use carillon_protocol::model::{JOB_READ_LIMIT, ModelQuery};
@@ -296,6 +297,7 @@ async fn interact(module: Arc<Module>, stop: Arc<AtomicBool>, seen: Arc<Counters
             values: Vec::new(),
             options: Value::Null,
             conversation: false,
+            markers: ActivityMarkers::default(),
         };
         let replied = match calls {
             Ok(calls) => module.invoke(calls, interaction).await.is_ok(),

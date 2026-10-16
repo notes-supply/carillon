@@ -6,7 +6,9 @@ use super::{COMMAND, interact};
 use crate::components::{PAGE, TEXT_LIMIT, fingerprint};
 use crate::{
     HostCalls,
-    contract::{HostReply, HostRequest, Interaction, InteractionKind, Outcome, Reply},
+    contract::{
+        ActivityMarkers, HostReply, HostRequest, Interaction, InteractionKind, Outcome, Reply,
+    },
 };
 use carillon_protocol::{
     model::ModelScope as Scope,
@@ -238,6 +240,7 @@ fn command(conversation: bool) -> Interaction {
         values: Vec::new(),
         options: Value::Null,
         conversation,
+        markers: ActivityMarkers::default(),
     }
 }
 
@@ -248,6 +251,7 @@ fn component(custom_id: &str, values: &[&str]) -> Interaction {
         values: values.iter().map(|value| (*value).to_owned()).collect(),
         options: Value::Null,
         conversation: true,
+        markers: ActivityMarkers::default(),
     }
 }
 

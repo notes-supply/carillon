@@ -222,6 +222,7 @@ fn unavailable(error: &str) -> Outcome {
 fn reply(content: String, components: Vec<Value>) -> Outcome {
     Outcome::Reply(Reply {
         content,
+        embeds: Vec::new(),
         components,
     })
 }
@@ -235,7 +236,10 @@ mod tests {
     use crate::{
         HostCalls,
         components::fingerprint,
-        contract::{HostReply, HostRequest, Intent, Interaction, InteractionKind, Outcome, Reply},
+        contract::{
+            ActivityMarkers, HostReply, HostRequest, Intent, Interaction, InteractionKind, Outcome,
+            Reply,
+        },
     };
 
     /// Lists a fixed catalogue and records submissions.
@@ -294,6 +298,7 @@ mod tests {
                 |text| json!([{ "name": "invocation", "type": 3, "value": text }]),
             ),
             conversation,
+            markers: ActivityMarkers::default(),
         }
     }
 
@@ -304,6 +309,7 @@ mod tests {
             values: values.iter().map(|value| (*value).to_owned()).collect(),
             options: Value::Null,
             conversation: true,
+            markers: ActivityMarkers::default(),
         }
     }
 

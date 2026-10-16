@@ -724,7 +724,7 @@ impl Module {
         interaction: Interaction,
     ) -> Result<Reply> {
         let generation = self.current();
-        let payload = serde_json::to_vec(&Invocation::Interaction(interaction))?;
+        let payload = serde_json::to_vec(&Invocation::Interaction(Box::new(interaction)))?;
         let calls = Calls::Interaction {
             calls: Box::new(calls),
             until: Instant::now() + CALLS_LIMIT,
@@ -929,11 +929,9 @@ async fn card(
         }
     };
     match card {
-        Card::Show(embed) => {
-            let embed: Embed = serde_json::from_value(embed).context("decode the card's embed")?;
-            twilight_validate::embed::embed(&embed).context("the card's embed is unusable")?;
-            Ok(Some(embed))
-        }
+        Card::Show(embed) => Ok(answer::embeds(vec![embed])
+            .context("the card's embed is unusable")?
+            .pop()),
         Card::Remove if request.job.settled().is_some() => Ok(None),
         Card::Remove => bail!("Discord module removed the card of a job that has not settled"),
     }
@@ -1029,6 +1027,7 @@ fn command(definition: &Value) -> Result<Command> {
     serde_json::from_value(Value::Object(fields)).context("invalid command definition")
 }
 
+pub(crate) mod answer;
 #[cfg(test)]
 mod measurement;
 
