@@ -282,6 +282,15 @@ it("concurrent reconciles create and replace shared links without losing native 
   expect((await readdir(home)).toSorted()).toEqual(["CLAUDE.md", "skills"]);
 });
 
+it("refuses missing resources instead of recreating them", async () => {
+  const { root, home } = await savedProfile();
+  const missing = join(root, "missing-agent");
+  await expect(reconcileProfile("claude", home, missing)).rejects.toThrow(
+    /must be an existing directory/u,
+  );
+  await expect(stat(missing)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
 it("shares linked skill directories and linked manifests at their source names", async () => {
   const { root, config, home } = await savedProfile();
   const source = join(root, "agent", "skills");

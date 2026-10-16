@@ -114,6 +114,13 @@ export async function reconcileProfile(
   home: string,
   resources: string,
 ): Promise<void> {
+  if (
+    !(await stat(resources).then(
+      (found) => found.isDirectory(),
+      () => false,
+    ))
+  )
+    throw new Error(`${resources}: the assistant's resources must be an existing directory`);
   const instructions = join(home, HARNESSES[harness].instructions);
   const previousInstructions = await targetOf(instructions);
   const previousResources =
