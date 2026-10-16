@@ -13,6 +13,7 @@ import {
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { configure, profile } from "./setup.ts";
+import { reconcileProfile } from "./profiles.ts";
 import { loadSettings } from "./settings.ts";
 import { cli, fakeT3, installation, loaded } from "./setup-fixtures.ts";
 
@@ -248,4 +249,40 @@ it("refuses supplied credentials on an existing profile without reporting succes
     });
     expect(await readFile(runtime.providerFile, "utf8")).toBe(before);
   }
+});
+
+it("concurrent reconciles create and replace shared links without losing native skills", async () => {
+  const { root, config, home } = await savedProfile();
+  const resources = join(root, "agent");
+  for (const name of ["first", "second", "third"]) {
+    await mkdir(join(resources, "skills", name), { recursive: true });
+    await writeFile(join(resources, "skills", name, "SKILL.md"), name);
+  }
+  const overlap = async (source: string) => {
+    const results = await Promise.allSettled(
+      Array.from({ length: 16 }, () => reconcileProfile("claude", source)),
+    );
+    for (const result of results) expect(result).toEqual({ status: "fulfilled", value: undefined });
+    expect(await readlink(join(home, "CLAUDE.md"))).toBe(join(source, "AGENTS.md"));
+    for (const name of ["first", "second", "third"])
+      expect(await readlink(join(home, "skills", name))).toBe(join(source, "skills", name));
+    expect((await readdir(join(home, "skills"))).toSorted()).toEqual(["first", "second", "third"]);
+  };
+  await overlap(resources);
+  await rm(join(home, "skills"), { recursive: true });
+  await symlink(join(resources, "skills"), join(home, "skills"));
+  await overlap(resources);
+  const restored = join(root, "restored-agent");
+  await rename(resources, restored);
+  await overlap(restored);
+  await writeFile(
+    config,
+    (await readFile(config, "utf8")).replace('resources = "agent"', 'resources = "restored-agent"'),
+  );
+  const checks = await Promise.all([
+    cli(["check", "--config", config], ""),
+    cli(["check", "--config", config], ""),
+  ]);
+  for (const checked of checks) expect(checked.status, checked.stderr).toBe(0);
+  expect((await readdir(home)).toSorted()).toEqual(["CLAUDE.md", "skills"]);
 });

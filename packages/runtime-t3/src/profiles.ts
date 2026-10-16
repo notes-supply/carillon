@@ -1,6 +1,6 @@
-import { lstat, mkdir, readdir, readlink, rm, symlink } from "node:fs/promises";
+import { lstat, mkdir, readdir, readlink, rename, rm, symlink, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { Installation } from "@carillon/runtime/installation";
 
 /** The harnesses Carillon makes profiles for, as T3 drives them. */
@@ -70,7 +70,17 @@ export async function reconcileProfile(harness: Harness, resources: string): Pro
   await mkdir(home, { recursive: true, mode: 0o700 });
   await mkdir(source, { recursive: true, mode: 0o700 });
   const present = await entry(skills);
-  if (present?.isSymbolicLink() === true) await rm(skills);
+  if (present?.isSymbolicLink() === true)
+    await unlink(skills).catch((failure: unknown) => {
+      // A concurrent reconcile may already have replaced the legacy directory link.
+      if (
+        failure instanceof Error &&
+        "code" in failure &&
+        (failure.code === "ENOENT" || failure.code === "EISDIR")
+      )
+        return;
+      throw failure;
+    });
   else if (present !== undefined && !present.isDirectory())
     throw new Error(
       `${skills} must be the harness's own skills directory; move it away, then retry`,
@@ -91,7 +101,7 @@ export async function reconcileProfile(harness: Harness, resources: string): Pro
       (target === join(source, name) ||
         (previousResources !== undefined && target === join(previousResources, "skills", name)))
     )
-      await rm(path);
+      await rm(path, { force: true });
   }
   for (const name of names)
     await link(
@@ -112,9 +122,18 @@ async function entry(path: string) {
 }
 
 async function targetOf(path: string): Promise<string | undefined> {
-  return (await entry(path))?.isSymbolicLink() === true
-    ? resolve(dirname(path), await readlink(path))
-    : undefined;
+  return readlink(path).then(
+    (target) => resolve(dirname(path), target),
+    (failure: unknown) => {
+      if (
+        failure instanceof Error &&
+        "code" in failure &&
+        (failure.code === "ENOENT" || failure.code === "EINVAL")
+      )
+        return undefined;
+      throw failure;
+    },
+  );
 }
 
 async function link(path: string, target: string, previous: string | undefined): Promise<void> {
@@ -128,7 +147,12 @@ async function link(path: string, target: string, previous: string | undefined):
       throw new Error(
         `${path} is not a link to ${target}; move it away, then set the profile up again`,
       );
-    await rm(path);
   }
-  await symlink(target, path);
+  const temporary = join(dirname(path), `.${basename(path)}.${crypto.randomUUID()}.tmp`);
+  try {
+    await symlink(target, temporary);
+    await rename(temporary, path);
+  } finally {
+    await rm(temporary, { force: true });
+  }
 }
