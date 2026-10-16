@@ -125,48 +125,62 @@ export function toNative(catalog: Catalog, selection: Selection): NativeSelectio
   };
 }
 
+/** An agent's models, as one read of T3's catalogue and the ledger found them. */
+export interface AgentModels {
+  /** T3's catalogue of the instances the agent runs on. */
+  readonly offered: Catalog;
+  /** The agent default, resolved against the catalogue, and whether `/model` chose it. */
+  readonly agent: { readonly selection: Selection; readonly overridden: boolean };
+}
+
+/**
+ * An agent's models: its catalogue, and its default, the one `/model` chose
+ * as the ledger resolved it (`chosen`), else the settings' default.
+ */
+export function agentModels(
+  offered: Catalog,
+  chosen: ScopeState,
+  settings: Selection,
+): AgentModels {
+  return {
+    offered,
+    agent:
+      chosen.selection === null
+        ? { selection: resolved(offered.available, settings), overridden: false }
+        : { selection: chosen.selection, overridden: chosen.overridden },
+  };
+}
+
 /**
  * The selection a conversation's next run takes: its thread's, while it is
  * on an instance the agent runs on, else the agent default. A model of such
  * an instance the catalogue no longer lists stays the thread's, and its run
  * fails rather than another model being substituted.
  */
-export function routed(
-  catalog: Catalog,
-  agentDefault: Selection,
-  thread: NativeSelection | undefined,
-): NativeSelection {
-  if (thread !== undefined && catalog.runsOn(thread.instanceId)) return thread;
-  return toNative(catalog, resolved(catalog.available, agentDefault));
+export function routed(models: AgentModels, thread?: NativeSelection): NativeSelection {
+  if (thread !== undefined && models.offered.runsOn(thread.instanceId)) return thread;
+  return toNative(models.offered, models.agent.selection);
 }
 
 /**
- * The model state of an agent, whose default `agent` the ledger resolved,
- * and, with a conversation, of its thread. A conversation whose thread does
- * not exist yet, or is on an instance the agent does not run on, runs with
- * the agent default.
+ * The model state of an agent and, with a conversation, of its thread. A
+ * conversation whose thread does not exist yet, or is on an instance the
+ * agent does not run on, runs with the agent default.
  */
 export function modelState(
-  catalog: Catalog,
-  agent: ScopeState,
+  { offered, agent }: AgentModels,
   conversation: { readonly thread: NativeSelection | undefined } | undefined,
 ): ModelState {
-  if (conversation === undefined) return { available: [...catalog.available], agent };
+  const available = [...offered.available];
+  if (conversation === undefined) return { available, agent };
   const thread = conversation.thread;
-  if (thread === undefined || !catalog.runsOn(thread.instanceId))
-    return {
-      available: [...catalog.available],
-      agent,
-      conversation: { selection: agent.selection, overridden: false },
-    };
-  const selection = resolved(catalog.available, fromNative(thread));
+  if (thread === undefined || !offered.runsOn(thread.instanceId))
+    return { available, agent, conversation: { selection: agent.selection, overridden: false } };
+  const selection = resolved(offered.available, fromNative(thread));
   return {
-    available: [...catalog.available],
+    available,
     agent,
-    conversation: {
-      selection,
-      overridden: agent.selection === null || !sameSelection(selection, agent.selection),
-    },
+    conversation: { selection, overridden: !sameSelection(selection, agent.selection) },
   };
 }
 
