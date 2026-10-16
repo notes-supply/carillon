@@ -342,9 +342,8 @@ impl Database {
         event_receipt(&self.connect()?, interface_id, event_id)
     }
 
-    /// The runtime that took the conversation's latest turn owns it, even
-    /// before that runtime has created a native session. Only a stranded
-    /// conversation's notice moves it, to the agent's current runtime.
+    /// The runtime that took the conversation's latest turn owns it, before any native
+    /// session exists; only a stranded conversation's notice moves it to the agent's runtime.
     pub(crate) fn conversation_runtime(
         &self,
         interface_id: &str,
