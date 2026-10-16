@@ -159,9 +159,10 @@ Startup fails closed:
   harness files;
 - T3 must speak orchestration protocol 2 and accept the token.
 
-Each conversation is pinned to the runtime that took its first turn. When
-an agent changes runtimes, its old conversations end with an explanation
-that asks the user to start a new conversation. After an agent's T3 project
+A conversation belongs to the runtime that took its latest turn. When an
+agent changes runtimes, the first message in an old conversation gets an
+explanation instead of running, and the next one starts a new conversation on
+the agent's runtime. After an agent's T3 project
 changes and the runtime restarts, the first message in an existing conversation
 opens an empty thread in the current project and is refused with an explanation.
 That message never runs. The next message starts work in the new thread, including
