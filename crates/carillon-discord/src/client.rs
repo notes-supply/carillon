@@ -159,12 +159,18 @@ impl CoreClient {
         )
     }
 
-    pub(crate) async fn model_state(&self, query: &ModelQuery) -> Result<ModelState, String> {
+    pub(crate) async fn model_state(
+        &self,
+        query: &ModelQuery,
+    ) -> Result<ModelState, InterfaceError> {
         self.runtime_query("/v1/model", query).await
     }
 
     /// The runtime's own commands a person may run in the conversation.
-    pub(crate) async fn commands(&self, query: &ModelQuery) -> Result<CommandCatalog, String> {
+    pub(crate) async fn commands(
+        &self,
+        query: &ModelQuery,
+    ) -> Result<CommandCatalog, InterfaceError> {
         self.runtime_query("/v1/commands", query).await
     }
 
@@ -172,8 +178,9 @@ impl CoreClient {
         &self,
         path: &str,
         query: &ModelQuery,
-    ) -> Result<T, String> {
-        let mut url = Url::parse(&self.url(path)).map_err(|error| error.to_string())?;
+    ) -> Result<T, InterfaceError> {
+        let mut url = Url::parse(&self.url(path))
+            .map_err(|error| InterfaceError::protocol(error.to_string()))?;
         {
             let mut pairs = url.query_pairs_mut();
             pairs.append_pair("agent_id", &query.agent_id);
@@ -185,7 +192,10 @@ impl CoreClient {
         runtime_json(request).await
     }
 
-    pub(crate) async fn set_model(&self, update: &ModelUpdate) -> Result<ModelState, String> {
+    pub(crate) async fn set_model(
+        &self,
+        update: &ModelUpdate,
+    ) -> Result<ModelState, InterfaceError> {
         let request = self
             .request(Method::PUT, self.url("/v1/model"))
             .timeout(MODEL_CALL_TIMEOUT)
@@ -203,32 +213,41 @@ const MODEL_CALL_TIMEOUT: Duration = Duration::from_secs(6);
 /// What the user is told when a model or command call ran out of time.
 pub(crate) const RUNTIME_LATE: &str = "The runtime did not answer in time.";
 
-/// Performs a model or command call and turns every failure into words for
-/// the user. Core and the runtime phrase their rejections for people;
-/// transport failures are described here.
-async fn runtime_json<T: DeserializeOwned>(request: RequestBuilder) -> Result<T, String> {
+/// Core and the runtime phrase rejections for people; transport failures
+/// get a local explanation while preserving an HTTP status for callers.
+async fn runtime_json<T: DeserializeOwned>(request: RequestBuilder) -> Result<T, InterfaceError> {
     let response = match request.send().await {
         Ok(response) => response,
         Err(error) if error.is_timeout() => {
-            return Err(RUNTIME_LATE.to_owned());
+            return Err(InterfaceError {
+                status: reqwest::StatusCode::GATEWAY_TIMEOUT,
+                message: RUNTIME_LATE.to_owned(),
+            });
         }
         Err(error) => {
             warn!(%error, "model or command call failed to reach core");
-            return Err("The runtime is not reachable right now.".to_owned());
+            return Err(InterfaceError {
+                status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                message: "The runtime is not reachable right now.".to_owned(),
+            });
         }
     };
     let status = response.status();
     let body = response.bytes().await.unwrap_or_default();
     if status.is_success() {
-        return serde_json::from_slice(&body)
-            .map_err(|_| "The runtime gave an unusable answer.".to_owned());
+        return serde_json::from_slice(&body).map_err(|_| {
+            InterfaceError::protocol("The runtime gave an unusable answer.".to_owned())
+        });
     }
     let detail = serde_json::from_slice::<Value>(&body)
         .ok()
         .and_then(|value| value.get("error")?.as_str().map(str::to_owned))
         .filter(|detail| !detail.is_empty());
     warn!(%status, detail, "model or command call was rejected");
-    Err(detail.unwrap_or_else(|| "The runtime refused the request.".to_owned()))
+    Err(InterfaceError {
+        status,
+        message: detail.unwrap_or_else(|| "The runtime refused the request.".to_owned()),
+    })
 }
 
 async fn core_send(

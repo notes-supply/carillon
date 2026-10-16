@@ -104,10 +104,13 @@ async fn model_calls_relay_rejections_in_the_runtime_words() -> anyhow::Result<(
         agent_id: "default".to_owned(),
         audience_id: None,
     };
-    assert_eq!(
-        core.model_state(&query).await.err().as_deref(),
-        Some("The runtime provider is disabled.")
-    );
+    let failure = core
+        .model_state(&query)
+        .await
+        .err()
+        .context("disabled runtime answered")?;
+    assert_eq!(failure.status, StatusCode::CONFLICT);
+    assert_eq!(failure.to_string(), "The runtime provider is disabled.");
     let update = carillon_protocol::model::ModelUpdate {
         agent_id: "default".to_owned(),
         audience_id: None,
@@ -115,15 +118,24 @@ async fn model_calls_relay_rejections_in_the_runtime_words() -> anyhow::Result<(
         selection: None,
         expected: None,
     };
-    assert_eq!(
-        core.set_model(&update).await.err().as_deref(),
-        Some("The runtime gave an unusable answer.")
-    );
+    let failure = core
+        .set_model(&update)
+        .await
+        .err()
+        .context("malformed answer accepted")?;
+    assert_eq!(failure.status, StatusCode::BAD_GATEWAY);
+    assert_eq!(failure.to_string(), "The runtime gave an unusable answer.");
     server.abort();
     let unreachable = core_client("http://127.0.0.1:1".to_owned())?;
+    let failure = unreachable
+        .model_state(&query)
+        .await
+        .err()
+        .context("unreachable core answered")?;
+    assert_eq!(failure.status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
-        unreachable.model_state(&query).await.err().as_deref(),
-        Some("The runtime is not reachable right now.")
+        failure.to_string(),
+        "The runtime is not reachable right now."
     );
     Ok(())
 }

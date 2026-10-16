@@ -1,7 +1,6 @@
 //! Hosting the replaceable Discord module, registering its commands,
 //! running interactions with native calls, rendering work cards without
-//! native calls, and switching modules
-//! while serving.
+//! native calls, and switching modules while serving.
 //!
 //! Three facts have separate owners. The provider's settings file declares
 //! the module to serve: a custom one it enables, otherwise the release's
@@ -138,11 +137,12 @@ impl Native for Calls {
 /// A runtime call of an interaction, ended by `until` if it has not ended.
 async fn within<T>(
     until: Instant,
-    call: impl Future<Output = Result<T, String>>,
+    call: impl Future<Output = Result<T, crate::InterfaceError>>,
 ) -> Result<T, String> {
     timeout_at(until, call)
         .await
-        .unwrap_or_else(|_| Err(RUNTIME_LATE.to_owned()))
+        .map_err(|_| RUNTIME_LATE.to_owned())?
+        .map_err(|error| error.to_string())
 }
 
 impl InteractionCalls {
