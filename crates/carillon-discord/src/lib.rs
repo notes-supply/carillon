@@ -13,6 +13,4 @@ mod inbound;
 mod module;
 mod operations;
 mod setup;
-#[cfg(test)]
-use client::CoreClient;
 pub use error::InterfaceError;

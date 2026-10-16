@@ -6,8 +6,7 @@
 //! retries.
 use super::{CardRecords, Delivering, activity_monitor};
 use crate::{
-    CoreClient,
-    client::test_client as core_client,
+    client::{CoreClient, test_client as core_client},
     config::{DiscordActivation, DiscordConfig, DiscordConversation},
     conversations::tests::discord_config,
     delivery::{Reactions, delivery_loop},

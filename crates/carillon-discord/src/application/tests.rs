@@ -30,11 +30,11 @@ use super::{
     discord_status_is_terminal, interaction_source, queue_message,
 };
 use crate::{
-    CoreClient,
     attachments::{
         Downloads,
         tests::{Serve, attachment, serve_cdn},
     },
+    client::CoreClient,
     client::test_client as core_client,
     config::{DiscordActivation, DiscordConfig, DiscordConversation, Settings},
     module::{
