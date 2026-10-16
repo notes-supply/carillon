@@ -36,6 +36,11 @@ mise run example:core
 Storage calls are synchronous. Async paths run SQLite writes and resource
 snapshots on Tokio's blocking pool.
 
+Conversations remain pinned to their original runtime. If the agent moves to
+another runtime, core interrupts their turns before dispatch and delivers an
+explanation asking the person to start a new conversation. New conversations
+use the agent's configured runtime.
+
 A runtime operation's failure decides what happens next.
 `TurnFailure::Retry` means the runtime provably never received the turn, so
 it is queued again. `Unanswered` asks an observation again and interrupts a

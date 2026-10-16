@@ -339,7 +339,8 @@ impl Core {
     }
 
     /// Resolve the pinned conversation owner, or the agent's runtime for a
-    /// new conversation.
+    /// new conversation. Admission keeps a former owner so the worker can
+    /// deliver an explained failure instead of rerouting the conversation.
     /// # Errors
     /// Returns an unknown agent, missing/disabled owner or storage error.
     pub fn runtime_for(
@@ -363,6 +364,23 @@ impl Core {
             ));
         }
         Ok(runtime)
+    }
+
+    fn check_runtime_owner(&self, turn: &ClaimedTurn) -> Result<(), TurnFailure> {
+        let agent = self
+            .agent(&turn.agent_id)
+            .map_err(|error| TurnFailure::Uncertain(error.into()))?;
+        if agent.runtime != turn.runtime_id {
+            return Err(TurnFailure::Reported(Box::new(Reported {
+                status: 409,
+                explanation: Some(format!(
+                    "This conversation ran on {}, which no longer runs {}. Start a new conversation.",
+                    turn.runtime_id, turn.agent_id
+                )),
+                activity: None,
+            })));
+        }
+        Ok(())
     }
 
     fn agent(&self, id: &str) -> Result<&AgentOptions, CoreError> {
@@ -478,6 +496,7 @@ impl Core {
             (unanswered, carried)
         };
         let outcome = async {
+            self.check_runtime_owner(turn)?;
             let request = self.runtime_request(turn, unanswered);
             let correlation_id = request.correlation_id.clone();
             let mut response = submit(request).await?;

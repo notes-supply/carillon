@@ -1452,7 +1452,7 @@ async fn unavailable_conversation_owner_rejects_input_as_configuration_conflict(
 }
 
 #[tokio::test]
-async fn runtime_ownership_survives_default_changes() -> Result<()> {
+async fn runtime_cutover_interrupts_pinned_conversations() -> Result<()> {
     let directory = tempdir()?;
     let mut state = installation(directory.path())?;
     let mut replacement = state
@@ -1482,24 +1482,19 @@ async fn runtime_ownership_survives_default_changes() -> Result<()> {
             .inspect_turn(&receipt.turn_id)?
             .context("missing turn")?;
         assert_eq!(inspected.providers[1]["id"], "test-runtime");
-        run_next_turn(&state, "test-runtime", async |_, _, request| {
-            assert_eq!(request.correlation_id, receipt.turn_id);
-            Ok(completed(request))
+        run_next_turn(&state, "test-runtime", async |_, _, _| {
+            Err(TurnFailure::Uncertain(anyhow!("old runtime was called")))
         })
         .await?;
     }
-    let third = accept(&state, "three", "conversation").await?;
-    run_next_turn(&state, "test-runtime", async |_, _, request| {
-        assert_eq!(request.correlation_id, third.turn_id);
-        Ok(completed(request))
-    })
-    .await?;
-    assert_eq!(state.core.database.turn_counts()?.completed, 4);
+    let counts = state.core.database.turn_counts()?;
+    assert_eq!(counts.completed, 1);
+    assert_eq!(counts.interrupted, 2);
     Ok(())
 }
 
 #[tokio::test]
-async fn startup_drains_queued_nondefault_runtime_without_replaying_running_work() -> Result<()> {
+async fn startup_interrupts_old_runtime_work_without_replaying_it() -> Result<()> {
     let directory = tempdir()?;
     let mut state = installation(directory.path())?;
     let running = accept(&state, "interrupted", "blocked").await?;
@@ -1555,21 +1550,13 @@ async fn startup_drains_queued_nondefault_runtime_without_replaying_running_work
             .map_err(std::io::Error::other)
     });
     tokio::time::timeout(Duration::from_secs(5), async {
-        let mut calls = Vec::new();
-        for _ in 0..3 {
-            calls.push(received.recv().await.context("runtime trace ended")?);
-        }
-        calls.sort();
         assert_eq!(
-            calls,
-            vec![
-                ("replacement", fresh.turn_id.clone()),
-                ("test-runtime", blocked.turn_id.clone()),
-                ("test-runtime", queued.turn_id.clone())
-            ]
+            received.recv().await.context("runtime trace ended")?,
+            ("replacement", fresh.turn_id.clone())
         );
         loop {
-            if state.core.database.turn_counts()?.completed == 3 {
+            let counts = state.core.database.turn_counts()?;
+            if counts.completed == 1 && counts.interrupted == 3 {
                 break;
             }
             tokio::task::yield_now().await;
@@ -1583,15 +1570,18 @@ async fn startup_drains_queued_nondefault_runtime_without_replaying_running_work
                 .state,
             TurnState::Interrupted
         );
-        assert_eq!(
-            state
+        for receipt in [&blocked, &queued] {
+            let turn = state
                 .core
-                .database
-                .inspect_turn(&blocked.turn_id)?
-                .context("blocked turn missing")?
-                .state,
-            TurnState::Completed
-        );
+                .inspect_turn(&receipt.turn_id)?
+                .context("missing old turn")?;
+            assert_eq!(turn.state, TurnState::Interrupted);
+            assert!(
+                turn.error
+                    .context("missing explanation")?
+                    .contains("Start a new conversation.")
+            );
+        }
         assert_eq!(received.try_recv(), Err(TryRecvError::Empty));
         Ok::<_, anyhow::Error>(())
     })
@@ -1838,7 +1828,7 @@ async fn runtime_explanation_reaches_the_conversation_once_and_it_continues() ->
             StatusCode::BAD_GATEWAY,
             json!({"error": explanation}),
             format!(
-                "That turn was interrupted: {explanation}\nSend another message to continue in this conversation. Actions already taken may have had effects."
+                "That turn was interrupted: {explanation}\nActions already taken may have had effects."
             ),
         ),
         // An internal runtime failure carries no explanation, so the

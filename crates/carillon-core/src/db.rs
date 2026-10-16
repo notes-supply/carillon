@@ -627,10 +627,8 @@ impl Database {
         Ok(())
     }
 
-    /// Records that a running turn did not complete, and queues a delivery
-    /// telling the conversation so, with the runtime's explanation when it
-    /// gave one. `error` is the operator's diagnostic; `activity` is the
-    /// runtime's final report of the failed turn, when it gave one.
+    /// Ends a running turn with a delivery. `error` is the operator diagnostic;
+    /// `explanation` is safe for the conversation and `activity` is the final report.
     pub(crate) fn interrupt_turn(
         &self,
         turn: &ClaimedTurn,
@@ -658,7 +656,9 @@ impl Database {
             bail!("turn {} was not running", turn.turn_id);
         }
         let notice = match explanation {
-            Some(explanation) => format!("That turn was interrupted: {explanation}\n{CONTINUE}"),
+            Some(explanation) => format!(
+                "That turn was interrupted: {explanation}\nActions already taken may have had effects."
+            ),
             None => format!("That turn was interrupted. {CONTINUE}"),
         };
         enqueue_delivery(&transaction, turn, &notice, now)?;
