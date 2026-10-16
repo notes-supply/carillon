@@ -76,15 +76,18 @@ export function catalog(config: unknown, runsOn: Catalog["runsOn"] = () => true)
               {
                 id: descriptor.id,
                 name: descriptor.label,
-                choices: [OFF, ON],
+                choices: [
+                  { id: OFF, name: "Off" },
+                  { id: ON, name: "On" },
+                ],
                 default: descriptor.currentValue === true ? ON : OFF,
               },
             ];
-          const choices = descriptor.options.map((choice) => choice.id);
+          const choices = descriptor.options.map(({ id, label }) => ({ id, name: label }));
           const fallback =
             descriptor.currentValue ??
             descriptor.options.find((choice) => choice.isDefault === true)?.id ??
-            choices[0];
+            choices[0]?.id;
           return fallback === undefined
             ? []
             : [{ id: descriptor.id, name: descriptor.label, choices, default: fallback }];

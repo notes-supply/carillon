@@ -16,7 +16,16 @@
             {
               "id": "thinking",
               "name": "Thinking",
-              "choices": ["off", "high"],
+              "choices": [
+                {
+                  "id": "off",
+                  "name": "Off"
+                },
+                {
+                  "id": "high",
+                  "name": "High"
+                }
+              ],
               "default": "off"
             }
           ]
@@ -49,7 +58,16 @@
             {
               "id": "thinking",
               "name": "Thinking",
-              "choices": ["off", "high"],
+              "choices": [
+                {
+                  "id": "off",
+                  "name": "Off"
+                },
+                {
+                  "id": "high",
+                  "name": "High"
+                }
+              ],
               "default": "off"
             }
           ]
@@ -100,7 +118,16 @@
             {
               "id": "effort",
               "name": "Reasoning",
-              "choices": ["low", "high"],
+              "choices": [
+                {
+                  "id": "low",
+                  "name": "Low"
+                },
+                {
+                  "id": "high",
+                  "name": "High"
+                }
+              ],
               "default": "low"
             }
           ]
@@ -299,6 +326,28 @@
         }
       ],
       "available": [],
+      "agent": {
+        "selection": null,
+        "overridden": false
+      }
+    },
+    {
+      "providers": [],
+      "available": [
+        {
+          "provider": "p",
+          "model": "m",
+          "name": "M",
+          "options": [
+            {
+              "id": "speed",
+              "name": "Speed",
+              "choices": ["fast"],
+              "default": "fast"
+            }
+          ]
+        }
+      ],
       "agent": {
         "selection": null,
         "overridden": false

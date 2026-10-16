@@ -170,7 +170,12 @@ const DETERMINISTIC_MODELS: readonly AvailableModel[] = [
       {
         id: "thinking",
         name: "Thinking",
-        choices: ["off", "low", "medium", "high"],
+        choices: [
+          { id: "off", name: "Off" },
+          { id: "low", name: "Low" },
+          { id: "medium", name: "Medium" },
+          { id: "high", name: "High" },
+        ],
         default: "medium",
       },
     ],

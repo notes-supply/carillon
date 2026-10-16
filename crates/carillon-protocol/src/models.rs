@@ -41,9 +41,17 @@ pub struct AvailableModel {
 pub struct ModelOption {
     pub id: String,
     pub name: String,
-    pub choices: Vec<String>,
-    /// Used when no scope chose a supported value.
+    pub choices: Vec<OptionChoice>,
+    /// The ID of the choice used when no scope chose a supported value.
     pub default: String,
+}
+
+/// One value a setting accepts, as the runtime names it. Selections hold
+/// its `id`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct OptionChoice {
+    pub id: String,
+    pub name: String,
 }
 
 /// The effective selection for one scope and whether it was set at that

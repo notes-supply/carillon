@@ -8,11 +8,14 @@ export const SelectionSchema = Type.Object({
 });
 export type Selection = Static<typeof SelectionSchema>;
 
-/** A setting the model supports; `default` applies when no scope chose a supported value. */
+/** One value a setting accepts, as the runtime names it. Selections hold its `id`. */
+export const OptionChoiceSchema = Type.Object({ id: Type.String(), name: Type.String() });
+export type OptionChoice = Static<typeof OptionChoiceSchema>;
+/** A setting the model supports; the choice `default` applies when no scope chose a supported value. */
 export const ModelOptionSchema = Type.Object({
   id: Type.String(),
   name: Type.String(),
-  choices: Type.Array(Type.String()),
+  choices: Type.Array(OptionChoiceSchema),
   default: Type.String(),
 });
 export type ModelOption = Static<typeof ModelOptionSchema>;

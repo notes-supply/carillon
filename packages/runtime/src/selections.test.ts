@@ -18,7 +18,7 @@ const models: readonly AvailableModel[] = [
       {
         id: "thinking",
         name: "Thinking",
-        choices: ["off", "low", "medium", "high"],
+        choices: ["off", "low", "medium", "high"].map((id) => ({ id, name: id })),
         default: "medium",
       },
     ],
@@ -124,7 +124,12 @@ it("reports and runs the settings a choice leaves to the model's defaults", asyn
         ? {
             ...model,
             options: [
-              { id: "thinking", name: "Thinking", choices: ["off", "low"], default: "low" },
+              {
+                id: "thinking",
+                name: "Thinking",
+                choices: ["off", "low"].map((id) => ({ id, name: id })),
+                default: "low",
+              },
             ],
           }
         : model,

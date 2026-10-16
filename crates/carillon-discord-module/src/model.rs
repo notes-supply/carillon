@@ -308,9 +308,9 @@ fn next_selection(
     let chosen = setting
         .choices
         .iter()
-        .find(|candidate| fingerprint(&[candidate]) == choice)?;
+        .find(|candidate| fingerprint(&[&candidate.id]) == choice)?;
     let mut options = selection.options.clone();
-    options.insert(setting.id.clone(), chosen.clone());
+    options.insert(setting.id.clone(), chosen.id.clone());
     Some(Selection {
         provider: selection.provider.clone(),
         model: selection.model.clone(),
@@ -687,10 +687,14 @@ fn choice_select(scope_name: &str, option: &ModelOption, selection: &Selection) 
             fingerprint(&[&option.id])
         ),
         &option.name,
-        option
-            .choices
-            .iter()
-            .map(|value| choice(value, &fingerprint(&[value]), None, chosen == Some(value))),
+        option.choices.iter().map(|value| {
+            choice(
+                &value.id,
+                &fingerprint(&[&value.id]),
+                None,
+                chosen == Some(&value.id),
+            )
+        }),
     )
 }
 

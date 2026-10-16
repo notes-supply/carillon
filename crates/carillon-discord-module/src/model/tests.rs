@@ -12,7 +12,9 @@ use crate::{
 };
 use carillon_protocol::{
     model::ModelScope as Scope,
-    models::{AvailableModel, ModelOption, ModelProvider, ModelState, ScopeState, Selection},
+    models::{
+        AvailableModel, ModelOption, ModelProvider, ModelState, OptionChoice, ScopeState, Selection,
+    },
 };
 
 /// Answers like the runtime: a set selection is resolved so every
@@ -72,8 +74,8 @@ impl HostCalls for FakeRuntime {
                     let chosen = selection
                         .options
                         .get(&option.id)
-                        .filter(|chosen| option.choices.contains(chosen))
-                        .or(option.choices.first())
+                        .filter(|chosen| option.choices.iter().any(|choice| choice.id == **chosen))
+                        .or(option.choices.first().map(|choice| &choice.id))
                         .ok_or("a setting without choices")?;
                     options.insert(option.id.clone(), chosen.clone());
                 }
@@ -116,11 +118,26 @@ fn model(provider: &str, id: &str, thinking: &[&str]) -> AvailableModel {
             vec![ModelOption {
                 id: "thinking".to_owned(),
                 name: "Thinking".to_owned(),
-                choices: thinking.iter().map(|level| (*level).to_owned()).collect(),
+                choices: choices(thinking),
                 default: thinking.first().copied().unwrap_or_default().to_owned(),
             }]
         },
     }
+}
+
+/// Choices named as a runtime names them: `high` is "High".
+fn choices(ids: &[&str]) -> Vec<OptionChoice> {
+    ids.iter()
+        .map(|id| {
+            let mut name = id.chars();
+            OptionChoice {
+                id: (*id).to_owned(),
+                name: name.next().map_or_else(String::new, |first| {
+                    first.to_uppercase().chain(name).collect()
+                }),
+            }
+        })
+        .collect()
 }
 
 fn selection(provider: &str, id: &str, thinking: Option<&str>) -> Selection {

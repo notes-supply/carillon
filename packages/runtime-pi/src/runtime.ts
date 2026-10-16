@@ -185,7 +185,10 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
             {
               id: THINKING_OPTION,
               name: "Thinking",
-              choices: getSupportedThinkingLevels(model),
+              choices: getSupportedThinkingLevels(model).map((level) => ({
+                id: level,
+                name: level,
+              })),
               default: defaultThinkingLevel(model),
             },
           ]

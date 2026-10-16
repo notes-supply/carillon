@@ -31,8 +31,24 @@ it("reads the conversation's model from its native thread against T3's catalogue
       model: "claude-sonnet-5",
       name: "Claude Sonnet 5",
       options: [
-        { id: "effort", name: "Effort", choices: ["low", "high"], default: "high" },
-        { id: "fastMode", name: "Fast Mode", choices: ["off", "on"], default: "off" },
+        {
+          id: "effort",
+          name: "Effort",
+          choices: [
+            { id: "low", name: "Low" },
+            { id: "high", name: "High" },
+          ],
+          default: "high",
+        },
+        {
+          id: "fastMode",
+          name: "Fast Mode",
+          choices: [
+            { id: "off", name: "Off" },
+            { id: "on", name: "On" },
+          ],
+          default: "off",
+        },
       ],
     },
     { provider: "claudeAgent", model: "claude-haiku-4-5", name: "Claude Haiku 4.5", options: [] },

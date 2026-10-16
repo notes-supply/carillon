@@ -369,7 +369,13 @@ export const OptionDescriptorSchema = Type.Union([
     id: Id,
     label: Type.String({ minLength: 1 }),
     type: Type.Literal("select"),
-    options: Type.Array(Type.Object({ id: Id, isDefault: Type.Optional(Type.Boolean()) })),
+    options: Type.Array(
+      Type.Object({
+        id: Id,
+        label: Type.String({ minLength: 1 }),
+        isDefault: Type.Optional(Type.Boolean()),
+      }),
+    ),
     currentValue: Type.Optional(Id),
   }),
   Type.Object({

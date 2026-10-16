@@ -156,7 +156,7 @@ fn provider_overflow_keeps_every_provider_reachable_within_the_row_limit() -> Re
         .map(|index| ModelOption {
             id: format!("setting-{index}"),
             name: format!("Setting {index}"),
-            choices: vec!["one".to_owned(), "two".to_owned()],
+            choices: choices(&["one", "two"]),
             default: "one".to_owned(),
         })
         .collect();
@@ -483,7 +483,7 @@ fn many_settings_are_reached_through_a_setting_chooser() -> Result<(), String> {
         .map(|id| ModelOption {
             id: (*id).to_owned(),
             name: id.to_uppercase(),
-            choices: vec!["one".to_owned(), "two".to_owned()],
+            choices: choices(&["one", "two"]),
             default: "one".to_owned(),
         })
         .collect();
