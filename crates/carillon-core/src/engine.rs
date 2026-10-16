@@ -308,12 +308,6 @@ impl Core {
         interface: &SelectedProvider,
         event: &ExternalEvent,
     ) -> Result<Admitted, CoreError> {
-        if let Some(receipt) = self
-            .database
-            .event_receipt(&interface.id, &event.event_id)?
-        {
-            return Ok(Admitted::Settled(receipt));
-        }
         let owner = self.conversation_owner(
             &interface.id,
             &ModelQuery {
@@ -321,6 +315,15 @@ impl Core {
                 audience_id: Some(event.audience_id.clone()),
             },
         )?;
+        // Read after the owner: a stranded notice moves its conversation in
+        // the transaction that records its receipt, so a duplicate that sees
+        // the move also sees the receipt.
+        if let Some(receipt) = self
+            .database
+            .event_receipt(&interface.id, &event.event_id)?
+        {
+            return Ok(Admitted::Settled(receipt));
+        }
         let agent = match owner {
             Owner::Current(agent) if event.attachments.is_some() => {
                 return Ok(Admitted::Capturing(agent.clone()));
