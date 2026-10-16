@@ -6,5 +6,11 @@ note: Use a typed error, or anyhow::Error where only a message and its sources a
 rule:
   kind: generic_type
   all:
-    - has: { field: type, regex: "^Box$" }
-    - has: { field: type_arguments, has: { kind: dynamic_type, regex: "Error", stopBy: end } }
+    - has: { field: type, regex: "(^|::)Box$" }
+    - has:
+        field: type_arguments
+        # The trait object, alone or under its `+ Send + Sync` bounds.
+        has:
+          kind: dynamic_type
+          has: { field: trait, regex: "^((std|core)::)?(error::)?Error$" }
+          stopBy: { not: { kind: bounded_type } }
