@@ -17,6 +17,13 @@ use carillon_protocol::model::{
 };
 use ownership::{Owner, stranded};
 use std::{path::PathBuf, sync::Arc};
+
+/// What admission decided before any capture work.
+enum Admitted {
+    Settled(EventReceipt),
+    /// Attachments to capture for a current agent before the turn is recorded.
+    Capturing(AgentOptions),
+}
 use tokio::sync::watch;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::warn;
@@ -283,59 +290,58 @@ impl Core {
                 "an interface identity is required".to_owned(),
             ));
         }
+        let (arrived, received) = (interface.clone(), event.clone());
+        match self
+            .blocking(move |core| core.admission(&arrived, &received))
+            .await?
+        {
+            Admitted::Settled(receipt) => Ok(receipt),
+            Admitted::Capturing(agent) => self.intake.accept(self, interface, event, &agent).await,
+        }
+    }
+
+    /// Settles an event that needs no capture: an earlier receipt, a stranded
+    /// conversation's explanation, or a turn without attachments. An event
+    /// with attachments for a current agent is left to capture.
+    fn admission(
+        &self,
+        interface: &SelectedProvider,
+        event: &ExternalEvent,
+    ) -> Result<Admitted, CoreError> {
         if let Some(receipt) = self
             .database
             .event_receipt(&interface.id, &event.event_id)?
         {
-            return Ok(receipt);
+            return Ok(Admitted::Settled(receipt));
         }
-        let agent = match self.conversation_owner(
+        let owner = self.conversation_owner(
             &interface.id,
             &ModelQuery {
                 agent_id: event.agent_id.clone(),
                 audience_id: Some(event.audience_id.clone()),
             },
-        )? {
+        )?;
+        let agent = match owner {
+            Owner::Current(agent) if event.attachments.is_some() => {
+                return Ok(Admitted::Capturing(agent.clone()));
+            }
             Owner::Current(agent) => agent,
             Owner::Stranded(runtime_id) => {
-                let (interface, event) = (interface.clone(), event.clone());
-                return self
-                    .blocking(move |core| {
-                        if let Some(receipt) = core
-                            .database
-                            .event_receipt(&interface.id, &event.event_id)?
-                        {
-                            return Ok(receipt);
-                        }
-                        core.intake.ensure_in_order(&interface.id, &event)?;
-                        Ok(core.database.accept_event(
-                            &interface.id,
-                            &runtime_id,
-                            &event,
-                            Admission::Stranded {
-                                explanation: &stranded(&runtime_id, &event.agent_id),
-                            },
-                            None,
-                        )?)
-                    })
-                    .await;
+                self.intake.ensure_in_order(&interface.id, event)?;
+                return Ok(Admitted::Settled(self.database.accept_event(
+                    &interface.id,
+                    &runtime_id,
+                    event,
+                    Admission::Stranded {
+                        explanation: &stranded(&runtime_id, &event.agent_id),
+                    },
+                    None,
+                )?));
             }
         };
-        if event.attachments.is_some() {
-            return self.intake.accept(self, interface, event, agent).await;
-        }
-        let (interface, event, agent) = (interface.clone(), event.clone(), agent.clone());
-        self.blocking(move |core| {
-            if let Some(receipt) = core
-                .database
-                .event_receipt(&interface.id, &event.event_id)?
-            {
-                return Ok(receipt);
-            }
-            core.intake.ensure_in_order(&interface.id, &event)?;
-            core.commit(&interface, &event, &agent, None)
-        })
-        .await
+        self.intake.ensure_in_order(&interface.id, event)?;
+        self.commit(interface, event, agent, None)
+            .map(Admitted::Settled)
     }
 
     /// Record the turn, referencing a published capture of its attachments.
