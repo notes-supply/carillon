@@ -60,7 +60,12 @@ fn a_pi_assistant_moves_to_t3_by_resources_and_none_drops_it() -> anyhow::Result
         title: "Notes".to_owned(),
         workspace: directory.path().to_path_buf(),
     };
-    agents(&home, &options(), Assistant::T3(&project), &[&project])?;
+    agents(
+        &home,
+        &options(),
+        Assistant::T3(&project),
+        Some(&[&project]),
+    )?;
     let loaded = LoadedConfig::load(&path)?;
     assert_eq!(loaded.value.agent("my-assistant")?.runtime, "runtime-t3");
     assert_eq!(
@@ -72,7 +77,7 @@ fn a_pi_assistant_moves_to_t3_by_resources_and_none_drops_it() -> anyhow::Result
         home.join("providers/runtime-t3.toml"),
         "[agents.t3-notes]\nproject_id = 'notes'\n",
     )?;
-    agents(&home, &options(), Assistant::None, &[&project])?;
+    agents(&home, &options(), Assistant::None, Some(&[&project]))?;
     let loaded = LoadedConfig::load(&path)?;
     assert_eq!(loaded.value.agents.len(), 1);
     assert_eq!(loaded.value.agents[0].id, "t3-notes");
@@ -93,7 +98,7 @@ fn a_pi_assistant_is_created_when_a_code_only_installation_chooses_pi() -> anyho
         workspace: Some(directory.path().to_path_buf()),
         ..options()
     };
-    agents(&home, &options, Assistant::Pi, &[])?;
+    agents(&home, &options, Assistant::Pi, Some(&[]))?;
     let stored: Config = toml::from_str(&std::fs::read_to_string(&path)?)?;
     assert_eq!(stored.agents.len(), 1);
     assert!(!home.join("agents/default/sessions").exists());
@@ -120,7 +125,7 @@ fn an_explicit_runtime_extends_a_pi_installation() -> anyhow::Result<()> {
         title: "Notes".to_owned(),
         workspace: directory.path().to_path_buf(),
     };
-    agents(&home, &options, Assistant::Pi, &[&project])?;
+    agents(&home, &options, Assistant::Pi, Some(&[&project]))?;
     assert_eq!(
         super::registered_runtimes(&home)?,
         [Runtime::Pi, Runtime::T3]

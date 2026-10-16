@@ -168,7 +168,20 @@ pub(super) fn setup(home: &Path, options: &Options, questions: &mut impl Questio
         bail!("--workspace is for Pi; on T3, an agent works in its project's folder");
     }
     let kept = existing && t3 && keep_t3(home, &provider_binary("runtime-t3")?, questions)?;
-    if !kept {
+    if kept {
+        let config = LoadedConfig::load(&home.join("carillon.toml"))?;
+        if options.runtimes.contains(&Runtime::Pi)
+            && !config
+                .value
+                .agents
+                .iter()
+                .any(|agent| agent.runtime == Runtime::Pi.id())
+        {
+            questions
+                .say("Pi will run Carillon's assistant. T3 Code agents keep their settings.")?;
+            agents(home, options, Assistant::Pi, None)?;
+        }
+    } else {
         let assistant = ask_assistant(&runtimes, questions)?;
         if t3 {
             set_up_t3(
@@ -179,13 +192,27 @@ pub(super) fn setup(home: &Path, options: &Options, questions: &mut impl Questio
                 questions,
             )?;
         } else {
-            agents(home, options, Assistant::Pi, &[])?;
+            agents(home, options, Assistant::Pi, None)?;
         }
     }
     {
         let _maintenance = MaintenanceLock::acquire_unless_held(home)?;
-        for runtime in runtimes {
+        for &runtime in &runtimes {
             register_runtime(&home.join("carillon.toml"), runtime)?;
+        }
+        let config = LoadedConfig::load(&home.join("carillon.toml"))?;
+        for runtime in runtimes {
+            if !config
+                .value
+                .agents
+                .iter()
+                .any(|agent| agent.runtime == runtime.id())
+            {
+                bail!(
+                    "{} has no agent; run setup again and choose an agent for every registered runtime",
+                    runtime.id()
+                );
+            }
         }
     }
     sign_in_to_pi(home, existing, questions)?;
@@ -464,7 +491,7 @@ fn set_up_t3(
     if matches!(plan, Assistant::None) && code.is_empty() {
         bail!("nothing runs on T3: choose a harness for the assistant, or a T3 Code project");
     }
-    let agents = agents(home, options, plan, &code)?;
+    let agents = agents(home, options, plan, Some(&code))?;
     if agents.is_empty() {
         questions.say("T3 Code has no agents to configure.")?;
         return Ok(());
@@ -520,11 +547,12 @@ fn configure_agents(
 /// Replaces T3's agents and places the assistant on the chosen runtime.
 /// Existing resource paths keep their stored spelling and identify the
 /// assistant even when its ID was changed. Other runtimes' plain agents stay.
+/// `None` keeps T3's plain agents; `Some` replaces them with the selected projects.
 fn agents<'a>(
     home: &Path,
     options: &Options,
     plan: Assistant<&'a Project>,
-    code: &[&'a Project],
+    code: Option<&[&'a Project]>,
 ) -> Result<Vec<(AgentConfig, &'a Project)>> {
     let config_path = home.join("carillon.toml");
     let workspace = match &plan {
@@ -548,7 +576,7 @@ fn agents<'a>(
         )?,
         Assistant::T3(project) => project.workspace.clone(),
         Assistant::None => code
-            .first()
+            .and_then(|code| code.first())
             .context("no agent to create the installation for")?
             .workspace
             .clone(),
@@ -570,7 +598,9 @@ fn agents<'a>(
     let mut registry: Vec<AgentConfig> = config
         .agents
         .iter()
-        .filter(|agent| agent.resources.is_none() && agent.runtime != Runtime::T3.id())
+        .filter(|agent| {
+            agent.resources.is_none() && (code.is_none() || agent.runtime != Runtime::T3.id())
+        })
         .cloned()
         .collect();
     let mut t3 = Vec::new();
@@ -585,7 +615,7 @@ fn agents<'a>(
         }
         registry.push(agent);
     }
-    for &project in code {
+    for &project in code.into_iter().flatten() {
         let id = project_agent_id(&config.agents, &registry, &projects, project);
         let agent = AgentConfig {
             id,

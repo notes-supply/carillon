@@ -251,7 +251,7 @@ fn fake_t3(directory: &Path, offer: &serde_json::Value) -> anyhow::Result<std::p
             "#!/bin/sh\n{{ echo \"$*\"; cat | sed 's/^/  stdin: /'; }} >>'{calls}'\ncase \"$1\" in\n  \
              discover) agent=; while [ \"$#\" -gt 0 ]; do if [ \"$1\" = --agent ]; then shift; agent=$1; fi; shift; done; if [ -n \"$agent\" ] && [ -f '{directory}/offer-'\"$agent\"'.json' ]; then cat '{directory}/offer-'\"$agent\"'.json'; else printf '%s' '{offer}'; fi ;;\n  \
              profile) printf '{{\"instanceId\":\"carillon_claude\",\"home\":\"{profiles}/claude\"}}' ;;\n  \
-             configure) echo \"configured $3 $4\" ;;\n  *) exit 2 ;;\nesac\n",
+             configure) echo \"configured $3 $4\" ;;\n  check) exit 0 ;;\n  *) exit 2 ;;\nesac\n",
             directory = directory.display(),
             calls = calls.display(),
             profiles = profiles.display(),
@@ -539,5 +539,6 @@ fn equally_named_agents_get_distinct_model_prompts_and_their_chosen_models() -> 
     Ok(())
 }
 
+mod added_pi;
 mod projects;
 mod reruns;
