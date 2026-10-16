@@ -125,7 +125,7 @@ settings file differs.
 Allowed users, routes, typing, reactions and their emoji, and activity
 markers apply live: messages and interactions admitted afterwards follow
 them, while work already admitted keeps the settings it was admitted with.
-The agent, guild and bot identity, attachment limits and whether activity
+The guild and bot identity, attachment limits and whether activity
 cards are shown apply only when the provider restarts; a file that changes
 any of them is not applied at all until then.")]
     Settings {

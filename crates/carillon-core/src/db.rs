@@ -4,7 +4,7 @@
 //! ```text
 //! turn:      queued -> running -> completed
 //!                   ^         \-> interrupted
-//!                   \--------- running
+//!                   \--------- running (not received, or unanswered observation)
 //!
 //! delivery:  pending -> delivering -> delivered
 //!                                 \-> uncertain (ack lost or claim abandoned)
