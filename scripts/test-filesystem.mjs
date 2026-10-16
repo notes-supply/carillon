@@ -875,7 +875,6 @@ async function testAttachments() {
 }
 
 async function attachmentAttempt(name, fault) {
-  // Distinct from the other cases sharing this scratch directory.
   const root = join(scratch, `capture-${name}`);
   run("--home", root, "init", "--workspace", scratch, ...initOptions);
   const config = join(root, "carillon.toml");
@@ -984,7 +983,6 @@ async function attachmentAttempt(name, fault) {
   return (await readFile(log, "utf8")).split("\n");
 }
 
-/** Run core, wait until it listens, run `body`, then stop it. */
 async function withCore([command, args], body) {
   const server = spawn(command, args, {
     env: { ...process.env, TOKIO_WORKER_THREADS: "1" },

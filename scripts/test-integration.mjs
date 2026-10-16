@@ -1870,7 +1870,6 @@ async function requestInteraction(source) {
   });
 }
 
-/** Runs a slash command or component interaction and returns the reply. */
 async function interact(channelId, parentChannelId, kind, name, values = [], options = {}) {
   const response = await requestInteraction(
     interaction(channelId, parentChannelId, kind, name, values, options),

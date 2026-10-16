@@ -44,7 +44,6 @@ const provider = createServer(async (request, response) => {
 provider.listen(0, "127.0.0.1");
 await once(provider, "listening");
 
-/** A small real PNG. */
 function png(width, height) {
   const table = Array.from({ length: 256 }, (_, n) => {
     let c = n;
@@ -209,7 +208,6 @@ try {
   assert.doesNotMatch(text, /Image omitted/u);
   assert.match(text, /name: "wide\.png"; .*sent inline as an image/u);
   assert.match(text, /name: "notes\.txt"; .*; file$/mu);
-  // The release ships Photon's module beside the executables.
   assert.ok((await readFile(join(release, "bin/photon_rs_bg.wasm"))).length > 0);
   console.log(
     `runtime: packaged Pi normalized an attached image natively and listed every file (local inference fixture; ${hidePhoton ? "build-tree Photon hidden, release copy used" : "build-tree Photon visible: no user namespaces here"})`,
