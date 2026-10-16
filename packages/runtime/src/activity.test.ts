@@ -194,7 +194,6 @@ it("bounds a final report's serialized size, dropping notes, then finished work,
     tool_calls: 1,
     notes: ["short"],
   };
-  // A report within the limit is unchanged, and not partial.
   expect(finalReport(small)).toEqual(small);
   // Three bytes a character: the counts are bounded, but not the bytes.
   const wide = (length: number) => "語".repeat(length);
@@ -223,8 +222,6 @@ it("bounds a final report's serialized size, dropping notes, then finished work,
   };
   const report = finalReport(big);
   expect(Buffer.byteLength(JSON.stringify(report))).toBeLessThanOrEqual(ACTIVITY_REPORT_LIMIT);
-  // It says it is partial. The notes went first, then finished work, counted
-  // exactly; live work, every call and the counts stayed.
   expect(report.partial).toBe(true);
   expect(report.notes).toBeUndefined();
   expect(report.recent).toEqual(big.recent);
@@ -261,8 +258,6 @@ it("keeps live work and running calls longest when only they are left to trim", 
   });
   expect(Buffer.byteLength(JSON.stringify(report))).toBeLessThanOrEqual(ACTIVITY_REPORT_LIMIT);
   expect(report.partial).toBe(true);
-  // Finished calls and the headline went before any live work; every
-  // running call stayed, and the live work left out is counted.
   expect(report.recent).toEqual([]);
   expect(report.headline).toBeUndefined();
   expect(report.running).toHaveLength(8);

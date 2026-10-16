@@ -28,7 +28,6 @@ interface RuntimeServerOptions {
   /** The runtime's own build version, which core compares with the registry's expectation. */
   readonly version: string;
   readonly features: readonly string[];
-  /** Each agent the runtime serves, with the workspace it works in. */
   readonly agents: readonly { readonly id: string; readonly workspace: string }[];
 }
 

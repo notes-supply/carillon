@@ -6,7 +6,6 @@
 import type { AvailableModel, Selection } from "@carillon/protocol";
 import { ExplainedFailure } from "./failure.ts";
 
-/** The catalogue's entry for the selection's model, if it still offers it. */
 export function offeredModel(
   available: readonly AvailableModel[],
   selection: Selection,
