@@ -1,6 +1,52 @@
 use super::*;
 
 #[tokio::test]
+async fn agents_of_the_same_name_are_routed_and_configured_by_distinct_labels() -> anyhow::Result<()>
+{
+    let directory = tempfile::tempdir()?;
+    let config = with_two_agents(directory.path())?;
+    let mut registry = config.value.clone();
+    for agent in &mut registry.agents {
+        agent.name = "T3 Code · Notes".to_owned();
+    }
+    std::fs::write(&config.path, toml::to_string(&registry)?)?;
+    let config = config.reload()?;
+    let address = discord(Arc::new(Discord::default())).await?;
+    let (result, shown) = run(
+        &config,
+        address,
+        &[TOKEN, "", "1 2", "2", "1", "2", "1", "", ""],
+    )
+    .await;
+    result?;
+    assert!(
+        shown.contains("T3 Code · Notes (default)\nT3 Code · Notes (code)\nWho answers in #agent?"),
+        "{shown}"
+    );
+    for id in ["default", "code"] {
+        assert!(
+            shown.contains(&format!("When should T3 Code · Notes ({id}) answer?")),
+            "{shown}"
+        );
+    }
+    assert!(
+        shown.contains(
+            "#general (300) (T3 Code · Notes (code)), #agent (T3 Code · Notes (default))"
+        ),
+        "{shown}"
+    );
+    let routes = DiscordConfig::load(&config, "discord-private")?.routes;
+    assert_eq!(routes.len(), 2);
+    assert_eq!(routes[0].channel_id, "300");
+    assert_eq!(routes[0].agent, "code");
+    assert_eq!(routes[0].conversation, DiscordConversation::Channel);
+    assert_eq!(routes[1].channel_id, "301");
+    assert_eq!(routes[1].agent, "default");
+    assert_eq!(routes[1].conversation, DiscordConversation::Thread);
+    Ok(())
+}
+
+#[tokio::test]
 async fn servers_and_channels_of_the_same_name_are_told_apart_by_id() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let config = fresh(directory.path())?;

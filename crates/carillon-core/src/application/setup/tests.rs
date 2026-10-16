@@ -490,4 +490,53 @@ fn options() -> Options {
     }
 }
 
+#[test]
+fn equally_named_agents_get_distinct_model_prompts_and_their_chosen_models() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let home = directory.path().join("home");
+    let first = directory.path().join("first");
+    let second = directory.path().join("second");
+    std::fs::create_dir_all(&first)?;
+    std::fs::create_dir_all(&second)?;
+    let offer = serde_json::json!({
+        "projects": [
+            {"id": "p1", "title": "Notes", "workspace": first},
+            {"id": "p2", "title": "Notes", "workspace": second},
+            {"id": "p3", "title": "Other", "workspace": directory.path()},
+        ],
+        "models": [model("claudeAgent", "sonnet", "Sonnet"), model("codex", "gpt", "GPT")],
+    });
+    let program = fake_t3(directory.path(), &offer)?;
+    let mut questions = Shown::answering(&["", "token", "0,1,2", "0", "1", "0"]);
+    set_up_t3(
+        &home,
+        &options(),
+        &Assistant::None,
+        &program,
+        &mut questions,
+    )?;
+    for label in [
+        "T3 Code · Notes (t3-notes)",
+        "T3 Code · Notes (t3-notes-2)",
+        "T3 Code · Other",
+    ] {
+        assert!(
+            questions.shown.contains(&format!(
+                "Which model should {label} start new conversations with?"
+            )),
+            "{:?}",
+            questions.shown
+        );
+    }
+    let calls = std::fs::read_to_string(directory.path().join("calls"))?;
+    for args in [
+        "--agent t3-notes --project p1 --model claudeAgent/sonnet",
+        "--agent t3-notes-2 --project p2 --model codex/gpt",
+        "--agent t3-other --project p3 --model claudeAgent/sonnet",
+    ] {
+        assert!(calls.contains(args), "{calls}");
+    }
+    Ok(())
+}
+
 mod reruns;
