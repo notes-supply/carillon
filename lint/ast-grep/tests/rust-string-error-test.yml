@@ -11,3 +11,6 @@ invalid:
   - "fn discover(&self) -> Result<Offer, std::string::String> { todo() }"
   - "fn discover(&self) -> Result<Offer, &'static str> { todo() }"
   - "fn discover(&self) -> Result<Offer, &str> { todo() }"
+  - "fn f<'a>() -> Result<(), &'a str> { todo() }"
+  - "fn f() -> Result<(), Cow<'_, str>> { todo() }"
+  - "fn f<'a>() -> Result<(), std::borrow::Cow<'a, str>> { todo() }"

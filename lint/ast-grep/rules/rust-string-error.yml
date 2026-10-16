@@ -11,7 +11,7 @@ rule:
         field: type_arguments
         has:
           nthChild: 2
-          regex: "^((std|alloc)::string::)?String$|^&('static\\s+)?str$"
+          regex: "^((std|alloc)::string::)?String$|^&('[A-Za-z_][A-Za-z0-9_]*\\s+)?str$|^((std|alloc)::borrow::)?Cow\\s*<\\s*('[^,]+,\\s*)?str\\s*>$"
 ignores:
   - crates/carillon-discord-module/**
   - crates/carillon-discord/src/module.rs

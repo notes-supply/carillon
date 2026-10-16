@@ -1,5 +1,6 @@
 id: rust-result-state-assert
 valid:
+  - 'fn t() { assert_eq!(live.is_ok(), captured.is_ok(), "mode"); }'
   - 'fn t() { assert_eq!(parse("x").unwrap_err().to_string(), "x is not a number"); }'
   - 'fn t() { assert!(matches!(parse("x"), Err(ParseError::Missing))); }'
   - "fn t() { assert!(value.is_some()); }"
@@ -16,3 +17,6 @@ invalid:
   - "fn t() { assert!(matches!(result, Err(_))); }"
   - 'fn t() { assert!(matches!(result, Err(_)), "fails"); }'
   - 'fn t() { assert!(matches!(parse("x"), Ok(_)), "parses"); }'
+  - "fn t() { assert!(matches!(r, Err(..))); }"
+  - "fn t() { assert_eq!(r.is_err(), true); }"
+  - "fn t() { assert!(r.err().is_some()); }"

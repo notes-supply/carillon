@@ -11,3 +11,5 @@ invalid:
   - "fn run() -> Result<(), Box<dyn Error + Send + Sync>> { Ok(()) }"
   - "fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> { Ok(()) }"
   - "fn run() -> Result<(), std::boxed::Box<dyn core::error::Error>> { Ok(()) }"
+  - "fn f() -> Arc<dyn Error + Send + Sync> { todo() }"
+  - "fn f() -> std::sync::Arc<dyn std::error::Error> { todo() }"
