@@ -35,7 +35,6 @@ interface PiExecutionSessionOptions {
   readonly customTools?: ToolDefinition[];
   /** Per-session host data, delivered to native extensions but never to the model. */
   readonly extensionContext?: unknown;
-  /** Host context for this turn's attachments, as a native extension. */
   readonly attachmentContext?: ExtensionFactory;
   /** Receives each fact participating extensions report on the session's `carillon:work` channel. */
   readonly onWork?: (fact: unknown) => void;

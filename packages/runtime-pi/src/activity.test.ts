@@ -130,7 +130,6 @@ it("reports a real turn's phases, slow and parallel tools, failures and bursts u
   const activity = () => runtime.activity("turn-1", "discord-private");
   try {
     const turn = runtime.executeTurn(request(root, "turn-1"));
-    // Model-only work: nothing running and no commentary yet.
     await expect.poll(() => activity()?.phase).toBe("model");
     // The session says which model runs; this one does not reason.
     expect(activity()).toMatchObject({
@@ -142,7 +141,6 @@ it("reports a real turn's phases, slow and parallel tools, failures and bursts u
     });
     expect(activity()?.headline).toBeUndefined();
     expect(activity()?.agent?.effort).toBeUndefined();
-    // Other interfaces and other turns are not described.
     expect(runtime.activity("turn-1", "other-interface")).toBeUndefined();
     expect(runtime.activity("turn-2", "discord-private")).toBeUndefined();
 
@@ -176,7 +174,6 @@ it("reports a real turn's phases, slow and parallel tools, failures and bursts u
       ok: true,
     });
     await writeFile(join(root, "two"), "");
-    // Model work after the tools: nothing is shown as still executing.
     await expect.poll(() => activity()?.running.length).toBe(0);
     expect(activity()?.phase).toBe("model");
 
@@ -404,7 +401,6 @@ it("says the work report is partial once it forgets finished work to make room",
   report("done", "succeeded");
   for (let index = 1; index < 16; index += 1) report(`c${String(index)}`, "running");
   expect(tracker.snapshot().work).toMatchObject({ partial: false });
-  // The finished item gives way to a new one: the report no longer covers it.
   report("late", "running");
   const work = tracker.snapshot().work;
   expect(work?.items.map((item) => item.id)).not.toContain("done");
@@ -500,7 +496,6 @@ it("keeps thinking as notes beside the answer, and a failed turn's report with i
     );
     expect(failed).toBeInstanceOf(ExplainedFailure);
     expect(failed).toMatchObject({ status: 502, message: "The usage limit has been reached" });
-    // The failure keeps the turn's report: what it read, and what it thought.
     expect(reportOf(failed)).toMatchObject({
       tool_calls: 1,
       recent: [{ tool: "read", detail: "notes.txt", ok: true }],

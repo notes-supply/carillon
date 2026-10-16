@@ -243,7 +243,6 @@ function prompt(sent: Sent | undefined) {
     .at(-1);
 }
 
-/** The attachment notes the request carries, in order. */
 function notes(sent: Sent | undefined): string[] {
   return users(sent ?? { messages: [] })
     .map((message) => text(message.content))
@@ -628,7 +627,6 @@ it("lets an extension choose the model before Pi prepares the images", async () 
   expect(text(message?.content)).toContain("image omitted: model does not support images");
 });
 
-/** An extension with a command that answers nothing and one that fails. */
 async function commands(resources: string) {
   await mkdir(join(resources, "extensions"));
   await writeFile(
@@ -646,7 +644,6 @@ async function commands(resources: string) {
   );
 }
 
-/** A `/command` invocation of `input`, with the command intent. */
 function commandTurn(resources: string, store: string, input: string, correlation: string) {
   return { ...turn(resources, store, input, [], correlation), native: { intent: "command" } };
 }

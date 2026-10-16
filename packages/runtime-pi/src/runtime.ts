@@ -1,4 +1,3 @@
-/** A native Pi runtime with instance-owned execution and model state. */
 import { ModelRuntime, SettingsManager } from "@earendil-works/pi-coding-agent";
 import type {
   AgentSession,
