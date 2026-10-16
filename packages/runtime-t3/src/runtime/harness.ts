@@ -45,6 +45,7 @@ afterEach(async () => {
 interface Overrides {
   readonly url?: string;
   readonly token?: string;
+  readonly projectId?: string;
   readonly reconnectDelayMs?: number;
   readonly connect?: Connect;
   /** The default agent's role and settings model, the assistant's on the profile by default. */
@@ -58,7 +59,7 @@ export function build(overrides: Overrides = {}) {
       [
         "default",
         {
-          projectId: PROJECT,
+          projectId: overrides.projectId ?? PROJECT,
           workspace: resources,
           ...(overrides.role ?? { assistant: true, selection }),
         },
@@ -66,7 +67,7 @@ export function build(overrides: Overrides = {}) {
       [
         "code",
         {
-          projectId: PROJECT,
+          projectId: overrides.projectId ?? PROJECT,
           workspace: resources,
           assistant: false,
           selection: { instanceId: "codex", model: "gpt-6-astra", options: [] },
