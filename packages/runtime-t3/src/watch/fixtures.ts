@@ -46,6 +46,7 @@ export function snapshot(overrides: Record<string, unknown>, sequence = 1) {
     projection: {
       thread: {
         id: "thread",
+        projectId: "project",
         modelSelection: { instanceId: "claudeAgent", model: "claude-sonnet-5" },
       },
       runs: [],

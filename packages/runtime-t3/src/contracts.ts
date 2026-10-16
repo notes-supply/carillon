@@ -333,7 +333,7 @@ export const WakeNotificationSchema = Type.Object({
 /** A thread snapshot. Timeline items are checked one by one as they are folded. */
 const ProjectionSchema = Type.Object({
   /** The thread's own record; its selection is what every run of the thread uses. */
-  thread: Type.Object({ id: Id, modelSelection: NativeSelectionSchema }),
+  thread: Type.Object({ id: Id, projectId: Id, modelSelection: NativeSelectionSchema }),
   runs: Type.Array(RunSchema),
   runtimeRequests: Type.Array(RuntimeRequestSchema),
   providerThreads: Type.Array(ProviderThreadSchema),

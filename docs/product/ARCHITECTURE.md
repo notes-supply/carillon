@@ -168,10 +168,17 @@ See the [Pi guide](../../packages/runtime-pi/README.md).
 client of the threads T3's own UI shows. It stores nothing durable of a
 conversation: one thread per conversation and one message per turn, named
 from Carillon's identifiers, let a lost connection read the work back
-instead of repeating it. Work delegated to T3's child agents reports later
-through observations. Native work whose stop T3 couldn't confirm fences that
-thread in the runtime's memory, and the runtime refuses a drained restart
-while any fence stands.
+instead of repeating it. A thread ID derives from the interface, agent, and
+audience, independently of the agent's current T3 project. T3's thread projection
+owns its project. The runtime checks that project before using the thread,
+including for model and command requests and follow-up observations. After an
+agent changes projects, existing conversations receive an explanation asking for
+a new conversation. Their queued turns never run in the new project. Conversations
+without a T3 thread yet start in the current project. Native work already running
+in the old project is left alone. Work delegated to T3's child agents reports later
+through observations while the conversation still belongs to the current project.
+Native work whose stop T3 couldn't confirm fences that thread in the runtime's
+memory, and the runtime refuses a drained restart while any fence stands.
 
 Its agents are of two kinds. Carillon's assistant runs on Carillon's own T3
 instances, its profiles: each has a home of its own whose instructions and

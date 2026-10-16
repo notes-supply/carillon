@@ -90,13 +90,7 @@ export async function restart(overrides: Overrides = {}): Promise<void> {
   runtime = build(overrides);
 }
 
-export const threadId = derivedId(
-  "thread",
-  PROJECT,
-  "discord-private",
-  "default",
-  "conversation-1",
-);
+export const threadId = derivedId("thread", "discord-private", "default", "conversation-1");
 
 export function turn(correlation: string, input: string, extra: Record<string, unknown> = {}) {
   return {

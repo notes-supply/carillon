@@ -67,7 +67,12 @@ token). The installer refuses while Carillon runs: stop it with `carillon
 stop` first, or update it with `carillon update ARCHIVE`. On an installed
 release, `carillon setup` asks the same questions, and `carillon discord
 setup` asks only Discord's. A rerun that changes the T3 settings or the bot
-token takes effect in a running Carillon at `carillon restart`.
+token takes effect in a running Carillon at `carillon restart`. Changing an
+agent's T3 project ends its conversations that already have T3 threads. Their
+messages, queued turns, follow-up observations, model requests, and commands
+receive an explanation asking for a new conversation. A conversation without a
+T3 thread yet starts in the current project. Work already running in the old
+project continues there.
 
 An explicit `--runtime` adds that runtime to an existing installation.
 Pi sign-in is skipped when no agent runs on Pi.

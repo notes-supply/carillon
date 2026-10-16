@@ -159,14 +159,20 @@ Startup fails closed:
 
 Each conversation is pinned to the runtime that took its first turn. When
 an agent changes runtimes, its old conversations end with an explanation
-that asks the user to start a new conversation.
+that asks the user to start a new conversation. Changing an agent's T3 project
+has the same effect once the runtime restarts. Messages, queued turns, follow-up
+observations, model requests, and commands on its existing T3 threads are refused
+with that explanation. Native work already running in the old project is left
+alone. A conversation without a T3 thread yet starts in the current project.
 
 ## How it behaves
 
 - **One T3 thread per conversation and one message per turn**, named from
-  Carillon's identifiers. A lost connection or answer reads the work back
-  instead of repeating it, and T3's per-command receipts mean a turn never
-  runs twice.
+  Carillon's identifiers. The thread ID derives from the interface, agent, and
+  audience, independently of the project. T3's thread record owns its project;
+  the runtime checks it before using the conversation. A lost connection or
+  answer reads the work back instead of repeating it, and T3's per-command
+  receipts mean a turn never runs twice.
 - **A turn is done** when its run, and any follow-up run T3 starts for its
   background work, have completed with nothing left open. A run waiting for
   an approval or answer the runtime can't give is stopped, and the question

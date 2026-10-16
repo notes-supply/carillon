@@ -38,7 +38,11 @@ with an explanation that asks the user to start a new conversation. Removing
 an agent ends its conversations the same way. Messages there receive a
 receipt and the explanation even if the former runtime is disabled or
 removed. An otherwise current conversation whose runtime is unavailable
-refuses new work. Nothing translates native state between engines.
+refuses new work. Changing an agent's T3 project also ends conversations that
+already have T3 threads. Their messages, queued turns, follow-up observations,
+model requests, and commands receive an explanation asking for a new conversation.
+Work already running in the previous project continues there. Nothing translates
+native state between engines or T3 projects.
 
 ## Behaviour
 

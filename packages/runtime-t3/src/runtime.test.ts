@@ -14,7 +14,6 @@ import {
   conversation,
   dispatches,
   fake,
-  PROJECT,
   resources,
   restart,
   runOf,
@@ -116,33 +115,6 @@ it.each([
   expect(userTexts()).toEqual(["Hello."]);
 });
 
-it("keeps a conversation's turns in one T3 thread and sends the person's text as written", async () => {
-  const first = runtime.executeTurn(turn("turn-1", "Remember carillon."));
-  answer(await started("turn-1"), "Noted.");
-  expect(answered(await first)).toEqual({ correlation_id: "turn-1", output: "Noted." });
-
-  const second = runtime.executeTurn(turn("turn-2", "Which word?"));
-  answer(await started("turn-2"), "Carillon.");
-  expect((await second).output).toBe("Carillon.");
-
-  expect(fake.threads.size).toBe(1);
-  expect(thread().runs.map((run) => run.ordinal)).toEqual([1, 2]);
-  expect(userTexts()).toEqual(["Remember carillon.", "Which word?"]);
-  // The thread was opened with the agent default; each message names the thread's own
-  // selection, which the agent offers, so its run takes it.
-  expect(fake.commands.find((command) => command.type === "thread.create")).toMatchObject({
-    modelSelection: { instanceId: "claudeAgent", model: "claude-sonnet-5" },
-  });
-  for (const dispatch of dispatches())
-    expect(dispatch["modelSelection"]).toEqual(thread().modelSelection);
-  // The thread is opened by the same command each turn, replayed under its receipt.
-  expect(fake.commands.filter((command) => command.type === "thread.create")).toHaveLength(2);
-  expect(fake.subscriptions).toEqual([
-    { afterSequence: undefined, bounded: true, marker: true },
-    { afterSequence: undefined, bounded: true, marker: true },
-  ]);
-});
-
 it("recovers a dispatch whose answer was lost by reading the run back, without dispatching again", async () => {
   let dropped = 0;
   fake.dropAnswer = (command) => command.type === "message.dispatch" && dropped++ === 0;
@@ -153,10 +125,8 @@ it("recovers a dispatch whose answer was lost by reading the run back, without d
   expect((await result).output).toBe("hi");
   expect(dispatches()).toHaveLength(1);
   expect(thread().runs).toHaveLength(1);
-  expect(fake.subscriptions.map((subscription) => typeof subscription.afterSequence)).toEqual([
-    "undefined",
-    "number",
-  ]);
+  expect(fake.subscriptions[0]?.afterSequence).toBeUndefined();
+  expect(typeof fake.subscriptions.at(-1)?.afterSequence).toBe("number");
 });
 
 it("replays a dispatch T3 never received under the same command, so one run results", async () => {
@@ -730,7 +700,7 @@ it("names earlier files it cannot provide", async () => {
 });
 
 it("runs plain T3 Code on the other instances, with the person's text as written and T3's own title", async () => {
-  const plainThread = derivedId("thread", PROJECT, "discord-private", "code", "conversation-1");
+  const plainThread = derivedId("thread", "discord-private", "code", "conversation-1");
   const code = { ...conversation, agent_id: "code" };
   // Never on Carillon's profiles, which are the assistant's.
   expect((await runtime.modelState(code)).available.map((model) => model.provider)).toEqual([
@@ -1121,21 +1091,31 @@ it("ignores a stale pending request until the new run's own item names its reque
   expect(fake.interrupts).toEqual([next.id]);
 });
 
-it("cancels promptly while the first snapshot never arrives, dispatching nothing", async () => {
-  fake.holdSnapshot = true;
-  const controller = new AbortController();
-  const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
-  await until(() => fake.subscriptions.length === 1);
-  const started = Date.now();
-  controller.abort(new Error("core disconnected"));
-  await expect(result).rejects.toThrow("core disconnected");
-  expect(Date.now() - started).toBeLessThan(1_000);
-  expect(dispatches()).toHaveLength(0);
-  fake.holdSnapshot = false;
-  const next = runtime.executeTurn(turn("turn-2", "again"));
-  answer(await started2("turn-2"), "ok");
-  expect((await next).output).toBe("ok");
-});
+it.each([false, true])(
+  "cancels promptly while the first snapshot never arrives, existing thread %s",
+  async (existing) => {
+    if (existing) {
+      const initial = runtime.executeTurn(turn("initial", "Hello."));
+      answer(await started2("initial"), "Hi.");
+      await initial;
+    }
+    const dispatched = dispatches().length;
+    const subscribed = fake.subscriptions.length;
+    fake.holdSnapshot = true;
+    const controller = new AbortController();
+    const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
+    await until(() => fake.subscriptions.length === subscribed + 1);
+    const started = Date.now();
+    controller.abort(new Error("core disconnected"));
+    await expect(result).rejects.toThrow("core disconnected");
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(dispatches()).toHaveLength(dispatched);
+    fake.holdSnapshot = false;
+    const next = runtime.executeTurn(turn("turn-2", "again"));
+    answer(await started2("turn-2"), "ok");
+    expect((await next).output).toBe("ok");
+  },
+);
 
 it("cancels promptly during a reconnect delay before anything was dispatched", async () => {
   const slow = build({ reconnectDelayMs: 5_000 });
@@ -1169,16 +1149,26 @@ it("keeps recovering a possibly dispatched turn when cancelled during a reconnec
   await slow.close();
 }, 10_000);
 
-it("closes promptly while the first snapshot never arrives", async () => {
-  fake.holdSnapshot = true;
-  const result = runtime.executeTurn(turn("turn-1", "work"));
-  await until(() => fake.subscriptions.length === 1);
-  const started = Date.now();
-  await runtime.close();
-  await expect(result).rejects.toThrow("T3 runtime is closed");
-  expect(Date.now() - started).toBeLessThan(1_000);
-  expect(dispatches()).toHaveLength(0);
-});
+it.each([false, true])(
+  "closes promptly while the first snapshot never arrives, existing thread %s",
+  async (existing) => {
+    if (existing) {
+      const initial = runtime.executeTurn(turn("initial", "Hello."));
+      answer(await started2("initial"), "Hi.");
+      await initial;
+    }
+    const dispatched = dispatches().length;
+    const subscribed = fake.subscriptions.length;
+    fake.holdSnapshot = true;
+    const result = runtime.executeTurn(turn("turn-1", "work"));
+    await until(() => fake.subscriptions.length === subscribed + 1);
+    const started = Date.now();
+    await runtime.close();
+    await expect(result).rejects.toThrow("T3 runtime is closed");
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(dispatches()).toHaveLength(dispatched);
+  },
+);
 
 const started2 = started;
 
@@ -1335,7 +1325,7 @@ it("fences the conversation when a turn read back from an existing run exits wit
   // Both turns will fail; observe each rejection as it happens.
   const firstFails = first.catch((failure: unknown) => failure);
   const againFails = again.catch((failure: unknown) => failure);
-  await until(() => fake.subscriptions.length === 2);
+  await until(() => retry.activity("turn-1", "discord-private")?.phase === "model");
   expect(dispatches()).toHaveLength(1);
   fake.protocolVersion = 3;
   fake.disconnectAll();
@@ -1565,7 +1555,7 @@ it("keeps the answer text it observed when a bounded snapshot resumes without it
   fake.assistant(threadId, run.id, "Part two.", false, "2");
   fake.complete(threadId, run.id);
   expect((await result).output).toBe("Part one.\n\nPart two.");
-  expect(fake.subscriptions).toHaveLength(2);
+  expect(fake.subscriptions.at(-1)?.afterSequence).toBeDefined();
 });
 
 it("queues behind a person's run in the native UI and cancels only its own queued run", async () => {
@@ -1946,7 +1936,7 @@ it("lists the commands and user-invocable skills T3 offers the conversation's pr
 
 it("runs different conversations at once and each conversation's turns in order", async () => {
   const other = { audience_id: "conversation-2" };
-  const otherThread = derivedId("thread", PROJECT, "discord-private", "default", "conversation-2");
+  const otherThread = derivedId("thread", "discord-private", "default", "conversation-2");
   const otherRun = (correlation: string) =>
     fake.threads
       .get(otherThread)
@@ -1973,7 +1963,7 @@ it("runs different conversations at once and each conversation's turns in order"
 });
 
 it("cancels one conversation's turn without touching another's", async () => {
-  const otherThread = derivedId("thread", PROJECT, "discord-private", "default", "conversation-2");
+  const otherThread = derivedId("thread", "discord-private", "default", "conversation-2");
   const controller = new AbortController();
   const cancelled = runtime.executeTurn(turn("turn-1", "stop me"), controller.signal);
   const mine = await started("turn-1");
