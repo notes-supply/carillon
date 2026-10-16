@@ -13,8 +13,8 @@
 1114 crates/carillon-discord/src/operations.rs
 1039 crates/carillon-discord/src/setup/tests.rs
 1152 packages/runtime-t3/src/fake.ts
-2449 packages/runtime-t3/src/runtime.test.ts
-1268 packages/runtime-t3/src/runtime.ts
+2104 packages/runtime-t3/src/runtime.test.ts
+1254 packages/runtime-t3/src/runtime.ts
 3366 packages/runtime-t3/src/watch.test.ts
 1913 packages/runtime-t3/src/watch.ts
 1027 scripts/test-filesystem.mjs
