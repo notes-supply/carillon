@@ -23,7 +23,7 @@ const Id = Type.String({ minLength: 1 });
 const Nullable = <T extends ReturnType<typeof Type.String>>(schema: T) =>
   Type.Union([schema, Type.Null()]);
 
-export const RunStatusSchema = Type.Union([
+const RunStatusSchema = Type.Union([
   Type.Literal("preparing"),
   Type.Literal("queued"),
   Type.Literal("starting"),
@@ -84,7 +84,7 @@ export const RuntimeRequestSchema = Type.Object({
 });
 export type RuntimeRequest = Static<typeof RuntimeRequestSchema>;
 
-export const BackgroundTaskSchema = Type.Object({
+const BackgroundTaskSchema = Type.Object({
   taskId: Id,
   kind: Type.Optional(Type.String()),
   description: Type.Optional(Type.String()),
@@ -201,7 +201,7 @@ export const ContextTransferSchema = Type.Object({
 });
 export type ContextTransfer = Static<typeof ContextTransferSchema>;
 
-export const ItemStatusSchema = Type.Union([
+const ItemStatusSchema = Type.Union([
   Type.Literal("idle"),
   Type.Literal("pending"),
   Type.Literal("running"),
@@ -211,7 +211,6 @@ export const ItemStatusSchema = Type.Union([
   Type.Literal("cancelled"),
   Type.Literal("interrupted"),
 ]);
-export type ItemStatus = Static<typeof ItemStatusSchema>;
 
 const itemBase = {
   id: Id,
@@ -334,7 +333,7 @@ export const WakeNotificationSchema = Type.Object({
 });
 
 /** A thread snapshot. Timeline items are checked one by one as they are folded. */
-export const ProjectionSchema = Type.Object({
+const ProjectionSchema = Type.Object({
   /** The thread's own record; its selection is what every run of the thread uses. */
   thread: Type.Object({ id: Id, modelSelection: NativeSelectionSchema }),
   runs: Type.Array(RunSchema),

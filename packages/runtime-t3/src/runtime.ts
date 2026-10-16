@@ -260,7 +260,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
   /** The model state of the query's agent and, with an audience, of its conversation's thread. */
   async function currentState(
     connection: T3Connection,
-    models: AgentModels,
+    models: Pick<AgentModels, "offered" | "scope">,
     query: ModelQuery,
   ): Promise<ModelState> {
     const audience = query.audience_id;
@@ -288,11 +288,15 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     if (update.scope === "agent")
       return connected(async (connection) => {
         const { offered } = await agentModels(connection, update, agent);
-        await options.selections.update(offered.available, fromNative(agent.selection), update);
+        const { agent: scope } = await options.selections.update(
+          offered.available,
+          fromNative(agent.selection),
+          update,
+        );
         log(
           `agent ${update.agent_id}: default model ${update.selection === null ? "reset" : "set"}`,
         );
-        return currentState(connection, await agentModels(connection, update, agent), update);
+        return currentState(connection, { offered, scope }, update);
       });
     const audience = update.audience_id;
     if (audience === undefined)
@@ -475,7 +479,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     },
     async close() {
       shutdown.abort(new RuntimeClosed("T3 runtime is closed"));
-      await Promise.allSettled([...pending]);
+      await Promise.allSettled(pending);
     },
   };
 
@@ -1242,6 +1246,10 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       case "disconnected":
       case "timeout":
         return new ExplainedFailure(502, `Lost contact with T3: ${failure.message}.`);
+      default: {
+        const exhaustive: never = failure.kind;
+        return exhaustive;
+      }
     }
   }
 }

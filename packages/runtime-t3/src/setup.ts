@@ -377,16 +377,18 @@ async function publishSettings(
   try {
     parseSettings(installation.providerFile, settings);
   } catch (failure) {
-    throw new Error(`${unchanged}: ${reason(failure)}`);
+    throw new Error(`${unchanged}: ${reason(failure)}`, { cause: failure });
   }
   if (tokenFile !== existing?.token_file)
     await publish(resolve(installation.root, tokenFile), `${endpoint.token}\n`).catch(
       (failure: unknown) => {
-        throw new Error(`${unchanged}: ${reason(failure)}`);
+        throw new Error(`${unchanged}: ${reason(failure)}`, { cause: failure });
       },
     );
   await publish(installation.providerFile, settings).catch((failure: unknown) => {
-    throw failure instanceof Unsynced ? failure : new Error(`${unchanged}: ${reason(failure)}`);
+    throw failure instanceof Unsynced
+      ? failure
+      : new Error(`${unchanged}: ${reason(failure)}`, { cause: failure });
   });
 }
 

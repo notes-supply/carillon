@@ -1846,9 +1846,12 @@ it.each([false, true])(
   },
 );
 
-it.each([false, true])(
-  "retains only native result uncertainty still owed before a gap (inside: %s)",
-  (inside) => {
+it.each([
+  { inside: false, outcome: { kind: "unresolved" }, quiet: false },
+  { inside: true, outcome: { kind: "completed", output: "PARENT\n\nB RESULT" }, quiet: true },
+])(
+  "retains only native result uncertainty still owed before a gap (inside: $inside)",
+  ({ inside, outcome, quiet }) => {
     const watch = watchTurn("thread", "message-1", "/workspace");
     watch.apply(
       snapshot({
@@ -1888,14 +1891,8 @@ it.each([false, true])(
       event(7, "message.updated", reply("result", "run-2", "B RESULT", "2026-10-05T11:14:59Z")),
     );
     watch.apply(event(8, "run.updated", run("completed", "wake", 2)));
-    if (inside) {
-      expect(watch.outcome()).toEqual({ kind: "completed", output: "PARENT\n\nB RESULT" });
-      expect(watch.quiet()).toBe(true);
-    } else {
-      // A was still owed, too: one unlinked wake cannot discharge both A and B.
-      expect(watch.outcome()).toMatchObject({ kind: "unresolved" });
-      expect(watch.quiet()).toBe(false);
-    }
+    expect(watch.outcome()).toMatchObject(outcome);
+    expect(watch.quiet()).toBe(quiet);
   },
 );
 

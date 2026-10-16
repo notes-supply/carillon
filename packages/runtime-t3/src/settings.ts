@@ -53,10 +53,10 @@ const SettingsSchema = Type.Object(
 
 /** The settings file as written, its URL an origin. */
 export type SettingsFile = Static<typeof SettingsSchema>;
-export type AgentSettingsFile = Static<typeof AgentSettingsSchema>;
+type AgentSettingsFile = Static<typeof AgentSettingsSchema>;
 
 /** An agent as the runtime runs it. */
-export interface AgentSettings {
+interface AgentSettings {
   readonly projectId: string;
   /** The agent default from the settings: what new threads start with until `/model` changes it. */
   readonly selection: NativeSelection;
@@ -130,6 +130,7 @@ export function parseSettings(path: string, text: string): SettingsFile {
     if (failure instanceof TomlError)
       throw new Error(
         `${path}: invalid TOML at line ${String(failure.line)}, column ${String(failure.column)}`,
+        { cause: failure },
       );
     throw failure;
   }

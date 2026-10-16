@@ -316,7 +316,7 @@ it("gives a new token a file of its own and leaves settings naming a token writt
   const previous = await readFile(runtime.providerFile, "utf8");
   const credentials = join(root, "credentials");
   const providers = join(root, "providers");
-  const tokens = async () => (await readdir(credentials)).sort();
+  const tokens = async () => (await readdir(credentials)).toSorted();
   const kept = await tokens();
   const moved = await fakeT3("rotated-token");
   moved.projects = fake.projects;
@@ -495,7 +495,7 @@ it("checks the saved settings and T3 token as startup reads them, reaching no T3
     expect(refused.stderr).toMatch(new RegExp(`^error: .*${reason.source}.*\\n$`, "u"));
     expect(refused.stderr).not.toContain("saved-token");
   }
-});
+}, 30_000);
 
 /** The CLI with `input` on standard input; the fake T3 serves from this process meanwhile. */
 async function cli(

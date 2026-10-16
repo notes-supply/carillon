@@ -85,11 +85,11 @@ it("ends a stalled discovery, body read or upgrade with the caller's own reason,
     fake[fault] = true;
     const controller = new AbortController();
     const pending = connectT3({ url: fake.url, token: fake.token }, { signal: controller.signal });
-    const failing = expect(pending).rejects.toThrow("core disconnected");
+    const failing = pending.catch((failure: unknown) => failure);
     await new Promise((resolve) => setTimeout(resolve, 100));
     const started = Date.now();
     controller.abort(new Error("core disconnected"));
-    await failing;
+    expect(await failing).toMatchObject({ message: "core disconnected" });
     expect(Date.now() - started).toBeLessThan(500);
     fake[fault] = false;
     fake.disconnectAll();

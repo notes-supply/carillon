@@ -1334,8 +1334,8 @@ it("neither interrupts nor detaches the session of a person's run when cancelled
   const person = fake.message(threadId, "Something else?");
   // The fold hears of the person's run before Carillon cancels.
   await sleep(200);
-  controller.abort();
-  await expect(result).rejects.toThrow();
+  controller.abort(new Error("core disconnected"));
+  await expect(result).rejects.toThrow("core disconnected");
   expect(fake.interrupts).toEqual([]);
   expect(fake.detached).toEqual([]);
   expect(thread().runs.find((candidate) => candidate.id === person.id)?.status).toBe("running");
@@ -1357,8 +1357,8 @@ it("detaches no session while a person's completed run still lists its own backg
   fake.complete(threadId, person.id);
   // The fold hears of it before Carillon cancels.
   await sleep(200);
-  controller.abort();
-  await expect(result).rejects.toThrow();
+  controller.abort(new Error("core disconnected"));
+  await expect(result).rejects.toThrow("core disconnected");
   // T3 refuses to interrupt the turn's completed run, and the session the
   // person's work runs in is not detached under it.
   expect(fake.interrupts).toEqual([]);
@@ -1411,8 +1411,8 @@ it("neither interrupts another provider's wake nor detaches a session under it w
   const { result, foreign } = await olderProviderWake(controller.signal);
   // The fold hears of the wake before Carillon cancels.
   await sleep(200);
-  controller.abort();
-  await expect(result).rejects.toThrow();
+  controller.abort(new Error("core disconnected"));
+  await expect(result).rejects.toThrow("core disconnected");
   expect(fake.interrupts).toEqual([]);
   expect(fake.detached).toEqual([]);
   expect(thread().runs.find((candidate) => candidate.id === foreign.id)?.status).toBe("running");
@@ -1685,18 +1685,17 @@ it("fences the conversation when a turn read back from an existing run exits wit
   const retry = build();
   const again = retry.executeTurn(turn("turn-1", "work"));
   // Both turns will fail; observe each rejection as it happens.
-  const firstFails = expect(first).rejects.toThrow(
-    /^Lost contact with T3 while the turn ran .*may still be running\.$/u,
-  );
-  const againFails = expect(again).rejects.toThrow(
-    /^Lost contact with T3 while the turn ran .*may still be running\.$/u,
-  );
+  const firstFails = first.catch((failure: unknown) => failure);
+  const againFails = again.catch((failure: unknown) => failure);
   await until(() => fake.subscriptions.length === 2);
   expect(dispatches()).toHaveLength(1);
   fake.protocolVersion = 3;
   fake.disconnectAll();
-  await againFails;
-  await firstFails;
+  for (const failure of [await againFails, await firstFails])
+    expect(failure).toHaveProperty(
+      "message",
+      expect.stringMatching(/^Lost contact with T3 while the turn ran .*may still be running\.$/u),
+    );
   fake.protocolVersion = 2;
   await expect((await backgroundTurn("turn-2", retry)).result).rejects.toThrow(
     /was not confirmed stopped/u,

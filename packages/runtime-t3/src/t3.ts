@@ -53,7 +53,7 @@ export interface T3Connection {
   close(): void;
 }
 
-export interface ConnectOptions {
+interface ConnectOptions {
   /** Bounds discovery, the upgrade and every answered call. */
   readonly timeoutMs?: number;
   /**
@@ -171,7 +171,7 @@ function openConnection(socket: WebSocket, timeoutMs: number): T3Connection {
   const closed = new Promise<void>((resolve) => {
     socket.addEventListener("close", () => {
       closeFailure ??= new T3Failure("disconnected", "the T3 connection closed");
-      for (const request of [...pending.values()]) request.exit(closeFailure, undefined);
+      for (const request of pending.values()) request.exit(closeFailure, undefined);
       pending.clear();
       resolve();
     });

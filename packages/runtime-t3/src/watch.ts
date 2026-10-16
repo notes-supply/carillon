@@ -84,7 +84,7 @@ export type Outcome =
   /** T3 waits for an approval or answer this runtime cannot give; `asked` says which. */
   | { readonly kind: "blocked"; readonly asked: string };
 
-export interface Retained {
+interface Retained {
   readonly runs: number;
   /** Calls under way: running, pending or waiting. */
   readonly running: number;
@@ -225,7 +225,7 @@ type ToolItem = TurnItemOf<
 >;
 type RequestItem = TurnItemOf<"user_input_request" | "approval_request">;
 
-export function isActive(run: Run): boolean {
+function isActive(run: Run): boolean {
   return ACTIVE.has(run.status);
 }
 
@@ -639,10 +639,10 @@ export function watchTurn(
       turnRuns.set(run.id, run);
       earlier.delete(run.id);
       if (last === undefined || run.ordinal >= last.ordinal) last = run;
-      for (const [message, parent] of [...pendingLinks])
+      for (const [message, parent] of pendingLinks)
         if (parent === run.id) keepLink(message, parent);
       if (delivery != null) keepLink(delivery.messageId, run.id);
-      for (const transfer of [...recentTransfers.values()])
+      for (const transfer of recentTransfers.values())
         if (namesLinkedRun(transfer)) foldTransfer(transfer);
       return;
     }
@@ -686,7 +686,7 @@ export function watchTurn(
   /** Runs seen before the turn's own were filed as earlier; refile those from the turn onward. */
   function refile(): void {
     if (anchor === undefined) return;
-    for (const run of [...earlier.values()]) if (run.ordinal >= anchor.ordinal) foldRun(run);
+    for (const run of earlier.values()) if (run.ordinal >= anchor.ordinal) foldRun(run);
   }
 
   function foldMessage(message: Message): void {
@@ -1081,7 +1081,7 @@ export function watchTurn(
 
   function answer(): string {
     return [...assistant.values()]
-      .sort((left, right) => madeAt(left) - madeAt(right))
+      .toSorted((left, right) => madeAt(left) - madeAt(right))
       .map((message) => message.text.trim())
       .filter((text) => text.length > 0)
       .join("\n\n");
@@ -1118,6 +1118,10 @@ export function watchTurn(
           tool: "subagent",
           ...withDetail(item.title === null ? undefined : displayed(item.title)),
         };
+      default: {
+        const exhaustive: never = item;
+        return exhaustive;
+      }
     }
   }
 
@@ -1469,7 +1473,7 @@ export function watchTurn(
           snapshotLinks = links;
           snapshotOpenings = opened;
           try {
-            for (const run of [...projection.runs].sort((a, b) => a.ordinal - b.ordinal))
+            for (const run of projection.runs.toSorted((a, b) => a.ordinal - b.ordinal))
               foldRun(run);
             refile();
           } finally {
@@ -1497,7 +1501,7 @@ export function watchTurn(
               .filter((task) => SETTLED_TASK.has(task.status))
               .map((task) => task.id),
           );
-          for (const task of [...listed].sort(
+          for (const task of listed.toSorted(
             (left, right) => Number(settledTask(left)) - Number(settledTask(right)),
           ))
             foldSubagent(task);
@@ -1757,6 +1761,10 @@ export function watchTurn(
         case "running":
         case "waiting":
           return undefined;
+        default: {
+          const exhaustive: never = last.status;
+          return exhaustive;
+        }
       }
     },
     activity() {
