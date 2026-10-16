@@ -24,6 +24,10 @@ rule:
             - pattern: $ASSERT!($$$RESULT.err().is_some(), $$$MESSAGE)
             - pattern: $ASSERT!($$$RESULT.err().is_none())
             - pattern: $ASSERT!($$$RESULT.err().is_none(), $$$MESSAGE)
+            - pattern: $ASSERT!($$$RESULT.ok().is_some())
+            - pattern: $ASSERT!($$$RESULT.ok().is_some(), $$$MESSAGE)
+            - pattern: $ASSERT!($$$RESULT.ok().is_none())
+            - pattern: $ASSERT!($$$RESULT.ok().is_none(), $$$MESSAGE)
     - all:
         - has: { field: macro, regex: "^(debug_)?assert_(eq|ne)$" }
         - any:

@@ -20,3 +20,9 @@ invalid:
   - "fn t() { assert!(matches!(r, Err(..))); }"
   - "fn t() { assert_eq!(r.is_err(), true); }"
   - "fn t() { assert!(r.err().is_some()); }"
+  - "fn t() { assert!(r.ok().is_none()); }"
+  - "fn t() { assert!(r.ok().is_some()); }"
+  - 'fn t() { assert!(r.ok().is_none(), "rejected"); }'
+  - 'fn t() { assert!(r.ok().is_some(), "accepted"); }'
+  - "fn t() { debug_assert!(read().ok().is_none()); }"
+  - "fn t() { debug_assert!(read().ok().is_some()); }"
