@@ -1,25 +1,82 @@
 /** Native thread identity and project ownership, read from T3 rather than stored locally. */
 import { ExplainedFailure } from "@carillon/runtime/failure";
+import type { TurnRequest } from "@carillon/runtime/operations";
 import { Check } from "typebox/value";
 import {
   RPC,
+  derivedId,
   subscribeThread,
+  threadCreate,
   ThreadSnapshotSchema,
+  type NativeSelection,
   type Projection,
   type ThreadBinding,
 } from "./contracts.ts";
 import { T3Failure, type T3Connection, type T3Stream } from "./t3.ts";
 import type { TurnWatch } from "./watch.ts";
 
+type Conversation = Pick<TurnRequest, "interface_id" | "agent_id" | "audience_id">;
+
+/** The stable queue and canonical thread identity of a channel or private conversation. */
+export function conversationId(request: Conversation): string {
+  return derivedId("thread", request.interface_id, request.agent_id, request.audience_id);
+}
+
+/** Resolves native project ownership; only a message supplies `start` to acknowledge a cutover. */
+export async function resolveThread(
+  connection: T3Connection,
+  request: Conversation,
+  context: Omit<ThreadBinding, "threadId">,
+  options: {
+    readonly timeoutMs: number;
+    readonly signal?: AbortSignal;
+    readonly start?: () => Promise<NativeSelection>;
+  },
+): Promise<ThreadBinding> {
+  const { timeoutMs, signal } = options;
+  const canonical = { ...context, threadId: conversationId(request) };
+  const original = await readProjection(connection, canonical.threadId, timeoutMs, signal);
+  if (original === undefined || original.thread.projectId === canonical.projectId) return canonical;
+  const scoped = {
+    ...context,
+    threadId: derivedId(
+      "thread",
+      context.projectId,
+      request.interface_id,
+      request.agent_id,
+      request.audience_id,
+    ),
+  };
+  if ((await readThread(connection, scoped, timeoutMs, signal)) !== undefined) return scoped;
+  if (options.start !== undefined)
+    await ensureThread(connection, scoped, await options.start(), timeoutMs, signal);
+  throw projectChanged();
+}
+
+function projectChanged(): ExplainedFailure {
+  return new ExplainedFailure(
+    409,
+    "This conversation ran in a T3 project this agent no longer works in. Your next message starts a new conversation in its current project.",
+  );
+}
+
 /** Refuses another thread's records or a conversation from the agent's previous project. */
 function checkThread(binding: ThreadBinding, thread: Projection["thread"]): void {
   if (thread.id !== binding.threadId)
     throw new T3Failure("malformed", "T3 sent the snapshot of another thread");
-  if (thread.projectId !== binding.projectId)
-    throw new ExplainedFailure(
-      409,
-      "This conversation ran in a T3 project this agent no longer works in. Start a new conversation.",
-    );
+  if (thread.projectId !== binding.projectId) throw projectChanged();
+}
+
+/** Reads a resolved thread, refusing a project change since it was bound. */
+export async function readThread(
+  connection: T3Connection,
+  binding: ThreadBinding,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<Projection | undefined> {
+  const projection = await readProjection(connection, binding.threadId, timeoutMs, signal);
+  if (projection !== undefined) checkThread(binding, projection.thread);
+  return projection;
 }
 
 /**
@@ -28,9 +85,9 @@ function checkThread(binding: ThreadBinding, thread: Projection["thread"]): void
  * armed once the subscription exists, so one that fails as it is set up
  * leaves nothing behind and rejects with its own failure.
  */
-export function readThread(
+function readProjection(
   connection: T3Connection,
-  binding: ThreadBinding,
+  threadId: string,
   timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<Projection | undefined> {
@@ -47,7 +104,7 @@ export function readThread(
     };
     const stream = connection.subscribe(
       RPC.subscribeThread,
-      subscribeThread(binding.threadId, undefined),
+      subscribeThread(threadId, undefined),
       (item) => {
         cleanup();
         if (!Check(ThreadSnapshotSchema, item))
@@ -59,7 +116,8 @@ export function readThread(
           );
         else {
           try {
-            checkThread(binding, item.projection.thread);
+            if (item.projection.thread.id !== threadId)
+              throw new T3Failure("malformed", "T3 sent the snapshot of another thread");
             resolve(item.projection);
           } catch (failure) {
             reject(failure);
@@ -84,6 +142,28 @@ export function readThread(
       },
     );
   });
+}
+
+/** Opens a resolved conversation thread on its default model unless T3 already has it. */
+export async function ensureThread(
+  connection: T3Connection,
+  binding: ThreadBinding,
+  selection: NativeSelection,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  if ((await readThread(connection, binding, timeoutMs, signal)) !== undefined) return;
+  signal?.throwIfAborted();
+  try {
+    await connection.call(RPC.dispatchCommand, threadCreate(binding, selection));
+  } catch (failure) {
+    if (failure instanceof T3Failure && failure.kind === "rejected")
+      throw new ExplainedFailure(
+        502,
+        `T3 refused to open the conversation thread: ${failure.detail ?? failure.message}`,
+      );
+    throw failure;
+  }
 }
 
 /**

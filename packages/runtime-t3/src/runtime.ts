@@ -48,7 +48,6 @@ import {
   RPC,
   runInterrupt,
   sessionDetach,
-  threadCreate,
   type MessageContent,
   type NativeSelection,
   type ThreadBinding,
@@ -67,7 +66,13 @@ import {
   type AgentModels,
 } from "./models.ts";
 import { offers } from "./settings.ts";
-import { followThread, readThread } from "./threads.ts";
+import {
+  conversationId,
+  ensureThread,
+  followThread,
+  readThread,
+  resolveThread,
+} from "./threads.ts";
 import {
   connectT3,
   DEFAULT_TIMEOUT_MS,
@@ -77,20 +82,13 @@ import {
   type T3Endpoint,
   type T3Stream,
 } from "./t3.ts";
+import { compose, titleSeed } from "./turn-input.ts";
 import { threadWorking, watchTurn, type FollowUp, type Outcome, type TurnWatch } from "./watch.ts";
 
 /** The follow-up cursor this runtime hands core with an answer, and reads back on the follow-up turn. */
 const FollowUpSchema = Type.Object({
   message: Type.String({ minLength: 1 }),
   after: Type.Integer({ minimum: 0 }),
-});
-
-// Integration addresses are data. Do not forward the provider's raw message,
-// signed attachments or arbitrary nested native payload into the prompt.
-const OriginSchema = Type.Object({
-  origin: Type.Record(Type.String(), Type.Union([Type.String({ maxLength: 128 }), Type.Null()]), {
-    maxProperties: 16,
-  }),
 });
 
 export interface T3Agent {
@@ -200,10 +198,13 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
   }
 
   /** One short exchange with T3 on its own connection; T3's failures are explained. */
-  async function connected<T>(work: (connection: T3Connection) => Promise<T>): Promise<T> {
+  async function connected<T>(
+    work: (connection: T3Connection) => Promise<T>,
+    signal = shutdown.signal,
+  ): Promise<T> {
     let connection: T3Connection | undefined;
     try {
-      connection = await connect(options.endpoint, { timeoutMs, signal: shutdown.signal });
+      connection = await connect(options.endpoint, { timeoutMs, signal });
       return await work(connection);
     } catch (failure) {
       throw unavailable(failure);
@@ -258,7 +259,11 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     const audience = query.audience_id;
     return audience === undefined
       ? undefined
-      : readThread(connection, bindThread({ ...query, audience_id: audience }), timeoutMs);
+      : readThread(
+          connection,
+          await bindThread(connection, { ...query, audience_id: audience }),
+          timeoutMs,
+        );
   }
 
   /**
@@ -295,17 +300,19 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     const audience = update.audience_id;
     if (audience === undefined)
       throw new ExplainedFailure(400, "There is no conversation here to set a model for.");
-    const binding = bindThread({ ...update, audience_id: audience });
-    if (threads.has(binding.threadId)) throw busy();
-    return inThread(binding.threadId, () =>
+    const conversation = { ...update, audience_id: audience };
+    const id = conversationId(conversation);
+    if (threads.has(id)) throw busy();
+    return inThread(id, () =>
       connected(async (connection) => {
+        const binding = await bindThread(connection, conversation);
         const models = await readModels(connection, update, agent);
         const { available } = models.offered;
         const target =
           update.selection === null
             ? routed(models)
             : toNative(models.offered, resolved(available, validated(available, update.selection)));
-        await ensureThread(connection, binding, routed(models));
+        await ensureThread(connection, binding, routed(models), timeoutMs);
         const before = await readThread(connection, binding, timeoutMs);
         if (before === undefined)
           throw new T3Failure("malformed", "T3 did not list the conversation's thread it opened");
@@ -361,7 +368,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       // A follow-up turn only reads T3's records, so it runs beside the
       // conversation's turns rather than ahead of or behind them.
       return track(() =>
-        request.follow_up === undefined ? inThread(bindThread(request).threadId, run) : run(),
+        request.follow_up === undefined ? inThread(conversationId(request), run) : run(),
       );
     },
     activity(correlationId, interfaceId) {
@@ -418,7 +425,17 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
   };
 
   async function executeT3(request: TurnRequest, signal: AbortSignal): Promise<TurnResponse> {
-    const binding = bindThread(request);
+    agentOf(request.agent_id);
+    const binding = await connected(
+      (connection) =>
+        bindThread(
+          connection,
+          request,
+          signal,
+          request.follow_up === undefined && turnIntent(request.native) !== "command",
+        ),
+      signal,
+    );
     // A follow-up turn core queued to carry the report of work an earlier
     // turn delegated: it reads T3's continuations of that turn's message and
     // dispatches nothing.
@@ -553,21 +570,34 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
   }
 
   function bindThread(
+    connection: T3Connection,
     request: Pick<TurnRequest, "interface_id" | "agent_id" | "audience_id">,
-  ): ThreadBinding {
+    signal?: AbortSignal,
+    start = false,
+  ): Promise<ThreadBinding> {
     const agent = agentOf(request.agent_id);
-    return {
-      threadId: derivedId("thread", request.interface_id, request.agent_id, request.audience_id),
-      projectId: agent.projectId,
-      // The assistant's threads say whose they are; T3 titles plain T3
-      // Code's from their first message, as it titles its own.
-      title: agent.assistant
-        ? `${options.title ?? "Carillon"} ${request.interface_id} ${request.audience_id}`.slice(
-            0,
-            120,
-          )
-        : NEW_THREAD,
-    };
+    return resolveThread(
+      connection,
+      request,
+      {
+        projectId: agent.projectId,
+        // The assistant's threads say whose they are; T3 titles plain T3
+        // Code's from their first message, as it titles its own.
+        title: agent.assistant
+          ? `${options.title ?? "Carillon"} ${request.interface_id} ${request.audience_id}`.slice(
+              0,
+              120,
+            )
+          : NEW_THREAD,
+      },
+      {
+        timeoutMs,
+        ...(signal === undefined ? {} : { signal }),
+        ...(start
+          ? { start: async () => routed(await readModels(connection, request, agent)) }
+          : {}),
+      },
+    );
   }
 
   /**
@@ -671,7 +701,13 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       const models =
         follow === undefined ? await readModels(connection, request, agent) : undefined;
       if (models !== undefined)
-        await ensureThread(connection, binding, routed(models), reached() ? undefined : signal);
+        await ensureThread(
+          connection,
+          binding,
+          routed(models),
+          timeoutMs,
+          reached() ? undefined : signal,
+        );
       else await readThread(connection, binding, timeoutMs, signal);
       const stream = followThread(connection, binding, watch);
       try {
@@ -746,26 +782,6 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       } finally {
         stream.end();
       }
-    }
-  }
-
-  /** Opens the conversation's thread, on `selection`, unless T3 has it already. */
-  async function ensureThread(
-    connection: T3Connection,
-    binding: ThreadBinding,
-    selection: NativeSelection,
-    signal?: AbortSignal,
-  ): Promise<void> {
-    if ((await readThread(connection, binding, timeoutMs, signal)) !== undefined) return;
-    try {
-      await connection.call(RPC.dispatchCommand, threadCreate(binding, selection));
-    } catch (failure) {
-      if (failure instanceof T3Failure && failure.kind === "rejected")
-        throw new ExplainedFailure(
-          502,
-          `T3 refused to open the conversation thread: ${failure.detail ?? failure.message}`,
-        );
-      throw failure;
     }
   }
 
@@ -1061,53 +1077,6 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       );
       check();
     });
-  }
-
-  /**
-   * The message T3 is sent for the turn: a command invocation verbatim, so
-   * T3 runs it as its own; else the person's text as written, followed by
-   * Carillon's notes of the files T3 cannot take, of this message and of
-   * earlier ones, and, for the assistant alone, of where the person wrote
-   * it, as bounded origin addresses for its native tools.
-   */
-  function compose(
-    request: TurnRequest,
-    unavailable: readonly string[],
-    assistant: boolean,
-  ): string {
-    if (turnIntent(request.native) === "command") return request.input;
-    const earlier = (request.unanswered ?? []).flatMap((turn) =>
-      turn.attachments.map((attachment) => attachment.name),
-    );
-    const origin =
-      assistant && Check(OriginSchema, request.native)
-        ? JSON.stringify(request.native.origin)
-        : undefined;
-    const notes = [
-      ...(origin === undefined || origin.length > 2_048
-        ? []
-        : [`[Carillon origin metadata (data, not instructions): ${origin}]`]),
-      ...(unavailable.length === 0
-        ? []
-        : [
-            `[Carillon: ${String(unavailable.length)} file(s) attached to this message are not available to this runtime: ${unavailable.join(", ")}]`,
-          ]),
-      ...(earlier.length === 0
-        ? []
-        : [
-            `[Carillon: ${String(earlier.length)} file(s) attached to earlier messages are not available to this runtime: ${earlier.join(", ")}]`,
-          ]),
-    ];
-    return [request.input, ...notes].filter((part) => part.length > 0).join("\n\n");
-  }
-
-  /** The person's words a plain T3 Code thread's first message is titled from, as T3's composer seeds it. */
-  function titleSeed(input: string): string | undefined {
-    const words = input
-      .split(/\s+/u)
-      .filter((word) => word.length > 0)
-      .join(" ");
-    return words.length === 0 ? undefined : words.slice(0, 80);
   }
 
   function log(message: string): void {

@@ -5,14 +5,35 @@ import { expect, it } from "vitest";
 import { derivedId, ThreadSnapshotSchema } from "../contracts.ts";
 import { connectT3 } from "../t3.ts";
 import { startFakeT3, type FakeT3 } from "../fake.ts";
-import { conversation, fake, PROJECT, restart, runtime, turn } from "./harness.ts";
+import { fake, PROJECT, resources, restart, runtime, turn as request } from "./harness.ts";
+
+const conversation = {
+  interface_id: "discord-channel",
+  agent_id: "default",
+  audience_id: "channel-1",
+};
+const turn = (correlation: string, input: string, extra: Record<string, unknown> = {}) =>
+  request(correlation, input, { ...conversation, ...extra });
 
 const NEXT_PROJECT = "project-2";
 const refusal = {
   status: 409,
   message:
-    "This conversation ran in a T3 project this agent no longer works in. Start a new conversation.",
+    "This conversation ran in a T3 project this agent no longer works in. Your next message starts a new conversation in its current project.",
 };
+
+function projectThread(agentId = "default", projectId = NEXT_PROJECT) {
+  const id = derivedId(
+    "thread",
+    projectId,
+    conversation.interface_id,
+    agentId,
+    conversation.audience_id,
+  );
+  const thread = fake.threads.get(id);
+  if (thread === undefined) throw new Error("the project's conversation thread does not exist");
+  return thread;
+}
 
 async function started(correlation: string, server: FakeT3 = fake) {
   const find = () =>
@@ -43,7 +64,7 @@ async function refused(operation: Promise<unknown>) {
 }
 
 it.each(["default", "code"])(
-  "ends %s conversations on a project change and starts new conversations in the new project",
+  "refuses one %s channel message on a project change, then continues there and resumes the original project",
   async (agentId) => {
     const old = await seed(agentId);
     await restart({ projectId: NEXT_PROJECT });
@@ -54,21 +75,57 @@ it.each(["default", "code"])(
         AbortSignal.timeout(500),
       ),
     );
-    expect(fake.received).toHaveLength(received);
-    expect(fake.threads.size).toBe(1);
+    const next = projectThread(agentId);
+    expect(next.projectId).toBe(NEXT_PROJECT);
+    expect(next.messages).toEqual([]);
+    expect(next.runs).toEqual([]);
+    expect(fake.received.slice(received)).toEqual([
+      expect.objectContaining({
+        type: "thread.create",
+        threadId: next.id,
+        projectId: NEXT_PROJECT,
+        title:
+          agentId === "default"
+            ? `Carillon ${conversation.interface_id} ${conversation.audience_id}`
+            : "New thread",
+      }),
+    ]);
+    expect(fake.threads.size).toBe(2);
     expect(old.messages.filter((message) => message.role === "user")).toHaveLength(1);
     expect(runtime.activity("queued", conversation.interface_id)).toBeUndefined();
 
-    const response = runtime.executeTurn(
-      turn("fresh", "Use the new project.", { audience_id: "new-conversation", agent_id: agentId }),
-    );
-    const fresh = await started("fresh");
-    expect(fresh.thread.projectId).toBe(NEXT_PROJECT);
-    fake.assistant(fresh.thread.id, fresh.run.id, "New project.");
-    fake.complete(fresh.thread.id, fresh.run.id);
-    expect((await response).output).toBe("New project.");
+    for (const correlation of ["second", "later"]) {
+      await restart({ projectId: NEXT_PROJECT });
+      const response = runtime.executeTurn(
+        turn(correlation, "Use the new project.", { agent_id: agentId }),
+      );
+      const fresh = await started(correlation);
+      expect(fresh.thread.id).toBe(next.id);
+      await fake.waitFor(
+        () => runtime.activity(correlation, conversation.interface_id)?.phase === "model",
+      );
+      fake.assistant(fresh.thread.id, fresh.run.id, "New project.");
+      fake.complete(fresh.thread.id, fresh.run.id);
+      expect((await response).output).toBe("New project.");
+    }
     expect(fake.threads.size).toBe(2);
     expect(old.projectId).toBe(PROJECT);
+    expect(old.messages.filter((message) => message.role === "user")).toHaveLength(1);
+    expect(next.messages.filter((message) => message.role === "user")).toHaveLength(2);
+    const sent = fake.commands.filter((command) => command.type === "message.dispatch");
+    expect(sent.slice(1).map((command) => command.threadId)).toEqual([next.id, next.id]);
+    expect(sent[1]?.["titleSeed"]).toBe(agentId === "code" ? "Use the new project." : undefined);
+
+    await restart({ projectId: PROJECT });
+    const resumed = runtime.executeTurn(
+      turn("resumed", "Back to the original.", { agent_id: agentId }),
+    );
+    const original = await started("resumed");
+    expect(original.thread.id).toBe(old.id);
+    fake.assistant(old.id, original.run.id, "Resumed.");
+    fake.complete(old.id, original.run.id);
+    expect((await resumed).output).toBe("Resumed.");
+    expect(fake.threads.size).toBe(2);
   },
 );
 
@@ -90,8 +147,15 @@ it("keeps the native thread identity independent of the project", async () => {
   }
 });
 
-it.each(["model read", "conversation model", "conversation reset", "agent model", "commands"])(
-  "refuses a bound %s request after a project change without changing native or default settings",
+it.each([
+  "model read",
+  "conversation model",
+  "conversation reset",
+  "agent model",
+  "agent reset",
+  "commands",
+])(
+  "refuses a bound %s request until a message creates the current project's thread, then uses it",
   async (operation) => {
     const old = await seed();
     await restart({ projectId: NEXT_PROJECT });
@@ -102,27 +166,60 @@ it.each(["model read", "conversation model", "conversation reset", "agent model"
     };
     const before = await runtime.modelState(defaultQuery);
     const selection = { provider: "claudeAgent", model: "claude-haiku-4-5" };
-    const request =
+    const perform = () =>
       operation === "model read"
         ? runtime.modelState(conversation)
         : operation === "commands"
           ? runtime.commands(conversation)
           : runtime.setModel({
               ...conversation,
-              scope: operation === "agent model" ? "agent" : "conversation",
-              selection: operation === "conversation reset" ? null : selection,
+              scope: operation.startsWith("agent") ? "agent" : "conversation",
+              selection: operation.endsWith("reset") ? null : selection,
             });
-    await refused(request);
+    await refused(perform());
     expect(fake.received).toHaveLength(received);
     expect(fake.refreshes).toEqual([]);
     expect(fake.threads.size).toBe(1);
     expect(old.modelSelection.model).toBe("claude-sonnet-5");
     expect(await runtime.modelState(defaultQuery)).toEqual(before);
+
+    await refused(runtime.executeTurn(turn("cutover", "Start in the current project.")));
+    const next = projectThread();
+    next.modelSelection = { instanceId: "claudeAgent", model: "claude-haiku-4-5", options: [] };
+    const commands = fake.received.length;
+    await perform();
+    expect(fake.threads.size).toBe(2);
+    expect(next.messages).toEqual([]);
+    expect(old.modelSelection.model).toBe("claude-sonnet-5");
+    expect(fake.received.slice(commands).every((command) => command.threadId === next.id)).toBe(
+      true,
+    );
+    expect(fake.refreshes).toEqual(
+      operation === "commands" ? [{ instanceId: "claudeAgent", cwd: resources }] : [],
+    );
+    const state = await runtime.modelState(conversation);
+    expect(state.conversation?.selection?.model).toBe(
+      operation === "conversation reset" ? "claude-sonnet-5" : "claude-haiku-4-5",
+    );
+    expect(state.agent.selection?.model).toBe(
+      operation === "agent model" ? "claude-haiku-4-5" : "claude-sonnet-5",
+    );
+    const response = runtime.executeTurn(turn("selected", "Use this model."));
+    const selected = await started("selected");
+    expect(selected.thread.id).toBe(next.id);
+    expect(selected.thread.modelSelection.model).toBe(state.conversation?.selection?.model);
+    fake.assistant(next.id, selected.run.id, "Selected.");
+    fake.complete(next.id, selected.run.id);
+    await response;
+    await restart({ projectId: PROJECT });
+    expect((await runtime.modelState(conversation)).conversation?.selection?.model).toBe(
+      "claude-sonnet-5",
+    );
   },
 );
 
 it.each(["default", "code"])(
-  "refuses %s native commands before dispatch, including thread creation or title seeds",
+  "refuses %s native commands without creating a thread, then dispatches them in the current project's thread",
   async (agentId) => {
     await seed(agentId);
     await restart({ projectId: NEXT_PROJECT });
@@ -135,6 +232,22 @@ it.each(["default", "code"])(
     );
     expect(fake.received).toHaveLength(received);
     expect(fake.threads.size).toBe(1);
+
+    await refused(runtime.executeTurn(turn("cutover", "Move projects.", { agent_id: agentId })));
+    const next = projectThread(agentId);
+    const response = runtime.executeTurn(
+      turn("next-command", "/compact", { agent_id: agentId, native: { intent: "command" } }),
+    );
+    const command = await started("next-command");
+    expect(command.thread.id).toBe(next.id);
+    expect(fake.commands.at(-1)).toMatchObject({
+      type: "message.dispatch",
+      threadId: next.id,
+      text: "/compact",
+    });
+    fake.complete(next.id, command.run.id);
+    await response;
+    expect(fake.threads.size).toBe(2);
   },
 );
 
@@ -157,6 +270,41 @@ it("refuses observations of delegated work from the previous project without sto
   expect(fake.detached).toEqual([]);
   expect(fake.threads.size).toBe(1);
   expect(runtime.activity("observation", conversation.interface_id)).toBeUndefined();
+
+  await refused(runtime.executeTurn(turn("cutover", "Move projects.")));
+  const next = projectThread();
+  const after = fake.received.length;
+  const observation = runtime.executeTurn(
+    turn("observation-after", "", { follow_up: initial.follow_up }),
+  );
+  await expect(observation).rejects.toMatchObject({ status: 502 });
+  await expect(observation).rejects.toThrow(
+    "T3 no longer lists the message whose delegated work this turn reports",
+  );
+  expect(fake.received).toHaveLength(after);
+  expect(next.messages).toEqual([]);
+  expect(fake.interrupts).toEqual([]);
+  expect(fake.detached).toEqual([]);
+
+  const currentResponse = runtime.executeTurn(turn("current", "Delegate in this project."));
+  const current = await started("current");
+  const currentTask = fake.delegate(next.id, current.run.id, { title: "Current project work" });
+  fake.assistant(next.id, current.run.id, "Delegated.");
+  fake.complete(next.id, current.run.id);
+  const currentTurn = await currentResponse;
+  expect(currentTurn.follow_up).toBeDefined();
+  const currentWake = fake.finishDelegation(next.id, currentTask.id);
+  fake.assistant(next.id, currentWake.id, "Current work finished.");
+  fake.complete(next.id, currentWake.id);
+  const currentObserved = runtime.executeTurn(
+    turn("current-observation", "", { follow_up: currentTurn.follow_up }),
+  );
+  expect((await currentObserved).output).toBe("Current work finished.");
+  await restart({ projectId: PROJECT });
+  expect(
+    (await runtime.executeTurn(turn("original-observation", "", { follow_up: initial.follow_up })))
+      .output,
+  ).toBe("Old work finished.");
 });
 
 it("checks the watched snapshot before dispatch or activity even when the ownership read passed", async () => {
@@ -170,7 +318,7 @@ it("checks the watched snapshot before dispatch or activity even when the owners
         ...connection,
         subscribe: (tag, payload, onItem) =>
           connection.subscribe(tag, payload, (item) => {
-            if (Check(ThreadSnapshotSchema, item) && ++snapshots === 1)
+            if (Check(ThreadSnapshotSchema, item) && ++snapshots <= 2)
               onItem({
                 ...item,
                 projection: {
@@ -185,7 +333,7 @@ it("checks the watched snapshot before dispatch or activity even when the owners
   });
   const received = fake.received.length;
   await refused(runtime.executeTurn(turn("watched", "Old work."), AbortSignal.timeout(500)));
-  expect(snapshots).toBe(2);
+  expect(snapshots).toBe(3);
   expect(fake.received).toHaveLength(received);
   expect(fake.threads.size).toBe(1);
   expect(runtime.activity("watched", conversation.interface_id)).toBeUndefined();

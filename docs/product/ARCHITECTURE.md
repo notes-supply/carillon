@@ -170,17 +170,19 @@ See the [Pi guide](../../packages/runtime-pi/README.md).
 
 **T3** (`carillon-runtime-t3`) runs turns on a T3 Code server as another
 client of the threads T3's own UI shows. It stores nothing durable of a
-conversation: one thread per conversation and one message per turn, named
+conversation: one thread per conversation in a project and one message per turn, named
 from Carillon's identifiers, let a lost connection read the work back
-instead of repeating it. A thread ID derives from the interface, agent, and
-audience, independently of the agent's current T3 project. T3's thread projection
-owns its project. The runtime checks that project before using the thread,
-including for model and command requests and follow-up observations. After an
-agent changes projects, existing conversations receive an explanation asking for
-a new conversation. Their queued turns never run in the new project. Conversations
-without a T3 thread yet start in the current project. Native work already running
-in the old project is left alone. Work delegated to T3's child agents reports later
-through observations while the conversation still belongs to the current project.
+instead of repeating it. The canonical thread ID derives from the interface, agent,
+and audience. The runtime uses it when absent or in the agent's current project;
+otherwise it uses an ID that also includes the current project. T3's projection
+owns each thread's project. After a project change, the first message opens an
+empty project-scoped thread and receives an explanation; none of it runs. The next
+message runs in that thread. Model requests, commands, and follow-up observations
+are refused without creating anything until the project-scoped thread exists,
+then use it. Returning to the original project resumes the canonical thread.
+Conversations without a T3 thread yet start in the current project. Native work
+already running in another project is left alone. Delegated work reports through
+observations of the resolved thread.
 Native work whose stop T3 couldn't confirm fences that thread in the runtime's
 memory, and the runtime refuses a drained restart while any fence stands.
 

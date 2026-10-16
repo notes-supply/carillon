@@ -159,18 +159,22 @@ Startup fails closed:
 
 Each conversation is pinned to the runtime that took its first turn. When
 an agent changes runtimes, its old conversations end with an explanation
-that asks the user to start a new conversation. Changing an agent's T3 project
-has the same effect once the runtime restarts. Messages, queued turns, follow-up
-observations, model requests, and commands on its existing T3 threads are refused
-with that explanation. Native work already running in the old project is left
-alone. A conversation without a T3 thread yet starts in the current project.
+that asks the user to start a new conversation. After an agent's T3 project
+changes and the runtime restarts, the first message in an existing conversation
+opens an empty thread in the current project and is refused with an explanation.
+That message never runs. The next message starts work in the new thread, including
+in a channel that always uses the same conversation. Model requests, commands, and
+follow-up observations are refused without creating anything until that thread
+exists; then they use it. Returning to the original project resumes the original
+thread. Native work already running in another project is left alone.
 
 ## How it behaves
 
-- **One T3 thread per conversation and one message per turn**, named from
-  Carillon's identifiers. The thread ID derives from the interface, agent, and
-  audience, independently of the project. T3's thread record owns its project;
-  the runtime checks it before using the conversation. A lost connection or
+- **One T3 thread per conversation in a project and one message per turn**, named
+  from Carillon's identifiers. The canonical thread ID derives from the interface,
+  agent, and audience. It is used when absent or in the agent's current project.
+  Otherwise the ID also includes the current project. T3's thread record owns
+  its project; the runtime checks it before using the conversation. A lost connection or
   answer reads the work back instead of repeating it, and T3's per-command
   receipts mean a turn never runs twice.
 - **A turn is done** when its run, and any follow-up run T3 starts for its
