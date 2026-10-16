@@ -255,7 +255,10 @@ it("removes a turn's activity when preparation fails before its session exists",
   catalogue.mockReturnValue(loading.promise);
   try {
     const turn = runtime.executeTurn(request(root, "turn-1"));
-    const failed = expect(turn).rejects.toThrow("catalogue unavailable");
+    const failed = turn.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
     await expect
       .poll(() => runtime.activity("turn-1", "discord-private"))
       .toEqual({
@@ -265,7 +268,7 @@ it("removes a turn's activity when preparation fails before its session exists",
         tool_calls: 0,
       });
     loading.reject(new Error("catalogue unavailable"));
-    await failed;
+    expect(await failed).toMatchObject({ message: "catalogue unavailable" });
     expect(runtime.activity("turn-1", "discord-private")).toBeUndefined();
   } finally {
     await runtime.close();
@@ -370,7 +373,7 @@ export default function (pi) {
     ]);
     expect(running?.work?.partial).toBe(false);
     // The unreported child stays an ordinary running tool.
-    expect(running?.running.map((tool) => tool.tool).sort()).toEqual(["solo", "team"]);
+    expect(running?.running.map((tool) => tool.tool).toSorted()).toEqual(["solo", "team"]);
 
     await writeFile(join(root, "helper"), "fail");
     await expect

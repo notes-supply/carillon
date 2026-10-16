@@ -187,7 +187,7 @@ const LIVE_WORK: ReadonlySet<WorkItem["state"]> = new Set(["running", "waiting",
 export function summarizeWork(items: readonly WorkItem[], partial: boolean): WorkSummary {
   const rank = (item: WorkItem) =>
     LIVE_WORK.has(item.state) ? 0 : item.state === "unknown" ? 1 : 2;
-  const ordered = [...items].sort((left, right) => rank(left) - rank(right));
+  const ordered = items.toSorted((left, right) => rank(left) - rank(right));
   const omitted = Math.max(0, ordered.length - WORK_ITEM_LIMIT);
   return {
     items: ordered.slice(0, WORK_ITEM_LIMIT),

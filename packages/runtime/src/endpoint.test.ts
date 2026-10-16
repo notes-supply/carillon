@@ -14,12 +14,9 @@ it("converts supported loopback URLs to native listener addresses", () => {
 
 it("rejects unusable and non-loopback endpoints before Pi starts", () => {
   for (const url of [
-    "not-a-url",
-    "",
     "https://127.0.0.1:3000",
     "http://localhost:3000",
     "http://127.0.0.1",
-    "http://127.0.0.1:99999",
     "http://127.0.0.1:3000/path",
     "http://user@127.0.0.1:3000",
     "http://127.0.0.1:3000?query",
@@ -32,5 +29,11 @@ it("rejects unusable and non-loopback endpoints before Pi starts", () => {
     "http://127.0.0.1:0",
     "http://[::1]:0",
   ])
-    expect(() => providerAddress(url), url).toThrow();
+    expect(() => providerAddress(url), url).toThrow(
+      "provider URL must use an HTTP loopback socket address and a nonzero port",
+    );
+});
+
+it.each(["not-a-url", "", "http://127.0.0.1:99999"])("rejects invalid URLs: %j", (url) => {
+  expect(() => providerAddress(url)).toThrow("Invalid URL");
 });

@@ -283,7 +283,7 @@ it("refuses selections the catalog does not offer without touching the ledger", 
 it("refuses a ledger it cannot read rather than starting empty", async () => {
   await withLedger(async (path) => {
     await writeFile(path, '{"agents": "not a list"}');
-    await expect(ModelSelections.open(path)).rejects.toThrow();
+    await expect(ModelSelections.open(path)).rejects.toThrow("Parse");
   });
 });
 

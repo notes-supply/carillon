@@ -155,7 +155,7 @@ function isNodeError(value: unknown): value is NodeJS.ErrnoException {
 }
 
 /** The catalog the deterministic provider substitute offers. */
-export const DETERMINISTIC_MODELS: readonly AvailableModel[] = [
+const DETERMINISTIC_MODELS: readonly AvailableModel[] = [
   { provider: "local", model: "echo", name: "Local echo", options: [] },
   {
     provider: "local",

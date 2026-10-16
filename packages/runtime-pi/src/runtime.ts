@@ -158,7 +158,7 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
     },
     async close() {
       shutdown.abort(new RuntimeClosed("Pi runtime is closed"));
-      await Promise.allSettled([...pending]);
+      await Promise.allSettled(pending);
     },
   };
 
