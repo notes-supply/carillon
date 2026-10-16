@@ -473,6 +473,9 @@ impl Core {
         turn: &ClaimedTurn,
         submit: impl AsyncFnOnce(RuntimeTurnRequest) -> Result<RuntimeTurnResponse, TurnFailure>,
     ) -> Result<WorkerStep> {
+        if self.refuse_stranded(turn).await? {
+            return Ok(WorkerStep::Advanced);
+        }
         let observation = turn.follow_up.is_some();
         // An observation carries no files and offers none.
         let (unanswered, mut carried) = if observation {
@@ -506,9 +509,6 @@ impl Core {
                 .collect();
             (unanswered, carried)
         };
-        if self.refuse_stranded(turn).await? {
-            return Ok(WorkerStep::Advanced);
-        }
         let outcome = async {
             let request = self.runtime_request(turn, unanswered);
             let correlation_id = request.correlation_id.clone();

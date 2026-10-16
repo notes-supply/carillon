@@ -676,52 +676,6 @@ async fn startup_reconciliation_keeps_accepted_files_and_removes_crash_leftovers
     Ok(())
 }
 
-#[tokio::test]
-async fn an_altered_capture_interrupts_its_turn_without_running_it() -> Result<()> {
-    let directory = tempdir()?;
-    let state = installation(directory.path())?;
-    let staged = stage(&state, "batch", &[("a", b"original")])?;
-    let receipt = submit(&state, event("altered", "read it", staged))
-        .await
-        .map_err(|error| anyhow!(error.message))?;
-    let inspection = state.core.inspect_turn(&receipt.turn_id)?.context("turn")?;
-    let file = state
-        .config
-        .value
-        .data_dir
-        .join("attachments")
-        .join(&inspection.attachments[0].path);
-    fs::set_permissions(&file, fs::Permissions::from_mode(0o640))?;
-    fs::write(&file, b"tampered")?;
-    let step = run_next_turn(&state, "test-runtime", async |_, _, _| {
-        Err(TurnFailure::Uncertain(anyhow!(
-            "the runtime must not be called"
-        )))
-    })
-    .await?;
-    assert_eq!(step, WorkerStep::Advanced);
-    let interrupted = state.core.inspect_turn(&receipt.turn_id)?.context("turn")?;
-    assert_eq!(interrupted.state, TurnState::Interrupted);
-    assert!(
-        interrupted
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("changed after it was accepted")),
-        "{:?}",
-        interrupted.error
-    );
-    let notice = state
-        .core
-        .claim_delivery("test-interface", "instance")?
-        .context("no interruption notice")?;
-    assert!(
-        notice.content.contains("changed or removed after"),
-        "{}",
-        notice.content
-    );
-    Ok(())
-}
-
 /// Run the next turn, answering with `output`, and return the earlier files
 /// it was offered. An empty answer ends the turn unanswered, as a command
 /// that consumed its message does.
@@ -1356,3 +1310,5 @@ async fn shutdown_waits_for_running_captures_to_settle() -> Result<()> {
     assert_eq!(refused.status, StatusCode::SERVICE_UNAVAILABLE);
     Ok(())
 }
+
+mod integrity;

@@ -1,6 +1,6 @@
 1663 crates/carillon-core/src/application/admin.rs
 3137 crates/carillon-core/src/application/http/tests.rs
-1358 crates/carillon-core/src/application/http/tests/attachments.rs
+1314 crates/carillon-core/src/application/http/tests/attachments.rs
 2302 crates/carillon-core/src/db.rs
 1137 crates/carillon-discord/src/activity.rs
 2545 crates/carillon-discord/src/activity/tests.rs
