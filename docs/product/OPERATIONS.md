@@ -36,11 +36,7 @@ Without Discord options, the installer asks at the terminal:
    Discord's context and Carillon's resources: Pi, or T3 with Claude, Codex
    or both, each signed in for Carillon alone. With T3 there may be no
    assistant at all, and only T3 Code channels.
-3. **Pi** opens next when it runs the assistant: sign in with `/login`,
-   choose the agent's model with `/model` and press Ctrl+S on it, then
-   leave with Ctrl+D. Setup checks that Pi is ready and offers to open it
-   again until it is.
-4. **T3** asks for its address and a token (`t3 auth session issue --label
+3. **T3** asks for its address and a token (`t3 auth session issue --label
    Carillon --token-only` prints one), the project the assistant works in,
    and the projects T3 Code channels work in: each becomes an agent that
    is plain T3 Code through Discord. For each harness of the assistant it
@@ -48,6 +44,10 @@ Without Discord options, the installer asks at the terminal:
    `~/.local/share/carillon/profiles/HARNESS`, and signs it in: with the
    harness's own login in that home, an API key, or a compatible endpoint
    and its token. Then it asks each agent's default model.
+4. **Pi** opens when an agent runs on it: sign in with `/login`,
+   choose the agent's model with `/model` and press Ctrl+S on it, then
+   leave with Ctrl+D. Setup checks that Pi is ready and offers to open it
+   again until it is.
 5. **Discord.** The bot token, not shown as you type. Setup learns the bot
    from it, waits until Message Content Intent is on, prints the
    invitation link if the bot is in no server yet, and offers the bot's
@@ -66,6 +66,20 @@ stop` first, or update it with `carillon update ARCHIVE`. On an installed
 release, `carillon setup` asks the same questions, and `carillon discord
 setup` asks only Discord's. A rerun that changes the T3 settings or the bot
 token takes effect in a running Carillon at `carillon restart`.
+
+An explicit `--runtime` adds that runtime to an existing installation.
+Pi sign-in is skipped when no agent runs on Pi.
+
+Each T3 profile keeps its own real `skills/` directory. Carillon links each
+`skills/NAME` to the assistant's `resources/skills/NAME`. The instructions
+file links to `resources/AGENTS.md`. Startup and `carillon runtime-t3 check`
+add new links, remove obsolete links, and update links after resources move.
+Only directories containing `SKILL.md` are shared. Harness files and directories stay in the profile. A conflicting name stops
+the check. Each T3 runtime permits at most one agent with resources.
+
+`carillon runtime-t3 discover --agent ID --url URL` reads the token on
+standard input and returns that agent's model offer. The saved `profiles`
+list decides which instances the assistant and plain T3 Code may use.
 
 The installer creates `~/.carillon` (or `CARILLON_HOME`), registers the user
 services (`carillon.target` with core, Discord and both runtimes; a
@@ -458,3 +472,9 @@ one on the owner's user units, and refuse while another holds them.
 It removes the user services, the `~/.local/bin/carillon` link and the
 application. Configuration, credentials, sessions and other data stay in the
 installation directory; delete it yourself if you no longer need it.
+
+T3 profile homes under `${XDG_DATA_HOME:-~/.local/share}/carillon/profiles`
+also stay, with their sign-ins, sessions, and settings. T3 keeps the
+`carillon_claude` and `carillon_codex` instances and their keys in its secret
+store. Remove those separately in T3 settings and remove the profile homes
+when no longer needed.

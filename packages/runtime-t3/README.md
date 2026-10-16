@@ -3,18 +3,16 @@
 Runs Carillon turns on a [T3 Code](https://github.com/pingdotgg/t3code) server
 instead of Pi, as another client of the threads T3's own UI shows. It serves
 the same runtime boundary as Pi through [`@carillon/runtime`](../runtime/README.md)
-and stores nothing of its own.
+and stores the agent defaults in `model-selection.json` in its component directory.
 
 ## Set it up
 
-Guided setup (the installer, or `carillon setup`) offers T3 beside Pi. It
-asks for T3's address and a token, then:
-
-- **Carillon's assistant**, if it runs on T3: its project, and Claude, Codex
-  or both. For each, setup makes Carillon's profile and signs it in.
-- **T3 Code channels:** the T3 projects they work in, each an agent of its
-  own.
-- each agent's default model.
+Guided setup (the installer, or `carillon setup`) asks for the runtimes,
+then what runs Carillon's assistant. With T3, the assistant uses Claude,
+Codex, or both, each signed in for Carillon alone. It may also be absent.
+Setup then asks for T3's address and token, the assistant's project when it
+runs there, and the projects for plain T3 Code channels. Each project gets
+an agent. Each agent gets a default model from the runtime's offer.
 
 Issue a token in T3 with `t3 auth session issue --label Carillon
 --token-only`.
@@ -28,17 +26,23 @@ A profile is a T3 instance of Carillon's own, `carillon_claude` or
 ```text
 ~/.local/share/carillon/profiles/claude/   T3's instance carillon_claude (CLAUDE_CONFIG_DIR)
   CLAUDE.md -> CARILLON_HOME/agents/default/AGENTS.md
-  skills    -> CARILLON_HOME/agents/default/skills
+  skills/
+    SKILL_NAME -> CARILLON_HOME/agents/default/skills/SKILL_NAME
   …         Claude's own sign-in, sessions and settings
 ~/.local/share/carillon/profiles/codex/    T3's instance carillon_codex (CODEX_HOME)
   AGENTS.md -> CARILLON_HOME/agents/default/AGENTS.md
-  skills    -> CARILLON_HOME/agents/default/skills
+  skills/
+    SKILL_NAME -> CARILLON_HOME/agents/default/skills/SKILL_NAME
 ```
 
 The links make the assistant's resources the one copy of Carillon's
 instructions and skills. `carillon discord tools install` puts the Discord
-skill there, and every profile then has it. Neither the shared workspace nor
-your own Claude or Codex sees them.
+skill there. Startup and `carillon runtime-t3 check` reconcile each profile's
+links. They add new skills, remove obsolete links, and update links after
+resources move. The harness keeps a real `skills/` directory for its own
+skills. Only directories containing `SKILL.md` are shared. A name that conflicts with a harness file or directory is refused.
+Neither the shared workspace nor your own Claude or Codex sees Carillon's
+profile resources.
 
 A profile signs in in one of three ways:
 
@@ -64,7 +68,12 @@ carillon runtime-t3 configure --url http://127.0.0.1:3773 --agent t3-notes \
 
 `profile` prints the profile's instance and home, as JSON. `--with-key`
 reads an API key from a second line of standard input, and `--endpoint URL`
-gives the endpoint it is for.
+gives the endpoint it is for. An existing instance refuses a supplied key or
+endpoint. Its environment is changed in T3 settings.
+
+`discover --agent ID` returns only models the agent may use. The persisted
+`profiles` list owns that choice, including profiles from earlier setup runs.
+Without `--agent`, discovery returns T3's full offer.
 
 `configure` checks two things with T3:
 
@@ -124,6 +133,8 @@ Startup fails closed:
 - the registry entry must exist and be enabled, and the credential must
   match;
 - the settings must be valid, and every agent's workspace a directory;
+- at most one agent on the runtime has resources;
+- Carillon's profile links must reconcile without replacing harness files;
 - T3 must speak orchestration protocol 2 and accept the token.
 
 Conversations that already started stay with the runtime that took their
@@ -173,6 +184,13 @@ first turn.
 - **Images.** PNG, JPEG, WebP and GIF files up to 10 MiB each (80 MiB per
   message) are uploaded to T3, after checking them against core's digest.
   The message names the files T3 doesn't receive.
+
+## Uninstall
+
+Uninstall leaves the profile homes and their sign-ins, sessions, and settings.
+It also leaves the `carillon_claude` and `carillon_codex` instances in T3,
+including their keys in T3's secret store. They are removed separately in T3
+settings and from the filesystem when no longer needed.
 
 ## As a library
 
