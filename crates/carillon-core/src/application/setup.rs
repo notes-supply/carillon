@@ -15,7 +15,7 @@ use std::{
 
 use anyhow::{Context as _, Result, bail};
 use carillon_installation::{
-    config::{AgentConfig, LoadedConfig, ProviderRole},
+    config::{AgentConfig, Config, LoadedConfig, ProviderRole},
     maintenance::MaintenanceLock,
     prompt::Questions,
 };
@@ -524,8 +524,8 @@ fn agents<'a>(
     let _maintenance = MaintenanceLock::acquire_unless_held(home)
         .context("the installation's agents were not changed")?;
     register_runtime(&config_path, Runtime::T3)?;
-    let config = LoadedConfig::load(&config_path)?;
-    let existing = config.value.agent(ASSISTANT).ok();
+    let config: Config = toml::from_str(&std::fs::read_to_string(&config_path)?)?;
+    let existing = config.agent(ASSISTANT).ok();
     let on_pi = existing
         .filter(|agent| assistant.is_none() && agent.runtime == Runtime::Pi.id())
         .cloned();

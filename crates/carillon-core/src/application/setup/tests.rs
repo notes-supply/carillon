@@ -1,12 +1,12 @@
 use std::{os::unix::fs::PermissionsExt as _, path::Path};
 
-use carillon_installation::config::{LoadedConfig, ProviderRole};
+use carillon_installation::config::{Config, LoadedConfig, ProviderRole};
 
 use super::{
     Assistant, Harness, Harnesses, Options, Runtime, initialize, keep_t3, registered_runtimes, run,
     set_up_t3, setup,
 };
-use crate::application::admin::{ASSISTANT, register_runtime, set_provider};
+use crate::application::admin::{ASSISTANT, backup, register_runtime, set_provider};
 
 #[test]
 fn a_secret_goes_on_standard_input_and_a_failure_is_its_one_line() -> anyhow::Result<()> {
@@ -300,6 +300,12 @@ fn t3_gets_the_assistant_with_its_profile_and_a_t3_code_agent_per_project() -> a
             ("t3-notes-app", "runtime-t3", notes.as_path(), false),
         ]
     );
+    let stored: Config = toml::from_str(&std::fs::read_to_string(home.join("carillon.toml"))?)?;
+    assert_eq!(
+        stored.agent(ASSISTANT)?.resources.as_deref(),
+        Some(Path::new("agents/default"))
+    );
+    backup(&config, &directory.path().join("backup.tar.gz"))?;
     let calls = std::fs::read_to_string(directory.path().join("calls"))?;
     let config_arg = home.join("carillon.toml");
     let config_arg = config_arg.display();
