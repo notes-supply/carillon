@@ -167,7 +167,25 @@ pub(super) fn setup(home: &Path, options: &Options, questions: &mut impl Questio
     if options.workspace.is_some() && !pi {
         bail!("--workspace is for Pi; on T3, an agent works in its project's folder");
     }
-    let kept = existing && t3 && keep_t3(home, &provider_binary("runtime-t3")?, questions)?;
+    let kept = if existing && t3 {
+        let config = LoadedConfig::load(&home.join("carillon.toml"))?;
+        if options.runtimes.contains(&Runtime::Pi)
+            && config
+                .value
+                .agents
+                .iter()
+                .any(|agent| agent.runtime == Runtime::T3.id() && agent.resources.is_some())
+        {
+            questions.say(
+                "T3 will be set up again so its settings match where you choose to run the assistant.",
+            )?;
+            false
+        } else {
+            keep_t3(home, &provider_binary("runtime-t3")?, questions)?
+        }
+    } else {
+        false
+    };
     if kept {
         let config = LoadedConfig::load(&home.join("carillon.toml"))?;
         if options.runtimes.contains(&Runtime::Pi)
@@ -175,7 +193,7 @@ pub(super) fn setup(home: &Path, options: &Options, questions: &mut impl Questio
                 .value
                 .agents
                 .iter()
-                .any(|agent| agent.runtime == Runtime::Pi.id())
+                .any(|agent| agent.runtime == Runtime::Pi.id() || agent.resources.is_some())
         {
             questions
                 .say("Pi will run Carillon's assistant. T3 Code agents keep their settings.")?;

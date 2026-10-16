@@ -220,8 +220,10 @@ servers, channels and people by name, asking who answers in each channel.
 Setup reruns retain a plain T3 agent's ID by its saved T3 project ID. New
 projects receive IDs that avoid both existing agents and saved project bindings,
 so keeping a Discord route cannot silently move it to a different project.
-Adding Pi explicitly still plans its assistant when T3's settings are kept and
-honours `--workspace`. Setup refuses to finish if a registered runtime has no agent.
+Adding Pi explicitly to plain T3 Code channels plans its assistant while keeping
+T3's settings and honours `--workspace`. If the assistant currently runs on T3,
+setup asks where it should run and sets T3 up again so its saved agents match.
+Setup refuses to finish if a registered runtime has no agent.
 The user target wants every bundled runtime's unit; one the registry doesn't
 list ends at once, as a disabled one does.
 

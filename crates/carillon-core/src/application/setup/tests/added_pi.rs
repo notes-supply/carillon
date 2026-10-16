@@ -30,14 +30,33 @@ impl Fixture {
                 })
                 .collect(),
         )?;
+        let settings = ids
+            .iter()
+            .map(|id| {
+                let instance = if *id == "assistant" { "carillon_claude" } else { "codex" };
+                format!("[agents.{id}]\nproject_id = 'p1'\n[agents.{id}.model]\ninstance_id = '{instance}'\nmodel = 'gpt'\n")
+            })
+            .collect::<String>();
+        let header = "url = 'http://127.0.0.1:3773'\ntoken_file = 'credentials/t3.token'\nprofiles = ['carillon_claude']\n";
         std::fs::write(
             home.join("providers/runtime-t3.toml"),
-            "[agents.t3-notes]\nproject_id = 'p1'\n",
+            format!("{header}{settings}"),
         )?;
-        fake_t3(
+        std::fs::write(home.join("credentials/t3.token"), "token")?;
+        let t3 = fake_t3(
             directory.path(),
-            &serde_json::json!({"projects": [], "models": []}),
+            &serde_json::json!({
+                "projects": [{"id": "p1", "title": "Notes", "workspace": directory.path()}],
+                "models": [model("codex", "gpt", "GPT")],
+            }),
         )?;
+        let program = std::fs::read_to_string(&t3)?.replace(
+            "configure) echo",
+            "configure) while [ \"$1\" != --agent ]; do shift; done; shift; agent=$1; \
+             printf 'url = \"http://127.0.0.1:3773\"\\ntoken_file = \"credentials/t3.token\"\\nprofiles = [\"carillon_claude\"]\\n[agents.%s]\\nproject_id = \"p1\"\\n[agents.%s.model]\\ninstance_id = \"codex\"\\nmodel = \"gpt\"\\n' \"$agent\" \"$agent\" \
+             >\"$CARILLON_HOME/providers/runtime-t3.toml\"; echo",
+        );
+        std::fs::write(t3, program)?;
         for (name, script) in [
             (
                 "runtime-pi",
@@ -59,7 +78,7 @@ impl Fixture {
         })
     }
 
-    fn run(&self, workspace: bool) -> anyhow::Result<std::process::Output> {
+    fn run(&self, workspace: bool, move_assistant: bool) -> anyhow::Result<std::process::Output> {
         let path =
             std::env::join_paths(std::iter::once(self.directory.path().to_path_buf()).chain(
                 std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
@@ -68,9 +87,13 @@ impl Fixture {
         child
             .args(["--exact", CHILD, "--ignored", "--nocapture"])
             .env("PATH", path)
+            .env("CARILLON_HOME", &self.home)
             .env("CARILLON_TEST_SETUP_HOME", &self.home);
         if workspace {
             child.env("CARILLON_TEST_SETUP_WORKSPACE", &self.workspace);
+        }
+        if move_assistant {
+            child.env("CARILLON_TEST_SETUP_MOVE_ASSISTANT", "pi");
         }
         child.output().context("run the setup rerun")
     }
@@ -85,54 +108,99 @@ fn setup_added_pi_child() -> anyhow::Result<()> {
         workspace: std::env::var_os("CARILLON_TEST_SETUP_WORKSPACE").map(Into::into),
         ..options()
     };
-    setup(Path::new(&home), &options, &mut Shown::default())
+    let mut questions = if std::env::var_os("CARILLON_TEST_SETUP_MOVE_ASSISTANT").is_some() {
+        Shown::answering(&["0", "", "token", "0", "0"])
+    } else {
+        Shown::default()
+    };
+    setup(Path::new(&home), &options, &mut questions)?;
+    println!("{}", questions.shown.join("\n"));
+    Ok(())
 }
 
 #[test]
 fn keeping_t3_while_adding_pi_plans_its_assistant_and_honours_workspace() -> anyhow::Result<()> {
-    for ids in [&["t3-notes"][..], &["assistant", "t3-notes"][..]] {
-        for workspace in [false, true] {
-            let fixture = Fixture::new(ids)?;
-            let settings = fixture.home.join("providers/runtime-t3.toml");
-            let before = std::fs::read(&settings)?;
-            let output = fixture.run(workspace)?;
-            assert!(output.status.success(), "{output:?}");
-            let config = LoadedConfig::load(&fixture.home.join("carillon.toml"))?;
-            let assistant = config.value.agent("assistant")?;
-            assert_eq!(assistant.runtime, "runtime-pi");
-            let expected = if workspace {
-                fixture.workspace.clone()
-            } else if ids.contains(&"assistant") {
-                fixture.directory.path().to_path_buf()
-            } else {
-                std::env::var_os("HOME").context("HOME")?.into()
-            };
-            assert_eq!(assistant.workspace, expected);
-            assert_eq!(config.value.agent("t3-notes")?.runtime, "runtime-t3");
-            assert_eq!(config.value.agents.len(), 2);
-            assert_eq!(std::fs::read(&settings)?, before);
-            assert!(std::fs::read_to_string(fixture.home.join("pi-calls"))?.contains("--check"));
-            assert_eq!(
-                std::fs::read_to_string(fixture.home.join("discord-calls"))?,
-                "setup\n"
-            );
-        }
+    for workspace in [false, true] {
+        let fixture = Fixture::new(&["t3-notes"])?;
+        let settings = fixture.home.join("providers/runtime-t3.toml");
+        let before = std::fs::read(&settings)?;
+        let output = fixture.run(workspace, false)?;
+        assert!(output.status.success(), "{output:?}");
+        let config = LoadedConfig::load(&fixture.home.join("carillon.toml"))?;
+        let assistant = config.value.agent("assistant")?;
+        assert_eq!(assistant.runtime, "runtime-pi");
+        let expected = if workspace {
+            fixture.workspace.clone()
+        } else {
+            std::env::var_os("HOME").context("HOME")?.into()
+        };
+        assert_eq!(assistant.workspace, expected);
+        assert_eq!(config.value.agent("t3-notes")?.runtime, "runtime-t3");
+        assert_eq!(config.value.agents.len(), 2);
+        assert_eq!(std::fs::read(&settings)?, before);
+        assert!(std::fs::read_to_string(fixture.home.join("pi-calls"))?.contains("--check"));
+        assert_eq!(
+            std::fs::read_to_string(fixture.home.join("discord-calls"))?,
+            "setup\n"
+        );
     }
     Ok(())
 }
 
 #[test]
-fn keeping_t3_refuses_success_if_moving_its_assistant_leaves_it_without_agents()
--> anyhow::Result<()> {
-    let fixture = Fixture::new(&["assistant"])?;
-    let output = fixture.run(true)?;
-    let output = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(output.contains("runtime-t3 has no agent"), "{output}");
-    assert!(!fixture.home.join("pi-calls").exists());
-    assert!(!fixture.home.join("discord-calls").exists());
+fn adding_pi_to_a_t3_assistant_reconfigures_t3_before_moving_it() -> anyhow::Result<()> {
+    for workspace in [false, true] {
+        let fixture = Fixture::new(&["assistant", "t3-notes"])?;
+        let output = fixture.run(workspace, true)?;
+        assert!(output.status.success(), "{output:?}");
+        let shown = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !shown.contains("Keep the T3 settings and agents?"),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("What should run Carillon's assistant?"),
+            "{shown}"
+        );
+        let config = LoadedConfig::load(&fixture.home.join("carillon.toml"))?;
+        let assistant = config.value.agent("assistant")?;
+        assert_eq!(assistant.runtime, "runtime-pi");
+        assert_eq!(
+            assistant.workspace,
+            if workspace {
+                fixture.workspace.clone()
+            } else {
+                fixture.directory.path().to_path_buf()
+            }
+        );
+        let saved = super::super::saved_projects(&fixture.home)?;
+        assert_eq!(
+            saved.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["t3-notes"]
+        );
+        for id in saved.keys() {
+            assert_eq!(config.value.agent(id)?.runtime, "runtime-t3");
+        }
+        run(
+            &fixture.directory.path().join("carillon-runtime-t3"),
+            &[
+                "check",
+                "--config",
+                &fixture.home.join("carillon.toml").to_string_lossy(),
+            ],
+            "",
+        )?;
+        let calls = std::fs::read_to_string(fixture.directory.path().join("calls"))?;
+        assert!(calls.contains("configure --config"), "{calls}");
+        assert!(
+            calls.contains("--agent t3-notes --project p1 --model codex/gpt"),
+            "{calls}"
+        );
+        assert!(calls.contains("check --config"), "{calls}");
+        assert_eq!(
+            std::fs::read_to_string(fixture.home.join("discord-calls"))?,
+            "setup\n"
+        );
+    }
     Ok(())
 }
