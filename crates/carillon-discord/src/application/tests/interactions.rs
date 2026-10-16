@@ -9,7 +9,13 @@ fn calling_model(answered: &str, failed: &str) -> anyhow::Result<Vec<u8>> {
         serde_json::to_vec(&carillon_discord_module::contract::Invocation::Describe)?.len();
     let request =
         serde_json::to_string(&carillon_discord_module::contract::HostRequest::ModelState)?;
-    let (answered, failed) = (replying(answered, &[]), replying(failed, &[]));
+    let answered = json!({"Reply": {
+        "content": answered,
+        "embeds": [{"type": "rich", "description": "Model settings received"}],
+        "components": [],
+    }})
+    .to_string();
+    let failed = replying(failed, &[]);
     let card = showing("A test card");
     let escape = |text: &str| text.replace('\\', "\\\\").replace('"', "\\\"");
     let text = format!(
@@ -176,6 +182,11 @@ async fn an_acknowledged_interaction_is_answered_before_the_provider_returns() -
         .clone();
     assert_eq!(replies.len(), 1, "{replies:?}");
     assert_eq!(replies[0]["content"], "model state received");
+    assert_eq!(
+        replies[0]["embeds"],
+        json!([{"type": "rich", "description": "Model settings received"}])
+    );
+    assert_eq!(replies[0]["allowed_mentions"], json!({"parse": []}));
     discord_server.abort();
     core_server.abort();
     Ok(())
