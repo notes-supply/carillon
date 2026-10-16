@@ -357,13 +357,28 @@ impl Core {
             None => None,
         };
         let id = owner.as_deref().unwrap_or(&agent.runtime);
-        let runtime = self.runtime(id)?;
-        if !runtime.enabled {
-            return Err(CoreError::Conflict(
-                "conversation runtime provider is disabled".to_owned(),
-            ));
+        self.enabled_runtime(id)
+    }
+
+    /// Refuses an interactive request for a conversation whose agent changed runtimes.
+    /// Messages are still admitted for the worker to deliver their interruption notice.
+    /// # Errors
+    /// Returns an unknown agent, stranded conversation or storage error.
+    pub(crate) fn query_runtime(
+        &self,
+        interface_id: &str,
+        query: &ModelQuery,
+    ) -> Result<RuntimeProvider, CoreError> {
+        let agent = self.agent(&query.agent_id)?;
+        if let Some(audience) = &query.audience_id
+            && let Some(id) =
+                self.database
+                    .conversation_runtime(interface_id, &query.agent_id, audience)?
+            && id != agent.runtime
+        {
+            return Err(CoreError::Conflict(stranded(&id, &query.agent_id)));
         }
-        Ok(runtime)
+        self.enabled_runtime(&agent.runtime)
     }
 
     /// Ends a turn whose agent no longer runs on the runtime that owns its
@@ -376,10 +391,7 @@ impl Core {
         if agent.runtime == turn.runtime_id {
             return Ok(false);
         }
-        let explanation = format!(
-            "This conversation ran on {}, which no longer runs {}. Start a new conversation.",
-            turn.runtime_id, turn.agent_id
-        );
+        let explanation = stranded(&turn.runtime_id, &turn.agent_id);
         let notice = if turn.follow_up.is_some() {
             format!(
                 "{explanation}\nWork already started there will not be reported here. Actions already taken may have had effects."
@@ -400,6 +412,16 @@ impl Core {
             .iter()
             .find(|agent| agent.id == id)
             .ok_or_else(|| CoreError::InvalidInput("unknown agent".to_owned()))
+    }
+
+    fn enabled_runtime(&self, id: &str) -> Result<RuntimeProvider, CoreError> {
+        let runtime = self.runtime(id)?;
+        if !runtime.enabled {
+            return Err(CoreError::Conflict(
+                "conversation runtime provider is disabled".to_owned(),
+            ));
+        }
+        Ok(runtime)
     }
 
     fn runtime(&self, id: &str) -> Result<RuntimeProvider, CoreError> {
@@ -871,6 +893,12 @@ pub enum TurnFailure {
     /// The runtime answered that the turn failed. As with `Uncertain`,
     /// model work may have run and is not automatically replayed.
     Reported(Box<Reported>),
+}
+
+fn stranded(runtime_id: &str, agent_id: &str) -> String {
+    format!(
+        "This conversation ran on {runtime_id}, which no longer runs {agent_id}. Start a new conversation."
+    )
 }
 
 /// What the conversation is told when a turn did not complete, with the

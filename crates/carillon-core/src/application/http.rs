@@ -343,15 +343,15 @@ async fn set_model(
     .await
 }
 
-/// Model calls address the runtime that owns the conversation, so a
-/// selection follows the conversation rather than the current default.
+/// Refuses stranded conversations before reading a runtime credential or
+/// issuing a model or command request.
 fn model_runtime<'a>(
     core: &Core,
     config: &'a LoadedConfig,
     interface_id: &str,
     query: &ModelQuery,
 ) -> Result<&'a Provider, ApiError> {
-    let runtime = core.runtime_for(interface_id, query)?;
+    let runtime = core.query_runtime(interface_id, query)?;
     Ok(config.provider(&runtime.id, ProviderRole::Runtime)?)
 }
 
