@@ -146,7 +146,7 @@ it("composes native Pi directly, retains history and isolates independently cons
   }
 });
 
-it("names each provider of its models as Pi does, and one Pi does not know by its ID", async () => {
+it("names providers as Pi does and thinking choices by their IDs when Pi has no names", async () => {
   const root = await mkdtemp(join(tmpdir(), "carillon-providers-"));
   const models = await ModelRuntime.create({
     authPath: join(root, "auth.json"),
@@ -154,7 +154,13 @@ it("names each provider of its models as Pi does, and one Pi does not know by it
     modelsStorePath: join(root, "models.json"),
     refreshOnCreate: false,
   });
-  const gateway: Model<"openai-responses"> = { ...model, provider: "local-gateway", id: "local" };
+  const gateway: Model<"openai-responses"> = {
+    ...model,
+    provider: "local-gateway",
+    id: "local",
+    reasoning: true,
+    thinkingLevelMap: { minimal: null, low: null, high: null },
+  };
   vi.spyOn(models, "getAvailable").mockResolvedValue([model, gateway]);
   const runtime = await createPiRuntime({
     agents: [{ id: "test", workspace: root }],
@@ -163,11 +169,23 @@ it("names each provider of its models as Pi does, and one Pi does not know by it
     settings: SettingsManager.inMemory({ defaultProvider: model.provider, defaultModel: model.id }),
   });
   try {
-    expect(
-      (await runtime.modelState({ interface_id: "test", agent_id: "test" })).providers,
-    ).toEqual([
+    const state = await runtime.modelState({ interface_id: "test", agent_id: "test" });
+    expect(state.providers).toEqual([
       { id: "local-gateway", name: "local-gateway" },
       { id: "openai", name: "OpenAI" },
+    ]);
+    expect(
+      state.available.find((offered) => offered.provider === "local-gateway")?.options,
+    ).toEqual([
+      {
+        id: "thinking",
+        name: "Thinking",
+        choices: [
+          { id: "off", name: "off" },
+          { id: "medium", name: "medium" },
+        ],
+        default: "medium",
+      },
     ]);
   } finally {
     await runtime.close();

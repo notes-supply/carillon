@@ -65,6 +65,30 @@ fn failed_participation_write_leaves_memory_and_disk_unchanged() -> Result<()> {
 }
 
 #[test]
+fn admitted_commands_and_components_carry_the_configured_markers() -> Result<()> {
+    let mut config = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
+    config.activity_markers.uncertain = String::new();
+    config
+        .activity_markers
+        .models
+        .insert("claude-".to_owned(), "<a:claude:123>".to_owned());
+    for kind in [InteractionKind::Command, InteractionKind::Component] {
+        let source = InteractionSource {
+            kind,
+            ..interaction("300", None)
+        };
+        let admitted =
+            admit_interaction(&config, source).map_err(|failure| anyhow!(failure.message))?;
+        assert!(admitted.interaction.markers.uncertain.is_empty());
+        assert_eq!(
+            admitted.interaction.markers.brand("claude-opus-5-5"),
+            "<a:claude:123>"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn interaction_admission_follows_routes_and_conversations() -> Result<()> {
     let channel = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
     let admitted = admit_interaction(&channel, interaction("300", None))
