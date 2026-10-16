@@ -380,7 +380,14 @@ impl Core {
             "This conversation ran on {}, which no longer runs {}. Start a new conversation.",
             turn.runtime_id, turn.agent_id
         );
-        self.interrupt(turn, explanation.clone(), explanation, None)
+        let notice = if turn.follow_up.is_some() {
+            format!(
+                "{explanation}\nWork already started there will not be reported here. Actions already taken may have had effects."
+            )
+        } else {
+            explanation.clone()
+        };
+        self.interrupt(turn, explanation, notice, None)
             .await
             .with_context(|| format!("record failure of turn {}", turn.turn_id))?;
         warn!(turn_id = %turn.turn_id, "turn refused: its agent moved to another runtime");

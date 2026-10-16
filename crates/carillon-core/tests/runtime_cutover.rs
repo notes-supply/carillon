@@ -1,7 +1,5 @@
 use anyhow::{Context as _, Result};
-use carillon_core::{
-    AgentOptions, Core, CoreOptions, Lane, RuntimeProvider, TurnFailure, WorkerStep,
-};
+use carillon_core::{AgentOptions, Core, CoreOptions, Lane, RuntimeProvider, WorkerStep};
 use carillon_installation::config::AttachmentLimits;
 use carillon_protocol::model::{
     ExternalEvent, ModelQuery, RuntimeTurnRequest, RuntimeTurnResponse, SelectedProvider, TurnState,
@@ -99,9 +97,7 @@ async fn changed_agent_runtime_explains_old_conversations_without_dispatching() 
     for lane in [Lane::Messages, Lane::Observations, Lane::Messages] {
         assert_eq!(
             core.run_next("old", lane, &stopping, async |_| {
-                Err(TurnFailure::Uncertain(anyhow::anyhow!(
-                    "old runtime received a turn after cutover"
-                )))
+                unreachable!("old runtime received a turn after cutover")
             })
             .await?,
             WorkerStep::Advanced
@@ -109,10 +105,11 @@ async fn changed_agent_runtime_explains_old_conversations_without_dispatching() 
     }
     let explanation =
         "This conversation ran on old, which no longer runs agent. Start a new conversation.";
+    let observation = "This conversation ran on old, which no longer runs agent. Start a new conversation.\nWork already started there will not be reported here. Actions already taken may have had effects.";
     for (state, content) in [
         (TurnState::Completed, "answer"),
         (TurnState::Interrupted, explanation),
-        (TurnState::Interrupted, explanation),
+        (TurnState::Interrupted, observation),
         (TurnState::Interrupted, explanation),
     ] {
         let delivery = core

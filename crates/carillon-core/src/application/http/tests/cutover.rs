@@ -49,3 +49,46 @@ async fn runtime_cutover_interrupts_pinned_conversations() -> Result<()> {
     assert_eq!(counts.interrupted, 2);
     Ok(())
 }
+
+#[tokio::test]
+async fn runtime_cutover_observation_explains_unreported_work_and_possible_effects() -> Result<()> {
+    let directory = tempdir()?;
+    let mut state = installation(directory.path())?;
+    let parent = accept(&state, "start native work", "conversation").await?;
+    run_next_turn(&state, "test-runtime", async |_, _, request| {
+        Ok(RuntimeTurnResponse {
+            follow_up: Some(json!({"after": 1})),
+            ..completed(request)
+        })
+    })
+    .await?;
+    let reply = state
+        .core
+        .claim_turn_delivery("test-interface", "instance", &parent.turn_id)?
+        .context("missing initial reply")?;
+    state.core.database.acknowledge_delivery(
+        "test-interface",
+        reply.id,
+        "instance",
+        DeliveryOutcome::Delivered,
+        None,
+    )?;
+    state.config.value.agents[0].runtime = "replacement".to_owned();
+    assert_eq!(
+        run_next_observation(&state, "test-runtime", async |_, _, _| {
+            unreachable!("stranded observation reached the old runtime")
+        })
+        .await?,
+        WorkerStep::Advanced
+    );
+    let notice = state
+        .core
+        .claim_delivery("test-interface", "instance")?
+        .context("missing observation refusal")?;
+    assert_eq!(
+        notice.content,
+        "This conversation ran on test-runtime, which no longer runs test-agent. Start a new conversation.\nWork already started there will not be reported here. Actions already taken may have had effects."
+    );
+    assert_eq!(state.core.database.turn_counts()?.interrupted, 1);
+    Ok(())
+}
