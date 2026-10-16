@@ -31,5 +31,5 @@ git ls-files -z -- '*.rs' '*.ts' '*.mjs' '*.sh' | xargs -0 wc -l | awk '$2 != "t
     }
   ' "$BUDGET" - || status=$?
 
-if $update; then sort -k2 "$next" >"$BUDGET"; fi
+if $update; then LC_ALL=C sort -k2 "$next" >"$BUDGET"; fi
 exit "$status"
