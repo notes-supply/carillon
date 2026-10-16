@@ -28,7 +28,7 @@ it("has T3 check instances signed in since it last looked before listing models"
   // T3 keeps what it last found of an instance's sign-in, so a profile
   // signed in after T3 made it is checked again on request, and only it.
   const fake = await fakeT3();
-  await discover({ url: fake.url, token: fake.token }, undefined, ["carillon_codex"]);
+  await discover({ url: fake.url, token: fake.token }, { refresh: ["carillon_codex"] });
   expect(fake.refreshes).toEqual([{ instanceId: "carillon_codex" }]);
 });
 

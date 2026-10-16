@@ -69,10 +69,13 @@ const ShellSchema = Type.Object({
  */
 export async function discover(
   endpoint: T3Endpoint,
-  connect: Connect = connectT3,
-  refresh: readonly string[] = [],
-  scope?: { readonly installation: Installation; readonly agentId: string },
+  options: {
+    readonly connect?: Connect;
+    readonly refresh?: readonly string[];
+    readonly scope?: { readonly installation: Installation; readonly agentId: string };
+  } = {},
 ): Promise<Offer> {
+  const { connect = connectT3, refresh = [], scope } = options;
   const agent = scope === undefined ? undefined : agentOf(scope.installation, scope.agentId);
   const profiles = new Set(
     scope === undefined ? [] : ((await readExisting(scope.installation))?.profiles ?? []),
@@ -164,7 +167,7 @@ export async function configure(
 ): Promise<Project> {
   const existing = await readExisting(installation);
   const agent = agentOf(installation, choice.agentId);
-  const offer = await discover(endpoint, connect, [], { installation, agentId: choice.agentId });
+  const offer = await discover(endpoint, { connect });
   const project = offer.projects.find(({ id }) => id === choice.projectId);
   if (project === undefined) throw new Error(`T3 has no project ${choice.projectId}`);
   const rooted = await realpath(project.workspace).catch(() => undefined);
@@ -174,9 +177,13 @@ export async function configure(
         `${agent.workspace}; choose a project rooted there`,
     );
   const assistant = agent.resources !== undefined;
+  const profiles = new Set(existing?.profiles ?? []);
   if (
     !offer.models.some(
-      ({ provider, model }) => provider === choice.instanceId && model === choice.model,
+      ({ provider, model }) =>
+        offers(profiles, assistant, provider) &&
+        provider === choice.instanceId &&
+        model === choice.model,
     )
   )
     throw new Error(

@@ -36,6 +36,11 @@ export const HARNESSES = {
 } as const;
 export type Harness = keyof typeof HARNESSES;
 
+/** Whether the name is one of Carillon's supported harnesses. */
+export function isHarness(value: string): value is Harness {
+  return Object.hasOwn(HARNESSES, value);
+}
+
 /** Where the harness's profile lives: its home, under the XDG data directory. */
 export function profileHome(harness: Harness): string {
   const data = process.env["XDG_DATA_HOME"];
@@ -64,7 +69,7 @@ export async function reconcileProfiles(
 ): Promise<void> {
   const resources = assistantResources(installation);
   if (resources === undefined) return;
-  for (const harness of ["claude", "codex"] as const)
+  for (const harness of Object.keys(HARNESSES).filter(isHarness))
     if (profiles.has(`carillon_${harness}`)) await reconcileProfile(harness, resources);
 }
 

@@ -16,7 +16,7 @@ import packageInfo from "../package.json" with { type: "json" };
 import { join } from "node:path";
 import { text } from "node:stream/consumers";
 import { configure, discover, profile } from "./setup.ts";
-import { HARNESSES, reconcileProfiles, type Harness } from "./profiles.ts";
+import { HARNESSES, isHarness, reconcileProfiles } from "./profiles.ts";
 import { loadSettings, offers, origin, type T3Settings } from "./settings.ts";
 import { connectT3, T3Failure, type T3Endpoint } from "./t3.ts";
 
@@ -159,8 +159,10 @@ function originArgument(args: ReadonlyMap<string, string>): string {
 }
 
 /**
- * `discover --url URL [--refresh INSTANCE,…]`: the server's projects and
- * models, as JSON, once T3 has checked the `--refresh` instances again.
+ * `discover --url URL [--refresh INSTANCE,…] [--agent ID --config PATH]`:
+ * the server's projects and models, as JSON, once T3 has checked the
+ * `--refresh` instances again. `--agent` limits models to that agent's offer
+ * in the installation `--config` names, or `CARILLON_HOME`'s.
  */
 async function discoverCommand(values: readonly string[]): Promise<void> {
   const args = parseArguments(values);
@@ -176,9 +178,7 @@ async function discoverCommand(values: readonly string[]): Promise<void> {
       : { installation: (await serving(args)).installation, agentId };
   const offer = await discover(
     { url: originArgument(args), token: await token() },
-    undefined,
-    refresh,
-    scope,
+    { refresh, ...(scope === undefined ? {} : { scope }) },
   );
   process.stdout.write(`${JSON.stringify(offer)}\n`);
 }
@@ -243,10 +243,6 @@ async function profileCommand(values: readonly string[]): Promise<void> {
     },
   );
   process.stdout.write(`${JSON.stringify(made)}\n`);
-}
-
-function isHarness(value: string): value is Harness {
-  return Object.hasOwn(HARNESSES, value);
 }
 
 /** The runtime `--provider` names, as the installation registers it and serving. */
