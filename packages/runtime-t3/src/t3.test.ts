@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { startFakeT3, type FakeT3 } from "./fake.ts";
-import { connectT3, T3Failure } from "./t3.ts";
+import { connectT3 } from "./t3.ts";
 
 let fake: FakeT3;
 
@@ -17,6 +17,7 @@ it("checks the protocol before sending the credential", async () => {
   await expect(connectT3({ url: fake.url, token: fake.token })).rejects.toMatchObject({
     kind: "incompatible",
   });
+  expect(fake.upgradeCredentials).toEqual([]);
   await expect(connectT3({ url: "http://127.0.0.1:1", token: fake.token })).rejects.toMatchObject({
     kind: "unreachable",
   });
@@ -24,6 +25,7 @@ it("checks the protocol before sending the credential", async () => {
   await expect(connectT3({ url: fake.url, token: "other" })).rejects.toMatchObject({
     kind: "refused",
   });
+  expect(new Set(fake.upgradeCredentials)).toEqual(new Set(["Bearer other"]));
 });
 
 it("classifies rejections, unknown methods and a closed socket", async () => {
@@ -51,9 +53,10 @@ it("classifies rejections, unknown methods and a closed socket", async () => {
   fake.disconnectAll();
   await expect(pending).rejects.toMatchObject({ kind: "disconnected" });
   await connection.closed;
-  await expect(connection.call("orchestration.dispatchCommand", {})).rejects.toBeInstanceOf(
-    T3Failure,
-  );
+  await expect(connection.call("orchestration.dispatchCommand", {})).rejects.toMatchObject({
+    kind: "disconnected",
+    message: "the T3 connection is closed",
+  });
 });
 
 it("delivers stream items and ends a stream on request", async () => {
@@ -86,7 +89,7 @@ it("ends a stalled discovery, body read or upgrade with the caller's own reason,
     const controller = new AbortController();
     const pending = connectT3({ url: fake.url, token: fake.token }, { signal: controller.signal });
     const failing = pending.catch((failure: unknown) => failure);
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await fake.waitFor(() => fake.heldRequests.size === 1);
     const started = Date.now();
     controller.abort(new Error("core disconnected"));
     expect(await failing).toMatchObject({ message: "core disconnected" });

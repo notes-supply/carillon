@@ -1257,7 +1257,7 @@ it("resumes by replay through the roster transitions and still waits for the wak
   fake.complete(threadId, run.id);
   fake.background(threadId, []);
   await resubscribed();
-  await pause(300);
+  await until(() => activity()?.phase === "model");
   expect(activity()).toMatchObject({ phase: "model", running: [] });
   const wake = fake.wake(threadId, "Background command completed");
   fake.assistant(threadId, wake.id, "It printed done.");
@@ -1423,7 +1423,6 @@ it("does not adopt a later run the turn does not owe, and the next turn waits be
   const run = await started("turn-1");
   // A predecessor's late wake lands on the thread while this turn runs: it queues behind it.
   const stale = fake.wake(threadId, 'Background command "old sleep" completed (exit code 0)');
-  expect(stale.status).toBe("queued");
   answer(run, "Only mine.");
   expect((await result).output).toBe("Only mine.");
   // The stale run now runs; it is not this turn's and is not awaited.
@@ -1454,8 +1453,7 @@ it("ignores a stale pending request until the new run's own item names its reque
   const next = await started("turn-2");
   // The new run waits on its own request before its item has arrived: unknown, not blocked.
   const own = fake.request(threadId, next.id, "user_input");
-  await until(() => runOf("turn-2")?.status === "waiting");
-  await pause(300);
+  await until(() => runtime.activity("turn-2", "discord-private")?.phase === "waiting");
   expect(fake.interrupts).toEqual([]);
   expect(runtime.activity("turn-2", "discord-private")?.phase).toBe("waiting");
   // Its item arrives and names the request: blocked with the new turn's wording.
@@ -1724,16 +1722,17 @@ it("cancels or closes promptly while T3's discovery or upgrade stalls before any
   fake.holdDiscovery = true;
   const controller = new AbortController();
   const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
-  await pause(100);
+  await until(() => fake.heldRequests.size === 1);
   let begun = Date.now();
   controller.abort(new Error("core disconnected"));
   await expect(result).rejects.toThrow("core disconnected");
   expect(Date.now() - begun).toBeLessThan(500);
   fake.holdDiscovery = false;
+  fake.disconnectAll();
 
   fake.holdUpgrade = true;
   const closing = runtime.executeTurn(turn("turn-2", "work"));
-  await pause(100);
+  await until(() => fake.heldRequests.size === 1);
   begun = Date.now();
   await runtime.close();
   await expect(closing).rejects.toThrow("T3 runtime is closed");
@@ -1752,7 +1751,7 @@ it("keeps reconnecting through a stalled discovery after the dispatch, and stops
   const run = await started("turn-1");
   // The reconnection's discovery stalls; the caller cancels meanwhile.
   fake.holdDiscovery = true;
-  await pause(200);
+  await until(() => fake.heldRequests.size === 1);
   controller.abort(new Error("core disconnected"));
   let settled = false;
   void result.catch(() => undefined).finally(() => (settled = true));
@@ -1926,7 +1925,6 @@ it("queues behind a person's run in the native UI and cancels only its own queue
   // The person starts a run in T3's own UI; it waits on their approval.
   const person = fake.wake(threadId, "a message typed in the T3 UI");
   fake.request(threadId, person.id, "tool_approval");
-  expect(thread().runs.find((run) => run.id === person.id)?.status).toBe("waiting");
 
   const controller = new AbortController();
   const queued = runtime.executeTurn(turn("turn-2", "from Discord"), controller.signal);

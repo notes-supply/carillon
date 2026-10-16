@@ -1847,7 +1847,15 @@ it.each([false, true])(
 );
 
 it.each([
-  { inside: false, outcome: { kind: "unresolved" }, quiet: false },
+  {
+    inside: false,
+    outcome: {
+      kind: "unresolved",
+      explanation:
+        "Carillon lost its connection to T3 while this turn ran background work, and T3's state does not show whether the result was delivered",
+    },
+    quiet: false,
+  },
   { inside: true, outcome: { kind: "completed", output: "PARENT\n\nB RESULT" }, quiet: true },
 ])(
   "retains only native result uncertainty still owed before a gap (inside: $inside)",
@@ -1891,7 +1899,7 @@ it.each([
       event(7, "message.updated", reply("result", "run-2", "B RESULT", "2026-10-05T11:14:59Z")),
     );
     watch.apply(event(8, "run.updated", run("completed", "wake", 2)));
-    expect(watch.outcome()).toMatchObject(outcome);
+    expect(watch.outcome()).toEqual(outcome);
     expect(watch.quiet()).toBe(quiet);
   },
 );

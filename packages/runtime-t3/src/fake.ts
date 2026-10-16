@@ -84,6 +84,8 @@ export interface Subscription {
 export interface FakeT3 {
   readonly url: string;
   readonly token: string;
+  readonly heldRequests: ReadonlySet<Duplex>;
+  readonly upgradeCredentials: readonly (string | undefined)[];
   readonly threads: Map<string, FakeThread>;
   /** Every command received, in order, before any fault applies. */
   readonly received: Command[];
@@ -300,6 +302,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
 
   /** Sockets of discovery and upgrade requests held open by a fault. */
   const held = new Set<Duplex>();
+  const upgradeCredentials: (string | undefined)[] = [];
   const server = createServer((request, response) => {
     if (request.url?.startsWith("/ws") === true) {
       if (fake.holdDiscovery) {
@@ -370,6 +373,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
   });
   const wss = new WebSocketServer({ noServer: true });
   server.on("upgrade", (request: IncomingMessage, socket: Duplex, head: Buffer) => {
+    upgradeCredentials.push(request.headers.authorization);
     const url = new URL(request.url ?? "/", "http://fake");
     if (url.searchParams.get("orchestrationProtocol") !== String(fake.protocolVersion)) {
       socket.write("HTTP/1.1 426 Upgrade Required\r\n\r\n");
@@ -407,6 +411,8 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
   const fake: FakeT3 = {
     url: `http://127.0.0.1:${String(address.port)}`,
     token,
+    heldRequests: held,
+    upgradeCredentials,
     threads,
     received,
     commands,
