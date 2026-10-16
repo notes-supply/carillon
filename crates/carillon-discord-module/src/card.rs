@@ -73,7 +73,6 @@ enum Status {
     },
 }
 
-/// What a card shows of one job.
 struct Shown<'a> {
     status: Status,
     /// When the person asked, once known.
@@ -175,7 +174,6 @@ fn job_card(job: &Job, seen: Option<&Seen>, markers: &ActivityMarkers) -> Embed 
     )
 }
 
-/// The card's embed.
 fn card(shown: &Shown<'_>, markers: &ActivityMarkers) -> Embed {
     let merged = Merged::of(&shown.reports, shown.live);
     let mut description = vec![status_line(shown, markers)];

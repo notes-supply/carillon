@@ -422,7 +422,6 @@ pub struct JobTurn {
 }
 
 impl JobTurn {
-    /// The turn completed or was interrupted.
     #[must_use]
     pub const fn ended(&self) -> bool {
         matches!(self.state, TurnState::Completed | TurnState::Interrupted)

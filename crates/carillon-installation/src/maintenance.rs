@@ -30,7 +30,6 @@ impl MaintenanceLock {
     /// already holds on behalf of a child process.
     pub const HELD_FOR: &str = "CARILLON_MAINTENANCE_LOCK";
 
-    /// The lock file of the installation at `home`.
     #[must_use]
     pub fn path(home: &Path) -> PathBuf {
         home.join(".maintenance.lock")
@@ -103,7 +102,6 @@ impl UnitsLock {
     /// already holds on behalf of a child process.
     pub const HELD_FOR: &str = "CARILLON_UNITS_LOCK";
 
-    /// The lock file beside the units in `units`.
     #[must_use]
     pub fn path(units: &Path) -> PathBuf {
         units.join(".carillon-units.lock")
@@ -134,7 +132,6 @@ pub struct ServiceLock {
 }
 
 impl ServiceLock {
-    /// The lock file in the state directory `data_dir`.
     #[must_use]
     pub fn path(data_dir: &Path) -> PathBuf {
         data_dir.join("service.lock")

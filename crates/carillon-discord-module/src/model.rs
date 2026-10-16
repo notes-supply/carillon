@@ -13,7 +13,8 @@
 //! earlier catalogue is reported rather than misapplied. Browsing a provider
 //! only filters the model list; choosing a model applies it. Models are paged
 //! 25 at a time within the browsed provider. Each setting gets a select while
-//! rows allow, otherwise one select picks the setting and another its value. A setting with more than 25 choices, or a model with more than 25
+//! rows allow, otherwise one select picks the setting and another its value.
+//! A setting with more than 25 choices, or a model with more than 25
 //! settings, shows the first 25.
 
 use carillon_protocol::model::ModelScope as Scope;
@@ -172,7 +173,6 @@ fn settle(
 
 /// Why the panel could not be rendered from a confirmed state.
 enum Unavailable {
-    /// Reading the runtime's state failed.
     Read(String),
     /// A change was refused, or its outcome is unknown.
     Write(String),
