@@ -229,5 +229,5 @@ repository, run the service with
 [`fake.ts`](src/fake.ts) stands in for T3, with injectable faults (dropped
 answers, ignored interrupts, disconnections, stalled discovery and more).
 [`runtime.test.ts`](src/runtime.test.ts) covers continuity, recovery without a
-second run, cancellation, background and delegated work, models, commands and
-images against it.
+second run, cancellation, background and delegated work, commands and images
+against it, and [`runtime/models.test.ts`](src/runtime/models.test.ts) models.

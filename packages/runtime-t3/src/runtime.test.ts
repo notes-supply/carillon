@@ -1,126 +1,37 @@
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import type { RuntimeOperations } from "@carillon/runtime/operations";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import { reportOf } from "@carillon/runtime/failure";
-import { ModelSelections } from "@carillon/runtime/selections";
+import type { RuntimeOperations } from "@carillon/runtime/operations";
 import { derivedId, type Run } from "./contracts.ts";
-import { startFakeT3, type FakeT3 } from "./fake.ts";
-import { createT3Runtime, type T3Agent } from "./runtime.ts";
-import { connectT3, type Connect } from "./t3.ts";
+import {
+  answer,
+  build,
+  conversation,
+  dispatches,
+  fake,
+  PROJECT,
+  resources,
+  restart,
+  runOf,
+  runtime,
+  started,
+  thread,
+  threadId,
+  turn,
+} from "./runtime/harness.ts";
+import { connectT3 } from "./t3.ts";
 
-const PROJECT = "project-1";
-const selection = {
-  instanceId: "claudeAgent",
-  model: "claude-sonnet-5",
-  options: [{ id: "effort", value: "low" }],
-};
 const attachment = {
   path: `${"0".repeat(8)}-0000-0000-0000-${"0".repeat(12)}/0`,
   name: "a.png",
   size: 1,
   sha256: "0".repeat(64),
 };
-let fake: FakeT3;
-let resources: string;
-let selections: ModelSelections;
-let runtime: RuntimeOperations;
-
-beforeEach(async () => {
-  fake = await startFakeT3();
-  resources = await mkdtemp(join(tmpdir(), "carillon-t3-"));
-  await writeFile(join(resources, "SYSTEM.md"), "You are the Carillon agent.\n");
-  selections = await ModelSelections.open(join(resources, "model-selection.json"));
-  vi.spyOn(console, "log").mockImplementation(() => undefined);
-  vi.spyOn(console, "error").mockImplementation(() => undefined);
-  runtime = build();
-});
-
-afterEach(async () => {
-  await runtime.close();
-  await fake.close();
-  await rm(resources, { recursive: true, force: true });
-  vi.restoreAllMocks();
-});
-
-function build(
-  overrides: {
-    url?: string;
-    token?: string;
-    reconnectDelayMs?: number;
-    connect?: Connect;
-    /** The default agent's role and settings model, the assistant's on the profile by default. */
-    role?: Pick<T3Agent, "assistant" | "selection">;
-  } = {},
-) {
-  return createT3Runtime({
-    endpoint: { url: overrides.url ?? fake.url, token: overrides.token ?? fake.token },
-    agents: new Map([
-      [
-        "default",
-        {
-          projectId: PROJECT,
-          workspace: resources,
-          ...(overrides.role ?? { assistant: true, selection }),
-        },
-      ],
-      [
-        "code",
-        {
-          projectId: PROJECT,
-          workspace: resources,
-          assistant: false,
-          selection: { instanceId: "codex", model: "gpt-6-astra", options: [] },
-        },
-      ],
-    ]),
-    profiles: new Set(["claudeAgent"]),
-    selections,
-    ...(overrides.connect === undefined ? {} : { connect: overrides.connect }),
-    reconnect: { attempts: 5, delayMs: overrides.reconnectDelayMs ?? 50 },
-    settleMs: 500,
-    timeoutMs: 2_000,
-  });
-}
-
-const threadId = derivedId("thread", PROJECT, "discord-private", "default", "conversation-1");
-
-function turn(correlation: string, input: string, extra: Record<string, unknown> = {}) {
-  return {
-    correlation_id: correlation,
-    interface_id: "discord-private",
-    agent_id: "default",
-    audience_id: "conversation-1",
-    input,
-    resource_root: resources,
-    attachment_root: join(resources, "attachments"),
-    ...extra,
-  };
-}
-
-function thread() {
-  const found = fake.threads.get(threadId);
-  if (found === undefined) throw new Error("the conversation's thread does not exist");
-  return found;
-}
-
-function runOf(correlation: string): Run | undefined {
-  return fake.threads
-    .get(threadId)
-    ?.runs.find((run) => run.userMessageId === derivedId("message", correlation));
-}
-
-async function started(correlation: string): Promise<Run> {
-  await fake.waitFor(() => runOf(correlation) !== undefined);
-  const run = runOf(correlation);
-  if (run === undefined) throw new Error("run not started");
-  return run;
-}
 
 /** The turn's run once it has the status. */
 async function waitForStatus(correlation: string, status: Run["status"]): Promise<Run> {
@@ -135,22 +46,20 @@ async function resubscribed(): Promise<void> {
   await fake.waitFor(() => thread().subscribers.size === 1);
 }
 
-function answer(run: Run, text: string): void {
-  fake.assistant(threadId, run.id, text);
-  fake.complete(threadId, run.id);
-}
-
 function userTexts(): string[] {
   return thread()
     .messages.filter((message) => message.role === "user")
     .map((message) => message.text);
 }
 
-const dispatches = () => fake.commands.filter((command) => command.type === "message.dispatch");
 const activity = () => runtime.activity("turn-1", "discord-private");
+
 const until = (condition: () => boolean) => fake.waitFor(condition);
+
 const roster = () => thread().providerThread.pendingBackgroundTasks ?? [];
+
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /** An answer apart from the turn's final report, which cases about the answer leave aside. */
 const answered = (response: { readonly activity?: unknown }) => ({
   ...response,
@@ -820,265 +729,6 @@ it("names earlier files it cannot provide", async () => {
   );
 });
 
-const conversation = {
-  interface_id: "discord-private",
-  agent_id: "default",
-  audience_id: "conversation-1",
-};
-const agentDefault = {
-  provider: "claudeAgent",
-  model: "claude-sonnet-5",
-  options: { effort: "low", fastMode: "off" },
-};
-const modelSets = () =>
-  fake.commands.filter((command) => command.type === "thread.model-selection.set");
-
-it("reads the conversation's model from its native thread against T3's catalogue", async () => {
-  const state = await runtime.modelState(conversation);
-  // Only usable provider instances are offered, and only the assistant's
-  // profiles, no other instance; a boolean setting is on or off.
-  expect(state.available).toEqual([
-    {
-      provider: "claudeAgent",
-      model: "claude-sonnet-5",
-      name: "Claude Sonnet 5",
-      options: [
-        { id: "effort", name: "Effort", choices: ["low", "high"], default: "high" },
-        { id: "fastMode", name: "Fast Mode", choices: ["off", "on"], default: "off" },
-      ],
-    },
-    { provider: "claudeAgent", model: "claude-haiku-4-5", name: "Claude Haiku 4.5", options: [] },
-  ]);
-  // The agent default is the settings' selection until `/model` changes it; a
-  // conversation without a thread yet will start with it. Reading creates nothing.
-  expect(state.agent).toEqual({ selection: agentDefault, overridden: false });
-  expect(state.conversation).toEqual({ selection: agentDefault, overridden: false });
-  expect(fake.threads.size).toBe(0);
-  expect(
-    await runtime.modelState({ interface_id: "discord-private", agent_id: "default" }),
-  ).not.toHaveProperty("conversation");
-
-  // A selection made in T3's own UI is the conversation's.
-  const reply = runtime.executeTurn(turn("turn-1", "hi"));
-  answer(await started("turn-1"), "Hello.");
-  await reply;
-  thread().modelSelection = { instanceId: "claudeAgent", model: "claude-haiku-4-5", options: [] };
-  expect((await runtime.modelState(conversation)).conversation).toEqual({
-    selection: { provider: "claudeAgent", model: "claude-haiku-4-5", options: {} },
-    overridden: true,
-  });
-});
-
-it("changes the thread's own selection, which later messages inherit, and reads it back", async () => {
-  // A change before the first message opens the thread with the agent default first.
-  const haiku = { provider: "claudeAgent", model: "claude-haiku-4-5" };
-  expect(
-    (await runtime.setModel({ ...conversation, scope: "conversation", selection: haiku }))
-      .conversation,
-  ).toEqual({ selection: { ...haiku, options: {} }, overridden: true });
-  expect(fake.commands.find((command) => command.type === "thread.create")).toMatchObject({
-    modelSelection: { instanceId: "claudeAgent", model: "claude-sonnet-5" },
-  });
-  expect(thread().modelSelection).toEqual({
-    instanceId: "claudeAgent",
-    model: "claude-haiku-4-5",
-    options: [],
-  });
-
-  const reply = runtime.executeTurn(turn("turn-1", "Which model?"));
-  answer(await started("turn-1"), "Haiku.");
-  await reply;
-  expect(dispatches()[0]).toMatchObject({
-    modelSelection: { instanceId: "claudeAgent", model: "claude-haiku-4-5" },
-  });
-  expect(thread().modelSelection.model).toBe("claude-haiku-4-5");
-
-  // A setting changes against the selection the panel showed; booleans reach T3 as booleans.
-  const sonnet = await runtime.setModel({
-    ...conversation,
-    scope: "conversation",
-    selection: { provider: "claudeAgent", model: "claude-sonnet-5" },
-  });
-  const shown = sonnet.conversation?.selection;
-  expect(shown).toEqual({ ...agentDefault, options: { effort: "high", fastMode: "off" } });
-  const fast = await runtime.setModel({
-    ...conversation,
-    scope: "conversation",
-    selection: { ...agentDefault, options: { effort: "high", fastMode: "on" } },
-    ...(shown == null ? {} : { expected: shown }),
-  });
-  expect(thread().modelSelection.options).toEqual([
-    { id: "effort", value: "high" },
-    { id: "fastMode", value: true },
-  ]);
-  expect(fast.conversation?.selection?.options).toEqual({ effort: "high", fastMode: "on" });
-
-  // A change made in T3's own UI meanwhile makes the panel's view stale.
-  thread().modelSelection = { instanceId: "claudeAgent", model: "claude-haiku-4-5", options: [] };
-  await expect(
-    runtime.setModel({
-      ...conversation,
-      scope: "conversation",
-      selection: { ...agentDefault, options: { effort: "low" } },
-      ...(fast.conversation?.selection == null ? {} : { expected: fast.conversation.selection }),
-    }),
-  ).rejects.toMatchObject({ status: 409, message: "The model settings changed." });
-  expect(thread().modelSelection.model).toBe("claude-haiku-4-5");
-
-  // A model T3's catalogue no longer lists is still the thread's selection,
-  // so a view from before T3 switched to it is stale too.
-  const shownHaiku = (await runtime.modelState(conversation)).conversation?.selection;
-  thread().modelSelection = { instanceId: "claudeAgent", model: "claude-retired", options: [] };
-  expect((await runtime.modelState(conversation)).conversation?.selection).toEqual({
-    provider: "claudeAgent",
-    model: "claude-retired",
-    options: {},
-  });
-  await expect(
-    runtime.setModel({
-      ...conversation,
-      scope: "conversation",
-      selection: { ...agentDefault, options: { effort: "low" } },
-      ...(shownHaiku == null ? {} : { expected: shownHaiku }),
-    }),
-  ).rejects.toMatchObject({ status: 409, message: "The model settings changed." });
-  expect(thread().modelSelection.model).toBe("claude-retired");
-
-  // Returning to the agent default sets it on the thread, every setting resolved.
-  const reset = await runtime.setModel({ ...conversation, scope: "conversation", selection: null });
-  expect(reset.conversation).toEqual({ selection: agentDefault, overridden: false });
-  expect(thread().modelSelection).toEqual({
-    ...selection,
-    options: [...selection.options, { id: "fastMode", value: false }],
-  });
-});
-
-it("reports no model when T3 no longer lists the thread whose model it changed", async () => {
-  const haiku = { provider: "claudeAgent", model: "claude-haiku-4-5" };
-  // T3 commits the change and answers with its receipt, then answers the
-  // read that follows with its typed missing-projection error.
-  let committed: unknown;
-  fake.failAfterDispatch = (command) => {
-    if (command.type === "thread.model-selection.set") {
-      committed = structuredClone(thread().modelSelection);
-      fake.threads.delete(threadId);
-    }
-    return undefined;
-  };
-  await expect(
-    runtime.setModel({ ...conversation, scope: "conversation", selection: haiku }),
-  ).rejects.toMatchObject({
-    status: 502,
-    message: "T3 answered in a form this runtime does not understand.",
-  });
-  // The change T3 committed is neither reported as the default nor sent again.
-  expect(committed).toEqual({ instanceId: "claudeAgent", model: "claude-haiku-4-5", options: [] });
-  expect(modelSets()).toHaveLength(1);
-});
-
-it("keeps the agent default `/model` chooses, which new threads start with", async () => {
-  const haiku = { provider: "claudeAgent", model: "claude-haiku-4-5" };
-  const channel = { interface_id: "discord-private", agent_id: "default" };
-  const changed = await runtime.setModel({ ...channel, scope: "agent", selection: haiku });
-  expect(changed.agent).toEqual({ selection: { ...haiku, options: {} }, overridden: true });
-  // A new conversation's thread opens with it, and its message names it.
-  const reply = runtime.executeTurn(turn("turn-1", "hi"));
-  answer(await started("turn-1"), "Hello.");
-  await reply;
-  expect(thread().modelSelection).toMatchObject({
-    instanceId: "claudeAgent",
-    model: "claude-haiku-4-5",
-  });
-  // The ledger keeps it: a restarted runtime reads it back.
-  await runtime.close();
-  selections = await ModelSelections.open(join(resources, "model-selection.json"));
-  runtime = build();
-  expect((await runtime.modelState(channel)).agent).toEqual({
-    selection: { ...haiku, options: {} },
-    overridden: true,
-  });
-  // An instance the assistant does not run on is refused here too.
-  await expect(
-    runtime.setModel({
-      ...channel,
-      scope: "agent",
-      selection: { provider: "codex", model: "gpt-6-astra" },
-    }),
-  ).rejects.toMatchObject({ status: 422 });
-  // Returning to the default restores the settings'.
-  expect((await runtime.setModel({ ...channel, scope: "agent", selection: null })).agent).toEqual({
-    selection: agentDefault,
-    overridden: false,
-  });
-});
-
-it("keeps the agent default `/model` chose only while the agent runs on its instance", async () => {
-  const channel = { interface_id: "discord-private", agent_id: "default" };
-  const haiku = { provider: "claudeAgent", model: "claude-haiku-4-5" };
-  await runtime.setModel({ ...channel, scope: "agent", selection: haiku });
-  // T3 stops listing the model on the profile: the default stays, and its
-  // run fails in T3 rather than another model running.
-  const listing = (instanceId: string, slug: string) => ({
-    instanceId,
-    driver: instanceId,
-    enabled: true,
-    installed: true,
-    status: "ready",
-    models: [{ slug, name: slug, isCustom: false, capabilities: null }],
-  });
-  fake.providers = [listing("claudeAgent", "claude-sonnet-5"), listing("codex", "gpt-6-astra")];
-  expect((await runtime.modelState(channel)).agent).toEqual({
-    selection: { ...haiku, options: {} },
-    overridden: true,
-  });
-
-  // The agent loses its resources: as plain T3 Code it may not run on the
-  // profile, so its settings' model is its default.
-  await runtime.close();
-  runtime = build({
-    role: {
-      assistant: false,
-      selection: { instanceId: "codex", model: "gpt-6-astra", options: [] },
-    },
-  });
-  expect((await runtime.modelState(channel)).agent).toEqual({
-    selection: { provider: "codex", model: "gpt-6-astra", options: {} },
-    overridden: false,
-  });
-  const reply = runtime.executeTurn(turn("turn-1", "hi"));
-  const run = await started("turn-1");
-  expect(run.modelSelection).toMatchObject({ instanceId: "codex", model: "gpt-6-astra" });
-  answer(run, "Hello.");
-  await reply;
-  // A change is checked against the default shown now, not the one set aside.
-  const astra = { provider: "codex", model: "gpt-6-astra", options: {} };
-  await expect(
-    runtime.setModel({ ...channel, scope: "agent", selection: astra, expected: haiku }),
-  ).rejects.toMatchObject({ status: 409, message: "The model settings changed." });
-  expect(
-    (await runtime.setModel({ ...channel, scope: "agent", selection: astra, expected: astra }))
-      .agent,
-  ).toEqual({ selection: astra, overridden: true });
-});
-
-it("routes a thread T3's UI moved onto an instance the assistant does not run on back to its default", async () => {
-  const first = runtime.executeTurn(turn("turn-1", "hi"));
-  answer(await started("turn-1"), "Hello.");
-  await first;
-  // An ordinary account's instance, chosen in T3's own picker.
-  thread().modelSelection = { instanceId: "codex", model: "gpt-6-astra", options: [] };
-  expect((await runtime.modelState(conversation)).conversation).toEqual({
-    selection: agentDefault,
-    overridden: false,
-  });
-  const second = runtime.executeTurn(turn("turn-2", "again"));
-  const run = await started("turn-2");
-  expect(run.modelSelection).toMatchObject({ instanceId: "claudeAgent", model: "claude-sonnet-5" });
-  expect(thread().modelSelection.instanceId).toBe("claudeAgent");
-  answer(run, "Back.");
-  await second;
-});
-
 it("runs plain T3 Code on the other instances, with the person's text as written and T3's own title", async () => {
   const plainThread = derivedId("thread", PROJECT, "discord-private", "code", "conversation-1");
   const code = { ...conversation, agent_id: "code" };
@@ -1111,63 +761,6 @@ it("runs plain T3 Code on the other instances, with the person's text as written
   await expect(
     runtime.executeTurn({ ...turn("turn-2", "hi"), agent_id: "elsewhere" }),
   ).rejects.toMatchObject({ status: 422 });
-});
-
-it("refuses changes it cannot make, without sending them to T3", async () => {
-  const change = (selection: {
-    provider: string;
-    model: string;
-    options?: Record<string, string>;
-  }) => runtime.setModel({ ...conversation, scope: "conversation", selection });
-  // An instance the assistant does not run on, an ordinary account's, is not
-  // offered to it, though T3 offers it to plain T3 Code.
-  await expect(change({ provider: "codex", model: "gpt-6-astra" })).rejects.toMatchObject({
-    status: 422,
-    message: "That model is not available.",
-  });
-  // T3 accepts any model name or setting value, so the catalogue decides.
-  await expect(change({ provider: "claudeAgent", model: "no-such-model" })).rejects.toMatchObject({
-    status: 422,
-    message: "That model is not available.",
-  });
-  await expect(change({ provider: "cursor", model: "auto" })).rejects.toMatchObject({
-    status: 422,
-  });
-  await expect(
-    change({ provider: "claudeAgent", model: "claude-sonnet-5", options: { effort: "max" } }),
-  ).rejects.toMatchObject({ status: 422 });
-  expect(modelSets()).toEqual([]);
-
-  // While a turn of the conversation runs, or anything else works on its thread.
-  const reply = runtime.executeTurn(turn("turn-1", "work"));
-  const run = await started("turn-1");
-  await expect(
-    change({ provider: "claudeAgent", model: "claude-haiku-4-5" }),
-  ).rejects.toMatchObject({ status: 409 });
-  answer(run, "Done.");
-  await reply;
-  fake.wake(threadId, "A run started in T3's own UI");
-  await expect(
-    change({ provider: "claudeAgent", model: "claude-haiku-4-5" }),
-  ).rejects.toMatchObject({ status: 409 });
-  expect(modelSets()).toEqual([]);
-  const ui = thread().runs.at(-1);
-  if (ui !== undefined) fake.complete(threadId, ui.id);
-
-  // T3's own refusal is reported as such.
-  fake.reject = (command) =>
-    command.type === "thread.model-selection.set"
-      ? "The target provider instance is unavailable."
-      : undefined;
-  const refused = change({ provider: "claudeAgent", model: "claude-haiku-4-5" });
-  await expect(refused).rejects.toMatchObject({ status: 422 });
-  await expect(refused).rejects.toThrow(
-    /^T3 refused the model change: .*The target provider instance is unavailable\.$/u,
-  );
-  expect(thread().modelSelection).toEqual({
-    ...selection,
-    options: [...selection.options, { id: "fastMode", value: false }],
-  });
 });
 
 it("stops the native run when the runtime closes mid-turn", async () => {
@@ -1722,8 +1315,7 @@ it("fences the conversation when a native failure does not prove a stop, but not
   fake.snapshotOnResume = false;
 
   // A fresh runtime: a confirmed interrupt and a completed turn leave the thread trusted.
-  await runtime.close();
-  runtime = build();
+  await restart();
   const controller = new AbortController();
   const cancelled = runtime.executeTurn(turn("turn-3", "work"), controller.signal);
   const run3 = await started("turn-3");
