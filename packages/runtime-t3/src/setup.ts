@@ -5,19 +5,8 @@
  * resources. The T3 token is given as a value, never as an argument, and
  * written only to a private credential file the runtime's settings name.
  */
-import {
-  lstat,
-  mkdir,
-  open,
-  readFile,
-  readlink,
-  realpath,
-  rename,
-  rm,
-  symlink,
-} from "node:fs/promises";
-import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { open, readFile, realpath, rename, rm } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import type { AvailableModel } from "@carillon/protocol";
 import type { Agent, Installation } from "@carillon/runtime/installation";
 import { stringify } from "smol-toml";
@@ -31,6 +20,13 @@ import {
   type InstanceDefinition,
 } from "./contracts.ts";
 import { catalog } from "./models.ts";
+import {
+  assistantResources,
+  HARNESSES,
+  profileHome,
+  reconcileProfile,
+  type Harness,
+} from "./profiles.ts";
 import { offers, parseSettings, readSettings, type SettingsFile } from "./settings.ts";
 import { connectT3, DEFAULT_TIMEOUT_MS, T3Failure, type Connect, type T3Endpoint } from "./t3.ts";
 
@@ -206,29 +202,6 @@ export async function configure(
   }).then(() => project);
 }
 
-/** The harnesses Carillon makes profiles for, as T3 drives them. */
-export const HARNESSES = {
-  claude: {
-    driver: "claudeAgent",
-    name: "Claude · Carillon",
-    /** The file the harness reads its user instructions from, in its home. */
-    instructions: "CLAUDE.md",
-    /** The variable an API key goes in, and the endpoint and its token for another one. */
-    key: "ANTHROPIC_API_KEY",
-    endpoint: "ANTHROPIC_BASE_URL",
-    endpointKey: "ANTHROPIC_AUTH_TOKEN",
-  },
-  codex: {
-    driver: "codex",
-    name: "Codex · Carillon",
-    instructions: "AGENTS.md",
-    key: "OPENAI_API_KEY",
-    endpoint: "OPENAI_BASE_URL",
-    endpointKey: "OPENAI_API_KEY",
-  },
-} as const;
-export type Harness = keyof typeof HARNESSES;
-
 /** A Carillon profile: a T3 instance of its own for one harness. */
 export interface ProfileChoice {
   readonly harness: Harness;
@@ -238,22 +211,11 @@ export interface ProfileChoice {
   readonly endpoint?: string;
 }
 
-/** Where the harness's profile lives: its home, under the XDG data directory. */
-function profileHome(harness: Harness): string {
-  const data = process.env["XDG_DATA_HOME"];
-  return resolve(
-    data === undefined || data === "" ? join(homedir(), ".local", "share") : data,
-    "carillon",
-    "profiles",
-    harness,
-  );
-}
-
 /**
  * Makes Carillon's profile for a harness on the server at `endpoint`: the T3
  * instance `carillon_HARNESS`, whose home holds the harness's own state,
  * with links to the assistant's resources: its instructions to their
- * `AGENTS.md`, its user skills to their `skills`, so Carillon's instructions
+ * `AGENTS.md`, each shared skill into its own `skills` directory, so Carillon's instructions
  * and skills have one copy, its resources. T3 then gets the instance, created
  * live, and the runtime's settings name it a profile. Each step keeps what an
  * earlier run made as it should be, and refuses what is otherwise. Returns
@@ -267,17 +229,14 @@ export async function profile(
 ): Promise<{ readonly instanceId: string; readonly home: string }> {
   const existing = await readExisting(installation);
   const harness = HARNESSES[choice.harness];
-  const resources = installation.agents.find((agent) => agent.resources !== undefined)?.resources;
+  const resources = assistantResources(installation);
   if (resources === undefined)
     throw new Error(
       `no agent of ${installation.runtime.id} in carillon.toml has resources for a profile to share`,
     );
   const instanceId = `carillon_${choice.harness}`;
   const home = profileHome(choice.harness);
-  await mkdir(home, { recursive: true, mode: 0o700 });
-  await mkdir(join(resources, "skills"), { recursive: true, mode: 0o700 });
-  await link(join(home, harness.instructions), join(resources, "AGENTS.md"));
-  await link(join(home, "skills"), join(resources, "skills"));
+  await reconcileProfile(choice.harness, resources);
   const connection = await connect(endpoint);
   try {
     const settings: unknown = await connection.call(RPC.getSettings, {});
@@ -324,23 +283,6 @@ function environmentOf(
     { name: harness.endpoint, value: choice.endpoint, sensitive: false },
     { name: harness.endpointKey, value: choice.key, sensitive: true },
   ];
-}
-
-/** Links `path` to `target`, keeping a link there already; anything else at `path` is refused. */
-async function link(path: string, target: string): Promise<void> {
-  const present = await lstat(path).catch((failure: unknown) => {
-    if (failure instanceof Error && "code" in failure && failure.code === "ENOENT")
-      return undefined;
-    throw failure;
-  });
-  if (present === undefined) {
-    await symlink(target, path);
-    return;
-  }
-  if (!present.isSymbolicLink() || resolve(dirname(path), await readlink(path)) !== target)
-    throw new Error(
-      `${path} is not a link to ${target}; move it away, then set the profile up again`,
-    );
 }
 
 async function readExisting(installation: Installation): Promise<SettingsFile | undefined> {

@@ -1,87 +1,11 @@
-import { spawn } from "node:child_process";
-import { once } from "node:events";
-import {
-  chmod,
-  lstat,
-  mkdir,
-  mkdtemp,
-  readFile,
-  readdir,
-  readlink,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
+import { chmod, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadInstallation, type Installation } from "@carillon/runtime/installation";
-import { afterEach, expect, it } from "vitest";
-import { startFakeT3, type FakeT3 } from "./fake.ts";
+import { expect, it } from "vitest";
 import { loadSettings } from "./settings.ts";
-import { configure, discover, profile } from "./setup.ts";
+import { configure, discover } from "./setup.ts";
 import { T3Failure } from "./t3.ts";
-
-const cleanups: (() => Promise<void>)[] = [];
-afterEach(async () => {
-  await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
-});
-
-async function fakeT3(token?: string): Promise<FakeT3> {
-  const fake = await startFakeT3(token);
-  cleanups.push(() => fake.close());
-  return fake;
-}
-
-const HASH = "0".repeat(64);
-
-/**
- * An installation registering runtime-t3, with its assistant, whose
- * resources are `agent/`, and plain T3 Code, `code`, working in `workspace/`.
- */
-async function installation(): Promise<{ root: string; workspace: string; config: string }> {
-  const root = await mkdtemp(join(tmpdir(), "carillon-t3-setup-"));
-  cleanups.push(() => rm(root, { recursive: true }));
-  const workspace = join(root, "workspace");
-  await mkdir(workspace);
-  await mkdir(join(root, "agent"));
-  await writeFile(join(root, "agent", "AGENTS.md"), "Carillon's instructions\n");
-  await mkdir(join(root, "credentials"));
-  await mkdir(join(root, "providers"));
-  const config = join(root, "carillon.toml");
-  await writeFile(
-    config,
-    [
-      'data_dir = "state"',
-      "[core]",
-      `operator_token_hash = "${HASH}"`,
-      "[[agents]]",
-      'id = "assistant"',
-      'name = "Carillon"',
-      'runtime = "runtime-t3"',
-      `workspace = "${workspace}"`,
-      'resources = "agent"',
-      "[[agents]]",
-      'id = "code"',
-      'name = "T3 Code"',
-      'runtime = "runtime-t3"',
-      `workspace = "${workspace}"`,
-      "[[providers]]",
-      'id = "runtime-t3"',
-      'role = "runtime"',
-      'version = "0.0.0"',
-      'url = "http://127.0.0.1:1"',
-      `token_hash = "${HASH}"`,
-      "enabled = true",
-    ].join("\n"),
-  );
-  return { root, workspace, config };
-}
-
-async function loaded(config: string): Promise<Installation> {
-  const result = await loadInstallation(config, "runtime-t3");
-  if (typeof result === "string") throw new Error(`runtime-t3 is ${result}`);
-  return result;
-}
+import { cleanup, cli, fakeT3, installation, loaded } from "./setup-fixtures.ts";
 
 it("discovers T3's projects and usable models", async () => {
   const fake = await fakeT3();
@@ -401,7 +325,7 @@ it("checks the saved settings and T3 token as startup reads them, reaching no T3
   // An agent's workspace, apart from the installation, must be a directory
   // for the runtime to start, whatever its settings and token say.
   const workspace = await mkdtemp(join(tmpdir(), "carillon-t3-workspace-"));
-  cleanups.push(() => rm(workspace, { recursive: true, force: true }));
+  cleanup(() => rm(workspace, { recursive: true, force: true }));
   const saved = await readFile(config, "utf8");
   await writeFile(config, saved.replace(/^workspace = ".*"$/mu, `workspace = "${workspace}"`));
   expect((await cli(["check", "--config", config], "")).status).toBe(0);
@@ -497,21 +421,6 @@ it("checks the saved settings and T3 token as startup reads them, reaching no T3
   }
 }, 30_000);
 
-/** The CLI with `input` on standard input; the fake T3 serves from this process meanwhile. */
-async function cli(
-  args: readonly string[],
-  input: string,
-): Promise<{ status: number | null; stdout: string; stderr: string }> {
-  const child = spawn(process.execPath, [join(import.meta.dirname, "cli.ts"), ...args]);
-  let stdout = "";
-  let stderr = "";
-  child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
-  child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
-  child.stdin.end(input);
-  await once(child, "close");
-  return { status: child.exitCode, stdout, stderr };
-}
-
 it("takes the token on standard input, says the settings are saved for a start, and reports a refusal in one line", async () => {
   const fake = await fakeT3();
   const discovered = await cli(
@@ -575,112 +484,6 @@ it("takes the token on standard input, says the settings are saved for a start, 
   );
   expect(configured.status).toBe(1);
   expect(configured.stderr).toMatch(/runtime-t3 is not in carillon\.toml/u);
-});
-
-it("makes a Carillon profile: a T3 instance whose home links to the assistant's resources", async () => {
-  const fake = await fakeT3();
-  const { root, workspace, config } = await installation();
-  const runtime = await loaded(config);
-  const endpoint = { url: fake.url, token: fake.token };
-  // Profiles live under the XDG data directory, by harness.
-  const data = process.env["XDG_DATA_HOME"];
-  process.env["XDG_DATA_HOME"] = join(root, "data");
-  cleanups.push(async () => {
-    if (data === undefined) delete process.env["XDG_DATA_HOME"];
-    else process.env["XDG_DATA_HOME"] = data;
-  });
-  const home = join(root, "data", "carillon", "profiles", "claude");
-  expect(await profile(runtime, endpoint, { harness: "claude", key: "sk-test" })).toEqual({
-    instanceId: "carillon_claude",
-    home,
-  });
-  // One copy of Carillon's instructions and skills: the resources'.
-  expect(await readlink(join(home, "CLAUDE.md"))).toBe(join(root, "agent", "AGENTS.md"));
-  expect(await readlink(join(home, "skills"))).toBe(join(root, "agent", "skills"));
-  expect((await stat(join(root, "agent", "skills"))).isDirectory()).toBe(true);
-  expect((await stat(home)).mode & 0o777).toBe(0o700);
-  // T3 holds the instance, its key a secret of its own, never the runtime's.
-  expect(fake.instances.get("carillon_claude")).toEqual({
-    driver: "claudeAgent",
-    displayName: "Claude · Carillon",
-    enabled: true,
-    config: { homePath: home },
-    environment: [{ name: "ANTHROPIC_API_KEY", value: "sk-test", sensitive: true }],
-  });
-  expect(await readFile(runtime.providerFile, "utf8")).not.toContain("sk-test");
-  expect((await loadSettings(runtime.providerFile, root)).profiles).toEqual(
-    new Set(["carillon_claude"]),
-  );
-
-  // A compatible endpoint's address is the harness's, its token a secret.
-  const proxied = await profile(runtime, endpoint, {
-    harness: "codex",
-    key: "proxy-token",
-    endpoint: "https://proxy.example",
-  });
-  const codexHome = join(root, "data", "carillon", "profiles", "codex");
-  expect(proxied).toEqual({ instanceId: "carillon_codex", home: codexHome });
-  expect(fake.instances.get("carillon_codex")).toMatchObject({
-    driver: "codex",
-    environment: [
-      { name: "OPENAI_BASE_URL", value: "https://proxy.example", sensitive: false },
-      { name: "OPENAI_API_KEY", value: "proxy-token", sensitive: true },
-    ],
-  });
-  expect(await readlink(join(codexHome, "AGENTS.md"))).toBe(join(root, "agent", "AGENTS.md"));
-  fake.instances.delete("carillon_codex");
-
-  // Making it again keeps what is there.
-  await profile(runtime, endpoint, { harness: "claude" });
-  expect(fake.instances.size).toBe(1);
-
-  // The assistant then runs on it, and plain T3 Code no longer may.
-  fake.providers = [
-    ...fake.providers,
-    {
-      instanceId: "carillon_claude",
-      driver: "claudeAgent",
-      enabled: true,
-      installed: true,
-      status: "ready",
-      models: [{ slug: "claude-sonnet-5", name: "Claude Sonnet 5", capabilities: null }],
-    },
-  ];
-  fake.projects = [{ id: "agent", title: "Agent", workspaceRoot: workspace }];
-  const sonnet = { projectId: "agent", model: "claude-sonnet-5" };
-  await configure(runtime, endpoint, {
-    ...sonnet,
-    agentId: "assistant",
-    instanceId: "carillon_claude",
-  });
-  await expect(
-    configure(runtime, endpoint, { ...sonnet, agentId: "code", instanceId: "carillon_claude" }),
-  ).rejects.toThrow(/no usable model/u);
-
-  // What is not this profile is refused, with T3 left as it was.
-  fake.instances.set("carillon_codex", { driver: "codex", config: { homePath: "/elsewhere" } });
-  await expect(profile(runtime, endpoint, { harness: "codex" })).rejects.toThrow(
-    /not this profile/u,
-  );
-  expect(fake.instances.get("carillon_codex")).toEqual({
-    driver: "codex",
-    config: { homePath: "/elsewhere" },
-  });
-  // So is a home holding the owner's own file where the link should be.
-  await rm(join(codexHome, "AGENTS.md"));
-  await writeFile(join(codexHome, "AGENTS.md"), "the owner's own");
-  await expect(profile(runtime, endpoint, { harness: "codex" })).rejects.toThrow(
-    /is not a link to/u,
-  );
-  expect((await lstat(join(codexHome, "AGENTS.md"))).isFile()).toBe(true);
-  // Only an agent with resources has something to share.
-  await writeFile(
-    config,
-    (await readFile(config, "utf8")).replace(/\[\[agents\]\]\nid = "assistant"[^[]*/u, ""),
-  );
-  await expect(profile(await loaded(config), endpoint, { harness: "claude" })).rejects.toThrow(
-    /has resources/u,
-  );
 });
 
 it("discovers each agent's models from every persisted profile through the CLI", async () => {

@@ -15,7 +15,8 @@ import { createT3Runtime, type T3Agent } from "./runtime.ts";
 import packageInfo from "../package.json" with { type: "json" };
 import { join } from "node:path";
 import { text } from "node:stream/consumers";
-import { configure, discover, HARNESSES, profile, type Harness } from "./setup.ts";
+import { configure, discover, profile } from "./setup.ts";
+import { HARNESSES, reconcileProfiles, type Harness } from "./profiles.ts";
 import { loadSettings, offers, origin, type T3Settings } from "./settings.ts";
 import { connectT3, T3Failure, type T3Endpoint } from "./t3.ts";
 
@@ -97,6 +98,7 @@ async function saved(installation: Installation): Promise<{
   agents: ReadonlyMap<string, T3Agent>;
 }> {
   const settings = await loadSettings(installation.providerFile, installation.root);
+  await reconcileProfiles(installation, settings.profiles);
   const agents = new Map<string, T3Agent>();
   for (const agent of installation.agents) {
     const workspace = await stat(agent.workspace).then(
@@ -260,7 +262,7 @@ async function serving(
 /**
  * `check`: whether the saved settings and T3 token read as startup reads
  * them, for the installation `--config` names, or `CARILLON_HOME`'s. It
- * reaches no T3 server and changes nothing. A runtime that would not serve,
+ * reaches no T3 server and reconciles the profile links. A runtime that would not serve,
  * disabled or not registered, starts from nothing, so it passes.
  */
 async function checkCommand(values: readonly string[]): Promise<void> {
