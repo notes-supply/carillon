@@ -392,8 +392,9 @@ T3_SETTINGS=$INSTALLATION/providers/runtime-t3.toml
 T3_TOKEN=$INSTALLATION/credentials/t3.token
 t3_settings() {
   printf '%s\n' 'url = "http://127.0.0.1:1"' 'token_file = "credentials/t3.token"' \
-    '[agents.assistant]' 'project_id = "agent"' '[agents.assistant.model]' \
-    'instance_id = "claudeAgent"' 'model = "claude-sonnet-5"' >"$T3_SETTINGS"
+    'profiles = ["carillon_claude"]' '[agents.assistant]' 'project_id = "agent"' \
+    '[agents.assistant.model]' 'instance_id = "carillon_claude"' 'model = "claude-sonnet-5"' \
+    >"$T3_SETTINGS"
   printf '%s\n' t3-token >"$T3_TOKEN"
   chmod 0600 "$T3_SETTINGS" "$T3_TOKEN"
 }
