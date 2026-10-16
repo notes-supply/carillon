@@ -16,6 +16,23 @@ pub(crate) struct Answer {
 }
 
 impl Answer {
+    /// Removes menu badges Discord can refuse while keeping the text emotes.
+    pub(crate) fn remove_option_emojis(&mut self) -> bool {
+        let mut removed = false;
+        for component in &mut self.components {
+            if let Component::ActionRow(row) = component {
+                for inner in &mut row.components {
+                    if let Component::SelectMenu(menu) = inner {
+                        for option in menu.options.iter_mut().flatten() {
+                            removed |= option.emoji.take().is_some();
+                        }
+                    }
+                }
+            }
+        }
+        removed
+    }
+
     /// Text alone, which as an edit also clears what the message showed.
     pub(crate) fn notice(content: &str) -> Self {
         Self {
