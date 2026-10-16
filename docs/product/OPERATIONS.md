@@ -79,7 +79,9 @@ the check. Each T3 runtime permits at most one agent with resources.
 
 `carillon runtime-t3 discover --agent ID --url URL` reads the token on
 standard input and returns that agent's model offer. The saved `profiles`
-list decides which instances the assistant and plain T3 Code may use.
+list decides which instances the assistant may use. Plain T3 Code excludes
+saved profiles and the reserved `carillon_claude` and `carillon_codex` IDs,
+even when they are absent from that list.
 
 The installer creates `~/.carillon` (or `CARILLON_HOME`), registers the user
 services (`carillon.target` with core, Discord and both runtimes; a

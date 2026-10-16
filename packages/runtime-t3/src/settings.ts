@@ -5,6 +5,9 @@ import { Type, type Static } from "typebox";
 import { Check, Errors } from "typebox/value";
 import { parse as parseToml, TomlError } from "smol-toml";
 import type { NativeSelection } from "./contracts.ts";
+import { HARNESSES } from "./profiles.ts";
+
+const PROFILE_IDS = new Set(Object.keys(HARNESSES).map((harness) => `carillon_${harness}`));
 
 const SelectionSchema = Type.Object(
   {
@@ -96,14 +99,17 @@ function nativeSelection(selection: AgentSettingsFile["model"]): NativeSelection
 
 /**
  * Whether `instanceId` is one the agent runs on: Carillon's profiles for its
- * assistant, every other instance for plain T3 Code.
+ * assistant. Plain T3 Code excludes saved profiles and reserved Carillon IDs,
+ * including profiles whose setup did not finish saving their settings.
  */
 export function offers(
   profiles: ReadonlySet<string>,
   assistant: boolean,
   instanceId: string,
 ): boolean {
-  return profiles.has(instanceId) === assistant;
+  return assistant
+    ? profiles.has(instanceId)
+    : !profiles.has(instanceId) && !PROFILE_IDS.has(instanceId);
 }
 
 /** The settings file at `path`, checked strictly, or undefined when there is none. */
