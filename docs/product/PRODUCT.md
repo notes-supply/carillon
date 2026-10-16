@@ -33,9 +33,10 @@ identity, turn state, the runtime that owns each conversation, and delivery.
 
 A conversation belongs to the agent of the route it began in, and is
 pinned to the runtime that took its first turn. Changing an agent's runtime
-affects new conversations only. A conversation
-whose runtime is disabled or removed is refused rather than moved; nothing
-translates native state between engines.
+starts new conversations on the new runtime. Its old conversations end
+with an explanation that asks the user to start a new conversation. A conversation
+whose runtime is disabled or removed is also refused; nothing translates
+native state between engines.
 
 ## Behaviour
 

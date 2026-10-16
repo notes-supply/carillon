@@ -138,8 +138,9 @@ Startup fails closed:
 - Carillon's profile links must reconcile without replacing harness files;
 - T3 must speak orchestration protocol 2 and accept the token.
 
-Conversations that already started stay with the runtime that took their
-first turn.
+Each conversation is pinned to the runtime that took its first turn. When
+an agent changes runtimes, its old conversations end with an explanation
+that asks the user to start a new conversation.
 
 ## How it behaves
 
