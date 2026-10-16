@@ -58,7 +58,7 @@ it("takes T3's address only as an HTTP origin, before anything connects or logs 
   }
 });
 
-it("reads the profiles and each agent's settings, refusing a repeated profile or an agent ID outside the grammar", async () => {
+it("reads the profiles and each agent's settings, refusing a repeated or unknown profile or an agent ID outside the grammar", async () => {
   const root = await mkdtemp(join(tmpdir(), "carillon-t3-settings-"));
   directories.push(root);
   const path = join(root, "runtime-t3.toml");
@@ -86,7 +86,8 @@ it("reads the profiles and each agent's settings, refusing a repeated profile or
     selection: { instanceId: "carillon_codex", model: "m", options: [] },
   });
   for (const [lines, refusal] of [
-    [['profiles = ["a", "a"]'], /\/profiles/u],
+    [['profiles = ["carillon_claude", "carillon_claude"]'], /\/profiles/u],
+    [['profiles = ["carillon_claude", "carillon_claud"]'], /\/profiles/u],
     [agent('"not/an/agent"', "claudeAgent"), /\/agents/u],
   ] as const) {
     await file(...lines);

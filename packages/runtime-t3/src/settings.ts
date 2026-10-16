@@ -43,7 +43,11 @@ const SettingsSchema = Type.Object(
     /** Prefix of the titles of the assistant's T3 threads. */
     title: Type.Optional(Type.String({ minLength: 1, maxLength: 60 })),
     /** Carillon's own T3 instances, whose homes hold its profile. */
-    profiles: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { uniqueItems: true })),
+    profiles: Type.Optional(
+      Type.Array(Type.String({ pattern: `^(?:${[...PROFILE_IDS].join("|")})$` }), {
+        uniqueItems: true,
+      }),
+    ),
     /** Each agent of this runtime, by its ID in `carillon.toml`. */
     agents: Type.Optional(
       Type.Record(Type.String({ pattern: "^[A-Za-z0-9_-]{1,128}$" }), AgentSettingsSchema, {
