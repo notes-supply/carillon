@@ -9,7 +9,7 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 tokio = { workspace = true, features = ["time"] }
-wasmtime = { version = "48.0.4", default-features = false, features = ["anyhow", "async", "cranelift", "runtime"] }
+wasmtime = { version = "48.0.6", default-features = false, features = ["anyhow", "async", "cranelift", "runtime"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
