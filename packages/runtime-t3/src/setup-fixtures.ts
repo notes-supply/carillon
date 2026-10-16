@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { loadInstallation, type Installation } from "@carillon/runtime/installation";
@@ -106,4 +108,55 @@ function useDataHome(root: string): string {
 
 export function cleanup(action: () => Promise<void>): void {
   cleanups.push(action);
+}
+
+/** Starts the real runtime CLI and stops it once it reports ready. */
+export async function serve(config: string): Promise<{
+  status: number | null;
+  stdout: string;
+  stderr: string;
+}> {
+  const listener = createServer();
+  listener.listen(0, "127.0.0.1");
+  await once(listener, "listening");
+  const address = listener.address();
+  if (address === null || typeof address === "string") throw new Error("no TCP address");
+  await new Promise<void>((done) => listener.close(() => done()));
+  const token = "runtime-test-token";
+  const tokenFile = join(dirname(config), "credentials", "runtime.token");
+  await writeFile(tokenFile, token);
+  await writeFile(
+    config,
+    (await readFile(config, "utf8"))
+      .replace(
+        /^token_hash = ".*"$/mu,
+        `token_hash = "${createHash("sha256").update(token).digest("hex")}"`,
+      )
+      .replace('url = "http://127.0.0.1:1"', `url = "http://127.0.0.1:${String(address.port)}"`),
+  );
+  const child = spawn(process.execPath, [
+    join(import.meta.dirname, "cli.ts"),
+    "--config",
+    config,
+    "--provider",
+    "runtime-t3",
+    "--token-file",
+    tokenFile,
+  ]);
+  const timeout = setTimeout(() => child.kill("SIGKILL"), 5_000);
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk: Buffer) => {
+    stdout += chunk.toString();
+    if (stdout.includes("runtime-t3 ready")) child.kill("SIGTERM");
+  });
+  child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
+  child.stdin.end();
+  try {
+    await once(child, "close");
+    return { status: child.exitCode, stdout, stderr };
+  } finally {
+    clearTimeout(timeout);
+    child.kill("SIGKILL");
+  }
 }
