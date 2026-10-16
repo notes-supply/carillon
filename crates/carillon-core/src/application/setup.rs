@@ -112,38 +112,25 @@ impl Harness {
     }
 }
 
-/// The harnesses the assistant runs on: one, or both.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Harnesses {
-    Claude,
-    Codex,
-    Both,
-}
+/// The harnesses the assistant runs on, of which there is at least one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Harnesses(Vec<Harness>);
 
 impl Harnesses {
     /// Those chosen among [`Harness::ALL`], by index; none chosen is no
     /// assistant on T3.
     fn chosen(indexes: &[usize]) -> Option<Self> {
-        match (indexes.contains(&0), indexes.contains(&1)) {
-            (true, true) => Some(Self::Both),
-            (true, false) => Some(Self::Claude),
-            (false, true) => Some(Self::Codex),
-            (false, false) => None,
-        }
-    }
-
-    const fn each(self) -> &'static [Harness] {
-        match self {
-            Self::Claude => &[Harness::Claude],
-            Self::Codex => &[Harness::Codex],
-            Self::Both => &Harness::ALL,
-        }
+        let chosen: Vec<Harness> = indexes
+            .iter()
+            .filter_map(|&index| Harness::ALL.get(index).copied())
+            .collect();
+        (!chosen.is_empty()).then_some(Self(chosen))
     }
 }
 
 /// What runs Carillon's assistant, the agent with Discord's context and
 /// Carillon's own resources.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Assistant {
     Pi,
     /// On T3, with a profile for each harness.
@@ -195,7 +182,7 @@ pub(super) fn setup(home: &Path, options: &Options, questions: &mut impl Questio
             set_up_t3(
                 home,
                 options.base_port,
-                assistant,
+                &assistant,
                 &provider_binary("runtime-t3")?,
                 questions,
             )?;
@@ -402,7 +389,7 @@ impl Server<'_> {
 fn set_up_t3(
     home: &Path,
     base_port: u16,
-    assistant: Assistant,
+    assistant: &Assistant,
     t3: &Path,
     questions: &mut impl Questions,
 ) -> Result<()> {
@@ -430,8 +417,8 @@ fn set_up_t3(
         .map(|project| format!("{} ({})", project.title, project.workspace.display()))
         .collect();
     let (harnesses, assistant_project) = match assistant {
-        Assistant::T3(harnesses) => (
-            harnesses.each(),
+        Assistant::T3(Harnesses(harnesses)) => (
+            harnesses.as_slice(),
             Some(
                 &projects[questions.choose(
                     "Which T3 project should Carillon's assistant work in?",
@@ -453,7 +440,7 @@ fn set_up_t3(
         .map(|index| &projects[index])
         .collect();
     if assistant_project.is_none() && code.is_empty() {
-        if assistant == Assistant::Pi {
+        if *assistant == Assistant::Pi {
             questions.say("T3 Code is not used, so it was not set up.")?;
             return Ok(());
         }
