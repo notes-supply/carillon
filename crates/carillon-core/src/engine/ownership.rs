@@ -1,47 +1,31 @@
-use super::{Core, CoreError, RuntimeProvider};
+use super::{AgentOptions, Core, CoreError, RuntimeProvider};
 use carillon_protocol::model::ModelQuery;
 
-enum Owner<'a> {
-    Current(&'a str),
+pub(super) enum Owner<'a> {
+    Current(&'a AgentOptions),
     Stranded(String),
 }
 
 impl Core {
-    fn conversation_owner(
+    pub(super) fn conversation_owner(
         &self,
         interface_id: &str,
         query: &ModelQuery,
     ) -> Result<Owner<'_>, CoreError> {
-        let agent = self.agent(&query.agent_id)?;
+        let agent = self.agent(&query.agent_id);
         if let Some(audience) = &query.audience_id
             && let Some(id) =
                 self.database
                     .conversation_runtime(interface_id, &query.agent_id, audience)?
-            && id != agent.runtime
+            && !agent.as_ref().is_ok_and(|agent| id == agent.runtime)
         {
             return Ok(Owner::Stranded(id));
         }
-        Ok(Owner::Current(&agent.runtime))
+        Ok(Owner::Current(agent?))
     }
 
-    /// Resolve the pinned conversation owner, or the agent's runtime for a
-    /// new conversation. Admission keeps a former owner so the worker can
-    /// deliver an explained failure instead of rerouting the conversation.
-    /// # Errors
-    /// Returns an unknown agent, missing/disabled owner or storage error.
-    pub fn runtime_for(
-        &self,
-        interface_id: &str,
-        query: &ModelQuery,
-    ) -> Result<RuntimeProvider, CoreError> {
-        match self.conversation_owner(interface_id, query)? {
-            Owner::Current(id) => self.enabled_runtime(id),
-            Owner::Stranded(id) => self.enabled_runtime(&id),
-        }
-    }
-
-    /// Refuses an interactive request for a conversation whose agent changed runtimes.
-    /// Messages are still admitted for the worker to deliver their interruption notice.
+    /// Refuses an interactive request for a conversation whose agent moved or was removed.
+    /// Messages instead commit their interruption notice during admission.
     /// # Errors
     /// Returns an unknown agent, stranded conversation or storage error.
     pub(crate) fn query_runtime(
@@ -50,7 +34,7 @@ impl Core {
         query: &ModelQuery,
     ) -> Result<RuntimeProvider, CoreError> {
         match self.conversation_owner(interface_id, query)? {
-            Owner::Current(id) => self.enabled_runtime(id),
+            Owner::Current(agent) => self.enabled_runtime(&agent.runtime),
             Owner::Stranded(id) => Err(CoreError::Conflict(stranded(&id, &query.agent_id))),
         }
     }

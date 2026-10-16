@@ -3,7 +3,7 @@ mod ownership;
 
 use crate::{
     attachments::{self, Capture, Reconciled, Unusable},
-    db::{ClaimedTurn, Database, JobPage, TurnFiles},
+    db::{Admission, ClaimedTurn, Database, JobPage, TurnFiles},
     intake::Intake,
     resources,
 };
@@ -15,7 +15,7 @@ use carillon_protocol::model::{
     RuntimeTurnResponse, SelectedProvider, StateCounts, TurnActivity, TurnInspection, TurnSummary,
     UnansweredTurn,
 };
-use ownership::stranded;
+use ownership::{Owner, stranded};
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::watch;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -307,17 +307,29 @@ impl Core {
         event: &ExternalEvent,
         capture: Option<&Capture>,
     ) -> Result<EventReceipt, CoreError> {
-        let runtime = self.runtime_for(
+        let owner = self.conversation_owner(
             &interface.id,
             &ModelQuery {
                 agent_id: event.agent_id.clone(),
                 audience_id: Some(event.audience_id.clone()),
             },
         )?;
-        let resources = resources::materialize(
-            self.agent(&event.agent_id)?.resources.as_deref(),
-            &self.snapshot_store(),
-        )?;
+        let agent = match owner {
+            Owner::Current(agent) => agent,
+            Owner::Stranded(runtime_id) => {
+                return Ok(self.database.accept_event(
+                    &interface.id,
+                    &runtime_id,
+                    event,
+                    Admission::Stranded {
+                        explanation: &stranded(&runtime_id, &event.agent_id),
+                    },
+                    capture,
+                )?);
+            }
+        };
+        let runtime = self.enabled_runtime(&agent.runtime)?;
+        let resources = resources::materialize(agent.resources.as_deref(), &self.snapshot_store())?;
         let selected = SelectedProvider {
             id: runtime.id.clone(),
             role: "runtime".to_owned(),
@@ -330,8 +342,10 @@ impl Core {
             &interface.id,
             &runtime.id,
             event,
-            &providers,
-            &resources,
+            Admission::Queued {
+                providers: &providers,
+                resource_snapshot_id: &resources,
+            },
             capture,
         )?;
         if !receipt.duplicate {
@@ -358,31 +372,6 @@ impl Core {
             .database
             .event_receipt(interface, event_id)?
             .map_or(EventStatus::Unknown, EventStatus::Accepted))
-    }
-
-    /// Ends a turn whose agent no longer runs on the runtime that owns its
-    /// conversation, telling the conversation why, before the runtime
-    /// receives it. Returns whether it did.
-    async fn refuse_stranded(&self, turn: &ClaimedTurn) -> Result<bool> {
-        let Ok(agent) = self.agent(&turn.agent_id) else {
-            return Ok(false);
-        };
-        if agent.runtime == turn.runtime_id {
-            return Ok(false);
-        }
-        let explanation = stranded(&turn.runtime_id, &turn.agent_id);
-        let notice = if turn.follow_up.is_some() {
-            format!(
-                "{explanation}\nWork already started there will not be reported here. Actions already taken may have had effects."
-            )
-        } else {
-            explanation.clone()
-        };
-        self.interrupt(turn, explanation, notice, None)
-            .await
-            .with_context(|| format!("record failure of turn {}", turn.turn_id))?;
-        warn!(turn_id = %turn.turn_id, "turn refused: its agent moved to another runtime");
-        Ok(true)
     }
 
     fn agent(&self, id: &str) -> Result<&AgentOptions, CoreError> {
@@ -414,7 +403,7 @@ impl Core {
 
     /// Replaces the runtimes core admits work for and runs it by, as the
     /// application derived them from its registry. A runtime disabled from
-    /// now on admits no new conversation turn and starts no queued one;
+    /// now on admits no executable turn and starts no queued one;
     /// turns already running settle as they would. Workers hear of the
     /// change, so queued turns of a runtime enabled again are claimed.
     /// # Errors
@@ -430,7 +419,8 @@ impl Core {
     /// Claim and run a runtime's oldest claimable turn of `lane` through a
     /// caller-supplied runtime operation, and record its outcome once.
     /// The application must verify local transport prerequisites (such as
-    /// credentials) before this call.
+    /// credentials) before this call. After opening existing storage, recover
+    /// interrupted turns under exclusive ownership before starting workers.
     ///
     /// A message whose runtime provably never received it is queued again;
     /// any other failure ends it, never replaying work that may have run.
@@ -474,9 +464,6 @@ impl Core {
         turn: &ClaimedTurn,
         submit: impl AsyncFnOnce(RuntimeTurnRequest) -> Result<RuntimeTurnResponse, TurnFailure>,
     ) -> Result<WorkerStep> {
-        if self.refuse_stranded(turn).await? {
-            return Ok(WorkerStep::Advanced);
-        }
         let observation = turn.follow_up.is_some();
         // An observation carries no files and offers none.
         let (unanswered, mut carried) = if observation {
@@ -845,7 +832,6 @@ impl Core {
                 crate::db::FOLLOW_UP_EVENT_PREFIX
             )));
         }
-        self.agent(&event.agent_id)?;
         if let Some(staged) = &event.attachments {
             crate::intake::admit(&self.options.attachments, staged)?;
         }

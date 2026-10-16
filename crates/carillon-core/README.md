@@ -40,9 +40,13 @@ Storage calls are synchronous. Async paths run SQLite writes and resource
 snapshots on Tokio's blocking pool.
 
 Conversations remain pinned to their original runtime. If the agent moves to
-another runtime, core interrupts their turns before dispatch and delivers an
-explanation asking the person to start a new conversation. New conversations
-use the agent's configured runtime.
+another runtime or is removed, core accepts further messages as interrupted
+turns and commits their explanation and delivery intent with the receipt.
+This needs no enabled or configured former runtime and captures no new agent
+resources. Duplicate events keep their original turn. Model and command
+queries instead return the explanation as a conflict. New conversations use
+the agent's configured runtime. Agent assignments change only on restart;
+`set_runtimes` changes runtime availability live.
 
 A runtime operation's failure decides what happens next.
 `TurnFailure::Retry` means the runtime provably never received the turn, so

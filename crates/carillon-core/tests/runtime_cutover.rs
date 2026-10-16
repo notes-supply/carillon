@@ -2,7 +2,7 @@ use anyhow::{Context as _, Result};
 use carillon_core::{AgentOptions, Core, CoreOptions, Lane, RuntimeProvider, WorkerStep};
 use carillon_installation::config::AttachmentLimits;
 use carillon_protocol::model::{
-    ExternalEvent, ModelQuery, RuntimeTurnRequest, RuntimeTurnResponse, SelectedProvider, TurnState,
+    ExternalEvent, RuntimeTurnRequest, RuntimeTurnResponse, SelectedProvider, TurnState,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -71,7 +71,7 @@ async fn queued_cutover(agent_runtime: Option<&str>, former_enabled: Option<bool
     core.storage_settled().await;
     drop(core);
     if let Some(runtime) = agent_runtime {
-        options.agents[0].runtime = runtime.to_owned();
+        runtime.clone_into(&mut options.agents[0].runtime);
     } else {
         options.agents.clear();
     }
@@ -95,6 +95,21 @@ async fn queued_cutover(agent_runtime: Option<&str>, former_enabled: Option<bool
     assert_eq!(notice.content, EXPLANATION);
     assert_eq!(core.recover_interrupted()?, 0);
     assert_eq!(core.turn_counts()?.pending, 0);
+    core.set_runtimes(vec![RuntimeProvider {
+        id: "old".to_owned(),
+        version: "test".to_owned(),
+        url: "in-process".to_owned(),
+        enabled: true,
+    }])?;
+    for lane in [Lane::Messages, Lane::Observations] {
+        assert_eq!(
+            core.run_next("old", lane, &CancellationToken::new(), async |_| {
+                unreachable!("settled stranded turn was retried")
+            })
+            .await?,
+            WorkerStep::Idle
+        );
+    }
     core.storage_settled().await;
     Ok(())
 }
@@ -132,7 +147,8 @@ async fn stranded_admission(former_enabled: Option<bool>) -> Result<()> {
     let original = core.inspect_turn(&first.turn_id)?.context("missing turn")?;
     core.storage_settled().await;
     drop(core);
-    options.agents[0].runtime = "new".to_owned();
+    "new".clone_into(&mut options.agents[0].runtime);
+    options.agents[0].resources = Some(directory.path().join("missing-resources"));
     let core = Core::open(options.clone())?;
     if let Some(enabled) = former_enabled {
         options.runtimes[0].enabled = enabled;
@@ -181,7 +197,7 @@ async fn concurrent_stranded_duplicates_return_the_first_receipt() -> Result<()>
     core.accept(&interface(), &event()).await?;
     core.storage_settled().await;
     drop(core);
-    options.agents[0].runtime = "new".to_owned();
+    "new".clone_into(&mut options.agents[0].runtime);
     options.runtimes.clear();
     let core = Core::open(options)?;
     let interface = interface();
@@ -238,26 +254,22 @@ async fn changed_agent_runtime_explains_old_conversations_without_dispatching() 
     core.accept(&interface, &queued).await?;
     core.storage_settled().await;
     drop(core);
-    options.agents[0].runtime = "new".to_owned();
+    "new".clone_into(&mut options.agents[0].runtime);
     let core = Core::open(options)?;
+    assert_eq!(core.recover_interrupted()?, 2);
     let later = ExternalEvent {
         event_id: "later".to_owned(),
         ..event.clone()
     };
     core.accept(&interface, &later).await?;
     assert!(core.accept(&interface, &queued).await?.duplicate);
-    let query = ModelQuery {
-        agent_id: "agent".to_owned(),
-        audience_id: Some("existing".to_owned()),
-    };
-    assert_eq!(core.runtime_for("discord", &query)?.id, "old");
-    for lane in [Lane::Messages, Lane::Observations, Lane::Messages] {
+    for lane in [Lane::Messages, Lane::Observations] {
         assert_eq!(
             core.run_next("old", lane, &stopping, async |_| {
                 unreachable!("old runtime received a turn after cutover")
             })
             .await?,
-            WorkerStep::Advanced
+            WorkerStep::Idle
         );
     }
     let explanation =
@@ -265,8 +277,8 @@ async fn changed_agent_runtime_explains_old_conversations_without_dispatching() 
     let observation = "This conversation ran on old, which no longer runs agent. Start a new conversation.\nWork already started there will not be reported here. Actions already taken may have had effects.";
     for (state, content) in [
         (TurnState::Completed, "answer"),
-        (TurnState::Interrupted, explanation),
         (TurnState::Interrupted, observation),
+        (TurnState::Interrupted, explanation),
         (TurnState::Interrupted, explanation),
     ] {
         let delivery = core

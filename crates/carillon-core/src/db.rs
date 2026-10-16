@@ -3,6 +3,7 @@
 //!
 //! ```text
 //! turn:      queued -> running -> completed
+//!              \--------------> interrupted
 //!                   ^         \-> interrupted
 //!                   \--------- running (not received, or unanswered observation)
 //!
@@ -25,16 +26,18 @@
 //!   A job, the turns of one origin, is read by that index, its latest
 //!   turns first, never by following its chain.
 //! - A turn's final report is stored once, with the outcome it describes.
-//! - A delivery row exists exactly when its turn left `running`; completion
-//!   output and the delivery intent commit in one
-//!   transaction.
+//! - Each terminal turn has one delivery row; its outcome and delivery intent
+//!   commit in one transaction, including a turn interrupted during admission.
 //! - Transitions are guarded conditional updates that succeed exactly once, so
 //!   a stale caller fails instead of overwriting newer state.
 //! - A turn's attachment references commit with the turn, and only after the
 //!   capture they name is published and synced; a losing duplicate's capture
 //!   is never referenced.
 
+mod admission;
 mod recovery;
+
+pub(crate) use admission::Admission;
 
 use std::{
     os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
@@ -348,94 +351,6 @@ impl Database {
         audience_id: &str,
     ) -> Result<Option<String>> {
         conversation_runtime(&self.connect()?, interface_id, agent_id, audience_id)
-    }
-
-    /// Records an admitted event as a queued turn, or returns the receipt of
-    /// the turn a previous submission of the same event already created.
-    /// A published capture of the event's attachments is referenced only by
-    /// the turn this call creates; a duplicate receipt leaves it unreferenced.
-    pub(crate) fn accept_event(
-        &self,
-        interface_id: &str,
-        runtime_id: &str,
-        event: &ExternalEvent,
-        providers: &Value,
-        resource_snapshot_id: &str,
-        capture: Option<&Capture>,
-    ) -> Result<EventReceipt> {
-        let mut connection = self.connect()?;
-        let transaction = write_transaction(&mut connection)?;
-        if let Some(receipt) = event_receipt(&transaction, interface_id, &event.event_id)? {
-            transaction.commit()?;
-            return Ok(receipt);
-        }
-
-        if let Some(owner) = conversation_runtime(
-            &transaction,
-            interface_id,
-            &event.agent_id,
-            &event.audience_id,
-        )? && owner != runtime_id
-        {
-            bail!("conversation is owned by runtime {owner}, not {runtime_id}");
-        }
-        let turn_id = uuid::Uuid::now_v7().to_string();
-        transaction.execute(
-            "INSERT INTO turns(id, interface_id, event_id, agent_id, audience_id, user_id,
-                 target_id, feedback_target_id, input, native_json, runtime_id,
-                 provider_snapshot_json, resource_snapshot_id, state, accepted_at,
-                 origin_turn_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'queued', ?14, ?1)",
-            params![
-                turn_id,
-                interface_id,
-                event.event_id,
-                event.agent_id,
-                event.audience_id,
-                event.user_id,
-                event.delivery_target_id,
-                event.feedback_target_id,
-                event.content,
-                serde_json::to_string(&event.native)?,
-                runtime_id,
-                serde_json::to_string(providers)?,
-                resource_snapshot_id,
-                timestamp()?,
-            ],
-        )?;
-        if let Some(capture) = capture {
-            let files = event
-                .attachments
-                .as_ref()
-                .map(|staged| staged.files.as_slice())
-                .unwrap_or_default();
-            if files.len() != capture.digests.len() {
-                bail!("captured attachments do not match the event");
-            }
-            for (ordinal, (file, digest)) in files.iter().zip(&capture.digests).enumerate() {
-                transaction.execute(
-                    "INSERT INTO turn_attachments(turn_id, ordinal, capture_id, name, size,
-                         content_type, sha256)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![
-                        turn_id,
-                        u32::try_from(ordinal)?,
-                        capture.id,
-                        file.name,
-                        i64::try_from(file.size)?,
-                        file.content_type,
-                        digest,
-                    ],
-                )?;
-            }
-        }
-        transaction.commit()?;
-        Ok(EventReceipt {
-            event_id: event.event_id.clone(),
-            turn_id,
-            state: TurnState::Queued,
-            duplicate: false,
-        })
     }
 
     /// Claims a runtime's oldest claimable turn of a lane and marks it
@@ -1234,7 +1149,7 @@ mod tests {
         Ok(directory)
     }
 
-    use super::{Database, Lane};
+    use super::{Admission, Database, Lane};
     use carillon_protocol::model::{
         Delivery, DeliveryOutcome, DeliveryState, EventReceipt, ExternalEvent, JOB_READ_LIMIT,
         JOB_TURN_LIMIT, Job, RuntimeTurnResponse, TurnActivity, TurnState,
@@ -1261,8 +1176,10 @@ mod tests {
             "discord",
             "runtime",
             &event(id, audience),
-            &json!([]),
-            "resources",
+            Admission::Queued {
+                providers: &json!([]),
+                resource_snapshot_id: "resources",
+            },
             None,
         )
     }
@@ -1383,8 +1300,10 @@ mod tests {
                 "discord",
                 "replacement",
                 &second,
-                &json!([]),
-                "resources",
+                Admission::Queued {
+                    providers: &json!([]),
+                    resource_snapshot_id: "resources",
+                },
                 None,
             ),
             "conversation is owned by runtime runtime, not replacement",
@@ -1398,8 +1317,10 @@ mod tests {
                     "discord",
                     "replacement",
                     &event("one", "conversation"),
-                    &json!([]),
-                    "resources",
+                    Admission::Queued {
+                        providers: &json!([]),
+                        resource_snapshot_id: "resources",
+                    },
                     None
                 )?
                 .duplicate
@@ -1818,8 +1739,10 @@ mod tests {
             "other",
             "runtime",
             &event("foreign", "elsewhere"),
-            &json!({}),
-            "snapshot",
+            Admission::Queued {
+                providers: &json!({}),
+                resource_snapshot_id: "snapshot",
+            },
             None,
         )?;
         let first = database

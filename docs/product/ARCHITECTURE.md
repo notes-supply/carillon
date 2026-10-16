@@ -55,6 +55,14 @@ retired worker settles its turn before it ends.
 5. Core stores the output and a delivery intent in one transaction.
 6. The interface claims the delivery, sends it and records the outcome.
 
+Agent assignments are fixed for core's lifetime. If an agent moves to
+another runtime or is removed at restart, further messages in its old
+conversations are accepted directly as interrupted turns. The receipt,
+interruption and explanation's delivery intent commit together. Neither
+admission nor delivery needs the former runtime enabled or configured.
+Model and command queries return the same explanation as a conflict.
+New conversations use the agent's current runtime.
+
 A turn whose outcome can't be proved, or that its runtime reports as failed,
 becomes interrupted. Core never replays it; the next message continues the
 native session. An observation that got no answer is asked again instead,

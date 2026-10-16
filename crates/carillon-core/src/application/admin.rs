@@ -1209,8 +1209,7 @@ mod tests {
                 let store = config.value.data_dir.join("resource-snapshots");
                 let snapshot =
                     resources::materialize(config.value.agents[0].resources.as_deref(), &store)?;
-                let db_path = config.value.data_dir.join("carillon.sqlite3");
-                let db = Database::open(&db_path)?;
+                let db = Database::open(&config.value.data_dir.join("carillon.sqlite3"))?;
                 let receipt = db.accept_event(
                     "discord-private",
                     "runtime-pi",
@@ -1225,8 +1224,10 @@ mod tests {
                         native: serde_json::json!({}),
                         attachments: None,
                     },
-                    &serde_json::json!([]),
-                    &snapshot,
+                    crate::db::Admission::Queued {
+                        providers: &serde_json::json!([]),
+                        resource_snapshot_id: &snapshot,
+                    },
                     None,
                 )?;
                 let expected_state = if uncertain {
@@ -1239,7 +1240,6 @@ mod tests {
                 } else {
                     TurnState::Queued
                 };
-                // Valid capture remains independent of subsequent live-root edits.
                 fs::write(
                     config.value.resource_roots()[0].join("SYSTEM.md"),
                     "new live prompt",

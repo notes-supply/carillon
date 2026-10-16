@@ -245,12 +245,13 @@ async fn model_calls_describe_unavailable_runtimes_for_people() -> Result<()> {
 async fn model_and_command_calls_refuse_stranded_conversations_before_transport() -> Result<()> {
     let directory = tempdir()?;
     let (mut state, mut received, mut services) = model_fixture(directory.path()).await?;
-    for availability in ["enabled", "disabled", "removed"] {
+    for availability in ["enabled", "disabled", "removed", "removed agent"] {
         match availability {
             "disabled" => state.config.value.providers[1].enabled = false,
             "removed" => {
                 state.config.value.providers.remove(1);
             }
+            "removed agent" => state.config.value.agents.clear(),
             _ => {}
         }
         for uri in [

@@ -64,13 +64,8 @@ async fn runtime_cutover_precedes_attachment_validation() -> Result<()> {
             .join(&inspection.attachments[0].path),
     )?;
     state.config.value.agents[0].runtime = "replacement".to_owned();
-    assert_eq!(
-        run_next_turn(&state, "test-runtime", async |_, _, _| {
-            unreachable!("stranded turn reached the old runtime")
-        })
-        .await?,
-        WorkerStep::Advanced
-    );
+    state.config.value.providers.remove(1);
+    assert_eq!(configured(&state).core.recover_interrupted()?, 1);
     let notice = state
         .core
         .claim_turn_delivery("test-interface", "instance", &receipt.turn_id)?

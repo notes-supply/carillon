@@ -524,7 +524,7 @@ async fn core_and_its_workers_follow_one_serving_registry() -> Result<()> {
         let provider = config.provider("test-runtime", ProviderRole::Runtime)?;
         assert_eq!(provider.enabled, enabled);
         // Core's engine has the derived facts, and nothing more.
-        let engine = state.core.runtime_for(
+        let engine = state.core.query_runtime(
             "test-interface",
             &ModelQuery {
                 agent_id: "test-agent".to_owned(),
