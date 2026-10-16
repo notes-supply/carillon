@@ -1,5 +1,6 @@
 use std::{os::unix::fs::PermissionsExt as _, path::Path};
 
+use anyhow::Context as _;
 use carillon_installation::config::{Config, LoadedConfig, ProviderRole};
 
 use super::{
@@ -293,7 +294,7 @@ fn t3_gets_the_assistant_with_its_profile_and_a_t3_code_agent_per_project() -> a
     set_up_t3(
         &home,
         &options(),
-        &Assistant::T3(Harnesses::chosen(&[0]).expect("Claude was chosen")),
+        &Assistant::T3(Harnesses::chosen(&[0]).context("Claude was chosen")?),
         &program,
         &mut questions,
     )?;

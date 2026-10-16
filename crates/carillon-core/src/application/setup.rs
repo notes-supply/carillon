@@ -139,7 +139,7 @@ impl Harnesses {
 
 /// What runs Carillon's assistant, the agent with Discord's context and
 /// Carillon's own resources.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Assistant<T = Harnesses> {
     Pi,
     /// On T3, with a profile for each harness.
@@ -580,7 +580,7 @@ fn agents<'a>(
         let mut agent = existing
             .cloned()
             .unwrap_or_else(|| assistant(runtime, &workspace));
-        agent.runtime = runtime.id().to_owned();
+        runtime.id().clone_into(&mut agent.runtime);
         agent.workspace = workspace;
         if let Assistant::T3(project) = plan {
             t3.push((agent.clone(), project));
