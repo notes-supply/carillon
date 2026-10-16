@@ -103,9 +103,9 @@ fn reconciling_core(trace: Arc<tokio::sync::Mutex<Vec<String>>>) -> Router {
         )
         .route(
             "/api/v10/channels/{channel}/messages/{message}/reactions/{emoji}/@me",
-            axum::routing::any(
+            any(
                 move |method: Method,
-                      axum::extract::Path((channel, message, emoji)): axum::extract::Path<(
+                      Path((channel, message, emoji)): Path<(
                     String,
                     String,
                     String,

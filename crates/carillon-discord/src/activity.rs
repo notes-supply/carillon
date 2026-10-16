@@ -132,8 +132,8 @@ impl Known {
     fn running_in(&self) -> Option<Id<ChannelMarker>> {
         let job = self.job()?;
         job.at_work()
-            .filter(|turn| turn.state == TurnState::Running)
-            .and_then(|_| job.target_id.parse().ok())
+            .filter(|turn| turn.state == TurnState::Running)?;
+        job.target_id.parse().ok()
     }
 }
 

@@ -536,20 +536,25 @@ async fn interact(
 }
 
 #[test]
-fn oversized_reply_content_is_rejected_before_the_discord_edit() {
-    let mut reply = carillon_discord_module::contract::Reply {
+fn oversized_reply_content_is_rejected_before_the_discord_edit() -> anyhow::Result<()> {
+    let mut reply = Reply {
         content: "🦀".repeat(2000),
         components: vec![],
     };
-    assert!(super::validate_reply(&reply).is_ok());
+    super::validate_reply(&reply)?;
     reply.content.push('x');
-    assert!(super::validate_reply(&reply).is_err());
+    assert_eq!(refusal(&reply), "Discord module reply has unusable content");
+    Ok(())
+}
+
+fn refusal(reply: &Reply) -> String {
+    super::validate_reply(reply).map_or_else(|error| error.to_string(), |_| "accepted".to_owned())
 }
 
 #[test]
 fn native_selects_need_no_string_options() -> anyhow::Result<()> {
     for kind in [5, 6, 7, 8] {
-        let reply = carillon_discord_module::contract::Reply {
+        let reply = Reply {
             content: "Choose".to_owned(),
             components: vec![json!({
                 "type": 1,
@@ -558,14 +563,20 @@ fn native_selects_need_no_string_options() -> anyhow::Result<()> {
         };
         assert_eq!(super::validate_reply(&reply)?.len(), 1, "type {kind}");
     }
-    for options in [Value::Null, json!([])] {
-        let reply = carillon_discord_module::contract::Reply {
+    for (options, refused) in [
+        (Value::Null, "Discord module reply has invalid components"),
+        (
+            json!([]),
+            "Discord module reply has a select menu without options",
+        ),
+    ] {
+        let reply = Reply {
             content: "Choose".to_owned(),
             components: vec![json!({
                 "type": 1, "components": [{"type": 3, "custom_id": "string", "options": options}]
             })],
         };
-        assert!(super::validate_reply(&reply).is_err());
+        assert_eq!(refusal(&reply), refused, "options {options}");
     }
     Ok(())
 }
@@ -1369,15 +1380,22 @@ async fn a_full_message_queue_refuses_instead_of_holding_the_gateway() -> anyhow
         )),
         dispatch: None,
     };
-    assert!(queue_message(&sender, inbound.clone())?.is_ok());
+    queue_message(&sender, inbound.clone())?
+        .ok()
+        .context("the first message should be queued")?;
     let refused = queue_message(&sender, inbound.clone())?
         .err()
         .context("a second message should be refused while the first waits")?;
     assert_eq!(refused.request.event_id, "1");
     receiver.recv().await.context("queued message")?;
-    assert!(queue_message(&sender, inbound.clone())?.is_ok());
+    queue_message(&sender, inbound.clone())?
+        .ok()
+        .context("a message should be queued once the first was taken")?;
     drop(receiver);
-    assert!(queue_message(&sender, inbound).is_err());
+    let stopped = queue_message(&sender, inbound)
+        .err()
+        .context("a stopped worker should fail the message")?;
+    assert_eq!(stopped.to_string(), "Discord message worker stopped");
     Ok(())
 }
 

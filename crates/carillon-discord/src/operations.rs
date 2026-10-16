@@ -31,7 +31,7 @@ type UserId = Id<UserMarker>;
 
 #[derive(Debug, Deserialize, Serialize, Subcommand)]
 #[serde(untagged)]
-pub enum Operation {
+pub(crate) enum Operation {
     /// Inspect the connected server and bot.
     #[command(subcommand)]
     Server(Server),
@@ -54,14 +54,14 @@ pub enum Operation {
 
 #[derive(Debug, Deserialize, Serialize, Subcommand)]
 #[serde(tag = "action", deny_unknown_fields)]
-pub enum Server {
+pub(crate) enum Server {
     #[serde(rename = "server.info")]
     Info,
 }
 
 #[derive(Debug, Deserialize, Serialize, Subcommand)]
 #[serde(tag = "action", deny_unknown_fields)]
-pub enum Channels {
+pub(crate) enum Channels {
     #[serde(rename = "channels.list")]
     List,
     #[serde(rename = "channels.get")]
@@ -123,7 +123,7 @@ pub enum Channels {
 
 #[derive(Debug, Deserialize, Serialize, Subcommand)]
 #[serde(tag = "action", deny_unknown_fields)]
-pub enum Threads {
+pub(crate) enum Threads {
     #[serde(rename = "threads.list")]
     List,
     #[serde(rename = "threads.create")]
@@ -148,7 +148,7 @@ pub enum Threads {
 
 #[derive(Debug, Deserialize, Serialize, Subcommand)]
 #[serde(tag = "action", deny_unknown_fields)]
-pub enum Messages {
+pub(crate) enum Messages {
     #[serde(rename = "messages.list")]
     List {
         #[arg(long)]
@@ -229,7 +229,7 @@ pub enum Messages {
 
 #[derive(Debug, Deserialize, Serialize, Subcommand)]
 #[serde(tag = "action", deny_unknown_fields)]
-pub enum Roles {
+pub(crate) enum Roles {
     #[serde(rename = "roles.list")]
     List,
     #[serde(rename = "roles.create")]
@@ -266,7 +266,7 @@ pub enum Roles {
 
 #[derive(Debug, Deserialize, Serialize, Subcommand)]
 #[serde(tag = "action", deny_unknown_fields)]
-pub enum Members {
+pub(crate) enum Members {
     #[serde(rename = "members.get")]
     Get {
         #[arg(long)]
@@ -317,15 +317,15 @@ pub enum Members {
     },
 }
 /// The most files one sent message may carry.
-pub const ATTACHMENT_COUNT: usize = 10;
+pub(crate) const ATTACHMENT_COUNT: usize = 10;
 /// The most bytes the files of one sent message may hold together.
-pub const ATTACHMENT_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const ATTACHMENT_BYTES: usize = 4 * 1024 * 1024;
 
 /// A file to attach to a sent message: a plain filename and its bytes,
 /// base64-encoded on the wire.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct Upload {
+pub(crate) struct Upload {
     filename: String,
     data: String,
 }
@@ -334,7 +334,7 @@ impl Upload {
     /// # Errors
     /// Rejects a name that is not a plain filename, or more bytes than one
     /// message may carry.
-    pub fn new(filename: String, bytes: &[u8]) -> Result<Self, OperationError> {
+    pub(crate) fn new(filename: String, bytes: &[u8]) -> Result<Self, OperationError> {
         plain_filename(&filename)?;
         if bytes.len() > ATTACHMENT_BYTES {
             return Err(too_large());
@@ -351,19 +351,19 @@ const fn page_size() -> u16 {
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
-pub enum NewChannelKind {
+pub(crate) enum NewChannelKind {
     Text,
     Category,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
-pub enum OverwriteKind {
+pub(crate) enum OverwriteKind {
     Role,
     Member,
 }
 
 #[derive(Debug, Serialize)]
-pub struct OperationError {
+pub(crate) struct OperationError {
     pub outcome: &'static str,
     pub message: String,
 }
@@ -405,7 +405,7 @@ impl From<twilight_http::Error> for OperationError {
 
 impl Operation {
     #[must_use]
-    pub const fn mutates(&self) -> bool {
+    pub(crate) const fn mutates(&self) -> bool {
         !matches!(
             self,
             Self::Server(_)
@@ -421,7 +421,7 @@ impl Operation {
     /// retry ambiguous HTTP mutations. A dropped caller cannot imply rollback.
     /// # Errors
     /// Returns a rejection or an explicitly uncertain mutation outcome.
-    pub async fn execute(
+    pub(crate) async fn execute(
         self,
         http: &Client,
         guild: Id<GuildMarker>,

@@ -68,11 +68,11 @@ const CARD_DEADLINE: Duration = Duration::from_secs(1);
 /// job core reads is far smaller unless a runtime's snapshot is not bounded.
 const CARD_REQUEST_LIMIT: usize = 1 << 20;
 /// The largest module the provider serves.
-pub const MODULE_LIMIT: usize = 16 << 20;
+pub(crate) const MODULE_LIMIT: usize = 16 << 20;
 
 /// The Discord application the provider acts as, once the token is known,
 /// and the guild whose commands it owns.
-pub struct DiscordApp {
+pub(crate) struct DiscordApp {
     pub http: Arc<DiscordHttp>,
     pub application_id: Id<ApplicationMarker>,
     pub guild_id: Id<GuildMarker>,
@@ -82,7 +82,7 @@ pub struct DiscordApp {
 /// selection for the agent and, inside a conversation, for that audience;
 /// the runtime's commands there; and, with a Discord connection, submitting
 /// text to the conversation as the person who invoked it.
-pub struct InteractionCalls {
+pub(crate) struct InteractionCalls {
     core: CoreClient,
     query: ModelQuery,
     submissions: Option<Submissions>,
@@ -92,7 +92,7 @@ pub struct InteractionCalls {
 /// Discord to post that anchor, the reactions that show its progress, the
 /// lanes in which it takes its place among the conversation's messages, and
 /// the settings that admitted the interaction, whose feedback it shows.
-pub struct Submissions {
+pub(crate) struct Submissions {
     pub http: Arc<DiscordHttp>,
     pub reactions: Reactions,
     pub lanes: Lanes,
@@ -101,7 +101,7 @@ pub struct Submissions {
 }
 
 impl InteractionCalls {
-    pub const fn new(core: CoreClient, query: ModelQuery) -> Self {
+    pub(crate) const fn new(core: CoreClient, query: ModelQuery) -> Self {
         Self {
             core,
             query,
@@ -110,7 +110,7 @@ impl InteractionCalls {
     }
 
     #[must_use]
-    pub fn with_submissions(mut self, submissions: Submissions) -> Self {
+    pub(crate) fn with_submissions(mut self, submissions: Submissions) -> Self {
         self.submissions = Some(submissions);
         self
     }
@@ -387,7 +387,7 @@ impl fmt::Display for Source {
 
 /// The files of one provider instance's module.
 #[derive(Clone, Debug)]
-pub struct ModuleFiles {
+pub(crate) struct ModuleFiles {
     /// The release's module; release updates replace it.
     pub bundled: PathBuf,
     /// What Discord last confirmed as registered.
@@ -398,7 +398,7 @@ pub struct ModuleFiles {
 
 impl ModuleFiles {
     /// The files of a configured instance whose bundled module is `bundled`.
-    pub fn of(config: &LoadedConfig, provider_id: &str, bundled: PathBuf) -> Self {
+    pub(crate) fn of(config: &LoadedConfig, provider_id: &str, bundled: PathBuf) -> Self {
         Self {
             bundled,
             record: crate::config::state_directory(config, provider_id).join("commands.json"),
@@ -412,7 +412,7 @@ impl ModuleFiles {
     /// # Errors
     ///
     /// Returns an error when the file cannot be read.
-    pub fn read(&self, source: &Source) -> Result<Vec<u8>> {
+    pub(crate) fn read(&self, source: &Source) -> Result<Vec<u8>> {
         let path = match source {
             Source::Bundled => &self.bundled,
             Source::Custom { path } => path,
@@ -432,7 +432,7 @@ impl ModuleFiles {
 ///
 /// Returns an error when the path is not a regular file or the file cannot
 /// be read.
-pub fn read_module(path: &Path) -> io::Result<Vec<u8>> {
+pub(crate) fn read_module(path: &Path) -> io::Result<Vec<u8>> {
     let regular = |metadata: fs::Metadata| {
         if metadata.is_file() {
             Ok(())
@@ -506,7 +506,7 @@ pub struct Change {
 /// whether the record shows the serving definitions registered for this
 /// application and guild (absent without a Discord application).
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct Status {
+pub(crate) struct Status {
     pub serving: ModuleSummary,
     pub declared: Declared,
     pub registered: Option<bool>,
@@ -515,7 +515,7 @@ pub struct Status {
 /// The module the settings file declares, as an apply would read it.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
-pub enum Declared {
+pub(crate) enum Declared {
     /// It is the module serving, byte for byte.
     Serving,
     /// It is another module, or the serving one's file has changed.
@@ -530,7 +530,7 @@ pub enum Declared {
 /// The operator's answer to a refused apply: why, and the module that still
 /// serves.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct Refusal {
+pub(crate) struct Refusal {
     pub error: String,
     pub serving: ModuleSummary,
     /// When the file was refused for changing what only a restart applies,
@@ -588,7 +588,7 @@ struct Record {
 
 /// The module in use, its command definitions, and the files that hold the
 /// bundled module and what Discord holds.
-pub struct Module {
+pub(crate) struct Module {
     host: Host<Calls>,
     files: ModuleFiles,
     current: Mutex<Arc<Generation>>,
@@ -604,7 +604,7 @@ impl Module {
     ///
     /// Returns an error when the module is unusable; an unusable custom
     /// module is named, with how to serve the bundled one instead.
-    pub async fn load(files: ModuleFiles, source: Source) -> Result<Self> {
+    pub(crate) async fn load(files: ModuleFiles, source: Source) -> Result<Self> {
         let host = Host::new()?;
         let bytes = files.read(&source)?;
         let generation = prepare(&host, &bytes, source.clone())
@@ -639,7 +639,7 @@ impl Module {
     /// # Errors
     ///
     /// Returns why the serving module was left in place.
-    pub async fn apply(
+    pub(crate) async fn apply(
         &self,
         source: Source,
         app: Option<&DiscordApp>,
@@ -693,14 +693,14 @@ impl Module {
     /// # Errors
     ///
     /// Returns why the definitions could not be registered.
-    pub async fn reconcile(&self, app: &DiscordApp) -> Result<Registration, ChangeError> {
+    pub(crate) async fn reconcile(&self, app: &DiscordApp) -> Result<Registration, ChangeError> {
         let _changes = self.changes.lock().await;
         let definitions = self.current().definitions.clone();
         self.reconcile_definitions(Some(app), &definitions).await
     }
 
     /// How the module `source` names compares with the one serving.
-    pub fn declared(&self, source: Source) -> Declared {
+    pub(crate) fn declared(&self, source: Source) -> Declared {
         match self.files.read(&source) {
             Ok(bytes) => {
                 let serving = self.current();
@@ -718,7 +718,7 @@ impl Module {
 
     /// The serving module, the declared one, and whether the record shows
     /// the serving definitions registered.
-    pub fn status(&self, app: Option<&DiscordApp>, declared: Declared) -> Status {
+    pub(crate) fn status(&self, app: Option<&DiscordApp>, declared: Declared) -> Status {
         let serving = self.current();
         Status {
             serving: serving.summary(),
@@ -727,12 +727,16 @@ impl Module {
         }
     }
 
-    pub fn serving(&self) -> ModuleSummary {
+    pub(crate) fn serving(&self) -> ModuleSummary {
         self.current().summary()
     }
 
     /// Runs one interaction through the module.
-    pub async fn invoke(&self, calls: InteractionCalls, interaction: Interaction) -> Result<Reply> {
+    pub(crate) async fn invoke(
+        &self,
+        calls: InteractionCalls,
+        interaction: Interaction,
+    ) -> Result<Reply> {
         let generation = self.current();
         let payload = serde_json::to_vec(&Invocation::Interaction(interaction))?;
         let calls = Calls::Interaction {
@@ -756,7 +760,7 @@ impl Module {
     /// # Errors
     ///
     /// Returns why the module gave no usable card.
-    pub async fn render_card(&self, request: &CardRequest) -> Result<Option<Embed>> {
+    pub(crate) async fn render_card(&self, request: &CardRequest) -> Result<Option<Embed>> {
         let generation = self.current();
         card(&self.host, &generation.module, request).await
     }
@@ -852,7 +856,7 @@ impl Module {
 /// # Errors
 ///
 /// Returns why the module is unusable.
-pub async fn check(bytes: &[u8]) -> Result<Vec<String>> {
+pub(crate) async fn check(bytes: &[u8]) -> Result<Vec<String>> {
     let generation = prepare(&Host::new()?, bytes, Source::Bundled).await?;
     Ok(command_names(&generation.definitions))
 }
@@ -869,7 +873,7 @@ fn command_names(definitions: &[Value]) -> Vec<String> {
 /// ancestors. This runs on every change: an existing directory does not show
 /// that its entry survives a system crash, and repeating a change must finish
 /// a sync an earlier attempt could not.
-fn publish_directory(path: &Path) -> std::io::Result<()> {
+fn publish_directory(path: &Path) -> io::Result<()> {
     let Some(directory) = path.parent() else {
         return Ok(());
     };
@@ -1385,23 +1389,53 @@ pub(crate) mod tests {
         let directory = tempfile::tempdir()?;
         let release = directory.path().join("release.wasm");
         let reply = replying("unused", &[]);
-        for description in [
-            json!({"Description": {"contract": carillon_discord_module::contract::CONTRACT + 1, "commands": []}}).to_string(),
-            describing(&[json!({"name": "missing-type"})]),
-            reply.clone(),
-            "not json".to_owned(),
+        let contract = carillon_discord_module::contract::CONTRACT;
+        for (description, refused) in [
+            (
+                json!({"Description": {"contract": contract + 1, "commands": []}}).to_string(),
+                format!(
+                    "Discord module speaks contract {}; this provider speaks {contract}",
+                    contract + 1
+                ),
+            ),
+            (
+                describing(&[json!({"name": "missing-type"})]),
+                "invalid command definition: missing field `description`".to_owned(),
+            ),
+            (
+                reply.clone(),
+                "Discord module did not describe itself".to_owned(),
+            ),
+            (
+                "not json".to_owned(),
+                "describe Discord module: decode Discord module outcome: expected value at line 1 column 1"
+                    .to_owned(),
+            ),
         ] {
             let bytes = module(&description, &reply)?;
-            assert!(super::check(&bytes).await.is_err(), "accepted {description}");
+            let checked = super::check(&bytes).await.err().context("check accepted")?;
+            assert_eq!(format!("{checked:#}"), refused);
             std::fs::write(&release, bytes)?;
-            assert!(
-                Module::load(files(directory.path()), Source::Bundled)
-                    .await
-                    .is_err(),
-                "accepted {description}"
+            let loaded = Module::load(files(directory.path()), Source::Bundled)
+                .await
+                .err()
+                .context("load accepted")?;
+            assert_eq!(
+                format!("{loaded:#}"),
+                format!(
+                    "bundled Discord module {} is unusable: {refused}",
+                    release.display()
+                )
             );
         }
-        assert!(super::check(b"\0asm broken").await.is_err());
+        let broken = super::check(b"\0asm broken")
+            .await
+            .err()
+            .context("a broken module was accepted")?;
+        assert!(
+            format!("{broken:#}").starts_with("compile guest module: "),
+            "{broken:#}"
+        );
         assert_eq!(
             super::check(&variant(&["model"], "unused")?).await?,
             ["model"]
@@ -1660,7 +1694,7 @@ pub(crate) mod tests {
         }
         assert_eq!(reply(&commands).await?, "initial");
         release.add_permits(1);
-        assert!(first.await.is_ok());
+        assert_eq!(first.await?.discord, Registration::Registered);
         assert_eq!(commands.serving().commands, ["first"]);
         assert_eq!(reply(&commands).await?, "first");
         let registration = tokio::select! {
@@ -1669,7 +1703,7 @@ pub(crate) mod tests {
         };
         assert_eq!(registration[0]["name"], "second");
         release.add_permits(1);
-        assert!(second.await.is_ok());
+        assert_eq!(second.await?.discord, Registration::Registered);
         assert_eq!(commands.serving().commands, ["second"]);
         assert!(commands.registered(&target, &commands.current().definitions));
         assert_eq!(reply(&commands).await?, "second");
@@ -1710,7 +1744,7 @@ pub(crate) mod tests {
         let target = app(&address.to_string(), 1, 100);
 
         // A record in the shape an earlier provider wrote names no target.
-        std::fs::create_dir_all(record.parent().unwrap_or(directory.path()))?;
+        std::fs::create_dir_all(record.parent().unwrap_or_else(|| directory.path()))?;
         std::fs::write(&record, serde_json::to_vec(&definitions)?)?;
         assert!(!commands.registered(&target, &definitions));
 

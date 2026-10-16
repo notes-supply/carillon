@@ -552,15 +552,16 @@ pub(crate) fn discord_chunks(content: &str) -> Vec<String> {
     // One scan of at most LIMIT characters per chunk finds where the rest
     // exceeds the limit, if it does; the rest is never counted whole.
     while let Some((end, _)) = remaining.char_indices().nth(LIMIT) {
-        let candidate = &remaining[..end];
+        let (candidate, _) = remaining.split_at(end);
         let split = candidate
             .rfind("\n\n")
             .or_else(|| candidate.rfind('\n'))
             .or_else(|| candidate.rfind(char::is_whitespace))
             .filter(|index| *index > 0)
             .unwrap_or(end);
-        chunks.push(remaining[..split].trim_end().to_owned());
-        remaining = remaining[split..].trim_start();
+        let (chunk, rest) = remaining.split_at(split);
+        chunks.push(chunk.trim_end().to_owned());
+        remaining = rest.trim_start();
     }
     if !remaining.is_empty() {
         chunks.push(remaining.to_owned());

@@ -167,9 +167,9 @@ async fn card_rendering_cost() -> anyhow::Result<()> {
                 "{name} differs from the native renderer"
             );
         }
-        let mut copies = vec![request.clone(); SAMPLES + WARMUP];
+        let copies = vec![request.clone(); SAMPLES + WARMUP];
         let mut native_samples = Vec::with_capacity(SAMPLES);
-        for (index, copy) in copies.drain(..).enumerate() {
+        for (index, copy) in copies.into_iter().enumerate() {
             let started = Instant::now();
             direct_guest(copy)?;
             if index >= WARMUP {
