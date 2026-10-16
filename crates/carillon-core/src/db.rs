@@ -342,8 +342,9 @@ impl Database {
         event_receipt(&self.connect()?, interface_id, event_id)
     }
 
-    /// The first accepted turn pins a conversation, even before its runtime
-    /// has created a native session. Changing the default cannot move it.
+    /// The runtime that took the conversation's latest turn owns it, even
+    /// before that runtime has created a native session. Only a stranded
+    /// conversation's notice moves it, to the agent's current runtime.
     pub(crate) fn conversation_runtime(
         &self,
         interface_id: &str,
