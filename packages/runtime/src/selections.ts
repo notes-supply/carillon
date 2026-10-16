@@ -13,8 +13,8 @@ import {
   type Selection,
   type AvailableModel,
   type ModelQuery,
-  type ModelUpdate,
   type ModelState,
+  type ModelUpdate,
   type ScopeState,
 } from "@carillon/protocol";
 import { Parse } from "typebox/value";
@@ -36,7 +36,10 @@ const LedgerSchema = Type.Object({
 type Ledger = Static<typeof LedgerSchema>;
 
 /** What the agent and, with a conversation, that conversation have chosen; the runtime adds its catalogue. */
-export type ModelScopes = Pick<ModelState, "agent" | "conversation">;
+export type ModelScopes = Pick<ModelState, "conversation"> & {
+  /** The agent default, which always resolves to a selection. */
+  readonly agent: ScopeState & { readonly selection: Selection };
+};
 
 /**
  * Selections made through Carillon, keyed by agent and by conversation.
@@ -103,7 +106,7 @@ export class ModelSelections {
     query: ModelQuery,
   ): ModelScopes {
     const agentSelection = this.agentSelection(query.agent_id);
-    const agent: ScopeState = {
+    const agent = {
       selection: resolved(available, agentSelection ?? runtimeDefault),
       overridden: agentSelection !== null,
     };

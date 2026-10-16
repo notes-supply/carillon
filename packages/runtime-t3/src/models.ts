@@ -146,7 +146,7 @@ export interface AgentModels {
   /** The agent default, resolved against the catalogue, and whether `/model` chose it. */
   readonly agent: { readonly selection: Selection; readonly overridden: boolean };
   /** The agent default as the ledger holds it, set aside while the agent may not run on it. */
-  readonly chosen: ScopeState;
+  readonly chosen: ScopeState & { readonly selection: Selection };
 }
 
 /**
@@ -159,15 +159,14 @@ export interface AgentModels {
  */
 export function agentModels(
   offered: Catalog,
-  chosen: ScopeState,
+  chosen: AgentModels["chosen"],
   settings: Selection,
 ): AgentModels {
   return {
     offered,
-    agent:
-      chosen.selection !== null && offered.runsOn(chosen.selection.provider)
-        ? { selection: chosen.selection, overridden: chosen.overridden }
-        : { selection: resolved(offered.available, settings), overridden: false },
+    agent: offered.runsOn(chosen.selection.provider)
+      ? { selection: chosen.selection, overridden: chosen.overridden }
+      : { selection: resolved(offered.available, settings), overridden: false },
     chosen,
   };
 }
@@ -181,7 +180,7 @@ export function agentModels(
  */
 export function ledgerUpdate(models: AgentModels, update: ModelUpdate): ModelUpdate {
   const { expected } = update;
-  if (expected === undefined || models.chosen.selection === null) return update;
+  if (expected === undefined) return update;
   if (!sameSelection(models.agent.selection, { ...expected, options: expected.options ?? {} }))
     throw new ExplainedFailure(409, "The model settings changed.");
   return { ...update, expected: models.chosen.selection };
