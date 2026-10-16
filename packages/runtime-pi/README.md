@@ -34,6 +34,9 @@ is refused. The service keeps sessions in its component directory. Pass
 `modelRuntime`, `settings`, `selections` or `sessionDirectory` to supply your
 own collaborators.
 
+Service startup and `--check` require every agent's workspace and each declared
+`resources` root to be an existing directory.
+
 ## Behaviour
 
 - Turns run one at a time. Interface, agent and audience name the native

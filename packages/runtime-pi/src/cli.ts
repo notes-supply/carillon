@@ -55,6 +55,11 @@ async function main(values: readonly string[]): Promise<void> {
     const workspace = await stat(agent.workspace).catch(() => undefined);
     if (workspace?.isDirectory() !== true)
       throw new Error(`agent ${agent.id}: workspace must be an existing directory`);
+    if (agent.resources !== undefined) {
+      const resources = await stat(agent.resources).catch(() => undefined);
+      if (resources?.isDirectory() !== true)
+        throw new Error(`agent ${agent.id}: resources must be an existing directory`);
+    }
   }
   const deterministic = args.has("deterministic");
   const stateDirectory = resolve(requiredArgument(args, "state-dir"));
