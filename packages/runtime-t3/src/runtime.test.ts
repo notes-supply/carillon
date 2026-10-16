@@ -11,7 +11,7 @@ import { reportOf } from "@carillon/runtime/failure";
 import { ModelSelections } from "@carillon/runtime/selections";
 import { derivedId, type Run } from "./contracts.ts";
 import { startFakeT3, type FakeT3 } from "./fake.ts";
-import { createT3Runtime } from "./runtime.ts";
+import { createT3Runtime, type T3Agent } from "./runtime.ts";
 import { connectT3, type Connect } from "./t3.ts";
 
 const PROJECT = "project-1";
@@ -49,12 +49,26 @@ afterEach(async () => {
 });
 
 function build(
-  overrides: { url?: string; token?: string; reconnectDelayMs?: number; connect?: Connect } = {},
+  overrides: {
+    url?: string;
+    token?: string;
+    reconnectDelayMs?: number;
+    connect?: Connect;
+    /** The default agent's role and settings model, the assistant's on the profile by default. */
+    role?: Pick<T3Agent, "assistant" | "selection">;
+  } = {},
 ) {
   return createT3Runtime({
     endpoint: { url: overrides.url ?? fake.url, token: overrides.token ?? fake.token },
     agents: new Map([
-      ["default", { projectId: PROJECT, workspace: resources, assistant: true, selection }],
+      [
+        "default",
+        {
+          projectId: PROJECT,
+          workspace: resources,
+          ...(overrides.role ?? { assistant: true, selection }),
+        },
+      ],
       [
         "code",
         {
@@ -996,6 +1010,46 @@ it("keeps the agent default `/model` chooses, which new threads start with", asy
     selection: agentDefault,
     overridden: false,
   });
+});
+
+it("keeps the agent default `/model` chose only while the agent runs on its instance", async () => {
+  const channel = { interface_id: "discord-private", agent_id: "default" };
+  const haiku = { provider: "claudeAgent", model: "claude-haiku-4-5" };
+  await runtime.setModel({ ...channel, scope: "agent", selection: haiku });
+  // T3 stops listing the model on the profile: the default stays, and its
+  // run fails in T3 rather than another model running.
+  const listing = (instanceId: string, slug: string) => ({
+    instanceId,
+    driver: instanceId,
+    enabled: true,
+    installed: true,
+    status: "ready",
+    models: [{ slug, name: slug, isCustom: false, capabilities: null }],
+  });
+  fake.providers = [listing("claudeAgent", "claude-sonnet-5"), listing("codex", "gpt-6-astra")];
+  expect((await runtime.modelState(channel)).agent).toEqual({
+    selection: { ...haiku, options: {} },
+    overridden: true,
+  });
+
+  // The agent loses its resources: as plain T3 Code it may not run on the
+  // profile, so its settings' model is its default.
+  await runtime.close();
+  runtime = build({
+    role: {
+      assistant: false,
+      selection: { instanceId: "codex", model: "gpt-6-astra", options: [] },
+    },
+  });
+  expect((await runtime.modelState(channel)).agent).toEqual({
+    selection: { provider: "codex", model: "gpt-6-astra", options: {} },
+    overridden: false,
+  });
+  const reply = runtime.executeTurn(turn("turn-1", "hi"));
+  const run = await started("turn-1");
+  expect(run.modelSelection).toMatchObject({ instanceId: "codex", model: "gpt-6-astra" });
+  answer(run, "Hello.");
+  await reply;
 });
 
 it("routes a thread T3's UI moved onto an instance the assistant does not run on back to its default", async () => {

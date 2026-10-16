@@ -5,8 +5,8 @@
  * thread's next selection, the last change winning. One on another
  * instance, as T3's UI may move a thread to, gives way to the agent default
  * at the next run. The catalogue is T3's, for the provider instances the
- * agent runs on. The agent default is the one `/model` chose for it, else the
- * one its settings name.
+ * agent runs on. The agent default is the one `/model` chose for it, while
+ * the agent runs on its instance, else the one its settings name.
  */
 import type { AvailableModel, ModelState, ScopeState, Selection } from "@carillon/protocol";
 import { resolved } from "@carillon/runtime/models";
@@ -134,8 +134,12 @@ export interface AgentModels {
 }
 
 /**
- * An agent's models: its catalogue, and its default, the one `/model` chose
- * as the ledger resolved it (`chosen`), else the settings' default.
+ * An agent's models: its catalogue, and its default. That is the one
+ * `/model` chose, as the ledger resolved it (`chosen`), while it is on an
+ * instance the agent runs on, else the settings' default: a profile's model
+ * chosen while the agent was the assistant does not outlive its resources.
+ * A chosen model of such an instance the catalogue no longer lists stays
+ * the default, and its run fails rather than another model being substituted.
  */
 export function agentModels(
   offered: Catalog,
@@ -145,9 +149,9 @@ export function agentModels(
   return {
     offered,
     agent:
-      chosen.selection === null
-        ? { selection: resolved(offered.available, settings), overridden: false }
-        : { selection: chosen.selection, overridden: chosen.overridden },
+      chosen.selection !== null && offered.runsOn(chosen.selection.provider)
+        ? { selection: chosen.selection, overridden: chosen.overridden }
+        : { selection: resolved(offered.available, settings), overridden: false },
   };
 }
 
