@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 
 /// Message preparation with staging under `directory`.
 pub(crate) fn ingress(
-    core: crate::CoreClient,
+    core: crate::client::CoreClient,
     config: crate::config::DiscordConfig,
     participation: Arc<Participation>,
     http: Arc<twilight_http::Client>,

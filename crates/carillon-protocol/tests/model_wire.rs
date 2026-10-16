@@ -1,5 +1,5 @@
 //! Both languages consume the same wire examples, including canonical round trips.
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use carillon_protocol::{
     model::{
         CommandCatalog, RuntimeModelQuery, RuntimeModelUpdate, RuntimeTurnRequest, TurnActivity,
@@ -13,6 +13,14 @@ fn round_trip<T: DeserializeOwned + Serialize>(value: &Value) -> Result<()> {
     let parsed: T = serde_json::from_value(value.clone())?;
     assert_eq!(serde_json::to_value(parsed)?, *value);
     Ok(())
+}
+
+/// The wire contract for an invalid value is only that both languages refuse it.
+fn refused<T: DeserializeOwned>(value: &Value) -> Result<()> {
+    serde_json::from_value::<T>(value.clone())
+        .err()
+        .map(drop)
+        .with_context(|| format!("accepted invalid {value}"))
 }
 
 #[derive(Deserialize)]
@@ -41,13 +49,13 @@ fn shared_model_wire_fixtures() -> Result<()> {
         round_trip::<RuntimeModelUpdate>(value)?;
     }
     for value in &fixtures.invalid_updates {
-        assert!(serde_json::from_value::<RuntimeModelUpdate>(value.clone()).is_err());
+        refused::<RuntimeModelUpdate>(value)?;
     }
-    for value in fixtures.invalid_queries {
-        assert!(serde_json::from_value::<RuntimeModelQuery>(value).is_err());
+    for value in &fixtures.invalid_queries {
+        refused::<RuntimeModelQuery>(value)?;
     }
-    for value in fixtures.invalid_states {
-        assert!(serde_json::from_value::<ModelState>(value).is_err());
+    for value in &fixtures.invalid_states {
+        refused::<ModelState>(value)?;
     }
     for value in fixtures.accepted_updates {
         serde_json::from_value::<RuntimeModelUpdate>(value)?;
@@ -69,8 +77,8 @@ fn shared_activity_wire_fixtures() -> Result<()> {
     for value in &fixtures.activities {
         round_trip::<TurnActivity>(value)?;
     }
-    for value in fixtures.invalid_activities {
-        assert!(serde_json::from_value::<TurnActivity>(value).is_err());
+    for value in &fixtures.invalid_activities {
+        refused::<TurnActivity>(value)?;
     }
     Ok(())
 }
@@ -106,8 +114,8 @@ fn shared_command_wire_fixtures() -> Result<()> {
     for value in &fixtures.catalogs {
         round_trip::<CommandCatalog>(value)?;
     }
-    for value in fixtures.invalid_catalogs {
-        assert!(serde_json::from_value::<CommandCatalog>(value).is_err());
+    for value in &fixtures.invalid_catalogs {
+        refused::<CommandCatalog>(value)?;
     }
     Ok(())
 }
@@ -153,10 +161,7 @@ fn only_a_whole_readiness_says_a_runtime_can_restart() -> Result<()> {
         serde_json::json!({"state": "maybe"}),
         serde_json::json!({}),
     ] {
-        assert!(
-            serde_json::from_value::<RestartReadiness>(value.clone()).is_err(),
-            "{value}"
-        );
+        refused::<RestartReadiness>(&value)?;
     }
     Ok(())
 }

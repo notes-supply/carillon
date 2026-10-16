@@ -375,36 +375,39 @@ fn wire_fixtures_match_the_extension() -> anyhow::Result<()> {
 
 #[test]
 fn strict_operation_inputs_and_attachment_limits() -> anyhow::Result<()> {
-    assert!(
-        serde_json::from_value::<Operation>(
-            json!({"action":"members.ban","user_id":"3","banned":true,"surprise":true})
-        )
-        .is_err()
-    );
-    assert!(
-        serde_json::from_value::<Operation>(json!({"action":"channels.delete","channel_id":"0"}))
-            .is_err()
-    );
-    assert!(
+    const UNKNOWN: &str = "data did not match any variant of untagged enum Operation";
+    let refused = |value: Value| {
+        serde_json::from_value::<Operation>(value)
+            .err()
+            .map(|error| error.to_string())
+    };
+    let rejected = |filename: &str, data: String| {
         uploads(vec![Upload {
-            filename: "../secret".into(),
-            data: "YQ==".into()
+            filename: filename.into(),
+            data,
         }])
-        .is_err()
+        .err()
+        .map(|error| error.to_string())
+    };
+    assert_eq!(
+        refused(json!({"action":"members.ban","user_id":"3","banned":true,"surprise":true})),
+        Some(UNKNOWN.to_owned())
     );
-    assert!(
-        uploads(vec![Upload {
-            filename: "ok".into(),
-            data: "not base64".into()
-        }])
-        .is_err()
+    assert_eq!(
+        refused(json!({"action":"channels.delete","channel_id":"0"})),
+        Some(UNKNOWN.to_owned())
     );
-    assert!(
-        uploads(vec![Upload {
-            filename: "ok".into(),
-            data: STANDARD.encode(vec![0; 4 * 1024 * 1024 + 1])
-        }])
-        .is_err()
+    assert_eq!(
+        rejected("../secret", "YQ==".into()).as_deref(),
+        Some("rejected: Attachment filename must be a plain filename.")
+    );
+    assert_eq!(
+        rejected("ok", "not base64".into()).as_deref(),
+        Some("rejected: Attachment data must be base64.")
+    );
+    assert_eq!(
+        rejected("ok", STANDARD.encode(vec![0; 4 * 1024 * 1024 + 1])).as_deref(),
+        Some("rejected: Attachments exceed the 4 MiB per-message limit.")
     );
     assert_eq!(
         uploads(vec![Upload {

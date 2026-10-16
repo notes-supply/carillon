@@ -492,7 +492,7 @@ pub struct InteractionSource {
 pub struct AdmittedInteraction {
     pub interaction: Interaction,
     /// The agent of the route that admitted it.
-    pub agent_id: String,
+    pub(crate) agent_id: String,
     pub audience_id: Option<String>,
     pub origin: InteractionOrigin,
 }

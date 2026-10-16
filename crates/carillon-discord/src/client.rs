@@ -16,7 +16,7 @@ use tracing::warn;
 use uuid::Uuid;
 /// The provider's authenticated client for core's provider API.
 #[derive(Clone)]
-pub struct CoreClient {
+pub(crate) struct CoreClient {
     http: Client,
     base_url: String,
     token: String,
@@ -29,7 +29,7 @@ pub struct CoreClient {
 impl CoreClient {
     /// # Errors
     /// Returns an error when the HTTP client cannot be initialized.
-    pub fn new(base_url: String, provider_id: String, token: String) -> Result<Self> {
+    pub(crate) fn new(base_url: String, provider_id: String, token: String) -> Result<Self> {
         Ok(Self {
             http: loopback::client().build()?,
             base_url,
@@ -60,7 +60,7 @@ impl CoreClient {
     ///
     /// # Errors
     /// Returns core rejection, transport, or malformed-response failures.
-    pub async fn submit_event(
+    pub(crate) async fn submit_event(
         &self,
         event: &ExternalEvent,
     ) -> Result<EventReceipt, InterfaceError> {
@@ -77,7 +77,7 @@ impl CoreClient {
     ///
     /// # Errors
     /// Returns core rejection, transport, or malformed-response failures.
-    pub async fn event_status(&self, event_id: &str) -> Result<EventStatus, InterfaceError> {
+    pub(crate) async fn event_status(&self, event_id: &str) -> Result<EventStatus, InterfaceError> {
         let mut url = Url::parse(&self.url("/v1/events"))
             .map_err(|error| InterfaceError::protocol(error.to_string()))?;
         url.path_segments_mut()
@@ -94,7 +94,7 @@ impl CoreClient {
     ///
     /// # Errors
     /// Returns core rejection, transport, or malformed-response failures.
-    pub async fn claim_delivery(&self) -> Result<Option<Delivery>, InterfaceError> {
+    pub(crate) async fn claim_delivery(&self) -> Result<Option<Delivery>, InterfaceError> {
         let request = self.request(Method::GET, self.url("/v1/deliveries"));
         core_json(request, "claim core delivery").await
     }
@@ -104,7 +104,7 @@ impl CoreClient {
     ///
     /// # Errors
     /// Returns core rejection, transport, or malformed-response failures.
-    pub async fn claim_turn_delivery(
+    pub(crate) async fn claim_turn_delivery(
         &self,
         turn_id: &str,
     ) -> Result<Option<Delivery>, InterfaceError> {
@@ -118,7 +118,7 @@ impl CoreClient {
     ///
     /// # Errors
     /// Returns core rejection, transport, or malformed-response failures.
-    pub async fn acknowledge_delivery(
+    pub(crate) async fn acknowledge_delivery(
         &self,
         id: i64,
         outcome: DeliveryOutcome,
@@ -138,7 +138,7 @@ impl CoreClient {
     ///
     /// # Errors
     /// Returns core rejection, transport, or malformed-response failures.
-    pub async fn reconcile(&self) -> Result<DeliveryReconciliation, InterfaceError> {
+    pub(crate) async fn reconcile(&self) -> Result<DeliveryReconciliation, InterfaceError> {
         let request = self.request(Method::POST, self.url("/v1/deliveries/reconcile"));
         core_json(request, "reconcile abandoned delivery claims").await
     }
@@ -148,7 +148,10 @@ impl CoreClient {
     ///
     /// # Errors
     /// Returns core rejection, transport, or malformed-response failures.
-    pub async fn jobs_at_work(&self, after: Option<&str>) -> Result<JobPage, InterfaceError> {
+    pub(crate) async fn jobs_at_work(
+        &self,
+        after: Option<&str>,
+    ) -> Result<JobPage, InterfaceError> {
         let mut url = Url::parse(&self.url("/v1/jobs"))
             .map_err(|error| InterfaceError::protocol(error.to_string()))?;
         if let Some(after) = after {
@@ -167,7 +170,7 @@ impl CoreClient {
     ///
     /// # Errors
     /// Returns core rejection, transport, or malformed-response failures.
-    pub async fn named_jobs(&self, named: &[String]) -> Result<Vec<Job>, InterfaceError> {
+    pub(crate) async fn named_jobs(&self, named: &[String]) -> Result<Vec<Job>, InterfaceError> {
         let mut url = Url::parse(&self.url("/v1/jobs"))
             .map_err(|error| InterfaceError::protocol(error.to_string()))?;
         url.query_pairs_mut()
@@ -188,7 +191,7 @@ impl CoreClient {
     ///
     /// # Errors
     /// Returns core rejection, transport, or malformed-response failures.
-    pub async fn model_state(&self, query: &ModelQuery) -> Result<ModelState, String> {
+    pub(crate) async fn model_state(&self, query: &ModelQuery) -> Result<ModelState, String> {
         self.runtime_query("/v1/model", query).await
     }
 
@@ -196,7 +199,7 @@ impl CoreClient {
     ///
     /// # Errors
     /// Returns core rejection, transport, or malformed-response failures.
-    pub async fn commands(&self, query: &ModelQuery) -> Result<CommandCatalog, String> {
+    pub(crate) async fn commands(&self, query: &ModelQuery) -> Result<CommandCatalog, String> {
         self.runtime_query("/v1/commands", query).await
     }
 
@@ -221,7 +224,7 @@ impl CoreClient {
     ///
     /// # Errors
     /// Returns core rejection, transport, or malformed-response failures.
-    pub async fn set_model(&self, update: &ModelUpdate) -> Result<ModelState, String> {
+    pub(crate) async fn set_model(&self, update: &ModelUpdate) -> Result<ModelState, String> {
         let request = self
             .request(Method::PUT, self.url("/v1/model"))
             .timeout(MODEL_CALL_TIMEOUT)

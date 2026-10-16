@@ -366,7 +366,7 @@ async fn submit(
 /// Where a module comes from.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "source", rename_all = "snake_case")]
-pub enum Source {
+pub(crate) enum Source {
     /// The module shipped with the release, served unless the provider's
     /// settings enable a custom one.
     Bundled,
@@ -468,7 +468,7 @@ impl Generation {
 
 /// A module as the operator sees it.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct ModuleSummary {
+pub(crate) struct ModuleSummary {
     #[serde(flatten)]
     pub source: Source,
     /// Command names, without the leading slash.
@@ -480,7 +480,7 @@ pub struct ModuleSummary {
 /// What a change needed from Discord.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum Registration {
+pub(crate) enum Registration {
     /// The record already showed these definitions registered.
     Unchanged,
     /// Discord confirmed the definitions.
@@ -492,7 +492,7 @@ pub enum Registration {
 /// The module serving after an apply, the one before it, and what the
 /// change needed from Discord.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct Change {
+pub(crate) struct Change {
     pub serving: ModuleSummary,
     pub previous: ModuleSummary,
     pub discord: Registration,
@@ -537,7 +537,7 @@ pub(crate) struct Refusal {
 
 /// Why an apply left the serving module in place.
 #[derive(Debug)]
-pub enum ChangeError {
+pub(crate) enum ChangeError {
     /// Another maintenance operation holds the installation's lock.
     Busy(PathBuf),
     /// The maintenance lock could not be taken.

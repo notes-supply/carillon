@@ -1062,7 +1062,7 @@ mod tests {
         http::{HeaderMap, StatusCode, Uri},
         response::IntoResponse as _,
     };
-    use clap::Parser as _;
+    use clap::{Parser as _, error::ErrorKind};
     use serde_json::{Value, json};
     use std::sync::{Arc, Mutex};
 
@@ -1076,6 +1076,13 @@ mod tests {
             anyhow::bail!("not a call");
         };
         Ok(operation)
+    }
+
+    fn refused_call(arguments: &[&str]) -> Result<clap::Error> {
+        parsed_call(arguments)
+            .err()
+            .context("the call parsed")?
+            .downcast()
     }
 
     /// A provider at a loopback address that reads each request and gives
@@ -1234,14 +1241,19 @@ mod tests {
     }
 
     #[test]
-    fn call_requires_the_intent_of_toggle_mutations_and_valid_ids() {
-        assert!(
-            parsed_call(&["messages", "pin", "--channel-id", "2", "--message-id", "3"]).is_err()
+    fn call_requires_the_intent_of_toggle_mutations_and_valid_ids() -> Result<()> {
+        let unpinned =
+            refused_call(&["messages", "pin", "--channel-id", "2", "--message-id", "3"])?;
+        assert_eq!(unpinned.kind(), ErrorKind::MissingRequiredArgument);
+        assert!(unpinned.to_string().contains("--pinned"), "{unpinned}");
+        let unbanned = refused_call(&["members", "ban", "--user-id", "3"])?;
+        assert_eq!(unbanned.kind(), ErrorKind::MissingRequiredArgument);
+        assert!(unbanned.to_string().contains("--banned"), "{unbanned}");
+        assert_eq!(
+            refused_call(&["messages", "get", "--channel-id", "0", "--message-id", "3"])?.kind(),
+            ErrorKind::ValueValidation
         );
-        assert!(parsed_call(&["members", "ban", "--user-id", "3"]).is_err());
-        assert!(
-            parsed_call(&["messages", "get", "--channel-id", "0", "--message-id", "3"]).is_err()
-        );
+        Ok(())
     }
 
     struct CallProvider {
@@ -1442,10 +1454,16 @@ mod tests {
             .context("eleven files were sent")?;
         assert!(refused.to_string().contains("At most 10"), "{refused}");
         assert!(provider.requests()?.is_empty());
-        assert!(uploads(&[provider.directory.path().to_path_buf()]).is_err());
+        let directory = uploads(&[provider.directory.path().to_path_buf()])
+            .err()
+            .context("a directory was uploaded")?;
+        assert_eq!(
+            directory.to_string(),
+            "attachments must be regular files; nothing was changed"
+        );
         // Only a message send takes files.
-        assert!(
-            parsed_call(&[
+        assert_eq!(
+            refused_call(&[
                 "messages",
                 "get",
                 "--channel-id",
@@ -1454,10 +1472,14 @@ mod tests {
                 "3",
                 "--file",
                 small
-            ])
-            .is_err()
+            ])?
+            .kind(),
+            ErrorKind::UnknownArgument
         );
-        assert!(parsed_call(&["--file", small, "messages", "send", "--channel-id", "2"]).is_err());
+        assert_eq!(
+            refused_call(&["--file", small, "messages", "send", "--channel-id", "2"])?.kind(),
+            ErrorKind::UnknownArgument
+        );
         Ok(())
     }
 
@@ -1466,10 +1488,22 @@ mod tests {
         let timeout = |arguments: &[&str]| {
             let mut all = vec!["members", "timeout", "--user-id", "3"];
             all.extend(arguments);
-            parsed_call(&all).and_then(|operation| Ok(serde_json::to_value(operation)?))
+            anyhow::Ok(serde_json::to_value(parsed_call(&all)?)?)
         };
-        assert!(timeout(&[]).is_err(), "no expiry must not remove a timeout");
-        assert!(timeout(&["--clear", "--until", "2030-01-01T00:00:00Z"]).is_err());
+        let refused = |arguments: &[&str]| {
+            let mut all = vec!["members", "timeout", "--user-id", "3"];
+            all.extend(arguments);
+            refused_call(&all).map(|failure| failure.kind())
+        };
+        assert_eq!(
+            refused(&[])?,
+            ErrorKind::MissingRequiredArgument,
+            "no expiry must not remove a timeout"
+        );
+        assert_eq!(
+            refused(&["--clear", "--until", "2030-01-01T00:00:00Z"])?,
+            ErrorKind::ArgumentConflict
+        );
         assert_eq!(
             timeout(&["--clear"])?,
             json!({"action": "members.timeout", "user_id": "3", "until": null})
@@ -1479,11 +1513,14 @@ mod tests {
             json!({"action": "members.timeout", "user_id": "3", "until": "2030-01-01T00:00:00Z"})
         );
         // On the wire, too, only an explicit null clears.
-        assert!(
-            serde_json::from_value::<Operation>(
-                json!({"action": "members.timeout", "user_id": "3"})
-            )
-            .is_err()
+        let unset = serde_json::from_value::<Operation>(
+            json!({"action": "members.timeout", "user_id": "3"}),
+        )
+        .err()
+        .context("a timeout without until decoded")?;
+        assert_eq!(
+            unset.to_string(),
+            "data did not match any variant of untagged enum Operation"
         );
         Ok(())
     }

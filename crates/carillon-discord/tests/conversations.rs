@@ -91,11 +91,11 @@ async fn native_preparation_creates_once_and_persists_activation() -> Result<()>
         Value::Null,
     )?
     .context("root message not admitted")?;
-    assert!(
-        prepare_conversation(&participation, &http, plan.clone())
-            .await
-            .is_err()
-    );
+    let lost = prepare_conversation(&participation, &http, plan.clone())
+        .await
+        .err()
+        .context("a create with a lost response was reported as prepared")?;
+    assert_eq!(lost.to_string(), "decode Discord conversation thread");
     let resolved = prepare_conversation(&participation, &http, plan.clone()).await?;
     assert_eq!(
         resolved.event.native["origin"],

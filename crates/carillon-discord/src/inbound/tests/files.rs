@@ -343,7 +343,7 @@ fn ingress(
         ),
         refusals: Arc::new(tokio::sync::Semaphore::new(lanes::REFUSALS)),
         stopping: tokio_util::sync::CancellationToken::new(),
-        settlements: crate::inbound::Settlements::new(tokio::sync::mpsc::unbounded_channel().0),
+        settlements: crate::inbound::Settlements::new(mpsc::unbounded_channel().0),
     }))
 }
 
@@ -855,7 +855,7 @@ async fn overload_replies_only_to_messages_admission_would_activate() -> Result<
         ),
         refusals: Arc::new(tokio::sync::Semaphore::new(lanes::REFUSALS)),
         stopping: tokio_util::sync::CancellationToken::new(),
-        settlements: crate::inbound::Settlements::new(tokio::sync::mpsc::unbounded_channel().0),
+        settlements: crate::inbound::Settlements::new(mpsc::unbounded_channel().0),
     });
     for ignored in [
         // A mention route, not mentioned.
@@ -1138,7 +1138,7 @@ async fn preparation_that_outlasts_its_deadline_ends_without_submitting() -> Res
         "{elapsed:?}"
     );
     let trace = trace(&world)?;
-    assert!(position(&trace, "thread 85").is_ok());
+    position(&trace, "thread 85")?;
     assert!(
         !trace.iter().any(|entry| entry.starts_with("submit")),
         "{trace:?}"
@@ -1608,7 +1608,7 @@ async fn a_text_whose_conversation_never_opens_is_refused_in_time() -> Result<()
         "{elapsed:?}"
     );
     let trace = trace(&world)?;
-    assert!(position(&trace, "thread 87").is_ok());
+    position(&trace, "thread 87")?;
     assert!(
         !trace.iter().any(|entry| entry.starts_with("submit")),
         "{trace:?}"

@@ -3,7 +3,7 @@ use crate::config::DiscordRoute;
 use anyhow::anyhow;
 
 #[test]
-fn participation_persistence_retries_without_bypassing_activation() -> anyhow::Result<()> {
+fn participation_persistence_retries_without_bypassing_activation() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("participation.json");
     let participation = Participation::load(path.clone())?;
@@ -44,20 +44,20 @@ fn participation_persistence_retries_without_bypassing_activation() -> anyhow::R
 }
 
 #[test]
-fn failed_participation_write_leaves_memory_and_disk_unchanged() -> anyhow::Result<()> {
+fn failed_participation_write_leaves_memory_and_disk_unchanged() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("participation.json");
     let participation = Participation::load(path.clone())?;
     participation.adopt("400", "300")?;
-    let original = std::fs::read(&path)?;
+    let original = fs::read(&path)?;
     let temporary = path.with_extension("json.tmp");
-    std::fs::create_dir(&temporary)?;
+    fs::create_dir(&temporary)?;
     assert!(participation.adopt("401", "300").is_err());
     assert!(participation.remember_created("500", "500", "300").is_err());
     assert_eq!(participation.parent_route("401"), None);
     assert_eq!(participation.created_thread("500"), None);
-    assert_eq!(std::fs::read(&path)?, original);
-    std::fs::remove_dir(temporary)?;
+    assert_eq!(fs::read(&path)?, original);
+    fs::remove_dir(temporary)?;
     participation.adopt("401", "300")?;
     participation.remember_created("500", "500", "300")?;
     let recovered = Participation::load(path)?;
@@ -67,7 +67,7 @@ fn failed_participation_write_leaves_memory_and_disk_unchanged() -> anyhow::Resu
 }
 
 #[test]
-fn interaction_admission_follows_routes_and_conversations() -> anyhow::Result<()> {
+fn interaction_admission_follows_routes_and_conversations() -> Result<()> {
     let channel = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
     let admitted = admit_interaction(&channel, interaction("300", None))
         .map_err(|failure| anyhow!(failure.message))?;
@@ -155,7 +155,7 @@ fn titled(content: &str, files: &[&str]) -> MessagePlan {
             .collect(),
         create_thread: true,
         adopt_thread: false,
-        native: serde_json::Value::Null,
+        native: Value::Null,
     }
 }
 
@@ -186,7 +186,7 @@ fn thread_titles_preserve_short_text_and_fit_discord() {
 }
 
 #[test]
-fn file_only_messages_activate_like_text_and_carry_their_files() -> anyhow::Result<()> {
+fn file_only_messages_activate_like_text_and_carry_their_files() -> Result<()> {
     let config = discord_config(DiscordActivation::Mention, DiscordConversation::Thread);
     let participation = ParticipationState::default();
     let file = titled("", &["photo.png"]).attachments;
@@ -223,7 +223,7 @@ fn file_only_messages_activate_like_text_and_carry_their_files() -> anyhow::Resu
 }
 
 #[test]
-fn mention_activation_strips_only_the_configured_bot() -> anyhow::Result<()> {
+fn mention_activation_strips_only_the_configured_bot() -> Result<()> {
     let config = discord_config(DiscordActivation::Mention, DiscordConversation::Thread);
     let ignored = resolve_message(
         &config,
@@ -248,7 +248,7 @@ fn mention_activation_strips_only_the_configured_bot() -> anyhow::Result<()> {
 }
 
 #[test]
-fn mention_thread_adoption_persists_activation_for_later_messages() -> anyhow::Result<()> {
+fn mention_thread_adoption_persists_activation_for_later_messages() -> Result<()> {
     let config = discord_config(DiscordActivation::Mention, DiscordConversation::Thread);
     let adoption = accepted(resolve_message(
         &config,
@@ -277,7 +277,7 @@ fn mention_thread_adoption_persists_activation_for_later_messages() -> anyhow::R
 }
 
 #[test]
-fn always_thread_accepts_children_but_channel_route_does_not() -> anyhow::Result<()> {
+fn always_thread_accepts_children_but_channel_route_does_not() -> Result<()> {
     let thread = discord_config(DiscordActivation::Always, DiscordConversation::Thread);
     let thread_message = accepted(resolve_message(
         &thread,
@@ -288,15 +288,15 @@ fn always_thread_accepts_children_but_channel_route_does_not() -> anyhow::Result
     assert!(!thread_message.create_thread);
 
     let channel = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
-    assert!(
-        resolve_message(
-            &channel,
-            request("400", Some("300"), "must reject"),
-            Value::Null,
-            &ParticipationState::default(),
-        )
-        .is_err()
-    );
+    let refused = resolve_message(
+        &channel,
+        request("400", Some("300"), "must reject"),
+        Value::Null,
+        &ParticipationState::default(),
+    )
+    .err()
+    .context("a channel route admitted a thread child")?;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN);
     let first = accepted(resolve_message(
         &channel,
         request("300", None, "first"),
@@ -346,7 +346,7 @@ pub(crate) fn discord_config(
 
 fn accepted(
     resolution: std::result::Result<Option<MessagePlan>, InterfaceError>,
-) -> anyhow::Result<MessagePlan> {
+) -> Result<MessagePlan> {
     resolution
         .map_err(|failure| anyhow!(failure.message))?
         .context("message was unexpectedly ignored")

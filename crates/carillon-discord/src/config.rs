@@ -26,41 +26,41 @@ use crate::module::{Change, ChangeError, Source};
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiscordConfig {
-    pub guild_id: String,
+    pub(crate) guild_id: String,
     #[serde(default)]
-    pub bot_user_id: String,
+    pub(crate) bot_user_id: String,
     /// The bot token's file, relative to the installation unless absolute;
     /// without it, `credentials/discord-bot.token`. Setup names a new file
     /// whenever the token changes, so the file these settings name is never
     /// rewritten.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bot_token_file: Option<PathBuf>,
-    pub allowed_user_ids: Vec<String>,
+    pub(crate) bot_token_file: Option<PathBuf>,
+    pub(crate) allowed_user_ids: Vec<String>,
     #[serde(default)]
-    pub routes: Vec<DiscordRoute>,
+    pub(crate) routes: Vec<DiscordRoute>,
     #[serde(default = "enabled")]
-    pub typing: bool,
+    pub(crate) typing: bool,
     /// Show a card of what each job is doing, kept as its summary.
     #[serde(default = "enabled")]
-    pub activity: bool,
+    pub(crate) activity: bool,
     #[serde(default)]
-    pub activity_markers: ActivityMarkers,
+    pub(crate) activity_markers: ActivityMarkers,
     /// Files uploaded with admitted messages.
     #[serde(default)]
-    pub attachments: AttachmentPolicy,
+    pub(crate) attachments: AttachmentPolicy,
     #[serde(default = "enabled")]
-    pub reactions: bool,
+    pub(crate) reactions: bool,
     #[serde(default = "processing_emoji")]
-    pub processing_emoji: String,
+    pub(crate) processing_emoji: String,
     #[serde(default = "delivered_emoji")]
-    pub delivered_emoji: String,
+    pub(crate) delivered_emoji: String,
     #[serde(default = "failed_emoji")]
-    pub failed_emoji: String,
+    pub(crate) failed_emoji: String,
     #[serde(default = "uncertain_emoji")]
-    pub uncertain_emoji: String,
+    pub(crate) uncertain_emoji: String,
     /// The Discord module to serve instead of the bundled one.
     #[serde(default, skip_serializing_if = "ModuleSetting::is_unset")]
-    pub module: ModuleSetting,
+    pub(crate) module: ModuleSetting,
 }
 
 /// A custom Discord module: served while `enabled`, from `path`, relative to
@@ -68,7 +68,7 @@ pub struct DiscordConfig {
 /// serves.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct ModuleSetting {
+pub(crate) struct ModuleSetting {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -107,7 +107,7 @@ fn uncertain_emoji() -> String {
 
 /// Inline card markers, independent of the provider's reaction emoji. The
 /// Discord module shows them; this configuration validates them.
-pub use carillon_discord_module::contract::ActivityMarkers;
+pub(crate) use carillon_discord_module::contract::ActivityMarkers;
 
 fn validate_activity_markers(markers: &ActivityMarkers) -> Result<()> {
     for (field, value) in [
@@ -187,7 +187,7 @@ fn validate_activity_marker(value: &str) -> Result<()> {
 /// applies its own limits again. Changes apply when the provider restarts.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
-pub struct AttachmentPolicy {
+pub(crate) struct AttachmentPolicy {
     /// Without it, a message carrying files is refused with an explanation
     /// rather than accepted without them.
     pub enabled: bool,
@@ -355,19 +355,19 @@ impl DiscordConfig {
     /// The bot token's file these settings name, resolved against the
     /// installation `root`.
     #[must_use]
-    pub fn bot_token_path(&self, root: &Path) -> PathBuf {
+    pub(crate) fn bot_token_path(&self, root: &Path) -> PathBuf {
         absolutize(
             root,
             self.bot_token_file
                 .as_deref()
-                .unwrap_or(Path::new(BOT_TOKEN_FILE)),
+                .unwrap_or_else(|| Path::new(BOT_TOKEN_FILE)),
         )
     }
 
     /// The module these settings serve, with a custom path resolved against
     /// the installation `root`.
     #[must_use]
-    pub fn module_source(&self, root: &Path) -> Source {
+    pub(crate) fn module_source(&self, root: &Path) -> Source {
         match &self.module {
             ModuleSetting {
                 enabled: true,
@@ -476,7 +476,7 @@ impl DiscordConfig {
 /// How a settings file differs from the settings that serve, by field:
 /// what an apply would change, and what only a restart applies.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-pub struct Difference {
+pub(crate) struct Difference {
     pub live: Vec<String>,
     pub restart: Vec<String>,
 }
@@ -487,7 +487,7 @@ impl Difference {
     /// capacity the provider set up at start apply at a restart; who is
     /// admitted where, and how work is shown, apply live.
     #[must_use]
-    pub fn between(serving: &DiscordConfig, file: &DiscordConfig) -> Self {
+    pub(crate) fn between(serving: &DiscordConfig, file: &DiscordConfig) -> Self {
         let DiscordConfig {
             guild_id,
             bot_user_id,
@@ -565,7 +565,7 @@ impl Difference {
 /// an apply changes only what is admitted after it, and shows work as it
 /// says from then on.
 #[derive(Clone)]
-pub struct Settings(Arc<Serving>);
+pub(crate) struct Settings(Arc<Serving>);
 
 struct Serving {
     current: watch::Sender<Arc<DiscordConfig>>,
@@ -575,7 +575,7 @@ struct Serving {
 
 impl Settings {
     #[must_use]
-    pub fn new(config: DiscordConfig) -> Self {
+    pub(crate) fn new(config: DiscordConfig) -> Self {
         Self(Arc::new(Serving {
             current: watch::Sender::new(Arc::new(config)),
             applying: Mutex::new(()),
@@ -584,7 +584,7 @@ impl Settings {
 
     /// The settings serving now.
     #[must_use]
-    pub fn current(&self) -> Arc<DiscordConfig> {
+    pub(crate) fn current(&self) -> Arc<DiscordConfig> {
         self.0.current.borrow().clone()
     }
 
@@ -592,7 +592,7 @@ impl Settings {
     /// `module_differs` says whether the module the file declares is not the
     /// one serving, which its bytes decide as well as its declaration.
     #[must_use]
-    pub fn status(
+    pub(crate) fn status(
         &self,
         read: impl FnOnce() -> Result<DiscordConfig>,
         module_differs: impl FnOnce(&DiscordConfig) -> bool,
@@ -626,7 +626,7 @@ impl Settings {
     /// Returns why what serves stays in place: the file did not read as
     /// valid settings, it changes what only a restart applies, or its module
     /// could not serve.
-    pub async fn apply<F>(
+    pub(crate) async fn apply<F>(
         &self,
         read: impl FnOnce() -> Result<DiscordConfig>,
         module: impl FnOnce(&DiscordConfig) -> F,
@@ -658,7 +658,7 @@ impl Settings {
 
 /// The settings that serve, and how the settings file differs from them.
 #[derive(Debug, Deserialize, Serialize)]
-pub struct Status {
+pub(crate) struct Status {
     pub serving: DiscordConfig,
     pub file: FileState,
 }
@@ -666,7 +666,7 @@ pub struct Status {
 /// The settings file as an apply would read it now.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
-pub enum FileState {
+pub(crate) enum FileState {
     /// Valid settings, differing from what serves by these fields.
     Read(Difference),
     /// Not valid settings for this provider; an apply is refused.
@@ -676,14 +676,14 @@ pub enum FileState {
 /// The fields an apply changed, none when the file already served, and the
 /// module serving after it.
 #[derive(Debug, Deserialize, Serialize)]
-pub struct Applied {
+pub(crate) struct Applied {
     pub changed: Vec<String>,
     pub module: Change,
 }
 
 /// Why an apply left the serving settings and module in place.
 #[derive(Debug)]
-pub enum Refusal {
+pub(crate) enum Refusal {
     /// The file is not valid settings for this provider.
     Invalid(anyhow::Error),
     /// The file changes fields only a restart applies.
@@ -764,7 +764,7 @@ fn valid_snowflake(value: &str) -> bool {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::{collections::BTreeMap, fs, path::Path, str::FromStr};
+    use std::{collections::BTreeMap, fmt::Display, fs, path::Path, str::FromStr};
 
     use anyhow::Context as _;
     use carillon_installation::config::{
@@ -775,6 +775,10 @@ pub(crate) mod tests {
         ActivityMarkers, DiscordActivation, DiscordConfig, DiscordConversation, DiscordEmoji,
         DiscordRoute, validate_activity_marker, validate_activity_markers,
     };
+
+    fn refusal<T, E: Display>(result: Result<T, E>) -> Option<String> {
+        result.err().map(|error| error.to_string())
+    }
 
     /// A complete installation on disk: `carillon.toml`, credentials, and
     /// the Discord provider file, with loopback provider endpoints on
@@ -896,7 +900,13 @@ failed = ""
         assert_eq!(partial.stopped, "⏹️");
         validate_activity_markers(&partial)?;
 
-        assert!(toml::from_str::<ActivityMarkers>("suceeded = '✓'").is_err());
+        let misspelt = refusal(toml::from_str::<ActivityMarkers>("suceeded = '✓'"));
+        assert!(
+            misspelt
+                .as_deref()
+                .is_some_and(|error| error.contains("unknown field `suceeded`")),
+            "{misspelt:?}"
+        );
         Ok(())
     }
 
@@ -919,29 +929,44 @@ failed = ""
                 .with_context(|| format!("rejected valid marker {marker:?}"))?;
         }
         validate_activity_marker(&"✓".repeat(21))?;
-        assert!(validate_activity_marker(&"✓".repeat(22)).is_err());
+        assert_eq!(
+            refusal(validate_activity_marker(&"✓".repeat(22))).as_deref(),
+            Some("activity marker must be at most 64 UTF-8 bytes")
+        );
         Ok(())
     }
 
     #[test]
-    fn model_markers_validate_prefixes_and_inline_emotes() {
+    fn model_markers_validate_prefixes_and_inline_emotes() -> anyhow::Result<()> {
+        const PREFIX_LENGTH: &str =
+            "activity_markers.models prefixes must contain 1–63 UTF-8 bytes";
         let mut markers = ActivityMarkers::default();
         markers
             .models
             .insert("claude-".to_owned(), "<:claude:123>".to_owned());
-        assert!(validate_activity_markers(&markers).is_ok());
+        validate_activity_markers(&markers)?;
         markers
             .models
             .insert("gpt-".to_owned(), "<@123>".to_owned());
-        assert!(validate_activity_markers(&markers).is_err());
+        assert_eq!(
+            refusal(validate_activity_markers(&markers)).as_deref(),
+            Some(r#"invalid activity_markers.models marker for "gpt-""#)
+        );
         markers.models.remove("gpt-");
         markers.models.insert("x".repeat(63), "✓".to_owned());
-        assert!(validate_activity_markers(&markers).is_ok());
+        validate_activity_markers(&markers)?;
         markers.models.insert("x".repeat(64), "✓".to_owned());
-        assert!(validate_activity_markers(&markers).is_err());
+        assert_eq!(
+            refusal(validate_activity_markers(&markers)).as_deref(),
+            Some(PREFIX_LENGTH)
+        );
         markers.models.remove(&"x".repeat(64));
         markers.models.insert(String::new(), "✓".to_owned());
-        assert!(validate_activity_markers(&markers).is_err());
+        assert_eq!(
+            refusal(validate_activity_markers(&markers)).as_deref(),
+            Some(PREFIX_LENGTH)
+        );
+        Ok(())
     }
 
     #[test]
@@ -1162,7 +1187,13 @@ stopped = "■"
                 .context("enabled a module without a path")?;
             assert!(refused.to_string().contains("module.path"), "{refused}");
         }
-        assert!(toml::from_str::<super::ModuleSetting>("enable = true").is_err());
+        let misspelt = refusal(toml::from_str::<super::ModuleSetting>("enable = true"));
+        assert!(
+            misspelt
+                .as_deref()
+                .is_some_and(|error| error.contains("unknown field `enable`")),
+            "{misspelt:?}"
+        );
         Ok(())
     }
 
@@ -1204,11 +1235,26 @@ stopped = "■"
         assert_eq!(route.agent, "assistant");
         assert_eq!(route.activation, DiscordActivation::Mention);
         assert_eq!(route.conversation, DiscordConversation::Thread);
-        assert!(DiscordRoute::from_str("300:mention:thread").is_err());
-        assert!(DiscordRoute::from_str("300:mention").is_err());
-        assert!(DiscordRoute::from_str("300:free:thread:assistant").is_err());
-        assert!(DiscordRoute::from_str("300:mention:thread:not/an/agent").is_err());
-        assert!(DiscordRoute::from_str("300:mention:thread:assistant:more").is_err());
+        let shape = "route must be CHANNEL_ID:mention|always:thread|channel:AGENT_ID";
+        for (route, refused) in [
+            ("300:mention:thread", shape),
+            (
+                "300:mention",
+                "route conversation must be thread or channel",
+            ),
+            (
+                "300:free:thread:assistant",
+                "route activation must be mention or always",
+            ),
+            ("300:mention:thread:not/an/agent", shape),
+            ("300:mention:thread:assistant:more", shape),
+        ] {
+            assert_eq!(
+                refusal(DiscordRoute::from_str(route)).as_deref(),
+                Some(refused),
+                "{route}"
+            );
+        }
         Ok(())
     }
 
@@ -1225,10 +1271,20 @@ stopped = "■"
             DiscordEmoji::parse("⏳")?,
             DiscordEmoji::Unicode(_)
         ));
-        assert!(DiscordEmoji::parse("working").is_err());
-        assert!(DiscordEmoji::parse("é").is_err());
-        assert!(DiscordEmoji::parse("working:not-an-id").is_err());
-        assert!(DiscordEmoji::parse("x:123").is_err());
+        let unknown = "Discord emoji must be Unicode emoji or canonical custom name:id";
+        let custom = "custom Discord emoji must use canonical name:id syntax";
+        for (emoji, refused) in [
+            ("working", unknown),
+            ("é", unknown),
+            ("working:not-an-id", custom),
+            ("x:123", custom),
+        ] {
+            assert_eq!(
+                refusal(DiscordEmoji::parse(emoji)).as_deref(),
+                Some(refused),
+                "{emoji}"
+            );
+        }
         Ok(())
     }
 }

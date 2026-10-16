@@ -60,18 +60,18 @@ async fn example() -> Result<Value> {
     let resolved = prepare_conversation(&participation, &http, admitted).await?;
     assert_eq!(resolved.conversation_id, "discord-100-300");
     assert_eq!(resolved.event.content, "Hello");
-    assert!(
-        admit_message(
-            &config,
-            &participation,
-            IncomingMessage {
-                user_id: "999".to_owned(),
-                ..message
-            },
-            Value::Null
-        )
-        .is_err()
-    );
+    let refused = admit_message(
+        &config,
+        &participation,
+        IncomingMessage {
+            user_id: "999".to_owned(),
+            ..message
+        },
+        Value::Null,
+    )
+    .err()
+    .context("a user outside the allowlist was admitted")?;
+    assert_eq!(refused.to_string(), "user is not allowlisted");
 
     let interaction = admit_interaction(
         &config,
