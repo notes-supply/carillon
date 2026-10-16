@@ -218,20 +218,6 @@ pub(super) fn setup(home: &Path, options: &Options, questions: &mut impl Questio
         for &runtime in &runtimes {
             register_runtime(&home.join("carillon.toml"), runtime)?;
         }
-        let config = LoadedConfig::load(&home.join("carillon.toml"))?;
-        for runtime in runtimes {
-            if !config
-                .value
-                .agents
-                .iter()
-                .any(|agent| agent.runtime == runtime.id())
-            {
-                bail!(
-                    "{} has no agent; run setup again and choose an agent for every registered runtime",
-                    runtime.id()
-                );
-            }
-        }
     }
     sign_in_to_pi(home, existing, questions)?;
     let discord = Command::new(provider_binary("discord")?)

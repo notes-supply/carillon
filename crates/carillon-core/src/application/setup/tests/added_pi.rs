@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use super::*;
 
 const CHILD: &str = "application::setup::tests::added_pi::setup_added_pi_child";
@@ -30,30 +32,34 @@ impl Fixture {
                 })
                 .collect(),
         )?;
-        let settings = ids
-            .iter()
-            .map(|id| {
-                let instance = if *id == "assistant" { "carillon_claude" } else { "codex" };
-                format!("[agents.{id}]\nproject_id = 'p1'\n[agents.{id}.model]\ninstance_id = '{instance}'\nmodel = 'gpt'\n")
-            })
-            .collect::<String>();
-        let header = "url = 'http://127.0.0.1:3773'\ntoken_file = 'credentials/t3.token'\nprofiles = ['carillon_claude']\n";
-        std::fs::write(
-            home.join("providers/runtime-t3.toml"),
-            format!("{header}{settings}"),
-        )?;
+        let mut settings = String::from(
+            "url = 'http://127.0.0.1:3773'\ntoken_file = 'credentials/t3.token'\nprofiles = ['carillon_claude']\n",
+        );
+        for id in ids {
+            let instance = if *id == "assistant" {
+                "carillon_claude"
+            } else {
+                "codex"
+            };
+            writeln!(
+                settings,
+                "[agents.{id}]\nproject_id = 'p1'\n[agents.{id}.model]\ninstance_id = '{instance}'\nmodel = 'gpt'"
+            )?;
+        }
+        std::fs::write(home.join("providers/runtime-t3.toml"), settings)?;
         std::fs::write(home.join("credentials/t3.token"), "token")?;
         let t3 = fake_t3(
             directory.path(),
             &serde_json::json!({
                 "projects": [{"id": "p1", "title": "Notes", "workspace": directory.path()}],
-                "models": [model("codex", "gpt", "GPT")],
+                "models": [model("codex", "gpt", "GPT"), model("carillon_claude", "gpt", "Profile GPT")],
             }),
         )?;
         let program = std::fs::read_to_string(&t3)?.replace(
             "configure) echo",
-            "configure) while [ \"$1\" != --agent ]; do shift; done; shift; agent=$1; \
-             printf 'url = \"http://127.0.0.1:3773\"\\ntoken_file = \"credentials/t3.token\"\\nprofiles = [\"carillon_claude\"]\\n[agents.%s]\\nproject_id = \"p1\"\\n[agents.%s.model]\\ninstance_id = \"codex\"\\nmodel = \"gpt\"\\n' \"$agent\" \"$agent\" \
+            "configure) while [ \"$#\" -gt 0 ]; do case \"$1\" in \
+             --agent) shift; agent=$1 ;; --model) shift; model=$1 ;; esac; shift; done; \
+             printf 'url = \"http://127.0.0.1:3773\"\\ntoken_file = \"credentials/t3.token\"\\nprofiles = [\"carillon_claude\"]\\n[agents.%s]\\nproject_id = \"p1\"\\n[agents.%s.model]\\ninstance_id = \"%s\"\\nmodel = \"%s\"\\n' \"$agent\" \"$agent\" \"${model%/*}\" \"${model#*/}\" \
              >\"$CARILLON_HOME/providers/runtime-t3.toml\"; echo",
         );
         std::fs::write(t3, program)?;
@@ -78,7 +84,11 @@ impl Fixture {
         })
     }
 
-    fn run(&self, workspace: bool, move_assistant: bool) -> anyhow::Result<std::process::Output> {
+    fn run(
+        &self,
+        workspace: bool,
+        move_assistant: Option<Runtime>,
+    ) -> anyhow::Result<std::process::Output> {
         let path =
             std::env::join_paths(std::iter::once(self.directory.path().to_path_buf()).chain(
                 std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
@@ -92,8 +102,8 @@ impl Fixture {
         if workspace {
             child.env("CARILLON_TEST_SETUP_WORKSPACE", &self.workspace);
         }
-        if move_assistant {
-            child.env("CARILLON_TEST_SETUP_MOVE_ASSISTANT", "pi");
+        if let Some(runtime) = move_assistant {
+            child.env("CARILLON_TEST_SETUP_MOVE_ASSISTANT", runtime.id());
         }
         child.output().context("run the setup rerun")
     }
@@ -103,15 +113,20 @@ impl Fixture {
 #[ignore = "run by setup rerun tests with isolated provider programs"]
 fn setup_added_pi_child() -> anyhow::Result<()> {
     let home = std::env::var_os("CARILLON_TEST_SETUP_HOME").context("setup home")?;
+    let moving = std::env::var("CARILLON_TEST_SETUP_MOVE_ASSISTANT").unwrap_or_default();
     let options = Options {
-        runtimes: vec![Runtime::Pi],
+        runtimes: if moving == "runtime-t3" {
+            Vec::new()
+        } else {
+            vec![Runtime::Pi]
+        },
         workspace: std::env::var_os("CARILLON_TEST_SETUP_WORKSPACE").map(Into::into),
         ..options()
     };
-    let mut questions = if std::env::var_os("CARILLON_TEST_SETUP_MOVE_ASSISTANT").is_some() {
-        Shown::answering(&["0", "", "token", "0", "0"])
-    } else {
-        Shown::default()
+    let mut questions = match moving.as_str() {
+        "runtime-pi" => Shown::answering(&["0", "", "token", "0", "0"]),
+        "runtime-t3" => Shown::answering(&["1", "0", "", "token", "0", "", "1", "key", "1"]),
+        _ => Shown::default(),
     };
     setup(Path::new(&home), &options, &mut questions)?;
     println!("{}", questions.shown.join("\n"));
@@ -124,7 +139,7 @@ fn keeping_t3_while_adding_pi_plans_its_assistant_and_honours_workspace() -> any
         let fixture = Fixture::new(&["t3-notes"])?;
         let settings = fixture.home.join("providers/runtime-t3.toml");
         let before = std::fs::read(&settings)?;
-        let output = fixture.run(workspace, false)?;
+        let output = fixture.run(workspace, None)?;
         assert!(output.status.success(), "{output:?}");
         let config = LoadedConfig::load(&fixture.home.join("carillon.toml"))?;
         let assistant = config.value.agent("assistant")?;
@@ -151,7 +166,7 @@ fn keeping_t3_while_adding_pi_plans_its_assistant_and_honours_workspace() -> any
 fn adding_pi_to_a_t3_assistant_reconfigures_t3_before_moving_it() -> anyhow::Result<()> {
     for workspace in [false, true] {
         let fixture = Fixture::new(&["assistant", "t3-notes"])?;
-        let output = fixture.run(workspace, true)?;
+        let output = fixture.run(workspace, Some(Runtime::Pi))?;
         assert!(output.status.success(), "{output:?}");
         let shown = String::from_utf8_lossy(&output.stdout);
         assert!(
@@ -202,5 +217,37 @@ fn adding_pi_to_a_t3_assistant_reconfigures_t3_before_moving_it() -> anyhow::Res
             "setup\n"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn moving_the_assistant_to_t3_leaves_pi_registered_and_idle() -> anyhow::Result<()> {
+    let fixture = Fixture::new(&["assistant"])?;
+    let path = fixture.home.join("carillon.toml");
+    register_runtime(&path, Runtime::Pi)?;
+    let mut config: Config = toml::from_str(&std::fs::read_to_string(&path)?)?;
+    config.agents[0].runtime = Runtime::Pi.id().to_owned();
+    crate::application::admin::set_agents(&path, config.agents)?;
+    std::fs::remove_file(fixture.home.join("providers/runtime-t3.toml"))?;
+
+    let output = fixture.run(false, Some(Runtime::T3))?;
+    assert!(output.status.success(), "{output:?}");
+    let config = LoadedConfig::load(&path)?;
+    assert_eq!(config.value.agent("assistant")?.runtime, "runtime-t3");
+    assert_eq!(config.value.agents.len(), 1);
+    assert!(
+        config
+            .provider("runtime-pi", ProviderRole::Runtime)?
+            .enabled
+    );
+    assert_eq!(
+        registered_runtimes(&fixture.home)?,
+        [Runtime::Pi, Runtime::T3]
+    );
+    assert!(!fixture.home.join("pi-calls").exists());
+    assert_eq!(
+        std::fs::read_to_string(fixture.home.join("discord-calls"))?,
+        "setup\n"
+    );
     Ok(())
 }
