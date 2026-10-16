@@ -388,6 +388,7 @@ export type OptionDescriptor = Static<typeof OptionDescriptorSchema>;
  */
 export const ProviderSchema = Type.Object({
   instanceId: Id,
+  displayName: Type.Optional(Type.String({ minLength: 1 })),
   enabled: Type.Boolean(),
   installed: Type.Boolean(),
   status: Type.String(),

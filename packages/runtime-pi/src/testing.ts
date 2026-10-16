@@ -1,5 +1,5 @@
 /** Service-test substitute. Does not exercise Pi or make model calls. */
-import type { AvailableModel, Selection } from "@carillon/protocol";
+import type { AvailableModel, ModelState, Selection } from "@carillon/protocol";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
 import { join } from "node:path";
@@ -55,11 +55,17 @@ export async function createDeterministicRuntime(
     },
     async modelState(query) {
       shutdown.signal.throwIfAborted();
-      return await selections.state(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, query);
+      return {
+        ...DETERMINISTIC_CATALOGUE,
+        ...(await selections.state(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, query)),
+      };
     },
-    setModel(update) {
+    async setModel(update) {
       shutdown.signal.throwIfAborted();
-      return selections.update(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, update);
+      return {
+        ...DETERMINISTIC_CATALOGUE,
+        ...(await selections.update(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, update)),
+      };
     },
     commands() {
       shutdown.signal.throwIfAborted();
@@ -171,6 +177,13 @@ const DETERMINISTIC_MODELS: readonly AvailableModel[] = [
   },
   { provider: "substitute", model: "fixed", name: "Substitute fixed", options: [] },
 ];
+const DETERMINISTIC_CATALOGUE: Pick<ModelState, "providers" | "available"> = {
+  providers: [
+    { id: "local", name: "Local" },
+    { id: "substitute", name: "Substitute" },
+  ],
+  available: [...DETERMINISTIC_MODELS],
+};
 
 export const DETERMINISTIC_DEFAULT: Selection = { provider: "local", model: "echo", options: {} };
 

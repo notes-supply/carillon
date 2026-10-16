@@ -16,6 +16,9 @@ export const ModelOptionSchema = Type.Object({
   default: Type.String(),
 });
 export type ModelOption = Static<typeof ModelOptionSchema>;
+/** A provider of the runtime's models, as the runtime names it; `id` is what models' `provider` names. */
+export const ModelProviderSchema = Type.Object({ id: Type.String(), name: Type.String() });
+export type ModelProvider = Static<typeof ModelProviderSchema>;
 export const AvailableModelSchema = Type.Object({
   provider: Type.String(),
   model: Type.String(),
@@ -31,6 +34,7 @@ export const ScopeStateSchema = Type.Object({
 });
 export type ScopeState = Static<typeof ScopeStateSchema>;
 export const ModelStateSchema = Type.Object({
+  providers: Type.Array(ModelProviderSchema),
   available: Type.Array(AvailableModelSchema),
   agent: ScopeStateSchema,
   conversation: Type.Optional(ScopeStateSchema),

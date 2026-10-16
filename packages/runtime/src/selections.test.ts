@@ -47,7 +47,6 @@ it("reports runtime defaults until a scope chooses, then follows the nearest sco
   await withLedger(async (path) => {
     const selections = await ModelSelections.open(path);
     expect(await selections.state(models, runtimeDefault, conversation)).toEqual({
-      available: models,
       agent: { selection: runtimeDefault, overridden: false },
       conversation: { selection: runtimeDefault, overridden: false },
     });

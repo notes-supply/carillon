@@ -33,6 +33,8 @@ const OFF = "off";
 
 /** T3's catalogue: the models Carillon offers, and which of their settings are booleans. */
 export interface Catalog {
+  /** The instances, by T3's display name for each. */
+  readonly providers: ModelState["providers"];
   readonly available: readonly AvailableModel[];
   /** Boolean settings by model, keyed by `optionKey`. */
   readonly booleans: ReadonlySet<string>;
@@ -50,11 +52,13 @@ export function catalog(config: unknown, runsOn: Catalog["runsOn"] = () => true)
       "malformed",
       "T3 described its providers in a form this runtime does not understand",
     );
+  const providers: ModelState["providers"] = [];
   const available: AvailableModel[] = [];
   const booleans = new Set<string>();
   for (const provider of config.providers) {
     if (!Check(ProviderSchema, provider) || !usable(provider) || !runsOn(provider.instanceId))
       continue;
+    providers.push({ id: provider.instanceId, name: provider.displayName ?? provider.instanceId });
     for (const model of provider.models) {
       const options = (model.capabilities?.optionDescriptors ?? []).filter(
         (descriptor): descriptor is OptionDescriptor => Check(OptionDescriptorSchema, descriptor),
@@ -88,7 +92,7 @@ export function catalog(config: unknown, runsOn: Catalog["runsOn"] = () => true)
       });
     }
   }
-  return { available, booleans, runsOn };
+  return { providers, available, booleans, runsOn };
 }
 
 function usable(provider: Provider): boolean {
@@ -200,13 +204,20 @@ export function modelState(
   { offered, agent }: AgentModels,
   conversation: { readonly thread: NativeSelection | undefined } | undefined,
 ): ModelState {
+  const providers = [...offered.providers];
   const available = [...offered.available];
-  if (conversation === undefined) return { available, agent };
+  if (conversation === undefined) return { providers, available, agent };
   const thread = conversation.thread;
   if (thread === undefined || !offered.runsOn(thread.instanceId))
-    return { available, agent, conversation: { selection: agent.selection, overridden: false } };
+    return {
+      providers,
+      available,
+      agent,
+      conversation: { selection: agent.selection, overridden: false },
+    };
   const selection = resolved(offered.available, fromNative(thread));
   return {
+    providers,
     available,
     agent,
     conversation: { selection, overridden: !sameSelection(selection, agent.selection) },

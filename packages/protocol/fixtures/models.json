@@ -1,6 +1,12 @@
 {
   "states": [
     {
+      "providers": [
+        {
+          "id": "fixture",
+          "name": "Fixture"
+        }
+      ],
       "available": [
         {
           "provider": "fixture",
@@ -28,6 +34,12 @@
       }
     },
     {
+      "providers": [
+        {
+          "id": "fixture",
+          "name": "Fixture"
+        }
+      ],
       "available": [
         {
           "provider": "fixture",
@@ -65,6 +77,7 @@
       }
     },
     {
+      "providers": [],
       "available": [],
       "agent": {
         "selection": null,
@@ -72,6 +85,12 @@
       }
     },
     {
+      "providers": [
+        {
+          "id": "claudeAgent",
+          "name": "Claude · Carillon"
+        }
+      ],
       "available": [
         {
           "provider": "claudeAgent",
@@ -230,18 +249,21 @@
   ],
   "invalid_states": [
     {
+      "providers": [],
       "available": [],
       "agent": {
         "overridden": false
       }
     },
     {
+      "providers": [],
       "available": [],
       "agent": {
         "selection": null
       }
     },
     {
+      "providers": [],
       "available": [],
       "agent": {
         "selection": null,
@@ -250,6 +272,7 @@
       "conversation": null
     },
     {
+      "providers": [],
       "available": [
         {
           "provider": "p",
@@ -257,6 +280,25 @@
           "name": "M"
         }
       ],
+      "agent": {
+        "selection": null,
+        "overridden": false
+      }
+    },
+    {
+      "available": [],
+      "agent": {
+        "selection": null,
+        "overridden": false
+      }
+    },
+    {
+      "providers": [
+        {
+          "id": "p"
+        }
+      ],
+      "available": [],
       "agent": {
         "selection": null,
         "overridden": false

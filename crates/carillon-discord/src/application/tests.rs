@@ -1111,7 +1111,7 @@ async fn an_acknowledged_interaction_is_answered_before_the_provider_returns() -
                 asked.notify_one();
                 release.notified().await;
                 Json(json!({
-                    "available": [],
+                    "providers": [], "available": [],
                     "agent": {"selection": null, "overridden": false}
                 }))
             }

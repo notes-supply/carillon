@@ -92,6 +92,7 @@ async fn example() -> Result<Value> {
     );
     let mut host = ModelFixture {
         state: serde_json::from_value(json!({
+            "providers": [{ "id": "example", "name": "Example" }],
             "available": [{ "provider": "example", "model": "small", "name": "Small", "options": [] }],
             "agent": { "selection": { "provider": "example", "model": "small", "options": {} }, "overridden": false },
             "conversation": { "selection": { "provider": "example", "model": "small", "options": {} }, "overridden": false }

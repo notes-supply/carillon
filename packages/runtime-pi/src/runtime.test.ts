@@ -146,6 +146,36 @@ it("composes native Pi directly, retains history and isolates independently cons
   }
 });
 
+it("names each provider of its models as Pi does, and one Pi does not know by its ID", async () => {
+  const root = await mkdtemp(join(tmpdir(), "carillon-providers-"));
+  const models = await ModelRuntime.create({
+    authPath: join(root, "auth.json"),
+    modelsPath: null,
+    modelsStorePath: join(root, "models.json"),
+    refreshOnCreate: false,
+  });
+  const gateway: Model<"openai-responses"> = { ...model, provider: "local-gateway", id: "local" };
+  vi.spyOn(models, "getAvailable").mockResolvedValue([model, gateway]);
+  const runtime = await createPiRuntime({
+    agents: [{ id: "test", workspace: root }],
+    stateDirectory: join(root, "state"),
+    modelRuntime: models,
+    settings: SettingsManager.inMemory({ defaultProvider: model.provider, defaultModel: model.id }),
+  });
+  try {
+    expect(
+      (await runtime.modelState({ interface_id: "test", agent_id: "test" })).providers,
+    ).toEqual([
+      { id: "local-gateway", name: "local-gateway" },
+      { id: "openai", name: "OpenAI" },
+    ]);
+  } finally {
+    await runtime.close();
+    vi.restoreAllMocks();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 it("keeps a running turn's model when an update commits while its catalogue is read", async () => {
   const root = await mkdtemp(join(tmpdir(), "carillon-pin-"));
   const later: Model<"openai-responses"> = { ...model, id: "later", name: "Later" };

@@ -17,6 +17,7 @@ import type {
   AgentInfo,
   AvailableModel,
   CommandCatalog,
+  ModelProvider,
   Selection,
   ModelQuery,
   ModelUpdate,
@@ -34,7 +35,7 @@ import {
   prepareAttachments,
   type InlineImagePolicy,
 } from "./attachments.ts";
-import { ModelSelections } from "@carillon/runtime/selections";
+import { ModelSelections, type ModelScopes } from "@carillon/runtime/selections";
 import { resolved } from "@carillon/runtime/models";
 import { openConversation } from "./namespace.ts";
 import { finalReport, toolName } from "@carillon/runtime/activity";
@@ -131,18 +132,13 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
       return turn?.interfaceId === interfaceId ? turn.activity.snapshot() : undefined;
     },
     modelState(query: ModelQuery): Promise<ModelState> {
-      return track(
-        async () =>
-          await selections.state(
-            offeredPiModels(await availablePiModels()),
-            runtimeDefault(),
-            query,
-          ),
+      return track(() =>
+        offered((available) => selections.state(available, runtimeDefault(), query)),
       );
     },
     setModel(update: ModelUpdate): Promise<ModelState> {
-      return track(async () =>
-        selections.update(offeredPiModels(await availablePiModels()), runtimeDefault(), update),
+      return track(() =>
+        offered((available) => selections.update(available, runtimeDefault(), update)),
       );
     },
     // Pi runs its own commands, prompt templates and skills from a message's
@@ -161,8 +157,25 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
     },
   };
 
+  /** The scopes `read` gives, with the catalogue it read them against. */
+  async function offered(
+    read: (available: readonly AvailableModel[]) => Promise<ModelScopes>,
+  ): Promise<ModelState> {
+    const models = await availablePiModels();
+    const available = offeredPiModels(models);
+    return { providers: piProviders(models), available, ...(await read(available)) };
+  }
+
+  /** The providers of Pi's models, as Pi names them. */
+  function piProviders(models: readonly Model<Api>[]): ModelProvider[] {
+    return [...new Set(models.map((model) => model.provider))].map((id) => ({
+      id,
+      name: modelRuntime.getProvider(id)?.name ?? id,
+    }));
+  }
+
   /** Pi's catalogue as the picker sees it: one thinking setting per reasoning model. */
-  function offeredPiModels(models: readonly Model<Api>[]): readonly AvailableModel[] {
+  function offeredPiModels(models: readonly Model<Api>[]): AvailableModel[] {
     return models.map((model) => ({
       provider: model.provider,
       model: model.id,

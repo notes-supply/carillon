@@ -35,6 +35,9 @@ const LedgerSchema = Type.Object({
 });
 type Ledger = Static<typeof LedgerSchema>;
 
+/** What the agent and, with a conversation, that conversation have chosen; the runtime adds its catalogue. */
+export type ModelScopes = Pick<ModelState, "agent" | "conversation">;
+
 /**
  * Selections made through Carillon, keyed by agent and by conversation.
  * Every change is written before it is confirmed. The ledger stores what was
@@ -87,7 +90,7 @@ export class ModelSelections {
     available: readonly AvailableModel[],
     runtimeDefault: Selection,
     query: ModelQuery,
-  ): Promise<ModelState> {
+  ): Promise<ModelScopes> {
     return this.#writes.run(async () => {
       await this.refresh();
       return this.snapshotState(available, runtimeDefault, query);
@@ -98,16 +101,15 @@ export class ModelSelections {
     available: readonly AvailableModel[],
     runtimeDefault: Selection,
     query: ModelQuery,
-  ): ModelState {
+  ): ModelScopes {
     const agentSelection = this.agentSelection(query.agent_id);
     const agent: ScopeState = {
       selection: resolved(available, agentSelection ?? runtimeDefault),
       overridden: agentSelection !== null,
     };
-    if (query.audience_id === undefined) return { available: [...available], agent };
+    if (query.audience_id === undefined) return { agent };
     const conversationSelection = this.conversationSelection(query);
     return {
-      available: [...available],
       agent,
       conversation: {
         selection:
@@ -128,7 +130,7 @@ export class ModelSelections {
     available: readonly AvailableModel[],
     runtimeDefault: Selection,
     update: ModelUpdate,
-  ): Promise<ModelState> {
+  ): Promise<ModelScopes> {
     if (update.scope === "conversation" && update.audience_id === undefined)
       throw new ExplainedFailure(400, "There is no conversation here to set a model for.");
     const selection = update.selection === null ? null : validated(available, update.selection);

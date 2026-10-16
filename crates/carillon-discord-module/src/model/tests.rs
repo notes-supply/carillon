@@ -10,7 +10,7 @@ use crate::{
 };
 use carillon_protocol::{
     model::ModelScope as Scope,
-    models::{AvailableModel, ModelOption, ModelState, ScopeState, Selection},
+    models::{AvailableModel, ModelOption, ModelProvider, ModelState, ScopeState, Selection},
 };
 
 /// Answers like the runtime: a set selection is resolved so every
@@ -139,6 +139,16 @@ fn runtime(conversation: bool) -> FakeRuntime {
     };
     FakeRuntime {
         state: ModelState {
+            providers: vec![
+                ModelProvider {
+                    id: "anthropic".to_owned(),
+                    name: "Anthropic".to_owned(),
+                },
+                ModelProvider {
+                    id: "openai".to_owned(),
+                    name: "OpenAI".to_owned(),
+                },
+            ],
             available: vec![
                 model("anthropic", "sonnet", &["off", "low", "medium", "high"]),
                 model("anthropic", "opus", &["off", "high"]),
