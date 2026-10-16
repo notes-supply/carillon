@@ -96,16 +96,22 @@ fn captures(state: &Fixture) -> Result<Vec<String>> {
     Ok(names)
 }
 
-/// Wait, without timers, until core reports the event's capture running:
-/// a paused test clock does not advance while a blocking copy runs.
-async fn wait_for_capture(state: &Fixture, event_id: &str) -> Result<()> {
-    for _ in 0..100_000 {
-        if matches!(status(state, event_id).await?, EventStatus::Capturing) {
-            return Ok(());
-        }
+/// Yield until `ready`: a paused clock stalls during a blocking copy, which load can slow down.
+async fn eventually(what: &str, ready: impl AsyncFn() -> Result<bool>) -> Result<()> {
+    let started = std::time::Instant::now();
+    while !ready().await? {
+        anyhow::ensure!(started.elapsed() < Duration::from_secs(30), "{what}");
         tokio::task::yield_now().await;
     }
-    bail!("the capture of {event_id} never started")
+    Ok(())
+}
+
+async fn wait_for_capture(state: &Fixture, event_id: &str) -> Result<()> {
+    eventually(&format!("{event_id} never started capturing"), async || {
+        let reported = status(state, event_id).await?;
+        Ok(matches!(reported, EventStatus::Capturing))
+    })
+    .await
 }
 
 #[tokio::test]
@@ -550,16 +556,10 @@ async fn a_capture_cancelled_while_publishing_makes_no_new_acceptance() -> Resul
             let state = state.clone();
             tokio::spawn(async move { submit(&state, event).await })
         };
-        for _ in 0..100_000 {
-            if signals.publishing.load(Ordering::SeqCst) {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        anyhow::ensure!(
-            signals.publishing.load(Ordering::SeqCst),
-            "the copy never reached publication"
-        );
+        eventually("the copy never reached publication", async || {
+            Ok(signals.publishing.load(Ordering::SeqCst))
+        })
+        .await?;
         tokio::time::advance(crate::intake::CAPTURE_DEADLINE * 2).await;
         for _ in 0..10 {
             tokio::task::yield_now().await;
