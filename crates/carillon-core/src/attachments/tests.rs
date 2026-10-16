@@ -267,28 +267,61 @@ fn verification_and_store_validation_detect_altered_missing_and_unexpected_files
     // Same length, different bytes: only the digest notices.
     fs::set_permissions(&first, fs::Permissions::from_mode(0o640))?;
     fs::write(&first, b"altered!")?;
-    assert!(check(data.path(), &files[0]).is_err());
-    assert!(validate_store(data.path(), &files).is_err());
+    let refused = check(data.path(), &files[0])
+        .err()
+        .context("accepted altered bytes")?;
+    assert!(
+        format!("{refused:#}").contains("was changed after it was accepted"),
+        "{refused:#}"
+    );
+    let refused = validate_store(data.path(), &files)
+        .err()
+        .context("accepted an altered store")?;
+    assert!(
+        format!("{refused:#}").contains("was changed after it was accepted"),
+        "{refused:#}"
+    );
     fs::write(&first, b"original")?;
     check(data.path(), &files[0])?;
 
     fs::remove_file(&first)?;
-    assert!(check(data.path(), &files[0]).is_err());
+    let refused = check(data.path(), &files[0])
+        .err()
+        .context("accepted a missing capture")?;
+    assert!(format!("{refused:#}").contains("is missing"), "{refused:#}");
     fs::write(&first, b"original")?;
 
     let extra = store(data.path()).join(&capture.id).join("2");
     fs::write(&extra, b"unexpected")?;
-    assert!(validate_store(data.path(), &files).is_err());
+    let refused = validate_store(data.path(), &files)
+        .err()
+        .context("accepted an unexpected file")?;
+    assert!(
+        format!("{refused:#}").contains("holds unexpected file"),
+        "{refused:#}"
+    );
     fs::remove_file(&extra)?;
     let stray = store(data.path()).join("stray");
     fs::create_dir(&stray)?;
-    assert!(validate_store(data.path(), &files).is_err());
+    let refused = validate_store(data.path(), &files)
+        .err()
+        .context("accepted a stray entry")?;
+    assert!(
+        format!("{refused:#}").contains("holds unexpected entry stray"),
+        "{refused:#}"
+    );
     fs::remove_dir(&stray)?;
     validate_store(data.path(), &files)?;
 
     // A stored identity is a capture name, never a path.
     let mut escaping = files[0].clone();
     "../outside".clone_into(&mut escaping.capture);
-    assert!(check(data.path(), &escaping).is_err());
+    let refused = check(data.path(), &escaping)
+        .err()
+        .context("accepted an escaping capture name")?;
+    assert!(
+        format!("{refused:#}").contains("invalid captured attachment identity"),
+        "{refused:#}"
+    );
     Ok(())
 }

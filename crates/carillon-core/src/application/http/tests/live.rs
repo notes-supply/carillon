@@ -534,7 +534,10 @@ async fn core_and_its_workers_follow_one_serving_registry() -> Result<()> {
                 audience_id: None,
             },
         );
-        assert_eq!(engine.is_ok(), enabled);
+        assert_eq!(
+            engine.err().map(|error| error.to_string()),
+            (!enabled).then(|| "conversation runtime provider is disabled".to_owned())
+        );
         let wanted = if enabled { parallel as usize } else { 0 };
         workers_are(&state, |runtime| runtime.messages.claiming == wanted).await?;
     }

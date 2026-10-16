@@ -222,7 +222,11 @@ async fn a_blocked_claim_holds_the_barrier_and_no_holder_reads_another_arrangeme
     std::thread::sleep(lease + Duration::from_millis(100));
     let second = ok(begin(&state, Duration::from_secs(30)).await)?;
     assert_eq!(second.workers, None);
-    assert!(ok(renew(&state, first).await.map(|_| ())).is_err());
+    let refused = renew(&state, first)
+        .await
+        .err()
+        .context("renewed an ended pause")?;
+    assert_eq!(refused.status, StatusCode::CONFLICT);
 
     // Ended, the workers return and wait on the writer again; a third
     // holder is never told they ended while they have not.

@@ -233,7 +233,13 @@ fn configuration_rejects_malformed_provider_endpoints_before_startup() -> Result
         ] {
             state.config.value.providers[index].url = url.to_owned();
             fs::write(&path, toml::to_string(&state.config.value)?)?;
-            assert!(LoadedConfig::load(&path).is_err(), "accepted {url:?}");
+            let refused = LoadedConfig::load(&path)
+                .err()
+                .with_context(|| format!("accepted {url:?}"))?;
+            assert!(
+                format!("{refused:#}").contains("invalid URL for provider"),
+                "{refused:#}"
+            );
         }
         for url in [
             "http://127.0.0.1:3000",
@@ -252,20 +258,27 @@ fn configuration_rejects_malformed_provider_endpoints_before_startup() -> Result
         for (parallel, valid) in [(0, false), (1, runtime), (16, runtime), (17, false)] {
             state.config.value.providers[index].parallel_turns = Some(parallel);
             fs::write(&path, toml::to_string(&state.config.value)?)?;
+            let id = &state.config.value.providers[index].id;
             assert_eq!(
-                LoadedConfig::load(&path).is_ok(),
-                valid,
-                "parallel_turns {parallel} on {:?}",
-                state.config.value.providers[index].role
+                LoadedConfig::load(&path)
+                    .err()
+                    .map(|error| error.to_string()),
+                (!valid).then(|| format!(
+                    "provider {id} parallel_turns must be between 1 and 16, on a runtime"
+                )),
+                "parallel_turns {parallel}"
             );
         }
         state.config.value.providers[index].parallel_turns = None;
     }
     state.config.value.core.listen.set_port(0);
     fs::write(&path, toml::to_string(&state.config.value)?)?;
+    let refused = LoadedConfig::load(&path)
+        .err()
+        .context("accepted core port zero")?;
     assert!(
-        LoadedConfig::load(&path).is_err(),
-        "accepted core port zero"
+        format!("{refused:#}").contains("core listen port must be nonzero"),
+        "{refused:#}"
     );
     Ok(())
 }
@@ -305,8 +318,9 @@ async fn status_probes_public_health_without_provider_credentials() -> Result<()
         .oneshot(Request::builder().uri("/v1/status").body(Body::empty())?)
         .await?;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    assert!(
-        received.try_recv().is_err(),
+    assert_eq!(
+        received.try_recv(),
+        Err(TryRecvError::Empty),
         "unauthenticated status probed providers"
     );
 
@@ -448,13 +462,16 @@ async fn startup_opens_the_database_without_creating_one() -> Result<()> {
     drop(listener);
     let path = state.config.value.data_dir.join("carillon.sqlite3");
     fs::remove_file(&path)?;
+    let refused = serve(
+        state.config.root.join("carillon.toml"),
+        state.config.clone(),
+    )
+    .await
+    .err()
+    .context("served without its database")?;
     assert!(
-        serve(
-            state.config.root.join("carillon.toml"),
-            state.config.clone()
-        )
-        .await
-        .is_err()
+        format!("{refused:#}").contains("unable to open database file"),
+        "{refused:#}"
     );
     assert!(!path.exists());
     Ok(())
@@ -596,8 +613,9 @@ async fn model_calls_follow_conversation_ownership() -> Result<()> {
     assert_eq!(status, StatusCode::FORBIDDEN);
     let (status, _) = model_call(&state, "GET", "/v1/model?agent_id=other", true, None).await?;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(
-        received.try_recv().is_err(),
+    assert_eq!(
+        received.try_recv(),
+        Err(TryRecvError::Empty),
         "rejected calls reached a runtime"
     );
 
@@ -876,7 +894,8 @@ async fn credential_drift_leaves_work_queued_until_repaired() -> Result<()> {
             Ok(completed(request))
         })
         .await;
-        assert!(result.is_err(), "invalid credential was accepted");
+        let refused = result.err().context("invalid credential was accepted")?;
+        assert!(format!("{refused:#}").contains("credential"), "{refused:#}");
         assert_eq!(
             calls, 0,
             "runtime was contacted before credential validation"
@@ -1220,7 +1239,7 @@ async fn an_interface_cannot_take_a_follow_up_identity_from_a_parent_turn() -> R
     })
     .await;
     // The parent completed with its answer, and its observation is queued.
-    assert!(step.is_ok(), "{step:?}");
+    step?;
     let inspection = state
         .core
         .inspect_turn(&parent.turn_id)?

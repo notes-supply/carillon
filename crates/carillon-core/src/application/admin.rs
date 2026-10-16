@@ -1091,17 +1091,32 @@ mod tests {
 
     #[test]
     fn incomplete_restore_is_rejected_before_publication_and_can_be_retried() -> Result<()> {
-        for damage in [
-            "config-only",
-            "database",
-            "operator",
-            "provider",
-            "resource-root",
-            "wrong-credential",
-            "corrupt-database",
-            "empty-database",
-            "old-schema",
-            "foreign-key",
+        for (damage, reason) in [
+            (
+                "config-only",
+                "backup is missing a configured agent resource directory",
+            ),
+            ("database", "unable to open database file"),
+            ("operator", "read provider credential"),
+            ("provider", "read provider credential"),
+            (
+                "resource-root",
+                "backup is missing a configured agent resource directory",
+            ),
+            (
+                "wrong-credential",
+                "backup credential for runtime-pi does not match the configuration",
+            ),
+            ("corrupt-database", "file is not a database"),
+            (
+                "empty-database",
+                "database schema is not the current Carillon format",
+            ),
+            (
+                "old-schema",
+                "database schema is not the current Carillon format",
+            ),
+            ("foreign-key", "SQLite foreign key check failed"),
         ] {
             let directory = tempdir()?;
             let source = directory.path().join("source");
@@ -1149,7 +1164,10 @@ mod tests {
                 if existing_target {
                     fs::create_dir(&target)?;
                 }
-                assert!(restore(&invalid, &target).is_err(), "accepted {damage}");
+                let refused = restore(&invalid, &target)
+                    .err()
+                    .with_context(|| format!("accepted {damage}"))?;
+                assert!(format!("{refused:#}").contains(reason), "{refused:#}");
                 assert_eq!(target.exists(), existing_target, "published {damage}");
                 if existing_target {
                     assert!(fs::read_dir(&target)?.next().is_none());
@@ -1207,6 +1225,7 @@ mod tests {
 
         use crate::{db::Database, resources};
 
+        const ALTERED: &str = "backup has missing or altered captured resources";
         for uncertain in [false, true] {
             for damage in ["missing", "content", "executable", "address", "malformed"] {
                 let directory = tempdir()?;
@@ -1256,10 +1275,10 @@ mod tests {
                 backup(&config, &valid)?;
                 damage_captured_resources(&config, &snapshot, damage)?;
                 let refused_backup = directory.path().join("refused.tar.gz");
-                assert!(
-                    backup(&config, &refused_backup).is_err(),
-                    "backup accepted {damage}"
-                );
+                let refused = backup(&config, &refused_backup)
+                    .err()
+                    .with_context(|| format!("backup accepted {damage}"))?;
+                assert!(format!("{refused:#}").contains(ALTERED), "{refused:#}");
                 assert!(!refused_backup.exists());
                 let invalid = directory.path().join("invalid.tar.gz");
                 archive_test_tree(&source, &invalid)?;
@@ -1269,10 +1288,10 @@ mod tests {
                     if existing {
                         fs::create_dir(&target)?;
                     }
-                    assert!(
-                        restore(&invalid, &target).is_err(),
-                        "restore accepted {damage}"
-                    );
+                    let refused = restore(&invalid, &target)
+                        .err()
+                        .with_context(|| format!("restore accepted {damage}"))?;
+                    assert!(format!("{refused:#}").contains(ALTERED), "{refused:#}");
                     assert_eq!(target.exists(), existing);
                     if existing {
                         assert!(fs::read_dir(&target)?.next().is_none());
@@ -1494,9 +1513,13 @@ mod tests {
             let invalid = damaged.join("invalid.tar.gz");
             archive_test_tree(&tree, &invalid)?;
             let target = damaged.join("restored");
+            let refused = restore(&invalid, &target)
+                .err()
+                .with_context(|| format!("restore accepted {damage}"))?;
             assert!(
-                restore(&invalid, &target).is_err(),
-                "restore accepted {damage}"
+                format!("{refused:#}")
+                    .contains("backup has missing, altered or unexpected captured attachments"),
+                "{refused:#}"
             );
             assert!(!target.exists(), "published {damage}");
         }
@@ -1674,7 +1697,13 @@ mod tests {
         let root = directory.path().join("installation");
         let config_path = initialize_test_installation(&root, directory.path(), 44_000)?;
         let before = fs::read(&config_path)?;
-        assert!(set_provider(&config_path, "../escape", false).is_err());
+        let refused = set_provider(&config_path, "../escape", false)
+            .err()
+            .context("accepted an escaping provider identity")?;
+        assert!(
+            format!("{refused:#}").contains("provider identity must be 1-128 bytes"),
+            "{refused:#}"
+        );
         assert_eq!(fs::read(&config_path)?, before);
         Ok(())
     }

@@ -1355,17 +1355,33 @@ mod tests {
     fn open_refuses_missing_empty_and_obsolete_databases_without_repair() -> Result<()> {
         let directory = tempdir()?;
         let path = directory.path().join("state.sqlite3");
-        for contents in [None, Some(Vec::new()), Some(b"not SQLite".to_vec())] {
+        for (contents, reason) in [
+            (None, "unable to open database file"),
+            (
+                Some(Vec::new()),
+                "database schema is not the current Carillon format",
+            ),
+            (Some(b"not SQLite".to_vec()), "file is not a database"),
+        ] {
             if let Some(bytes) = &contents {
                 std::fs::write(&path, bytes)?;
             }
-            assert!(Database::open(&path).is_err());
+            let refused = Database::open(&path)
+                .err()
+                .context("opened an unusable database")?;
+            assert!(format!("{refused:#}").contains(reason), "{refused:#}");
             assert_eq!(std::fs::read(&path).ok(), contents);
         }
         std::fs::remove_file(&path)?;
         rusqlite::Connection::open(&path)?.execute_batch("CREATE TABLE obsolete (id INTEGER)")?;
         let before = std::fs::read(&path)?;
-        assert!(Database::open(&path).is_err());
+        let refused = Database::open(&path)
+            .err()
+            .context("opened an obsolete schema")?;
+        assert!(
+            format!("{refused:#}").contains("database schema is not the current Carillon format"),
+            "{refused:#}"
+        );
         assert_eq!(std::fs::read(&path)?, before);
         std::fs::remove_file(&path)?;
         Database::create(&path)?;
@@ -2010,8 +2026,20 @@ mod tests {
         // An index is part of the format: a database an earlier release wrote
         // without it is refused, and nothing adds it.
         rusqlite::Connection::open(&path)?.execute_batch("DROP INDEX turns_origin")?;
-        assert!(Database::validate_backup(&path).is_err());
-        assert!(Database::open(&path).is_err());
+        let refused = Database::validate_backup(&path)
+            .err()
+            .context("accepted a missing index")?;
+        assert!(
+            format!("{refused:#}").contains("database schema is not the current Carillon format"),
+            "{refused:#}"
+        );
+        let refused = Database::open(&path)
+            .err()
+            .context("opened a missing index")?;
+        assert!(
+            format!("{refused:#}").contains("database schema is not the current Carillon format"),
+            "{refused:#}"
+        );
         let indexes: u32 = rusqlite::Connection::open(&path)?.query_row(
             "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'turns_origin'",
             [],
@@ -2288,23 +2316,43 @@ mod tests {
             .claim("runtime", Lane::Messages, &CancellationToken::new())?
             .context("uncertain turn was not queued")?;
         database.interrupt_turn(&uncertain, "ambiguous", None, None)?;
+        let refused = database
+            .interrupt_turn(&uncertain, "ambiguous", None, None)
+            .err()
+            .context("interrupted a turn that is not running")?;
         assert!(
-            database
-                .interrupt_turn(&uncertain, "ambiguous", None, None)
-                .is_err()
+            format!("{refused:#}").contains("was not running"),
+            "{refused:#}"
         );
-        assert!(database.requeue_turn(&uncertain).is_err());
+        let refused = database
+            .requeue_turn(&uncertain)
+            .err()
+            .context("requeued a turn that is not running")?;
+        assert!(
+            format!("{refused:#}").contains("was not running"),
+            "{refused:#}"
+        );
 
         accept(&database, "requeued", "two")?;
         let requeued = database
             .claim("runtime", Lane::Messages, &CancellationToken::new())?
             .context("requeued turn was not queued")?;
         database.requeue_turn(&requeued)?;
-        assert!(database.requeue_turn(&requeued).is_err());
+        let refused = database
+            .requeue_turn(&requeued)
+            .err()
+            .context("requeued a turn twice")?;
         assert!(
-            database
-                .interrupt_turn(&requeued, "ambiguous", None, None)
-                .is_err()
+            format!("{refused:#}").contains("was not running"),
+            "{refused:#}"
+        );
+        let refused = database
+            .interrupt_turn(&requeued, "ambiguous", None, None)
+            .err()
+            .context("interrupted a requeued turn")?;
+        assert!(
+            format!("{refused:#}").contains("was not running"),
+            "{refused:#}"
         );
 
         let requeued = database
@@ -2319,12 +2367,29 @@ mod tests {
             attachments_left: false,
         };
         database.complete_turn(&requeued, &response)?;
-        assert!(database.complete_turn(&requeued, &response).is_err());
-        assert!(database.requeue_turn(&requeued).is_err());
+        let refused = database
+            .complete_turn(&requeued, &response)
+            .err()
+            .context("completed a requeued turn")?;
         assert!(
-            database
-                .interrupt_turn(&requeued, "ambiguous", None, None)
-                .is_err()
+            format!("{refused:#}").contains("was not running"),
+            "{refused:#}"
+        );
+        let refused = database
+            .requeue_turn(&requeued)
+            .err()
+            .context("requeued a requeued turn")?;
+        assert!(
+            format!("{refused:#}").contains("was not running"),
+            "{refused:#}"
+        );
+        let refused = database
+            .interrupt_turn(&requeued, "ambiguous", None, None)
+            .err()
+            .context("interrupted a requeued turn")?;
+        assert!(
+            format!("{refused:#}").contains("was not running"),
+            "{refused:#}"
         );
         let inspection = database
             .inspect_turn(&requeued.turn_id)?

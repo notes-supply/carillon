@@ -456,7 +456,13 @@ mod tests {
             format!("{refused:#}").contains("does not match its content address"),
             "{refused:#}"
         );
-        assert!(super::validate(&ordinary, &store).is_err());
+        let refused = super::validate(&ordinary, &store)
+            .err()
+            .context("validated a tampered snapshot")?;
+        assert!(
+            format!("{refused:#}").contains("does not match its content address"),
+            "{refused:#}"
+        );
         Ok(())
     }
 
