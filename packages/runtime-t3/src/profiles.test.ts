@@ -318,3 +318,28 @@ it("discovers profile existence from T3 even when the saved list disagrees", asy
   );
   expect((await discover(endpoint)).profiles).toEqual([]);
 });
+
+it("removes only its abandoned temporary skill links after a crashed reconciliation", async () => {
+  const { root, config, home } = await savedProfile();
+  const source = join(root, "agent", "skills");
+  await mkdir(join(source, "status"), { recursive: true });
+  await writeFile(join(source, "status", "SKILL.md"), "Status skill");
+  await mkdir(join(home, "skills"), { recursive: true });
+  const temporary = `.status.${crypto.randomUUID()}.tmp`;
+  const old = join(root, "old-agent");
+  await symlink(join(old, "AGENTS.md"), join(home, "CLAUDE.md"));
+  const stale = `.removed.${crypto.randomUUID()}.tmp`;
+  await symlink(join(source, "status"), join(home, "skills", temporary));
+  await symlink(join(old, "skills", "removed"), join(home, "skills", stale));
+  const native = `.native.${crypto.randomUUID()}.tmp`;
+  await symlink(join(root, "native"), join(home, "skills", native));
+  await writeFile(join(home, "skills", `.status.${crypto.randomUUID()}.tmp`), "native file");
+  const before = await readdir(join(home, "skills"));
+  const checked = await cli(["check", "--config", config], "");
+  expect(checked.status, checked.stderr).toBe(0);
+  expect((await readdir(join(home, "skills"))).toSorted()).toEqual(
+    [...before.filter((name) => name !== temporary && name !== stale), "status"].toSorted(),
+  );
+  expect(await readlink(join(home, "skills", "status"))).toBe(join(source, "status"));
+  expect(await readlink(join(home, "skills", native))).toBe(join(root, "native"));
+});

@@ -118,11 +118,15 @@ export async function reconcileProfile(harness: Harness, resources: string): Pro
   for (const name of await readdir(skills)) {
     const path = join(skills, name);
     const target = await targetOf(path);
+    const skillName =
+      /^\.(.+)\.[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}\.tmp$/u.exec(name)?.[1] ??
+      name;
     if (
       !names.has(name) &&
       target !== undefined &&
-      (target === join(source, name) ||
-        (previousResources !== undefined && target === join(previousResources, "skills", name)))
+      (target === join(source, skillName) ||
+        (previousResources !== undefined &&
+          target === join(previousResources, "skills", skillName)))
     )
       await rm(path, { force: true });
   }
@@ -171,11 +175,20 @@ async function link(path: string, target: string, previous: string | undefined):
         `${path} is not a link to ${target}; move it away, then set the profile up again`,
       );
   }
-  const temporary = join(dirname(path), `.${basename(path)}.${crypto.randomUUID()}.tmp`);
-  try {
-    await symlink(target, temporary);
-    await rename(temporary, path);
-  } finally {
-    await rm(temporary, { force: true });
+  for (;;) {
+    const temporary = join(dirname(path), `.${basename(path)}.${crypto.randomUUID()}.tmp`);
+    try {
+      await symlink(target, temporary);
+      try {
+        await rename(temporary, path);
+        return;
+      } catch (failure) {
+        // Another reconcile can remove this temporary link before it is published.
+        if (!(failure instanceof Error && "code" in failure && failure.code === "ENOENT"))
+          throw failure;
+      }
+    } finally {
+      await rm(temporary, { force: true });
+    }
   }
 }
