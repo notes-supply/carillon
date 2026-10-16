@@ -6,11 +6,10 @@
 use std::{
     fs,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
-    time::Duration,
 };
 
 use anyhow::Context as _;
-use carillon_protocol::model::{DeliveryAck, DeliveryOutcome};
+use carillon_protocol::model::DeliveryOutcome;
 use tempfile::tempdir;
 use uuid::Uuid;
 
@@ -22,7 +21,7 @@ use crate::application::{
     drain::{Held, Pace, drain},
     http::{
         maintenance::{self, RuntimeRestart},
-        workers, *,
+        *,
     },
 };
 
@@ -321,7 +320,11 @@ async fn one_holder_at_a_time_renews_only_a_pause_still_in_force() -> Result<()>
         assert!(unready.starts_with("it did not say"), "{drain:?}");
     }
     ok(end(&state, second).await)?;
-    assert!(renew(&state, second).await.is_err());
+    let refused = renew(&state, second)
+        .await
+        .err()
+        .context("renewed an ended pause")?;
+    assert_eq!(refused.status, StatusCode::CONFLICT);
     stopping.cancel();
     supervisor.await?;
     Ok(())
@@ -569,7 +572,7 @@ async fn a_pause_arranged_just_before_it_lapses_still_ends() -> Result<()> {
     // A reader of the census holds it, so the supervisor, having arranged
     // the workers under the pause while it was in force, publishes that
     // only after the pause has lapsed. No other event follows.
-    let reading = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let reading = Arc::new(std::sync::Barrier::new(2));
     let reader = std::thread::spawn({
         let (state, reading) = (state.clone(), reading.clone());
         move || {
@@ -630,6 +633,10 @@ async fn the_timeout_bounds_the_whole_drain_however_slowly_core_answers() -> Res
     let mut hung = fixture.config.clone();
     hung.value.core.listen = silent.local_addr()?;
     let held = tokio::spawn(async move {
+        #[expect(
+            clippy::collection_is_never_read,
+            reason = "held so core's requests stay open and unanswered"
+        )]
         let mut connections = Vec::new();
         while let Ok((connection, _)) = silent.accept().await {
             connections.push(connection);
@@ -731,6 +738,10 @@ async fn forcing_waits_for_one_request_to_core_not_the_whole_timeout() -> Result
         "test-operator",
     )?;
     let held = tokio::spawn(async move {
+        #[expect(
+            clippy::collection_is_never_read,
+            reason = "held so core's requests stay open and unanswered"
+        )]
         let mut connections = Vec::new();
         while let Ok((connection, _)) = silent.accept().await {
             connections.push(connection);

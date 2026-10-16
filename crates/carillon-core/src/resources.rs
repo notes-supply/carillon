@@ -41,7 +41,7 @@ impl ResourceFile {
 /// Captures the current resource root into the snapshot store and returns the
 /// content address identifying it. An agent without resources captures the
 /// empty snapshot.
-pub fn materialize(source: Option<&Path>, store: &Path) -> Result<String> {
+pub(crate) fn materialize(source: Option<&Path>, store: &Path) -> Result<String> {
     let files = match source {
         Some(source) => selected_resource_files(source)?,
         None => BTreeMap::new(),
@@ -113,7 +113,7 @@ pub fn materialize(source: Option<&Path>, store: &Path) -> Result<String> {
 }
 
 /// Check an archived core-owned snapshot without publishing or repairing it.
-pub fn validate(id: &str, store: &Path) -> Result<()> {
+pub(crate) fn validate(id: &str, store: &Path) -> Result<()> {
     if id.len() != 64
         || !id
             .bytes()
@@ -136,7 +136,7 @@ pub fn validate(id: &str, store: &Path) -> Result<()> {
 
 /// Where a snapshot lives in the given store. Resolved at claim time, so a
 /// relocated store still points at the right content.
-pub fn root(store: &Path, id: &str) -> PathBuf {
+pub(crate) fn root(store: &Path, id: &str) -> PathBuf {
     store.join(id)
 }
 
@@ -285,7 +285,13 @@ mod tests {
         let captured = store.join(&ids[0]).join("SYSTEM.md");
         fs::set_permissions(&captured, fs::Permissions::from_mode(0o600))?;
         fs::write(captured, "damaged")?;
-        assert!(materialize(Some(source.path()), &store).is_err());
+        let refused = materialize(Some(source.path()), &store)
+            .err()
+            .context("reused a damaged snapshot")?;
+        assert!(
+            format!("{refused:#}").contains("does not match its content address"),
+            "{refused:#}"
+        );
         Ok(())
     }
 
@@ -443,7 +449,13 @@ mod tests {
             root(&store, &ordinary).join("skills/example/scripts/helper"),
             fs::Permissions::from_mode(0o550),
         )?;
-        assert!(materialize(Some(source.path()), &store).is_err());
+        let refused = materialize(Some(source.path()), &store)
+            .err()
+            .context("reused a damaged snapshot")?;
+        assert!(
+            format!("{refused:#}").contains("does not match its content address"),
+            "{refused:#}"
+        );
         assert!(super::validate(&ordinary, &store).is_err());
         Ok(())
     }

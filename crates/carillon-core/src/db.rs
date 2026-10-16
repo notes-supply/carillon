@@ -62,14 +62,14 @@ use crate::{
 };
 
 #[derive(Clone)]
-pub struct Database {
+pub(crate) struct Database {
     path: PathBuf,
 }
 
 /// A queued turn after this process moved it to `running`. Holding one is the
 /// permission to execute runtime work and to record its outcome.
 #[derive(Clone, Debug)]
-pub struct ClaimedTurn {
+pub(crate) struct ClaimedTurn {
     pub turn_id: String,
     pub interface_id: String,
     pub agent_id: String,
@@ -131,7 +131,7 @@ fn optional_state_column<T: FromStr<Err = anyhow::Error>>(
 }
 
 impl Database {
-    pub fn create(path: &Path) -> Result<Self> {
+    pub(crate) fn create(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::DirBuilder::new()
                 .recursive(true)
@@ -164,7 +164,7 @@ impl Database {
         Ok(database)
     }
 
-    pub fn open(path: &Path) -> Result<Self> {
+    pub(crate) fn open(path: &Path) -> Result<Self> {
         Self::validate_backup(path)?;
         Ok(Self {
             path: path.to_path_buf(),
@@ -182,7 +182,7 @@ impl Database {
     }
 
     /// Validate without creating a missing database or repairing an old schema.
-    pub fn validate_backup(path: &Path) -> Result<()> {
+    pub(crate) fn validate_backup(path: &Path) -> Result<()> {
         let connection =
             Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         let integrity: String =
@@ -208,7 +208,7 @@ impl Database {
     }
 
     /// Validate every captured resource reference before archiving or restoring.
-    pub fn validate_resource_snapshots(&self, store: &Path) -> Result<()> {
+    pub(crate) fn validate_resource_snapshots(&self, store: &Path) -> Result<()> {
         let connection =
             Connection::open_with_flags(&self.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         let mut statement =
@@ -222,14 +222,14 @@ impl Database {
 
     /// Every committed attachment reference, for validating the store before
     /// archiving or restoring.
-    pub fn captured_files(&self) -> Result<Vec<CapturedFile>> {
+    pub(crate) fn captured_files(&self) -> Result<Vec<CapturedFile>> {
         let connection =
             Connection::open_with_flags(&self.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         captured_files(&connection, None)
     }
 
     /// The captures committed turns reference.
-    pub fn captures(&self) -> Result<std::collections::BTreeSet<String>> {
+    pub(crate) fn captures(&self) -> Result<std::collections::BTreeSet<String>> {
         let connection = self.connect()?;
         let mut statement =
             connection.prepare("SELECT DISTINCT capture_id FROM turn_attachments")?;
@@ -240,7 +240,7 @@ impl Database {
     }
 
     /// Whether a committed turn references this capture.
-    pub fn capture_referenced(&self, capture: &str) -> Result<bool> {
+    pub(crate) fn capture_referenced(&self, capture: &str) -> Result<bool> {
         Ok(self.connect()?.query_row(
             "SELECT EXISTS(SELECT 1 FROM turn_attachments WHERE capture_id = ?1)",
             [capture],
@@ -249,7 +249,7 @@ impl Database {
     }
 
     /// Bytes kept by every committed capture.
-    pub fn captured_bytes(&self) -> Result<u64> {
+    pub(crate) fn captured_bytes(&self) -> Result<u64> {
         let bytes: i64 = self.connect()?.query_row(
             "SELECT COALESCE(SUM(size), 0) FROM turn_attachments",
             [],
@@ -331,7 +331,7 @@ impl Database {
     }
 
     /// Reads an accepted event without depending on current runtime resources.
-    pub fn event_receipt(
+    pub(crate) fn event_receipt(
         &self,
         interface_id: &str,
         event_id: &str,
@@ -341,7 +341,7 @@ impl Database {
 
     /// The first accepted turn pins a conversation, even before its runtime
     /// has created a native session. Changing the default cannot move it.
-    pub fn conversation_runtime(
+    pub(crate) fn conversation_runtime(
         &self,
         interface_id: &str,
         agent_id: &str,
@@ -354,7 +354,7 @@ impl Database {
     /// the turn a previous submission of the same event already created.
     /// A published capture of the event's attachments is referenced only by
     /// the turn this call creates; a duplicate receipt leaves it unreferenced.
-    pub fn accept_event(
+    pub(crate) fn accept_event(
         &self,
         interface_id: &str,
         runtime_id: &str,
@@ -448,7 +448,7 @@ impl Database {
     /// messages nor holds them back. Once `stopping` is cancelled none is
     /// claimed, even by a caller that was waiting for the database writer
     /// when it was.
-    pub fn claim(
+    pub(crate) fn claim(
         &self,
         runtime_id: &str,
         lane: Lane,
@@ -583,7 +583,11 @@ impl Database {
     /// target, runtime and origin, carrying the cursor and nothing an
     /// interface sent. It does not hold back the conversation's later
     /// messages.
-    pub fn complete_turn(&self, turn: &ClaimedTurn, response: &RuntimeTurnResponse) -> Result<()> {
+    pub(crate) fn complete_turn(
+        &self,
+        turn: &ClaimedTurn,
+        response: &RuntimeTurnResponse,
+    ) -> Result<()> {
         let mut connection = self.connect()?;
         let transaction = write_transaction(&mut connection)?;
         let now = timestamp()?;
@@ -629,7 +633,7 @@ impl Database {
     /// telling the conversation so, with the runtime's explanation when it
     /// gave one. `error` is the operator's diagnostic; `activity` is the
     /// runtime's final report of the failed turn, when it gave one.
-    pub fn interrupt_turn(
+    pub(crate) fn interrupt_turn(
         &self,
         turn: &ClaimedTurn,
         error: &str,
@@ -667,7 +671,7 @@ impl Database {
     /// Returns a running turn to the queue. Only valid when the runtime
     /// provably never received the work, or for an observation, which only
     /// reads.
-    pub fn requeue_turn(&self, turn: &ClaimedTurn) -> Result<()> {
+    pub(crate) fn requeue_turn(&self, turn: &ClaimedTurn) -> Result<()> {
         let changed = self.connect()?.execute(
             "UPDATE turns SET state = 'queued' WHERE id = ?1 AND runtime_id = ?2 AND state = 'running'",
             params![turn.turn_id, turn.runtime_id],
@@ -684,7 +688,7 @@ impl Database {
     /// Carillon does not infer that repeating it is safe; an observation
     /// only reads native records, so it is asked again and delivers its
     /// report once, when it completes.
-    pub fn recover_running_turns(&self) -> Result<usize> {
+    pub(crate) fn recover_running_turns(&self) -> Result<usize> {
         let mut connection = self.connect()?;
         let transaction = write_transaction(&mut connection)?;
         let now = timestamp()?;
@@ -715,7 +719,7 @@ impl Database {
     /// Releases delivery claims held by other, presumed dead, instances of an
     /// interface as uncertain, and returns the feedback targets of every
     /// uncertain delivery so the new instance can surface them.
-    pub fn reconcile_delivery_claims(
+    pub(crate) fn reconcile_delivery_claims(
         &self,
         interface_id: &str,
         owner: &str,
@@ -743,12 +747,16 @@ impl Database {
 
     /// Claims the oldest pending delivery for an interface instance, with its
     /// turn's outcome and origin.
-    pub fn claim_delivery(&self, interface_id: &str, owner: &str) -> Result<Option<Delivery>> {
+    pub(crate) fn claim_delivery(
+        &self,
+        interface_id: &str,
+        owner: &str,
+    ) -> Result<Option<Delivery>> {
         self.claim_next_delivery(interface_id, owner, None)
     }
 
     /// Claims the pending delivery of one turn for an interface instance.
-    pub fn claim_turn_delivery(
+    pub(crate) fn claim_turn_delivery(
         &self,
         interface_id: &str,
         owner: &str,
@@ -822,7 +830,7 @@ impl Database {
 
     /// Records the reported outcome of a claimed delivery. Repeating the same
     /// acknowledgement is safe when the first commit's response was lost.
-    pub fn acknowledge_delivery(
+    pub(crate) fn acknowledge_delivery(
         &self,
         interface_id: &str,
         id: i64,
@@ -868,7 +876,7 @@ impl Database {
         Ok(already_recorded)
     }
 
-    pub fn inspect_turn(&self, turn_id: &str) -> Result<Option<TurnInspection>> {
+    pub(crate) fn inspect_turn(&self, turn_id: &str) -> Result<Option<TurnInspection>> {
         let connection = self.connect()?;
         let inspection = connection
             .query_row(
@@ -912,7 +920,11 @@ impl Database {
     /// that turn's ID to read the next page from when more follow. A job has
     /// at most one turn at work, its newest, so every job at work is on one
     /// page. `None` when `after` is not one of the interface's turns.
-    pub fn jobs_at_work(&self, interface_id: &str, after: Option<&str>) -> Result<Option<JobPage>> {
+    pub(crate) fn jobs_at_work(
+        &self,
+        interface_id: &str,
+        after: Option<&str>,
+    ) -> Result<Option<JobPage>> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
         let after = match after {
@@ -956,13 +968,17 @@ impl Database {
     /// The interface's jobs among `named`, by their origin, however they
     /// stand, in the order named. A name that is not the origin of one of
     /// the interface's jobs names nothing.
-    pub fn named_jobs(&self, interface_id: &str, named: &[String]) -> Result<Vec<(String, Job)>> {
+    pub(crate) fn named_jobs(
+        &self,
+        interface_id: &str,
+        named: &[String],
+    ) -> Result<Vec<(String, Job)>> {
         let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
         jobs(&transaction, interface_id, named)
     }
 
-    pub fn turn_counts(&self) -> Result<StateCounts> {
+    pub(crate) fn turn_counts(&self) -> Result<StateCounts> {
         let connection = self.connect()?;
         let mut statement =
             connection.prepare("SELECT state, COUNT(*) FROM turns GROUP BY state")?;
@@ -983,7 +999,7 @@ impl Database {
         Ok(counts)
     }
 
-    pub fn delivery_counts(&self) -> Result<StateCounts> {
+    pub(crate) fn delivery_counts(&self) -> Result<StateCounts> {
         let connection = self.connect()?;
         let mut statement =
             connection.prepare("SELECT state, COUNT(*) FROM deliveries GROUP BY state")?;
@@ -1009,7 +1025,7 @@ impl Database {
 
     /// Deliveries of `interfaces` their interface has not yet settled:
     /// waiting to be claimed, or claimed and not acknowledged.
-    pub fn undelivered(&self, interfaces: &[&str]) -> Result<u64> {
+    pub(crate) fn undelivered(&self, interfaces: &[&str]) -> Result<u64> {
         let connection = self.connect()?;
         let mut statement = connection.prepare(
             "SELECT interface_id, COUNT(*) FROM deliveries
@@ -1027,7 +1043,11 @@ impl Database {
         Ok(undelivered)
     }
 
-    pub fn recent_turns(&self, event_id: Option<&str>, limit: u32) -> Result<Vec<TurnSummary>> {
+    pub(crate) fn recent_turns(
+        &self,
+        event_id: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<TurnSummary>> {
         let connection = self.connect()?;
         let mut statement = connection.prepare(
             "SELECT t.id, t.event_id, t.state, t.accepted_at, d.state
@@ -1360,7 +1380,14 @@ mod tests {
         let database = Database::create(&path)?;
         accept(&database, "one", "conversation")?;
         std::fs::remove_file(&path)?;
-        assert!(database.turn_counts().is_err());
+        let refused = database
+            .turn_counts()
+            .err()
+            .context("read a lost database")?;
+        assert!(
+            format!("{refused:#}").contains("unable to open database file"),
+            "{refused:#}"
+        );
         assert!(!path.exists());
         Ok(())
     }
@@ -1389,17 +1416,21 @@ mod tests {
             None
         );
         let second = event("two", "conversation");
+        let refused = database
+            .accept_event(
+                "discord",
+                "replacement",
+                &second,
+                &json!([]),
+                "resources",
+                None,
+            )
+            .err()
+            .context("moved a conversation to another runtime")?;
         assert!(
-            database
-                .accept_event(
-                    "discord",
-                    "replacement",
-                    &second,
-                    &json!([]),
-                    "resources",
-                    None
-                )
-                .is_err()
+            format!("{refused:#}")
+                .contains("conversation is owned by runtime runtime, not replacement"),
+            "{refused:#}"
         );
         assert!(database.event_receipt("discord", "two")?.is_none());
         assert_eq!(database.recent_turns(None, 10)?.len(), 1);
@@ -1759,13 +1790,13 @@ mod tests {
                     Some(2)
                 ),
                 (
-                    reading.turn_id.clone(),
+                    reading.turn_id,
                     TurnState::Completed,
                     Some(DeliveryState::Delivered),
                     Some(0)
                 ),
                 (
-                    last.turn_id.clone(),
+                    last.turn_id,
                     TurnState::Completed,
                     Some(DeliveryState::Pending),
                     None
@@ -1804,7 +1835,7 @@ mod tests {
         assert_eq!(
             turns(&stopped),
             [(
-                failed.turn_id.clone(),
+                failed.turn_id,
                 TurnState::Interrupted,
                 Some(DeliveryState::Delivering),
                 Some(1)
@@ -1890,7 +1921,7 @@ mod tests {
                 .is_none()
         );
         // Every job at work is read, a bounded page at a time, oldest first.
-        let mut accepted = vec![one.turn_id.clone(), two.turn_id.clone()];
+        let mut accepted = vec![one.turn_id, two.turn_id];
         for index in 0..2 * JOB_READ_LIMIT {
             accepted.push(
                 accept(

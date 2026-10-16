@@ -1,20 +1,18 @@
 use std::{
     fs,
     path::Path,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use anyhow::Context as _;
-use axum::{response::IntoResponse as _, routing::post};
+use axum::response::IntoResponse as _;
 use tempfile::tempdir;
+use tokio::sync::mpsc::error::TryRecvError;
 
 use super::*;
 use crate::Reported;
 use crate::db::Database;
-use carillon_protocol::model::{DeliveryOutcome, JOB_READ_LIMIT, TurnActivity, TurnState};
+use carillon_protocol::model::{DeliveryOutcome, JOB_READ_LIMIT, TurnState};
 
 /// A test installation: its registry, which cases change in memory as an
 /// operator would edit and restart it, and core over its storage.
@@ -32,7 +30,7 @@ impl Fixture {
 }
 
 fn installation(root: &Path) -> Result<Fixture> {
-    use carillon_installation::config::{AgentConfig, Config, CoreConfig, Provider, hash_token};
+    use carillon_installation::config::{AgentConfig, Config, CoreConfig, hash_token};
 
     // Core tests use opaque provider IDs, without a Discord or Pi installation.
     // Native session state belongs to the runtime.
@@ -91,7 +89,7 @@ fn installation(root: &Path) -> Result<Fixture> {
     Ok(Fixture {
         core: Core::create(core_options(&config))?,
         config,
-        client: carillon_installation::loopback::client().build()?,
+        client: loopback::client().build()?,
     })
 }
 
@@ -118,7 +116,7 @@ async fn run_next_turn(
         RuntimeTurnRequest,
     ) -> Result<RuntimeTurnResponse, TurnFailure>,
 ) -> Result<WorkerStep> {
-    super::run_next(
+    run_next(
         &configured(state),
         runtime_id,
         Lane::Messages,
@@ -137,7 +135,7 @@ async fn run_next_observation(
         RuntimeTurnRequest,
     ) -> Result<RuntimeTurnResponse, TurnFailure>,
 ) -> Result<WorkerStep> {
-    super::run_next(
+    run_next(
         &configured(state),
         runtime_id,
         Lane::Observations,
@@ -174,7 +172,7 @@ async fn accept_for(
             delivery_target_id: "test-destination".to_owned(),
             feedback_target_id: "test-feedback".to_owned(),
             content: id.to_owned(),
-            native: serde_json::Value::Null,
+            native: Value::Null,
             attachments: None,
         }),
     )
@@ -184,7 +182,7 @@ async fn accept_for(
 }
 
 /// A runtime's final report that counted `calls` calls, as it reads on the wire.
-fn report_value(calls: u32) -> serde_json::Value {
+fn report_value(calls: u32) -> Value {
     json!({
         "phase": "model",
         "running": [],
@@ -466,7 +464,7 @@ async fn startup_opens_the_database_without_creating_one() -> Result<()> {
 /// a real runtime phrases it for people.
 fn fake_runtime(
     id: &'static str,
-    sent: tokio::sync::mpsc::UnboundedSender<(&'static str, serde_json::Value)>,
+    sent: tokio::sync::mpsc::UnboundedSender<(&'static str, Value)>,
 ) -> Router {
     fn bearer(headers: &HeaderMap) -> Option<&str> {
         headers.get(http::header::AUTHORIZATION)?.to_str().ok()
@@ -500,7 +498,7 @@ fn fake_runtime(
             },
         )
         .put(
-            move |headers: HeaderMap, Json(update): Json<serde_json::Value>| {
+            move |headers: HeaderMap, Json(update): Json<Value>| {
                 let sent = sent.clone();
                 async move {
                     let _ = sent.send((id, json!({"auth": bearer(&headers), "update": update})));
@@ -524,7 +522,7 @@ async fn model_fixture(
     directory: &Path,
 ) -> Result<(
     Fixture,
-    tokio::sync::mpsc::UnboundedReceiver<(&'static str, serde_json::Value)>,
+    tokio::sync::mpsc::UnboundedReceiver<(&'static str, Value)>,
     tokio::task::JoinSet<std::io::Result<()>>,
 )> {
     let mut state = installation(directory)?;
@@ -560,8 +558,8 @@ async fn model_call(
     method: &str,
     uri: &str,
     authorized: bool,
-    body: Option<&serde_json::Value>,
-) -> Result<(StatusCode, serde_json::Value)> {
+    body: Option<&Value>,
+) -> Result<(StatusCode, Value)> {
     use axum::{body::Body, http::Request};
     use tower::ServiceExt as _;
 
@@ -659,7 +657,7 @@ async fn command_catalogues_come_from_the_conversation_runtime() -> Result<()> {
     )
     .await?;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    assert!(received.try_recv().is_err());
+    assert_eq!(received.try_recv(), Err(TryRecvError::Empty));
     let (status, body) = model_call(
         &state,
         "GET",
@@ -701,7 +699,7 @@ async fn model_calls_describe_unavailable_runtimes_for_people() -> Result<()> {
         model_call(&state, "GET", "/v1/model?agent_id=test-agent", true, None).await?;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"], "The runtime is not reachable right now.");
-    assert!(received.try_recv().is_err());
+    assert_eq!(received.try_recv(), Err(TryRecvError::Disconnected));
     Ok(())
 }
 
@@ -1256,7 +1254,7 @@ async fn concurrent_workers_progress_other_conversations_and_keep_each_in_order(
     let (started, running) = tokio::sync::oneshot::channel::<String>();
     let worker = configured(&state);
     let long = tokio::spawn(async move {
-        super::run_next(
+        run_next(
             &worker,
             "test-runtime",
             Lane::Messages,
@@ -1311,7 +1309,14 @@ async fn missing_resource_root_refuses_new_acceptance_without_losing_receipts() 
         if !missing {
             fs::write(root, "not a directory")?;
         }
-        assert!(accept(&state, "two", "conversation").await.is_err());
+        let refused = accept(&state, "two", "conversation")
+            .await
+            .err()
+            .context("accepted without a resource root")?;
+        assert!(
+            format!("{refused:#}").contains("agent resource root"),
+            "{refused:#}"
+        );
         assert_eq!(state.core.database.recent_turns(None, 10)?.len(), 1);
         assert!(
             state
@@ -1363,7 +1368,14 @@ async fn duplicate_receipts_do_not_read_mutable_resources() -> Result<()> {
     assert!(duplicate.duplicate);
     assert_eq!(duplicate.turn_id, first.turn_id);
     assert_eq!(duplicate.state, TurnState::Queued);
-    assert!(accept(&state, "two", "conversation").await.is_err());
+    let refused = accept(&state, "two", "conversation")
+        .await
+        .err()
+        .context("accepted without a resource root")?;
+    assert!(
+        format!("{refused:#}").contains("resource symlinks are not supported"),
+        "{refused:#}"
+    );
     assert_eq!(state.core.database.recent_turns(None, 10)?.len(), 1);
     assert!(
         state
@@ -1408,7 +1420,7 @@ async fn unavailable_conversation_owner_rejects_input_as_configuration_conflict(
                         delivery_target_id: "target".to_owned(),
                         feedback_target_id: "feedback".to_owned(),
                         content: "new input".to_owned(),
-                        native: serde_json::Value::Null,
+                        native: Value::Null,
                         attachments: None,
                     })?))?,
             )
@@ -1583,7 +1595,7 @@ async fn startup_drains_queued_nondefault_runtime_without_replaying_running_work
                 .state,
             TurnState::Completed
         );
-        assert!(received.try_recv().is_err());
+        assert_eq!(received.try_recv(), Err(TryRecvError::Empty));
         Ok::<_, anyhow::Error>(())
     })
     .await??;
@@ -2112,7 +2124,7 @@ async fn empty_runtime_output_interrupts_without_empty_delivery_or_replay() -> R
             None,
         )?;
     }
-    assert!(received.try_recv().is_err());
+    assert_eq!(received.try_recv(), Err(TryRecvError::Empty));
     Ok(())
 }
 
@@ -2289,7 +2301,7 @@ async fn jobs_call(
     provider: &str,
     token: Option<&str>,
     query: &str,
-) -> Result<(StatusCode, serde_json::Value)> {
+) -> Result<(StatusCode, Value)> {
     use axum::{body::Body, http::Request};
     use tower::ServiceExt as _;
 
@@ -2315,7 +2327,7 @@ async fn jobs_call(
 /// A runtime that records each activity request and answers as `mode` says.
 fn activity_runtime(
     mode: Arc<std::sync::Mutex<Snapshot>>,
-    sent: tokio::sync::mpsc::UnboundedSender<serde_json::Value>,
+    sent: tokio::sync::mpsc::UnboundedSender<Value>,
 ) -> Router {
     Router::new().route(
         "/v1/turns/{id}/activity",
@@ -2384,7 +2396,7 @@ async fn foreign_turn(state: &mut Fixture, directory: &Path) -> Result<EventRece
                 delivery_target_id: "foreign-destination".to_owned(),
                 feedback_target_id: "foreign-feedback".to_owned(),
                 content: "not yours".to_owned(),
-                native: serde_json::Value::Null,
+                native: Value::Null,
                 attachments: None,
             },
         )
@@ -2493,7 +2505,7 @@ async fn job_reads_show_only_the_callers_jobs_with_runtime_snapshots() -> Result
             "auth": "Bearer test-only",
         })
     );
-    assert!(received.try_recv().is_err());
+    assert_eq!(received.try_recv(), Err(TryRecvError::Empty));
 
     // A snapshot the runtime cannot supply is absent, never a shorter list.
     for snapshot in [Snapshot::Missing, Snapshot::Malformed, Snapshot::Hanging] {
@@ -2652,7 +2664,7 @@ async fn job_reads_answer_promptly_when_several_runtimes_cannot_describe_their_t
         listed,
         accepted
             .into_iter()
-            .map(|turn| (Some(turn), serde_json::Value::Null))
+            .map(|turn| (Some(turn), Value::Null))
             .collect::<Vec<_>>()
     );
     // Well within an interface's ten-second request deadline.
@@ -2704,26 +2716,22 @@ async fn cut_off_runtime(
                 }
             };
             let Some(body) = body else { continue };
-            let correlation = serde_json::from_slice::<serde_json::Value>(&body)
+            let correlation = serde_json::from_slice::<Value>(&body)
                 .ok()
                 .and_then(|request| request["correlation_id"].as_str().map(str::to_owned))
                 .unwrap_or_default();
             let answer =
                 serde_json::to_string(&json!({"correlation_id": correlation, "output": output}))
                     .unwrap_or_default();
-            let response = if cut.load(std::sync::atomic::Ordering::SeqCst) {
-                format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                    answer.len() + 100,
-                    &answer[..answer.len() / 2]
-                )
+            let (announced, body) = if cut.load(Ordering::SeqCst) {
+                (answer.len() + 100, &answer.as_bytes()[..answer.len() / 2])
             } else {
-                format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{answer}",
-                    answer.len()
-                )
+                (answer.len(), answer.as_bytes())
             };
-            let _ = socket.write_all(response.as_bytes()).await;
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {announced}\r\nconnection: close\r\n\r\n"
+            );
+            let _ = socket.write_all(&[headers.as_bytes(), body].concat()).await;
             let _ = socket.shutdown().await;
         }
     });
@@ -2790,7 +2798,7 @@ async fn a_cut_off_answer_asks_an_observation_again_but_never_replays_an_executa
             .is_none()
     );
     // Asked again, it completes and its report is delivered once.
-    cut.store(false, std::sync::atomic::Ordering::SeqCst);
+    cut.store(false, Ordering::SeqCst);
     run_next_observation(&state, "test-runtime", async |_, _, request| {
         call_runtime(&state.client, &runtime, "unused", request).await
     })
@@ -2804,7 +2812,7 @@ async fn a_cut_off_answer_asks_an_observation_again_but_never_replays_an_executa
     assert_eq!(report.content, "the report");
 
     // An executable turn whose answer is cut off is interrupted, never replayed.
-    cut.store(true, std::sync::atomic::Ordering::SeqCst);
+    cut.store(true, Ordering::SeqCst);
     accept(&state, "two", "elsewhere").await?;
     run_next_turn(&state, "test-runtime", async |_, _, request| {
         call_runtime(&state.client, &runtime, "unused", request).await
@@ -2994,7 +3002,7 @@ async fn a_turns_final_report_is_kept_with_its_outcome_and_read_within_its_bound
         };
         Ok(job.turns[0].activity.clone())
     };
-    let next_delivery = || -> Result<carillon_protocol::model::Delivery> {
+    let next_delivery = || -> Result<Delivery> {
         let delivery = state
             .core
             .database
@@ -3200,10 +3208,13 @@ async fn each_agent_runs_on_its_own_runtime_with_its_own_resources() -> Result<(
         Ok(completed(request))
     })
     .await?;
+    let refused = accept_for(&state, "unknown", "unknown-turn", "conversation")
+        .await
+        .err()
+        .context("accepted an event for an unknown agent")?;
     assert!(
-        accept_for(&state, "unknown", "unknown-turn", "conversation")
-            .await
-            .is_err()
+        format!("{refused:#}").contains("unknown agent"),
+        "{refused:#}"
     );
     Ok(())
 }

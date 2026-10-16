@@ -1,10 +1,6 @@
 //! Events with attachments through core's authenticated HTTP admission, its
 //! capture workers, real SQLite and real files.
-use std::{
-    collections::BTreeSet,
-    os::unix::fs::PermissionsExt as _,
-    sync::{Arc, atomic::AtomicUsize},
-};
+use std::{collections::BTreeSet, os::unix::fs::PermissionsExt as _};
 
 use anyhow::bail;
 
@@ -20,7 +16,7 @@ fn with_limits(state: &mut Fixture, limits: AttachmentLimits) -> Result<()> {
     Ok(())
 }
 
-fn staging(state: &Fixture) -> std::path::PathBuf {
+fn staging(state: &Fixture) -> PathBuf {
     state
         .config
         .value
@@ -56,7 +52,7 @@ fn event(id: &str, content: &str, attachments: StagedAttachments) -> ExternalEve
         delivery_target_id: "test-destination".to_owned(),
         feedback_target_id: "test-feedback".to_owned(),
         content: content.to_owned(),
-        native: serde_json::Value::Null,
+        native: Value::Null,
         attachments: Some(attachments),
     }
 }
@@ -147,7 +143,7 @@ async fn files_are_captured_before_acceptance_and_dispatched_by_relative_path() 
     let dispatched = Arc::new(std::sync::Mutex::new(Vec::<TurnAttachment>::new()));
     let seen = dispatched.clone();
     run_next_turn(&state, "test-runtime", async |_, _, request| {
-        assert_eq!(std::path::Path::new(&request.attachment_root), root);
+        assert_eq!(Path::new(&request.attachment_root), root);
         assert!(request.input.is_empty());
         for attachment in &request.attachments {
             assert!(!attachment.path.starts_with('/'));
@@ -174,7 +170,7 @@ async fn files_are_captured_before_acceptance_and_dispatched_by_relative_path() 
     // Later turns of the conversation carry the root without files.
     accept(&state, "text later", "files").await?;
     run_next_turn(&state, "test-runtime", async |_, _, request| {
-        assert_eq!(std::path::Path::new(&request.attachment_root), root);
+        assert_eq!(Path::new(&request.attachment_root), root);
         assert!(request.attachments.is_empty());
         Ok(completed(request))
     })
@@ -447,7 +443,13 @@ async fn an_abandoned_submission_keeps_its_capture_and_worker_until_the_copy_set
     wait_for_capture(&state, "slow").await?;
     // The submitting connection goes away; core keeps capturing.
     first.abort();
-    assert!(first.await.is_err());
+    assert!(
+        first
+            .await
+            .err()
+            .context("the submission outlived its abort")?
+            .is_cancelled()
+    );
     assert!(matches!(
         status(&state, "slow").await?,
         EventStatus::Capturing
@@ -665,12 +667,12 @@ async fn startup_reconciliation_keeps_accepted_files_and_removes_crash_leftovers
     let ran = Arc::new(AtomicUsize::new(0));
     let count = ran.clone();
     run_next_turn(&state, "test-runtime", async |_, _, request| {
-        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        count.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.correlation_id, receipt.turn_id);
         Ok(completed(request))
     })
     .await?;
-    assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
     Ok(())
 }
 
@@ -729,10 +731,7 @@ async fn offered(state: &Fixture, output: &str) -> Result<Vec<UnansweredTurn>> {
 
 /// Run the next turn, answering with the fields of `answer` as a runtime's
 /// response reads on the wire, and return the earlier files it was offered.
-async fn offered_answering(
-    state: &Fixture,
-    mut answer: serde_json::Value,
-) -> Result<Vec<UnansweredTurn>> {
+async fn offered_answering(state: &Fixture, mut answer: Value) -> Result<Vec<UnansweredTurn>> {
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let record = seen.clone();
     run_next_turn(state, "test-runtime", async move |_, _, request| {

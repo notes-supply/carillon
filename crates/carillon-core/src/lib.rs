@@ -9,6 +9,7 @@ mod resources;
 mod runtime_client;
 
 pub use attachments::Reconciled;
+pub use db::JobPage;
 pub use engine::{
     AgentOptions, Core, CoreError, CoreOptions, Lane, Reported, RuntimeProvider, TurnFailure,
     WorkerStep,

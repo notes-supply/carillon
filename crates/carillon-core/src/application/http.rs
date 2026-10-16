@@ -132,14 +132,14 @@ impl IntoResponse for ApiError {
 
 /// Open the installation's core exactly as [`serve`] does, without listening,
 /// recovering turns or writing: the registry and the current core schema.
-pub fn check(config: &LoadedConfig) -> Result<()> {
+pub(super) fn check(config: &LoadedConfig) -> Result<()> {
     Core::open(core_options(config))?;
     Ok(())
 }
 
 /// Serves the installation whose registry `config` was loaded from `path`,
 /// which [`Registry::apply`] reads again.
-pub async fn serve(path: PathBuf, config: LoadedConfig) -> Result<()> {
+pub(super) async fn serve(path: PathBuf, config: LoadedConfig) -> Result<()> {
     // A failed bind must not recover state or start accepted work.
     let listener = TcpListener::bind(config.value.core.listen).await?;
     let core = Core::open(core_options(&config))?;
@@ -887,10 +887,10 @@ fn authorize(headers: &HeaderMap, expected_hash: &str) -> Result<(), ApiError> {
 }
 
 fn bearer(headers: &HeaderMap) -> Option<&str> {
-    headers
+    let value = headers
         .get(http::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
+        .and_then(|value| value.to_str().ok())?;
+    value.strip_prefix("Bearer ")
 }
 
 fn provider_identity(headers: &HeaderMap) -> Result<&str, ApiError> {

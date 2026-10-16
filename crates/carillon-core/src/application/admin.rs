@@ -49,7 +49,7 @@ const SKILL: &str = "---\nname: carillon-status\ndescription: Explain Carillon c
 
 /// The bundled runtime an installation's agent runs on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub enum Runtime {
+pub(super) enum Runtime {
     /// Pi, signed in to a model provider.
     Pi,
     /// An existing T3 Code server.
@@ -59,7 +59,7 @@ pub enum Runtime {
 impl Runtime {
     /// The runtime provider's registry ID.
     #[must_use]
-    pub const fn id(self) -> &'static str {
+    pub(super) const fn id(self) -> &'static str {
         match self {
             Self::Pi => "runtime-pi",
             Self::T3 => "runtime-t3",
@@ -84,7 +84,7 @@ impl Runtime {
 /// registered and credentialed, and only those. Provider-owned settings
 /// (such as Discord admission or the T3 server) are written afterwards by
 /// each provider's own commands.
-pub fn initialize(
+pub(super) fn initialize(
     root: &Path,
     workspace: &Path,
     base_port: u16,
@@ -165,11 +165,11 @@ pub fn initialize(
 
 /// The ID of the agent a new installation starts with: Carillon's own
 /// assistant, with the installation's resources.
-pub const ASSISTANT: &str = "assistant";
+pub(super) const ASSISTANT: &str = "assistant";
 
 /// Carillon's assistant on `runtime`, working in `workspace`.
 #[must_use]
-pub fn assistant(runtime: Runtime, workspace: &Path) -> AgentConfig {
+pub(super) fn assistant(runtime: Runtime, workspace: &Path) -> AgentConfig {
     AgentConfig {
         id: ASSISTANT.to_owned(),
         name: "Carillon".to_owned(),
@@ -186,7 +186,7 @@ const RESOURCES: &str = "agents/default";
 /// the first loopback port after theirs, with a credential of its own; it
 /// does nothing when the runtime is registered already. The registry is
 /// rewritten whole, under the caller's maintenance lock.
-pub fn register_runtime(config_path: &Path, runtime: Runtime) -> Result<()> {
+pub(super) fn register_runtime(config_path: &Path, runtime: Runtime) -> Result<()> {
     let config_path = config_path
         .canonicalize()
         .context("resolve configuration path")?;
@@ -217,7 +217,7 @@ pub fn register_runtime(config_path: &Path, runtime: Runtime) -> Result<()> {
 
 /// Replaces the installation's agents with `agents`, validated with the
 /// rest of the registry before anything is written.
-pub fn set_agents(config_path: &Path, agents: Vec<AgentConfig>) -> Result<()> {
+pub(super) fn set_agents(config_path: &Path, agents: Vec<AgentConfig>) -> Result<()> {
     let config_path = config_path
         .canonicalize()
         .context("resolve configuration path")?;
@@ -306,7 +306,7 @@ fn write_credentials(root: &Path, credentials: &[(&str, &str)]) -> Result<()> {
     Ok(())
 }
 
-pub fn set_provider(config_path: &Path, id: &str, enabled: bool) -> Result<()> {
+pub(super) fn set_provider(config_path: &Path, id: &str, enabled: bool) -> Result<()> {
     validate_provider_identity(id)?;
     let config_path = config_path
         .canonicalize()
@@ -335,7 +335,7 @@ fn write_config(config_path: &Path, config: &Config) -> Result<()> {
 
 /// Copies the example extension and skill into the resources of every agent
 /// that has them.
-pub fn enable_demo_resources(config: &LoadedConfig) -> Result<()> {
+pub(super) fn enable_demo_resources(config: &LoadedConfig) -> Result<()> {
     let extension = config.root.join("examples/carillon-context.js");
     let skill = config.root.join("examples/SKILL.md");
     if !extension.exists() || !skill.exists() {
@@ -350,7 +350,7 @@ pub fn enable_demo_resources(config: &LoadedConfig) -> Result<()> {
     Ok(())
 }
 
-pub fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
+pub(super) fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
     let root = config
         .root
         .canonicalize()
@@ -442,7 +442,7 @@ pub fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn restore(archive_path: &Path, target: &Path) -> Result<PathBuf> {
+pub(super) fn restore(archive_path: &Path, target: &Path) -> Result<PathBuf> {
     let target = absolute_destination(target)?;
     if target.exists() && fs::read_dir(&target)?.next().is_some() {
         bail!("restore target {} is not empty", target.display());
@@ -715,10 +715,22 @@ mod tests {
         let file = directory.path().join("file");
         fs::write(&file, "not a directory")?;
         for workspace in [Path::new("."), Path::new("relative"), &missing, &file] {
-            assert!(initialize_test_installation(&root, workspace, 44_000).is_err());
+            let refused = initialize_test_installation(&root, workspace, 44_000)
+                .err()
+                .context("initialized with an unusable workspace")?;
+            assert_eq!(
+                refused.to_string(),
+                "workspace must be an absolute path to an existing directory"
+            );
             assert!(!root.exists());
             fs::create_dir(&root)?;
-            assert!(initialize_test_installation(&root, workspace, 44_000).is_err());
+            let refused = initialize_test_installation(&root, workspace, 44_000)
+                .err()
+                .context("initialized with an unusable workspace")?;
+            assert_eq!(
+                refused.to_string(),
+                "workspace must be an absolute path to an existing directory"
+            );
             assert!(fs::read_dir(&root)?.next().is_none());
             fs::remove_dir(&root)?;
         }
@@ -734,11 +746,21 @@ mod tests {
     fn initialization_rejects_unusable_ports_without_writing_installation() -> Result<()> {
         let directory = tempdir()?;
         let root = directory.path().join("installation");
-        for base_port in [0, 65_534, 65_535] {
-            assert!(initialize_test_installation(&root, directory.path(), base_port).is_err());
+        for (base_port, reason) in [
+            (0, "core listen port must be nonzero"),
+            (65_534, "base port does not leave room for all services"),
+            (65_535, "base port does not leave room for all services"),
+        ] {
+            let refused = initialize_test_installation(&root, directory.path(), base_port)
+                .err()
+                .context("initialized with an unusable port")?;
+            assert_eq!(refused.to_string(), reason);
             assert!(!root.exists());
             fs::create_dir(&root)?;
-            assert!(initialize_test_installation(&root, directory.path(), base_port).is_err());
+            let refused = initialize_test_installation(&root, directory.path(), base_port)
+                .err()
+                .context("initialized with an unusable port")?;
+            assert_eq!(refused.to_string(), reason);
             assert!(fs::read_dir(&root)?.next().is_none());
             fs::remove_dir(&root)?;
         }
@@ -830,11 +852,11 @@ mod tests {
             runtime.token_hash
         );
         // Nothing of Pi's: no registration, credential or state directory.
-        assert!(
-            config
-                .provider("runtime-pi", ProviderRole::Runtime)
-                .is_err()
-        );
+        let refused = config
+            .provider("runtime-pi", ProviderRole::Runtime)
+            .err()
+            .context("registered Pi")?;
+        assert_eq!(refused.to_string(), "provider runtime-pi is not configured");
         assert!(!root.join("credentials/runtime-pi.token").exists());
         assert!(!root.join("pi").exists());
         assert!(!root.join("state/components/runtime-pi").exists());
@@ -1045,7 +1067,15 @@ mod tests {
             // even when that state is still accessible to this Unix user.
             archive_test_tree(&root, &destination)?;
             let target = directory.path().join("restored");
-            assert!(restore(&destination, &target).is_err());
+            let refused = restore(&destination, &target)
+                .err()
+                .context("restored from source state")?;
+            assert!(
+                refused
+                    .to_string()
+                    .contains(&format!("require {field} to be installation-relative")),
+                "{refused:#}"
+            );
             assert!(!target.exists());
         }
         Ok(())
@@ -1417,7 +1447,7 @@ mod tests {
                 &CancellationToken::new(),
                 async |request| {
                     assert_eq!(request.correlation_id, turns[1]);
-                    let root = std::path::Path::new(&request.attachment_root);
+                    let root = Path::new(&request.attachment_root);
                     assert!(root.starts_with(&relocated), "{}", root.display());
                     assert_eq!(
                         fs::read(root.join(&request.attachments[0].path))
@@ -1584,7 +1614,13 @@ mod tests {
         archive.append(&header, Cursor::new(invalid_config))?;
         archive.into_inner()?.finish()?;
         let target = directory.path().join("restored");
-        assert!(restore(&invalid_archive, &target).is_err());
+        let refused = restore(&invalid_archive, &target)
+            .err()
+            .context("restored an invalid configuration")?;
+        assert!(
+            format!("{refused:#}").contains("TOML parse error"),
+            "{refused:#}"
+        );
         assert!(!target.exists());
         let names = fs::read_dir(directory.path())?
             .map(|entry| entry.map(|entry| entry.file_name()))

@@ -49,16 +49,14 @@ fn concurrent_creators_have_one_winner_and_public_parents_are_refused() -> anyho
     let config = options(root.path());
     let barrier = Arc::new(Barrier::new(8));
     let successes = std::thread::scope(|scope| {
-        let tasks: Vec<_> = (0..8)
-            .map(|_| {
-                let config = config.clone();
-                let barrier = barrier.clone();
-                scope.spawn(move || {
-                    barrier.wait();
-                    Core::create(config).is_ok()
-                })
+        let tasks: [_; 8] = std::array::from_fn(|_| {
+            let config = config.clone();
+            let barrier = barrier.clone();
+            scope.spawn(move || {
+                barrier.wait();
+                Core::create(config).is_ok()
             })
-            .collect();
+        });
         tasks
             .into_iter()
             .map(|task| task.join().unwrap_or(false))
