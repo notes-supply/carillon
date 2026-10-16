@@ -166,6 +166,21 @@ pub struct AgentConfig {
     pub resources: Option<PathBuf>,
 }
 
+impl AgentConfig {
+    /// Display name, with the ID when another agent has the same name.
+    #[must_use]
+    pub fn label<'a>(&self, agents: impl IntoIterator<Item = &'a Self>) -> String {
+        if agents
+            .into_iter()
+            .any(|other| other.id != self.id && other.name == self.name)
+        {
+            format!("{} ({})", self.name, self.id)
+        } else {
+            self.name.clone()
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Provider {

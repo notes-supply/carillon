@@ -206,7 +206,10 @@ pub(crate) async fn setup(
         .map(|((_, label), route)| {
             Ok(format!(
                 "{label} ({})",
-                loaded.value.agent(&route.agent)?.name
+                loaded
+                    .value
+                    .agent(&route.agent)?
+                    .label(&loaded.value.agents)
             ))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -235,7 +238,7 @@ fn routes(
     if agents.is_empty() {
         bail!("carillon.toml has no agent to answer in Discord; run `carillon setup`");
     }
-    let names: Vec<String> = agents.iter().map(|agent| agent.name.clone()).collect();
+    let names: Vec<String> = agents.iter().map(|agent| agent.label(agents)).collect();
     let answering = channels
         .iter()
         .map(|(id, label)| {
@@ -257,7 +260,7 @@ fn routes(
                     let question = if agents.len() == 1 {
                         "When should the agent answer?".to_owned()
                     } else {
-                        format!("When should {} answer?", agent.name)
+                        format!("When should {} answer?", agent.label(agents))
                     };
                     *mode.insert(MODES[prompt.choose(&question, &labels, 0)?])
                 }

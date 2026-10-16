@@ -14,6 +14,10 @@ and controls with provider and choice display names.
 
 ## Components
 
+- [`setup`](src/setup.rs) routes each chosen channel to an agent and asks
+  when that agent answers. Agents with the same display name include their
+  IDs in the choices, questions, and route summary. Unique names stay
+  as configured. Core setup uses the same labels when choosing agents' models.
 - [`config`](src/config.rs): the provider's settings file and the settings it
   serves; `Settings::apply` serves a re-read file whole, the module it
   declares included, when every difference applies live. Each admitted

@@ -489,21 +489,16 @@ fn configure_agents(
     questions: &mut impl Questions,
 ) -> Result<()> {
     for (agent, project) in agents {
+        let label = agent.label(agents.iter().map(|(agent, _)| agent));
         let offer = server.run(home, "discover", &["--agent", &agent.id], None)?;
         let offer: Offer = serde_json::from_str(&offer)
             .context("carillon-runtime-t3 discovered something unreadable")?;
         let models = &offer.models;
         if models.is_empty() {
-            bail!(
-                "T3 offers {} no usable model; set one up in T3, then run setup again",
-                agent.name
-            );
+            bail!("T3 offers {label} no usable model; set one up in T3, then run setup again");
         }
         let model = &models[questions.choose(
-            &format!(
-                "Which model should {} start new conversations with?",
-                agent.name
-            ),
+            &format!("Which model should {label} start new conversations with?"),
             &model_labels(models),
             0,
         )?];
