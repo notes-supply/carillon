@@ -270,7 +270,7 @@ fn create_installation_directories(root: &Path, runtime: Runtime) -> Result<()> 
     ] {
         private_directory(&root.join(directory))?;
     }
-    for subtree in ["extensions", "skills", "sessions"] {
+    for subtree in ["extensions", "skills"] {
         private_directory(&root.join(RESOURCES).join(subtree))?;
     }
     create_runtime_directories(root, runtime)

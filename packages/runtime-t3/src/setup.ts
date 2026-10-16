@@ -293,6 +293,7 @@ async function readExisting(installation: Installation): Promise<SettingsFile | 
   return readSettings(installation.providerFile).catch((failure: unknown) => {
     throw new Error(
       `${reason(failure)}; nothing was changed: correct or remove it, then configure again`,
+      { cause: failure },
     );
   });
 }

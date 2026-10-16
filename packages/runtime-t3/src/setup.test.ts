@@ -213,6 +213,7 @@ it("refuses settings that do not read as valid before writing anything", async (
     ).rejects.toSatisfy(
       (failure) =>
         failure instanceof Error &&
+        failure.cause instanceof Error &&
         failure.message.startsWith(runtime.providerFile) &&
         failure.message.endsWith(
           "nothing was changed: correct or remove it, then configure again",

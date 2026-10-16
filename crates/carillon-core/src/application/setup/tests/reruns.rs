@@ -92,6 +92,7 @@ fn a_pi_assistant_is_created_when_a_code_only_installation_chooses_pi() -> anyho
     agents(&home, &options, Assistant::Pi, &[])?;
     let stored: Config = toml::from_str(&std::fs::read_to_string(&path)?)?;
     assert_eq!(stored.agents.len(), 1);
+    assert!(!home.join("agents/default/sessions").exists());
     assert_eq!(stored.agent("assistant")?.runtime, "runtime-pi");
     assert_eq!(
         stored.agent("assistant")?.resources.as_deref(),
