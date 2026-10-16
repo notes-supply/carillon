@@ -285,13 +285,10 @@ mod tests {
         let captured = store.join(&ids[0]).join("SYSTEM.md");
         fs::set_permissions(&captured, fs::Permissions::from_mode(0o600))?;
         fs::write(captured, "damaged")?;
-        let refused = materialize(Some(source.path()), &store)
-            .err()
-            .context("reused a damaged snapshot")?;
-        assert!(
-            format!("{refused:#}").contains("does not match its content address"),
-            "{refused:#}"
-        );
+        crate::assert_refused(
+            materialize(Some(source.path()), &store),
+            "does not match its content address",
+        )?;
         Ok(())
     }
 
@@ -449,20 +446,14 @@ mod tests {
             root(&store, &ordinary).join("skills/example/scripts/helper"),
             fs::Permissions::from_mode(0o550),
         )?;
-        let refused = materialize(Some(source.path()), &store)
-            .err()
-            .context("reused a damaged snapshot")?;
-        assert!(
-            format!("{refused:#}").contains("does not match its content address"),
-            "{refused:#}"
-        );
-        let refused = super::validate(&ordinary, &store)
-            .err()
-            .context("validated a tampered snapshot")?;
-        assert!(
-            format!("{refused:#}").contains("does not match its content address"),
-            "{refused:#}"
-        );
+        crate::assert_refused(
+            materialize(Some(source.path()), &store),
+            "does not match its content address",
+        )?;
+        crate::assert_refused(
+            super::validate(&ordinary, &store),
+            "does not match its content address",
+        )?;
         Ok(())
     }
 

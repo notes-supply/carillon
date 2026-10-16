@@ -710,22 +710,16 @@ mod tests {
         let file = directory.path().join("file");
         fs::write(&file, "not a directory")?;
         for workspace in [Path::new("."), Path::new("relative"), &missing, &file] {
-            let refused = initialize_test_installation(&root, workspace, 44_000)
-                .err()
-                .context("initialized with an unusable workspace")?;
-            assert_eq!(
-                refused.to_string(),
-                "workspace must be an absolute path to an existing directory"
-            );
+            crate::assert_refused(
+                initialize_test_installation(&root, workspace, 44_000),
+                "workspace must be an absolute path to an existing directory",
+            )?;
             assert!(!root.exists());
             fs::create_dir(&root)?;
-            let refused = initialize_test_installation(&root, workspace, 44_000)
-                .err()
-                .context("initialized with an unusable workspace")?;
-            assert_eq!(
-                refused.to_string(),
-                "workspace must be an absolute path to an existing directory"
-            );
+            crate::assert_refused(
+                initialize_test_installation(&root, workspace, 44_000),
+                "workspace must be an absolute path to an existing directory",
+            )?;
             assert!(fs::read_dir(&root)?.next().is_none());
             fs::remove_dir(&root)?;
         }
@@ -746,16 +740,16 @@ mod tests {
             (65_534, "base port does not leave room for all services"),
             (65_535, "base port does not leave room for all services"),
         ] {
-            let refused = initialize_test_installation(&root, directory.path(), base_port)
-                .err()
-                .context("initialized with an unusable port")?;
-            assert_eq!(refused.to_string(), reason);
+            crate::assert_refused(
+                initialize_test_installation(&root, directory.path(), base_port),
+                reason,
+            )?;
             assert!(!root.exists());
             fs::create_dir(&root)?;
-            let refused = initialize_test_installation(&root, directory.path(), base_port)
-                .err()
-                .context("initialized with an unusable port")?;
-            assert_eq!(refused.to_string(), reason);
+            crate::assert_refused(
+                initialize_test_installation(&root, directory.path(), base_port),
+                reason,
+            )?;
             assert!(fs::read_dir(&root)?.next().is_none());
             fs::remove_dir(&root)?;
         }
@@ -840,11 +834,10 @@ mod tests {
             runtime.token_hash
         );
         // Nothing of Pi's: no registration, credential or state directory.
-        let refused = config
-            .provider("runtime-pi", ProviderRole::Runtime)
-            .err()
-            .context("registered Pi")?;
-        assert_eq!(refused.to_string(), "provider runtime-pi is not configured");
+        crate::assert_refused(
+            config.provider("runtime-pi", ProviderRole::Runtime),
+            "provider runtime-pi is not configured",
+        )?;
         assert!(!root.join("credentials/runtime-pi.token").exists());
         assert!(!root.join("pi").exists());
         assert!(!root.join("state/components/runtime-pi").exists());
@@ -1055,15 +1048,10 @@ mod tests {
             // even when that state is still accessible to this Unix user.
             archive_test_tree(&root, &destination)?;
             let target = directory.path().join("restored");
-            let refused = restore(&destination, &target)
-                .err()
-                .context("restored from source state")?;
-            assert!(
-                refused
-                    .to_string()
-                    .contains(&format!("require {field} to be installation-relative")),
-                "{refused:#}"
-            );
+            crate::assert_refused(
+                restore(&destination, &target),
+                &format!("require {field} to be installation-relative"),
+            )?;
             assert!(!target.exists());
         }
         Ok(())
@@ -1152,10 +1140,7 @@ mod tests {
                 if existing_target {
                     fs::create_dir(&target)?;
                 }
-                let refused = restore(&invalid, &target)
-                    .err()
-                    .with_context(|| format!("accepted {damage}"))?;
-                assert!(format!("{refused:#}").contains(reason), "{refused:#}");
+                crate::assert_refused(restore(&invalid, &target), reason)?;
                 assert_eq!(target.exists(), existing_target, "published {damage}");
                 if existing_target {
                     assert!(fs::read_dir(&target)?.next().is_none());
@@ -1263,10 +1248,7 @@ mod tests {
                 backup(&config, &valid)?;
                 damage_captured_resources(&config, &snapshot, damage)?;
                 let refused_backup = directory.path().join("refused.tar.gz");
-                let refused = backup(&config, &refused_backup)
-                    .err()
-                    .with_context(|| format!("backup accepted {damage}"))?;
-                assert!(format!("{refused:#}").contains(ALTERED), "{refused:#}");
+                crate::assert_refused(backup(&config, &refused_backup), ALTERED)?;
                 assert!(!refused_backup.exists());
                 let invalid = directory.path().join("invalid.tar.gz");
                 archive_test_tree(&source, &invalid)?;
@@ -1276,10 +1258,7 @@ mod tests {
                     if existing {
                         fs::create_dir(&target)?;
                     }
-                    let refused = restore(&invalid, &target)
-                        .err()
-                        .with_context(|| format!("restore accepted {damage}"))?;
-                    assert!(format!("{refused:#}").contains(ALTERED), "{refused:#}");
+                    crate::assert_refused(restore(&invalid, &target), ALTERED)?;
                     assert_eq!(target.exists(), existing);
                     if existing {
                         assert!(fs::read_dir(&target)?.next().is_none());
@@ -1500,14 +1479,10 @@ mod tests {
             let invalid = damaged.join("invalid.tar.gz");
             archive_test_tree(&tree, &invalid)?;
             let target = damaged.join("restored");
-            let refused = restore(&invalid, &target)
-                .err()
-                .with_context(|| format!("restore accepted {damage}"))?;
-            assert!(
-                format!("{refused:#}")
-                    .contains("backup has missing, altered or unexpected captured attachments"),
-                "{refused:#}"
-            );
+            crate::assert_refused(
+                restore(&invalid, &target),
+                "backup has missing, altered or unexpected captured attachments",
+            )?;
             assert!(!target.exists(), "published {damage}");
         }
         Ok(())
@@ -1624,13 +1599,7 @@ mod tests {
         archive.append(&header, Cursor::new(invalid_config))?;
         archive.into_inner()?.finish()?;
         let target = directory.path().join("restored");
-        let refused = restore(&invalid_archive, &target)
-            .err()
-            .context("restored an invalid configuration")?;
-        assert!(
-            format!("{refused:#}").contains("TOML parse error"),
-            "{refused:#}"
-        );
+        crate::assert_refused(restore(&invalid_archive, &target), "TOML parse error")?;
         assert!(!target.exists());
         let names = fs::read_dir(directory.path())?
             .map(|entry| entry.map(|entry| entry.file_name()))
@@ -1684,13 +1653,10 @@ mod tests {
         let root = directory.path().join("installation");
         let config_path = initialize_test_installation(&root, directory.path(), 44_000)?;
         let before = fs::read(&config_path)?;
-        let refused = set_provider(&config_path, "../escape", false)
-            .err()
-            .context("accepted an escaping provider identity")?;
-        assert!(
-            format!("{refused:#}").contains("provider identity must be 1-128 bytes"),
-            "{refused:#}"
-        );
+        crate::assert_refused(
+            set_provider(&config_path, "../escape", false),
+            "provider identity must be 1-128 bytes",
+        )?;
         assert_eq!(fs::read(&config_path)?, before);
         Ok(())
     }

@@ -1355,31 +1355,19 @@ mod tests {
         let path = directory.path().join("state.sqlite3");
         for (contents, reason) in [
             (None, "unable to open database file"),
-            (
-                Some(Vec::new()),
-                "database schema is not the current Carillon format",
-            ),
+            (Some(Vec::new()), "not the current Carillon format"),
             (Some(b"not SQLite".to_vec()), "file is not a database"),
         ] {
             if let Some(bytes) = &contents {
                 std::fs::write(&path, bytes)?;
             }
-            let refused = Database::open(&path)
-                .err()
-                .context("opened an unusable database")?;
-            assert!(format!("{refused:#}").contains(reason), "{refused:#}");
+            crate::assert_refused(Database::open(&path), reason)?;
             assert_eq!(std::fs::read(&path).ok(), contents);
         }
         std::fs::remove_file(&path)?;
         rusqlite::Connection::open(&path)?.execute_batch("CREATE TABLE obsolete (id INTEGER)")?;
         let before = std::fs::read(&path)?;
-        let refused = Database::open(&path)
-            .err()
-            .context("opened an obsolete schema")?;
-        assert!(
-            format!("{refused:#}").contains("database schema is not the current Carillon format"),
-            "{refused:#}"
-        );
+        crate::assert_refused(Database::open(&path), "not the current Carillon format")?;
         assert_eq!(std::fs::read(&path)?, before);
         std::fs::remove_file(&path)?;
         Database::create(&path)?;
@@ -1394,14 +1382,7 @@ mod tests {
         let database = Database::create(&path)?;
         accept(&database, "one", "conversation")?;
         std::fs::remove_file(&path)?;
-        let refused = database
-            .turn_counts()
-            .err()
-            .context("read a lost database")?;
-        assert!(
-            format!("{refused:#}").contains("unable to open database file"),
-            "{refused:#}"
-        );
+        crate::assert_refused(database.turn_counts(), "unable to open database file")?;
         assert!(!path.exists());
         Ok(())
     }
@@ -1430,22 +1411,17 @@ mod tests {
             None
         );
         let second = event("two", "conversation");
-        let refused = database
-            .accept_event(
+        crate::assert_refused(
+            database.accept_event(
                 "discord",
                 "replacement",
                 &second,
                 &json!([]),
                 "resources",
                 None,
-            )
-            .err()
-            .context("moved a conversation to another runtime")?;
-        assert!(
-            format!("{refused:#}")
-                .contains("conversation is owned by runtime runtime, not replacement"),
-            "{refused:#}"
-        );
+            ),
+            "conversation is owned by runtime runtime, not replacement",
+        )?;
         assert!(database.event_receipt("discord", "two")?.is_none());
         assert_eq!(database.recent_turns(None, 10)?.len(), 1);
         // A stale runtime selection must not prevent recovery of an existing receipt.
@@ -2000,13 +1976,7 @@ mod tests {
         // An index is part of the format: a database an earlier release wrote
         // without it is refused, and nothing adds it.
         rusqlite::Connection::open(&path)?.execute_batch("DROP INDEX turns_origin")?;
-        let refused = Database::open(&path)
-            .err()
-            .context("opened a missing index")?;
-        assert!(
-            format!("{refused:#}").contains("database schema is not the current Carillon format"),
-            "{refused:#}"
-        );
+        crate::assert_refused(Database::open(&path), "not the current Carillon format")?;
         let indexes: u32 = rusqlite::Connection::open(&path)?.query_row(
             "SELECT COUNT(*) FROM sqlite_schema WHERE name = 'turns_origin'",
             [],
@@ -2283,44 +2253,22 @@ mod tests {
             .claim("runtime", Lane::Messages, &CancellationToken::new())?
             .context("uncertain turn was not queued")?;
         database.interrupt_turn(&uncertain, "ambiguous", None, None)?;
-        let refused = database
-            .interrupt_turn(&uncertain, "ambiguous", None, None)
-            .err()
-            .context("interrupted a turn that is not running")?;
-        assert!(
-            format!("{refused:#}").contains("was not running"),
-            "{refused:#}"
-        );
-        let refused = database
-            .requeue_turn(&uncertain)
-            .err()
-            .context("requeued a turn that is not running")?;
-        assert!(
-            format!("{refused:#}").contains("was not running"),
-            "{refused:#}"
-        );
+        crate::assert_refused(
+            database.interrupt_turn(&uncertain, "ambiguous", None, None),
+            "was not running",
+        )?;
+        crate::assert_refused(database.requeue_turn(&uncertain), "was not running")?;
 
         accept(&database, "requeued", "two")?;
         let requeued = database
             .claim("runtime", Lane::Messages, &CancellationToken::new())?
             .context("requeued turn was not queued")?;
         database.requeue_turn(&requeued)?;
-        let refused = database
-            .requeue_turn(&requeued)
-            .err()
-            .context("requeued a turn twice")?;
-        assert!(
-            format!("{refused:#}").contains("was not running"),
-            "{refused:#}"
-        );
-        let refused = database
-            .interrupt_turn(&requeued, "ambiguous", None, None)
-            .err()
-            .context("interrupted a requeued turn")?;
-        assert!(
-            format!("{refused:#}").contains("was not running"),
-            "{refused:#}"
-        );
+        crate::assert_refused(database.requeue_turn(&requeued), "was not running")?;
+        crate::assert_refused(
+            database.interrupt_turn(&requeued, "ambiguous", None, None),
+            "was not running",
+        )?;
 
         let requeued = database
             .claim("runtime", Lane::Messages, &CancellationToken::new())?
@@ -2334,30 +2282,15 @@ mod tests {
             attachments_left: false,
         };
         database.complete_turn(&requeued, &response)?;
-        let refused = database
-            .complete_turn(&requeued, &response)
-            .err()
-            .context("completed a requeued turn")?;
-        assert!(
-            format!("{refused:#}").contains("was not running"),
-            "{refused:#}"
-        );
-        let refused = database
-            .requeue_turn(&requeued)
-            .err()
-            .context("requeued a requeued turn")?;
-        assert!(
-            format!("{refused:#}").contains("was not running"),
-            "{refused:#}"
-        );
-        let refused = database
-            .interrupt_turn(&requeued, "ambiguous", None, None)
-            .err()
-            .context("interrupted a requeued turn")?;
-        assert!(
-            format!("{refused:#}").contains("was not running"),
-            "{refused:#}"
-        );
+        crate::assert_refused(
+            database.complete_turn(&requeued, &response),
+            "was not running",
+        )?;
+        crate::assert_refused(database.requeue_turn(&requeued), "was not running")?;
+        crate::assert_refused(
+            database.interrupt_turn(&requeued, "ambiguous", None, None),
+            "was not running",
+        )?;
         let inspection = database
             .inspect_turn(&requeued.turn_id)?
             .context("completed turn disappeared")?;

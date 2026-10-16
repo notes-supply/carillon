@@ -687,13 +687,7 @@ mod tests {
 
         // A file on PATH without the executable bit is not a command.
         std::fs::write(elsewhere.join("carillon-review"), "")?;
-        let refused = super::locate_provider("review", &own, &path)
-            .err()
-            .context("found a provider that is not executable")?;
-        assert!(
-            format!("{refused:#}").contains("not on PATH"),
-            "{refused:#}"
-        );
+        crate::assert_refused(super::locate_provider("review", &own, &path), "not on PATH")?;
         std::fs::set_permissions(
             elsewhere.join("carillon-review"),
             std::fs::Permissions::from_mode(0o755),

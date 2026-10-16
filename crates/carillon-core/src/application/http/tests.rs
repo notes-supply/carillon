@@ -232,13 +232,7 @@ fn configuration_rejects_malformed_provider_endpoints_before_startup() -> Result
         ] {
             state.config.value.providers[index].url = url.to_owned();
             fs::write(&path, toml::to_string(&state.config.value)?)?;
-            let refused = LoadedConfig::load(&path)
-                .err()
-                .with_context(|| format!("accepted {url:?}"))?;
-            assert!(
-                format!("{refused:#}").contains("invalid URL for provider"),
-                "{refused:#}"
-            );
+            crate::assert_refused(LoadedConfig::load(&path), "invalid URL for provider")?;
         }
         for url in [
             "http://127.0.0.1:3000",
@@ -272,13 +266,10 @@ fn configuration_rejects_malformed_provider_endpoints_before_startup() -> Result
     }
     state.config.value.core.listen.set_port(0);
     fs::write(&path, toml::to_string(&state.config.value)?)?;
-    let refused = LoadedConfig::load(&path)
-        .err()
-        .context("accepted core port zero")?;
-    assert!(
-        format!("{refused:#}").contains("core listen port must be nonzero"),
-        "{refused:#}"
-    );
+    crate::assert_refused(
+        LoadedConfig::load(&path),
+        "core listen port must be nonzero",
+    )?;
     Ok(())
 }
 
@@ -461,17 +452,14 @@ async fn startup_opens_the_database_without_creating_one() -> Result<()> {
     drop(listener);
     let path = state.config.value.data_dir.join("carillon.sqlite3");
     fs::remove_file(&path)?;
-    let refused = serve(
-        state.config.root.join("carillon.toml"),
-        state.config.clone(),
-    )
-    .await
-    .err()
-    .context("served without its database")?;
-    assert!(
-        format!("{refused:#}").contains("unable to open database file"),
-        "{refused:#}"
-    );
+    crate::assert_refused(
+        serve(
+            state.config.root.join("carillon.toml"),
+            state.config.clone(),
+        )
+        .await,
+        "unable to open database file",
+    )?;
     assert!(!path.exists());
     Ok(())
 }
@@ -893,8 +881,7 @@ async fn credential_drift_leaves_work_queued_until_repaired() -> Result<()> {
             Ok(completed(request))
         })
         .await;
-        let refused = result.err().context("invalid credential was accepted")?;
-        assert!(format!("{refused:#}").contains("credential"), "{refused:#}");
+        crate::assert_refused(result, "credential")?;
         assert_eq!(
             calls, 0,
             "runtime was contacted before credential validation"
@@ -1327,14 +1314,10 @@ async fn missing_resource_root_refuses_new_acceptance_without_losing_receipts() 
         if !missing {
             fs::write(root, "not a directory")?;
         }
-        let refused = accept(&state, "two", "conversation")
-            .await
-            .err()
-            .context("accepted without a resource root")?;
-        assert!(
-            format!("{refused:#}").contains("agent resource root"),
-            "{refused:#}"
-        );
+        crate::assert_refused(
+            accept(&state, "two", "conversation").await,
+            "agent resource root",
+        )?;
         assert_eq!(state.core.database.recent_turns(None, 10)?.len(), 1);
         assert!(
             state
@@ -1386,14 +1369,10 @@ async fn duplicate_receipts_do_not_read_mutable_resources() -> Result<()> {
     assert!(duplicate.duplicate);
     assert_eq!(duplicate.turn_id, first.turn_id);
     assert_eq!(duplicate.state, TurnState::Queued);
-    let refused = accept(&state, "two", "conversation")
-        .await
-        .err()
-        .context("accepted a resource symlink")?;
-    assert!(
-        format!("{refused:#}").contains("resource symlinks are not supported"),
-        "{refused:#}"
-    );
+    crate::assert_refused(
+        accept(&state, "two", "conversation").await,
+        "resource symlinks are not supported",
+    )?;
     assert_eq!(state.core.database.recent_turns(None, 10)?.len(), 1);
     assert!(
         state
@@ -2265,13 +2244,7 @@ fn check_opens_storage_like_the_service_without_writing() -> Result<()> {
     rusqlite::Connection::open(&database)?
         .execute_batch("CREATE TABLE later_release (id INTEGER)")?;
     let before = fs::read(&database)?;
-    let refused = check(&state.config)
-        .err()
-        .context("accepted a schema this release does not know")?;
-    assert!(
-        format!("{refused:#}").contains("not the current Carillon format"),
-        "{refused:#}"
-    );
+    crate::assert_refused(check(&state.config), "not the current Carillon format")?;
     assert_eq!(fs::read(&database)?, before);
     Ok(())
 }
@@ -3206,13 +3179,9 @@ async fn each_agent_runs_on_its_own_runtime_with_its_own_resources() -> Result<(
         Ok(completed(request))
     })
     .await?;
-    let refused = accept_for(&state, "unknown", "unknown-turn", "conversation")
-        .await
-        .err()
-        .context("accepted an event for an unknown agent")?;
-    assert!(
-        format!("{refused:#}").contains("unknown agent"),
-        "{refused:#}"
-    );
+    crate::assert_refused(
+        accept_for(&state, "unknown", "unknown-turn", "conversation").await,
+        "unknown agent",
+    )?;
     Ok(())
 }
