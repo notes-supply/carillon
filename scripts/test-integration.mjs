@@ -22,6 +22,17 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { availableBasePort } from "./integration/ports.mjs";
+import {
+  buttons,
+  control,
+  customIds,
+  embedText,
+  options,
+  providerControl,
+  seen,
+  selectedLabel,
+  value,
+} from "./integration/replies.mjs";
 
 // This fixture uses the bundled providers and simulated model responses.
 // Counters/activation markers below are test output, not a required reply format.
@@ -1380,14 +1391,6 @@ effort = "low"
 }
 
 /** A work card's text: its description, then each field under its name. */
-function embedText(embed) {
-  assert.ok(embed, "the job has no work card");
-  return [
-    embed.description,
-    ...(embed.fields ?? []).map(({ name, value }) => `${name}:\n${value}`),
-  ].join("\n");
-}
-
 /** Core's job read for the Discord provider: jobs at work, or `query`'s. */
 async function jobs(authorization, query = "") {
   const response = await fetch(`http://127.0.0.1:${String(basePort)}/v1/jobs${query}`, {
@@ -1868,60 +1871,6 @@ async function interact(channelId, parentChannelId, kind, name, values = [], opt
 }
 
 /** A reply as a person reads it: its text, then its embeds' notes, sections and hints. */
-function seen(reply) {
-  return [
-    reply.content,
-    ...reply.embeds.flatMap((embed) => [
-      embed.description,
-      ...(embed.fields ?? []).flatMap((field) => [field.name, field.value]),
-      embed.footer?.text,
-    ]),
-  ]
-    .filter(Boolean)
-    .join("\n");
-}
-
-/** The first control of each action row. */
-function customIds(reply) {
-  return reply.components.map((row) => row.components[0].custom_id);
-}
-
-/** The buttons of the last action row. */
-function buttons(reply) {
-  return reply.components.at(-1).components.map((component) => component.custom_id);
-}
-
-function control(reply, customId) {
-  const found = reply.components
-    .flatMap((row) => row.components)
-    .find((component) => component.custom_id === customId);
-  assert.ok(found, `${customId} is present`);
-  return found;
-}
-
-function options(reply, customId) {
-  return control(reply, customId).options;
-}
-
-function providerControl(reply, scope) {
-  const id = customIds(reply).find((id) => id.startsWith(`model:provider:${scope}:`));
-  assert.ok(id, "provider menu is present");
-  return id;
-}
-
-function selectedLabel(reply, customId) {
-  return options(reply, customId).find((option) => option.default)?.label;
-}
-
-/** The select value standing for the option labelled or described `text`. */
-function value(reply, customId, text) {
-  const option = options(reply, customId).find(
-    (candidate) => candidate.label === text || candidate.description === text,
-  );
-  assert.ok(option, `${customId} offers ${text}`);
-  return option.value;
-}
-
 /** Files staged as the Discord provider stages them, captured through core. */
 async function testAttachments() {
   // Simulation fetches an admitted message's files only from Discord's CDN:
