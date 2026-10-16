@@ -62,6 +62,7 @@ import {
   type TurnItemOf,
 } from "./contracts.ts";
 import { T3Failure } from "./t3.ts";
+import { TASK_STATE, transferState } from "./watch/work.ts";
 
 /**
  * Where a turn's report of delegated work continues: the message the
@@ -1850,36 +1851,6 @@ function phase(
   if (retrying) return "retrying";
   if (runningTools > 0) return "tools";
   return run.status === "waiting" || heldCalls > 0 ? "waiting" : "model";
-}
-
-const TASK_STATE: Readonly<Record<Subagent["status"], WorkItem["state"]>> = {
-  idle: "queued",
-  pending: "queued",
-  running: "running",
-  waiting: "waiting",
-  completed: "succeeded",
-  failed: "failed",
-  cancelled: "cancelled",
-  interrupted: "cancelled",
-};
-
-/** What a transfer's native status confirms: prepared is not consumed. */
-function transferState(status: string): WorkItem["state"] {
-  switch (status) {
-    case "pending":
-      return "running";
-    case "resolved_native":
-    case "resolved_portable":
-      return "waiting";
-    case "consumed":
-      return "succeeded";
-    case "failed":
-      return "failed";
-    case "superseded":
-      return "cancelled";
-    default:
-      return "unknown";
-  }
 }
 
 /** Claude's tool names and argument names in the vocabulary the shared description knows. */
