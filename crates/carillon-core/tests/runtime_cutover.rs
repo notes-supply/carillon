@@ -51,6 +51,163 @@ fn answer(request: RuntimeTurnRequest) -> RuntimeTurnResponse {
     }
 }
 
+fn interface() -> SelectedProvider {
+    SelectedProvider {
+        id: "discord".to_owned(),
+        role: "interface".to_owned(),
+        version: "test".to_owned(),
+        url: "in-process".to_owned(),
+    }
+}
+
+const EXPLANATION: &str =
+    "This conversation ran on old, which no longer runs agent. Start a new conversation.";
+
+async fn queued_cutover(agent_runtime: Option<&str>, former_enabled: Option<bool>) -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let mut options = options(directory.path());
+    let core = Core::create(options.clone())?;
+    let receipt = core.accept(&interface(), &event()).await?;
+    core.storage_settled().await;
+    drop(core);
+    if let Some(runtime) = agent_runtime {
+        options.agents[0].runtime = runtime.to_owned();
+    } else {
+        options.agents.clear();
+    }
+    if let Some(enabled) = former_enabled {
+        options.runtimes[0].enabled = enabled;
+    } else {
+        options.runtimes.remove(0);
+    }
+    let core = Core::open(options)?;
+    assert_eq!(core.recover_interrupted()?, 1);
+    let turn = core
+        .inspect_turn(&receipt.turn_id)?
+        .context("missing turn")?;
+    assert_eq!(turn.state, TurnState::Interrupted);
+    assert_eq!(turn.error.as_deref(), Some(EXPLANATION));
+    let notice = core
+        .claim_delivery("discord", "instance")?
+        .context("missing stranded notice")?;
+    assert_eq!(notice.turn_id, receipt.turn_id);
+    assert_eq!(notice.turn_state, TurnState::Interrupted);
+    assert_eq!(notice.content, EXPLANATION);
+    assert_eq!(core.recover_interrupted()?, 0);
+    assert_eq!(core.turn_counts()?.pending, 0);
+    core.storage_settled().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn queued_removed_agent_is_interrupted_without_dispatch_or_retry() -> Result<()> {
+    queued_cutover(None, Some(true)).await
+}
+
+#[tokio::test]
+async fn queued_removed_agent_on_disabled_runtime_is_interrupted_at_startup() -> Result<()> {
+    queued_cutover(None, Some(false)).await
+}
+
+#[tokio::test]
+async fn queued_removed_agent_on_removed_runtime_is_interrupted_at_startup() -> Result<()> {
+    queued_cutover(None, None).await
+}
+
+#[tokio::test]
+async fn queued_moved_agent_on_disabled_runtime_is_interrupted_at_startup() -> Result<()> {
+    queued_cutover(Some("new"), Some(false)).await
+}
+
+#[tokio::test]
+async fn queued_moved_agent_on_removed_runtime_is_interrupted_at_startup() -> Result<()> {
+    queued_cutover(Some("new"), None).await
+}
+
+async fn stranded_admission(former_enabled: Option<bool>) -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let mut options = options(directory.path());
+    let core = Core::create(options.clone())?;
+    let first = core.accept(&interface(), &event()).await?;
+    let original = core.inspect_turn(&first.turn_id)?.context("missing turn")?;
+    core.storage_settled().await;
+    drop(core);
+    options.agents[0].runtime = "new".to_owned();
+    let core = Core::open(options.clone())?;
+    if let Some(enabled) = former_enabled {
+        options.runtimes[0].enabled = enabled;
+    } else {
+        options.runtimes.remove(0);
+    }
+    core.set_runtimes(options.runtimes)?;
+    let later = ExternalEvent {
+        event_id: "later".to_owned(),
+        ..event()
+    };
+    let receipt = core.accept(&interface(), &later).await?;
+    assert!(!receipt.duplicate);
+    assert_eq!(receipt.state, TurnState::Interrupted);
+    let turn = core
+        .inspect_turn(&receipt.turn_id)?
+        .context("missing turn")?;
+    assert_eq!(turn.state, TurnState::Interrupted);
+    assert_eq!(turn.error.as_deref(), Some(EXPLANATION));
+    assert_eq!(turn.providers, original.providers);
+    assert_eq!(turn.resource_snapshot_id, original.resource_snapshot_id);
+    let notice = core
+        .claim_turn_delivery("discord", "instance", &receipt.turn_id)?
+        .context("missing immediate notice")?;
+    assert_eq!(notice.turn_state, TurnState::Interrupted);
+    assert_eq!(notice.content, EXPLANATION);
+    core.storage_settled().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn stranded_message_is_accepted_when_former_runtime_is_disabled_live() -> Result<()> {
+    stranded_admission(Some(false)).await
+}
+
+#[tokio::test]
+async fn stranded_message_is_accepted_when_former_runtime_is_removed_live() -> Result<()> {
+    stranded_admission(None).await
+}
+
+#[tokio::test]
+async fn concurrent_stranded_duplicates_return_the_first_receipt() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let mut options = options(directory.path());
+    let core = Core::create(options.clone())?;
+    core.accept(&interface(), &event()).await?;
+    core.storage_settled().await;
+    drop(core);
+    options.agents[0].runtime = "new".to_owned();
+    options.runtimes.clear();
+    let core = Core::open(options)?;
+    let interface = interface();
+    let later = ExternalEvent {
+        event_id: "later".to_owned(),
+        ..event()
+    };
+    let (one, two) = tokio::join!(
+        core.accept(&interface, &later),
+        core.accept(&interface, &later)
+    );
+    let (one, two) = (one?, two?);
+    assert_ne!(one.duplicate, two.duplicate);
+    assert_eq!(one.turn_id, two.turn_id);
+    assert_eq!(one.state, TurnState::Interrupted);
+    assert_eq!(two.state, one.state);
+    assert_eq!(core.recent_turns(Some("later"), 10)?.len(), 1);
+    assert_eq!(core.delivery_counts()?.pending, 1);
+    let duplicate = core.accept(&interface, &later).await?;
+    assert!(duplicate.duplicate);
+    assert_eq!(duplicate.turn_id, one.turn_id);
+    assert_eq!(duplicate.state, one.state);
+    core.storage_settled().await;
+    Ok(())
+}
+
 #[tokio::test]
 async fn changed_agent_runtime_explains_old_conversations_without_dispatching() -> Result<()> {
     let directory = tempfile::tempdir()?;
