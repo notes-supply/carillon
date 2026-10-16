@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, mkdir, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { ModelRuntime, SettingsManager } from "@earendil-works/pi-coding-agent";
 import {
   createAssistantMessageEventStream,
@@ -10,7 +10,7 @@ import {
   type Model,
 } from "@earendil-works/pi-ai";
 import { expect, it, vi } from "vitest";
-import { createPiRuntime, openConversation } from "@carillon/runtime-pi";
+import { conversationDirectory, createPiRuntime, openConversation } from "@carillon/runtime-pi";
 import { runSessionExample } from "../examples/session.ts";
 
 it("imports the public package without startup, discovery or installation files", async () => {
@@ -252,7 +252,11 @@ it("close waits for accepted operations and prevents queued execution from start
     const active = runtime.executeTurn(request);
     // The first call has entered the serial queue and is waiting for its catalogue.
     await Promise.resolve();
-    const queued = runtime.executeTurn({ ...request, correlation_id: "two" });
+    const queued = runtime.executeTurn({
+      ...request,
+      audience_id: "queued",
+      correlation_id: "two",
+    });
     const result = Promise.allSettled([active, queued]);
     let closed = false;
     const closing = runtime.close().then(() => {
@@ -266,6 +270,9 @@ it("close waits for accepted operations and prevents queued execution from start
       { status: "rejected", reason: { message: "Pi runtime is closed" } },
       { status: "rejected", reason: { message: "Pi runtime is closed" } },
     ]);
+    // The active turn opened its conversation; the queued one never started.
+    const sessions = join(root, "state", "sessions");
+    expect(await readdir(sessions)).toEqual([basename(conversationDirectory(sessions, request))]);
     await expect(runtime.executeTurn(request)).rejects.toThrow("closed");
   } finally {
     deferred.resolve([model]);
@@ -309,6 +316,9 @@ it("refuses a follow-up it never offered, and says a restart loses a turn it exe
       status: 422,
       message: "This runtime does not follow up on delegated work.",
     });
+    // Refused before any work: the conversation was not opened.
+    const sessions = join(root, "state", "sessions");
+    expect(await readdir(sessions)).toEqual([]);
     catalogue.mockReturnValue(deferred.promise);
     const active = runtime.executeTurn({ ...request, input: "Do not execute" });
     void active.catch(() => undefined);
@@ -318,6 +328,7 @@ it("refuses a follow-up it never offered, and says a restart loses a turn it exe
         reason: "1 turn(s) still executing",
       });
     });
+    expect(await readdir(sessions)).toEqual([basename(conversationDirectory(sessions, request))]);
     const closing = runtime.close();
     deferred.resolve([model]);
     await closing;
