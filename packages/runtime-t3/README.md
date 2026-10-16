@@ -45,6 +45,8 @@ obsolete links, and updates links after resources move. A saved profile
 missing from T3 or without a homePath stops startup. The harness keeps a real
 `skills/` directory for its own skills. Only directories containing `SKILL.md`
 are shared. A name that conflicts with a harness file or directory is refused.
+Startup refuses symlinks in the source `AGENTS.md` or `skills/` tree, including
+skill directories, manifests, and nested resources, as core's admission snapshots do.
 Neither the shared workspace nor your own Claude or Codex sees Carillon's
 profile resources.
 

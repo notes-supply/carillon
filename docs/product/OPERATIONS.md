@@ -86,8 +86,10 @@ homePath from T3, then adds new links, removes obsolete links, and updates
 links after resources move before accepting turns. A saved profile missing
 from T3 or without a homePath stops startup. Only directories containing
 `SKILL.md` are shared. Harness files and directories stay in the profile.
-A conflicting name stops startup. Each T3 runtime permits at most one agent
-with resources.
+A conflicting name or a symlink in the source `AGENTS.md` or `skills/` tree stops
+startup. This includes linked skill directories, manifests, and nested resources,
+which core's admission snapshots also refuse. Each T3 runtime permits at most
+one agent with resources.
 
 Profiles belong to the user and are shared across installations. Setup creates
 or validates each T3 instance and creates its home for sign-in, leaving links

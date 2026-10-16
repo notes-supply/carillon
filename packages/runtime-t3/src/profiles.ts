@@ -121,11 +121,13 @@ export async function reconcileProfile(
     ))
   )
     throw new Error(`${resources}: the assistant's resources must be an existing directory`);
+  const source = join(resources, "skills");
+  await rejectResourceSymlinks(join(resources, "AGENTS.md"));
+  await rejectResourceSymlinks(source);
   const instructions = join(home, HARNESSES[harness].instructions);
   const previousInstructions = await targetOf(instructions);
   const previousResources =
     previousInstructions === undefined ? undefined : dirname(previousInstructions);
-  const source = join(resources, "skills");
   const skills = join(home, "skills");
   await mkdir(home, { recursive: true, mode: 0o700 });
   await mkdir(source, { recursive: true, mode: 0o700 });
@@ -148,7 +150,7 @@ export async function reconcileProfile(
   await mkdir(skills, { recursive: true, mode: 0o700 });
   const names = new Set<string>();
   for (const directory of await readdir(source, { withFileTypes: true })) {
-    if (!directory.isDirectory() && !directory.isSymbolicLink()) continue;
+    if (!directory.isDirectory()) continue;
     const skill = await stat(join(source, directory.name, "SKILL.md")).catch((failure: unknown) => {
       if (
         failure instanceof Error &&
@@ -183,6 +185,14 @@ export async function reconcileProfile(
     );
   // Keep the old instructions link until every skill moved, so a retry still knows their old root.
   await link(instructions, join(resources, "AGENTS.md"), previousInstructions);
+}
+
+async function rejectResourceSymlinks(path: string): Promise<void> {
+  const found = await entry(path);
+  if (found?.isSymbolicLink() === true)
+    throw new Error(`resource symlinks are not supported: ${path}`);
+  if (found?.isDirectory() === true)
+    for (const name of await readdir(path)) await rejectResourceSymlinks(join(path, name));
 }
 
 async function entry(path: string) {

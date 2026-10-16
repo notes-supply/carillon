@@ -10,7 +10,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { expect, it } from "vitest";
 import { configure, discover, profile } from "./setup.ts";
 import { reconcileProfile } from "./profiles.ts";
@@ -291,22 +291,36 @@ it("refuses missing resources instead of recreating them", async () => {
   await expect(stat(missing)).rejects.toMatchObject({ code: "ENOENT" });
 });
 
-it("shares linked skill directories and linked manifests at their source names", async () => {
+it.each([
+  ["skill directory", "skills/status", "directory"],
+  ["skill manifest", "skills/status/SKILL.md", "file"],
+  ["nested skill file", "skills/status/scripts/check.sh", "file"],
+  ["nested skill directory", "skills/status/scripts", "directory"],
+  ["skills root", "skills", "directory"],
+  ["instructions", "AGENTS.md", "file"],
+  ["dangling skill directory", "skills/status", "missing"],
+  ["dangling skill manifest", "skills/status/SKILL.md", "missing"],
+])("refuses a symlinked %s before changing profile links", async (name, relative, targetKind) => {
   const { root, config, home } = await savedProfile();
-  const source = join(root, "agent", "skills");
+  const resources = join(root, "agent");
   const external = join(root, "external-skill");
   await mkdir(external);
-  await writeFile(join(external, "SKILL.md"), "External skill");
-  await mkdir(source);
-  await symlink(external, join(source, "linked-directory"));
-  await mkdir(join(source, "linked-manifest"));
-  await symlink(join(external, "SKILL.md"), join(source, "linked-manifest", "SKILL.md"));
+  const manifest = join(external, "SKILL.md");
+  await writeFile(manifest, "External skill");
+  const path = join(resources, relative);
+  await mkdir(dirname(path), { recursive: true });
+  if (name.startsWith("nested"))
+    await writeFile(join(resources, "skills", "status", "SKILL.md"), "Status skill");
+  if (relative === "AGENTS.md") await rm(path);
+  await symlink(
+    targetKind === "missing" ? join(root, "missing") : targetKind === "file" ? manifest : external,
+    path,
+  );
   const checked = await serve(config);
-  expect(checked.status, checked.stderr).toBe(0);
-  for (const name of ["linked-directory", "linked-manifest"]) {
-    expect(await readlink(join(home, "skills", name))).toBe(join(source, name));
-    expect(await readFile(join(home, "skills", name, "SKILL.md"), "utf8")).toBe("External skill");
-  }
+  expect(checked.status, checked.stderr).toBe(1);
+  expect(checked.stderr).toContain(`resource symlinks are not supported: ${path}`);
+  await expect(lstat(join(home, "CLAUDE.md"))).rejects.toMatchObject({ code: "ENOENT" });
+  await expect(lstat(join(home, "skills"))).rejects.toMatchObject({ code: "ENOENT" });
 });
 
 it("discovers profile existence from T3 even when the saved list disagrees", async () => {
