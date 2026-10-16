@@ -3,22 +3,12 @@ use crate::config::DiscordRoute;
 use anyhow::anyhow;
 
 #[test]
-fn participation_persistence_retries_without_bypassing_activation() -> Result<()> {
+fn participation_persists_activation_across_a_reload() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("participation.json");
     let participation = Participation::load(path.clone())?;
-    if let Err(failure) = participation.adopt("400", "300") {
-        eprintln!("adoption persistence failed: {failure}");
-        assert_eq!(participation.parent_route("400"), None);
-        participation.adopt("400", "300")?;
-    }
-    if let Err(failure) = participation.remember_created("500", "500", "300") {
-        eprintln!("creation persistence failed: {failure}");
-        assert_eq!(participation.created_thread("500"), None);
-        assert_eq!(participation.parent_route("500"), None);
-        assert_eq!(participation.parent_route("400").as_deref(), Some("300"));
-        participation.remember_created("500", "500", "300")?;
-    }
+    participation.adopt("400", "300")?;
+    participation.remember_created("500", "500", "300")?;
     let recovered = Participation::load(path)?;
     assert_eq!(recovered.created_thread("500").as_deref(), Some("500"));
     let config = discord_config(DiscordActivation::Mention, DiscordConversation::Thread);
@@ -74,7 +64,12 @@ fn interaction_admission_follows_routes_and_conversations() -> Result<()> {
     assert_eq!(admitted.audience_id.as_deref(), Some("discord-100-300"));
     assert!(admitted.interaction.conversation);
     // Threads under a channel route are not conversations the agent joins.
-    assert!(admit_interaction(&channel, interaction("400", Some("300"))).is_err());
+    assert_eq!(
+        admit_interaction(&channel, interaction("400", Some("300")))
+            .err()
+            .map(|failure| failure.status),
+        Some(StatusCode::FORBIDDEN)
+    );
 
     let thread = discord_config(DiscordActivation::Mention, DiscordConversation::Thread);
     let in_channel = admit_interaction(&thread, interaction("300", None))

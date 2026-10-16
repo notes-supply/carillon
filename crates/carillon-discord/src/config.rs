@@ -1123,28 +1123,26 @@ stopped = "■"
                 models: BTreeMap::new(),
             }
         );
-        assert!(
-            super::configure(
-                &config,
+        for (provider, refused) in [
+            (
                 "test-runtime",
-                "110",
-                "111",
-                &["210".to_owned()],
-                &["310:mention:thread:default".parse()?],
-            )
-            .is_err()
-        );
-        assert!(
-            super::configure(
-                &config,
-                "unregistered",
-                "110",
-                "111",
-                &["210".to_owned()],
-                &["310:mention:thread:default".parse()?],
-            )
-            .is_err()
-        );
+                "provider test-runtime does not have role interface",
+            ),
+            ("unregistered", "provider unregistered is not configured"),
+        ] {
+            assert_eq!(
+                refusal(super::configure(
+                    &config,
+                    provider,
+                    "110",
+                    "111",
+                    &["210".to_owned()],
+                    &["310:mention:thread:default".parse()?],
+                ))
+                .as_deref(),
+                Some(refused)
+            );
+        }
         assert!(!config.provider_config_path("unregistered")?.exists());
         Ok(())
     }

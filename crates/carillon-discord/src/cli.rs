@@ -1485,16 +1485,12 @@ mod tests {
 
     #[test]
     fn a_timeout_is_set_or_cleared_explicitly() -> Result<()> {
-        let timeout = |arguments: &[&str]| {
-            let mut all = vec!["members", "timeout", "--user-id", "3"];
-            all.extend(arguments);
-            anyhow::Ok(serde_json::to_value(parsed_call(&all)?)?)
+        let of_user = |arguments: &[&'static str]| {
+            [&["members", "timeout", "--user-id", "3"], arguments].concat()
         };
-        let refused = |arguments: &[&str]| {
-            let mut all = vec!["members", "timeout", "--user-id", "3"];
-            all.extend(arguments);
-            refused_call(&all).map(|failure| failure.kind())
-        };
+        let timeout =
+            |arguments| anyhow::Ok(serde_json::to_value(parsed_call(&of_user(arguments))?)?);
+        let refused = |arguments| refused_call(&of_user(arguments)).map(|failure| failure.kind());
         assert_eq!(
             refused(&[])?,
             ErrorKind::MissingRequiredArgument,

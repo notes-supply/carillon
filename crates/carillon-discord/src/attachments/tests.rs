@@ -372,23 +372,40 @@ async fn policy_refuses_before_any_request() -> Result<()> {
     };
     let downloads = downloads(staging.path(), port, policy)?;
     let mib = 1024 * 1024;
-    for files in [
-        vec![
-            attachment(port, "601", "a", 1),
-            attachment(port, "602", "b", 1),
-            attachment(port, "603", "c", 1),
-        ],
-        vec![attachment(port, "601", "a", mib + 1)],
-        vec![
-            attachment(port, "601", "a", mib / 2 + 1),
-            attachment(port, "602", "b", mib / 2),
-        ],
-        vec![SourceAttachment {
-            url: "https://evil.test/attachments/300/601/a".to_owned(),
-            ..attachment(port, "601", "a", 1)
-        }],
+    let too_large = "Carillon accepts attachments of up to 1 MiB each and 1 MiB per message, so this message was not accepted.";
+    for (files, refused) in [
+        (
+            vec![
+                attachment(port, "601", "a", 1),
+                attachment(port, "602", "b", 1),
+                attachment(port, "603", "c", 1),
+            ],
+            "Carillon accepts at most 2 attachments per message, so this message was not accepted.",
+        ),
+        (vec![attachment(port, "601", "a", mib + 1)], too_large),
+        (
+            vec![
+                attachment(port, "601", "a", mib / 2 + 1),
+                attachment(port, "602", "b", mib / 2),
+            ],
+            too_large,
+        ),
+        (
+            vec![SourceAttachment {
+                url: "https://evil.test/attachments/300/601/a".to_owned(),
+                ..attachment(port, "601", "a", 1)
+            }],
+            "`a` is not a Discord attachment Carillon can download, so this message was not accepted.",
+        ),
     ] {
-        assert!(downloads.admit(&files).is_err());
+        assert_eq!(
+            downloads
+                .admit(&files)
+                .err()
+                .map(|refusal| refusal.0)
+                .as_deref(),
+            Some(refused)
+        );
     }
     let disabled = Downloads::open(
         staging.path().join("other"),
@@ -602,18 +619,21 @@ async fn a_later_failure_discards_earlier_files_of_the_message() -> Result<()> {
     let (http, _) = serve_discord(None).await?;
     let staging = tempfile::tempdir()?;
     let downloads = downloads(staging.path(), port, AttachmentPolicy::default())?;
-    assert!(
-        downloads
-            .stage(
-                Some(&http),
-                &plan(vec![
-                    attachment(port, "601", "ok.bin", 1000),
-                    attachment(port, "602", "bad.bin", 1),
-                ]),
-                soon(),
-            )
-            .await
-            .is_err()
+    let refusal = downloads
+        .stage(
+            Some(&http),
+            &plan(vec![
+                attachment(port, "601", "ok.bin", 1000),
+                attachment(port, "602", "bad.bin", 1),
+            ]),
+            soon(),
+        )
+        .await
+        .err()
+        .context("a message with a refused file was staged")?;
+    assert_eq!(
+        refusal.0,
+        "Discord refused to provide an attachment, so this message was not accepted."
     );
     wait_until_empty(staging.path()).await?;
     Ok(())

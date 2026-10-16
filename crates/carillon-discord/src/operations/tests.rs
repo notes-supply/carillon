@@ -122,7 +122,6 @@ async fn cross_guild_mutation_is_rejected_before_write() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn history_has_an_honest_cursor_and_preserves_string_ids() -> anyhow::Result<()> {
-    serde_json::from_value::<twilight_model::channel::Message>(message_fixture("7"))?;
     let server = Mock::new(vec![
         get("/api/v10/channels/2", channel_fixture("1")),
         get(
@@ -272,8 +271,7 @@ async fn permission_edit_uses_one_target_not_the_whole_channel() -> anyhow::Resu
         },
     ])
     .await?;
-    let result=server.execute(json!({"action":"channels.overwrite","channel_id":"2","target_id":"4","kind":"role","allow":"1024","deny":"0"})).await?;
-    assert!(result.is_ok(), "{result:?}");
+    server.execute(json!({"action":"channels.overwrite","channel_id":"2","target_id":"4","kind":"role","allow":"1024","deny":"0"})).await??;
     let bodies = server.bodies()?;
     assert_eq!(bodies[2], json!({"type":0,"allow":"1024","deny":"0"}));
     server.finished()
@@ -283,7 +281,6 @@ async fn permission_edit_uses_one_target_not_the_whole_channel() -> anyhow::Resu
 #[expect(clippy::expect_used, reason = "test mutex")]
 async fn project_channel_role_thread_and_member_workflow() -> anyhow::Result<()> {
     let role = json!({"id":"7","name":"project","color":0,"colors":{"primary_color":0},"hoist":false,"position":1,"permissions":"1024","managed":false,"mentionable":false,"flags":0});
-    serde_json::from_value::<twilight_model::guild::Role>(role.clone())?;
     let thread = json!({"id":"8","guild_id":"1","parent_id":"2","type":11,"name":"discussion"});
     let server = Mock::new(vec![
         Step {
