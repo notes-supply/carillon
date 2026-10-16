@@ -642,22 +642,40 @@ fn make_profile(
     harness: Harness,
     questions: &mut impl Questions,
 ) -> Result<Profile> {
+    #[derive(Default, Deserialize)]
+    struct SavedProfiles {
+        #[serde(default)]
+        profiles: Vec<String>,
+    }
     let name = harness.name();
     let choices = [
         format!("With a {name} account, in the browser"),
         "With an API key".to_owned(),
         "With a compatible endpoint's address and token".to_owned(),
     ];
-    let method = questions.choose(
-        &format!("How should {name} sign in for Carillon?"),
-        &choices,
-        0,
-    )?;
+    let settings = home.join("providers/runtime-t3.toml");
+    let saved: SavedProfiles = match std::fs::read_to_string(&settings) {
+        Ok(text) => toml::from_str(&text).context("read T3's saved profiles")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => SavedProfiles::default(),
+        Err(error) => return Err(error).context("read T3's settings"),
+    };
+    let existing = saved
+        .profiles
+        .contains(&format!("carillon_{}", harness.id()));
+    let method = if existing {
+        None
+    } else {
+        Some(questions.choose(
+            &format!("How should {name} sign in for Carillon?"),
+            &choices,
+            0,
+        )?)
+    };
     let mut args = vec!["--harness", harness.id()];
     let (endpoint, key) = match method {
-        0 => (None, None),
-        1 => (None, Some(questions.secret(&format!("{name} API key:"))?)),
-        _ => (
+        None | Some(0) => (None, None),
+        Some(1) => (None, Some(questions.secret(&format!("{name} API key:"))?)),
+        Some(_) => (
             Some(questions.answer("The endpoint's address:", None)?),
             Some(questions.secret("The endpoint's token:")?),
         ),
@@ -677,7 +695,7 @@ fn make_profile(
         profile.instance_id,
         profile.home.display()
     ))?;
-    if key.is_none() {
+    if method == Some(0) {
         sign_in(harness, &profile.home, questions)?;
     }
     Ok(profile)
