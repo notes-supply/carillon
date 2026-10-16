@@ -637,7 +637,11 @@ impl Core {
     /// # Errors
     /// Returns a cursor that is not one of the interface's turns as invalid
     /// input, or storage errors.
-    pub fn jobs_at_work(&self, interface: &str, after: Option<&str>) -> Result<JobPage, CoreError> {
+    pub(crate) fn jobs_at_work(
+        &self,
+        interface: &str,
+        after: Option<&str>,
+    ) -> Result<JobPage, CoreError> {
         self.database
             .jobs_at_work(interface, after)?
             .ok_or_else(|| CoreError::InvalidInput("no such page of jobs".to_owned()))

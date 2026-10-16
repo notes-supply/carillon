@@ -88,9 +88,9 @@ pub(crate) struct ClaimedTurn {
 /// A page of an interface's jobs at work, each with the ID of the runtime
 /// that owns it, and where the next page begins when more follow.
 #[derive(Debug)]
-pub struct JobPage {
-    pub jobs: Vec<(String, Job)>,
-    pub next: Option<String>,
+pub(crate) struct JobPage {
+    pub(crate) jobs: Vec<(String, Job)>,
+    pub(crate) next: Option<String>,
 }
 
 #[derive(Clone, Debug)]
