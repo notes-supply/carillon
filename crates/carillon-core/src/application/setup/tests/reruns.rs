@@ -125,3 +125,29 @@ fn an_explicit_runtime_extends_a_pi_installation() -> anyhow::Result<()> {
     assert_eq!(stored.agent("t3-notes")?.runtime, "runtime-t3");
     Ok(())
 }
+
+#[test]
+fn t3_reruns_use_the_runtimes_agent_offer_including_older_profiles() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let home = directory.path().join("home");
+    initialize(&home, directory.path(), 44_000, Runtime::T3)?;
+    let offer = serde_json::json!({
+        "projects": [{"id": "notes", "title": "Notes", "workspace": directory.path()}],
+        "models": [model("carillon_codex", "gpt", "Profile GPT"), model("codex", "gpt", "GPT")],
+        "agentModels": {"t3-notes": [model("codex", "gpt", "GPT")]},
+    });
+    let program = fake_t3(directory.path(), &offer)?;
+    set_up_t3(
+        &home,
+        &options(),
+        &Assistant::None,
+        &program,
+        &mut Shown::answering(&["", "token", "0", "0"]),
+    )?;
+    let calls = std::fs::read_to_string(directory.path().join("calls"))?;
+    assert!(
+        calls.contains("--agent t3-notes --project notes --model codex/gpt"),
+        "{calls}"
+    );
+    Ok(())
+}

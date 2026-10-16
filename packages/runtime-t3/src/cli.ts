@@ -1,5 +1,5 @@
 import { once } from "node:events";
-import { readFile, stat } from "node:fs/promises";
+import { mkdir, readFile, stat } from "node:fs/promises";
 import { providerAddress } from "@carillon/runtime/endpoint";
 import { createRuntimeServer } from "@carillon/runtime/http";
 import {
@@ -13,7 +13,6 @@ import {
 import { ModelSelections } from "@carillon/runtime/selections";
 import { createT3Runtime, type T3Agent } from "./runtime.ts";
 import packageInfo from "../package.json" with { type: "json" };
-import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { text } from "node:stream/consumers";
 import { configure, discover, HARNESSES, profile, type Harness } from "./setup.ts";
@@ -164,10 +163,16 @@ async function discoverCommand(values: readonly string[]): Promise<void> {
       .get("refresh")
       ?.split(",")
       .filter((id) => id.length > 0) ?? [];
+  const agentId = args.get("agent");
+  const scope =
+    agentId === undefined
+      ? undefined
+      : { installation: (await serving(args)).installation, agentId };
   const offer = await discover(
     { url: originArgument(args), token: await token() },
     undefined,
     refresh,
+    scope,
   );
   process.stdout.write(`${JSON.stringify(offer)}\n`);
 }
@@ -296,12 +301,10 @@ const commands = {
   check: checkCommand,
 };
 const [command, ...rest] = process.argv.slice(2);
-if (
-  command === "discover" ||
-  command === "configure" ||
-  command === "profile" ||
-  command === "check"
-) {
+function isCommand(value: string | undefined): value is keyof typeof commands {
+  return value !== undefined && Object.hasOwn(commands, value);
+}
+if (isCommand(command)) {
   try {
     await commands[command](rest);
   } catch (failure) {

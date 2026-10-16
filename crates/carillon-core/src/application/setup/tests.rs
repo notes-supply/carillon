@@ -227,13 +227,27 @@ fn fake_t3(directory: &Path, offer: &serde_json::Value) -> anyhow::Result<std::p
     let program = directory.join("carillon-runtime-t3");
     let calls = directory.join("calls");
     let profiles = directory.join("profiles");
+    if let Some(offers) = offer
+        .get("agentModels")
+        .and_then(serde_json::Value::as_object)
+    {
+        for (id, models) in offers {
+            std::fs::write(
+                directory.join(format!("offer-{id}.json")),
+                serde_json::to_vec(
+                    &serde_json::json!({"projects": offer["projects"], "models": models}),
+                )?,
+            )?;
+        }
+    }
     std::fs::write(
         &program,
         format!(
             "#!/bin/sh\n{{ echo \"$*\"; cat | sed 's/^/  stdin: /'; }} >>'{calls}'\ncase \"$1\" in\n  \
-             discover) printf '%s' '{offer}' ;;\n  \
+             discover) agent=; while [ \"$#\" -gt 0 ]; do if [ \"$1\" = --agent ]; then shift; agent=$1; fi; shift; done; if [ -n \"$agent\" ] && [ -f '{directory}/offer-'\"$agent\"'.json' ]; then cat '{directory}/offer-'\"$agent\"'.json'; else printf '%s' '{offer}'; fi ;;\n  \
              profile) printf '{{\"instanceId\":\"carillon_claude\",\"home\":\"{profiles}/claude\"}}' ;;\n  \
              configure) echo \"configured $3 $4\" ;;\n  *) exit 2 ;;\nesac\n",
+            directory = directory.display(),
             calls = calls.display(),
             profiles = profiles.display(),
         ),
@@ -267,6 +281,10 @@ fn t3_gets_the_assistant_with_its_profile_and_a_t3_code_agent_per_project() -> a
             model("carillon_claude", "sonnet", "Sonnet"),
             model("codex", "gpt", "GPT"),
         ],
+        "agentModels": {
+            "assistant": [model("carillon_claude", "sonnet", "Sonnet")],
+            "t3-notes-app": [model("claudeAgent", "sonnet", "Sonnet"), model("codex", "gpt", "GPT")],
+        },
     });
     let program = fake_t3(directory.path(), &offer)?;
     // The default address, a token, the assistant's project, Notes for T3

@@ -474,8 +474,8 @@ fn set_up_t3(
             .collect::<Result<Vec<_>>>()?,
         Assistant::Pi | Assistant::None => Vec::new(),
     };
-    let offer = ready(&server, &profiles, questions)?;
-    configure_agents(home, &server, &agents, &profiles, offer, questions)
+    ready(&server, &profiles, questions)?;
+    configure_agents(home, &server, &agents, questions)
 }
 
 /// Has the T3 runtime write each of `agents`' settings, with its project and
@@ -485,21 +485,13 @@ fn configure_agents(
     home: &Path,
     server: &Server<'_>,
     agents: &[(AgentConfig, &Project)],
-    profiles: &[Profile],
-    offer: Offer,
     questions: &mut impl Questions,
 ) -> Result<()> {
-    let instances: Vec<&str> = profiles
-        .iter()
-        .map(|profile| profile.instance_id.as_str())
-        .collect();
-    let (theirs, others): (Vec<AvailableModel>, Vec<AvailableModel>) = offer
-        .models
-        .into_iter()
-        .partition(|model| instances.contains(&model.provider.as_str()));
     for (agent, project) in agents {
-        let assistant = agent.resources.is_some();
-        let models = if assistant { &theirs } else { &others };
+        let offer = server.run(home, "discover", &["--agent", &agent.id], None)?;
+        let offer: Offer = serde_json::from_str(&offer)
+            .context("carillon-runtime-t3 discovered something unreadable")?;
+        let models = &offer.models;
         if models.is_empty() {
             bail!(
                 "T3 offers {} no usable model; set one up in T3, then run setup again",
@@ -741,11 +733,7 @@ fn sign_in(harness: Harness, home: &Path, questions: &mut impl Questions) -> Res
 /// What the server offers once it lists every profile as usable. T3 checks
 /// a new instance on its own time, and keeps what it found of its sign-in, so
 /// each round first has it check the profiles again.
-fn ready(
-    server: &Server<'_>,
-    profiles: &[Profile],
-    questions: &mut impl Questions,
-) -> Result<Offer> {
+fn ready(server: &Server<'_>, profiles: &[Profile], questions: &mut impl Questions) -> Result<()> {
     let instances: Vec<&str> = profiles
         .iter()
         .map(|profile| profile.instance_id.as_str())
@@ -764,7 +752,7 @@ fn ready(
                     .iter()
                     .any(|model| model.provider == profile.instance_id)
             }) {
-                return Ok(offer);
+                return Ok(());
             }
             std::thread::sleep(Duration::from_secs(1));
         }

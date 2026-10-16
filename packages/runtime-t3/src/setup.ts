@@ -69,17 +69,31 @@ const ShellSchema = Type.Object({
  * The projects and models the server at `endpoint` offers, after T3 checks
  * the `refresh` instances again: T3 keeps what it last found of an
  * instance's sign-in, so one signed in since then has to be checked again.
+ * With a scope, only models the named agent may use are offered.
  */
 export async function discover(
   endpoint: T3Endpoint,
   connect: Connect = connectT3,
   refresh: readonly string[] = [],
+  scope?: { readonly installation: Installation; readonly agentId: string },
 ): Promise<Offer> {
+  const agent = scope === undefined ? undefined : agentOf(scope.installation, scope.agentId);
+  const profiles = new Set(
+    scope === undefined ? [] : ((await readExisting(scope.installation))?.profiles ?? []),
+  );
   const connection = await connect(endpoint);
   try {
     for (const instanceId of refresh) await connection.call(RPC.refreshProviders, { instanceId });
     const { available } = catalog(await connection.call(RPC.getConfig, {}));
-    return { projects: await projects(endpoint), models: available };
+    return {
+      projects: await projects(endpoint),
+      models:
+        agent === undefined
+          ? available
+          : available.filter(({ provider }) =>
+              offers(profiles, agent.resources !== undefined, provider),
+            ),
+    };
   } finally {
     connection.close();
   }
@@ -154,7 +168,7 @@ export async function configure(
 ): Promise<Project> {
   const existing = await readExisting(installation);
   const agent = agentOf(installation, choice.agentId);
-  const offer = await discover(endpoint, connect);
+  const offer = await discover(endpoint, connect, [], { installation, agentId: choice.agentId });
   const project = offer.projects.find(({ id }) => id === choice.projectId);
   if (project === undefined) throw new Error(`T3 has no project ${choice.projectId}`);
   const rooted = await realpath(project.workspace).catch(() => undefined);
@@ -165,7 +179,6 @@ export async function configure(
     );
   const assistant = agent.resources !== undefined;
   if (
-    !offers(new Set(existing?.profiles ?? []), assistant, choice.instanceId) ||
     !offer.models.some(
       ({ provider, model }) => provider === choice.instanceId && model === choice.model,
     )

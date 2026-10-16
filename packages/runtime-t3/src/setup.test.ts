@@ -682,3 +682,51 @@ it("makes a Carillon profile: a T3 instance whose home links to the assistant's 
     /has resources/u,
   );
 });
+
+it("discovers each agent's models from every persisted profile through the CLI", async () => {
+  const fake = await fakeT3();
+  const { root, config } = await installation();
+  fake.providers = [
+    ...fake.providers,
+    ...["carillon_claude", "carillon_codex"].map((instanceId) => ({
+      instanceId,
+      driver: "codex",
+      enabled: true,
+      installed: true,
+      status: "ready",
+      models: [{ slug: "profile-model", name: instanceId, capabilities: null }],
+    })),
+  ];
+  await writeFile(
+    join(root, "providers", "runtime-t3.toml"),
+    `url = "${fake.url}"\ntoken_file = "credentials/t3.token"\nprofiles = ["carillon_claude", "carillon_codex"]\n`,
+  );
+  const offered = async (id: string) => {
+    const found = await cli(
+      ["discover", "--config", config, "--url", fake.url, "--agent", id],
+      `${fake.token}\n`,
+    );
+    expect(found.status, found.stderr).toBe(0);
+    const offer: unknown = JSON.parse(found.stdout);
+    return offer;
+  };
+  expect(await offered("assistant")).toMatchObject({
+    models: [
+      { provider: "carillon_claude", model: "profile-model" },
+      { provider: "carillon_codex", model: "profile-model" },
+    ],
+  });
+  expect(await offered("code")).toMatchObject({
+    models: [
+      { provider: "claudeAgent", model: "claude-sonnet-5" },
+      { provider: "claudeAgent", model: "claude-haiku-4-5" },
+      { provider: "codex", model: "gpt-6-astra" },
+    ],
+  });
+  const unknown = await cli(
+    ["discover", "--config", config, "--url", fake.url, "--agent", "unknown"],
+    `${fake.token}\n`,
+  );
+  expect(unknown.status).toBe(1);
+  expect(unknown.stderr).toContain("unknown is not an agent of runtime-t3");
+});
