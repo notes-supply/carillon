@@ -29,18 +29,21 @@ fn provider_browsing_is_read_only_and_model_selection_uses_the_chosen_scope() ->
         ))?;
         assert_eq!(host.state, before);
         assert_eq!(&host.requests[calls..], &[HostRequest::ModelState]);
-        assert!(browsed.content.contains("This conversation: sonnet name"));
-        assert!(
-            browsed
-                .content
-                .contains("Default for new conversations: sonnet name")
+        assert!(shown(&browsed).contains("This conversation\nsonnet name"));
+        assert!(shown(&browsed).contains("Default for new conversations\nsonnet name"));
+        assert_eq!(
+            showing(&browsed, &provider_control(name, "openai")).as_deref(),
+            Some("OpenAI")
         );
-        assert!(browsed.content.contains("Browsing provider: openai"));
         assert_eq!(
             values(&browsed, &format!("model:model:{name}")),
             [key("openai", "gpt")]
         );
         assert_eq!(selected(&browsed, &format!("model:model:{name}")), None);
+        assert_eq!(
+            showing(&browsed, &format!("model:model:{name}")),
+            Some(format!("Model for {}", super::super::scope_target(scope)))
+        );
         assert!(
             !custom_ids(&browsed)
                 .iter()
@@ -82,7 +85,14 @@ fn provider_browsing_is_read_only_and_model_selection_uses_the_chosen_scope() ->
                 &[],
             ),
         ))?;
-        assert!(other.content.contains("Browsing provider: anthropic"));
+        assert_eq!(
+            showing(
+                &other,
+                &provider_control(super::super::scope_name(other_scope), "anthropic")
+            )
+            .as_deref(),
+            Some("Anthropic")
+        );
     }
     Ok(())
 }
@@ -103,12 +113,14 @@ fn provider_removal_and_paging_do_not_retarget_a_selection() -> Result<(), Strin
             &[&fingerprint(&["zeta"])],
         ),
     ))?;
-    assert!(browsed.content.contains("Browsing provider: zeta"));
+    // A provider the runtime does not name is shown by its ID.
+    let zeta = provider_control("conversation", "zeta");
+    assert_eq!(showing(&browsed, &zeta).as_deref(), Some("zeta"));
     let page = expect_reply(interact(
         &mut host,
         &component(&model_page("conversation", "zeta", 1), &[]),
     ))?;
-    assert!(page.content.contains("Browsing provider: zeta"));
+    assert_eq!(showing(&page, &zeta).as_deref(), Some("zeta"));
     assert_eq!(values(&page, "model:model:conversation").len(), PAGE);
     assert!(values(&page, "model:model:conversation").contains(&key("zeta", "model-25")));
     assert_eq!(host.state, before);
@@ -123,12 +135,14 @@ fn provider_removal_and_paging_do_not_retarget_a_selection() -> Result<(), Strin
         ),
     ] {
         let reply = expect_reply(interact(&mut host, &control))?;
-        assert!(
-            reply
-                .content
-                .contains("That provider is no longer available")
+        assert!(shown(&reply).starts_with(
+            "⚠️ That provider is no longer available; the list below is current.\n\
+             This conversation\nsonnet name · thinking medium\n"
+        ));
+        assert_eq!(
+            showing(&reply, &provider_control("conversation", "anthropic")).as_deref(),
+            Some("Anthropic")
         );
-        assert!(reply.content.contains("Browsing provider: anthropic"));
     }
     assert!(
         host.requests
@@ -228,11 +242,10 @@ fn scope_switching_and_defaults_apply_to_the_displayed_scope() -> Result<(), Str
         &component("model:model:agent", &[&key("anthropic", "opus")]),
     ))?;
     assert!(
-        reply
-            .content
-            .contains("Default for new conversations: opus name")
+        shown(&reply).ends_with(
+            "Default for new conversations\nopus name · thinking off\n-# set with /model"
+        )
     );
-    assert!(reply.content.contains("(set with /model)"));
     let reply = expect_reply(interact(&mut host, &component("model:default:agent", &[])))?;
     assert_eq!(
         host.requests[3],
@@ -242,7 +255,7 @@ fn scope_switching_and_defaults_apply_to_the_displayed_scope() -> Result<(), Str
             expected: None,
         }
     );
-    assert!(reply.content.contains("(runtime default)"));
+    assert!(shown(&reply).ends_with("\n-# runtime default"));
     Ok(())
 }
 
@@ -262,7 +275,10 @@ fn paging_reaches_every_model_and_opens_on_the_selection() -> Result<(), String>
     });
     let reply = expect_reply(interact(&mut host, &command(true)))?;
     let model = component_by_id(&reply, "model:model:conversation");
-    assert_eq!(model["placeholder"], "Model — showing 51–60 of 60");
+    assert_eq!(
+        model["placeholder"],
+        "Model for this conversation (51–60 of 60)"
+    );
     assert_eq!(
         selected(&reply, "model:model:conversation"),
         Some(key("zeta", "model-59"))
@@ -311,7 +327,7 @@ fn paging_reaches_every_model_and_opens_on_the_selection() -> Result<(), String>
     );
     assert_eq!(
         component_by_id(&reply, "model:model:conversation")["placeholder"],
-        "Model — showing 1–25 of 60"
+        "Model for this conversation (1–25 of 60)"
     );
     Ok(())
 }
@@ -381,7 +397,7 @@ fn a_setting_from_an_old_panel_never_targets_a_different_model() -> Result<(), S
             .as_array()
             .ok_or("choices")?
             .iter()
-            .find(|option| option["label"] == "high")
+            .find(|option| option["label"] == "Thinking: High")
             .and_then(|option| option["value"].as_str())
             .ok_or("high choice")?;
         // Both models offer the exact same setting/value. Identity, not
@@ -395,12 +411,10 @@ fn a_setting_from_an_old_panel_never_targets_a_different_model() -> Result<(), S
         let before = host.state.clone();
         let calls = host.requests.len();
         let reply = expect_reply(interact(&mut host, &component(&id, &[high])))?;
-        assert!(
-            reply
-                .content
-                .contains("That setting is no longer available")
-        );
-        assert!(reply.content.contains("opus name"));
+        assert!(shown(&reply).starts_with(
+            "⚠️ That setting is no longer available; the controls below are current.\n"
+        ));
+        assert!(shown(&reply).contains("\nopus name · thinking off\n"));
         assert_eq!(host.state, before);
         assert_eq!(&host.requests[calls..], &[HostRequest::ModelState]);
     }
@@ -414,17 +428,16 @@ fn stale_controls_are_reported_without_changing_anything() -> Result<(), String>
         &mut host,
         &component("model:model:conversation", &[&key("anthropic", "retired")]),
     ))?;
-    assert!(reply.content.contains("That model is no longer available"));
+    assert!(
+        shown(&reply)
+            .starts_with("⚠️ That model is no longer available; the list below is current.\n")
+    );
     assert!(custom_ids(&reply).contains(&"model:model:conversation".to_owned()));
     let reply = expect_reply(interact(
         &mut host,
         &component(&thinking_control("conversation"), &[&fingerprint(&["max"])]),
     ))?;
-    assert!(
-        reply
-            .content
-            .contains("That setting is no longer available")
-    );
+    assert!(shown(&reply).starts_with("⚠️ That setting is no longer available"));
     let reply = expect_reply(interact(
         &mut host,
         &component(
@@ -432,11 +445,7 @@ fn stale_controls_are_reported_without_changing_anything() -> Result<(), String>
             &[&fingerprint(&["fast"])],
         ),
     ))?;
-    assert!(
-        reply
-            .content
-            .contains("That setting is no longer available")
-    );
+    assert!(shown(&reply).starts_with("⚠️ That setting is no longer available"));
     assert_eq!(host.requests, [const { HostRequest::ModelState }; 3]);
     Ok(())
 }
@@ -450,11 +459,10 @@ fn a_selection_missing_from_the_catalogue_leaves_no_empty_control() -> Result<()
         read_only: false,
     });
     let reply = expect_reply(interact(&mut host, &command(true)))?;
-    assert!(
-        reply
-            .content
-            .contains("`removed/gone` (not currently available)")
-    );
+    assert!(shown(&reply).starts_with(
+        "This conversation\ngone · thinking high · not currently available\n\
+         -# set for this conversation\n"
+    ));
     assert_eq!(
         custom_ids(&reply),
         [
@@ -563,16 +571,12 @@ fn a_refused_change_shows_the_current_state_without_retrying() -> Result<(), Str
         &mut host,
         &component(&thinking_control("conversation"), &[&high]),
     ))?;
-    assert!(
-        reply.content.contains(
-            "Your change was not confirmed: The model settings changed. The settings below are current."
-        ),
-        "{}",
-        reply.content
-    );
     // The panel is rebuilt from the state read after the refusal, so it
     // shows the other writer's change and controls bound to it.
-    assert!(reply.content.contains("This conversation: opus name"));
+    assert!(shown(&reply).starts_with(
+        "⚠️ Your change was not confirmed: The model settings changed.\n\
+         This conversation\nopus name · thinking high\n"
+    ));
     assert!(custom_ids(&reply).contains(&option_control(
         "conversation",
         "anthropic",
@@ -594,11 +598,10 @@ fn a_refused_change_shows_the_current_state_without_retrying() -> Result<(), Str
         component("model:model:agent", &[&key("openai", "gpt")]),
     ] {
         let reply = expect_reply(interact(&mut host, &control))?;
-        assert!(reply.content.contains("Your change was not confirmed"));
-        assert!(
-            reply
-                .content
-                .contains("Changing the default for new conversations:")
+        assert!(shown(&reply).starts_with("⚠️ Your change was not confirmed"));
+        assert_eq!(
+            component_by_id(&reply, "model:model:agent")["placeholder"],
+            "Model for new conversations"
         );
         assert!(custom_ids(&reply).contains(&"model:default:agent".to_owned()));
     }

@@ -5,12 +5,14 @@
 //! Discord call. Markers are the provider's validated configuration, shown
 //! on status/model rows; section names stay plain. Text a model wrote cannot
 //! format, mention or link anything.
-use crate::contract::{ActivityMarkers, Card, CardRequest, Seen};
+use crate::{
+    contract::{ActivityMarkers, Card, CardRequest, Seen},
+    embed::{Embed, Field, escaped, marked, model_line},
+};
 use carillon_protocol::model::{
     ActivityPhase, AgentInfo, DeliveryOutcome, FinishedTool, Job, TurnActivity, TurnState,
     WorkItem, WorkKind, WorkState,
 };
-use serde::Serialize;
 use std::{collections::HashMap, fmt::Write as _};
 
 const RECENT_LINES: usize = 5;
@@ -33,23 +35,6 @@ pub fn render(request: &CardRequest) -> Card {
         return Card::Remove;
     }
     Card::Show(serde_json::to_value(job_card(job, seen.as_ref(), markers)).unwrap_or_default())
-}
-
-/// A card's embed, as Discord's JSON names its parts.
-#[derive(Debug, Serialize)]
-struct Embed {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    description: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    fields: Vec<Field>,
-}
-
-#[derive(Debug, Serialize)]
-struct Field {
-    inline: bool,
-    name: String,
-    value: String,
 }
 
 /// What a card says of its job as a whole.
@@ -212,6 +197,7 @@ fn card(shown: &Shown<'_>, markers: &ActivityMarkers) -> Embed {
         kind: "rich",
         description: cut(&description.join("\n"), DESCRIPTION_LENGTH),
         fields,
+        footer: None,
     }
 }
 
@@ -474,7 +460,7 @@ fn work_line(item: &WorkItem, markers: &ActivityMarkers) -> String {
 fn agent_line(agent: &AgentInfo, markers: &ActivityMarkers) -> String {
     let mut parts = Vec::new();
     if let Some(model) = &agent.model {
-        parts.push(model_label(model, markers));
+        parts.push(plain(&cut(model, LABEL_LIMIT)));
     }
     if let Some(effort) = &agent.effort {
         parts.push(format!("effort {}", plain(&cut(effort, LABEL_LIMIT))));
@@ -489,18 +475,15 @@ fn agent_line(agent: &AgentInfo, markers: &ActivityMarkers) -> String {
             None => format!("context ≈ {} tokens", tokens(context.used)),
         });
     }
-    parts.join(" · ")
+    let brand = agent
+        .model
+        .as_deref()
+        .map_or("", |model| markers.brand(model));
+    model_line(brand, &parts)
 }
 
-/// Branding is an operator's explicit mapping, not inferred provider telemetry.
 fn model_label(model: &str, markers: &ActivityMarkers) -> String {
-    let marker = markers
-        .models
-        .iter()
-        .filter(|(prefix, _)| model.starts_with(prefix.as_str()))
-        .max_by_key(|(prefix, _)| prefix.len())
-        .map_or("", |(_, marker)| marker.as_str());
-    marked(marker, &plain(&cut(model, LABEL_LIMIT)))
+    marked(markers.brand(model), &plain(&cut(model, LABEL_LIMIT)))
 }
 
 /// A native relative start, or an estimated one said as such.
@@ -558,19 +541,6 @@ fn fitted(lines: &[String], limit: usize) -> String {
     kept.join("\n")
 }
 
-/// Text a model wrote, shown as written but unable to format, mention or
-/// link anything.
-fn escaped(text: &str) -> String {
-    let mut shown = String::with_capacity(text.len());
-    for character in text.chars() {
-        if "\\*_~`|<>[]()#:@".contains(character) {
-            shown.push('\\');
-        }
-        shown.push(character);
-    }
-    shown
-}
-
 /// Text that cannot format, mention or link anything: letters, digits and
 /// a few separators, everything else replaced.
 fn plain(text: &str) -> String {
@@ -594,15 +564,6 @@ fn tool_line(mark: &str, tool: &str, detail: Option<&str>) -> String {
         None => tool,
     };
     marked(mark, &text)
-}
-
-/// Empty markers omit their separating space too.
-fn marked(marker: &str, text: &str) -> String {
-    if marker.is_empty() {
-        text.to_owned()
-    } else {
-        format!("{marker} {text}")
-    }
 }
 
 fn cut(text: &str, limit: usize) -> String {

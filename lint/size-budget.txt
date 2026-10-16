@@ -18,4 +18,4 @@
 3366 packages/runtime-t3/src/watch.test.ts
 1913 packages/runtime-t3/src/watch.ts
 1027 scripts/test-filesystem.mjs
-2196 scripts/test-integration.mjs
+2184 scripts/test-integration.mjs

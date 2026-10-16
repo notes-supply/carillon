@@ -173,6 +173,19 @@ pub struct ActivityMarkers {
     pub models: BTreeMap<String, String>,
 }
 
+impl ActivityMarkers {
+    /// The brand emote of the model with this ID: an operator's explicit
+    /// mapping, never inferred, so an unmatched model has none.
+    #[must_use]
+    pub fn brand(&self, model: &str) -> &str {
+        self.models
+            .iter()
+            .filter(|(prefix, _)| model.starts_with(prefix.as_str()))
+            .max_by_key(|(prefix, _)| prefix.len())
+            .map_or("", |(_, marker)| marker.as_str())
+    }
+}
+
 impl Default for ActivityMarkers {
     fn default() -> Self {
         Self {

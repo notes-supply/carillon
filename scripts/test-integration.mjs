@@ -462,21 +462,16 @@ function assertStartupRefused(name, expected, extraArgs = [], options = {}) {
 async function testModelPicker() {
   const conversation = "discord-100-305";
   const shown = await interact("305", null, "command", "model");
-  assert.match(shown.content, /^\*\*Model settings\*\*\n/u);
-  assert.match(
-    shown.content,
-    /This conversation: Local echo \(`local\/echo`\) \(follows the default for new conversations\)/u,
-  );
-  assert.match(
-    shown.content,
-    /Default for new conversations: Local echo \(`local\/echo`\) \(runtime default\)/u,
+  assert.equal(
+    seen(shown),
+    "This conversation\nLocal echo\n-# follows the default for new conversations\nDefault for new conversations\nLocal echo\n-# runtime default",
   );
   assert.deepEqual(customIds(shown), [
     providerControl(shown, "conversation"),
     "model:model:conversation",
     "model:scope:conversation",
   ]);
-  assert.equal(selectedLabel(shown, providerControl(shown, "conversation")), "local");
+  assert.equal(selectedLabel(shown, providerControl(shown, "conversation")), "Local");
   assert.deepEqual(buttons(shown), [
     "model:scope:conversation",
     "model:scope:agent",
@@ -485,11 +480,11 @@ async function testModelPicker() {
   // Only the browsed provider's models are offered. Identities remain opaque.
   assert.deepEqual(
     options(shown, providerControl(shown, "conversation")).map((option) => option.label),
-    ["local", "substitute"],
+    ["Local", "Substitute"],
   );
   assert.deepEqual(
     options(shown, "model:model:conversation").map((option) => option.description),
-    ["local/echo", "local/reasoner"],
+    ["echo", "reasoner"],
   );
   assert.ok(
     options(shown, "model:model:conversation").every((option) =>
@@ -500,7 +495,7 @@ async function testModelPicker() {
   assert.equal(control(shown, "model:default:conversation").disabled, true);
   // Outside a conversation only the default for new conversations is offered.
   const outside = await interact("301", null, "command", "model");
-  assert.match(outside.content, /Use `\/model` inside a conversation to set a model for it\./u);
+  assert.match(seen(outside), /\nUse \/model inside a conversation to choose its model\.$/u);
   assert.deepEqual(customIds(outside), [
     providerControl(outside, "agent"),
     "model:model:agent",
@@ -510,60 +505,58 @@ async function testModelPicker() {
   // Browsing another provider cannot apply a model or disturb inheritance.
   const provider = providerControl(shown, "conversation");
   const browsed = await interact("305", null, "component", provider, [
-    value(shown, provider, "substitute"),
+    value(shown, provider, "Substitute"),
   ]);
-  assert.equal(selectedLabel(browsed, providerControl(browsed, "conversation")), "substitute");
+  assert.equal(selectedLabel(browsed, providerControl(browsed, "conversation")), "Substitute");
   assert.deepEqual(
     options(browsed, "model:model:conversation").map((option) => option.description),
-    ["substitute/fixed"],
+    ["fixed"],
   );
-  assert.match(browsed.content, /This conversation: Local echo/u);
-  assert.match(browsed.content, /follows the default for new conversations/u);
-  assert.match(browsed.content, /Default for new conversations: Local echo/u);
+  assert.equal(seen(browsed), seen(shown), "browsing changes no selection");
   const stillActive = await simulateRoute("model-browse", "305", null, "which model");
   assert.match(stillActive.delivery.content, /model local\/echo\.$/u);
   const reopened = await interact("305", null, "command", "model");
-  assert.equal(selectedLabel(reopened, providerControl(reopened, "conversation")), "local");
+  assert.equal(selectedLabel(reopened, providerControl(reopened, "conversation")), "Local");
 
   // Choosing a model shows the settings it will run with, defaults included,
   // and a turn runs with exactly those.
   const chosen = await interact("305", null, "component", "model:model:conversation", [
-    value(shown, "model:model:conversation", "local/reasoner"),
+    value(shown, "model:model:conversation", "reasoner"),
   ]);
   assert.match(
-    chosen.content,
-    /This conversation: Local reasoner \(`local\/reasoner`\), Thinking: medium \(set for this conversation\)/u,
+    seen(chosen),
+    /^This conversation\nLocal reasoner · thinking medium\n-# set for this/u,
   );
   const thinking = customIds(chosen).find((id) => id.startsWith("model:option:conversation:"));
   assert.ok(thinking, "the reasoner's thinking setting is offered");
   assert.deepEqual(
     options(chosen, thinking).map((option) => option.label),
-    ["off", "low", "medium", "high"],
+    ["Thinking: Off", "Thinking: Low", "Thinking: Medium", "Thinking: High"],
   );
-  assert.equal(selectedLabel(chosen, thinking), "medium");
+  assert.equal(selectedLabel(chosen, thinking), "Thinking: Medium");
   const defaulted = await simulateRoute("model-0", "305", null, "which model");
   assert.equal(defaulted.conversation_id, conversation);
   assert.match(defaulted.delivery.content, /model local\/reasoner \(thinking=medium\)\.$/u);
 
   const reasoner =
-    /Local reasoner \(`local\/reasoner`\), Thinking: high \(set for this conversation\)/u;
+    /This conversation\nLocal reasoner · thinking high\n-# set for this conversation/u;
   const tuned = await interact("305", null, "component", thinking, [
-    value(chosen, thinking, "high"),
+    value(chosen, thinking, "Thinking: High"),
   ]);
-  assert.match(tuned.content, reasoner);
-  assert.equal(selectedLabel(tuned, thinking), "high");
+  assert.match(seen(tuned), reasoner);
+  assert.equal(selectedLabel(tuned, thinking), "Thinking: High");
   assert.equal(control(tuned, "model:default:conversation").disabled, false);
   const overridden = await simulateRoute("model-1", "305", null, "which model");
   assert.match(overridden.delivery.content, /model local\/reasoner \(thinking=high\)\.$/u);
   // A control left over from an earlier catalogue is reported, not misapplied.
   const staleSetting = await interact("305", null, "component", thinking, ["0000000000000000"]);
-  assert.match(staleSetting.content, /That setting is no longer available/u);
-  assert.match(staleSetting.content, reasoner);
+  assert.match(seen(staleSetting), /That setting is no longer available/u);
+  assert.match(seen(staleSetting), reasoner);
   const staleModel = await interact("305", null, "component", "model:model:conversation", [
     "0000000000000000",
   ]);
-  assert.match(staleModel.content, /That model is no longer available/u);
-  assert.match(staleModel.content, reasoner);
+  assert.match(seen(staleModel), /That model is no longer available/u);
+  assert.match(seen(staleModel), reasoner);
 
   // Core must relay the runtime's atomic precondition, not discard it.
   const staleWrite = await fetch(`http://127.0.0.1:${String(basePort)}/v1/model`, {
@@ -583,11 +576,11 @@ async function testModelPicker() {
   });
   assert.equal(staleWrite.status, 409, await staleWrite.text());
   const unchanged = await interact("305", null, "command", "model");
-  assert.match(unchanged.content, reasoner);
+  assert.match(seen(unchanged), reasoner);
 
   // The default for new conversations also reaches those without a choice of their own.
   const agentScope = await interact("305", null, "component", "model:scope:agent");
-  assert.match(agentScope.content, /Changing the default for new conversations:/u);
+  assert.equal(control(agentScope, "model:model:agent").placeholder, "Model for new conversations");
   assert.deepEqual(customIds(agentScope), [
     providerControl(agentScope, "agent"),
     "model:model:agent",
@@ -595,18 +588,16 @@ async function testModelPicker() {
   ]);
   const agentProvider = providerControl(agentScope, "agent");
   const agentBrowse = await interact("305", null, "component", agentProvider, [
-    value(agentScope, agentProvider, "substitute"),
+    value(agentScope, agentProvider, "Substitute"),
   ]);
-  assert.match(agentBrowse.content, reasoner);
-  assert.match(agentBrowse.content, /Default for new conversations: Local echo/u);
+  assert.match(seen(agentBrowse), reasoner);
+  assert.match(seen(agentBrowse), /Default for new conversations\nLocal echo\n/u);
   const agentSet = await interact("305", null, "component", "model:model:agent", [
-    value(agentBrowse, "model:model:agent", "substitute/fixed"),
+    value(agentBrowse, "model:model:agent", "fixed"),
   ]);
-  assert.match(
-    agentSet.content,
-    /Default for new conversations: Substitute fixed \(`substitute\/fixed`\) \(set with \/model\)/u,
-  );
-  assert.match(agentSet.content, reasoner);
+  const substitute = /Default for new conversations\nSubstitute fixed\n-# set with \/model/u;
+  assert.match(seen(agentSet), substitute);
+  assert.match(seen(agentSet), reasoner);
   const elsewhere = await simulateRoute("model-2", "406", "302", "which model");
   assert.notEqual(elsewhere.conversation_id, conversation);
   assert.match(elsewhere.delivery.content, /model substitute\/fixed\.$/u);
@@ -616,27 +607,14 @@ async function testModelPicker() {
   // Selections live in the runtime's ledger, not in a process.
   await restart("runtime");
   const persisted = await interact("305", null, "command", "model");
-  assert.match(persisted.content, reasoner);
-  assert.match(
-    persisted.content,
-    /Default for new conversations: Substitute fixed \(`substitute\/fixed`\) \(set with \/model\)/u,
-  );
+  assert.match(seen(persisted), reasoner);
+  assert.match(seen(persisted), substitute);
 
   // Each scope returns to its default separately.
   const followsAgent = await interact("305", null, "component", "model:default:conversation");
-  assert.match(
-    followsAgent.content,
-    /This conversation: Substitute fixed \(`substitute\/fixed`\) \(follows the default for new conversations\)/u,
-  );
+  assert.match(seen(followsAgent), /^This conversation\nSubstitute fixed\n-# follows the default/u);
   const runtimeDefault = await interact("305", null, "component", "model:default:agent");
-  assert.match(
-    runtimeDefault.content,
-    /Default for new conversations: Local echo \(`local\/echo`\) \(runtime default\)/u,
-  );
-  assert.match(
-    runtimeDefault.content,
-    /This conversation: Local echo \(`local\/echo`\) \(follows the default for new conversations\)/u,
-  );
+  assert.equal(seen(runtimeDefault), seen(shown), "each scope is back to its default");
   const reset = await simulateRoute("model-4", "305", null, "which model");
   assert.match(reset.delivery.content, /model local\/echo\.$/u);
 
@@ -644,16 +622,12 @@ async function testModelPicker() {
   // keeps the selection it started with and the next turn picks up the change.
   const held = await holdTurn("held-turn");
   const during = await interact("305", null, "component", "model:model:agent", [
-    value(shown, "model:model:conversation", "local/reasoner"),
+    value(shown, "model:model:conversation", "reasoner"),
   ]);
-  assert.match(
-    during.content,
-    /Default for new conversations: Local reasoner \(`local\/reasoner`\), Thinking: medium \(set with \/model\)/u,
-  );
-  assert.match(
-    (await interact("305", null, "command", "model")).content,
-    /Default for new conversations: Local reasoner \(`local\/reasoner`\), Thinking: medium \(set with \/model\)/u,
-  );
+  const confirmed =
+    /Default for new conversations\nLocal reasoner · thinking medium\n-# set with \/model/u;
+  assert.match(seen(during), confirmed);
+  assert.match(seen(await interact("305", null, "command", "model")), confirmed);
   const released = await held.release();
   assert.match(released.output, /model local\/echo\.$/u, "the running turn keeps its selection");
   const next = await simulateRoute("model-5", "305", null, "which model");
@@ -761,8 +735,8 @@ async function testModuleOperations() {
     `discord-private serves the custom Discord module ${custom}: ${commands}.`,
   );
   assert.match(
-    (await interact("305", null, "command", "model")).content,
-    /Default for new conversations:/u,
+    seen(await interact("305", null, "command", "model")),
+    /Default for new conversations/u,
   );
 
   // A rebuild that breaks is declared, refused when applied, and the
@@ -779,8 +753,8 @@ async function testModuleOperations() {
   assert.notEqual(refused.status, 0, "an apply served a broken module");
   assert.match(refused.stderr, /not a usable Discord module.*nothing was applied/u);
   assert.match(
-    (await interact("305", null, "command", "model")).content,
-    /Default for new conversations:/u,
+    seen(await interact("305", null, "command", "model")),
+    /Default for new conversations/u,
   );
 
   // A working rebuild at the same path serves once applied.
@@ -807,8 +781,8 @@ async function testModuleOperations() {
   );
   assert.equal(operate(), `discord-private serves the bundled Discord module: ${commands}.`);
   assert.match(
-    (await interact("305", null, "command", "model")).content,
-    /Default for new conversations:/u,
+    seen(await interact("305", null, "command", "model")),
+    /Default for new conversations/u,
   );
   await rm(custom);
   await writeFile(settingsFile, before);
@@ -1881,6 +1855,20 @@ async function interact(channelId, parentChannelId, kind, name, values = [], opt
 }
 
 /** The first control of each action row. */
+/** A reply as a person reads it: its text, then its embeds' notes, sections and hints. */
+function seen(reply) {
+  return [
+    reply.content,
+    ...reply.embeds.flatMap((embed) => [
+      embed.description,
+      ...(embed.fields ?? []).flatMap((field) => [field.name, field.value]),
+      embed.footer?.text,
+    ]),
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 function customIds(reply) {
   return reply.components.map((row) => row.components[0].custom_id);
 }

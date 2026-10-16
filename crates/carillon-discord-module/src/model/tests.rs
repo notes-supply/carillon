@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::{COMMAND, interact};
 use crate::components::{PAGE, TEXT_LIMIT, fingerprint};
@@ -197,21 +197,22 @@ fn oversized_state_and_errors_keep_replies_sendable() -> Result<(), String> {
     host.state.agent = scope.clone();
     host.state.conversation = Some(scope);
     let reply = expect_reply(interact(&mut host, &command(true)))?;
-    assert!(reply.content.contains("This conversation:"));
-    assert!(reply.content.contains("Default for new conversations:"));
-    assert!(reply.content.contains('…'));
+    assert!(shown(&reply).contains("This conversation\n🦀"));
+    assert!(shown(&reply).contains("Default for new conversations\n🦀"));
+    assert!(shown(&reply).contains('…'));
     assert!(!reply.components.is_empty());
     host.refusal = Some(long.clone());
     let reply = expect_reply(interact(
         &mut host,
         &component("model:default:conversation", &[]),
     ))?;
-    assert!(reply.content.contains("Your change was not confirmed:"));
-    assert!(reply.content.contains("Default for new conversations:"));
+    assert!(shown(&reply).starts_with("⚠️ Your change was not confirmed: 🦀"));
+    assert!(shown(&reply).contains("Default for new conversations\n🦀"));
     assert!(!reply.components.is_empty());
     host.failure = Some(long);
     let reply = expect_reply(interact(&mut host, &command(true)))?;
     assert!(reply.content.starts_with("Model settings are unavailable:"));
+    assert!(reply.embeds.is_empty());
     Ok(())
 }
 
@@ -220,22 +221,19 @@ fn a_read_only_scope_shows_its_selection_without_controls() -> Result<(), String
     let mut host = runtime(true);
     host.state.agent.read_only = true;
     let reply = expect_reply(interact(&mut host, &command(true)))?;
-    assert!(
-        reply
-            .content
-            .contains("Default for new conversations: sonnet name")
-    );
-    assert!(reply.content.contains("(set by the runtime)"));
+    assert!(shown(&reply).ends_with(
+        "Default for new conversations\nsonnet name · thinking medium\n-# set by the runtime"
+    ));
     assert!(custom_ids(&reply).contains(&"model:model:conversation".to_owned()));
 
     let reply = expect_reply(interact(&mut host, &component("model:scope:agent", &[])))?;
-    assert!(reply.content.ends_with(
-        "The default for new conversations is set by the runtime and cannot be \
-         changed here."
+    assert!(shown(&reply).starts_with(
+        "The default for new conversations is set by the runtime and cannot be changed here.\n\
+         This conversation\n"
     ));
     assert_eq!(
-        custom_ids(&reply),
-        ["model:scope:conversation", "model:scope:agent"]
+        labels(&reply),
+        ["This conversation", "Default for new conversations"]
     );
 
     let mut host = runtime(false);
@@ -247,6 +245,23 @@ fn a_read_only_scope_shows_its_selection_without_controls() -> Result<(), String
             .iter()
             .all(|request| matches!(request, HostRequest::ModelState))
     );
+    Ok(())
+}
+
+#[test]
+fn a_runtime_without_models_says_so_and_offers_no_controls() -> Result<(), String> {
+    let mut host = runtime(true);
+    host.state.available.clear();
+    host.state.agent.selection = None;
+    host.state.conversation = Some(host.state.agent.clone());
+    let reply = expect_reply(interact(&mut host, &command(true)))?;
+    assert_eq!(
+        shown(&reply),
+        "No models are available from the runtime.\n\
+         This conversation\nNo model selected\n-# follows the default for new conversations\n\
+         Default for new conversations\nNo model selected\n-# runtime default"
+    );
+    assert!(reply.components.is_empty());
     Ok(())
 }
 
@@ -296,8 +311,8 @@ fn thinking_control(scope: &str) -> String {
     option_control(scope, "anthropic", "sonnet", "thinking")
 }
 
-/// A reply, checked against the Discord component limits the module
-/// promises to respect.
+/// A reply, checked against the Discord limits the module promises to
+/// respect: its embeds as the host checks them, and its components.
 fn expect_reply(outcome: Outcome) -> Result<Reply, String> {
     let Outcome::Reply(reply) = outcome else {
         return Err(format!("expected a reply, got {outcome:?}"));
@@ -306,6 +321,10 @@ fn expect_reply(outcome: Outcome) -> Result<Reply, String> {
         reply.content.chars().count() <= 2000,
         "reply content too long"
     );
+    let embeds: Vec<twilight_model::channel::message::Embed> =
+        serde_json::from_value(Value::Array(reply.embeds.clone()))
+            .map_err(|error| error.to_string())?;
+    twilight_validate::message::embeds(&embeds).map_err(|error| error.to_string())?;
     assert!(reply.components.len() <= 5, "too many rows");
     for row in &reply.components {
         let components = row["components"]
@@ -323,6 +342,11 @@ fn expect_reply(outcome: Outcome) -> Result<Reply, String> {
                 continue;
             }
             assert!(components.len() == 1, "a select fills its row");
+            assert!(
+                component["placeholder"]
+                    .as_str()
+                    .is_some_and(|text| text.chars().count() <= 150)
+            );
             let options = component["options"]
                 .as_array()
                 .ok_or("select without options")?;
@@ -342,6 +366,22 @@ fn expect_reply(outcome: Outcome) -> Result<Reply, String> {
     Ok(reply)
 }
 
+/// The reply as a person reads it: its text, then its embed's notes, each
+/// section's heading and lines, and its closing hint.
+fn shown(reply: &Reply) -> String {
+    let mut lines = vec![reply.content.as_str()];
+    for embed in &reply.embeds {
+        lines.extend(embed["description"].as_str());
+        for field in embed["fields"].as_array().into_iter().flatten() {
+            lines.extend(field["name"].as_str());
+            lines.extend(field["value"].as_str());
+        }
+        lines.extend(embed["footer"]["text"].as_str());
+    }
+    lines.retain(|line| !line.is_empty());
+    lines.join("\n")
+}
+
 fn components(reply: &Reply) -> Vec<&Value> {
     reply
         .components
@@ -359,6 +399,15 @@ fn custom_ids(reply: &Reply) -> Vec<String> {
         .collect()
 }
 
+/// Each button's label, in order.
+fn labels(reply: &Reply) -> Vec<String> {
+    components(reply)
+        .into_iter()
+        .filter_map(|component| component["label"].as_str())
+        .map(str::to_owned)
+        .collect()
+}
+
 fn component_by_id<'a>(reply: &'a Reply, custom_id: &str) -> &'a Value {
     components(reply)
         .into_iter()
@@ -366,67 +415,103 @@ fn component_by_id<'a>(reply: &'a Reply, custom_id: &str) -> &'a Value {
         .unwrap_or(&Value::Null)
 }
 
-fn selected(reply: &Reply, custom_id: &str) -> Option<String> {
+fn options<'a>(reply: &'a Reply, custom_id: &str) -> &'a [Value] {
     component_by_id(reply, custom_id)["options"]
-        .as_array()?
+        .as_array()
+        .map_or(&[], Vec::as_slice)
+}
+
+fn selected(reply: &Reply, custom_id: &str) -> Option<String> {
+    options(reply, custom_id)
         .iter()
         .find(|option| option["default"] == true)?["value"]
         .as_str()
         .map(str::to_owned)
 }
 
+/// What a select shows: its chosen option's label, otherwise its placeholder.
+fn showing(reply: &Reply, custom_id: &str) -> Option<String> {
+    options(reply, custom_id)
+        .iter()
+        .find(|option| option["default"] == true)
+        .map_or(
+            &component_by_id(reply, custom_id)["placeholder"],
+            |option| &option["label"],
+        )
+        .as_str()
+        .map(str::to_owned)
+}
+
 fn values(reply: &Reply, custom_id: &str) -> Vec<String> {
-    component_by_id(reply, custom_id)["options"]
-        .as_array()
-        .map(|options| {
-            options
-                .iter()
-                .filter_map(|option| option["value"].as_str())
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
+    options(reply, custom_id)
+        .iter()
+        .filter_map(|option| option["value"].as_str())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn option_labels(reply: &Reply, custom_id: &str) -> Vec<String> {
+    options(reply, custom_id)
+        .iter()
+        .filter_map(|option| option["label"].as_str())
+        .map(str::to_owned)
+        .collect()
 }
 
 #[test]
-fn command_shows_both_scopes_and_targets_the_conversation_first() -> Result<(), String> {
+fn in_a_conversation_both_scopes_show_and_the_controls_change_the_conversation()
+-> Result<(), String> {
     let mut host = runtime(true);
     let reply = expect_reply(interact(&mut host, &command(true)))?;
-    assert!(reply.content.contains("This conversation: sonnet name"));
-    assert!(reply.content.contains("Thinking: medium"));
-    assert!(
-        reply
-            .content
-            .contains("follows the default for new conversations")
+    assert_eq!(
+        shown(&reply),
+        "This conversation\nsonnet name · thinking medium\n\
+         -# follows the default for new conversations\n\
+         Default for new conversations\nsonnet name · thinking medium\n-# runtime default"
     );
-    assert!(
-        reply
-            .content
-            .contains("Default for new conversations: sonnet name")
+    let provider = provider_control("conversation", "anthropic");
+    assert_eq!(option_labels(&reply, &provider), ["Anthropic", "OpenAI"]);
+    assert_eq!(showing(&reply, &provider).as_deref(), Some("Anthropic"));
+    assert_eq!(
+        component_by_id(&reply, &provider)["placeholder"],
+        "Provider for this conversation"
+    );
+    let model = "model:model:conversation";
+    assert_eq!(option_labels(&reply, model), ["opus name", "sonnet name"]);
+    assert_eq!(showing(&reply, model).as_deref(), Some("sonnet name"));
+    assert_eq!(
+        options(&reply, model)
+            .iter()
+            .map(|option| option["description"].as_str())
+            .collect::<Vec<_>>(),
+        [Some("opus"), Some("sonnet")]
     );
     assert_eq!(
-        custom_ids(&reply),
+        component_by_id(&reply, model)["placeholder"],
+        "Model for this conversation"
+    );
+    let thinking = thinking_control("conversation");
+    assert_eq!(
+        option_labels(&reply, &thinking),
         [
-            provider_control("conversation", "anthropic"),
-            "model:model:conversation".to_owned(),
-            thinking_control("conversation"),
-            "model:scope:conversation".to_owned(),
-            "model:scope:agent".to_owned(),
-            "model:default:conversation".to_owned(),
+            "Thinking: Off",
+            "Thinking: Low",
+            "Thinking: Medium",
+            "Thinking: High"
         ]
     );
     assert_eq!(
-        selected(&reply, "model:model:conversation"),
-        Some(key("anthropic", "sonnet"))
+        showing(&reply, &thinking).as_deref(),
+        Some("Thinking: Medium")
     );
     assert_eq!(
-        selected(&reply, &thinking_control("conversation")),
-        Some(fingerprint(&["medium"]))
+        labels(&reply),
+        [
+            "This conversation",
+            "Default for new conversations",
+            "Use default for new conversations"
+        ]
     );
-    let model = component_by_id(&reply, "model:model:conversation");
-    assert_eq!(model["placeholder"], "Model");
-    assert_eq!(model["options"][0]["label"], "opus name");
-    assert_eq!(model["options"][0]["description"], "anthropic/opus");
     // The displayed scope is highlighted; nothing to undo while the
     // conversation follows the default for new conversations.
     assert_eq!(
@@ -443,10 +528,15 @@ fn command_shows_both_scopes_and_targets_the_conversation_first() -> Result<(), 
 }
 
 #[test]
-fn outside_a_conversation_only_the_agent_scope_is_offered() -> Result<(), String> {
+fn outside_a_conversation_only_the_default_for_new_conversations_is_offered() -> Result<(), String>
+{
     let mut host = runtime(false);
     let reply = expect_reply(interact(&mut host, &command(false)))?;
-    assert!(reply.content.contains("Use `/model` inside a conversation"));
+    assert_eq!(
+        shown(&reply),
+        "Default for new conversations\nsonnet name · thinking medium\n-# runtime default\n\
+         Use /model inside a conversation to choose its model."
+    );
     assert_eq!(
         custom_ids(&reply),
         [
@@ -455,6 +545,102 @@ fn outside_a_conversation_only_the_agent_scope_is_offered() -> Result<(), String
             thinking_control("agent"),
             "model:default:agent".to_owned(),
         ]
+    );
+    assert_eq!(
+        component_by_id(&reply, "model:model:agent")["placeholder"],
+        "Model for new conversations"
+    );
+    assert_eq!(labels(&reply), ["Use runtime default"]);
+    Ok(())
+}
+
+#[test]
+fn brand_emotes_come_from_the_providers_markers() -> Result<(), String> {
+    let mut host = runtime(true);
+    let mut interaction = command(true);
+    interaction.markers.models.extend([
+        ("sonnet".to_owned(), "<:claude:111>".to_owned()),
+        ("opus".to_owned(), "<:claude:111>".to_owned()),
+        ("gpt".to_owned(), "✳️".to_owned()),
+    ]);
+    let reply = expect_reply(interact(&mut host, &interaction))?;
+    assert!(
+        shown(&reply)
+            .starts_with("This conversation\n<:claude:111> sonnet name · thinking medium\n")
+    );
+    let claude = json!({ "id": "111", "name": "claude", "animated": false });
+    let provider = provider_control("conversation", "anthropic");
+    // A Unicode marker shows in the text only: Discord refuses an option
+    // emoji that is not an emoji, and markers may be other symbols.
+    assert_eq!(
+        options(&reply, &provider)
+            .iter()
+            .map(|option| &option["emoji"])
+            .collect::<Vec<_>>(),
+        [&claude, &Value::Null]
+    );
+    assert!(
+        options(&reply, "model:model:conversation")
+            .iter()
+            .all(|option| option["emoji"] == claude)
+    );
+
+    let mut gpt = command(true);
+    gpt.markers = interaction.markers.clone();
+    host.state.agent.selection = Some(selection("openai", "gpt", None));
+    let reply = expect_reply(interact(&mut host, &gpt))?;
+    assert!(shown(&reply).contains("Default for new conversations\n✳️ gpt name\n"));
+    Ok(())
+}
+
+#[test]
+fn choices_read_as_the_runtime_names_them_and_send_their_ids() -> Result<(), String> {
+    let mut host = runtime(true);
+    host.state.available[2].options = vec![ModelOption {
+        id: "serviceTier".to_owned(),
+        name: "Speed".to_owned(),
+        choices: vec![
+            OptionChoice {
+                id: "default".to_owned(),
+                name: "Standard".to_owned(),
+            },
+            OptionChoice {
+                id: "priority".to_owned(),
+                name: "Fast".to_owned(),
+            },
+        ],
+        default: "default".to_owned(),
+    }];
+    expect_reply(interact(
+        &mut host,
+        &component("model:model:conversation", &[&key("openai", "gpt")]),
+    ))?;
+    let speed = option_control("conversation", "openai", "gpt", "serviceTier");
+    let reply = expect_reply(interact(
+        &mut host,
+        &component(&speed, &[&fingerprint(&["priority"])]),
+    ))?;
+    assert!(shown(&reply).starts_with("This conversation\ngpt name · speed fast\n"));
+    assert_eq!(
+        option_labels(&reply, &speed),
+        ["Speed: Standard", "Speed: Fast"]
+    );
+    assert_eq!(showing(&reply, &speed).as_deref(), Some("Speed: Fast"));
+    let mut options = BTreeMap::new();
+    options.insert("serviceTier".to_owned(), "priority".to_owned());
+    assert_eq!(
+        host.requests[3],
+        HostRequest::SetModel {
+            scope: Scope::Conversation,
+            selection: Some(Selection {
+                options,
+                ..selection("openai", "gpt", None)
+            }),
+            expected: Some(Selection {
+                options: BTreeMap::from([("serviceTier".to_owned(), "default".to_owned())]),
+                ..selection("openai", "gpt", None)
+            }),
+        }
     );
     Ok(())
 }
@@ -474,8 +660,9 @@ fn choosing_a_model_starts_from_its_defaults_and_settings_pin_the_view() -> Resu
             expected: None,
         }
     );
-    assert!(reply.content.contains("This conversation: gpt name"));
-    assert!(reply.content.contains("set for this conversation"));
+    assert!(
+        shown(&reply).starts_with("This conversation\ngpt name\n-# set for this conversation\n")
+    );
     assert!(!custom_ids(&reply).contains(&option_control(
         "conversation",
         "anthropic",
@@ -499,19 +686,11 @@ fn choosing_a_model_starts_from_its_defaults_and_settings_pin_the_view() -> Resu
             expected: None,
         }
     );
-    assert_eq!(
-        selected(
-            &reply,
-            &option_control("conversation", "anthropic", "opus", "thinking")
-        ),
-        Some(fingerprint(&["off"]))
-    );
+    let thinking = option_control("conversation", "anthropic", "opus", "thinking");
+    assert_eq!(showing(&reply, &thinking).as_deref(), Some("Thinking: Off"));
     let reply = expect_reply(interact(
         &mut host,
-        &component(
-            &option_control("conversation", "anthropic", "opus", "thinking"),
-            &[&fingerprint(&["high"])],
-        ),
+        &component(&thinking, &[&fingerprint(&["high"])]),
     ))?;
     assert_eq!(
         host.requests[5],
@@ -521,7 +700,9 @@ fn choosing_a_model_starts_from_its_defaults_and_settings_pin_the_view() -> Resu
             expected: Some(selection("anthropic", "opus", Some("off"))),
         }
     );
-    assert!(reply.content.contains("Thinking: high"));
+    assert!(shown(&reply).starts_with(
+        "This conversation\nopus name · thinking high\n-# set for this conversation\n"
+    ));
     Ok(())
 }
 

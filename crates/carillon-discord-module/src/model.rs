@@ -1,5 +1,6 @@
-//! `/model`: show the effective model for the conversation and its channel,
-//! and change either scope through Discord components. Every change is
+//! `/model`: show the effective model for the conversation and its channel
+//! in one embed drawn like the work cards, and change either scope through
+//! Discord components. Every change is
 //! applied immediately and the panel re-renders from the runtime's confirmed
 //! state. A change the runtime refuses, or does not confirm, is reported
 //! above the state read afterwards, with controls bound to it; it is never
@@ -21,26 +22,29 @@ use carillon_protocol::model::ModelScope as Scope;
 use carillon_protocol::models::{AvailableModel, ModelOption, ModelState, ScopeState, Selection};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt::Write as _,
+    iter,
 };
 
 use serde_json::{Value, json};
 
 use crate::{
     HostCalls,
-    components::{PAGE, PRIMARY, SECONDARY, button, choice, fingerprint, select, shorten, text},
-    contract::{Interaction, InteractionKind, Outcome, Reply},
+    components::{
+        PAGE, PRIMARY, SECONDARY, TEXT_LIMIT, branded, button, choice, fingerprint, select, shorten,
+    },
+    contract::{ActivityMarkers, Interaction, InteractionKind, Outcome, Reply},
+    embed::{Embed, Field, Footer, escaped, marked, model_line},
 };
 
 pub const COMMAND: &str = "model";
 /// Provider, model, and action buttons leave two of Discord's five rows.
 const SETTING_ROWS: usize = 2;
 /// Bound for a runtime's explanation shown above the panel, which leaves
-/// room for both scopes' summaries within Discord's message limit.
+/// room for both scopes' summaries within Discord's embed limits.
 const NOTE_LIMIT: usize = 400;
+/// Bound for a scope's selection line, within an embed field's limit.
+const LINE_LIMIT: usize = 900;
 const STALE_PROVIDER: &str = "That provider is no longer available; the list below is current.";
-const STALE_MODEL: &str = "That model is no longer available; the list below is current.";
-const STALE_SETTING: &str = "That setting is no longer available; the controls below are current.";
 
 pub fn definition() -> Value {
     json!({
@@ -95,7 +99,7 @@ pub fn interact(host: &mut impl HostCalls, interaction: &Interaction) -> Outcome
                         )
                         .map_err(Unavailable::Write)
                     } else {
-                        view.note = Some(STALE_MODEL.to_owned());
+                        view.note = Some(Note::StaleModel);
                         Ok(state)
                     }
                 })
@@ -118,7 +122,7 @@ pub fn interact(host: &mut impl HostCalls, interaction: &Interaction) -> Outcome
                     )
                     .map_err(Unavailable::Write)
                 } else {
-                    view.note = Some(STALE_SETTING.to_owned());
+                    view.note = Some(Note::StaleSetting);
                     Ok(state)
                 }
             }),
@@ -137,7 +141,7 @@ pub fn interact(host: &mut impl HostCalls, interaction: &Interaction) -> Outcome
                 Scope::Agent
             },
         );
-    Outcome::Reply(render(&state, scope, &view))
+    Outcome::Reply(render(&state, scope, &view, &interaction.markers))
 }
 
 /// The state to render, or the reply to send when there is none. The
@@ -152,10 +156,7 @@ fn settle(
         Ok(state) => Ok(state),
         Err(Unavailable::Write(refusal)) => match host.model_state() {
             Ok(state) => {
-                view.note = Some(format!(
-                    "Your change was not confirmed: {} The settings below are current.",
-                    shorten(&refusal, NOTE_LIMIT)
-                ));
+                view.note = Some(Note::Unconfirmed(refusal));
                 Ok(state)
             }
             Err(error) => Err(unavailable(&format!(
@@ -227,7 +228,34 @@ struct View {
     /// The setting (by fingerprint) whose choices to show when settings
     /// outnumber their rows.
     setting: Option<String>,
-    note: Option<String>,
+    note: Option<Note>,
+}
+
+/// What became of the interaction's control, said above the state shown.
+enum Note {
+    /// The runtime refused the change or did not confirm it, saying this.
+    Unconfirmed(String),
+    /// The control named a model the catalogue no longer lists.
+    StaleModel,
+    /// The control named a setting or choice the model no longer offers.
+    StaleSetting,
+}
+
+impl Note {
+    fn text(&self) -> String {
+        match self {
+            Self::Unconfirmed(refusal) => format!(
+                "Your change was not confirmed: {}",
+                escaped(&shorten(refusal, NOTE_LIMIT))
+            ),
+            Self::StaleModel => {
+                "That model is no longer available; the list below is current.".to_owned()
+            }
+            Self::StaleSetting => {
+                "That setting is no longer available; the controls below are current.".to_owned()
+            }
+        }
+    }
 }
 
 /// Custom IDs follow `model:<control>:<scope>[:<argument>]`, where the
@@ -336,21 +364,20 @@ fn find_model<'a>(
         .find(|candidate| candidate.provider == provider && candidate.model == model)
 }
 
-fn render(state: &ModelState, scope: Scope, view: &View) -> Reply {
-    let mut content = summary(state);
-    if let Some(note) = &view.note {
-        content.push_str(note);
-        content.push('\n');
-    }
+fn render(state: &ModelState, scope: Scope, view: &View, markers: &ActivityMarkers) -> Reply {
+    let mut notes: Vec<String> = view
+        .note
+        .iter()
+        .map(|note| marked(&markers.uncertain, &note.text()))
+        .collect();
     let components = if state.available.is_empty() {
-        content.push_str("No models are available from the runtime.");
+        notes.push("No models are available from the runtime.".to_owned());
         Vec::new()
     } else if effective(state, scope).is_some_and(|scope| scope.read_only) {
-        let _ = write!(
-            content,
+        notes.push(format!(
             "The {} is set by the runtime and cannot be changed here.",
             scope_label(scope)
-        );
+        ));
         let buttons = scope_buttons(state, scope);
         if buttons.is_empty() {
             Vec::new()
@@ -358,72 +385,72 @@ fn render(state: &ModelState, scope: Scope, view: &View) -> Reply {
             vec![json!({ "type": 1, "components": buttons })]
         }
     } else {
-        let providers: Vec<&str> = state
-            .available
-            .iter()
-            .map(|model| model.provider.as_str())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
+        let providers = browsable(state, markers);
         let browsed = providers
             .iter()
-            .find(|provider| Some(fingerprint(&[provider])) == view.provider);
+            .find(|provider| Some(fingerprint(&[provider.id])) == view.provider);
         if view.provider.is_some() && browsed.is_none() {
-            let _ = writeln!(content, "{STALE_PROVIDER}");
+            notes.push(marked(&markers.uncertain, STALE_PROVIDER));
         }
         let selection = effective(state, scope).and_then(|scope| scope.selection.as_ref());
         let provider = browsed
             .or_else(|| {
                 providers
                     .iter()
-                    .find(|provider| selection.is_some_and(|s| s.provider == **provider))
+                    .find(|provider| selection.is_some_and(|s| s.provider == provider.id))
             })
             .unwrap_or(&providers[0]);
-        let _ = writeln!(content, "Changing the {}:", scope_label(scope));
-        let _ = write!(
-            content,
-            "Browsing provider: {}. Choose a model to apply it.",
-            text(provider)
-        );
-        controls(state, scope, view, &providers, provider)
+        controls(state, scope, view, &providers, provider, markers)
+    };
+    let embed = Embed {
+        kind: "rich",
+        description: notes.join("\n"),
+        fields: fields(state, markers),
+        footer: state.conversation.is_none().then(|| Footer {
+            text: "Use /model inside a conversation to choose its model.".to_owned(),
+        }),
     };
     Reply {
-        content,
-        embeds: Vec::new(),
+        content: String::new(),
+        embeds: vec![serde_json::to_value(embed).unwrap_or_default()],
         components,
     }
 }
 
-fn summary(state: &ModelState) -> String {
-    let mut content = String::from("**Model settings**\n");
+/// Each scope's selection, and where it comes from.
+fn fields(state: &ModelState, markers: &ActivityMarkers) -> Vec<Field> {
+    let field = |name: &str, scope: &ScopeState, source: &str| Field {
+        inline: false,
+        name: name.to_owned(),
+        value: format!(
+            "{}\n-# {source}",
+            describe(state, scope.selection.as_ref(), markers)
+        ),
+    };
+    let mut fields = Vec::new();
     if let Some(conversation) = &state.conversation {
-        let _ = writeln!(
-            content,
-            "This conversation: {} ({})",
-            describe(state, conversation.selection.as_ref()),
+        fields.push(field(
+            "This conversation",
+            conversation,
             if conversation.overridden {
                 "set for this conversation"
             } else {
                 "follows the default for new conversations"
-            }
-        );
+            },
+        ));
     }
-    let _ = writeln!(
-        content,
-        "Default for new conversations: {} ({})",
-        describe(state, state.agent.selection.as_ref()),
+    fields.push(field(
+        "Default for new conversations",
+        &state.agent,
         if state.agent.read_only {
             "set by the runtime"
         } else if state.agent.overridden {
             "set with /model"
         } else {
             "runtime default"
-        }
-    );
-    if state.conversation.is_none() {
-        content.push_str("Use `/model` inside a conversation to set a model for it.\n");
-    }
-    content
+        },
+    ));
+    fields
 }
 
 /// The scope as the panel names it. Every channel routed to an agent shares
@@ -435,11 +462,59 @@ const fn scope_label(scope: Scope) -> &'static str {
     }
 }
 
+/// What a control changes, as its placeholder ends.
+const fn scope_target(scope: Scope) -> &'static str {
+    match scope {
+        Scope::Agent => "new conversations",
+        Scope::Conversation => "this conversation",
+    }
+}
+
 const fn scope_name(scope: Scope) -> &'static str {
     match scope {
         Scope::Agent => "agent",
         Scope::Conversation => "conversation",
     }
+}
+
+/// A provider the panel browses: its catalogue ID, the name its runtime
+/// gives it, and the brand all its models share, if they share one.
+struct Browsable<'a> {
+    id: &'a str,
+    name: &'a str,
+    brand: &'a str,
+}
+
+/// The providers of the catalogue's models, in ID order.
+fn browsable<'a>(state: &'a ModelState, markers: &'a ActivityMarkers) -> Vec<Browsable<'a>> {
+    state
+        .available
+        .iter()
+        .map(|model| model.provider.as_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|id| {
+            let mut brands = state
+                .available
+                .iter()
+                .filter(|model| model.provider == id)
+                .map(|model| markers.brand(&model.model));
+            let first = brands.next().unwrap_or_default();
+            Browsable {
+                id,
+                name: state
+                    .providers
+                    .iter()
+                    .find(|provider| provider.id == id)
+                    .map_or(id, |provider| provider.name.as_str()),
+                brand: if brands.all(|brand| brand == first) {
+                    first
+                } else {
+                    ""
+                },
+            }
+        })
+        .collect()
 }
 
 /// Provider and model menus, the active model's settings when browsing its
@@ -448,8 +523,9 @@ fn controls(
     state: &ModelState,
     scope: Scope,
     view: &View,
-    providers: &[&str],
-    provider: &str,
+    providers: &[Browsable<'_>],
+    provider: &Browsable<'_>,
+    markers: &ActivityMarkers,
 ) -> Vec<Value> {
     let name = scope_name(scope);
     let current = effective(state, scope);
@@ -457,7 +533,7 @@ fn controls(
     let mut models: Vec<&AvailableModel> = state
         .available
         .iter()
-        .filter(|model| model.provider == provider)
+        .filter(|model| model.provider == provider.id)
         .collect();
     models.sort_by(|left, right| {
         (&left.provider, display_name(left), &left.model).cmp(&(
@@ -476,37 +552,40 @@ fn controls(
         .page
         .unwrap_or_else(|| selected.map_or(0, |index| index / PAGE))
         .min(pages - 1);
+    let mut placeholder = format!("Model for {}", scope_target(scope));
+    if pages > 1 {
+        placeholder = format!(
+            "{placeholder} ({}–{} of {})",
+            page * PAGE + 1,
+            ((page + 1) * PAGE).min(models.len()),
+            models.len()
+        );
+    }
     let mut rows = vec![
-        provider_select(name, providers, provider, view.provider_page),
+        provider_select(scope, providers, provider, view.provider_page),
         select(
             &format!("model:model:{name}"),
-            &if pages > 1 {
-                format!(
-                    "Model — showing {}–{} of {}",
-                    page * PAGE + 1,
-                    ((page + 1) * PAGE).min(models.len()),
-                    models.len()
-                )
-            } else {
-                "Model".to_owned()
-            },
+            &placeholder,
             models
                 .iter()
                 .enumerate()
                 .skip(page * PAGE)
                 .take(PAGE)
                 .map(|(index, model)| {
-                    choice(
-                        display_name(model),
-                        &model_key(model),
-                        Some(&format!("{}/{}", model.provider, model.model)),
-                        selected == Some(index),
+                    branded(
+                        choice(
+                            display_name(model),
+                            &model_key(model),
+                            Some(&model.model),
+                            selected == Some(index),
+                        ),
+                        markers.brand(&model.model),
                     )
                 }),
         ),
     ];
     if let Some((selection, model)) = selection
-        .filter(|selection| selection.provider == provider)
+        .filter(|selection| selection.provider == provider.id)
         .and_then(|selection| {
             Some((
                 selection,
@@ -515,13 +594,13 @@ fn controls(
         })
     {
         rows.extend(setting_rows(
-            name,
+            scope,
             model,
             selection,
             view.setting.as_deref(),
         ));
     }
-    rows.push(actions(state, scope, provider, page, pages));
+    rows.push(actions(state, scope, provider.id, page, pages));
     rows
 }
 
@@ -584,9 +663,9 @@ fn scope_buttons(state: &ModelState, scope: Scope) -> Vec<Value> {
 /// Rare provider overflow uses navigation choices in the same menu, leaving
 /// the normal action buttons and both settings rows available.
 fn provider_select(
-    scope: &str,
-    providers: &[&str],
-    provider: &str,
+    scope: Scope,
+    providers: &[Browsable<'_>],
+    provider: &Browsable<'_>,
     requested_page: Option<usize>,
 ) -> Value {
     let size = if providers.len() > PAGE {
@@ -597,7 +676,7 @@ fn provider_select(
     let pages = providers.len().div_ceil(size);
     let selected = providers
         .iter()
-        .position(|candidate| *candidate == provider)
+        .position(|candidate| candidate.id == provider.id)
         .unwrap_or(0);
     let page = requested_page.unwrap_or(selected / size).min(pages - 1);
     let mut options: Vec<Value> = providers
@@ -605,11 +684,14 @@ fn provider_select(
         .skip(page * size)
         .take(size)
         .map(|candidate| {
-            choice(
-                candidate,
-                &fingerprint(&[candidate]),
-                None,
-                *candidate == provider,
+            branded(
+                choice(
+                    candidate.name,
+                    &fingerprint(&[candidate.id]),
+                    None,
+                    candidate.id == provider.id,
+                ),
+                candidate.brand,
             )
         })
         .collect();
@@ -629,19 +711,23 @@ fn provider_select(
             false,
         ));
     }
+    let mut placeholder = format!("Provider for {}", scope_target(scope));
+    if pages > 1 {
+        placeholder = format!("{placeholder} (page {} of {pages})", page + 1);
+    }
     select(
-        &format!("model:provider:{scope}:{}", fingerprint(&[provider])),
-        &if pages > 1 {
-            format!("Provider (page {} of {pages})", page + 1)
-        } else {
-            "Provider".to_owned()
-        },
+        &format!(
+            "model:provider:{}:{}",
+            scope_name(scope),
+            fingerprint(&[provider.id])
+        ),
+        &placeholder,
         options.into_iter(),
     )
 }
 
 fn setting_rows(
-    scope_name: &str,
+    scope: Scope,
     model: &AvailableModel,
     selection: &Selection,
     focus: Option<&str>,
@@ -650,7 +736,7 @@ fn setting_rows(
         return model
             .options
             .iter()
-            .map(|option| choice_select(scope_name, option, selection))
+            .map(|option| choice_select(scope, option, selection))
             .collect();
     }
     let Some(focused) = model
@@ -663,8 +749,8 @@ fn setting_rows(
     };
     vec![
         select(
-            &format!("model:setting:{scope_name}"),
-            "Setting",
+            &format!("model:setting:{}", scope_name(scope)),
+            &format!("Setting for {}", scope_target(scope)),
             model.options.iter().map(|option| {
                 choice(
                     &option.name,
@@ -674,22 +760,25 @@ fn setting_rows(
                 )
             }),
         ),
-        choice_select(scope_name, focused, selection),
+        choice_select(scope, focused, selection),
     ]
 }
 
-fn choice_select(scope_name: &str, option: &ModelOption, selection: &Selection) -> Value {
+/// One setting's choices, each labelled with the setting so the chosen one
+/// says what it is.
+fn choice_select(scope: Scope, option: &ModelOption, selection: &Selection) -> Value {
     let chosen = selection.options.get(&option.id);
     select(
         &format!(
-            "model:option:{scope_name}:{}:{}",
+            "model:option:{}:{}:{}",
+            scope_name(scope),
             fingerprint(&[&selection.provider, &selection.model]),
             fingerprint(&[&option.id])
         ),
-        &option.name,
+        &format!("{} for {}", option.name, scope_target(scope)),
         option.choices.iter().map(|value| {
             choice(
-                &value.id,
+                &format!("{}: {}", option.name, value.name),
                 &fingerprint(&[&value.id]),
                 None,
                 chosen == Some(&value.id),
@@ -698,30 +787,48 @@ fn choice_select(scope_name: &str, option: &ModelOption, selection: &Selection) 
     )
 }
 
-fn describe(state: &ModelState, selection: Option<&Selection>) -> String {
+/// The selection as one line: the model's brand and name, then each setting
+/// and the choice it holds, as the runtime names them.
+fn describe(
+    state: &ModelState,
+    selection: Option<&Selection>,
+    markers: &ActivityMarkers,
+) -> String {
     let Some(selection) = selection else {
-        return "no model selected".to_owned();
+        return "No model selected".to_owned();
     };
-    let model = find_model(state, &selection.provider, &selection.model);
-    let mut text = match model {
-        Some(model) => format!(
-            "{} (`{}/{}`)",
-            display_name(model),
-            model.provider,
-            model.model
-        ),
-        None => format!(
-            "`{}/{}` (not currently available)",
-            selection.provider, selection.model
-        ),
+    let setting = |name: &str, value: &str| {
+        escaped(&shorten(
+            &format!("{} {}", name.to_lowercase(), value.to_lowercase()),
+            TEXT_LIMIT,
+        ))
     };
-    for (id, value) in &selection.options {
-        let name = model
-            .and_then(|model| model.options.iter().find(|option| option.id == *id))
-            .map_or(id.as_str(), |option| option.name.as_str());
-        let _ = write!(text, ", {name}: {value}");
-    }
-    shorten(&text, 600)
+    let parts: Vec<String> = match find_model(state, &selection.provider, &selection.model) {
+        Some(model) => iter::once(escaped(&shorten(display_name(model), TEXT_LIMIT)))
+            .chain(model.options.iter().filter_map(|option| {
+                let chosen = selection.options.get(&option.id)?;
+                let value = option
+                    .choices
+                    .iter()
+                    .find(|choice| choice.id == *chosen)
+                    .map_or(chosen.as_str(), |choice| choice.name.as_str());
+                Some(setting(&option.name, value))
+            }))
+            .collect(),
+        None => iter::once(escaped(&shorten(&selection.model, TEXT_LIMIT)))
+            .chain(
+                selection
+                    .options
+                    .iter()
+                    .map(|(id, value)| setting(id, value)),
+            )
+            .chain(iter::once("not currently available".to_owned()))
+            .collect(),
+    };
+    shorten(
+        &model_line(markers.brand(&selection.model), &parts),
+        LINE_LIMIT,
+    )
 }
 
 fn display_name(model: &AvailableModel) -> &str {
