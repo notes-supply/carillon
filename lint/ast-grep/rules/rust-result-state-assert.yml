@@ -1,0 +1,17 @@
+id: rust-result-state-assert
+language: rust
+severity: error
+message: Asserting only that a Result is Ok or Err passes whatever the error is.
+note: Assert the error a caller sees, its variant or message, or take the value with expect and the error with expect_err so a failure shows it.
+rule:
+  any:
+    - pattern: $ASSERT!($$$RESULT.is_ok())
+    - pattern: $ASSERT!($$$RESULT.is_err())
+    - pattern: $ASSERT!($$$RESULT.is_ok(), $$$MESSAGE)
+    - pattern: $ASSERT!($$$RESULT.is_err(), $$$MESSAGE)
+    - pattern: $ASSERT!(matches!($$$RESULT, Ok(_)))
+    - pattern: $ASSERT!(matches!($$$RESULT, Err(_)))
+    - pattern: $ASSERT!(matches!($$$RESULT, Ok(_)), $$$MESSAGE)
+    - pattern: $ASSERT!(matches!($$$RESULT, Err(_)), $$$MESSAGE)
+constraints:
+  ASSERT: { regex: "^(debug_)?assert$" }
