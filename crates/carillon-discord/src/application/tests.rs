@@ -25,8 +25,9 @@ use tower::ServiceExt as _;
 use twilight_http::response::StatusCode as DiscordStatusCode;
 
 use super::{
-    DiscordState, IncomingMessage, InteractionSource, MessagePlan, Participation, QueuedMessage,
-    ServeOptions, discord_router, discord_status_is_terminal, interaction_source, queue_message,
+    Connection, DiscordApp, DiscordState, IncomingMessage, InteractionSource, Lanes, MessagePlan,
+    Participation, QueuedMessage, Reactions, ServeOptions, discord_router,
+    discord_status_is_terminal, interaction_source, queue_message,
 };
 use crate::{
     CoreClient,
@@ -81,10 +82,17 @@ async fn discord_state(core: CoreClient, directory: &Path) -> anyhow::Result<Dis
         core,
         participation: Arc::new(Participation::load(directory.join("participation.json"))?),
         module: stub_module(directory, &replying("stub reply", &[])).await?,
-        app: None,
-        reactions: None,
-        lanes: None,
+        connection: None,
     })
+}
+
+/// Connects `state` to Discord as `app`, with its lanes stopped.
+fn connect(state: &mut DiscordState, app: DiscordApp) {
+    state.connection = Some(Connection {
+        reactions: Reactions::new(app.http.clone(), state.settings.clone()),
+        lanes: Lanes::new(tokio::sync::mpsc::channel(1).0),
+        app: Arc::new(app),
+    });
 }
 
 /// Has `state` serve its settings changed by `change`, as a restart would.
@@ -851,7 +859,7 @@ async fn applies_serve_a_module_only_once_discord_confirmed_it() -> anyhow::Resu
         directory.path(),
     )
     .await?;
-    state.app = Some(Arc::new(app(&address.to_string(), 1, 100)));
+    connect(&mut state, app(&address.to_string(), 1, 100));
     let (_, body) = module_status(&state, Some("operator")).await?;
     assert_eq!(body["registered"], false);
 
@@ -926,7 +934,7 @@ async fn an_abandoned_apply_completes_while_holding_the_maintenance_lock() -> an
         directory.path(),
     )
     .await?;
-    state.app = Some(Arc::new(target));
+    connect(&mut state, target);
     std::fs::write(
         directory.path().join("custom.wasm"),
         variant(&["model", "other"], "replacement")?,
@@ -1126,8 +1134,7 @@ async fn an_acknowledged_interaction_is_answered_before_the_provider_returns() -
         calling_model("model state received", "the native call failed")?,
     )?;
     state.module = Arc::new(Module::load(files(directory.path()), Source::Bundled).await?);
-    let target = Arc::new(app(&discord_address.to_string(), 2, 100));
-    state.app = Some(target.clone());
+    connect(&mut state, app(&discord_address.to_string(), 2, 100));
     let event = model_command()?;
     let mut interactions = tokio::task::JoinSet::new();
     assert!(super::take_event(&state, event, None, &mut interactions).is_none());
@@ -1205,8 +1212,7 @@ async fn a_replayed_interaction_discord_does_not_acknowledge_again_runs_nothing(
         calling_model("model state received", "the native call failed")?,
     )?;
     state.module = Arc::new(Module::load(files(directory.path()), Source::Bundled).await?);
-    let target = Arc::new(app(&discord_address.to_string(), 2, 100));
-    state.app = Some(target.clone());
+    connect(&mut state, app(&discord_address.to_string(), 2, 100));
     let mut interactions = tokio::task::JoinSet::new();
     let taken = super::take_event(&state, model_command()?, None, &mut interactions);
     assert!(

@@ -106,13 +106,22 @@ struct DiscordState {
     participation: Arc<Participation>,
     module: Arc<Module>,
     /// Absent in deterministic mode, where no Discord application exists.
-    app: Option<Arc<DiscordApp>>,
-    /// The reactions shown on messages, with the Discord application.
-    reactions: Option<Reactions>,
-    /// The conversation lanes `/command` submissions take their place in,
-    /// with the Discord application.
-    lanes: Option<Lanes>,
+    connection: Option<Connection>,
     downloads: Arc<Downloads>,
+}
+
+#[derive(Clone)]
+struct Connection {
+    app: Arc<DiscordApp>,
+    reactions: Reactions,
+    /// The conversation lanes `/command` submissions take their place in.
+    lanes: Lanes,
+}
+
+impl DiscordState {
+    fn app(&self) -> Option<&DiscordApp> {
+        self.connection.as_ref().map(|connection| &*connection.app)
+    }
 }
 
 pub(crate) struct ServeOptions<'a> {
@@ -187,9 +196,7 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
         core,
         participation,
         module,
-        app: None,
-        reactions: None,
-        lanes: None,
+        connection: None,
         downloads,
     };
     info!(url = %provider.url, deterministic = options.deterministic, "Discord interface provider ready");
@@ -218,14 +225,16 @@ async fn connect(
     let identity = state.settings.current();
     let app = Arc::new(application(&http, &identity).await?);
     state.module.reconcile(&app).await?;
-    state.app = Some(app);
     let reactions = Reactions::new(http.clone(), state.settings.clone());
-    state.reactions = Some(reactions.clone());
     for target in reconciled.feedback_target_ids {
         reactions.outcome(&target, Feedback::Uncertain).await;
     }
     let (messages, receiver) = mpsc::channel(lanes::MAX_PENDING);
-    state.lanes = Some(Lanes::new(messages.clone()));
+    state.connection = Some(Connection {
+        app,
+        reactions: reactions.clone(),
+        lanes: Lanes::new(messages.clone()),
+    });
     let delivery_state = state.clone();
     let stopping = CancellationToken::new();
     let (settled, settlements) = mpsc::unbounded_channel();
@@ -423,7 +432,7 @@ async fn discord_operation(
             status: StatusCode::BAD_REQUEST,
             message: "Invalid Discord operation; check the action and its fields".to_owned(),
         })?;
-    let Some(app) = &state.app else {
+    let Some(app) = state.app() else {
         return Ok((StatusCode::SERVICE_UNAVAILABLE, Json(json!({"outcome":"unavailable","message":"Discord operations require a connected provider; deterministic mode does not call Discord."}))).into_response());
     };
     Ok(match operation.execute(&app.http, app.guild_id).await {
@@ -475,7 +484,7 @@ async fn apply_settings(
                 || read_settings(state),
                 |file| {
                     let source = file.module_source(&state.installation.root);
-                    state.module.apply(source, state.app.as_deref())
+                    state.module.apply(source, state.app())
                 },
             )
             .await
@@ -590,7 +599,7 @@ async fn module_status(
             error: format!("the settings file is not valid: {error:#}"),
         },
     };
-    Ok(Json(state.module.status(state.app.as_deref(), declared)))
+    Ok(Json(state.module.status(state.app(), declared)))
 }
 
 async fn simulate(
@@ -954,12 +963,11 @@ async fn run_interaction(
         },
     );
     // Without a Discord connection there is nowhere to anchor a submission.
-    if let (Some(app), Some(reactions), Some(lanes)) = (&state.app, &state.reactions, &state.lanes)
-    {
+    if let Some(connection) = &state.connection {
         calls = calls.with_submissions(Submissions {
-            http: Arc::clone(&app.http),
-            reactions: reactions.clone(),
-            lanes: lanes.clone(),
+            http: Arc::clone(&connection.app.http),
+            reactions: connection.reactions.clone(),
+            lanes: connection.lanes.clone(),
             origin: admitted.origin,
             settings,
         });
@@ -1008,7 +1016,7 @@ fn validate_reply(reply: &Reply) -> Result<Vec<Component>> {
 /// run the module, then edit the acknowledgement into the reply. Refusals
 /// and failures are told to the user in general terms and logged in full.
 async fn handle_interaction(state: DiscordState, interaction: DiscordInteraction) {
-    let Some(app) = state.app.clone() else {
+    let Some(app) = state.app() else {
         return;
     };
     let Some(source) = interaction_source(&interaction) else {
