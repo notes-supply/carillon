@@ -830,13 +830,12 @@ async function testAttachments() {
   const copying = baseline.find((line) => /\/attachments\/\.partial-[^/>]+\/0>/u.test(line));
   assert.ok(copying, "captured files must be synced before publication");
   const worker = copying.split(" ")[0];
-  // Tokio wakes its I/O driver by writing to an eventfd, from whichever
-  // thread finished blocking work, so whether the capture's thread writes
-  // one before its files depends on the blocking pool's thread reuse. Writes
-  // to those descriptors are not counted here, nor by strace (`trace-fds`).
-  const wakers = [
-    ...new Set(baseline.flatMap((line) => / write\((\d+)<\{eventfd/u.exec(line)?.slice(1) ?? [])),
-  ];
+  // Tokio wakes its I/O driver by writing to an eventfd from whichever thread
+  // finished blocking work, so the capture's thread may write one before its
+  // files. Those writes count neither here nor in strace (`trace-fds`); strace
+  // before 6.10 shows such a descriptor only as `anon_inode:[eventfd]`.
+  const waker = / write\((\d+)<(?:\{eventfd|anon_inode:\[eventfd\])/u;
+  const wakers = [...new Set(baseline.flatMap((line) => waker.exec(line)?.slice(1) ?? []))];
   const counted = (line) => !wakers.some((fd) => line.includes(` write(${fd}<`));
   const calls = (name, thread = worker) =>
     baseline.filter(
