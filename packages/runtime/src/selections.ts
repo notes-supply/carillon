@@ -1,7 +1,7 @@
 // Model selection: what the runtime offers, what each scope has chosen, and
-// the ledger that keeps those choices. The runtime default is Pi's own
-// setting; the agent default and conversation overrides are Carillon's, kept
-// beside Pi's private state and resolved when a turn starts.
+// the ledger that keeps those choices. The runtime default is the runtime's
+// own setting; the agent default and conversation overrides are Carillon's,
+// kept beside the runtime's private state and resolved when a turn starts.
 
 import { open, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
@@ -13,14 +13,14 @@ import {
   type Selection,
   type AvailableModel,
   type ModelQuery,
-  type ModelUpdate,
   type ModelState,
+  type ModelUpdate,
   type ScopeState,
 } from "@carillon/protocol";
 import { Parse } from "typebox/value";
-import { ExplainedFailure } from "@carillon/runtime/failure";
-import { resolved, validated } from "@carillon/runtime/models";
-import { Serial } from "@carillon/runtime/serial";
+import { ExplainedFailure } from "./failure.ts";
+import { resolved, validated } from "./models.ts";
+import { Serial } from "./serial.ts";
 
 const LedgerSchema = Type.Object({
   agents: Type.Array(Type.Object({ agent_id: Type.String(), selection: SelectionSchema })),
@@ -34,6 +34,12 @@ const LedgerSchema = Type.Object({
   ),
 });
 type Ledger = Static<typeof LedgerSchema>;
+
+/** What the agent and, with a conversation, that conversation have chosen; the runtime adds its catalogue. */
+export type ModelScopes = Pick<ModelState, "conversation"> & {
+  /** The agent default, which always resolves to a selection. */
+  readonly agent: ScopeState & { readonly selection: Selection };
+};
 
 /**
  * Selections made through Carillon, keyed by agent and by conversation.
@@ -87,7 +93,7 @@ export class ModelSelections {
     available: readonly AvailableModel[],
     runtimeDefault: Selection,
     query: ModelQuery,
-  ): Promise<ModelState> {
+  ): Promise<ModelScopes> {
     return this.#writes.run(async () => {
       await this.refresh();
       return this.snapshotState(available, runtimeDefault, query);
@@ -98,16 +104,15 @@ export class ModelSelections {
     available: readonly AvailableModel[],
     runtimeDefault: Selection,
     query: ModelQuery,
-  ): ModelState {
+  ): ModelScopes {
     const agentSelection = this.agentSelection(query.agent_id);
-    const agent: ScopeState = {
+    const agent = {
       selection: resolved(available, agentSelection ?? runtimeDefault),
       overridden: agentSelection !== null,
     };
-    if (query.audience_id === undefined) return { available: [...available], agent };
+    if (query.audience_id === undefined) return { agent };
     const conversationSelection = this.conversationSelection(query);
     return {
-      available: [...available],
       agent,
       conversation: {
         selection:
@@ -128,7 +133,7 @@ export class ModelSelections {
     available: readonly AvailableModel[],
     runtimeDefault: Selection,
     update: ModelUpdate,
-  ): Promise<ModelState> {
+  ): Promise<ModelScopes> {
     if (update.scope === "conversation" && update.audience_id === undefined)
       throw new ExplainedFailure(400, "There is no conversation here to set a model for.");
     const selection = update.selection === null ? null : validated(available, update.selection);

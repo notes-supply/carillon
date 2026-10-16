@@ -85,7 +85,7 @@ install() {
     CARILLON_RELEASES="http://127.0.0.1:$PORT" CARILLON_RELEASES_API="http://127.0.0.1:$PORT/api" \
     "$@"
 }
-OPTIONS='--guild-id 100 --bot-user-id 201 --user-id 200 --route 300:always:thread'
+OPTIONS='--guild-id 100 --bot-user-id 201 --user-id 200 --route 300:always:thread:assistant'
 
 refused() {
   expected=$1
@@ -102,7 +102,6 @@ refused() {
   refused 'built for x86_64; this machine is aarch64' env TEST_ARCH=aarch64 sh "$ROOT/install.sh" $OPTIONS
   refused 'needs glibc 2.39 or newer; this system has 2.36' env TEST_GLIBC=2.36 sh "$ROOT/install.sh" $OPTIONS
   [ ! -s "$TEST_ROOT/requests" ] || fail "an unsupported host downloaded something"
-  # Without its options the installer asks at a terminal; with none, it says so.
   refused 'setup asks its questions at a terminal' setsid -w sh "$ROOT/install.sh" </dev/null
   refused 'does not match its published checksum; nothing was installed' \
     sh "$ROOT/install.sh" --version 0.0.9 $OPTIONS

@@ -1,0 +1,16 @@
+id: rust-string-error
+valid:
+  - "fn parse(text: &str) -> Result<Config, ConfigError> { todo() }"
+  - "fn name() -> Result<String, Error> { todo() }"
+  - "fn name() -> std::result::Result<&'static str, Error> { todo() }"
+  - "fn name() -> io::Result<String> { todo() }"
+invalid:
+  - "fn run(program: &Path) -> Result<String, String> { todo() }"
+  - "fn discover(&self) -> Result<Offer, String> { todo() }"
+  - "fn discover(&self) -> std::result::Result<Offer, String> { todo() }"
+  - "fn discover(&self) -> Result<Offer, std::string::String> { todo() }"
+  - "fn discover(&self) -> Result<Offer, &'static str> { todo() }"
+  - "fn discover(&self) -> Result<Offer, &str> { todo() }"
+  - "fn f<'a>() -> Result<(), &'a str> { todo() }"
+  - "fn f() -> Result<(), Cow<'_, str>> { todo() }"
+  - "fn f<'a>() -> Result<(), std::borrow::Cow<'a, str>> { todo() }"

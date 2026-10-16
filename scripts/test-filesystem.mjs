@@ -38,7 +38,7 @@ const installOptions = [
   "--user-id",
   "200",
   "--route",
-  "300:always:channel",
+  "300:always:channel:assistant",
   ...initOptions,
 ];
 const discordOptions = [
@@ -93,7 +93,7 @@ async function testConfiguration() {
     "--user-id",
     "200",
     "--route",
-    "300:always:channel",
+    "300:always:channel:assistant",
   );
   await chmod(config, 0o640);
   const token = await readFile(join(root, "credentials/operator.token"));
@@ -108,7 +108,7 @@ async function testConfiguration() {
         "--user-id",
         "999",
         "--route",
-        "301:mention:thread",
+        "301:mention:thread:assistant",
       ],
       discord,
       0o600,
@@ -519,7 +519,7 @@ async function testModule() {
   const args = [
     providerTestBinary(),
     "--exact",
-    "module::tests::clearing_the_record_reports_its_boundary_and_a_repeat_registers",
+    "module::tests::registration::clearing_the_record_reports_its_boundary_and_a_repeat_registers",
     "--nocapture",
     "--test-threads=1",
   ];
@@ -585,7 +585,7 @@ async function testModuleDirectory() {
   const args = [
     providerTestBinary(),
     "--exact",
-    "module::tests::a_new_state_directory_is_synced_again_by_a_repeat",
+    "module::tests::registration::a_new_state_directory_is_synced_again_by_a_repeat",
     "--nocapture",
     "--test-threads=1",
   ];
@@ -763,7 +763,7 @@ async function resourceAttempt(name, fault) {
         },
         body: JSON.stringify({
           event_id: "durability",
-          agent_id: "default",
+          agent_id: "assistant",
           user_id: "200",
           audience_id: "test",
           delivery_target_id: "300",
@@ -830,13 +830,12 @@ async function testAttachments() {
   const copying = baseline.find((line) => /\/attachments\/\.partial-[^/>]+\/0>/u.test(line));
   assert.ok(copying, "captured files must be synced before publication");
   const worker = copying.split(" ")[0];
-  // Tokio wakes its I/O driver by writing to an eventfd, from whichever
-  // thread finished blocking work, so whether the capture's thread writes
-  // one before its files depends on the blocking pool's thread reuse. Writes
-  // to those descriptors are not counted here, nor by strace (`trace-fds`).
-  const wakers = [
-    ...new Set(baseline.flatMap((line) => / write\((\d+)<\{eventfd/u.exec(line)?.slice(1) ?? [])),
-  ];
+  // Tokio wakes its I/O driver by writing to an eventfd from whichever thread
+  // finished blocking work, so the capture's thread may write one before its
+  // files. Those writes count neither here nor in strace (`trace-fds`); strace
+  // before 6.10 shows such a descriptor only as `anon_inode:[eventfd]`.
+  const waker = / write\((\d+)<(?:\{eventfd|anon_inode:\[eventfd\])/u;
+  const wakers = [...new Set(baseline.flatMap((line) => waker.exec(line)?.slice(1) ?? []))];
   const counted = (line) => !wakers.some((fd) => line.includes(` write(${fd}<`));
   const calls = (name, thread = worker) =>
     baseline.filter(
@@ -875,7 +874,6 @@ async function testAttachments() {
 }
 
 async function attachmentAttempt(name, fault) {
-  // Distinct from the other cases sharing this scratch directory.
   const root = join(scratch, `capture-${name}`);
   run("--home", root, "init", "--workspace", scratch, ...initOptions);
   const config = join(root, "carillon.toml");
@@ -905,7 +903,7 @@ async function attachmentAttempt(name, fault) {
       },
       body: JSON.stringify({
         event_id: "attached",
-        agent_id: "default",
+        agent_id: "assistant",
         user_id: "200",
         audience_id: "test",
         delivery_target_id: "300",
@@ -984,7 +982,6 @@ async function attachmentAttempt(name, fault) {
   return (await readFile(log, "utf8")).split("\n");
 }
 
-/** Run core, wait until it listens, run `body`, then stop it. */
 async function withCore([command, args], body) {
   const server = spawn(command, args, {
     env: { ...process.env, TOKIO_WORKER_THREADS: "1" },

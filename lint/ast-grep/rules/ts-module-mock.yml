@@ -1,0 +1,9 @@
+id: ts-module-mock
+language: typescript
+severity: error
+message: Mocking a module pins a test to how the code is wired.
+note: Drive the code through its interface with a fake at the real boundary, such as the T3 fake server.
+rule:
+  pattern: vi.$MOCK($$$)
+constraints:
+  MOCK: { regex: "^(mock|doMock|hoisted)$" }

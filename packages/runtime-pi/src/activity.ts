@@ -70,7 +70,6 @@ const RUNNING_CALLS = 8;
 
 export interface ActivityTracker {
   observe(event: AgentSessionEvent): void;
-  /** What the session reports about its agent now. */
   agent(info: AgentInfo): void;
   /**
    * One fact a participating extension reported on {@link WORK_CHANNEL}.

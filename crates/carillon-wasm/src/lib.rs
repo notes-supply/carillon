@@ -359,12 +359,14 @@ mod tests {
     #[test]
     fn loading_rejects_invalid_modules_and_missing_exports() -> anyhow::Result<()> {
         let host = host()?;
-        assert!(host.load(b"not wasm").is_err());
+        let refusal = |bytes: &[u8]| host.load(bytes).err().map(|error| error.to_string());
         let echo = wat::parse_str(ECHO)?;
-        assert!(host.load(&echo[..echo.len() / 2]).is_err());
-        assert!(
-            host.load(&wat::parse_str("(module (memory (export \"memory\") 1))")?)
-                .is_err()
+        for invalid in [&b"not wasm"[..], &echo[..echo.len() / 2]] {
+            assert_eq!(refusal(invalid).as_deref(), Some("compile guest module"));
+        }
+        assert_eq!(
+            refusal(&wat::parse_str("(module (memory (export \"memory\") 1))")?).as_deref(),
+            Some("guest module lacks export input")
         );
         Ok(())
     }

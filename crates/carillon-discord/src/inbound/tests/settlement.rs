@@ -35,9 +35,7 @@ use crate::{
 /// What the fake core does with each event, and what it saw.
 #[derive(Default)]
 struct Core {
-    /// Events it holds.
     accepted: BTreeSet<String>,
-    /// Events whose submission it refuses.
     refused: BTreeSet<String>,
     /// Events whose submission never gets an answer it confirms.
     lost: BTreeSet<String>,
@@ -233,7 +231,6 @@ async fn a_stop_leaves_unsettled_exactly_what_core_may_still_need_replayed() -> 
     })
     .await
     .map_err(|_| anyhow!("the preparations did not get under way"))?;
-    // The provider stops.
     ingress.stopping.cancel();
     drop(send);
     tokio::time::timeout(Duration::from_secs(10), dispatcher).await??;

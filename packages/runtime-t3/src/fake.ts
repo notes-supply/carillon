@@ -25,6 +25,7 @@ import {
   type Subagent,
   type TurnItem,
 } from "./contracts.ts";
+import { FAKE_PROVIDERS } from "./fake/providers.ts";
 
 /** A timeline item as the fake stores it: any kind, with whatever fields a test gives. */
 export interface FakeItem {
@@ -84,6 +85,8 @@ export interface Subscription {
 export interface FakeT3 {
   readonly url: string;
   readonly token: string;
+  readonly heldRequests: ReadonlySet<Duplex>;
+  readonly upgradeCredentials: readonly (string | undefined)[];
   readonly threads: Map<string, FakeThread>;
   /** Every command received, in order, before any fault applies. */
   readonly received: Command[];
@@ -112,6 +115,8 @@ export interface FakeT3 {
   protocolVersion: number;
   /** The provider instances `server.getConfig` and `server.refreshProviders` list, as T3 describes them. */
   providers: unknown[];
+  /** The provider instances T3's settings hold, by ID, as `server.getSettings` lists them. */
+  readonly instances: Map<string, unknown>;
   /** The projects T3's authenticated shell snapshot lists. */
   projects: { id: string; title: string; workspaceRoot: string }[];
   /** Processes the command, then drops the socket before answering. */
@@ -233,47 +238,6 @@ const BACKGROUND_ITEMS: ReadonlySet<string> = new Set([
 ]);
 const RUNNING_ITEMS: ReadonlySet<string> = new Set(["pending", "running", "waiting"]);
 
-/** A catalogue shaped like the serving build's: one usable instance and one disabled. */
-export const FAKE_PROVIDERS: readonly unknown[] = [
-  {
-    instanceId: "claudeAgent",
-    driver: "claudeAgent",
-    enabled: true,
-    installed: true,
-    status: "ready",
-    models: [
-      {
-        slug: "claude-sonnet-5",
-        name: "Claude Sonnet 5",
-        isCustom: false,
-        capabilities: {
-          optionDescriptors: [
-            {
-              id: "effort",
-              label: "Effort",
-              type: "select",
-              options: [
-                { id: "low", label: "Low" },
-                { id: "high", label: "High", isDefault: true },
-              ],
-            },
-            { id: "fastMode", label: "Fast Mode", type: "boolean" },
-          ],
-        },
-      },
-      { slug: "claude-haiku-4-5", name: "Claude Haiku 4.5", isCustom: false, capabilities: null },
-    ],
-  },
-  {
-    instanceId: "cursor",
-    driver: "cursor",
-    enabled: false,
-    installed: false,
-    status: "disabled",
-    models: [{ slug: "auto", name: "Auto", isCustom: false, capabilities: null }],
-  },
-];
-
 export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
   const threads = new Map<string, FakeThread>();
   const received: Command[] = [];
@@ -290,6 +254,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
 
   /** Sockets of discovery and upgrade requests held open by a fault. */
   const held = new Set<Duplex>();
+  const upgradeCredentials: (string | undefined)[] = [];
   const server = createServer((request, response) => {
     if (request.url?.startsWith("/ws") === true) {
       if (fake.holdDiscovery) {
@@ -360,6 +325,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
   });
   const wss = new WebSocketServer({ noServer: true });
   server.on("upgrade", (request: IncomingMessage, socket: Duplex, head: Buffer) => {
+    upgradeCredentials.push(request.headers.authorization);
     const url = new URL(request.url ?? "/", "http://fake");
     if (url.searchParams.get("orchestrationProtocol") !== String(fake.protocolVersion)) {
       socket.write("HTTP/1.1 426 Upgrade Required\r\n\r\n");
@@ -397,6 +363,8 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
   const fake: FakeT3 = {
     url: `http://127.0.0.1:${String(address.port)}`,
     token,
+    heldRequests: held,
+    upgradeCredentials,
     threads,
     received,
     commands,
@@ -410,6 +378,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
     uploadRedirect: undefined,
     protocolVersion: ORCHESTRATION_PROTOCOL,
     providers: [...FAKE_PROVIDERS],
+    instances: new Map(),
     projects: [{ id: "project-1", title: "Project", workspaceRoot: "/" }],
     dropAnswer: () => false,
     dropRequest: () => false,
@@ -860,6 +829,31 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
         refreshes.push(payload);
         exit(socket, id, { _tag: "Success", value: { providers: fake.providers } });
         return;
+      case "server.getSettings":
+        exit(socket, id, {
+          _tag: "Success",
+          value: { providerInstances: Object.fromEntries(fake.instances) },
+        });
+        return;
+      case "server.updateSettings": {
+        // As T3: a created instance must be new; it applies at once.
+        const mutation = isRecord(payload) ? payload["providerInstanceMutation"] : undefined;
+        if (
+          !isRecord(mutation) ||
+          mutation["operation"] !== "create" ||
+          typeof mutation["instanceId"] !== "string" ||
+          fake.instances.has(mutation["instanceId"])
+        ) {
+          rejectRequest(socket, id, "ServerSettingsError", "create-provider-instance");
+          return;
+        }
+        fake.instances.set(mutation["instanceId"], mutation["instance"]);
+        exit(socket, id, {
+          _tag: "Success",
+          value: { providerInstances: Object.fromEntries(fake.instances) },
+        });
+        return;
+      }
       default:
         rejectRequest(socket, id, "RpcNotFound", String(frame["tag"]));
     }
@@ -901,6 +895,14 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
       }
       case "message.dispatch": {
         const thread = threadOf(command.threadId);
+        // As T3: a message's selection is its run's, and the thread's from then on.
+        if (command["modelSelection"] !== undefined) {
+          thread.modelSelection = selectionOf(command);
+          emit(thread, "thread.model-selection-updated", {
+            id: thread.id,
+            modelSelection: thread.modelSelection,
+          });
+        }
         startRun(thread, String(command["messageId"]), String(command["text"]));
         receipts.set(command.commandId, thread.sequence);
         return thread.sequence;

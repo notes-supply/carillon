@@ -140,7 +140,7 @@ text(results); store("sentinel", "survives-reopen");`,
         expect(JSON.stringify(result)).toContain("native-bash");
         expect(JSON.stringify(result)).toContain("after");
         expect(JSON.stringify(result)).toContain("native-hook-block");
-        await expect(readFile(join(root, "blocked.txt"))).rejects.toThrow();
+        await expect(readFile(join(root, "blocked.txt"))).rejects.toMatchObject({ code: "ENOENT" });
         expect(
           events
             .filter(
@@ -226,14 +226,17 @@ it("cancels a native codemode child and settles before reopening", async () => {
   const abort = new AbortController();
   try {
     const running = promptSession(session, "run script", abort.signal);
-    const rejected = expect(running).rejects.toThrow();
+    const rejected = running.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
     await expect
       .poll(() => readFile(join(root, "started"), "utf8").catch(() => ""), { timeout: 8_000 })
       .toBe("started");
     abort.abort();
-    await rejected;
+    expect(await rejected).toMatchObject({ name: "AbortError" });
     expect(session.isIdle).toBe(true);
-    await expect(readFile(join(root, "finished"))).rejects.toThrow();
+    await expect(readFile(join(root, "finished"))).rejects.toMatchObject({ code: "ENOENT" });
     session.dispose();
     const { session: next } = await createPiExecutionSession({
       resourceRoot: root,

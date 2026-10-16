@@ -49,7 +49,7 @@ const SKILL: &str = "---\nname: carillon-status\ndescription: Explain Carillon c
 
 /// The bundled runtime an installation's agent runs on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub enum Runtime {
+pub(super) enum Runtime {
     /// Pi, signed in to a model provider.
     Pi,
     /// An existing T3 Code server.
@@ -59,7 +59,7 @@ pub enum Runtime {
 impl Runtime {
     /// The runtime provider's registry ID.
     #[must_use]
-    pub const fn id(self) -> &'static str {
+    pub(super) const fn id(self) -> &'static str {
         match self {
             Self::Pi => "runtime-pi",
             Self::T3 => "runtime-t3",
@@ -84,7 +84,7 @@ impl Runtime {
 /// registered and credentialed, and only those. Provider-owned settings
 /// (such as Discord admission or the T3 server) are written afterwards by
 /// each provider's own commands.
-pub fn initialize(
+pub(super) fn initialize(
     root: &Path,
     workspace: &Path,
     base_port: u16,
@@ -109,13 +109,7 @@ pub fn initialize(
             attachments: AttachmentLimits::default(),
         },
         providers: default_providers(base_port, &discord_token, runtime, &runtime_token)?,
-        agent: AgentConfig {
-            id: "default".to_owned(),
-            name: "Default agent".to_owned(),
-            resource_root: PathBuf::from("agents/default"),
-            workspace: workspace.to_path_buf(),
-            runtime_provider: runtime.id().to_owned(),
-        },
+        agents: vec![assistant(runtime, workspace)],
     };
     config.validate()?;
     let target = absolute_destination(root)?;
@@ -142,7 +136,7 @@ pub fn initialize(
                 (runtime.id(), &runtime_token),
             ],
         )?;
-        let agent = root.join("agents/default");
+        let agent = root.join(RESOURCES);
         atomic_write(&agent.join("SYSTEM.md"), DEFAULT_SYSTEM.as_bytes(), 0o640)?;
         atomic_write(&agent.join("AGENTS.md"), DEFAULT_CONTEXT.as_bytes(), 0o640)?;
         atomic_write(&agent.join("settings.json"), b"{}\n", 0o640)?;
@@ -169,6 +163,69 @@ pub fn initialize(
     Ok(target.join("carillon.toml"))
 }
 
+/// The ID of the agent a new installation starts with: Carillon's own
+/// assistant, with the installation's resources.
+pub(super) const ASSISTANT: &str = "assistant";
+
+#[must_use]
+pub(super) fn assistant(runtime: Runtime, workspace: &Path) -> AgentConfig {
+    AgentConfig {
+        id: ASSISTANT.to_owned(),
+        name: "Carillon".to_owned(),
+        runtime: runtime.id().to_owned(),
+        workspace: workspace.to_path_buf(),
+        resources: Some(PathBuf::from(RESOURCES)),
+    }
+}
+
+/// The installation's own agent resources, relative to its root.
+const RESOURCES: &str = "agents/default";
+
+/// Registers the bundled `runtime` beside the installation's providers, on
+/// the first loopback port after theirs, with a credential of its own; it
+/// does nothing when the runtime is registered already. The registry is
+/// rewritten whole, under the caller's maintenance lock.
+pub(super) fn register_runtime(config_path: &Path, runtime: Runtime) -> Result<()> {
+    let config_path = config_path
+        .canonicalize()
+        .context("resolve configuration path")?;
+    let root = config_path
+        .parent()
+        .context("configuration path has no parent")?;
+    let mut config: Config = toml::from_str(&fs::read_to_string(&config_path)?)?;
+    if config
+        .providers
+        .iter()
+        .any(|provider| provider.id == runtime.id())
+    {
+        return Ok(());
+    }
+    let mut port = config.core.listen.port();
+    for provider in &config.providers {
+        port = port.max(provider.listen_address()?.port());
+    }
+    let token = new_token();
+    config
+        .providers
+        .push(runtime_provider(runtime, checked_port(port, 1)?, &token)?);
+    config.validate()?;
+    create_runtime_directories(root, runtime)?;
+    write_credentials(root, &[(runtime.id(), &token)])?;
+    write_config(&config_path, &config)
+}
+
+/// Replaces the installation's agents with `agents`, validated with the
+/// rest of the registry before anything is written.
+pub(super) fn set_agents(config_path: &Path, agents: Vec<AgentConfig>) -> Result<()> {
+    let config_path = config_path
+        .canonicalize()
+        .context("resolve configuration path")?;
+    let mut config: Config = toml::from_str(&fs::read_to_string(&config_path)?)?;
+    config.agents = agents;
+    config.validate()?;
+    write_config(&config_path, &config)
+}
+
 fn default_providers(
     base_port: u16,
     discord_token: &str,
@@ -185,43 +242,52 @@ fn default_providers(
             enabled: true,
             parallel_turns: None,
         },
-        Provider {
-            id: runtime.id().to_owned(),
-            role: ProviderRole::Runtime,
-            version: runtime.version()?,
-            url: format!("http://127.0.0.1:{}", checked_port(base_port, 2)?),
-            token_hash: hash_token(runtime_token),
-            enabled: true,
-            parallel_turns: None,
-        },
+        runtime_provider(runtime, checked_port(base_port, 2)?, runtime_token)?,
     ])
 }
 
+fn runtime_provider(runtime: Runtime, port: u16, token: &str) -> Result<Provider> {
+    Ok(Provider {
+        id: runtime.id().to_owned(),
+        role: ProviderRole::Runtime,
+        version: runtime.version()?,
+        url: format!("http://127.0.0.1:{port}"),
+        token_hash: hash_token(token),
+        enabled: true,
+        parallel_turns: None,
+    })
+}
+
 fn create_installation_directories(root: &Path, runtime: Runtime) -> Result<()> {
-    fs::create_dir_all(root)?;
-    fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
-    let component = format!("state/components/{}", runtime.id());
-    // Pi keeps its sign-in and settings apart from the owner's ~/.pi.
-    let pi = (runtime == Runtime::Pi).then_some("pi");
+    private_directory(root)?;
     for directory in [
         "state",
         "credentials",
         "providers",
         "logs",
         "state/components/discord-private",
-        &component,
-        "agents/default/extensions",
-        "agents/default/skills",
-        "agents/default/sessions",
         "examples",
-    ]
-    .into_iter()
-    .chain(pi)
-    {
-        let path = root.join(directory);
-        fs::create_dir_all(&path)?;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    ] {
+        private_directory(&root.join(directory))?;
     }
+    for subtree in ["extensions", "skills"] {
+        private_directory(&root.join(RESOURCES).join(subtree))?;
+    }
+    create_runtime_directories(root, runtime)
+}
+
+fn create_runtime_directories(root: &Path, runtime: Runtime) -> Result<()> {
+    private_directory(&root.join("state/components").join(runtime.id()))?;
+    // Pi keeps its sign-in and settings apart from the owner's ~/.pi.
+    if runtime == Runtime::Pi {
+        private_directory(&root.join("pi"))?;
+    }
+    Ok(())
+}
+
+fn private_directory(path: &Path) -> Result<()> {
+    fs::create_dir_all(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     Ok(())
 }
 
@@ -236,7 +302,7 @@ fn write_credentials(root: &Path, credentials: &[(&str, &str)]) -> Result<()> {
     Ok(())
 }
 
-pub fn set_provider(config_path: &Path, id: &str, enabled: bool) -> Result<()> {
+pub(super) fn set_provider(config_path: &Path, id: &str, enabled: bool) -> Result<()> {
     validate_provider_identity(id)?;
     let config_path = config_path
         .canonicalize()
@@ -263,21 +329,24 @@ fn write_config(config_path: &Path, config: &Config) -> Result<()> {
     Ok(())
 }
 
-pub fn enable_demo_resources(config: &LoadedConfig) -> Result<()> {
+/// Copies the example extension and skill into the resources of every agent
+/// that has them.
+pub(super) fn enable_demo_resources(config: &LoadedConfig) -> Result<()> {
     let extension = config.root.join("examples/carillon-context.js");
     let skill = config.root.join("examples/SKILL.md");
     if !extension.exists() || !skill.exists() {
         bail!("installation does not contain the first-release example resources");
     }
-    let root = &config.value.agent.resource_root;
-    fs::create_dir_all(root.join("extensions"))?;
-    fs::create_dir_all(root.join("skills/carillon-status"))?;
-    fs::copy(extension, root.join("extensions/carillon-context.js"))?;
-    fs::copy(skill, root.join("skills/carillon-status/SKILL.md"))?;
+    for root in config.value.resource_roots() {
+        fs::create_dir_all(root.join("extensions"))?;
+        fs::create_dir_all(root.join("skills/carillon-status"))?;
+        fs::copy(&extension, root.join("extensions/carillon-context.js"))?;
+        fs::copy(&skill, root.join("skills/carillon-status/SKILL.md"))?;
+    }
     Ok(())
 }
 
-pub fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
+pub(super) fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
     let root = config
         .root
         .canonicalize()
@@ -303,10 +372,7 @@ pub fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
     }
     // Only installation-owned state is archived; the user's workspace may
     // deliberately live elsewhere.
-    for (field, path) in [
-        ("data_dir", &config.value.data_dir),
-        ("agent.resource_root", &config.value.agent.resource_root),
-    ] {
+    for (field, path) in installation_paths(&config.value) {
         let path = path
             .canonicalize()
             .with_context(|| format!("resolve backup {field}"))?;
@@ -372,7 +438,7 @@ pub fn backup(config: &LoadedConfig, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn restore(archive_path: &Path, target: &Path) -> Result<PathBuf> {
+pub(super) fn restore(archive_path: &Path, target: &Path) -> Result<PathBuf> {
     let target = absolute_destination(target)?;
     if target.exists() && fs::read_dir(&target)?.next().is_some() {
         bail!("restore target {} is not empty", target.display());
@@ -444,10 +510,7 @@ fn validate_portable_paths(root: &Path) -> Result<()> {
     // LoadedConfig resolves paths for services; check the stored spelling before
     // allowing it into an archive that must work under a different root.
     let config: Config = toml::from_str(&fs::read_to_string(root.join("carillon.toml"))?)?;
-    for (field, path) in [
-        ("data_dir", &config.data_dir),
-        ("agent.resource_root", &config.agent.resource_root),
-    ] {
+    for (field, path) in installation_paths(&config) {
         if path.as_os_str().is_empty()
             || path.is_absolute()
             || path
@@ -460,9 +523,27 @@ fn validate_portable_paths(root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The registry paths of installation-owned state a backup archives: the
+/// data directory and each agent's resources, named as their fields.
+fn installation_paths(config: &Config) -> Vec<(String, &Path)> {
+    std::iter::once(("data_dir".to_owned(), config.data_dir.as_path()))
+        .chain(config.agents.iter().filter_map(|agent| {
+            agent
+                .resources
+                .as_deref()
+                .map(|resources| (format!("agents.{}.resources", agent.id), resources))
+        }))
+        .collect()
+}
+
 fn validate_installation(config: &LoadedConfig) -> Result<()> {
-    if !config.value.agent.resource_root.is_dir() {
-        bail!("backup is missing the configured agent resource directory");
+    if config
+        .value
+        .resource_roots()
+        .iter()
+        .any(|resources| !resources.is_dir())
+    {
+        bail!("backup is missing a configured agent resource directory");
     }
     for (id, expected) in std::iter::once(("operator", &config.value.core.operator_token_hash))
         .chain(
@@ -501,7 +582,6 @@ fn ensure_stopped(config: &LoadedConfig) -> Result<ServiceLock> {
     Ok(lock)
 }
 
-/// Archive `directory` below `root`, leaving out the `scratch` directories.
 fn append_directory<W: std::io::Write>(
     archive: &mut Builder<W>,
     root: &Path,
@@ -630,16 +710,22 @@ mod tests {
         let file = directory.path().join("file");
         fs::write(&file, "not a directory")?;
         for workspace in [Path::new("."), Path::new("relative"), &missing, &file] {
-            assert!(initialize_test_installation(&root, workspace, 44_000).is_err());
+            crate::assert_refused(
+                initialize_test_installation(&root, workspace, 44_000),
+                "workspace must be an absolute path to an existing directory",
+            )?;
             assert!(!root.exists());
             fs::create_dir(&root)?;
-            assert!(initialize_test_installation(&root, workspace, 44_000).is_err());
+            crate::assert_refused(
+                initialize_test_installation(&root, workspace, 44_000),
+                "workspace must be an absolute path to an existing directory",
+            )?;
             assert!(fs::read_dir(&root)?.next().is_none());
             fs::remove_dir(&root)?;
         }
         let config = initialize_test_installation(&root, directory.path(), 44_000)?;
         assert_eq!(
-            LoadedConfig::load(&config)?.value.agent.workspace,
+            LoadedConfig::load(&config)?.value.agents[0].workspace,
             directory.path()
         );
         Ok(())
@@ -649,11 +735,21 @@ mod tests {
     fn initialization_rejects_unusable_ports_without_writing_installation() -> Result<()> {
         let directory = tempdir()?;
         let root = directory.path().join("installation");
-        for base_port in [0, 65_534, 65_535] {
-            assert!(initialize_test_installation(&root, directory.path(), base_port).is_err());
+        for (base_port, reason) in [
+            (0, "core listen port must be nonzero"),
+            (65_534, "base port does not leave room for all services"),
+            (65_535, "base port does not leave room for all services"),
+        ] {
+            crate::assert_refused(
+                initialize_test_installation(&root, directory.path(), base_port),
+                reason,
+            )?;
             assert!(!root.exists());
             fs::create_dir(&root)?;
-            assert!(initialize_test_installation(&root, directory.path(), base_port).is_err());
+            crate::assert_refused(
+                initialize_test_installation(&root, directory.path(), base_port),
+                reason,
+            )?;
             assert!(fs::read_dir(&root)?.next().is_none());
             fs::remove_dir(&root)?;
         }
@@ -686,13 +782,6 @@ mod tests {
                 .version,
             RELEASE_VERSION
         );
-        // This initializer bundles defaults; it does not constrain core providers.
-        for (id, role) in [
-            ("discord-private", ProviderRole::Interface),
-            ("runtime-pi", ProviderRole::Runtime),
-        ] {
-            config.provider(id, role)?;
-        }
 
         let mut credentials = fs::read_dir(root.join("credentials"))?
             .map(|entry| entry.map(|entry| entry.file_name()))
@@ -722,7 +811,7 @@ mod tests {
         let root = directory.path().join("installation");
         let config_path = initialize(&root, directory.path(), 44_000, super::Runtime::T3)?;
         let config = LoadedConfig::load(&config_path)?;
-        assert_eq!(config.value.agent.runtime_provider, "runtime-t3");
+        assert_eq!(config.value.agents[0].runtime, "runtime-t3");
         let ids: Vec<&str> = config
             .value
             .providers
@@ -745,11 +834,10 @@ mod tests {
             runtime.token_hash
         );
         // Nothing of Pi's: no registration, credential or state directory.
-        assert!(
-            config
-                .provider("runtime-pi", ProviderRole::Runtime)
-                .is_err()
-        );
+        crate::assert_refused(
+            config.provider("runtime-pi", ProviderRole::Runtime),
+            "provider runtime-pi is not configured",
+        )?;
         assert!(!root.join("credentials/runtime-pi.token").exists());
         assert!(!root.join("pi").exists());
         assert!(!root.join("state/components/runtime-pi").exists());
@@ -889,7 +977,7 @@ mod tests {
 
     #[test]
     fn backup_rejects_external_configured_owned_paths() -> Result<()> {
-        for field in ["data_dir", "agent.resource_root"] {
+        for field in ["data_dir", "agents.assistant.resources"] {
             let directory = tempdir()?;
             let root = directory.path().join("installation");
             let config_path = initialize_test_installation(&root, directory.path(), 44_500)?;
@@ -909,7 +997,7 @@ mod tests {
             ] {
                 match field {
                     "data_dir" => config.data_dir = path,
-                    _ => config.agent.resource_root = path,
+                    _ => config.agents[0].resources = Some(path),
                 }
                 fs::write(&config_path, toml::to_string_pretty(&config)?)?;
                 let loaded = LoadedConfig::load(&config_path)?;
@@ -934,14 +1022,14 @@ mod tests {
 
     #[test]
     fn backup_and_restore_reject_absolute_managed_paths_inside_source() -> Result<()> {
-        for field in ["data_dir", "agent.resource_root"] {
+        for field in ["data_dir", "agents.assistant.resources"] {
             let directory = tempdir()?;
             let root = directory.path().join("installation");
             let config_path = initialize_test_installation(&root, directory.path(), 44_700)?;
             let mut config: Config = toml::from_str(&fs::read_to_string(&config_path)?)?;
             match field {
                 "data_dir" => config.data_dir = root.join("state"),
-                _ => config.agent.resource_root = root.join("agents/default"),
+                _ => config.agents[0].resources = Some(root.join("agents/default")),
             }
             fs::write(&config_path, toml::to_string_pretty(&config)?)?;
             let destination = directory.path().join("backup.tar.gz");
@@ -960,7 +1048,10 @@ mod tests {
             // even when that state is still accessible to this Unix user.
             archive_test_tree(&root, &destination)?;
             let target = directory.path().join("restored");
-            assert!(restore(&destination, &target).is_err());
+            crate::assert_refused(
+                restore(&destination, &target),
+                &format!("require {field} to be installation-relative"),
+            )?;
             assert!(!target.exists());
         }
         Ok(())
@@ -976,17 +1067,32 @@ mod tests {
 
     #[test]
     fn incomplete_restore_is_rejected_before_publication_and_can_be_retried() -> Result<()> {
-        for damage in [
-            "config-only",
-            "database",
-            "operator",
-            "provider",
-            "resource-root",
-            "wrong-credential",
-            "corrupt-database",
-            "empty-database",
-            "old-schema",
-            "foreign-key",
+        for (damage, reason) in [
+            (
+                "config-only",
+                "backup is missing a configured agent resource directory",
+            ),
+            ("database", "unable to open database file"),
+            ("operator", "read provider credential"),
+            ("provider", "read provider credential"),
+            (
+                "resource-root",
+                "backup is missing a configured agent resource directory",
+            ),
+            (
+                "wrong-credential",
+                "backup credential for runtime-pi does not match the configuration",
+            ),
+            ("corrupt-database", "file is not a database"),
+            (
+                "empty-database",
+                "database schema is not the current Carillon format",
+            ),
+            (
+                "old-schema",
+                "database schema is not the current Carillon format",
+            ),
+            ("foreign-key", "SQLite foreign key check failed"),
         ] {
             let directory = tempdir()?;
             let source = directory.path().join("source");
@@ -1034,7 +1140,7 @@ mod tests {
                 if existing_target {
                     fs::create_dir(&target)?;
                 }
-                assert!(restore(&invalid, &target).is_err(), "accepted {damage}");
+                crate::assert_refused(restore(&invalid, &target), reason)?;
                 assert_eq!(target.exists(), existing_target, "published {damage}");
                 if existing_target {
                     assert!(fs::read_dir(&target)?.next().is_none());
@@ -1092,6 +1198,7 @@ mod tests {
 
         use crate::{db::Database, resources};
 
+        const ALTERED: &str = "backup has missing or altered captured resources";
         for uncertain in [false, true] {
             for damage in ["missing", "content", "executable", "address", "malformed"] {
                 let directory = tempdir()?;
@@ -1100,15 +1207,15 @@ mod tests {
                     initialize_test_installation(&source, directory.path(), OFFLINE_BACKUP_PORT)?;
                 let config = LoadedConfig::load(&config_path)?;
                 let store = config.value.data_dir.join("resource-snapshots");
-                let snapshot = resources::materialize(&config.value.agent.resource_root, &store)?;
-                let db_path = config.value.data_dir.join("carillon.sqlite3");
-                let db = Database::open(&db_path)?;
+                let snapshot =
+                    resources::materialize(config.value.agents[0].resources.as_deref(), &store)?;
+                let db = Database::open(&config.value.data_dir.join("carillon.sqlite3"))?;
                 let receipt = db.accept_event(
                     "discord-private",
                     "runtime-pi",
                     &ExternalEvent {
                         event_id: "captured".to_owned(),
-                        agent_id: "default".to_owned(),
+                        agent_id: super::ASSISTANT.to_owned(),
                         audience_id: "audience".to_owned(),
                         user_id: "user".to_owned(),
                         delivery_target_id: "target".to_owned(),
@@ -1117,8 +1224,10 @@ mod tests {
                         native: serde_json::json!({}),
                         attachments: None,
                     },
-                    &serde_json::json!([]),
-                    &snapshot,
+                    crate::db::Admission::Queued {
+                        providers: &serde_json::json!([]),
+                        resource_snapshot_id: &snapshot,
+                    },
                     None,
                 )?;
                 let expected_state = if uncertain {
@@ -1131,19 +1240,15 @@ mod tests {
                 } else {
                     TurnState::Queued
                 };
-                // Valid capture remains independent of subsequent live-root edits.
                 fs::write(
-                    config.value.agent.resource_root.join("SYSTEM.md"),
+                    config.value.resource_roots()[0].join("SYSTEM.md"),
                     "new live prompt",
                 )?;
                 let valid = directory.path().join("valid.tar.gz");
                 backup(&config, &valid)?;
                 damage_captured_resources(&config, &snapshot, damage)?;
                 let refused_backup = directory.path().join("refused.tar.gz");
-                assert!(
-                    backup(&config, &refused_backup).is_err(),
-                    "backup accepted {damage}"
-                );
+                crate::assert_refused(backup(&config, &refused_backup), ALTERED)?;
                 assert!(!refused_backup.exists());
                 let invalid = directory.path().join("invalid.tar.gz");
                 archive_test_tree(&source, &invalid)?;
@@ -1153,10 +1258,7 @@ mod tests {
                     if existing {
                         fs::create_dir(&target)?;
                     }
-                    assert!(
-                        restore(&invalid, &target).is_err(),
-                        "restore accepted {damage}"
-                    );
+                    crate::assert_refused(restore(&invalid, &target), ALTERED)?;
                     assert_eq!(target.exists(), existing);
                     if existing {
                         assert!(fs::read_dir(&target)?.next().is_none());
@@ -1188,15 +1290,16 @@ mod tests {
         Ok(())
     }
 
-    /// A core over an initialized installation, as the service opens it.
     fn installed_core(config: &LoadedConfig) -> Result<crate::Core> {
         use carillon_installation::config::AttachmentLimits;
 
         crate::Core::open(crate::CoreOptions {
             data_directory: config.value.data_dir.clone(),
-            agent_id: config.value.agent.id.clone(),
-            resource_root: config.value.agent.resource_root.clone(),
-            default_runtime: "runtime-pi".to_owned(),
+            agents: vec![crate::AgentOptions {
+                id: super::ASSISTANT.to_owned(),
+                runtime: "runtime-pi".to_owned(),
+                resources: config.value.agent(super::ASSISTANT)?.resources.clone(),
+            }],
             runtimes: vec![crate::RuntimeProvider {
                 id: "runtime-pi".to_owned(),
                 version: "test".to_owned(),
@@ -1250,7 +1353,7 @@ mod tests {
                     &interface,
                     &ExternalEvent {
                         event_id: event_id.to_owned(),
-                        agent_id: "default".to_owned(),
+                        agent_id: super::ASSISTANT.to_owned(),
                         user_id: "user".to_owned(),
                         audience_id: event_id.to_owned(),
                         delivery_target_id: "target".to_owned(),
@@ -1329,7 +1432,7 @@ mod tests {
                 &CancellationToken::new(),
                 async |request| {
                     assert_eq!(request.correlation_id, turns[1]);
-                    let root = std::path::Path::new(&request.attachment_root);
+                    let root = Path::new(&request.attachment_root);
                     assert!(root.starts_with(&relocated), "{}", root.display());
                     assert_eq!(
                         fs::read(root.join(&request.attachments[0].path))
@@ -1376,10 +1479,10 @@ mod tests {
             let invalid = damaged.join("invalid.tar.gz");
             archive_test_tree(&tree, &invalid)?;
             let target = damaged.join("restored");
-            assert!(
-                restore(&invalid, &target).is_err(),
-                "restore accepted {damage}"
-            );
+            crate::assert_refused(
+                restore(&invalid, &target),
+                "backup has missing, altered or unexpected captured attachments",
+            )?;
             assert!(!target.exists(), "published {damage}");
         }
         Ok(())
@@ -1395,7 +1498,7 @@ mod tests {
             .providers
             .retain(|provider| provider.role == ProviderRole::Runtime);
         config.providers[0].id = "other-runtime".to_owned();
-        config.agent.runtime_provider = "other-runtime".to_owned();
+        config.agents[0].runtime = "other-runtime".to_owned();
         fs::rename(
             root.join("credentials/runtime-pi.token"),
             root.join("credentials/other-runtime.token"),
@@ -1466,10 +1569,10 @@ mod tests {
         );
         assert!(restored.value.data_dir.join("carillon.sqlite3").is_file());
         assert_eq!(
-            fs::read(restored.value.agent.resource_root.join("SYSTEM.md"))?,
+            fs::read(restored.value.resource_roots()[0].join("SYSTEM.md"))?,
             b"agent instructions"
         );
-        assert_eq!(restored.value.agent.workspace, workspace);
+        assert_eq!(restored.value.agents[0].workspace, workspace);
         assert_eq!(fs::read(workspace.join("user-file"))?, b"user-owned");
         assert!(!target.join("workspace").exists());
         Ok(())
@@ -1496,7 +1599,7 @@ mod tests {
         archive.append(&header, Cursor::new(invalid_config))?;
         archive.into_inner()?.finish()?;
         let target = directory.path().join("restored");
-        assert!(restore(&invalid_archive, &target).is_err());
+        crate::assert_refused(restore(&invalid_archive, &target), "TOML parse error")?;
         assert!(!target.exists());
         let names = fs::read_dir(directory.path())?
             .map(|entry| entry.map(|entry| entry.file_name()))
@@ -1550,7 +1653,10 @@ mod tests {
         let root = directory.path().join("installation");
         let config_path = initialize_test_installation(&root, directory.path(), 44_000)?;
         let before = fs::read(&config_path)?;
-        assert!(set_provider(&config_path, "../escape", false).is_err());
+        crate::assert_refused(
+            set_provider(&config_path, "../escape", false),
+            "provider identity must be 1-128 bytes",
+        )?;
         assert_eq!(fs::read(&config_path)?, before);
         Ok(())
     }

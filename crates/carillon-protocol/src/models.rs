@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 /// unchanged by the provider and core.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ModelState {
+    pub providers: Vec<ModelProvider>,
     pub available: Vec<AvailableModel>,
     pub agent: ScopeState,
     /// Absent outside a conversation.
@@ -16,6 +17,14 @@ pub struct ModelState {
         skip_serializing_if = "Option::is_none"
     )]
     pub conversation: Option<ScopeState>,
+}
+
+/// A provider of the runtime's models, as the runtime names it.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ModelProvider {
+    /// What [`AvailableModel::provider`] and [`Selection::provider`] name.
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -32,9 +41,17 @@ pub struct AvailableModel {
 pub struct ModelOption {
     pub id: String,
     pub name: String,
-    pub choices: Vec<String>,
-    /// Used when no scope chose a supported value.
+    pub choices: Vec<OptionChoice>,
+    /// The ID of the choice used when no scope chose a supported value.
     pub default: String,
+}
+
+/// One value a setting accepts, as the runtime names it. Selections hold
+/// its `id`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct OptionChoice {
+    pub id: String,
+    pub name: String,
 }
 
 /// The effective selection for one scope and whether it was set at that

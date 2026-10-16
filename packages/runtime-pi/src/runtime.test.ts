@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, mkdir, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { ModelRuntime, SettingsManager } from "@earendil-works/pi-coding-agent";
 import {
   createAssistantMessageEventStream,
@@ -10,7 +10,7 @@ import {
   type Model,
 } from "@earendil-works/pi-ai";
 import { expect, it, vi } from "vitest";
-import { createPiRuntime, openConversation } from "@carillon/runtime-pi";
+import { conversationDirectory, createPiRuntime, openConversation } from "@carillon/runtime-pi";
 import { runSessionExample } from "../examples/session.ts";
 
 it("imports the public package without startup, discovery or installation files", async () => {
@@ -104,13 +104,13 @@ it("composes native Pi directly, retains history and isolates independently cons
   const settings = () =>
     SettingsManager.inMemory({ defaultProvider: model.provider, defaultModel: model.id });
   const first = await createPiRuntime({
-    workspace: root,
+    agents: [{ id: "example", workspace: root }],
     stateDirectory: join(root, "one"),
     modelRuntime: models,
     settings: settings(),
   });
   const second = await createPiRuntime({
-    workspace: root,
+    agents: [{ id: "example", workspace: root }],
     stateDirectory: join(root, "two"),
     modelRuntime: models,
     settings: settings(),
@@ -141,6 +141,54 @@ it("composes native Pi directly, retains history and isolates independently cons
     expect(observed.map((history) => history.length)).toEqual([1, 2, 1, 2]);
   } finally {
     await Promise.all([first.close(), second.close()]);
+    vi.restoreAllMocks();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("names providers as Pi does and thinking choices by their IDs when Pi has no names", async () => {
+  const root = await mkdtemp(join(tmpdir(), "carillon-providers-"));
+  const models = await ModelRuntime.create({
+    authPath: join(root, "auth.json"),
+    modelsPath: null,
+    modelsStorePath: join(root, "models.json"),
+    refreshOnCreate: false,
+  });
+  const gateway: Model<"openai-responses"> = {
+    ...model,
+    provider: "local-gateway",
+    id: "local",
+    reasoning: true,
+    thinkingLevelMap: { minimal: null, low: null, high: null },
+  };
+  vi.spyOn(models, "getAvailable").mockResolvedValue([model, gateway]);
+  const runtime = await createPiRuntime({
+    agents: [{ id: "test", workspace: root }],
+    stateDirectory: join(root, "state"),
+    modelRuntime: models,
+    settings: SettingsManager.inMemory({ defaultProvider: model.provider, defaultModel: model.id }),
+  });
+  try {
+    const state = await runtime.modelState({ interface_id: "test", agent_id: "test" });
+    expect(state.providers).toEqual([
+      { id: "local-gateway", name: "local-gateway" },
+      { id: "openai", name: "OpenAI" },
+    ]);
+    expect(
+      state.available.find((offered) => offered.provider === "local-gateway")?.options,
+    ).toEqual([
+      {
+        id: "thinking",
+        name: "Thinking",
+        choices: [
+          { id: "off", name: "off" },
+          { id: "medium", name: "medium" },
+        ],
+        default: "medium",
+      },
+    ]);
+  } finally {
+    await runtime.close();
     vi.restoreAllMocks();
     await rm(root, { recursive: true, force: true });
   }
@@ -187,7 +235,7 @@ it("keeps a running turn's model when an update commits while its catalogue is r
     return stream;
   });
   const runtime = await createPiRuntime({
-    workspace: root,
+    agents: [{ id: "test", workspace: root }],
     stateDirectory: join(root, "state"),
     modelRuntime: models,
     settings: SettingsManager.inMemory({ defaultProvider: model.provider, defaultModel: model.id }),
@@ -232,7 +280,7 @@ it("close waits for accepted operations and prevents queued execution from start
   });
   const catalogue = vi.spyOn(models, "getAvailable").mockResolvedValue([model]);
   const runtime = await createPiRuntime({
-    workspace: root,
+    agents: [{ id: "test", workspace: root }],
     stateDirectory: join(root, "state"),
     modelRuntime: models,
     settings: SettingsManager.inMemory({ defaultProvider: model.provider, defaultModel: model.id }),
@@ -252,7 +300,11 @@ it("close waits for accepted operations and prevents queued execution from start
     const active = runtime.executeTurn(request);
     // The first call has entered the serial queue and is waiting for its catalogue.
     await Promise.resolve();
-    const queued = runtime.executeTurn({ ...request, correlation_id: "two" });
+    const queued = runtime.executeTurn({
+      ...request,
+      audience_id: "queued",
+      correlation_id: "two",
+    });
     const result = Promise.allSettled([active, queued]);
     let closed = false;
     const closing = runtime.close().then(() => {
@@ -262,8 +314,13 @@ it("close waits for accepted operations and prevents queued execution from start
     expect(closed).toBe(false);
     deferred.resolve([model]);
     await closing;
-    expect((await result).map((entry) => entry.status)).toEqual(["rejected", "rejected"]);
-    expect(catalogue).toHaveBeenCalledTimes(2); // construction and the first turn, never the queued turn
+    expect(await result).toMatchObject([
+      { status: "rejected", reason: { message: "Pi runtime is closed" } },
+      { status: "rejected", reason: { message: "Pi runtime is closed" } },
+    ]);
+    // The active turn opened its conversation; the queued one never started.
+    const sessions = join(root, "state", "sessions");
+    expect(await readdir(sessions)).toEqual([basename(conversationDirectory(sessions, request))]);
     await expect(runtime.executeTurn(request)).rejects.toThrow("closed");
   } finally {
     deferred.resolve([model]);
@@ -283,7 +340,7 @@ it("refuses a follow-up it never offered, and says a restart loses a turn it exe
   });
   const catalogue = vi.spyOn(models, "getAvailable").mockResolvedValue([model]);
   const runtime = await createPiRuntime({
-    workspace: root,
+    agents: [{ id: "test", workspace: root }],
     stateDirectory: join(root, "state"),
     modelRuntime: models,
     settings: SettingsManager.inMemory({ defaultProvider: model.provider, defaultModel: model.id }),
@@ -307,7 +364,9 @@ it("refuses a follow-up it never offered, and says a restart loses a turn it exe
       status: 422,
       message: "This runtime does not follow up on delegated work.",
     });
-    expect(catalogue).toHaveBeenCalledTimes(1); // construction alone
+    // Refused before any work: the conversation was not opened.
+    const sessions = join(root, "state", "sessions");
+    expect(await readdir(sessions)).toEqual([]);
     catalogue.mockReturnValue(deferred.promise);
     const active = runtime.executeTurn({ ...request, input: "Do not execute" });
     void active.catch(() => undefined);
@@ -317,6 +376,7 @@ it("refuses a follow-up it never offered, and says a restart loses a turn it exe
         reason: "1 turn(s) still executing",
       });
     });
+    expect(await readdir(sessions)).toEqual([basename(conversationDirectory(sessions, request))]);
     const closing = runtime.close();
     deferred.resolve([model]);
     await closing;

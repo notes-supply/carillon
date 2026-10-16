@@ -44,7 +44,6 @@ const provider = createServer(async (request, response) => {
 provider.listen(0, "127.0.0.1");
 await once(provider, "listening");
 
-/** A small real PNG. */
 function png(width, height) {
   const table = Array.from({ length: 256 }, (_, n) => {
     let c = n;
@@ -124,7 +123,7 @@ try {
   await writeFile(tokenFile, token, { mode: 0o600 });
   await writeFile(
     config,
-    `data_dir = "state"\n[core]\noperator_token_hash = "${hash}"\n[agent]\nresource_root = "resources"\nworkspace = ${JSON.stringify(root)}\n[[providers]]\nid = "runtime-pi"\nrole = "runtime"\nversion = "0.0.0"\nurl = "${url}"\ntoken_hash = "${hash}"\nenabled = true\n`,
+    `data_dir = "state"\n[core]\noperator_token_hash = "${hash}"\n[[agents]]\nid = "default"\nname = "Fixture"\nruntime = "runtime-pi"\nworkspace = ${JSON.stringify(root)}\nresources = "resources"\n[[providers]]\nid = "runtime-pi"\nrole = "runtime"\nversion = "0.0.0"\nurl = "${url}"\ntoken_hash = "${hash}"\nenabled = true\n`,
   );
   let logs = "";
   const program = [
@@ -209,7 +208,6 @@ try {
   assert.doesNotMatch(text, /Image omitted/u);
   assert.match(text, /name: "wide\.png"; .*sent inline as an image/u);
   assert.match(text, /name: "notes\.txt"; .*; file$/mu);
-  // The release ships Photon's module beside the executables.
   assert.ok((await readFile(join(release, "bin/photon_rs_bg.wasm"))).length > 0);
   console.log(
     `runtime: packaged Pi normalized an attached image natively and listed every file (local inference fixture; ${hidePhoton ? "build-tree Photon hidden, release copy used" : "build-tree Photon visible: no user namespaces here"})`,

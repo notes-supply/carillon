@@ -102,8 +102,9 @@ enum Command {
         #[arg(long, value_enum, default_value_t = Runtime::Pi)]
         runtime: Runtime,
     },
-    /// Set up an installation at the terminal: the runtime, then Discord.
-    /// A rerun keeps what is already set up when asked to.
+    /// Set up an installation at the terminal: the runtimes and what runs
+    /// Carillon's assistant, then Discord. A rerun keeps what is already set
+    /// up when asked to.
     Setup {
         /// The agent's folder with Pi (default: your home). With T3, the
         /// chosen project's folder.
@@ -111,9 +112,9 @@ enum Command {
         workspace: Option<PathBuf>,
         #[arg(long, default_value_t = 43_800)]
         base_port: u16,
-        /// The runtime, instead of asking.
+        /// A runtime to use, instead of asking; repeat it for both.
         #[arg(long, value_enum)]
-        runtime: Option<Runtime>,
+        runtime: Vec<Runtime>,
     },
     /// Run the core service with an explicit registry.
     Core {
@@ -256,7 +257,7 @@ pub(crate) async fn run() -> Result<()> {
             &SetupOptions {
                 workspace,
                 base_port,
-                runtime,
+                runtimes: runtime,
             },
             &mut Terminal,
         )?,
@@ -353,7 +354,6 @@ async fn provider(home: &Path, id: &str, action: ProviderAction) -> Result<()> {
     Ok(())
 }
 
-/// Shows the registry core serves, or has core serve `carillon.toml`.
 async fn registry(config: &LoadedConfig, action: Option<RegistryAction>) -> Result<()> {
     let Some(RegistryAction::Apply) = action else {
         print_registry(&registry_status(config).await?);
@@ -518,7 +518,6 @@ async fn print_inspection(config: &LoadedConfig, turn_id: &str) -> Result<()> {
     print_pretty(&inspection)
 }
 
-/// Each runtime as core serves it.
 fn print_runtimes(applied: &Applied) {
     for runtime in &applied.runtimes {
         print_runtime(runtime);
@@ -598,8 +597,6 @@ mod tests {
 
     use anyhow::{Context, Result};
 
-    /// A provider command that writes the installation's files runs under
-    /// its maintenance lock, and never while another operation holds it.
     #[test]
     fn a_locked_provider_command_runs_only_under_the_maintenance_lock() -> Result<()> {
         use carillon_installation::maintenance::MaintenanceLock;
@@ -690,7 +687,7 @@ mod tests {
 
         // A file on PATH without the executable bit is not a command.
         std::fs::write(elsewhere.join("carillon-review"), "")?;
-        assert!(super::locate_provider("review", &own, &path).is_err());
+        crate::assert_refused(super::locate_provider("review", &own, &path), "not on PATH")?;
         std::fs::set_permissions(
             elsewhere.join("carillon-review"),
             std::fs::Permissions::from_mode(0o755),

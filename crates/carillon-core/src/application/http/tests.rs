@@ -1,20 +1,18 @@
 use std::{
     fs,
     path::Path,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use anyhow::Context as _;
-use axum::{response::IntoResponse as _, routing::post};
+use axum::response::IntoResponse as _;
 use tempfile::tempdir;
+use tokio::sync::mpsc::error::TryRecvError;
 
 use super::*;
 use crate::Reported;
 use crate::db::Database;
-use carillon_protocol::model::{DeliveryOutcome, JOB_READ_LIMIT, TurnActivity, TurnState};
+use carillon_protocol::model::{DeliveryOutcome, JOB_READ_LIMIT, TurnState};
 
 /// A test installation: its registry, which cases change in memory as an
 /// operator would edit and restart it, and core over its storage.
@@ -32,10 +30,9 @@ impl Fixture {
 }
 
 fn installation(root: &Path) -> Result<Fixture> {
-    use carillon_installation::config::{AgentConfig, Config, CoreConfig, Provider, hash_token};
+    use carillon_installation::config::{AgentConfig, Config, CoreConfig, hash_token};
 
     // Core tests use opaque provider IDs, without a Discord or Pi installation.
-    // Native session state belongs to the runtime.
     let resources = root.join("resources");
     fs::create_dir(&resources)?;
     fs::write(resources.join("SYSTEM.md"), "test instructions")?;
@@ -74,13 +71,13 @@ fn installation(root: &Path) -> Result<Fixture> {
             },
         },
         providers,
-        agent: AgentConfig {
+        agents: vec![AgentConfig {
             id: "test-agent".to_owned(),
             name: "Test agent".to_owned(),
-            resource_root: resources,
+            runtime: "test-runtime".to_owned(),
             workspace: root.to_path_buf(),
-            runtime_provider: "test-runtime".to_owned(),
-        },
+            resources: Some(resources),
+        }],
     };
     value.validate()?;
     let config = LoadedConfig {
@@ -91,7 +88,7 @@ fn installation(root: &Path) -> Result<Fixture> {
     Ok(Fixture {
         core: Core::create(core_options(&config))?,
         config,
-        client: carillon_installation::loopback::client().build()?,
+        client: loopback::client().build()?,
     })
 }
 
@@ -118,7 +115,7 @@ async fn run_next_turn(
         RuntimeTurnRequest,
     ) -> Result<RuntimeTurnResponse, TurnFailure>,
 ) -> Result<WorkerStep> {
-    super::run_next(
+    run_next(
         &configured(state),
         runtime_id,
         Lane::Messages,
@@ -137,7 +134,7 @@ async fn run_next_observation(
         RuntimeTurnRequest,
     ) -> Result<RuntimeTurnResponse, TurnFailure>,
 ) -> Result<WorkerStep> {
-    super::run_next(
+    run_next(
         &configured(state),
         runtime_id,
         Lane::Observations,
@@ -148,6 +145,15 @@ async fn run_next_observation(
 }
 
 async fn accept(state: &Fixture, id: &str, audience: &str) -> Result<EventReceipt> {
+    accept_for(state, &state.config.value.agents[0].id, id, audience).await
+}
+
+async fn accept_for(
+    state: &Fixture,
+    agent: &str,
+    id: &str,
+    audience: &str,
+) -> Result<EventReceipt> {
     let mut headers = HeaderMap::new();
     headers.insert(PROVIDER_HEADER, "test-interface".parse()?);
     headers.insert(
@@ -159,13 +165,13 @@ async fn accept(state: &Fixture, id: &str, audience: &str) -> Result<EventReceip
         headers,
         Json(ExternalEvent {
             event_id: id.to_owned(),
-            agent_id: state.config.value.agent.id.clone(),
+            agent_id: agent.to_owned(),
             user_id: "test-user".to_owned(),
             audience_id: audience.to_owned(),
             delivery_target_id: "test-destination".to_owned(),
             feedback_target_id: "test-feedback".to_owned(),
             content: id.to_owned(),
-            native: serde_json::Value::Null,
+            native: Value::Null,
             attachments: None,
         }),
     )
@@ -175,7 +181,7 @@ async fn accept(state: &Fixture, id: &str, audience: &str) -> Result<EventReceip
 }
 
 /// A runtime's final report that counted `calls` calls, as it reads on the wire.
-fn report_value(calls: u32) -> serde_json::Value {
+fn report_value(calls: u32) -> Value {
     json!({
         "phase": "model",
         "running": [],
@@ -226,7 +232,7 @@ fn configuration_rejects_malformed_provider_endpoints_before_startup() -> Result
         ] {
             state.config.value.providers[index].url = url.to_owned();
             fs::write(&path, toml::to_string(&state.config.value)?)?;
-            assert!(LoadedConfig::load(&path).is_err(), "accepted {url:?}");
+            crate::assert_refused(LoadedConfig::load(&path), "invalid URL for provider")?;
         }
         for url in [
             "http://127.0.0.1:3000",
@@ -245,190 +251,25 @@ fn configuration_rejects_malformed_provider_endpoints_before_startup() -> Result
         for (parallel, valid) in [(0, false), (1, runtime), (16, runtime), (17, false)] {
             state.config.value.providers[index].parallel_turns = Some(parallel);
             fs::write(&path, toml::to_string(&state.config.value)?)?;
+            let id = &state.config.value.providers[index].id;
             assert_eq!(
-                LoadedConfig::load(&path).is_ok(),
-                valid,
-                "parallel_turns {parallel} on {:?}",
-                state.config.value.providers[index].role
+                LoadedConfig::load(&path)
+                    .err()
+                    .map(|error| error.to_string()),
+                (!valid).then(|| format!(
+                    "provider {id} parallel_turns must be between 1 and 16, on a runtime"
+                )),
+                "parallel_turns {parallel}"
             );
         }
         state.config.value.providers[index].parallel_turns = None;
     }
     state.config.value.core.listen.set_port(0);
     fs::write(&path, toml::to_string(&state.config.value)?)?;
-    assert!(
-        LoadedConfig::load(&path).is_err(),
-        "accepted core port zero"
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn status_probes_public_health_without_provider_credentials() -> Result<()> {
-    use axum::{body::Body, http::Request};
-    use tower::ServiceExt as _;
-
-    let directory = tempdir()?;
-    let mut state = installation(directory.path())?;
-    let mut services = tokio::task::JoinSet::new();
-    let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
-    for provider in &mut state.config.value.providers {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        provider.url = format!("http://{}", listener.local_addr()?);
-        let report = provider_status(provider, "ready");
-        let sent = sent.clone();
-        let router = Router::new().route(
-            "/health",
-            get(move |headers: HeaderMap| {
-                let sent = sent.clone();
-                let report = report.clone();
-                async move {
-                    let _ = sent.send(headers);
-                    Json(report)
-                }
-            }),
-        );
-        services.spawn(async move { axum::serve(listener, router).await });
-    }
-    let router = Router::new()
-        .route("/v1/status", get(status))
-        .with_state(configured(&state));
-    let response = router
-        .clone()
-        .oneshot(Request::builder().uri("/v1/status").body(Body::empty())?)
-        .await?;
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    assert!(
-        received.try_recv().is_err(),
-        "unauthenticated status probed providers"
-    );
-
-    let response = tokio::time::timeout(
-        Duration::from_secs(5),
-        router.oneshot(
-            Request::builder()
-                .uri("/v1/status")
-                .header(http::header::AUTHORIZATION, "Bearer test-operator")
-                .body(Body::empty())?,
-        ),
-    )
-    .await??;
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), 65536).await?;
-    let report: StatusReport = serde_json::from_slice(&body)?;
-    assert_eq!(report.release, RELEASE_VERSION);
-    assert_eq!(report.providers.len(), 3);
-    assert!(
-        report
-            .providers
-            .iter()
-            .all(|provider| provider.status == "ready")
-    );
-    for _ in 0..2 {
-        let headers = received.try_recv()?;
-        assert!(
-            !headers.contains_key(http::header::AUTHORIZATION),
-            "public health leaked a credential"
-        );
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn stalled_providers_are_reported_within_the_operator_timeout() -> Result<()> {
-    let directory = tempdir()?;
-    let mut state = installation(directory.path())?;
-    fs::write(
-        directory.path().join("credentials/operator.token"),
-        "test-operator",
+    crate::assert_refused(
+        LoadedConfig::load(&path),
+        "core listen port must be nonzero",
     )?;
-    // Four enabled providers accept a health request and never answer it;
-    // a disabled one sits among them. Keep slow fixtures away from backup's
-    // 127.0.0.1 probes.
-    let mut services = tokio::task::JoinSet::new();
-    let mut providers = Vec::new();
-    for index in 0..5 {
-        let listener = TcpListener::bind("127.0.0.2:0").await?;
-        let mut provider = state.config.value.providers[index % 2].clone();
-        provider.id = format!("stalled-{index}");
-        provider.url = format!("http://{}", listener.local_addr()?);
-        provider.enabled = index != 2;
-        let router = Router::new().route("/health", get(std::future::pending::<StatusCode>));
-        services.spawn(async move { axum::serve(listener, router).await });
-        providers.push(provider);
-    }
-    state.config.value.providers = providers;
-    let listener = TcpListener::bind("127.0.0.2:0").await?;
-    state.config.value.core.listen = listener.local_addr()?;
-    let config = state.config.clone();
-    let router = Router::new()
-        .route("/v1/status", get(status))
-        .with_state(configured(&state));
-    services.spawn(async move { axum::serve(listener, router).await });
-
-    // The operator's status request, bounded at five seconds, gets the
-    // report, in registry order, each provider judged by its own timeout.
-    let report = crate::application::operations::status(&config).await?;
-    let shown = report
-        .providers
-        .iter()
-        .map(|health| (health.id.as_str(), health.status.as_str()))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        shown,
-        [
-            ("core", "ready"),
-            ("stalled-0", "unavailable"),
-            ("stalled-1", "unavailable"),
-            ("stalled-2", "disabled"),
-            ("stalled-3", "unavailable"),
-            ("stalled-4", "unavailable"),
-        ]
-    );
-    // Readiness names the providers that did not answer.
-    let waited = crate::application::operations::wait_until_healthy(&config, Duration::ZERO)
-        .await
-        .err()
-        .context("stalled providers were healthy")?;
-    assert!(
-        format!("{waited:#}").contains("unavailable: stalled-0, stalled-1, stalled-3, stalled-4"),
-        "{waited:#}"
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn provider_health_mismatches_keep_configured_identity_unavailable() -> Result<()> {
-    let directory = tempdir()?;
-    let state = installation(directory.path())?;
-    let mut services = tokio::task::JoinSet::new();
-    for provider in &state.config.value.providers {
-        for field in ["id", "role", "version"] {
-            let listener = TcpListener::bind("127.0.0.1:0").await?;
-            let mut configured = provider.clone();
-            configured.url = format!("http://{}", listener.local_addr()?);
-            let mut report = serde_json::to_value(provider_status(provider, "ready"))?;
-            report[field] = json!("unexpected");
-            let router = Router::new().route(
-                "/health",
-                get(move || {
-                    let report = report.clone();
-                    async move { Json(report) }
-                }),
-            );
-            services.spawn(async move { axum::serve(listener, router).await });
-            let result = fetch_health(&state.client, &configured).await;
-            assert_eq!(result.id, configured.id);
-            assert_eq!(result.role, configured.role.as_str());
-            if field == "version" {
-                assert_eq!(result.version, "unexpected");
-                assert_eq!(result.status, "version_mismatch");
-            } else {
-                assert_eq!(result.version, configured.version);
-                assert_eq!(result.status, "unavailable", "accepted mismatched {field}");
-            }
-        }
-    }
     Ok(())
 }
 
@@ -441,258 +282,15 @@ async fn startup_opens_the_database_without_creating_one() -> Result<()> {
     drop(listener);
     let path = state.config.value.data_dir.join("carillon.sqlite3");
     fs::remove_file(&path)?;
-    assert!(
+    crate::assert_refused(
         serve(
             state.config.root.join("carillon.toml"),
-            state.config.clone()
+            state.config.clone(),
         )
-        .await
-        .is_err()
-    );
+        .await,
+        "unable to open database file",
+    )?;
     assert!(!path.exists());
-    Ok(())
-}
-
-/// A runtime that records every model call and rejects one selection the way
-/// a real runtime phrases it for people.
-fn fake_runtime(
-    id: &'static str,
-    sent: tokio::sync::mpsc::UnboundedSender<(&'static str, serde_json::Value)>,
-) -> Router {
-    fn bearer(headers: &HeaderMap) -> Option<&str> {
-        headers.get(http::header::AUTHORIZATION)?.to_str().ok()
-    }
-    let recorded = sent.clone();
-    let listed = sent.clone();
-    Router::new()
-        .route(
-            "/v1/commands",
-            get(
-                move |headers: HeaderMap,
-                      Query(query): Query<std::collections::HashMap<String, String>>| {
-                    let sent = listed.clone();
-                    async move {
-                        let _ = sent.send((id, json!({"auth": bearer(&headers), "query": query})));
-                        Json(json!({"runtime": id, "commands": [{"name": "compact"}]}))
-                    }
-                },
-            ),
-        )
-        .route(
-        "/v1/model",
-        get(
-            move |headers: HeaderMap,
-                  Query(query): Query<std::collections::HashMap<String, String>>| {
-                let sent = recorded.clone();
-                async move {
-                    let _ = sent.send((id, json!({"auth": bearer(&headers), "query": query})));
-                    Json(json!({"runtime": id, "available": []}))
-                }
-            },
-        )
-        .put(
-            move |headers: HeaderMap, Json(update): Json<serde_json::Value>| {
-                let sent = sent.clone();
-                async move {
-                    let _ = sent.send((id, json!({"auth": bearer(&headers), "update": update})));
-                    if update["selection"]["model"] == json!("missing") {
-                        return (
-                            StatusCode::UNPROCESSABLE_ENTITY,
-                            Json(json!({"error": "That model is not available."})),
-                        )
-                            .into_response();
-                    }
-                    Json(json!({"runtime": id, "updated": true})).into_response()
-                }
-            },
-        ),
-    )
-}
-
-/// Two fake runtimes: `test-runtime` owns the `pinned` conversation and
-/// `replacement` has become the agent default.
-async fn model_fixture(
-    directory: &Path,
-) -> Result<(
-    Fixture,
-    tokio::sync::mpsc::UnboundedReceiver<(&'static str, serde_json::Value)>,
-    tokio::task::JoinSet<std::io::Result<()>>,
-)> {
-    let mut state = installation(directory)?;
-    let (sent, received) = tokio::sync::mpsc::unbounded_channel();
-    let mut services = tokio::task::JoinSet::new();
-    for id in ["test-runtime", "replacement"] {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let mut provider = state
-            .config
-            .provider("test-runtime", ProviderRole::Runtime)?
-            .clone();
-        provider.id = id.to_owned();
-        provider.url = format!("http://{}", listener.local_addr()?);
-        fs::write(
-            directory.join(format!("credentials/{id}.token")),
-            "test-only",
-        )?;
-        if id == "test-runtime" {
-            state.config.value.providers[1] = provider;
-        } else {
-            state.config.value.providers.push(provider);
-        }
-        let app = fake_runtime(id, sent.clone());
-        services.spawn(async move { axum::serve(listener, app).await });
-    }
-    accept(&state, "one", "pinned").await?;
-    state.config.value.agent.runtime_provider = "replacement".to_owned();
-    Ok((state, received, services))
-}
-
-async fn model_call(
-    state: &Fixture,
-    method: &str,
-    uri: &str,
-    authorized: bool,
-    body: Option<&serde_json::Value>,
-) -> Result<(StatusCode, serde_json::Value)> {
-    use axum::{body::Body, http::Request};
-    use tower::ServiceExt as _;
-
-    let router = Router::new()
-        .route("/v1/model", get(model_state).put(set_model))
-        .route("/v1/commands", get(commands))
-        .with_state(configured(state));
-    let mut request = Request::builder()
-        .method(method)
-        .uri(uri)
-        .header(http::header::CONTENT_TYPE, "application/json")
-        .header(PROVIDER_HEADER, "test-interface");
-    if authorized {
-        request = request.header(http::header::AUTHORIZATION, "Bearer test-only");
-    }
-    let body = match body {
-        Some(body) => Body::from(serde_json::to_vec(body)?),
-        None => Body::empty(),
-    };
-    let response =
-        tokio::time::timeout(Duration::from_secs(10), router.oneshot(request.body(body)?))
-            .await??;
-    let status = response.status();
-    let body = axum::body::to_bytes(response.into_body(), 65536).await?;
-    Ok((status, serde_json::from_slice(&body)?))
-}
-
-#[tokio::test]
-async fn model_calls_follow_conversation_ownership() -> Result<()> {
-    let directory = tempdir()?;
-    let (state, mut received, mut services) = model_fixture(directory.path()).await?;
-    let (status, _) =
-        model_call(&state, "GET", "/v1/model?agent_id=test-agent", false, None).await?;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    let (status, _) = model_call(&state, "GET", "/v1/model?agent_id=other", true, None).await?;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(
-        received.try_recv().is_err(),
-        "rejected calls reached a runtime"
-    );
-
-    for (uri, runtime, audience) in [
-        (
-            "/v1/model?agent_id=test-agent&audience_id=pinned",
-            "test-runtime",
-            Some("pinned"),
-        ),
-        ("/v1/model?agent_id=test-agent", "replacement", None),
-        (
-            "/v1/model?agent_id=test-agent&audience_id=fresh",
-            "replacement",
-            Some("fresh"),
-        ),
-    ] {
-        let (status, body) = model_call(&state, "GET", uri, true, None).await?;
-        assert_eq!(status, StatusCode::OK, "{uri}");
-        assert_eq!(body["runtime"], runtime, "{uri}");
-        let (called, call) = received.try_recv()?;
-        assert_eq!(called, runtime);
-        assert_eq!(call["auth"], "Bearer test-only");
-        let mut expected = json!({"interface_id": "test-interface", "agent_id": "test-agent"});
-        if let Some(audience) = audience {
-            expected["audience_id"] = json!(audience);
-        }
-        assert_eq!(call["query"], expected, "{uri}");
-    }
-
-    let update = json!({
-        "agent_id": "test-agent",
-        "audience_id": "pinned",
-        "scope": "conversation",
-        "selection": {"provider": "fixture", "model": "missing", "options": {}},
-    });
-    let (status, body) = model_call(&state, "PUT", "/v1/model", true, Some(&update)).await?;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(body["error"], "That model is not available.");
-    let (called, call) = received.try_recv()?;
-    assert_eq!(called, "test-runtime");
-    assert_eq!(call["update"]["interface_id"], "test-interface");
-    assert_eq!(call["update"]["selection"], update["selection"]);
-    services.shutdown().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn command_catalogues_come_from_the_conversation_runtime() -> Result<()> {
-    let directory = tempdir()?;
-    let (state, mut received, mut services) = model_fixture(directory.path()).await?;
-    let (status, _) = model_call(
-        &state,
-        "GET",
-        "/v1/commands?agent_id=test-agent&audience_id=pinned",
-        false,
-        None,
-    )
-    .await?;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert!(received.try_recv().is_err());
-    let (status, body) = model_call(
-        &state,
-        "GET",
-        "/v1/commands?agent_id=test-agent&audience_id=pinned",
-        true,
-        None,
-    )
-    .await?;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["runtime"], "test-runtime");
-    assert_eq!(body["commands"], json!([{"name": "compact"}]));
-    let (called, call) = received.try_recv()?;
-    assert_eq!(called, "test-runtime");
-    assert_eq!(
-        call["query"],
-        json!({"interface_id": "test-interface", "agent_id": "test-agent", "audience_id": "pinned"})
-    );
-    services.shutdown().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn model_calls_describe_unavailable_runtimes_for_people() -> Result<()> {
-    let directory = tempdir()?;
-    let (mut state, mut received, mut services) = model_fixture(directory.path()).await?;
-    state.config.value.providers[1].enabled = false;
-    let (status, body) = model_call(
-        &state,
-        "GET",
-        "/v1/model?agent_id=test-agent&audience_id=pinned",
-        true,
-        None,
-    )
-    .await?;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["error"], "conversation runtime provider is disabled");
-    services.shutdown().await;
-    let (status, body) =
-        model_call(&state, "GET", "/v1/model?agent_id=test-agent", true, None).await?;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(body["error"], "The runtime is not reachable right now.");
-    assert!(received.try_recv().is_err());
     Ok(())
 }
 
@@ -869,7 +467,7 @@ async fn credential_drift_leaves_work_queued_until_repaired() -> Result<()> {
             Ok(completed(request))
         })
         .await;
-        assert!(result.is_err(), "invalid credential was accepted");
+        crate::assert_refused(result, "credential")?;
         assert_eq!(
             calls, 0,
             "runtime was contacted before credential validation"
@@ -929,7 +527,7 @@ async fn duplicate_events_share_one_accepted_turn_without_reexecution() -> Resul
     );
     let snapshot = state.snapshot_store();
     fs::write(
-        state.config.value.agent.resource_root.join("SYSTEM.md"),
+        state.config.value.resource_roots()[0].join("SYSTEM.md"),
         "changed after acceptance",
     )?;
     let step = run_next_turn(&state, "test-runtime", async |runtime, _, request| {
@@ -1120,7 +718,7 @@ async fn an_interface_cannot_pose_as_cores_follow_up() -> Result<()> {
         headers,
         Json(ExternalEvent {
             event_id: "forged".to_owned(),
-            agent_id: state.config.value.agent.id.clone(),
+            agent_id: state.config.value.agents[0].id.clone(),
             user_id: "test-user".to_owned(),
             audience_id: "conversation".to_owned(),
             delivery_target_id: "test-destination".to_owned(),
@@ -1213,7 +811,7 @@ async fn an_interface_cannot_take_a_follow_up_identity_from_a_parent_turn() -> R
     })
     .await;
     // The parent completed with its answer, and its observation is queued.
-    assert!(step.is_ok(), "{step:?}");
+    step?;
     let inspection = state
         .core
         .inspect_turn(&parent.turn_id)?
@@ -1247,7 +845,7 @@ async fn concurrent_workers_progress_other_conversations_and_keep_each_in_order(
     let (started, running) = tokio::sync::oneshot::channel::<String>();
     let worker = configured(&state);
     let long = tokio::spawn(async move {
-        super::run_next(
+        run_next(
             &worker,
             "test-runtime",
             Lane::Messages,
@@ -1295,14 +893,17 @@ async fn missing_resource_root_refuses_new_acceptance_without_losing_receipts() 
     let directory = tempdir()?;
     let state = installation(directory.path())?;
     let first = accept(&state, "one", "conversation").await?;
-    let root = &state.config.value.agent.resource_root;
+    let root = &state.config.value.resource_roots()[0].to_path_buf();
     let saved = directory.path().join("saved-resources");
     fs::rename(root, &saved)?;
     for missing in [true, false] {
         if !missing {
             fs::write(root, "not a directory")?;
         }
-        assert!(accept(&state, "two", "conversation").await.is_err());
+        crate::assert_refused(
+            accept(&state, "two", "conversation").await,
+            "agent resource root",
+        )?;
         assert_eq!(state.core.database.recent_turns(None, 10)?.len(), 1);
         assert!(
             state
@@ -1348,140 +949,29 @@ async fn duplicate_receipts_do_not_read_mutable_resources() -> Result<()> {
     // A resource change after acceptance must affect new work, not receipt recovery.
     std::os::unix::fs::symlink(
         "SYSTEM.md",
-        state.config.value.agent.resource_root.join("AGENTS.md"),
+        state.config.value.resource_roots()[0].join("AGENTS.md"),
     )?;
     let duplicate = accept(&state, "one", "conversation").await?;
     assert!(duplicate.duplicate);
     assert_eq!(duplicate.turn_id, first.turn_id);
     assert_eq!(duplicate.state, TurnState::Queued);
-    assert!(accept(&state, "two", "conversation").await.is_err());
+    crate::assert_refused(
+        accept(&state, "two", "conversation").await,
+        "resource symlinks are not supported",
+    )?;
     assert_eq!(state.core.database.recent_turns(None, 10)?.len(), 1);
     assert!(
         state
             .core
             .database
-            .event_receipt("other-interface", "one")?
+            .event_receipt("test-interface", "two")?
             .is_none()
     );
     Ok(())
 }
 
 #[tokio::test]
-async fn unavailable_conversation_owner_rejects_input_as_configuration_conflict() -> Result<()> {
-    use axum::{body::Body, http::Request};
-    use tower::ServiceExt as _;
-
-    let directory = tempdir()?;
-    let mut state = installation(directory.path())?;
-    let original = accept(&state, "original", "pinned").await?;
-    let mut replacement = state.config.value.providers[1].clone();
-    replacement.id = "replacement".to_owned();
-    state.config.value.providers.push(replacement);
-    state.config.value.agent.runtime_provider = "replacement".to_owned();
-    state.config.value.providers[1].enabled = false;
-    for id in ["disabled", "removed"] {
-        let router = Router::new()
-            .route("/v1/events", post(accept_event))
-            .with_state(configured(&state));
-        let response = router
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/events")
-                    .header(http::header::CONTENT_TYPE, "application/json")
-                    .header(http::header::AUTHORIZATION, "Bearer test-only")
-                    .header(PROVIDER_HEADER, "test-interface")
-                    .body(Body::from(serde_json::to_vec(&ExternalEvent {
-                        event_id: id.to_owned(),
-                        agent_id: "test-agent".to_owned(),
-                        user_id: "test-user".to_owned(),
-                        audience_id: "pinned".to_owned(),
-                        delivery_target_id: "target".to_owned(),
-                        feedback_target_id: "feedback".to_owned(),
-                        content: "new input".to_owned(),
-                        native: serde_json::Value::Null,
-                        attachments: None,
-                    })?))?,
-            )
-            .await?;
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-        assert!(
-            state
-                .core
-                .database
-                .event_receipt("test-interface", id)?
-                .is_none()
-        );
-        // Other conversations still accept input; recovery of known receipts still works.
-        accept(&state, id, "unrelated").await?;
-        assert!(accept(&state, "original", "pinned").await?.duplicate);
-        assert_eq!(
-            state
-                .core
-                .database
-                .inspect_turn(&original.turn_id)?
-                .context("missing pinned turn")?
-                .state,
-            TurnState::Queued
-        );
-        state
-            .config
-            .value
-            .providers
-            .retain(|provider| provider.id != "test-runtime");
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn runtime_ownership_survives_default_changes() -> Result<()> {
-    let directory = tempdir()?;
-    let mut state = installation(directory.path())?;
-    let mut replacement = state
-        .config
-        .provider("test-runtime", ProviderRole::Runtime)?
-        .clone();
-    replacement.id = "replacement".to_owned();
-    fs::write(
-        directory.path().join("credentials/replacement.token"),
-        "test-only",
-    )?;
-    state.config.value.providers.push(replacement);
-    let first = accept(&state, "one", "conversation").await?;
-    state.config.value.agent.runtime_provider = "replacement".to_owned();
-    state.core.database = Database::open(&state.config.value.data_dir.join("carillon.sqlite3"))?;
-    let second = accept(&state, "two", "conversation").await?;
-    let fresh = accept(&state, "fresh", "new-conversation").await?;
-    run_next_turn(&state, "replacement", async |_, _, request| {
-        assert_eq!(request.correlation_id, fresh.turn_id);
-        Ok(completed(request))
-    })
-    .await?;
-    for receipt in [&first, &second] {
-        let inspected = state
-            .core
-            .database
-            .inspect_turn(&receipt.turn_id)?
-            .context("missing turn")?;
-        assert_eq!(inspected.providers[1]["id"], "test-runtime");
-        run_next_turn(&state, "test-runtime", async |_, _, request| {
-            assert_eq!(request.correlation_id, receipt.turn_id);
-            Ok(completed(request))
-        })
-        .await?;
-    }
-    let third = accept(&state, "three", "conversation").await?;
-    run_next_turn(&state, "test-runtime", async |_, _, request| {
-        assert_eq!(request.correlation_id, third.turn_id);
-        Ok(completed(request))
-    })
-    .await?;
-    assert_eq!(state.core.database.turn_counts()?.completed, 4);
-    Ok(())
-}
-
-#[tokio::test]
-async fn startup_drains_queued_nondefault_runtime_without_replaying_running_work() -> Result<()> {
+async fn startup_interrupts_old_runtime_work_without_replaying_it() -> Result<()> {
     let directory = tempdir()?;
     let mut state = installation(directory.path())?;
     let running = accept(&state, "interrupted", "blocked").await?;
@@ -1524,7 +1014,7 @@ async fn startup_drains_queued_nondefault_runtime_without_replaying_running_work
         );
         services.spawn(async move { axum::serve(listener, app).await });
     }
-    state.config.value.agent.runtime_provider = "replacement".to_owned();
+    state.config.value.agents[0].runtime = "replacement".to_owned();
     let fresh = accept(&state, "fresh", "new-conversation").await?;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     state.config.value.core.listen = listener.local_addr()?;
@@ -1537,21 +1027,13 @@ async fn startup_drains_queued_nondefault_runtime_without_replaying_running_work
             .map_err(std::io::Error::other)
     });
     tokio::time::timeout(Duration::from_secs(5), async {
-        let mut calls = Vec::new();
-        for _ in 0..3 {
-            calls.push(received.recv().await.context("runtime trace ended")?);
-        }
-        calls.sort();
         assert_eq!(
-            calls,
-            vec![
-                ("replacement", fresh.turn_id.clone()),
-                ("test-runtime", blocked.turn_id.clone()),
-                ("test-runtime", queued.turn_id.clone())
-            ]
+            received.recv().await.context("runtime trace ended")?,
+            ("replacement", fresh.turn_id.clone())
         );
         loop {
-            if state.core.database.turn_counts()?.completed == 3 {
+            let counts = state.core.database.turn_counts()?;
+            if counts.completed == 1 && counts.interrupted == 3 {
                 break;
             }
             tokio::task::yield_now().await;
@@ -1565,41 +1047,23 @@ async fn startup_drains_queued_nondefault_runtime_without_replaying_running_work
                 .state,
             TurnState::Interrupted
         );
-        assert_eq!(
-            state
+        for receipt in [&blocked, &queued] {
+            let turn = state
                 .core
-                .database
-                .inspect_turn(&blocked.turn_id)?
-                .context("blocked turn missing")?
-                .state,
-            TurnState::Completed
-        );
-        assert!(received.try_recv().is_err());
+                .inspect_turn(&receipt.turn_id)?
+                .context("missing old turn")?;
+            assert_eq!(turn.state, TurnState::Interrupted);
+            assert!(
+                turn.error
+                    .context("missing explanation")?
+                    .contains("no longer runs test-agent.")
+            );
+        }
+        assert_eq!(received.try_recv(), Err(TryRecvError::Empty));
         Ok::<_, anyhow::Error>(())
     })
     .await??;
     services.shutdown().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn queued_turns_keep_the_same_runtime_conversation() -> Result<()> {
-    let directory = tempdir()?;
-    let state = installation(directory.path())?;
-    let first = accept(&state, "one", "conversation").await?;
-    let second = accept(&state, "two", "conversation").await?;
-    run_next_turn(&state, "test-runtime", async |_, _, request| {
-        assert_eq!(request.correlation_id, first.turn_id);
-        Ok(completed(request))
-    })
-    .await?;
-    run_next_turn(&state, "test-runtime", async |_, _, request| {
-        assert_eq!(request.correlation_id, second.turn_id);
-        assert_eq!(request.audience_id, "conversation");
-        Ok(completed(request))
-    })
-    .await?;
-    assert_eq!(state.core.database.turn_counts()?.completed, 2);
     Ok(())
 }
 
@@ -1801,7 +1265,6 @@ async fn a_claim_waiting_for_the_database_writer_is_not_made_once_stopping() -> 
     Ok(())
 }
 
-/// A runtime serving `/v1/turns` with a fixed failure response, counting calls.
 async fn failing_runtime(
     state: &Fixture,
     status: StatusCode,
@@ -2103,7 +1566,7 @@ async fn empty_runtime_output_interrupts_without_empty_delivery_or_replay() -> R
             None,
         )?;
     }
-    assert!(received.try_recv().is_err());
+    assert_eq!(received.try_recv(), Err(TryRecvError::Empty));
     Ok(())
 }
 
@@ -2221,13 +1684,6 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
     })?;
     assert_eq!(response.correlation_id, turn.turn_id);
     server.abort();
-    assert!(
-        server
-            .await
-            .err()
-            .context("server unexpectedly finished")?
-            .is_cancelled()
-    );
     // Reserve a local TCP port without listening, so refusal cannot hit another service.
     let socket = tokio::net::TcpSocket::new_v4()?;
     socket.bind("127.0.0.1:0".parse()?)?;
@@ -2255,13 +1711,7 @@ fn check_opens_storage_like_the_service_without_writing() -> Result<()> {
     rusqlite::Connection::open(&database)?
         .execute_batch("CREATE TABLE later_release (id INTEGER)")?;
     let before = fs::read(&database)?;
-    let refused = check(&state.config)
-        .err()
-        .context("accepted a schema this release does not know")?;
-    assert!(
-        format!("{refused:#}").contains("not the current Carillon format"),
-        "{refused:#}"
-    );
+    crate::assert_refused(check(&state.config), "not the current Carillon format")?;
     assert_eq!(fs::read(&database)?, before);
     Ok(())
 }
@@ -2280,7 +1730,7 @@ async fn jobs_call(
     provider: &str,
     token: Option<&str>,
     query: &str,
-) -> Result<(StatusCode, serde_json::Value)> {
+) -> Result<(StatusCode, Value)> {
     use axum::{body::Body, http::Request};
     use tower::ServiceExt as _;
 
@@ -2306,7 +1756,7 @@ async fn jobs_call(
 /// A runtime that records each activity request and answers as `mode` says.
 fn activity_runtime(
     mode: Arc<std::sync::Mutex<Snapshot>>,
-    sent: tokio::sync::mpsc::UnboundedSender<serde_json::Value>,
+    sent: tokio::sync::mpsc::UnboundedSender<Value>,
 ) -> Router {
     Router::new().route(
         "/v1/turns/{id}/activity",
@@ -2375,7 +1825,7 @@ async fn foreign_turn(state: &mut Fixture, directory: &Path) -> Result<EventRece
                 delivery_target_id: "foreign-destination".to_owned(),
                 feedback_target_id: "foreign-feedback".to_owned(),
                 content: "not yours".to_owned(),
-                native: serde_json::Value::Null,
+                native: Value::Null,
                 attachments: None,
             },
         )
@@ -2484,7 +1934,7 @@ async fn job_reads_show_only_the_callers_jobs_with_runtime_snapshots() -> Result
             "auth": "Bearer test-only",
         })
     );
-    assert!(received.try_recv().is_err());
+    assert_eq!(received.try_recv(), Err(TryRecvError::Empty));
 
     // A snapshot the runtime cannot supply is absent, never a shorter list.
     for snapshot in [Snapshot::Missing, Snapshot::Malformed, Snapshot::Hanging] {
@@ -2613,7 +2063,7 @@ async fn job_reads_answer_promptly_when_several_runtimes_cannot_describe_their_t
         )?;
         state.config.value.providers.push(provider);
         // New conversations belong to the runtime that is the default when they start.
-        state.config.value.agent.runtime_provider.clone_from(&id);
+        state.config.value.agents[0].runtime.clone_from(&id);
         let receipt = accept(
             &state,
             &format!("event-{index}"),
@@ -2643,7 +2093,7 @@ async fn job_reads_answer_promptly_when_several_runtimes_cannot_describe_their_t
         listed,
         accepted
             .into_iter()
-            .map(|turn| (Some(turn), serde_json::Value::Null))
+            .map(|turn| (Some(turn), Value::Null))
             .collect::<Vec<_>>()
     );
     // Well within an interface's ten-second request deadline.
@@ -2695,26 +2145,22 @@ async fn cut_off_runtime(
                 }
             };
             let Some(body) = body else { continue };
-            let correlation = serde_json::from_slice::<serde_json::Value>(&body)
+            let correlation = serde_json::from_slice::<Value>(&body)
                 .ok()
                 .and_then(|request| request["correlation_id"].as_str().map(str::to_owned))
                 .unwrap_or_default();
             let answer =
                 serde_json::to_string(&json!({"correlation_id": correlation, "output": output}))
                     .unwrap_or_default();
-            let response = if cut.load(std::sync::atomic::Ordering::SeqCst) {
-                format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                    answer.len() + 100,
-                    &answer[..answer.len() / 2]
-                )
+            let (announced, body) = if cut.load(Ordering::SeqCst) {
+                (answer.len() + 100, &answer.as_bytes()[..answer.len() / 2])
             } else {
-                format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{answer}",
-                    answer.len()
-                )
+                (answer.len(), answer.as_bytes())
             };
-            let _ = socket.write_all(response.as_bytes()).await;
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {announced}\r\nconnection: close\r\n\r\n"
+            );
+            let _ = socket.write_all(&[headers.as_bytes(), body].concat()).await;
             let _ = socket.shutdown().await;
         }
     });
@@ -2781,7 +2227,7 @@ async fn a_cut_off_answer_asks_an_observation_again_but_never_replays_an_executa
             .is_none()
     );
     // Asked again, it completes and its report is delivered once.
-    cut.store(false, std::sync::atomic::Ordering::SeqCst);
+    cut.store(false, Ordering::SeqCst);
     run_next_observation(&state, "test-runtime", async |_, _, request| {
         call_runtime(&state.client, &runtime, "unused", request).await
     })
@@ -2795,7 +2241,7 @@ async fn a_cut_off_answer_asks_an_observation_again_but_never_replays_an_executa
     assert_eq!(report.content, "the report");
 
     // An executable turn whose answer is cut off is interrupted, never replayed.
-    cut.store(true, std::sync::atomic::Ordering::SeqCst);
+    cut.store(true, Ordering::SeqCst);
     accept(&state, "two", "elsewhere").await?;
     run_next_turn(&state, "test-runtime", async |_, _, request| {
         call_runtime(&state.client, &runtime, "unused", request).await
@@ -2918,10 +2364,11 @@ async fn a_turn_takes_as_long_as_its_runtime_and_ends_when_its_caller_stops() ->
     // The runtime's native work runs past half an hour, in the paused
     // clock's virtual time; it reports when its request is dropped.
     let (ended, mut endings) = tokio::sync::mpsc::unbounded_channel();
+    let (began, mut beginnings) = tokio::sync::mpsc::unbounded_channel();
     let app = Router::new().route(
         "/v1/turns",
         post(move |Json(request): Json<RuntimeTurnRequest>| {
-            let ended = ended.clone();
+            let (ended, began) = (ended.clone(), began.clone());
             async move {
                 struct Ending(tokio::sync::mpsc::UnboundedSender<()>);
                 impl Drop for Ending {
@@ -2930,6 +2377,7 @@ async fn a_turn_takes_as_long_as_its_runtime_and_ends_when_its_caller_stops() ->
                     }
                 }
                 let _ending = Ending(ended);
+                let _ = began.send(());
                 tokio::time::sleep(Duration::from_mins(31)).await;
                 Json(completed(request))
             }
@@ -2950,6 +2398,10 @@ async fn a_turn_takes_as_long_as_its_runtime_and_ends_when_its_caller_stops() ->
         "{response:?}"
     );
     assert!(started.elapsed() >= Duration::from_mins(31));
+    beginnings
+        .recv()
+        .await
+        .context("the answered request never began")?;
     endings
         .recv()
         .await
@@ -2960,7 +2412,10 @@ async fn a_turn_takes_as_long_as_its_runtime_and_ends_when_its_caller_stops() ->
     let (client, cancelled) = (state.client.clone(), runtime.clone());
     let call =
         tokio::spawn(async move { call_runtime(&client, &cancelled, "unused", request).await });
-    tokio::time::sleep(Duration::from_mins(1)).await;
+    beginnings
+        .recv()
+        .await
+        .context("the request never reached the runtime")?;
     call.abort();
     tokio::time::timeout(Duration::from_secs(5), endings.recv())
         .await
@@ -2985,7 +2440,7 @@ async fn a_turns_final_report_is_kept_with_its_outcome_and_read_within_its_bound
         };
         Ok(job.turns[0].activity.clone())
     };
-    let next_delivery = || -> Result<carillon_protocol::model::Delivery> {
+    let next_delivery = || -> Result<Delivery> {
         let delivery = state
             .core
             .database
@@ -3143,3 +2598,63 @@ async fn a_failed_turns_report_crosses_the_runtime_boundary_with_or_without_an_e
     server.abort();
     Ok(())
 }
+
+#[tokio::test]
+async fn each_agent_runs_on_its_own_runtime_with_its_own_resources() -> Result<()> {
+    let directory = tempdir()?;
+    let mut state = installation(directory.path())?;
+    let mut replacement = state
+        .config
+        .provider("test-runtime", ProviderRole::Runtime)?
+        .clone();
+    replacement.id = "replacement".to_owned();
+    replacement.url = "http://127.0.0.1:59".to_owned();
+    fs::write(
+        directory.path().join("credentials/replacement.token"),
+        "test-only",
+    )?;
+    state.config.value.providers.push(replacement);
+    let mut plain = state.config.value.agents[0].clone();
+    "plain".clone_into(&mut plain.id);
+    "replacement".clone_into(&mut plain.runtime);
+    plain.resources = None;
+    state.config.value.agents.push(plain);
+    state.config.value.validate()?;
+    fs::write(
+        state.config.value.resource_roots()[0].join("SYSTEM.md"),
+        "assistant",
+    )?;
+
+    // One audience, two agents: two conversations, each on its agent's runtime.
+    let assistant = accept(&state, "assistant-turn", "conversation").await?;
+    let plain = accept_for(&state, "plain", "plain-turn", "conversation").await?;
+    run_next_turn(&state, "replacement", async |runtime, _, request| {
+        assert_eq!(runtime.id, "replacement");
+        assert_eq!(request.correlation_id, plain.turn_id);
+        assert_eq!(request.agent_id, "plain");
+        let snapshot = fs::read_dir(&request.resource_root)
+            .map_err(|error| TurnFailure::Uncertain(error.into()))?;
+        assert_eq!(snapshot.count(), 0);
+        Ok(completed(request))
+    })
+    .await?;
+    run_next_turn(&state, "test-runtime", async |_, _, request| {
+        assert_eq!(request.correlation_id, assistant.turn_id);
+        let system = fs::read_to_string(Path::new(&request.resource_root).join("SYSTEM.md"))
+            .map_err(|error| TurnFailure::Uncertain(error.into()))?;
+        assert_eq!(system, "assistant");
+        Ok(completed(request))
+    })
+    .await?;
+    crate::assert_refused(
+        accept_for(&state, "unknown", "unknown-turn", "conversation").await,
+        "unknown agent",
+    )?;
+    Ok(())
+}
+
+mod cutover;
+
+mod models;
+
+mod health;

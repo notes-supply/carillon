@@ -43,12 +43,10 @@ export function withReport(failure: unknown, activity: TurnActivity): unknown {
   return carrier;
 }
 
-/** The final report a failed turn left with `failure`, if any. */
 export function reportOf(failure: unknown): TurnActivity | undefined {
   return canHold(failure) ? reports.get(failure) : undefined;
 }
 
-/** Whether `failure` can hold a report: an object or a function. */
 function canHold(failure: unknown): failure is object {
   return (typeof failure === "object" && failure !== null) || typeof failure === "function";
 }

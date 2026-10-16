@@ -140,7 +140,6 @@ pub(super) async fn update(
     Ok(())
 }
 
-/// An unpacked release whose identity and payload were checked.
 struct Release {
     root: PathBuf,
     version: String,

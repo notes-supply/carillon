@@ -334,12 +334,15 @@ it.each([false, true])(
       const controller = new AbortController();
       try {
         const running = promptSession(session, "run the bounded test", controller.signal);
-        const rejected = expect(running).rejects.toThrow();
+        const rejected = running.then(
+          () => undefined,
+          (error: unknown) => error,
+        );
         await expect
           .poll(() => readFile(attempts, "utf8").catch(() => ""), { timeout: 5_000 })
           .toBe("attempt\n");
         controller.abort();
-        await rejected;
+        expect(await rejected).toMatchObject({ name: "AbortError" });
         expect(session.isIdle).toBe(true);
       } finally {
         await session.abort();
@@ -361,7 +364,7 @@ it.each([false, true])(
         );
         expect(calls).toBe(2);
         expect(await readFile(attempts, "utf8")).toBe("attempt\n");
-        await expect(readFile(finished)).rejects.toThrow();
+        await expect(readFile(finished)).rejects.toMatchObject({ code: "ENOENT" });
       } finally {
         next.dispose();
       }

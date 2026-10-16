@@ -39,7 +39,7 @@ if (import.meta.main) {
       "Pass --state-dir with configured Pi auth.json and settings.json; see the package README.",
     );
   const runtime = await createPiRuntime({
-    workspace: resolve(values.workspace),
+    agents: [{ id: "example", workspace: resolve(values.workspace) }],
     stateDirectory: resolve(values["state-dir"]),
   });
   try {

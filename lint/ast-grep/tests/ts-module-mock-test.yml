@@ -1,0 +1,7 @@
+id: ts-module-mock
+valid:
+  - "const now = vi.fn(() => 1);"
+  - "vi.useFakeTimers();"
+invalid:
+  - "vi.mock('./t3.ts');"
+  - "vi.doMock('node:fs', () => ({}));"

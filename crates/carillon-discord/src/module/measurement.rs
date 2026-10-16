@@ -22,10 +22,11 @@ use anyhow::Context as _;
 use carillon_discord_module::{
     HostCalls,
     contract::{
-        Card, CardRequest, HostReply, HostRequest, Interaction, InteractionKind, Invocation,
+        ActivityMarkers, Card, CardRequest, HostReply, HostRequest, Interaction, InteractionKind,
+        Invocation,
     },
 };
-use carillon_protocol::model::ModelQuery;
+use carillon_protocol::model::{JOB_READ_LIMIT, ModelQuery};
 use serde_json::{Value, json};
 use twilight_model::channel::message::Embed;
 
@@ -126,8 +127,6 @@ async fn release(directory: &std::path::Path) -> anyhow::Result<Module> {
 
 const SAMPLES: usize = 300;
 const WARMUP: usize = 20;
-/// Jobs the monitor reads at most per page of jobs at work.
-const BATCH: usize = 32;
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "measurement; run in a release build with the built module"]
@@ -167,9 +166,9 @@ async fn card_rendering_cost() -> anyhow::Result<()> {
                 "{name} differs from the native renderer"
             );
         }
-        let mut copies = vec![request.clone(); SAMPLES + WARMUP];
+        let copies = vec![request.clone(); SAMPLES + WARMUP];
         let mut native_samples = Vec::with_capacity(SAMPLES);
-        for (index, copy) in copies.drain(..).enumerate() {
+        for (index, copy) in copies.into_iter().enumerate() {
             let started = Instant::now();
             direct_guest(copy)?;
             if index >= WARMUP {
@@ -201,13 +200,13 @@ async fn card_rendering_cost() -> anyhow::Result<()> {
         let mut concurrent = Vec::new();
         for _ in 0..20 {
             let started = Instant::now();
-            for _ in 0..BATCH {
+            for _ in 0..JOB_READ_LIMIT {
                 module.render_card(request).await?;
             }
             sequential.push(started.elapsed());
             let started = Instant::now();
             let mut batch = tokio::task::JoinSet::new();
-            for _ in 0..BATCH {
+            for _ in 0..JOB_READ_LIMIT {
                 let (module, request) = (module.clone(), request.clone());
                 batch.spawn(async move { module.render_card(&request).await.map(|_| ()) });
             }
@@ -221,7 +220,7 @@ async fn card_rendering_cost() -> anyhow::Result<()> {
             json!({
                 "measure": "batch",
                 "case": name,
-                "jobs": BATCH,
+                "jobs": JOB_READ_LIMIT,
                 "read_interval_us": micros(crate::activity::POLL_INTERVAL),
                 "sequential": summary(&mut sequential),
                 "concurrent": summary(&mut concurrent),
@@ -298,6 +297,7 @@ async fn interact(module: Arc<Module>, stop: Arc<AtomicBool>, seen: Arc<Counters
             values: Vec::new(),
             options: Value::Null,
             conversation: false,
+            markers: ActivityMarkers::default(),
         };
         let replied = match calls {
             Ok(calls) => module.invoke(calls, interaction).await.is_ok(),

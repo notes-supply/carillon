@@ -3,10 +3,9 @@
  * catalogue and where selections live; what a selection means against the
  * catalogue is the same for all of them.
  */
-import type { AvailableModel, Selection } from "@carillon/protocol";
+import type { AvailableModel, ModelOption, Selection } from "@carillon/protocol";
 import { ExplainedFailure } from "./failure.ts";
 
-/** The catalogue's entry for the selection's model, if it still offers it. */
 export function offeredModel(
   available: readonly AvailableModel[],
   selection: Selection,
@@ -28,8 +27,7 @@ export function resolved(available: readonly AvailableModel[], selection: Select
   const options: Record<string, string> = {};
   for (const option of model.options) {
     const choice = selection.options?.[option.id];
-    options[option.id] =
-      choice !== undefined && option.choices.includes(choice) ? choice : option.default;
+    options[option.id] = choice !== undefined && offers(option, choice) ? choice : option.default;
   }
   return { provider: model.provider, model: model.model, options };
 }
@@ -43,7 +41,7 @@ export function validated(available: readonly AvailableModel[], selection: Selec
     const option = model.options.find((candidate) => candidate.id === id);
     if (option === undefined)
       throw new ExplainedFailure(422, `${model.name} has no ${id} setting.`);
-    if (!option.choices.includes(choice))
+    if (!offers(option, choice))
       throw new ExplainedFailure(
         422,
         `${choice} is not a ${option.name} setting ${model.name} supports.`,
@@ -51,4 +49,8 @@ export function validated(available: readonly AvailableModel[], selection: Selec
     options[id] = choice;
   }
   return { provider: model.provider, model: model.model, options };
+}
+
+function offers(option: ModelOption, choice: string): boolean {
+  return option.choices.some((candidate) => candidate.id === choice);
 }

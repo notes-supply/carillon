@@ -1,4 +1,3 @@
-/** A native Pi runtime with instance-owned execution and model state. */
 import { ModelRuntime, SettingsManager } from "@earendil-works/pi-coding-agent";
 import type {
   AgentSession,
@@ -18,13 +17,14 @@ import type {
   AgentInfo,
   AvailableModel,
   CommandCatalog,
+  ModelProvider,
   Selection,
   ModelQuery,
   ModelUpdate,
   ModelState,
 } from "@carillon/protocol";
 import { existsSync } from "node:fs";
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { trackActivity, type ActivityTracker } from "./activity.ts";
 import {
@@ -35,7 +35,7 @@ import {
   prepareAttachments,
   type InlineImagePolicy,
 } from "./attachments.ts";
-import { ModelSelections } from "./model.ts";
+import { ModelSelections, type ModelScopes } from "@carillon/runtime/selections";
 import { resolved } from "@carillon/runtime/models";
 import { openConversation } from "./namespace.ts";
 import { finalReport, toolName } from "@carillon/runtime/activity";
@@ -50,7 +50,8 @@ import {
 } from "@carillon/runtime/operations";
 
 export interface PiRuntimeOptions {
-  readonly workspace: string;
+  /** The agents the runtime serves, each with the existing directory its sessions work in. */
+  readonly agents: readonly { readonly id: string; readonly workspace: string }[];
   readonly stateDirectory: string;
   /** Defaults to sessions under stateDirectory. The service supplies its installation path. */
   readonly sessionDirectory?: string;
@@ -69,9 +70,7 @@ export interface PiRuntimeOptions {
  * Supplied collaborators remain caller-owned. close() cancels/settles work, but does not destroy them.
  */
 export async function createPiRuntime(options: PiRuntimeOptions): Promise<RuntimeOperations> {
-  const workspace = resolve(options.workspace);
-  if (!(await stat(workspace)).isDirectory())
-    throw new Error("workspace must be an existing directory");
+  const workspaces = new Map(options.agents.map((agent) => [agent.id, resolve(agent.workspace)]));
   const stateDirectory = resolve(options.stateDirectory);
   const sessionDirectory = resolve(options.sessionDirectory ?? join(stateDirectory, "sessions"));
   await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
@@ -133,18 +132,13 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
       return turn?.interfaceId === interfaceId ? turn.activity.snapshot() : undefined;
     },
     modelState(query: ModelQuery): Promise<ModelState> {
-      return track(
-        async () =>
-          await selections.state(
-            offeredPiModels(await availablePiModels()),
-            runtimeDefault(),
-            query,
-          ),
+      return track(() =>
+        offered((available) => selections.state(available, runtimeDefault(), query)),
       );
     },
     setModel(update: ModelUpdate): Promise<ModelState> {
-      return track(async () =>
-        selections.update(offeredPiModels(await availablePiModels()), runtimeDefault(), update),
+      return track(() =>
+        offered((available) => selections.update(available, runtimeDefault(), update)),
       );
     },
     // Pi runs its own commands, prompt templates and skills from a message's
@@ -159,12 +153,29 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
     },
     async close() {
       shutdown.abort(new RuntimeClosed("Pi runtime is closed"));
-      await Promise.allSettled([...pending]);
+      await Promise.allSettled(pending);
     },
   };
 
+  /** The scopes `read` gives, with the catalogue it read them against. */
+  async function offered(
+    read: (available: readonly AvailableModel[]) => Promise<ModelScopes>,
+  ): Promise<ModelState> {
+    const models = await availablePiModels();
+    const available = offeredPiModels(models);
+    return { providers: piProviders(models), available, ...(await read(available)) };
+  }
+
+  /** The providers of Pi's models, as Pi names them. */
+  function piProviders(models: readonly Model<Api>[]): ModelProvider[] {
+    return [...new Set(models.map((model) => model.provider))].map((id) => ({
+      id,
+      name: modelRuntime.getProvider(id)?.name ?? id,
+    }));
+  }
+
   /** Pi's catalogue as the picker sees it: one thinking setting per reasoning model. */
-  function offeredPiModels(models: readonly Model<Api>[]): readonly AvailableModel[] {
+  function offeredPiModels(models: readonly Model<Api>[]): AvailableModel[] {
     return models.map((model) => ({
       provider: model.provider,
       model: model.id,
@@ -174,7 +185,10 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
             {
               id: THINKING_OPTION,
               name: "Thinking",
-              choices: getSupportedThinkingLevels(model),
+              choices: getSupportedThinkingLevels(model).map((level) => ({
+                id: level,
+                name: level,
+              })),
               default: defaultThinkingLevel(model),
             },
           ]
@@ -225,16 +239,25 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
     return model;
   }
 
+  /** The workspace of the turn's agent; a turn of another agent is refused before anything runs. */
+  function workspaceOf(request: TurnRequest): string {
+    const workspace = workspaces.get(request.agent_id);
+    if (workspace === undefined)
+      throw new ExplainedFailure(422, "This conversation's agent does not run on Pi here.");
+    return workspace;
+  }
+
   /**
    * The turn's activity is visible from before preparation, and removed
    * however it ends; its final report is taken first, with the answer or
    * the failure.
    */
   async function executePi(request: TurnRequest, signal: AbortSignal): Promise<TurnResponse> {
+    const workspace = workspaceOf(request);
     const activity = trackActivity(workspace);
     executing.set(request.correlation_id, { interfaceId: request.interface_id, activity });
     try {
-      const response = await runPi(request, signal, activity);
+      const response = await runPi(request, workspace, signal, activity);
       return { ...response, activity: finalReport(activity.snapshot()) };
     } catch (failure) {
       throw withReport(failure, finalReport(activity.snapshot()));
@@ -245,6 +268,7 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
 
   async function runPi(
     request: TurnRequest,
+    workspace: string,
     signal: AbortSignal,
     activity: ActivityTracker,
   ): Promise<TurnResponse> {
@@ -280,7 +304,7 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
       resourceRoot: root,
       extensionContext: options.extensionContext?.(request),
       attachmentContext: attachmentContext(request.attachment_root, notes.length > 0),
-      workspace: workspace,
+      workspace,
       manager,
       modelRuntime: runtime,
       model,

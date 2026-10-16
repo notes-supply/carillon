@@ -15,7 +15,9 @@ share:
 
 - accepted events, with duplicate suppression and immutable copies of their
   files;
-- conversations and the runtime each one is pinned to;
+- the agents conversations belong to, each with the runtime its new
+  conversations start on;
+- conversations and the runtime of each one's latest turn;
 - turns (queued, running, completed, interrupted) and the observations core
   queues when a runtime says delegated work will report later;
 - delivery intents and their outcomes;
@@ -53,11 +55,27 @@ retired worker settles its turn before it ends.
 5. Core stores the output and a delivery intent in one transaction.
 6. The interface claims the delivery, sends it and records the outcome.
 
+Agent assignments are fixed for core's lifetime. If an agent moves to
+another runtime or is removed at restart, further messages in its old
+conversations are accepted directly as interrupted turns. The receipt,
+interruption and explanation's delivery intent commit together. For a moved
+agent, that settled turn records the current runtime as owner. The next message
+in the same conversation starts a fresh native conversation there. Removed
+agents have no new runtime, so further messages remain stranded. Neither
+admission nor delivery needs the former runtime enabled or configured.
+Model and command queries return the explanation as a conflict without
+changing ownership. Startup settlement also preserves the former owner.
+New conversations use the agent's current runtime.
+
 A turn whose outcome can't be proved, or that its runtime reports as failed,
 becomes interrupted. Core never replays it; the next message continues the
 native session. An observation that got no answer is asked again instead,
-since it only reads. Startup records turns still marked running as
-interrupted. Delivery is a separate outbox, so a lost interface never reruns
+since it only reads. Startup interrupts running messages and requeues
+running observations. It then interrupts queued turns whose agent moved to
+another runtime or was removed, without needing their former runtime's
+workers. Observations also warn that work already started there will not
+be reported here and that actions already taken may have had effects.
+Delivery is a separate outbox, so a lost interface never reruns
 the model, and a delivery claimed by a crashed interface becomes uncertain.
 
 ### Maintenance drain
@@ -83,7 +101,8 @@ claims deliveries and sends them. Interfaces fail closed before any runtime
 work.
 
 The Discord provider (`carillon-discord`) admits messages and interactions by
-guild, user and route; downloads attachments after admission; creates and
+guild, user and route, each route a channel, by ID, and the agent that
+answers there; downloads attachments after admission; creates and
 adopts threads; and owns typing, reactions, mention-free delivery and slash
 command registration. It also owns one card per job, drawn from core's
 record of the job and the runtime's activity snapshot. Feedback is
@@ -104,6 +123,11 @@ file; when the module changed, it takes the installation's maintenance lock,
 validates the module (including drawing sample cards), registers commands if
 they changed, and only then swaps it in, with the rest of the settings. See
 the [Wasm host](../../crates/carillon-wasm/README.md).
+
+Module contract 5 carries the provider's configured markers with both card
+requests and admitted interactions. Interaction replies can include embeds
+and controls. The host validates reply and card embeds against Discord's
+limits and suppresses mentions when it sends them.
 
 ### Agent Discord operations
 
@@ -127,8 +151,9 @@ Runtimes also answer:
 - `GET /v1/turns/{id}/activity` with a bounded snapshot of the running turn:
   phase, recent and running calls, published reasoning and delegated work.
   Tool output is never included.
-- `GET|PUT /v1/model` with the models they offer and the selection for the
-  agent or a conversation.
+- `GET|PUT /v1/model` with the models they offer, provider display names,
+  named option choices, and the selection for the agent or a conversation.
+  Selections hold provider, model and choice IDs.
 - `GET /v1/commands` with the engine's own commands. Invoking one sends its
   text verbatim.
 - `GET /v1/restart`: whether restarting now loses anything.
@@ -144,27 +169,64 @@ compaction. Its state and sign-in live in `CARILLON_HOME/pi`, apart from
 See the [Pi guide](../../packages/runtime-pi/README.md).
 
 **T3** (`carillon-runtime-t3`) runs turns on a T3 Code server as another
-client of the threads T3's own UI shows. It stores nothing durable: one
-thread per conversation and one message per turn, named from Carillon's
-identifiers, let a lost connection read the work back instead of repeating
-it. Work delegated to T3's child agents reports later through observations.
-Native work whose stop T3 couldn't confirm fences that thread in the
-runtime's memory, and the runtime refuses a drained restart while any fence
-stands. See the [T3 guide](../../packages/runtime-t3/README.md).
+client of the threads T3's own UI shows. It stores nothing durable of a
+conversation: one thread per conversation in a project and one message per turn, named
+from Carillon's identifiers, let a lost connection read the work back
+instead of repeating it. The canonical thread ID derives from the interface, agent,
+and audience. The runtime uses it when absent or in the agent's current project;
+otherwise it uses an ID that also includes the current project. T3's projection
+owns each thread's project. After a project change, the first message opens an
+empty project-scoped thread and receives an explanation; none of it runs. The next
+message runs in that thread. Model requests, commands, and follow-up observations
+are refused without creating anything until the project-scoped thread exists,
+then use it. Returning to the original project resumes the canonical thread.
+Conversations without a T3 thread yet start in the current project. Native work
+already running in another project is left alone. Delegated work reports through
+observations of the resolved thread.
+Native work whose stop T3 couldn't confirm fences that thread in the runtime's
+memory, and the runtime refuses a drained restart while any fence stands.
+
+Its agents are of two kinds. Carillon's assistant runs on Carillon's own T3
+instances, its profiles: each has a home of its own whose instructions and
+skills link to the assistant's resources, so the harness loads them natively
+and no other T3 thread sees them. T3's instance `config.homePath` owns the home
+path. Profiles are shared across installations of the same user. Serve startup
+reconciles the saved profiles' links before accepting turns. It refuses symlinks
+in the source `AGENTS.md` and `skills/` tree, including skill directories,
+manifests, and nested resources, as admission snapshots do. Setup and preflight
+checks leave profile links untouched. The assistant's messages carry where the
+person wrote them. Every other agent is plain T3 Code, on every other instance, given the
+person's text as written, its threads titled by T3. Each message names the
+selection its run takes: the thread's while it is on one of the agent's
+instances, else the agent default. See the
+[T3 guide](../../packages/runtime-t3/README.md).
 
 ## Configuration
 
 `carillon.toml` declares providers by stable ID and role, with each one's
-address, credential hash, expected version and whether it's enabled. Each
-provider owns `providers/ID.toml`. Both files reject unknown fields.
+address, credential hash, expected version and whether it's enabled, and the
+agents: each one's ID, name, runtime, workspace and, for Carillon's
+assistant, resources. Each provider owns `providers/ID.toml`, where a
+runtime keeps its own settings for its agents. Both files reject unknown
+fields.
 
-Setup registers the Discord provider and the one runtime chosen, Pi or T3.
-Each provider's own program sets up its part: Pi signs in through its own
-interface, the T3 runtime checks a project and model with T3 and writes its
-settings, and the Discord provider learns the bot from its token and offers
-servers, channels and people by name. The user target wants every bundled
-runtime's unit; one the registry doesn't list ends at once, as a disabled
-one does.
+Setup registers the Discord provider and the runtimes chosen, Pi, T3 or
+both, and asks what runs Carillon's assistant: Pi, or T3 with Claude or Codex
+signed in for Carillon alone. Each provider's own program sets up its part:
+Pi signs in through its own interface; the T3 runtime makes the assistant's
+profiles, an agent for each T3 project T3 Code channels work in, and their
+settings; and the Discord provider learns the bot from its token and offers
+servers, channels and people by name, asking who answers in each channel.
+Setup reruns retain a plain T3 agent's ID by its saved T3 project ID. New
+projects receive IDs that avoid both existing agents and saved project bindings,
+so keeping a Discord route cannot silently move it to a different project.
+Adding Pi explicitly to plain T3 Code channels plans its assistant while keeping
+T3's settings and honours `--workspace`. If the assistant currently runs on T3,
+setup asks where it should run and sets T3 up again so its saved agents match.
+Moving the assistant can leave a registered runtime with no agents. Core reports
+that runtime as idle, and its service exits successfully without serving.
+The user target wants every bundled runtime's unit; one the registry doesn't
+list ends at once, as a disabled one does.
 
 Services load their files at start. An explicit apply re-reads a file and
 serves it whole when every difference applies live, and otherwise refuses
@@ -175,7 +237,7 @@ with.
 
 ## Agent resources
 
-The agent's resource root is an ordinary Pi-compatible directory:
+An agent's resource root is an ordinary Pi-compatible directory:
 `SYSTEM.md` (the system prompt), optional `AGENTS.md`, `settings.json`,
 `extensions/` and `skills/`. Core captures a content-addressed copy with each
 accepted turn, so later edits don't change work already queued. The copy is
@@ -183,8 +245,10 @@ write-protected against accidents, not against the owner. The root must
 exist; its files are optional, and symlinks or special files are refused.
 Model sign-in and engine settings are not resources: Pi keeps them in
 `CARILLON_HOME/pi` and checks its default model is usable before it serves,
-so incomplete setup leaves work queued. The runtime works in the configured
-workspace (your home by default) with your authority.
+so incomplete setup leaves work queued. An agent without resources captures
+none. T3 takes no resources with a turn: the assistant's profiles link to
+them instead, and read them as their sessions open. A runtime works in its
+agent's workspace (your home by default for Pi) with your authority.
 
 ## Packaging
 

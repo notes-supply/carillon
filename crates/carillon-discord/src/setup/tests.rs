@@ -15,7 +15,10 @@ use axum::{
     response::{IntoResponse as _, Response},
     routing::get,
 };
-use carillon_installation::{config::LoadedConfig, prompt::Questions};
+use carillon_installation::{
+    config::{AgentConfig, LoadedConfig},
+    prompt::Questions,
+};
 use serde_json::{Value, json};
 use twilight_model::guild::Permissions;
 
@@ -407,6 +410,22 @@ fn fresh(root: &Path) -> anyhow::Result<LoadedConfig> {
     Ok(config)
 }
 
+/// An installation without Discord settings whose registry has a second
+/// agent, plain T3 Code, beside the test agent.
+fn with_two_agents(root: &Path) -> anyhow::Result<LoadedConfig> {
+    let config = fresh(root)?;
+    let mut registry = config.value.clone();
+    registry.agents.push(AgentConfig {
+        id: "code".to_owned(),
+        name: "T3 Code · Notes".to_owned(),
+        runtime: "test-runtime".to_owned(),
+        workspace: config.root.join("workspace"),
+        resources: None,
+    });
+    std::fs::write(&config.path, toml::to_string(&registry)?)?;
+    config.reload()
+}
+
 /// An installation set up by hand: settings naming no token file, and in the
 /// canonical one a bot token Discord no longer accepts.
 fn by_hand(root: &Path) -> anyhow::Result<LoadedConfig> {
@@ -533,6 +552,7 @@ async fn refused_tokens_and_unknown_people_are_asked_again_and_only_named_people
     assert_eq!(settings.allowed_user_ids, ["250"]);
     let route = |channel: &str| DiscordRoute {
         channel_id: channel.to_owned(),
+        agent: "default".to_owned(),
         activation: DiscordActivation::Mention,
         conversation: DiscordConversation::Thread,
     };
@@ -580,6 +600,7 @@ async fn setup_waits_for_message_content_and_an_invitation() -> anyhow::Result<(
         settings.routes,
         [DiscordRoute {
             channel_id: "300".to_owned(),
+            agent: "default".to_owned(),
             activation: DiscordActivation::Always,
             conversation: DiscordConversation::Thread,
         }]
@@ -593,7 +614,10 @@ async fn setup_that_ends_unanswered_writes_nothing() -> anyhow::Result<()> {
     let config = fresh(directory.path())?;
     let address = discord(Arc::new(Discord::default())).await?;
     let (result, _) = run(&config, address, &[TOKEN, "1"]).await;
-    assert!(result.is_err());
+    assert_eq!(
+        result.map_err(|error| error.to_string()),
+        Err("no answer to Channels the agent answers in".to_owned())
+    );
     assert!(bot_tokens(&config)?.is_empty());
     assert!(!config.provider_config_path("discord-private")?.exists());
     Ok(())
@@ -627,135 +651,7 @@ async fn setup_during_other_maintenance_changes_neither_token_nor_settings() -> 
     Ok(())
 }
 
-#[tokio::test]
-async fn servers_and_channels_of_the_same_name_are_told_apart_by_id() -> anyhow::Result<()> {
-    let directory = tempfile::tempdir()?;
-    let config = fresh(directory.path())?;
-    let address = discord(Arc::new(Discord::default())).await?;
-    // The second Notes, its second #general, every message in its own
-    // thread, and the application's owner, who is not in that server, then
-    // someone who is.
-    let (result, shown) = run(
-        &config,
-        address,
-        &[TOKEN, "3", "3", "", "", "", "none", "250"],
-    )
-    .await;
-    result?;
-    assert!(
-        shown.contains("owner (200) is not a member of Notes (102)."),
-        "{shown}"
-    );
-    assert!(
-        shown.contains("Notes (100)\nOther\nNotes (102)\n"),
-        "{shown}"
-    );
-    assert!(
-        shown.contains("#general (300)\n#agent\n#general (303)\n"),
-        "{shown}"
-    );
-    let settings = DiscordConfig::load(&config, "discord-private")?;
-    assert_eq!(settings.guild_id, "102");
-    assert_eq!(settings.routes[0].channel_id, "303");
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_route_is_saved_only_once_the_bot_may_answer_there_as_its_mode_needs()
--> anyhow::Result<()> {
-    let without_role = || Discord {
-        unroled: AtomicUsize::new(usize::MAX),
-        ..Discord::default()
-    };
-
-    // Without its role, the bot cannot see #agent; answering there ends
-    // setup unanswered, with nothing written.
-    let directory = tempfile::tempdir()?;
-    let config = fresh(directory.path())?;
-    let address = discord(Arc::new(without_role())).await?;
-    let (result, shown) = run(&config, address, &[TOKEN, "1", "2", "2"]).await;
-    assert!(result.is_err());
-    assert!(
-        shown.contains(
-            "The bot cannot answer in #agent: allow it View Channel in the channel's settings."
-        ),
-        "{shown}"
-    );
-    assert!(bot_tokens(&config)?.is_empty());
-    assert!(!config.provider_config_path("discord-private")?.exists());
-
-    // #general needs no role for the channel as one conversation, and lacking
-    // cards and reactions there is only said.
-    let directory = tempfile::tempdir()?;
-    let config = fresh(directory.path())?;
-    let address = discord(Arc::new(without_role())).await?;
-    let (result, shown) = run(&config, address, &[TOKEN, "1", "1", "2", "", ""]).await;
-    result?;
-    assert!(!shown.contains("cannot answer"), "{shown}");
-    assert!(
-        shown.contains(
-            "In #general (300) the bot lacks Embed Links, Add Reactions, so the agent answers \
-             there without cards or reactions."
-        ),
-        "{shown}"
-    );
-    assert_eq!(
-        DiscordConfig::load(&config, "discord-private")?.routes[0].channel_id,
-        "300"
-    );
-
-    // A thread per conversation needs the role in both; once it is granted,
-    // the next check passes and both are saved.
-    let directory = tempfile::tempdir()?;
-    let config = fresh(directory.path())?;
-    let address = discord(Arc::new(Discord {
-        unroled: AtomicUsize::new(2),
-        ..Discord::default()
-    }))
-    .await?;
-    let (result, shown) = run(&config, address, &[TOKEN, "1", "1 2", "1", "", "", "", ""]).await;
-    result?;
-    assert!(
-        shown.contains(
-            "The bot cannot answer in #general (300): allow it Create Public Threads, Send \
-             Messages in Threads in the channel's settings.\nThe bot cannot answer in #agent: \
-             allow it View Channel, Create Public Threads, Send Messages in Threads in the \
-             channel's settings.\nPress Enter to check again."
-        ),
-        "{shown}"
-    );
-    assert_eq!(shown.matches("Press Enter to check again.").count(), 2);
-    let routes = DiscordConfig::load(&config, "discord-private")?.routes;
-    assert_eq!(
-        routes
-            .iter()
-            .map(|route| route.channel_id.as_str())
-            .collect::<Vec<_>>(),
-        ["300", "301"]
-    );
-
-    // An administrator role passes every overwrite.
-    let directory = tempfile::tempdir()?;
-    let config = fresh(directory.path())?;
-    let address = discord(Arc::new(Discord {
-        admin: true,
-        ..Discord::default()
-    }))
-    .await?;
-    let (result, shown) = run(&config, address, &[TOKEN, "1", "1 2", "1", "", ""]).await;
-    result?;
-    assert!(
-        !shown.contains("lacks") && !shown.contains("cannot answer"),
-        "{shown}"
-    );
-    assert_eq!(
-        DiscordConfig::load(&config, "discord-private")?
-            .routes
-            .len(),
-        2
-    );
-    Ok(())
-}
+mod routing;
 
 #[tokio::test]
 async fn a_new_bot_token_gets_a_file_of_its_own_and_the_same_one_keeps_its_file()
@@ -1015,7 +911,6 @@ async fn owners_sharing_a_name_are_told_apart_and_the_one_chosen_is_admitted() -
 async fn saved_settings_are_offered_for_keeping_only_while_their_bot_signs_in() -> anyhow::Result<()>
 {
     let address = discord(Arc::new(Discord::default())).await?;
-    // Settings for bot `bot`, saved with `token` in the canonical file.
     let installation = |root: &Path, bot: &str, token: &str| -> anyhow::Result<LoadedConfig> {
         let config = crate::config::tests::installation(root, "discord-private", 46_600)?;
         let mut settings = DiscordConfig::read(&config, "discord-private")?;
@@ -1026,7 +921,6 @@ async fn saved_settings_are_offered_for_keeping_only_while_their_bot_signs_in() 
     };
     let keep = "Keep the saved Discord bot and settings?";
 
-    // The token signs in as the saved bot: kept as it is.
     let directory = tempfile::tempdir()?;
     let config = installation(directory.path(), "201", TOKEN)?;
     let before = saved_files(&config)?;
@@ -1054,13 +948,12 @@ async fn saved_settings_are_offered_for_keeping_only_while_their_bot_signs_in() 
         let config = installation(directory.path(), bot, token)?;
         let before = saved_files(&config)?;
         let (result, shown) = run(&config, address, &[]).await;
-        assert!(result.is_err());
+        assert_eq!(
+            result.map_err(|error| error.to_string()),
+            Err("no answer to Bot token (Enter keeps the saved one):".to_owned())
+        );
         assert!(shown.contains(said), "{shown}");
         assert!(!shown.contains(keep), "{shown}");
-        assert!(
-            shown.contains("Bot token (Enter keeps the saved one):"),
-            "{shown}"
-        );
         assert_eq!(saved_files(&config)?, before);
     }
 
@@ -1110,8 +1003,8 @@ async fn publication_follows_the_registry_as_it_is_when_the_questions_end() -> a
         anyhow::Ok((directory, config, before, result))
     };
 
-    // An interface disabled or removed meanwhile is refused, with nothing
-    // written.
+    // An interface disabled or removed, or the agent renamed, meanwhile is
+    // refused, with nothing written: the routes name the agent as asked.
     let disable: fn(&mut Config) = |registry| {
         for provider in &mut registry.providers {
             if provider.id == "discord-private" {
@@ -1124,9 +1017,13 @@ async fn publication_follows_the_registry_as_it_is_when_the_questions_end() -> a
             .providers
             .retain(|provider| provider.id != "discord-private");
     };
+    let rename: fn(&mut Config) = |registry| {
+        "other".clone_into(&mut registry.agents[0].id);
+    };
     for (change, reason) in [
         (disable, "discord-private is disabled in carillon.toml"),
         (remove, "discord-private"),
+        (rename, "route 300 names an unknown agent"),
     ] {
         let (_directory, config, before, result) = edited(change).await?;
         let refusal = format!("{:#}", result.err().context("setup ignored the registry")?);
@@ -1138,15 +1035,5 @@ async fn publication_follows_the_registry_as_it_is_when_the_questions_end() -> a
         );
         assert_eq!(saved_files(&config)?, before);
     }
-
-    // Another agent meanwhile is the one the saved settings select, so the
-    // registry as it is accepts them.
-    let (_directory, config, _, result) = edited(|registry| {
-        "other".clone_into(&mut registry.agent.id);
-    })
-    .await?;
-    result?;
-    let settings = DiscordConfig::load(&config.reload()?, "discord-private")?;
-    assert_eq!(settings.agent, "other");
     Ok(())
 }

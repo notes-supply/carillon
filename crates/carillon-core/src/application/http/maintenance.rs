@@ -40,7 +40,6 @@ pub(crate) struct Lease {
     pub(crate) lease_ms: u64,
 }
 
-/// How a pause's drain stands.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Drain {
     pub(crate) holder: Uuid,
@@ -54,7 +53,6 @@ pub(crate) struct Drain {
     pub(crate) runtimes: Vec<RuntimeRestart>,
 }
 
-/// One runtime's word on a restart.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) struct RuntimeRestart {
     pub(crate) id: String,

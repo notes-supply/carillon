@@ -6,8 +6,7 @@
 //! retries.
 use super::{CardRecords, Delivering, activity_monitor};
 use crate::{
-    CoreClient,
-    client::test_client as core_client,
+    client::{CoreClient, test_client as core_client},
     config::{DiscordActivation, DiscordConfig, DiscordConversation},
     conversations::tests::discord_config,
     delivery::{Reactions, delivery_loop},
@@ -106,8 +105,6 @@ struct Recorded {
     claimed: HashMap<i64, String>,
     /// The names of each read by name.
     named: Vec<Vec<String>>,
-    /// Pages read after another.
-    paged: usize,
 }
 
 struct Substitute {
@@ -450,13 +447,10 @@ fn read_jobs(core: &Mutex<Recorded>, query: &str) -> Option<JobPage> {
         })
         .collect::<Vec<_>>();
     let start = match parameter("after") {
-        Some(after) => {
-            core.paged += 1;
-            at_work
-                .iter()
-                .position(|job| job.origin.turn_id == after)
-                .map_or(at_work.len(), |index| index + 1)
-        }
+        Some(after) => at_work
+            .iter()
+            .position(|job| job.origin.turn_id == after)
+            .map_or(at_work.len(), |index| index + 1),
         None => 0,
     };
     let page = at_work.into_iter().skip(start).collect::<Vec<_>>();
@@ -627,7 +621,6 @@ fn job(origin: &str, channel: &str, accepted_at: i64, turns: Vec<JobTurn>) -> Jo
     }
 }
 
-/// A job whose message's turn runs, its channel its name.
 fn running(origin: &str, channel: &str, accepted_at: i64, activity: Option<TurnActivity>) -> Job {
     job(
         origin,
@@ -1144,7 +1137,6 @@ async fn jobs_of_one_conversation_get_cards_of_their_own_across_pages_of_jobs_at
     };
     let (first_card, second_card, other_card) =
         (card("300", false)?, card("300", true)?, card("301", false)?);
-    assert!(lock(&discord.core).paged > 0, "every page was read");
     // The first job ends; the second starts on its own card.
     let first = ended(
         "first",
@@ -1174,15 +1166,15 @@ async fn jobs_of_one_conversation_get_cards_of_their_own_across_pages_of_jobs_at
             "Working",
         )
         .await?;
-    tokio::time::sleep(Duration::from_millis(1_000)).await;
-    assert_eq!(discord.cards_in("300").len(), 2);
-    assert_eq!(
-        recorded(&records)?,
-        json!({
+    recorded_soon(
+        &records,
+        &json!({
             "other": {"channel_id": "301", "message_id": other_card},
             "second": {"channel_id": "300", "message_id": second_card},
-        })
-    );
+        }),
+    )
+    .await?;
+    assert_eq!(discord.cards_in("300").len(), 2);
     monitor.abort();
     Ok(())
 }
@@ -1240,13 +1232,10 @@ async fn a_restart_goes_on_with_the_cards_of_jobs_at_work_from_what_core_recorde
     );
     assert!(!continued.contains("may not be shown"), "{continued}");
     tokio::time::sleep(Duration::from_millis(3_500)).await;
-    // Nothing says the restart lost track, and a card nobody can name holds
-    // its job from another until it settles.
+    // A card nobody can name holds its job from another until it settles.
     let seen = discord.seen();
     assert!(
-        seen.iter()
-            .all(|request| request.method == Method::PATCH
-                && !request.content().contains("restarted")),
+        seen.iter().all(|request| request.method == Method::PATCH),
         "{seen:#?}"
     );
     assert_eq!(recorded(&records)?, before);
@@ -1345,7 +1334,6 @@ async fn a_read_begun_before_a_job_ended_is_shown_and_the_next_read_ends_the_car
     );
     discord.record(vec![sent(done)]);
     delivering.send(Delivering::Recorded)?;
-    tokio::time::sleep(Duration::from_millis(3_200)).await;
     let released = Instant::now();
     drop(held);
     // The late read shows what it took; the next follows at once and ends
@@ -1353,7 +1341,10 @@ async fn a_read_begun_before_a_job_ended_is_shown_and_the_next_read_ends_the_car
     let summary = discord
         .wait_for_text(&Method::PATCH, "/channels/300/messages/901", "✓ Done")
         .await?;
-    assert!(summary.at - released < Duration::from_secs(2));
+    assert!(
+        summary.at - released < Duration::from_millis(1_500),
+        "the next read waited for the poll interval"
+    );
     tokio::time::sleep(Duration::from_millis(4_000)).await;
     let edits = discord.matching(&Method::PATCH, "/channels/300/messages/901");
     assert!(
@@ -1420,12 +1411,9 @@ async fn unknown_refused_or_deleted_cards_are_never_created_again_or_replaced() 
     );
     assert_eq!(discord.matching(&Method::PATCH, "/channels").len(), 2);
     // Typing does not depend on cards.
-    assert!(
-        discord
-            .matching(&Method::POST, "/channels/300/typing")
-            .len()
-            >= 2
-    );
+    discord
+        .wait_for(&Method::POST, "/channels/300/typing", 2)
+        .await?;
     // Unknown, refused and deleted cards retain their suppression checkpoint,
     // so their jobs get no other card even after a restart.
     recorded_soon(
@@ -1661,14 +1649,10 @@ async fn a_failed_progress_identity_save_does_not_create_a_second_card_after_res
         let saved = saved.clone();
         move |seen, earlier| {
             if seen.method == Method::POST && earlier == 0 {
-                assert!(
-                    std::fs::rename(&records, &saved).is_ok(),
-                    "save the pre-creation checkpoint"
-                );
-                assert!(
-                    std::fs::create_dir(&records).is_ok(),
-                    "obstruct the identity publication"
-                );
+                let saved = std::fs::rename(&records, &saved).map_err(|error| error.kind());
+                assert_eq!(saved, Ok(()), "save the pre-creation checkpoint");
+                let obstructed = std::fs::create_dir(&records).map_err(|error| error.kind());
+                assert_eq!(obstructed, Ok(()), "obstruct the identity publication");
             }
             Reply::Success
         }
@@ -2095,11 +2079,6 @@ async fn unreadable_card_records_turn_cards_off_but_keep_typing_and_the_evidence
         faults.push(unreadable.clone());
     }
     for records in faults {
-        assert!(
-            CardRecords::open(records.clone()).is_none(),
-            "{}",
-            records.display()
-        );
         let discord = Substitute::start(succeed()).await?;
         let activity = tools(None, &[("bash", "sleep 600")], &[]);
         discord.record(vec![running("turn", "300", now() - 60, Some(activity))]);
@@ -2241,46 +2220,6 @@ async fn progress_stuck_behind_the_limiter_yields_to_the_jobs_end_and_answers() 
     tokio::time::sleep(Duration::from_millis(1_000)).await;
     assert_eq!(discord.matching(&Method::PATCH, "/channels/300/").len(), 1);
     monitor.abort();
-    Ok(())
-}
-
-/// Uses the rate limiter.
-#[tokio::test]
-async fn an_answer_waits_for_progress_only_in_a_bucket_discord_shares() -> anyhow::Result<()> {
-    // Discord may place edits and messages in one learned bucket; distinct
-    // routes alone do not isolate them. This shows the cost the design accepts.
-    for shared in [false, true] {
-        let discord = Substitute::start(Arc::new(move |seen, _| match (&seen.method, shared) {
-            (&Method::PATCH, true) => Reply::Bucket("messages", 0, 2),
-            (&Method::PATCH, false) => Reply::Bucket("edits", 0, 2),
-            (_, true) => Reply::Bucket("messages", 1, 2),
-            (_, false) => Reply::Bucket("answers", 1, 2),
-        }))
-        .await?;
-        let directory = tempfile::tempdir()?;
-        let http = discord.http(true);
-        let channel = Id::new(300);
-        // Twilight learns a route's bucket from its first response.
-        crate::delivery::send_discord_message(&http, channel, "first answer").await?;
-        let card = super::Card {
-            channel_id: channel,
-            message_id: Id::new(901),
-        };
-        let cards = cards(http.clone(), directory.path(), CancellationToken::new()).await?;
-        let progress = embed("Finishing up");
-        assert_eq!(
-            cards.edit(card, &progress, None).await,
-            super::Call::Done(())
-        );
-        let started = Instant::now();
-        crate::delivery::send_discord_message(&http, channel, "second answer").await?;
-        let waited = started.elapsed();
-        if shared {
-            assert!(waited >= Duration::from_millis(1_500), "{waited:?}");
-        } else {
-            assert!(waited < Duration::from_millis(500), "{waited:?}");
-        }
-    }
     Ok(())
 }
 

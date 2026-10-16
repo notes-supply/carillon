@@ -445,25 +445,6 @@ fn a_job_shows_its_turns_together_and_the_latest_state_of_each_work_wins() {
 }
 
 #[test]
-fn model_text_cannot_format_mention_or_link() {
-    let markers = ActivityMarkers::default();
-    let mut activity = tools();
-    activity.headline = Some("**bold** <@200> @everyone".to_owned());
-    activity.notes =
-        vec!["See [here](https://example.invalid) and <#300> `code` # title".to_owned()];
-    let embed = discord(&card(&live(&activity, Vec::new()), &markers));
-    assert!(
-        text(&embed).contains(r"> \*\*bold\*\* \<\@200\> \@everyone"),
-        "{}",
-        text(&embed)
-    );
-    assert_eq!(
-        field(&embed, "Reasoning"),
-        Some(r"See \[here\]\(https\://example.invalid\) and \<\#300\> \`code\` \# title")
-    );
-}
-
-#[test]
 fn work_items_render_generic_bounded_rows_without_provider_knowledge() {
     let markers = ActivityMarkers::default();
     let mut activity = tools();
@@ -1000,3 +981,5 @@ fn only_a_settled_job_loses_its_card() {
     };
     assert_eq!(render(&answered), Card::Remove);
 }
+
+mod prose;

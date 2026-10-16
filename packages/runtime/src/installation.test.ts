@@ -22,7 +22,10 @@ async function registry(
   await writeFile(
     join(root, "carillon.toml"),
     [
-      `data_dir = "data"\n[core]\noperator_token_hash = "${hash}"\n[agent]\nresource_root = "agent"\nworkspace = "workspace"\n`,
+      `data_dir = "data"\n[core]\noperator_token_hash = "${hash}"\n`,
+      `[[agents]]\nid = "assistant"\nname = "Carillon"\nruntime = "runtime-t3"\nworkspace = "workspace"\nresources = "agent"\n`,
+      `[[agents]]\nid = "elsewhere"\nname = "Elsewhere"\nruntime = "runtime-pi"\nworkspace = "/elsewhere"\n`,
+      `[[agents]]\nid = "code"\nname = "T3 Code"\nruntime = "runtime-t3"\nworkspace = "/code"\n`,
       provider("runtime-t3", "runtime", "http://127.0.0.1:3101", runtimeEnabled),
       provider("discord", "interface", interfaceUrl, interfaceEnabled),
     ].join("\n"),
@@ -58,4 +61,21 @@ it("reports a disabled or unregistered runtime instead of loading it", async () 
   await expect(loadInstallation(await registry("http://127.0.0.1:3102"), "discord")).resolves.toBe(
     "unregistered",
   );
+});
+
+it("lists the agents whose conversations start on the runtime, paths resolved", async () => {
+  const path = await registry("http://127.0.0.1:3102");
+  const loaded = await loadInstallation(path, "runtime-t3");
+  if (typeof loaded === "string") throw new Error(`an enabled runtime was reported ${loaded}`);
+  const root = join(path, "..");
+  expect(loaded.agents).toEqual([
+    {
+      id: "assistant",
+      name: "Carillon",
+      workspace: join(root, "workspace"),
+      resources: join(root, "agent"),
+    },
+    { id: "code", name: "T3 Code", workspace: "/code" },
+  ]);
+  expect(loaded.componentDirectory).toBe(join(root, "data", "components", "runtime-t3"));
 });

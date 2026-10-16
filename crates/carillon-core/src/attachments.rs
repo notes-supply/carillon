@@ -40,7 +40,6 @@ use sha2::{Digest as _, Sha256};
 const CHUNK: usize = 1024 * 1024;
 const PARTIAL: &str = ".partial-";
 
-/// The installation's capture store.
 pub(crate) fn store(data_directory: &Path) -> PathBuf {
     data_directory.join("attachments")
 }
@@ -58,7 +57,6 @@ pub(crate) enum CaptureError {
     /// The staged files are not what the event declares.
     #[error("{0}")]
     Invalid(String),
-    /// The filesystem ran out of space.
     #[error("the attachment filesystem is full")]
     Full,
     #[error("the capture was cancelled")]
@@ -123,7 +121,6 @@ impl Cancel {
         self.own.load(Ordering::SeqCst) || self.shutdown.load(Ordering::SeqCst)
     }
 
-    /// The copy's check between chunks.
     fn checkpoint(&self) -> bool {
         #[cfg(test)]
         drop(self.stall.lock());

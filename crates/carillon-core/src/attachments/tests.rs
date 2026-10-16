@@ -11,7 +11,6 @@ use carillon_protocol::model::{StagedAttachments, StagedFile};
 
 use super::{Cancel, CaptureError, CapturedFile, check, reconcile, store, validate_store};
 
-/// Open the staged batch of `interface` and capture it.
 fn capture(
     data: &Path,
     interface: &str,
@@ -25,7 +24,6 @@ fn staging(data: &Path) -> PathBuf {
     data.join("components/interface/incoming")
 }
 
-/// Stage `files` as batch `batch` of interface `interface`.
 fn stage(data: &Path, batch: &str, files: &[&[u8]]) -> Result<StagedAttachments> {
     let directory = staging(data).join(batch);
     fs::create_dir_all(&directory)?;
@@ -199,7 +197,7 @@ fn staged_sources_are_confined_regular_files_of_the_declared_length() -> Result<
 }
 
 #[test]
-fn cancellation_stops_between_chunks_and_leaves_nothing() -> Result<()> {
+fn a_cancelled_capture_is_refused_and_leaves_nothing() -> Result<()> {
     let data = tempfile::tempdir()?;
     let staged = stage(data.path(), "batch", &[&vec![7; 3 * super::CHUNK]])?;
     let cancel = Cancel::default();
@@ -267,28 +265,40 @@ fn verification_and_store_validation_detect_altered_missing_and_unexpected_files
     // Same length, different bytes: only the digest notices.
     fs::set_permissions(&first, fs::Permissions::from_mode(0o640))?;
     fs::write(&first, b"altered!")?;
-    assert!(check(data.path(), &files[0]).is_err());
-    assert!(validate_store(data.path(), &files).is_err());
+    crate::assert_refused(
+        check(data.path(), &files[0]),
+        "was changed after it was accepted",
+    )?;
+    crate::assert_refused(
+        validate_store(data.path(), &files),
+        "was changed after it was accepted",
+    )?;
     fs::write(&first, b"original")?;
     check(data.path(), &files[0])?;
 
     fs::remove_file(&first)?;
-    assert!(check(data.path(), &files[0]).is_err());
+    crate::assert_refused(check(data.path(), &files[0]), "is missing")?;
     fs::write(&first, b"original")?;
 
     let extra = store(data.path()).join(&capture.id).join("2");
     fs::write(&extra, b"unexpected")?;
-    assert!(validate_store(data.path(), &files).is_err());
+    crate::assert_refused(validate_store(data.path(), &files), "holds unexpected file")?;
     fs::remove_file(&extra)?;
     let stray = store(data.path()).join("stray");
     fs::create_dir(&stray)?;
-    assert!(validate_store(data.path(), &files).is_err());
+    crate::assert_refused(
+        validate_store(data.path(), &files),
+        "holds unexpected entry stray",
+    )?;
     fs::remove_dir(&stray)?;
     validate_store(data.path(), &files)?;
 
     // A stored identity is a capture name, never a path.
     let mut escaping = files[0].clone();
     "../outside".clone_into(&mut escaping.capture);
-    assert!(check(data.path(), &escaping).is_err());
+    crate::assert_refused(
+        check(data.path(), &escaping),
+        "invalid captured attachment identity",
+    )?;
     Ok(())
 }

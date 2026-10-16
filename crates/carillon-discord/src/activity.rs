@@ -132,8 +132,8 @@ impl Known {
     fn running_in(&self) -> Option<Id<ChannelMarker>> {
         let job = self.job()?;
         job.at_work()
-            .filter(|turn| turn.state == TurnState::Running)
-            .and_then(|_| job.target_id.parse().ok())
+            .filter(|turn| turn.state == TurnState::Running)?;
+        job.target_id.parse().ok()
     }
 }
 
@@ -258,7 +258,6 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// What every job task shares.
 #[derive(Clone)]
 struct Cards {
     http: Arc<DiscordHttp>,
@@ -795,8 +794,6 @@ impl Cards {
                 Holding::Held
             }
             Call::Unknown => {
-                // Discord may hold a card this task cannot name: the job
-                // gets no other, even after a restart.
                 warn!(
                     job_id,
                     "an activity card of unknown identity may be in Discord; the job gets no other"

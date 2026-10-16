@@ -39,9 +39,13 @@ impl ResourceFile {
 }
 
 /// Captures the current resource root into the snapshot store and returns the
-/// content address identifying it.
-pub fn materialize(source: &Path, store: &Path) -> Result<String> {
-    let files = selected_resource_files(source)?;
+/// content address identifying it. An agent without resources captures the
+/// empty snapshot.
+pub(crate) fn materialize(source: Option<&Path>, store: &Path) -> Result<String> {
+    let files = match source {
+        Some(source) => selected_resource_files(source)?,
+        None => BTreeMap::new(),
+    };
 
     let id = content_address(&files);
     let destination = store.join(&id);
@@ -109,7 +113,7 @@ pub fn materialize(source: &Path, store: &Path) -> Result<String> {
 }
 
 /// Check an archived core-owned snapshot without publishing or repairing it.
-pub fn validate(id: &str, store: &Path) -> Result<()> {
+pub(crate) fn validate(id: &str, store: &Path) -> Result<()> {
     if id.len() != 64
         || !id
             .bytes()
@@ -132,7 +136,7 @@ pub fn validate(id: &str, store: &Path) -> Result<()> {
 
 /// Where a snapshot lives in the given store. Resolved at claim time, so a
 /// relocated store still points at the right content.
-pub fn root(store: &Path, id: &str) -> PathBuf {
+pub(crate) fn root(store: &Path, id: &str) -> PathBuf {
     store.join(id)
 }
 
@@ -263,7 +267,7 @@ mod tests {
                 .map(|_| {
                     scope.spawn(|| {
                         barrier.wait();
-                        materialize(source.path(), &store)
+                        materialize(Some(source.path()), &store)
                     })
                 })
                 .collect();
@@ -281,7 +285,10 @@ mod tests {
         let captured = store.join(&ids[0]).join("SYSTEM.md");
         fs::set_permissions(&captured, fs::Permissions::from_mode(0o600))?;
         fs::write(captured, "damaged")?;
-        assert!(materialize(source.path(), &store).is_err());
+        crate::assert_refused(
+            materialize(Some(source.path()), &store),
+            "does not match its content address",
+        )?;
         Ok(())
     }
 
@@ -293,7 +300,7 @@ mod tests {
         fs::create_dir(source.path().join("skills"))?;
         let socket = source.path().join("skills/live.sock");
         let _listener = std::os::unix::net::UnixListener::bind(&socket)?;
-        let error = materialize(source.path(), &store)
+        let error = materialize(Some(source.path()), &store)
             .err()
             .context("socket was omitted")?;
         assert!(
@@ -303,7 +310,7 @@ mod tests {
         );
         assert!(!store.exists());
         fs::remove_file(socket)?;
-        let snapshot = materialize(source.path(), &store)?;
+        let snapshot = materialize(Some(source.path()), &store)?;
         super::validate(&snapshot, &store)?;
         Ok(())
     }
@@ -321,7 +328,7 @@ mod tests {
         for mode in [0o450, 0o405, 0o455, 0o500, 0o550, 0o555] {
             fs::set_permissions(&helper, fs::Permissions::from_mode(mode))?;
             let live = Command::new(&helper).output();
-            let snapshot = materialize(source.path(), &store)?;
+            let snapshot = materialize(Some(source.path()), &store)?;
             let captured = Command::new(root(&store, &snapshot).join("skills/helper")).output();
             assert_eq!(live.is_ok(), captured.is_ok(), "mode {mode:o}");
             let previous = if mode & 0o100 != 0 {
@@ -342,7 +349,7 @@ mod tests {
                 assert_eq!(output.stdout, b"native-helper");
             }
             super::validate(&snapshot, &store)?;
-            assert_eq!(materialize(source.path(), &store)?, snapshot);
+            assert_eq!(materialize(Some(source.path()), &store)?, snapshot);
         }
         assert_ne!(executable_snapshot, ordinary_snapshot);
         Ok(())
@@ -373,7 +380,7 @@ mod tests {
                 let store = parent.path().join("snapshots");
                 let link = source.path().join(name);
                 symlink(destination, &link)?;
-                let error = materialize(source.path(), &store)
+                let error = materialize(Some(source.path()), &store)
                     .err()
                     .context("symlink was accepted")?;
                 assert!(
@@ -384,7 +391,7 @@ mod tests {
                 assert!(!store.exists(), "rejected resource published a snapshot");
                 fs::remove_file(link)?;
                 // Missing optional resources are still valid; refusal leaves retry usable.
-                let snapshot = materialize(source.path(), &store)?;
+                let snapshot = materialize(Some(source.path()), &store)?;
                 assert!(fs::read_dir(root(&store, &snapshot))?.next().is_none());
             }
         }
@@ -402,7 +409,7 @@ mod tests {
             fs::write(&helper, b"#!/bin/sh\nprintf native-helper")?;
             fs::set_permissions(&helper, fs::Permissions::from_mode(0o750))?;
         }
-        let executable = materialize(source.path(), &store)?;
+        let executable = materialize(Some(source.path()), &store)?;
         for relative in ["skills/example/scripts/helper", "extensions/example/helper"] {
             let helper = root(&store, &executable).join(relative);
             let output = Command::new(&helper).output()?;
@@ -414,9 +421,9 @@ mod tests {
                 fs::Permissions::from_mode(0o640),
             )?;
         }
-        let ordinary = materialize(source.path(), &store)?;
+        let ordinary = materialize(Some(source.path()), &store)?;
         assert_ne!(executable, ordinary);
-        assert_eq!(materialize(source.path(), &store)?, ordinary);
+        assert_eq!(materialize(Some(source.path()), &store)?, ordinary);
         for relative in ["skills/example/scripts/helper", "extensions/example/helper"] {
             // Source chmod affects future turns only; already accepted helpers still run.
             assert!(
@@ -439,8 +446,14 @@ mod tests {
             root(&store, &ordinary).join("skills/example/scripts/helper"),
             fs::Permissions::from_mode(0o550),
         )?;
-        assert!(materialize(source.path(), &store).is_err());
-        assert!(super::validate(&ordinary, &store).is_err());
+        crate::assert_refused(
+            materialize(Some(source.path()), &store),
+            "does not match its content address",
+        )?;
+        crate::assert_refused(
+            super::validate(&ordinary, &store),
+            "does not match its content address",
+        )?;
         Ok(())
     }
 
@@ -450,14 +463,26 @@ mod tests {
         let store = tempdir()?;
         fs::write(source.path().join("SYSTEM.md"), "first")?;
         fs::create_dir(source.path().join("skills"))?;
-        let first = materialize(source.path(), store.path())?;
+        let first = materialize(Some(source.path()), store.path())?;
         fs::write(source.path().join("SYSTEM.md"), "second")?;
-        let second = materialize(source.path(), store.path())?;
+        let second = materialize(Some(source.path()), store.path())?;
         assert_ne!(first, second);
         assert_eq!(
             fs::read_to_string(root(store.path(), &first).join("SYSTEM.md"))?,
             "first"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn an_agent_without_resources_captures_the_empty_snapshot() -> anyhow::Result<()> {
+        let store = tempdir()?;
+        let empty = materialize(None, store.path())?;
+        assert_eq!(materialize(None, store.path())?, empty);
+        assert!(fs::read_dir(root(store.path(), &empty))?.next().is_none());
+        super::validate(&empty, store.path())?;
+        let source = tempdir()?;
+        assert_eq!(materialize(Some(source.path()), store.path())?, empty);
         Ok(())
     }
 }

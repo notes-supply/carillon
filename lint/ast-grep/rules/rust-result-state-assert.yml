@@ -1,0 +1,41 @@
+id: rust-result-state-assert
+language: rust
+severity: error
+message: Asserting only that a Result is Ok or Err passes whatever the error is.
+note: Assert the error a caller sees, its variant or message, or take the value with expect and the error with expect_err so a failure shows it.
+rule:
+  any:
+    - all:
+        - has: { field: macro, regex: "^(debug_)?assert$" }
+        - any:
+            - pattern: $ASSERT!($$$RESULT.is_ok())
+            - pattern: $ASSERT!($$$RESULT.is_err())
+            - pattern: $ASSERT!($$$RESULT.is_ok(), $$$MESSAGE)
+            - pattern: $ASSERT!($$$RESULT.is_err(), $$$MESSAGE)
+            - pattern: $ASSERT!(matches!($$$RESULT, Ok(_)))
+            - pattern: $ASSERT!(matches!($$$RESULT, Err(_)))
+            - pattern: $ASSERT!(matches!($$$RESULT, Ok(_)), $$$MESSAGE)
+            - pattern: $ASSERT!(matches!($$$RESULT, Err(_)), $$$MESSAGE)
+            - pattern: $ASSERT!(matches!($$$RESULT, Err(..)))
+            - pattern: $ASSERT!(matches!($$$RESULT, Ok(..)))
+            - pattern: $ASSERT!(matches!($$$RESULT, Err(..)), $$$MESSAGE)
+            - pattern: $ASSERT!(matches!($$$RESULT, Ok(..)), $$$MESSAGE)
+            - pattern: $ASSERT!($$$RESULT.err().is_some())
+            - pattern: $ASSERT!($$$RESULT.err().is_some(), $$$MESSAGE)
+            - pattern: $ASSERT!($$$RESULT.err().is_none())
+            - pattern: $ASSERT!($$$RESULT.err().is_none(), $$$MESSAGE)
+            - pattern: $ASSERT!($$$RESULT.ok().is_some())
+            - pattern: $ASSERT!($$$RESULT.ok().is_some(), $$$MESSAGE)
+            - pattern: $ASSERT!($$$RESULT.ok().is_none())
+            - pattern: $ASSERT!($$$RESULT.ok().is_none(), $$$MESSAGE)
+    - all:
+        - has: { field: macro, regex: "^(debug_)?assert_(eq|ne)$" }
+        - any:
+            - pattern: $ASSERT!($$$RESULT.is_err(), true)
+            - pattern: $ASSERT!($$$RESULT.is_err(), false)
+            - pattern: $ASSERT!($$$RESULT.is_ok(), true)
+            - pattern: $ASSERT!($$$RESULT.is_ok(), false)
+            - pattern: $ASSERT!(true, $$$RESULT.is_err())
+            - pattern: $ASSERT!(false, $$$RESULT.is_err())
+            - pattern: $ASSERT!(true, $$$RESULT.is_ok())
+            - pattern: $ASSERT!(false, $$$RESULT.is_ok())

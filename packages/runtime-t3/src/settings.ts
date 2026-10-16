@@ -5,6 +5,34 @@ import { Type, type Static } from "typebox";
 import { Check, Errors } from "typebox/value";
 import { parse as parseToml, TomlError } from "smol-toml";
 import type { NativeSelection } from "./contracts.ts";
+import { HARNESSES } from "./profiles.ts";
+
+const PROFILE_IDS = new Set(Object.keys(HARNESSES).map((harness) => `carillon_${harness}`));
+
+const SelectionSchema = Type.Object(
+  {
+    instance_id: Type.String({ minLength: 1 }),
+    model: Type.String({ minLength: 1 }),
+    /** Option values by ID: a select choice's ID, or a boolean. */
+    options: Type.Optional(
+      Type.Record(
+        Type.String({ minLength: 1 }),
+        Type.Union([Type.String({ minLength: 1 }), Type.Boolean()]),
+      ),
+    ),
+  },
+  { additionalProperties: false },
+);
+
+const AgentSettingsSchema = Type.Object(
+  {
+    /** The T3 project the agent works in, rooted at its workspace. */
+    project_id: Type.String({ minLength: 1 }),
+    /** The selection a new conversation thread starts with, as T3 names it. */
+    model: SelectionSchema,
+  },
+  { additionalProperties: false },
+);
 
 const SettingsSchema = Type.Object(
   {
@@ -12,24 +40,19 @@ const SettingsSchema = Type.Object(
     url: Type.String({ minLength: 1 }),
     /** A file holding a bearer token T3 issued, relative to the installation. */
     token_file: Type.String({ minLength: 1 }),
-    /** The T3 project whose workspace is the agent's workspace. */
-    project_id: Type.String({ minLength: 1 }),
-    /** Prefix of the T3 thread titles this runtime opens. */
+    /** Prefix of the titles of the assistant's T3 threads. */
     title: Type.Optional(Type.String({ minLength: 1, maxLength: 60 })),
-    /** The native selection a new conversation thread starts with, as T3 names it. */
-    model: Type.Object(
-      {
-        instance_id: Type.String({ minLength: 1 }),
-        model: Type.String({ minLength: 1 }),
-        /** Option values by ID: a select choice's ID, or a boolean. */
-        options: Type.Optional(
-          Type.Record(
-            Type.String({ minLength: 1 }),
-            Type.Union([Type.String({ minLength: 1 }), Type.Boolean()]),
-          ),
-        ),
-      },
-      { additionalProperties: false },
+    /** Carillon's own T3 instances, whose homes hold its profile. */
+    profiles: Type.Optional(
+      Type.Array(Type.String({ pattern: `^(?:${[...PROFILE_IDS].join("|")})$` }), {
+        uniqueItems: true,
+      }),
+    ),
+    /** Each agent of this runtime, by its ID in `carillon.toml`. */
+    agents: Type.Optional(
+      Type.Record(Type.String({ pattern: "^[A-Za-z0-9_-]{1,128}$" }), AgentSettingsSchema, {
+        additionalProperties: false,
+      }),
     ),
   },
   { additionalProperties: false },
@@ -37,13 +60,20 @@ const SettingsSchema = Type.Object(
 
 /** The settings file as written, its URL an origin. */
 export type SettingsFile = Static<typeof SettingsSchema>;
+type AgentSettingsFile = Static<typeof AgentSettingsSchema>;
+
+interface AgentSettings {
+  readonly projectId: string;
+  /** The agent default from the settings: what new threads start with until `/model` changes it. */
+  readonly selection: NativeSelection;
+}
 
 export interface T3Settings {
   readonly url: string;
   readonly tokenFile: string;
-  readonly projectId: string;
   readonly title: string;
-  readonly selection: NativeSelection;
+  readonly profiles: ReadonlySet<string>;
+  readonly agents: ReadonlyMap<string, AgentSettings>;
 }
 
 export async function loadSettings(path: string, root: string): Promise<T3Settings> {
@@ -52,14 +82,38 @@ export async function loadSettings(path: string, root: string): Promise<T3Settin
   return {
     url: settings.url,
     tokenFile: resolve(root, settings.token_file),
-    projectId: settings.project_id,
     title: settings.title ?? "Carillon",
-    selection: {
-      instanceId: settings.model.instance_id,
-      model: settings.model.model,
-      options: Object.entries(settings.model.options ?? {}).map(([id, value]) => ({ id, value })),
-    },
+    profiles: new Set(settings.profiles ?? []),
+    agents: new Map(
+      Object.entries(settings.agents ?? {}).map(([id, agent]) => [
+        id,
+        { projectId: agent.project_id, selection: nativeSelection(agent.model) },
+      ]),
+    ),
   };
+}
+
+function nativeSelection(selection: AgentSettingsFile["model"]): NativeSelection {
+  return {
+    instanceId: selection.instance_id,
+    model: selection.model,
+    options: Object.entries(selection.options ?? {}).map(([id, value]) => ({ id, value })),
+  };
+}
+
+/**
+ * Whether `instanceId` is one the agent runs on: Carillon's profiles for its
+ * assistant. Plain T3 Code excludes saved profiles and reserved Carillon IDs,
+ * including profiles whose setup did not finish saving their settings.
+ */
+export function offers(
+  profiles: ReadonlySet<string>,
+  assistant: boolean,
+  instanceId: string,
+): boolean {
+  return assistant
+    ? profiles.has(instanceId)
+    : !profiles.has(instanceId) && !PROFILE_IDS.has(instanceId);
 }
 
 /** The settings file at `path`, checked strictly, or undefined when there is none. */
@@ -85,6 +139,7 @@ export function parseSettings(path: string, text: string): SettingsFile {
     if (failure instanceof TomlError)
       throw new Error(
         `${path}: invalid TOML at line ${String(failure.line)}, column ${String(failure.column)}`,
+        { cause: failure },
       );
     throw failure;
   }

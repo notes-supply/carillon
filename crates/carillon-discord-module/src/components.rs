@@ -6,6 +6,8 @@ use serde_json::{Value, json};
 pub const PAGE: usize = 25;
 /// Discord's length limit for select labels, values, and descriptions.
 pub const TEXT_LIMIT: usize = 100;
+/// Discord's length limit for a select's placeholder.
+const PLACEHOLDER_LIMIT: usize = 150;
 pub const PRIMARY: u8 = 1;
 pub const SECONDARY: u8 = 2;
 
@@ -27,7 +29,7 @@ pub fn select(custom_id: &str, placeholder: &str, options: impl Iterator<Item = 
         "components": [{
             "type": 3,
             "custom_id": custom_id,
-            "placeholder": placeholder,
+            "placeholder": shorten(placeholder, PLACEHOLDER_LIMIT),
             "options": options.take(PAGE).collect::<Vec<_>>(),
         }],
     })
@@ -37,6 +39,22 @@ pub fn choice(label: &str, value: &str, description: Option<&str>, default: bool
     let mut option = json!({ "label": text(label), "value": value, "default": default });
     if let Some(description) = description {
         option["description"] = text(description).into();
+    }
+    option
+}
+
+/// The option with a custom emote or Unicode emoji as its badge. Other
+/// configured symbols stay in text because Discord refuses them as emoji.
+pub fn branded(mut option: Value, marker: &str) -> Value {
+    let emote = marker
+        .strip_prefix("<a:")
+        .map(|emote| (true, emote))
+        .or_else(|| marker.strip_prefix("<:").map(|emote| (false, emote)))
+        .and_then(|(animated, emote)| Some((animated, emote.strip_suffix('>')?.split_once(':')?)));
+    if let Some((animated, (name, id))) = emote {
+        option["emoji"] = json!({ "id": id, "name": name, "animated": animated });
+    } else if emojis::get(marker).is_some() {
+        option["emoji"] = json!({ "name": marker });
     }
     option
 }

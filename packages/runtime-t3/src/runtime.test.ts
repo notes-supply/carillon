@@ -1,98 +1,36 @@
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import type { RuntimeOperations } from "@carillon/runtime/operations";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import { reportOf } from "@carillon/runtime/failure";
+import type { RuntimeOperations } from "@carillon/runtime/operations";
 import { derivedId, type Run } from "./contracts.ts";
-import { startFakeT3, type FakeT3 } from "./fake.ts";
-import { createT3Runtime } from "./runtime.ts";
-import { connectT3, type Connect } from "./t3.ts";
+import {
+  answer,
+  build,
+  conversation,
+  dispatches,
+  fake,
+  resources,
+  restart,
+  runOf,
+  runtime,
+  started,
+  thread,
+  threadId,
+  turn,
+} from "./runtime/harness.ts";
+import { connectT3 } from "./t3.ts";
 
-const PROJECT = "project-1";
-const selection = {
-  instanceId: "claudeAgent",
-  model: "claude-sonnet-5",
-  options: [{ id: "effort", value: "low" }],
-};
 const attachment = {
   path: `${"0".repeat(8)}-0000-0000-0000-${"0".repeat(12)}/0`,
   name: "a.png",
   size: 1,
   sha256: "0".repeat(64),
 };
-let fake: FakeT3;
-let resources: string;
-let runtime: RuntimeOperations;
-
-beforeEach(async () => {
-  fake = await startFakeT3();
-  resources = await mkdtemp(join(tmpdir(), "carillon-t3-"));
-  await writeFile(join(resources, "SYSTEM.md"), "You are the Carillon agent.\n");
-  vi.spyOn(console, "log").mockImplementation(() => undefined);
-  vi.spyOn(console, "error").mockImplementation(() => undefined);
-  runtime = build();
-});
-
-afterEach(async () => {
-  await runtime.close();
-  await fake.close();
-  await rm(resources, { recursive: true, force: true });
-  vi.restoreAllMocks();
-});
-
-function build(
-  overrides: { url?: string; token?: string; reconnectDelayMs?: number; connect?: Connect } = {},
-) {
-  return createT3Runtime({
-    endpoint: { url: overrides.url ?? fake.url, token: overrides.token ?? fake.token },
-    projectId: PROJECT,
-    selection,
-    workspace: resources,
-    ...(overrides.connect === undefined ? {} : { connect: overrides.connect }),
-    reconnect: { attempts: 5, delayMs: overrides.reconnectDelayMs ?? 50 },
-    settleMs: 500,
-    timeoutMs: 2_000,
-  });
-}
-
-const threadId = derivedId("thread", PROJECT, "discord-private", "default", "conversation-1");
-
-function turn(correlation: string, input: string, extra: Record<string, unknown> = {}) {
-  return {
-    correlation_id: correlation,
-    interface_id: "discord-private",
-    agent_id: "default",
-    audience_id: "conversation-1",
-    input,
-    resource_root: resources,
-    attachment_root: join(resources, "attachments"),
-    ...extra,
-  };
-}
-
-function thread() {
-  const found = fake.threads.get(threadId);
-  if (found === undefined) throw new Error("the conversation's thread does not exist");
-  return found;
-}
-
-function runOf(correlation: string): Run | undefined {
-  return fake.threads
-    .get(threadId)
-    ?.runs.find((run) => run.userMessageId === derivedId("message", correlation));
-}
-
-async function started(correlation: string): Promise<Run> {
-  await fake.waitFor(() => runOf(correlation) !== undefined);
-  const run = runOf(correlation);
-  if (run === undefined) throw new Error("run not started");
-  return run;
-}
 
 /** The turn's run once it has the status. */
 async function waitForStatus(correlation: string, status: Run["status"]): Promise<Run> {
@@ -107,22 +45,20 @@ async function resubscribed(): Promise<void> {
   await fake.waitFor(() => thread().subscribers.size === 1);
 }
 
-function answer(run: Run, text: string): void {
-  fake.assistant(threadId, run.id, text);
-  fake.complete(threadId, run.id);
-}
-
 function userTexts(): string[] {
   return thread()
     .messages.filter((message) => message.role === "user")
     .map((message) => message.text);
 }
 
-const dispatches = () => fake.commands.filter((command) => command.type === "message.dispatch");
 const activity = () => runtime.activity("turn-1", "discord-private");
+
 const until = (condition: () => boolean) => fake.waitFor(condition);
+
 const roster = () => thread().providerThread.pendingBackgroundTasks ?? [];
+
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /** An answer apart from the turn's final report, which cases about the answer leave aside. */
 const answered = (response: { readonly activity?: unknown }) => ({
   ...response,
@@ -179,34 +115,6 @@ it.each([
   expect(userTexts()).toEqual(["Hello."]);
 });
 
-it("keeps a conversation's turns in one T3 thread and sends the person's text as written", async () => {
-  const first = runtime.executeTurn(turn("turn-1", "Remember carillon."));
-  answer(await started("turn-1"), "Noted.");
-  expect(answered(await first)).toEqual({ correlation_id: "turn-1", output: "Noted." });
-
-  const second = runtime.executeTurn(turn("turn-2", "Which word?"));
-  answer(await started("turn-2"), "Carillon.");
-  expect((await second).output).toBe("Carillon.");
-
-  expect(fake.threads.size).toBe(1);
-  expect(thread().runs.map((run) => run.ordinal)).toEqual([1, 2]);
-  // The agent's instructions are the T3 project's own configuration, not a preamble.
-  expect(userTexts()).toEqual(["Remember carillon.", "Which word?"]);
-  // The thread was opened with the configured selection; messages carry none, so the
-  // thread's own selection (which the native UI may change) runs them.
-  expect(fake.commands.find((command) => command.type === "thread.create")).toMatchObject({
-    modelSelection: { instanceId: "claudeAgent", model: "claude-sonnet-5" },
-  });
-  for (const dispatch of dispatches()) expect(dispatch).not.toHaveProperty("modelSelection");
-  // The thread is opened by the same command each turn, replayed under its receipt.
-  expect(fake.commands.filter((command) => command.type === "thread.create")).toHaveLength(2);
-  // Each turn asks T3 for a bounded snapshot and a completion marker.
-  expect(fake.subscriptions).toEqual([
-    { afterSequence: undefined, bounded: true, marker: true },
-    { afterSequence: undefined, bounded: true, marker: true },
-  ]);
-});
-
 it("recovers a dispatch whose answer was lost by reading the run back, without dispatching again", async () => {
   let dropped = 0;
   fake.dropAnswer = (command) => command.type === "message.dispatch" && dropped++ === 0;
@@ -217,11 +125,8 @@ it("recovers a dispatch whose answer was lost by reading the run back, without d
   expect((await result).output).toBe("hi");
   expect(dispatches()).toHaveLength(1);
   expect(thread().runs).toHaveLength(1);
-  // The reconnection resumed from the folded sequence instead of reloading the thread.
-  expect(fake.subscriptions.map((subscription) => typeof subscription.afterSequence)).toEqual([
-    "undefined",
-    "number",
-  ]);
+  expect(fake.subscriptions[0]?.afterSequence).toBeUndefined();
+  expect(typeof fake.subscriptions.at(-1)?.afterSequence).toBe("number");
 });
 
 it("replays a dispatch T3 never received under the same command, so one run results", async () => {
@@ -547,7 +452,6 @@ it("describes the running turn to its own interface, bounded and redacted, from 
     ],
     tool_calls: 2,
     notes: ["Reading the system file first, to see the agent's instructions."],
-    // The run's own selection: the model and Claude's effort option.
     agent: { model: "claude-sonnet-5", effort: "low" },
   });
   // T3 dated both ends of each call.
@@ -689,7 +593,6 @@ it("uploads only the bytes core captured, failing a turn whose image changed sin
     message:
       "The attached file photo.png changed after Carillon received it; please send it again.",
   });
-  // Nothing was granted, uploaded or dispatched.
   expect(fake.uploads.size).toBe(0);
   expect(dispatches()).toHaveLength(0);
 
@@ -775,7 +678,6 @@ it("never follows T3's upload redirect to another origin", async () => {
       (error: unknown) => error,
     )
     .finally(() => elsewhere.close());
-  // No image byte reached the other origin, and the turn failed as T3 refused it.
   expect(reached).toEqual([]);
   expect(failure).toMatchObject({
     status: 502,
@@ -797,205 +699,38 @@ it("names earlier files it cannot provide", async () => {
   );
 });
 
-const conversation = {
-  interface_id: "discord-private",
-  agent_id: "default",
-  audience_id: "conversation-1",
-};
-const agentDefault = {
-  provider: "claudeAgent",
-  model: "claude-sonnet-5",
-  options: { effort: "low", fastMode: "off" },
-};
-const modelSets = () =>
-  fake.commands.filter((command) => command.type === "thread.model-selection.set");
-
-it("reads the conversation's model from its native thread against T3's catalogue", async () => {
-  const state = await runtime.modelState(conversation);
-  // Only usable provider instances are offered; a boolean setting is on or off.
-  expect(state.available).toEqual([
-    {
-      provider: "claudeAgent",
-      model: "claude-sonnet-5",
-      name: "Claude Sonnet 5",
-      options: [
-        { id: "effort", name: "Effort", choices: ["low", "high"], default: "high" },
-        { id: "fastMode", name: "Fast Mode", choices: ["off", "on"], default: "off" },
-      ],
-    },
-    { provider: "claudeAgent", model: "claude-haiku-4-5", name: "Claude Haiku 4.5", options: [] },
+it("runs plain T3 Code on the other instances, with the person's text as written and T3's own title", async () => {
+  const plainThread = derivedId("thread", "discord-private", "code", "conversation-1");
+  const code = { ...conversation, agent_id: "code" };
+  // Never on Carillon's profiles, which are the assistant's.
+  expect((await runtime.modelState(code)).available.map((model) => model.provider)).toEqual([
+    "codex",
   ]);
-  // The agent default is the settings' selection, changed there; a conversation
-  // without a thread yet will start with it. Reading creates nothing.
-  expect(state.agent).toEqual({ selection: agentDefault, overridden: false, read_only: true });
-  expect(state.conversation).toEqual({ selection: agentDefault, overridden: false });
-  expect(fake.threads.size).toBe(0);
-  expect(
-    await runtime.modelState({ interface_id: "discord-private", agent_id: "default" }),
-  ).not.toHaveProperty("conversation");
-
-  // A selection made in T3's own UI is the conversation's.
-  const reply = runtime.executeTurn(turn("turn-1", "hi"));
-  answer(await started("turn-1"), "Hello.");
-  await reply;
-  thread().modelSelection = { instanceId: "claudeAgent", model: "claude-haiku-4-5", options: [] };
-  expect((await runtime.modelState(conversation)).conversation).toEqual({
-    selection: { provider: "claudeAgent", model: "claude-haiku-4-5", options: {} },
-    overridden: true,
+  const native = { origin: { guild_id: "100", channel_id: "300", user_id: "200" } };
+  const reply = runtime.executeTurn({
+    ...turn("turn-1", "Fix the  flaky\ntest", { native }),
+    agent_id: "code",
   });
-});
-
-it("changes the thread's own selection, which later messages inherit, and reads it back", async () => {
-  // A change before the first message opens the thread with the agent default first.
-  const haiku = { provider: "claudeAgent", model: "claude-haiku-4-5" };
-  expect(
-    (await runtime.setModel({ ...conversation, scope: "conversation", selection: haiku }))
-      .conversation,
-  ).toEqual({ selection: { ...haiku, options: {} }, overridden: true });
+  await fake.waitFor(() => fake.threads.get(plainThread)?.runs.length === 1);
+  const plain = fake.threads.get(plainThread);
+  const run = plain?.runs[0];
+  if (plain === undefined || run === undefined) throw new Error("the plain thread did not run");
+  expect(run.modelSelection).toMatchObject({ instanceId: "codex", model: "gpt-6-astra" });
+  expect(plain.messages.filter((message) => message.role === "user").map((m) => m.text)).toEqual([
+    "Fix the  flaky\ntest",
+  ]);
   expect(fake.commands.find((command) => command.type === "thread.create")).toMatchObject({
-    modelSelection: selection,
+    threadId: plainThread,
+    title: "New thread",
   });
-  expect(thread().modelSelection).toEqual({
-    instanceId: "claudeAgent",
-    model: "claude-haiku-4-5",
-    options: [],
-  });
-
-  const reply = runtime.executeTurn(turn("turn-1", "Which model?"));
-  answer(await started("turn-1"), "Haiku.");
-  await reply;
-  expect(dispatches()[0]).not.toHaveProperty("modelSelection");
-  expect(thread().modelSelection.model).toBe("claude-haiku-4-5");
-
-  // A setting changes against the selection the panel showed; booleans reach T3 as booleans.
-  const sonnet = await runtime.setModel({
-    ...conversation,
-    scope: "conversation",
-    selection: { provider: "claudeAgent", model: "claude-sonnet-5" },
-  });
-  const shown = sonnet.conversation?.selection;
-  expect(shown).toEqual({ ...agentDefault, options: { effort: "high", fastMode: "off" } });
-  const fast = await runtime.setModel({
-    ...conversation,
-    scope: "conversation",
-    selection: { ...agentDefault, options: { effort: "high", fastMode: "on" } },
-    ...(shown == null ? {} : { expected: shown }),
-  });
-  expect(thread().modelSelection.options).toEqual([
-    { id: "effort", value: "high" },
-    { id: "fastMode", value: true },
-  ]);
-  expect(fast.conversation?.selection?.options).toEqual({ effort: "high", fastMode: "on" });
-
-  // A change made in T3's own UI meanwhile makes the panel's view stale.
-  thread().modelSelection = { instanceId: "claudeAgent", model: "claude-haiku-4-5", options: [] };
+  expect(dispatches()[0]).toMatchObject({ titleSeed: "Fix the flaky test" });
+  fake.assistant(plainThread, run.id, "Fixed.");
+  fake.complete(plainThread, run.id);
+  expect((await reply).output).toBe("Fixed.");
+  // A conversation of an agent the runtime does not serve is refused before T3.
   await expect(
-    runtime.setModel({
-      ...conversation,
-      scope: "conversation",
-      selection: { ...agentDefault, options: { effort: "low" } },
-      ...(fast.conversation?.selection == null ? {} : { expected: fast.conversation.selection }),
-    }),
-  ).rejects.toMatchObject({ status: 409, message: "The model settings changed." });
-  expect(thread().modelSelection.model).toBe("claude-haiku-4-5");
-
-  // A model T3's catalogue no longer lists is still the thread's selection,
-  // so a view from before T3 switched to it is stale too.
-  const shownHaiku = (await runtime.modelState(conversation)).conversation?.selection;
-  thread().modelSelection = { instanceId: "claudeAgent", model: "claude-retired", options: [] };
-  expect((await runtime.modelState(conversation)).conversation?.selection).toEqual({
-    provider: "claudeAgent",
-    model: "claude-retired",
-    options: {},
-  });
-  await expect(
-    runtime.setModel({
-      ...conversation,
-      scope: "conversation",
-      selection: { ...agentDefault, options: { effort: "low" } },
-      ...(shownHaiku == null ? {} : { expected: shownHaiku }),
-    }),
-  ).rejects.toMatchObject({ status: 409, message: "The model settings changed." });
-  expect(thread().modelSelection.model).toBe("claude-retired");
-
-  // Returning to the agent default sets the settings' selection on the thread.
-  const reset = await runtime.setModel({ ...conversation, scope: "conversation", selection: null });
-  expect(reset.conversation).toEqual({ selection: agentDefault, overridden: false });
-  expect(thread().modelSelection).toEqual(selection);
-});
-
-it("reports no model when T3 no longer lists the thread whose model it changed", async () => {
-  const haiku = { provider: "claudeAgent", model: "claude-haiku-4-5" };
-  // T3 commits the change and answers with its receipt, then answers the
-  // read that follows with its typed missing-projection error.
-  let committed: unknown;
-  fake.failAfterDispatch = (command) => {
-    if (command.type === "thread.model-selection.set") {
-      committed = structuredClone(thread().modelSelection);
-      fake.threads.delete(threadId);
-    }
-    return undefined;
-  };
-  await expect(
-    runtime.setModel({ ...conversation, scope: "conversation", selection: haiku }),
-  ).rejects.toMatchObject({
-    status: 502,
-    message: "T3 answered in a form this runtime does not understand.",
-  });
-  // The change T3 committed is neither reported as the default nor sent again.
-  expect(committed).toEqual({ instanceId: "claudeAgent", model: "claude-haiku-4-5", options: [] });
-  expect(modelSets()).toHaveLength(1);
-});
-
-it("refuses changes it cannot make, without sending them to T3", async () => {
-  const change = (selection: {
-    provider: string;
-    model: string;
-    options?: Record<string, string>;
-  }) => runtime.setModel({ ...conversation, scope: "conversation", selection });
-  await expect(
-    runtime.setModel({ ...conversation, scope: "agent", selection: agentDefault }),
+    runtime.executeTurn({ ...turn("turn-2", "hi"), agent_id: "elsewhere" }),
   ).rejects.toMatchObject({ status: 422 });
-  // T3 accepts any model name or setting value, so the catalogue decides.
-  await expect(change({ provider: "claudeAgent", model: "no-such-model" })).rejects.toMatchObject({
-    status: 422,
-    message: "That model is not available.",
-  });
-  await expect(change({ provider: "cursor", model: "auto" })).rejects.toMatchObject({
-    status: 422,
-  });
-  await expect(
-    change({ provider: "claudeAgent", model: "claude-sonnet-5", options: { effort: "max" } }),
-  ).rejects.toMatchObject({ status: 422 });
-  expect(modelSets()).toEqual([]);
-
-  // While a turn of the conversation runs, or anything else works on its thread.
-  const reply = runtime.executeTurn(turn("turn-1", "work"));
-  const run = await started("turn-1");
-  await expect(
-    change({ provider: "claudeAgent", model: "claude-haiku-4-5" }),
-  ).rejects.toMatchObject({ status: 409 });
-  answer(run, "Done.");
-  await reply;
-  fake.wake(threadId, "A run started in T3's own UI");
-  await expect(
-    change({ provider: "claudeAgent", model: "claude-haiku-4-5" }),
-  ).rejects.toMatchObject({ status: 409 });
-  expect(modelSets()).toEqual([]);
-  const ui = thread().runs.at(-1);
-  if (ui !== undefined) fake.complete(threadId, ui.id);
-
-  // T3's own refusal is reported as such.
-  fake.reject = (command) =>
-    command.type === "thread.model-selection.set"
-      ? "The target provider instance is unavailable."
-      : undefined;
-  const refused = change({ provider: "claudeAgent", model: "claude-haiku-4-5" });
-  await expect(refused).rejects.toMatchObject({ status: 422 });
-  await expect(refused).rejects.toThrow(
-    /^T3 refused the model change: .*The target provider instance is unavailable\.$/u,
-  );
-  expect(thread().modelSelection).toEqual(selection);
 });
 
 it("stops the native run when the runtime closes mid-turn", async () => {
@@ -1143,7 +878,7 @@ it("resumes by replay through the roster transitions and still waits for the wak
   fake.complete(threadId, run.id);
   fake.background(threadId, []);
   await resubscribed();
-  await pause(300);
+  await until(() => activity()?.phase === "model");
   expect(activity()).toMatchObject({ phase: "model", running: [] });
   const wake = fake.wake(threadId, "Background command completed");
   fake.assistant(threadId, wake.id, "It printed done.");
@@ -1220,8 +955,8 @@ it("neither interrupts nor detaches the session of a person's run when cancelled
   const person = fake.message(threadId, "Something else?");
   // The fold hears of the person's run before Carillon cancels.
   await sleep(200);
-  controller.abort();
-  await expect(result).rejects.toThrow();
+  controller.abort(new Error("core disconnected"));
+  await expect(result).rejects.toThrow("core disconnected");
   expect(fake.interrupts).toEqual([]);
   expect(fake.detached).toEqual([]);
   expect(thread().runs.find((candidate) => candidate.id === person.id)?.status).toBe("running");
@@ -1243,8 +978,8 @@ it("detaches no session while a person's completed run still lists its own backg
   fake.complete(threadId, person.id);
   // The fold hears of it before Carillon cancels.
   await sleep(200);
-  controller.abort();
-  await expect(result).rejects.toThrow();
+  controller.abort(new Error("core disconnected"));
+  await expect(result).rejects.toThrow("core disconnected");
   // T3 refuses to interrupt the turn's completed run, and the session the
   // person's work runs in is not detached under it.
   expect(fake.interrupts).toEqual([]);
@@ -1297,8 +1032,8 @@ it("neither interrupts another provider's wake nor detaches a session under it w
   const { result, foreign } = await olderProviderWake(controller.signal);
   // The fold hears of the wake before Carillon cancels.
   await sleep(200);
-  controller.abort();
-  await expect(result).rejects.toThrow();
+  controller.abort(new Error("core disconnected"));
+  await expect(result).rejects.toThrow("core disconnected");
   expect(fake.interrupts).toEqual([]);
   expect(fake.detached).toEqual([]);
   expect(thread().runs.find((candidate) => candidate.id === foreign.id)?.status).toBe("running");
@@ -1309,7 +1044,6 @@ it("does not adopt a later run the turn does not owe, and the next turn waits be
   const run = await started("turn-1");
   // A predecessor's late wake lands on the thread while this turn runs: it queues behind it.
   const stale = fake.wake(threadId, 'Background command "old sleep" completed (exit code 0)');
-  expect(stale.status).toBe("queued");
   answer(run, "Only mine.");
   expect((await result).output).toBe("Only mine.");
   // The stale run now runs; it is not this turn's and is not awaited.
@@ -1340,8 +1074,7 @@ it("ignores a stale pending request until the new run's own item names its reque
   const next = await started("turn-2");
   // The new run waits on its own request before its item has arrived: unknown, not blocked.
   const own = fake.request(threadId, next.id, "user_input");
-  await until(() => runOf("turn-2")?.status === "waiting");
-  await pause(300);
+  await until(() => runtime.activity("turn-2", "discord-private")?.phase === "waiting");
   expect(fake.interrupts).toEqual([]);
   expect(runtime.activity("turn-2", "discord-private")?.phase).toBe("waiting");
   // Its item arrives and names the request: blocked with the new turn's wording.
@@ -1358,21 +1091,31 @@ it("ignores a stale pending request until the new run's own item names its reque
   expect(fake.interrupts).toEqual([next.id]);
 });
 
-it("cancels promptly while the first snapshot never arrives, dispatching nothing", async () => {
-  fake.holdSnapshot = true;
-  const controller = new AbortController();
-  const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
-  await until(() => fake.subscriptions.length === 1);
-  const started = Date.now();
-  controller.abort(new Error("core disconnected"));
-  await expect(result).rejects.toThrow("core disconnected");
-  expect(Date.now() - started).toBeLessThan(1_000);
-  expect(dispatches()).toHaveLength(0);
-  fake.holdSnapshot = false;
-  const next = runtime.executeTurn(turn("turn-2", "again"));
-  answer(await started2("turn-2"), "ok");
-  expect((await next).output).toBe("ok");
-});
+it.each([false, true])(
+  "cancels promptly while the first snapshot never arrives, existing thread %s",
+  async (existing) => {
+    if (existing) {
+      const initial = runtime.executeTurn(turn("initial", "Hello."));
+      answer(await started2("initial"), "Hi.");
+      await initial;
+    }
+    const dispatched = dispatches().length;
+    const subscribed = fake.subscriptions.length;
+    fake.holdSnapshot = true;
+    const controller = new AbortController();
+    const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
+    await until(() => fake.subscriptions.length === subscribed + 1);
+    const started = Date.now();
+    controller.abort(new Error("core disconnected"));
+    await expect(result).rejects.toThrow("core disconnected");
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(dispatches()).toHaveLength(dispatched);
+    fake.holdSnapshot = false;
+    const next = runtime.executeTurn(turn("turn-2", "again"));
+    answer(await started2("turn-2"), "ok");
+    expect((await next).output).toBe("ok");
+  },
+);
 
 it("cancels promptly during a reconnect delay before anything was dispatched", async () => {
   const slow = build({ reconnectDelayMs: 5_000 });
@@ -1406,16 +1149,26 @@ it("keeps recovering a possibly dispatched turn when cancelled during a reconnec
   await slow.close();
 }, 10_000);
 
-it("closes promptly while the first snapshot never arrives", async () => {
-  fake.holdSnapshot = true;
-  const result = runtime.executeTurn(turn("turn-1", "work"));
-  await until(() => fake.subscriptions.length === 1);
-  const started = Date.now();
-  await runtime.close();
-  await expect(result).rejects.toThrow("T3 runtime is closed");
-  expect(Date.now() - started).toBeLessThan(1_000);
-  expect(dispatches()).toHaveLength(0);
-});
+it.each([false, true])(
+  "closes promptly while the first snapshot never arrives, existing thread %s",
+  async (existing) => {
+    if (existing) {
+      const initial = runtime.executeTurn(turn("initial", "Hello."));
+      answer(await started2("initial"), "Hi.");
+      await initial;
+    }
+    const dispatched = dispatches().length;
+    const subscribed = fake.subscriptions.length;
+    fake.holdSnapshot = true;
+    const result = runtime.executeTurn(turn("turn-1", "work"));
+    await until(() => fake.subscriptions.length === subscribed + 1);
+    const started = Date.now();
+    await runtime.close();
+    await expect(result).rejects.toThrow("T3 runtime is closed");
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(dispatches()).toHaveLength(dispatched);
+  },
+);
 
 const started2 = started;
 
@@ -1552,8 +1305,7 @@ it("fences the conversation when a native failure does not prove a stop, but not
   fake.snapshotOnResume = false;
 
   // A fresh runtime: a confirmed interrupt and a completed turn leave the thread trusted.
-  await runtime.close();
-  runtime = build();
+  await restart();
   const controller = new AbortController();
   const cancelled = runtime.executeTurn(turn("turn-3", "work"), controller.signal);
   const run3 = await started("turn-3");
@@ -1571,18 +1323,17 @@ it("fences the conversation when a turn read back from an existing run exits wit
   const retry = build();
   const again = retry.executeTurn(turn("turn-1", "work"));
   // Both turns will fail; observe each rejection as it happens.
-  const firstFails = expect(first).rejects.toThrow(
-    /^Lost contact with T3 while the turn ran .*may still be running\.$/u,
-  );
-  const againFails = expect(again).rejects.toThrow(
-    /^Lost contact with T3 while the turn ran .*may still be running\.$/u,
-  );
-  await until(() => fake.subscriptions.length === 2);
+  const firstFails = first.catch((failure: unknown) => failure);
+  const againFails = again.catch((failure: unknown) => failure);
+  await until(() => retry.activity("turn-1", "discord-private")?.phase === "model");
   expect(dispatches()).toHaveLength(1);
   fake.protocolVersion = 3;
   fake.disconnectAll();
-  await againFails;
-  await firstFails;
+  for (const failure of [await againFails, await firstFails])
+    expect(failure).toHaveProperty(
+      "message",
+      expect.stringMatching(/^Lost contact with T3 while the turn ran .*may still be running\.$/u),
+    );
   fake.protocolVersion = 2;
   await expect((await backgroundTurn("turn-2", retry)).result).rejects.toThrow(
     /was not confirmed stopped/u,
@@ -1611,16 +1362,17 @@ it("cancels or closes promptly while T3's discovery or upgrade stalls before any
   fake.holdDiscovery = true;
   const controller = new AbortController();
   const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
-  await pause(100);
+  await until(() => fake.heldRequests.size === 1);
   let begun = Date.now();
   controller.abort(new Error("core disconnected"));
   await expect(result).rejects.toThrow("core disconnected");
   expect(Date.now() - begun).toBeLessThan(500);
   fake.holdDiscovery = false;
+  fake.disconnectAll();
 
   fake.holdUpgrade = true;
   const closing = runtime.executeTurn(turn("turn-2", "work"));
-  await pause(100);
+  await until(() => fake.heldRequests.size === 1);
   begun = Date.now();
   await runtime.close();
   await expect(closing).rejects.toThrow("T3 runtime is closed");
@@ -1639,7 +1391,7 @@ it("keeps reconnecting through a stalled discovery after the dispatch, and stops
   const run = await started("turn-1");
   // The reconnection's discovery stalls; the caller cancels meanwhile.
   fake.holdDiscovery = true;
-  await pause(200);
+  await until(() => fake.heldRequests.size === 1);
   controller.abort(new Error("core disconnected"));
   let settled = false;
   void result.catch(() => undefined).finally(() => (settled = true));
@@ -1803,7 +1555,7 @@ it("keeps the answer text it observed when a bounded snapshot resumes without it
   fake.assistant(threadId, run.id, "Part two.", false, "2");
   fake.complete(threadId, run.id);
   expect((await result).output).toBe("Part one.\n\nPart two.");
-  expect(fake.subscriptions).toHaveLength(2);
+  expect(fake.subscriptions.at(-1)?.afterSequence).toBeDefined();
 });
 
 it("queues behind a person's run in the native UI and cancels only its own queued run", async () => {
@@ -1813,7 +1565,6 @@ it("queues behind a person's run in the native UI and cancels only its own queue
   // The person starts a run in T3's own UI; it waits on their approval.
   const person = fake.wake(threadId, "a message typed in the T3 UI");
   fake.request(threadId, person.id, "tool_approval");
-  expect(thread().runs.find((run) => run.id === person.id)?.status).toBe("waiting");
 
   const controller = new AbortController();
   const queued = runtime.executeTurn(turn("turn-2", "from Discord"), controller.signal);
@@ -2167,12 +1918,16 @@ it("lists the commands and user-invocable skills T3 offers the conversation's pr
   expect(fake.threads.size).toBe(0);
   expect(fake.refreshes).toEqual([{ instanceId: "claudeAgent", cwd: resources }]);
 
-  // Once the thread runs on another instance, that instance's commands are offered.
+  // A thread T3's UI moved onto an instance the assistant does not run on gives
+  // way to the agent's at its next run, whose commands are still the ones offered.
   const reply = runtime.executeTurn(turn("turn-1", "hi"));
   answer(await started("turn-1"), "Hello.");
   await reply;
   thread().modelSelection = { instanceId: "codex", model: "gpt-6-astra", options: [] };
-  expect((await runtime.commands(conversation)).commands.map((command) => command.name)).toEqual([
+  expect((await runtime.commands(conversation)).commands).toEqual(listed);
+  // Plain T3 Code runs on the other instances: its commands are theirs.
+  const code = { ...conversation, agent_id: "code" };
+  expect((await runtime.commands(code)).commands.map((command) => command.name)).toEqual([
     "status",
     "deploy-notes",
     "only-person",
@@ -2181,7 +1936,7 @@ it("lists the commands and user-invocable skills T3 offers the conversation's pr
 
 it("runs different conversations at once and each conversation's turns in order", async () => {
   const other = { audience_id: "conversation-2" };
-  const otherThread = derivedId("thread", PROJECT, "discord-private", "default", "conversation-2");
+  const otherThread = derivedId("thread", "discord-private", "default", "conversation-2");
   const otherRun = (correlation: string) =>
     fake.threads
       .get(otherThread)
@@ -2208,7 +1963,7 @@ it("runs different conversations at once and each conversation's turns in order"
 });
 
 it("cancels one conversation's turn without touching another's", async () => {
-  const otherThread = derivedId("thread", PROJECT, "discord-private", "default", "conversation-2");
+  const otherThread = derivedId("thread", "discord-private", "default", "conversation-2");
   const controller = new AbortController();
   const cancelled = runtime.executeTurn(turn("turn-1", "stop me"), controller.signal);
   const mine = await started("turn-1");

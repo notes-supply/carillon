@@ -1,6 +1,12 @@
 {
   "states": [
     {
+      "providers": [
+        {
+          "id": "fixture",
+          "name": "Fixture"
+        }
+      ],
       "available": [
         {
           "provider": "fixture",
@@ -10,7 +16,16 @@
             {
               "id": "thinking",
               "name": "Thinking",
-              "choices": ["off", "high"],
+              "choices": [
+                {
+                  "id": "off",
+                  "name": "Off"
+                },
+                {
+                  "id": "high",
+                  "name": "High"
+                }
+              ],
               "default": "off"
             }
           ]
@@ -28,6 +43,12 @@
       }
     },
     {
+      "providers": [
+        {
+          "id": "fixture",
+          "name": "Fixture"
+        }
+      ],
       "available": [
         {
           "provider": "fixture",
@@ -37,7 +58,16 @@
             {
               "id": "thinking",
               "name": "Thinking",
-              "choices": ["off", "high"],
+              "choices": [
+                {
+                  "id": "off",
+                  "name": "Off"
+                },
+                {
+                  "id": "high",
+                  "name": "High"
+                }
+              ],
               "default": "off"
             }
           ]
@@ -65,6 +95,7 @@
       }
     },
     {
+      "providers": [],
       "available": [],
       "agent": {
         "selection": null,
@@ -72,6 +103,12 @@
       }
     },
     {
+      "providers": [
+        {
+          "id": "claudeAgent",
+          "name": "Claude · Carillon"
+        }
+      ],
       "available": [
         {
           "provider": "claudeAgent",
@@ -81,7 +118,16 @@
             {
               "id": "effort",
               "name": "Reasoning",
-              "choices": ["low", "high"],
+              "choices": [
+                {
+                  "id": "low",
+                  "name": "Low"
+                },
+                {
+                  "id": "high",
+                  "name": "High"
+                }
+              ],
               "default": "low"
             }
           ]
@@ -230,18 +276,21 @@
   ],
   "invalid_states": [
     {
+      "providers": [],
       "available": [],
       "agent": {
         "overridden": false
       }
     },
     {
+      "providers": [],
       "available": [],
       "agent": {
         "selection": null
       }
     },
     {
+      "providers": [],
       "available": [],
       "agent": {
         "selection": null,
@@ -250,11 +299,53 @@
       "conversation": null
     },
     {
+      "providers": [],
       "available": [
         {
           "provider": "p",
           "model": "m",
           "name": "M"
+        }
+      ],
+      "agent": {
+        "selection": null,
+        "overridden": false
+      }
+    },
+    {
+      "available": [],
+      "agent": {
+        "selection": null,
+        "overridden": false
+      }
+    },
+    {
+      "providers": [
+        {
+          "id": "p"
+        }
+      ],
+      "available": [],
+      "agent": {
+        "selection": null,
+        "overridden": false
+      }
+    },
+    {
+      "providers": [],
+      "available": [
+        {
+          "provider": "p",
+          "model": "m",
+          "name": "M",
+          "options": [
+            {
+              "id": "speed",
+              "name": "Speed",
+              "choices": ["fast"],
+              "default": "fast"
+            }
+          ]
         }
       ],
       "agent": {

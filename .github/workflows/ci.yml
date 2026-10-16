@@ -33,6 +33,7 @@ jobs:
       rust: ${{ steps.plan.outputs.rust }}
       ts: ${{ steps.plan.outputs.ts }}
       release: ${{ steps.plan.outputs.release }}
+      lint: ${{ steps.plan.outputs.lint }}
       workflows: ${{ steps.plan.outputs.workflows }}
       reason: ${{ steps.plan.outputs.reason }}
     steps:
@@ -88,7 +89,7 @@ jobs:
       - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
         with:
           version: ${{ env.MISE_VERSION }}
-          install_args: rust cargo:cargo-deny cargo:cargo-shear
+          install_args: rust cargo:cargo-deny cargo:cargo-shear aqua:nextest-rs/nextest/cargo-nextest
           cache_key_prefix: mise-rust
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -249,6 +250,23 @@ jobs:
           path: ${{ steps.package-key.outputs.archive }}
           key: ${{ steps.package-key.outputs.key }}
 
+  lint:
+    needs: plan
+    if: needs.plan.outputs.lint == 'true'
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+        with:
+          version: ${{ env.MISE_VERSION }}
+          install_args: ast-grep shellcheck
+          cache_key_prefix: mise-lint
+      - run: mise run check:lint
+
   workflows:
     needs: plan
     if: needs.plan.outputs.workflows == 'true'
@@ -272,7 +290,7 @@ jobs:
   # The one required check: the plan succeeded, every selected lane passed and
   # every other lane was deliberately skipped.
   ci-ok:
-    needs: [plan, rust, ts, release, workflows]
+    needs: [plan, rust, ts, release, lint, workflows]
     if: always()
     runs-on: blacksmith-2vcpu-ubuntu-2404
     permissions: {}
@@ -283,12 +301,13 @@ jobs:
           RUST: ${{ needs.plan.outputs.rust }}/${{ needs.rust.result }}
           TS: ${{ needs.plan.outputs.ts }}/${{ needs.ts.result }}
           RELEASE: ${{ needs.plan.outputs.release }}/${{ needs.release.result }}
+          LINT: ${{ needs.plan.outputs.lint }}/${{ needs.lint.result }}
           WORKFLOWS: ${{ needs.plan.outputs.workflows }}/${{ needs.workflows.result }}
         run: |
           [ "$PLAN" = success ] || { echo "the plan did not succeed: $PLAN"; exit 1; }
           echo "plan: $REASON"
           status=0 tested=0
-          for lane in "rust=$RUST" "ts=$TS" "release=$RELEASE" "workflows=$WORKFLOWS"; do
+          for lane in "rust=$RUST" "ts=$TS" "release=$RELEASE" "lint=$LINT" "workflows=$WORKFLOWS"; do
             case "${lane#*=}" in
               true/success) echo "${lane%%=*}: passed"; tested=$((tested + 1)) ;;
               false/skipped) echo "${lane%%=*}: not needed" ;;

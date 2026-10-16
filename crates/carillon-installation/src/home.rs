@@ -174,8 +174,16 @@ mod tests {
 
     #[test]
     fn relative_locations_are_refused_rather_than_searched() {
-        assert!(resolve_from(None, Some("relative".into()), None, None).is_err());
-        assert!(resolve_from(None, None, None, Some("relative".into())).is_err());
-        assert!(resolve_from(None, None, None, None).is_err());
+        let refusal = |variable: Option<&str>, home: Option<&str>| {
+            resolve_from(None, variable.map(Into::into), None, home.map(Into::into))
+                .map_or_else(|error| error.to_string(), |path| path.display().to_string())
+        };
+        assert_eq!(
+            refusal(Some("relative"), None),
+            "CARILLON_HOME must be an absolute path"
+        );
+        let home = "HOME must be an absolute path to locate ~/.carillon; pass --home";
+        assert_eq!(refusal(None, Some("relative")), home);
+        assert_eq!(refusal(None, None), home);
     }
 }

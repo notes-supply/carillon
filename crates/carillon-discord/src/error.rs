@@ -29,7 +29,7 @@ impl InterfaceError {
     /// rather than rejecting the request, refusing it for lack of storage,
     /// or violating its wire contract.
     #[must_use]
-    pub fn is_transient(&self) -> bool {
+    pub(crate) fn is_transient(&self) -> bool {
         self.status.is_server_error()
             && !matches!(
                 self.status,

@@ -12,7 +12,7 @@ import { groups } from "./schemas.ts";
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
-  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+  for (const cleanup of cleanups.splice(0).toReversed()) await cleanup();
 });
 async function fixture(status: number, responseBody: string, redirect = false) {
   const root = await mkdtemp(join(tmpdir(), "discord-client-"));

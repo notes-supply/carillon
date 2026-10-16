@@ -814,7 +814,7 @@
   },
   {
     "card": {
-      "description": "⏳ Working · started <t:1790000000:R>\n> \\*\\*bold\\*\\* \\<\\@123\\> \\@everyone \\[link\\]\\(https\\://example.com\\) \\`code\\`",
+      "description": "⏳ Working · started <t:1790000000:R>\n> **bold** \\<\\@123\\> \\@everyone \\[link\\]\\(https\\://example.com\\) `code`",
       "fields": [
         {
           "inline": false,
@@ -834,7 +834,7 @@
       ],
       "type": "rich"
     },
-    "name": "model-text-is-inert",
+    "name": "model-text-renders-only-inline-emphasis",
     "request": {
       "job": {
         "origin": {

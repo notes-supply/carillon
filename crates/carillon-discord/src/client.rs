@@ -14,9 +14,8 @@ use serde_json::Value;
 use std::time::Duration;
 use tracing::warn;
 use uuid::Uuid;
-/// The provider's authenticated client for core's provider API.
 #[derive(Clone)]
-pub struct CoreClient {
+pub(crate) struct CoreClient {
     http: Client,
     base_url: String,
     token: String,
@@ -27,9 +26,7 @@ pub struct CoreClient {
 }
 
 impl CoreClient {
-    /// # Errors
-    /// Returns an error when the HTTP client cannot be initialized.
-    pub fn new(base_url: String, provider_id: String, token: String) -> Result<Self> {
+    pub(crate) fn new(base_url: String, provider_id: String, token: String) -> Result<Self> {
         Ok(Self {
             http: loopback::client().build()?,
             base_url,
@@ -57,10 +54,7 @@ impl CoreClient {
     /// Submit an event with its stable platform event ID. With attachments,
     /// core answers once it has captured them, so the wait is longer than
     /// core's own capture deadline; other calls keep their short one.
-    ///
-    /// # Errors
-    /// Returns core rejection, transport, or malformed-response failures.
-    pub async fn submit_event(
+    pub(crate) async fn submit_event(
         &self,
         event: &ExternalEvent,
     ) -> Result<EventReceipt, InterfaceError> {
@@ -73,11 +67,7 @@ impl CoreClient {
         core_json(request, "submit event to core").await
     }
 
-    /// What core knows about one of this provider's events.
-    ///
-    /// # Errors
-    /// Returns core rejection, transport, or malformed-response failures.
-    pub async fn event_status(&self, event_id: &str) -> Result<EventStatus, InterfaceError> {
+    pub(crate) async fn event_status(&self, event_id: &str) -> Result<EventStatus, InterfaceError> {
         let mut url = Url::parse(&self.url("/v1/events"))
             .map_err(|error| InterfaceError::protocol(error.to_string()))?;
         url.path_segments_mut()
@@ -91,20 +81,14 @@ impl CoreClient {
     }
 
     /// Claim the next delivery for this provider instance.
-    ///
-    /// # Errors
-    /// Returns core rejection, transport, or malformed-response failures.
-    pub async fn claim_delivery(&self) -> Result<Option<Delivery>, InterfaceError> {
+    pub(crate) async fn claim_delivery(&self) -> Result<Option<Delivery>, InterfaceError> {
         let request = self.request(Method::GET, self.url("/v1/deliveries"));
         core_json(request, "claim core delivery").await
     }
 
     /// Claim the delivery of one turn for this provider instance, if it has
     /// one pending or held.
-    ///
-    /// # Errors
-    /// Returns core rejection, transport, or malformed-response failures.
-    pub async fn claim_turn_delivery(
+    pub(crate) async fn claim_turn_delivery(
         &self,
         turn_id: &str,
     ) -> Result<Option<Delivery>, InterfaceError> {
@@ -115,10 +99,7 @@ impl CoreClient {
     }
 
     /// Commit the observed outcome of a held delivery claim.
-    ///
-    /// # Errors
-    /// Returns core rejection, transport, or malformed-response failures.
-    pub async fn acknowledge_delivery(
+    pub(crate) async fn acknowledge_delivery(
         &self,
         id: i64,
         outcome: DeliveryOutcome,
@@ -135,20 +116,17 @@ impl CoreClient {
     }
 
     /// Reconcile abandoned claims after establishing instance exclusivity.
-    ///
-    /// # Errors
-    /// Returns core rejection, transport, or malformed-response failures.
-    pub async fn reconcile(&self) -> Result<DeliveryReconciliation, InterfaceError> {
+    pub(crate) async fn reconcile(&self) -> Result<DeliveryReconciliation, InterfaceError> {
         let request = self.request(Method::POST, self.url("/v1/deliveries/reconcile"));
         core_json(request, "reconcile abandoned delivery claims").await
     }
 
     /// A page of this provider's jobs at work, `after` the previous page,
     /// each running turn with its runtime's latest snapshot when it has one.
-    ///
-    /// # Errors
-    /// Returns core rejection, transport, or malformed-response failures.
-    pub async fn jobs_at_work(&self, after: Option<&str>) -> Result<JobPage, InterfaceError> {
+    pub(crate) async fn jobs_at_work(
+        &self,
+        after: Option<&str>,
+    ) -> Result<JobPage, InterfaceError> {
         let mut url = Url::parse(&self.url("/v1/jobs"))
             .map_err(|error| InterfaceError::protocol(error.to_string()))?;
         if let Some(after) = after {
@@ -164,10 +142,7 @@ impl CoreClient {
     /// The jobs this provider names by their origin turn, at most
     /// [`JOB_READ_LIMIT`](carillon_protocol::model::JOB_READ_LIMIT), however
     /// they stand; core leaves out a name of nothing this provider began.
-    ///
-    /// # Errors
-    /// Returns core rejection, transport, or malformed-response failures.
-    pub async fn named_jobs(&self, named: &[String]) -> Result<Vec<Job>, InterfaceError> {
+    pub(crate) async fn named_jobs(&self, named: &[String]) -> Result<Vec<Job>, InterfaceError> {
         let mut url = Url::parse(&self.url("/v1/jobs"))
             .map_err(|error| InterfaceError::protocol(error.to_string()))?;
         url.query_pairs_mut()
@@ -184,19 +159,18 @@ impl CoreClient {
         )
     }
 
-    /// Read the runtime's model state for an agent and optional conversation.
-    ///
-    /// # Errors
-    /// Returns core rejection, transport, or malformed-response failures.
-    pub async fn model_state(&self, query: &ModelQuery) -> Result<ModelState, String> {
+    pub(crate) async fn model_state(
+        &self,
+        query: &ModelQuery,
+    ) -> Result<ModelState, InterfaceError> {
         self.runtime_query("/v1/model", query).await
     }
 
     /// The runtime's own commands a person may run in the conversation.
-    ///
-    /// # Errors
-    /// Returns core rejection, transport, or malformed-response failures.
-    pub async fn commands(&self, query: &ModelQuery) -> Result<CommandCatalog, String> {
+    pub(crate) async fn commands(
+        &self,
+        query: &ModelQuery,
+    ) -> Result<CommandCatalog, InterfaceError> {
         self.runtime_query("/v1/commands", query).await
     }
 
@@ -204,8 +178,9 @@ impl CoreClient {
         &self,
         path: &str,
         query: &ModelQuery,
-    ) -> Result<T, String> {
-        let mut url = Url::parse(&self.url(path)).map_err(|error| error.to_string())?;
+    ) -> Result<T, InterfaceError> {
+        let mut url = Url::parse(&self.url(path))
+            .map_err(|error| InterfaceError::protocol(error.to_string()))?;
         {
             let mut pairs = url.query_pairs_mut();
             pairs.append_pair("agent_id", &query.agent_id);
@@ -217,11 +192,10 @@ impl CoreClient {
         runtime_json(request).await
     }
 
-    /// Changes a model selection and returns the resulting state.
-    ///
-    /// # Errors
-    /// Returns core rejection, transport, or malformed-response failures.
-    pub async fn set_model(&self, update: &ModelUpdate) -> Result<ModelState, String> {
+    pub(crate) async fn set_model(
+        &self,
+        update: &ModelUpdate,
+    ) -> Result<ModelState, InterfaceError> {
         let request = self
             .request(Method::PUT, self.url("/v1/model"))
             .timeout(MODEL_CALL_TIMEOUT)
@@ -239,32 +213,41 @@ const MODEL_CALL_TIMEOUT: Duration = Duration::from_secs(6);
 /// What the user is told when a model or command call ran out of time.
 pub(crate) const RUNTIME_LATE: &str = "The runtime did not answer in time.";
 
-/// Performs a model or command call and turns every failure into words for
-/// the user. Core and the runtime phrase their rejections for people;
-/// transport failures are described here.
-async fn runtime_json<T: DeserializeOwned>(request: RequestBuilder) -> Result<T, String> {
+/// Core and the runtime phrase rejections for people; transport failures
+/// get a local explanation while preserving an HTTP status for callers.
+async fn runtime_json<T: DeserializeOwned>(request: RequestBuilder) -> Result<T, InterfaceError> {
     let response = match request.send().await {
         Ok(response) => response,
         Err(error) if error.is_timeout() => {
-            return Err(RUNTIME_LATE.to_owned());
+            return Err(InterfaceError {
+                status: reqwest::StatusCode::GATEWAY_TIMEOUT,
+                message: RUNTIME_LATE.to_owned(),
+            });
         }
         Err(error) => {
             warn!(%error, "model or command call failed to reach core");
-            return Err("The runtime is not reachable right now.".to_owned());
+            return Err(InterfaceError {
+                status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                message: "The runtime is not reachable right now.".to_owned(),
+            });
         }
     };
     let status = response.status();
     let body = response.bytes().await.unwrap_or_default();
     if status.is_success() {
-        return serde_json::from_slice(&body)
-            .map_err(|_| "The runtime gave an unusable answer.".to_owned());
+        return serde_json::from_slice(&body).map_err(|_| {
+            InterfaceError::protocol("The runtime gave an unusable answer.".to_owned())
+        });
     }
     let detail = serde_json::from_slice::<Value>(&body)
         .ok()
         .and_then(|value| value.get("error")?.as_str().map(str::to_owned))
         .filter(|detail| !detail.is_empty());
     warn!(%status, detail, "model or command call was rejected");
-    Err(detail.unwrap_or_else(|| "The runtime refused the request.".to_owned()))
+    Err(InterfaceError {
+        status,
+        message: detail.unwrap_or_else(|| "The runtime refused the request.".to_owned()),
+    })
 }
 
 async fn core_send(

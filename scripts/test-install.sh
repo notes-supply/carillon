@@ -74,9 +74,12 @@ printf '%s\n' \
   'data_dir = "state"' \
   '[core]' \
   "operator_token_hash = \"$T3_HASH\"" \
-  '[agent]' \
-  'resource_root = "agent"' \
+  '[[agents]]' \
+  'id = "assistant"' \
+  'name = "Carillon"' \
+  'runtime = "runtime-t3"' \
   'workspace = "workspace"' \
+  'resources = "agent"' \
   '[[providers]]' \
   'id = "runtime-t3"' \
   'role = "runtime"' \
@@ -165,7 +168,7 @@ install_release() {
   env HOME="$install_home" XDG_CONFIG_HOME="$install_config_home" \
     CARILLON_HOME="$install_root" CARILLON_SKIP_SYSTEMD_RELOAD=1 "$@" \
     "$RELEASE/install.sh" \
-    --guild-id 100 --bot-user-id 201 --user-id 200 --route 300:always:channel \
+    --guild-id 100 --bot-user-id 201 --user-id 200 --route 300:always:channel:assistant \
     --workspace "$install_workspace" --base-port "$install_port"
 }
 
@@ -432,13 +435,8 @@ grep -F 'Carillon core is running' "$TEST_ROOT/tools.log" >/dev/null
 [ "$(cat "$CARILLON_HOME/agents/default/extensions/carillon-discord.js" \
   "$CARILLON_HOME/agents/default/skills/discord/SKILL.md" | sha256sum)" = "$TOOLS_HASH" ]
 
-# A running installation can publish a skill into the native T3 workspace,
-# named relative to the current directory as people type it.
-(cd "$(dirname -- "$WORKSPACE")" &&
-  env CARILLON_HOME="$CARILLON_HOME" "$APP/carillon" discord tools install \
-    --workspace "$(basename -- "$WORKSPACE")")
-cmp "$CARILLON_HOME/app/lib/carillon-discord-SKILL.md" "$WORKSPACE/.claude/skills/discord/SKILL.md"
-cmp "$WORKSPACE/.claude/skills/discord/SKILL.md" "$WORKSPACE/.agents/skills/discord/SKILL.md"
+# The skill goes only into the agents' resources, never the shared workspace.
+[ ! -e "$WORKSPACE/.claude/skills/discord" ] && [ ! -e "$WORKSPACE/.agents/skills/discord" ]
 env CARILLON_HOME="$CARILLON_HOME" "$APP/carillon" discord call messages pin --help >/dev/null
 
 grep -F -- '--provider runtime-pi' "$XDG_CONFIG_HOME/systemd/user/carillon-runtime-pi.service" >/dev/null
@@ -459,10 +457,13 @@ env EXPECTED_UID="$(id -u)" EXPECTED_USER="$OWNER" EXPECTED_HOME="$OWNER_HOME" \
   EXPECTED_SHELL="$OWNER_SHELL" EXPECTED_PATH="$PATH" EXPECTED_WORKSPACE="$WORKSPACE" \
   ENVIRONMENT="$ENVIRONMENT" node -e '
 const value = JSON.parse(process.env.ENVIRONMENT);
-for (const key of ["uid", "user", "home", "shell", "path", "workspace"]) {
+for (const key of ["uid", "user", "home", "shell", "path"]) {
   const expected = process.env[`EXPECTED_${key.toUpperCase()}`];
   if (String(value[key]) !== expected) throw new Error(`${key}: ${String(value[key])} != ${expected}`);
 }
+const agents = JSON.stringify(value.agents);
+const expectedAgents = JSON.stringify([{ id: "assistant", workspace: process.env.EXPECTED_WORKSPACE }]);
+if (agents !== expectedAgents) throw new Error(`agents: ${agents} != ${expectedAgents}`);
 const expectedGroups = process.getgroups().slice().sort((a, b) => a - b);
 const actualGroups = value.groups.slice().sort((a, b) => a - b);
 if (JSON.stringify(actualGroups) !== JSON.stringify(expectedGroups)) throw new Error("supplementary groups differ");

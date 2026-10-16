@@ -1,4 +1,4 @@
-use super::{Feedback, OUTCOMES, Reactions, delivery_loop, discord_chunks, send_discord_message};
+use super::{Feedback, OUTCOMES, Reactions, delivery_loop, discord_chunks};
 use crate::{
     activity::Delivering,
     client::test_client as core_client,
@@ -103,9 +103,9 @@ fn reconciling_core(trace: Arc<tokio::sync::Mutex<Vec<String>>>) -> Router {
         )
         .route(
             "/api/v10/channels/{channel}/messages/{message}/reactions/{emoji}/@me",
-            axum::routing::any(
+            any(
                 move |method: Method,
-                      axum::extract::Path((channel, message, emoji)): axum::extract::Path<(
+                      Path((channel, message, emoji)): Path<(
                     String,
                     String,
                     String,
@@ -194,35 +194,69 @@ async fn ambiguous_claim_failures_reconcile_before_polling_again() -> anyhow::Re
 
 #[tokio::test]
 async fn empty_discord_delivery_is_not_successful() -> anyhow::Result<()> {
-    let failure = send_discord_message(
-        &twilight_http::Client::new("unused".to_owned()),
-        twilight_model::id::Id::new(1),
-        " \n ",
+    let messages = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let acks = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let app = delivering_core(
+        vec![Delivery {
+            content: " \n ".to_owned(),
+            ..answer(1, TurnState::Completed)
+        }],
+        messages.clone(),
+        acks.clone(),
+        Duration::ZERO,
+        Arc::default(),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let http = discord_client(address);
+    let (outcomes, _observed) = tokio::sync::mpsc::unbounded_channel();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        delivery_loop(
+            core_client(format!("http://{address}"))?,
+            Reactions::new(
+                http.clone(),
+                crate::config::Settings::new(discord_config(
+                    DiscordActivation::Always,
+                    DiscordConversation::Channel,
+                )),
+            ),
+            http,
+            outcomes,
+            tokio_util::sync::CancellationToken::new(),
+        ),
     )
-    .await
+    .await?
     .err()
-    .context("empty content was accepted for delivery")?;
-    assert_eq!(failure.to_string(), "Discord delivery content is empty");
+    .context("delivery loop unexpectedly succeeded")?;
+    server.abort();
+    assert!(messages.lock().await.is_empty());
+    let acks = acks.lock().await;
+    assert_eq!(acks.len(), 1);
+    assert_eq!(acks[0]["outcome"], "uncertain");
+    assert_eq!(acks[0]["native_ref"], serde_json::Value::Null);
     Ok(())
 }
 
 #[test]
 fn discord_messages_split_cleanly_at_the_platform_limit() {
-    let content = format!("{}\n\n{}", "a".repeat(1_990), "b".repeat(30));
-    let chunks = discord_chunks(&content);
-    assert_eq!(chunks.len(), 2);
-    assert_eq!(chunks.join("\n\n"), content);
-    assert!(chunks.iter().all(|chunk| chunk.chars().count() <= 2_000));
-
-    let content = "🦀".repeat(2_001);
-    let unbroken = discord_chunks(&content);
-    assert!(unbroken.len() > 1);
-    assert!(
-        unbroken
-            .iter()
-            .all(|chunk| !chunk.is_empty() && chunk.chars().count() <= 2_000)
+    let (a, b, c) = ("a".repeat(1_000), "b".repeat(500), "c".repeat(1_000));
+    assert_eq!(
+        discord_chunks(&format!("{a}\n\n{b}\n{c}")),
+        [a.clone(), format!("{b}\n{c}")],
+        "a paragraph break is preferred to a line break"
     );
-    assert_eq!(unbroken.concat(), content);
+    assert_eq!(
+        discord_chunks(&format!("{b} {b}\n{a}")),
+        [format!("{b} {b}"), a],
+        "a line break is preferred to a space"
+    );
+    assert_eq!(
+        discord_chunks(&"🦀".repeat(2_001)),
+        ["🦀".repeat(2_000), "🦀".to_owned()],
+        "with nowhere to break, the limit counts characters, not bytes"
+    );
 
     // Exactly at the limit is one message; a whitespace break is preferred
     // to a cut, and the whitespace around a split is dropped.
@@ -236,32 +270,24 @@ fn discord_messages_split_cleanly_at_the_platform_limit() {
 
 #[test]
 fn a_long_answer_is_split_in_one_pass() {
-    // 12,000 chunks of an answer with nowhere to break. Counting the whole
-    // remaining answer for every chunk, as an earlier splitter did, read it
-    // 6,000 times over; one bounded scan per chunk reads it about once.
-    //
-    // A coarse guard against that quadratic regression, not a performance
-    // benchmark: the split is timed against one search of the same answer
-    // for whitespace, the scan the splitter makes over each chunk, in the
-    // same process, so a slow or busy machine slows both. The bounded
-    // splitter took about two such searches and the whole-tail one ten.
-    let answer = "a".repeat(24_000_000);
-    let search = || {
+    // A coarse guard against splitting in time quadratic in the answer, as
+    // an earlier splitter did by counting the whole rest for every chunk:
+    // eight times the answer takes about eight times as long, not 64.
+    let split = |length: usize| {
+        let answer = "a".repeat(length);
         let started = std::time::Instant::now();
-        assert_eq!(answer.rfind(char::is_whitespace), None);
-        started.elapsed()
+        let chunks = discord_chunks(&answer);
+        let elapsed = started.elapsed();
+        assert_eq!(chunks.len(), length / 2_000);
+        assert!(chunks.iter().all(|chunk| chunk.len() == 2_000));
+        elapsed
     };
-    let before = search();
-    let started = std::time::Instant::now();
-    let chunks = discord_chunks(&answer);
-    let elapsed = started.elapsed();
-    let reference = before.min(search());
-    assert_eq!(chunks.len(), 12_000);
-    assert!(chunks.iter().all(|chunk| chunk.len() == 2_000));
+    let short = split(3_000_000).min(split(3_000_000));
+    let long = split(24_000_000);
     assert!(
-        elapsed < reference * 5,
-        "splitting took {elapsed:?}, {:.1} times one search of the answer ({reference:?})",
-        elapsed.as_secs_f64() / reference.as_secs_f64()
+        long < short * 16,
+        "eight times the answer took {:.1} times as long",
+        long.as_secs_f64() / short.as_secs_f64()
     );
 }
 
@@ -502,6 +528,7 @@ async fn deliveries_reach_discord_verbatim_without_notifying_anyone() -> anyhow:
     assert_eq!(acks.len(), 2);
     assert!(acks.iter().all(|ack| ack["outcome"] == "delivered"));
     assert_eq!(acks[0]["native_ref"], "901");
+    assert_eq!(acks[1]["native_ref"], "902,903");
     // The monitor hears of each answer's job as it is taken up, and of its
     // outcome once core recorded it.
     let heard = std::iter::from_fn(|| observed.try_recv().ok()).collect::<Vec<_>>();

@@ -34,7 +34,9 @@ use tokio::{net::TcpListener, sync::watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::{Core, CoreError, CoreOptions, Lane, RuntimeClient, TurnFailure, WorkerStep};
+use crate::{
+    AgentOptions, Core, CoreError, CoreOptions, Lane, RuntimeClient, TurnFailure, WorkerStep,
+};
 pub(super) use maintenance::{Drain, Lease};
 pub(super) use registry::{Applied, FileState, RegistryStatus, ServingRuntime};
 use registry::{Refusal, Registry, runtime_facts};
@@ -54,7 +56,6 @@ struct AppState {
 }
 
 impl AppState {
-    /// The serving registry, read once by each request.
     fn config(&self) -> Arc<LoadedConfig> {
         self.registry.current()
     }
@@ -63,9 +64,16 @@ impl AppState {
 fn core_options(config: &LoadedConfig) -> CoreOptions {
     CoreOptions {
         data_directory: config.value.data_dir.clone(),
-        agent_id: config.value.agent.id.clone(),
-        resource_root: config.value.agent.resource_root.clone(),
-        default_runtime: config.value.agent.runtime_provider.clone(),
+        agents: config
+            .value
+            .agents
+            .iter()
+            .map(|agent| AgentOptions {
+                id: agent.id.clone(),
+                runtime: agent.runtime.clone(),
+                resources: agent.resources.clone(),
+            })
+            .collect(),
         attachments: config.value.core.attachments,
         runtimes: runtime_facts(config),
     }
@@ -123,14 +131,14 @@ impl IntoResponse for ApiError {
 
 /// Open the installation's core exactly as [`serve`] does, without listening,
 /// recovering turns or writing: the registry and the current core schema.
-pub fn check(config: &LoadedConfig) -> Result<()> {
+pub(super) fn check(config: &LoadedConfig) -> Result<()> {
     Core::open(core_options(config))?;
     Ok(())
 }
 
 /// Serves the installation whose registry `config` was loaded from `path`,
 /// which [`Registry::apply`] reads again.
-pub async fn serve(path: PathBuf, config: LoadedConfig) -> Result<()> {
+pub(super) async fn serve(path: PathBuf, config: LoadedConfig) -> Result<()> {
     // A failed bind must not recover state or start accepted work.
     let listener = TcpListener::bind(config.value.core.listen).await?;
     let core = Core::open(core_options(&config))?;
@@ -138,7 +146,10 @@ pub async fn serve(path: PathBuf, config: LoadedConfig) -> Result<()> {
     // Interface processes may outlive core. Their claims remain recoverable;
     // interface-instance reconciliation handles abandoned claims instead.
     if recovered_turns > 0 {
-        warn!(recovered_turns, "running turns were interrupted by restart");
+        warn!(
+            recovered_turns,
+            "turns were interrupted by restart or agent changes"
+        );
     }
     // Exclusive: the service lock is held and nothing is accepted yet.
     let reconciled = core.reconcile_attachments()?;
@@ -193,7 +204,6 @@ pub async fn serve(path: PathBuf, config: LoadedConfig) -> Result<()> {
     Ok(())
 }
 
-/// Core's provider and operator API over `state`.
 fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -286,8 +296,8 @@ async fn relay_query(
 ) -> Result<Response, ApiError> {
     let config = state.config();
     let interface = interface_provider(headers, &config)?;
-    let runtime = model_runtime(state, &interface.id, &query)?;
-    let token = runtime_token(&config, &runtime)?;
+    let runtime = model_runtime(&state.core, &config, &interface.id, &query)?;
+    let token = runtime_token(&config, runtime)?;
     let query = RuntimeModelQuery {
         interface_id: interface.id.clone(),
         query,
@@ -313,14 +323,15 @@ async fn set_model(
     let config = state.config();
     let interface = interface_provider(&headers, &config)?;
     let runtime = model_runtime(
-        &state,
+        &state.core,
+        &config,
         &interface.id,
         &ModelQuery {
             agent_id: update.agent_id.clone(),
             audience_id: update.audience_id.clone(),
         },
     )?;
-    let token = runtime_token(&config, &runtime)?;
+    let token = runtime_token(&config, runtime)?;
     let update = RuntimeModelUpdate {
         interface_id: interface.id.clone(),
         update,
@@ -335,18 +346,16 @@ async fn set_model(
     .await
 }
 
-/// Model calls address the runtime that owns the conversation, so a
-/// selection follows the conversation rather than the current default.
-fn model_runtime(
-    state: &AppState,
+/// Refuses stranded conversations before reading a runtime credential or
+/// issuing a model or command request.
+fn model_runtime<'a>(
+    core: &Core,
+    config: &'a LoadedConfig,
     interface_id: &str,
     query: &ModelQuery,
-) -> Result<Provider, ApiError> {
-    let runtime = state.core.runtime_for(interface_id, query)?;
-    Ok(state
-        .config()
-        .provider(&runtime.id, ProviderRole::Runtime)?
-        .clone())
+) -> Result<&'a Provider, ApiError> {
+    let runtime = core.query_runtime(interface_id, query)?;
+    Ok(config.provider(&runtime.id, ProviderRole::Runtime)?)
 }
 
 /// Forwards a model call and relays the runtime's answer. Runtimes phrase
@@ -444,10 +453,11 @@ async fn jobs(
         else {
             continue;
         };
-        let (state, runtime_id) = (state.clone(), runtime_id.clone());
+        let (client, config, runtime_id) =
+            (state.client.clone(), config.clone(), runtime_id.clone());
         let (interface_id, turn_id) = (interface.id.clone(), turn.turn_id.clone());
         snapshots.spawn(async move {
-            let activity = runtime_activity(&state, &runtime_id, &interface_id, &turn_id);
+            let activity = runtime_activity(&client, &config, &runtime_id, &interface_id, &turn_id);
             (index, activity.await)
         });
     }
@@ -463,23 +473,22 @@ async fn jobs(
 }
 
 async fn runtime_activity(
-    state: &AppState,
+    client: &Client,
+    config: &LoadedConfig,
     runtime_id: &str,
     interface_id: &str,
     turn_id: &str,
 ) -> Option<TurnActivity> {
     let snapshot = async {
-        let config = state.config();
         let runtime = config.provider(runtime_id, ProviderRole::Runtime)?;
-        let token = runtime_token(&config, runtime)?;
+        let token = runtime_token(config, runtime)?;
         let mut url = Url::parse(&runtime.url)?;
         url.path_segments_mut()
             .map_err(|()| anyhow!("runtime provider URL cannot have a path"))?
             .extend(["v1", "turns", turn_id, "activity"]);
         url.query_pairs_mut()
             .append_pair("interface_id", interface_id);
-        let response = state
-            .client
+        let response = client
             .get(url)
             .bearer_auth(token)
             .timeout(ACTIVITY_TIMEOUT)
@@ -706,7 +715,12 @@ async fn status(
     let providers = provider_health(&state.client, &config).await;
     Ok(Json(StatusReport {
         release: RELEASE_VERSION.to_owned(),
-        agent_id: config.value.agent.id.clone(),
+        agents: config
+            .value
+            .agents
+            .iter()
+            .map(|agent| agent.id.clone())
+            .collect(),
         providers,
         turns: state.core.turn_counts()?,
         deliveries: state.core.delivery_counts()?,
@@ -724,7 +738,7 @@ async fn registry_status(
     Ok(Json(RegistryStatus::of(
         &config,
         &state.workers.borrow(),
-        state.registry.compare(),
+        state.registry.compare(&config),
     )))
 }
 
@@ -790,23 +804,25 @@ async fn apply_registry(
 async fn provider_health(client: &Client, config: &LoadedConfig) -> Vec<Health> {
     let providers = &config.value.providers;
     let mut probes = tokio::task::JoinSet::new();
+    let mut reports = Vec::with_capacity(providers.len());
     for (index, provider) in providers.iter().enumerate() {
-        if provider.enabled {
+        let status = if !provider.enabled {
+            "disabled"
+        } else if provider.role == ProviderRole::Runtime
+            && !config
+                .value
+                .agents
+                .iter()
+                .any(|agent| agent.runtime == provider.id)
+        {
+            "idle"
+        } else {
             let (client, provider) = (client.clone(), provider.clone());
             probes.spawn(async move { (index, fetch_health(&client, &provider).await) });
-        }
+            "unavailable"
+        };
+        reports.push(provider_status(provider, status));
     }
-    let mut reports = providers
-        .iter()
-        .map(|provider| {
-            let status = if provider.enabled {
-                "unavailable"
-            } else {
-                "disabled"
-            };
-            provider_status(provider, status)
-        })
-        .collect::<Vec<_>>();
     while let Some(probe) = probes.join_next().await {
         if let Ok((index, health)) = probe {
             reports[index] = health;
@@ -873,10 +889,10 @@ fn authorize(headers: &HeaderMap, expected_hash: &str) -> Result<(), ApiError> {
 }
 
 fn bearer(headers: &HeaderMap) -> Option<&str> {
-    headers
+    let value = headers
         .get(http::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
+        .and_then(|value| value.to_str().ok())?;
+    value.strip_prefix("Bearer ")
 }
 
 fn provider_identity(headers: &HeaderMap) -> Result<&str, ApiError> {

@@ -17,7 +17,7 @@ install_release() {
   env HOME="$OWNER_HOME" XDG_CONFIG_HOME="$OWNER_HOME/.config" \
     CARILLON_HOME="$1" CARILLON_SKIP_SYSTEMD_RELOAD=1 \
     "$RELEASE/install.sh" --guild-id 100 --bot-user-id 201 --user-id 200 \
-    --route 300:always:channel --workspace "$OWNER_HOME/workspace" \
+    --route 300:always:channel:assistant --workspace "$OWNER_HOME/workspace" \
     --base-port "$((${CARILLON_TEST_BASE_PORT:-44800} + 50))" >/dev/null
 }
 install_release "$DECOY"

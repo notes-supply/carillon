@@ -3,14 +3,17 @@
 //! from what core recorded of the job, and whether a settled job keeps its
 //! card as a summary. The provider owns the card's lifecycle and every
 //! Discord call. Markers are the provider's validated configuration, shown
-//! on status/model rows; section names stay plain. Text a model wrote cannot
-//! format, mention or link anything.
-use crate::contract::{ActivityMarkers, Card, CardRequest, Seen};
+//! on status/model rows; section names stay plain. Model text permits inline
+//! emphasis and code, but cannot mention, link or add block formatting.
+use crate::{
+    contract::{ActivityMarkers, Card, CardRequest, Seen},
+    embed::{Embed, Field, marked, model_line},
+    prose::prose,
+};
 use carillon_protocol::model::{
     ActivityPhase, AgentInfo, DeliveryOutcome, FinishedTool, Job, TurnActivity, TurnState,
     WorkItem, WorkKind, WorkState,
 };
-use serde::Serialize;
 use std::{collections::HashMap, fmt::Write as _};
 
 const RECENT_LINES: usize = 5;
@@ -35,23 +38,6 @@ pub fn render(request: &CardRequest) -> Card {
     Card::Show(serde_json::to_value(job_card(job, seen.as_ref(), markers)).unwrap_or_default())
 }
 
-/// A card's embed, as Discord's JSON names its parts.
-#[derive(Debug, Serialize)]
-struct Embed {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    description: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    fields: Vec<Field>,
-}
-
-#[derive(Debug, Serialize)]
-struct Field {
-    inline: bool,
-    name: String,
-    value: String,
-}
-
 /// What a card says of its job as a whole.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Status {
@@ -73,7 +59,6 @@ enum Status {
     },
 }
 
-/// What a card shows of one job.
 struct Shown<'a> {
     status: Status,
     /// When the person asked, once known.
@@ -175,12 +160,11 @@ fn job_card(job: &Job, seen: Option<&Seen>, markers: &ActivityMarkers) -> Embed 
     )
 }
 
-/// The card's embed.
 fn card(shown: &Shown<'_>, markers: &ActivityMarkers) -> Embed {
     let merged = Merged::of(&shown.reports, shown.live);
     let mut description = vec![status_line(shown, markers)];
     if let Some(headline) = shown.live.and_then(|live| live.headline.as_deref()) {
-        description.push(format!("> {}", escaped(&cut(headline, HEADLINE_LIMIT))));
+        description.push(format!("> {}", prose(&cut(headline, HEADLINE_LIMIT))));
     }
     if merged.partial || shown.partial {
         description.push(marked(
@@ -189,31 +173,37 @@ fn card(shown: &Shown<'_>, markers: &ActivityMarkers) -> Embed {
         ));
     }
     let mut fields = Vec::new();
-    let mut field = |name: &str, lines: Vec<String>| {
+    let mut field = |name: &str, lines: Vec<String>, show: fn(&str) -> String| {
         if !lines.is_empty() {
             fields.push(Field {
                 inline: false,
                 name: name.to_owned(),
-                value: fitted(&lines, FIELD_VALUE_LENGTH),
+                value: fitted(&lines, FIELD_VALUE_LENGTH, show),
             });
         }
     };
     field(
         "Reasoning",
-        merged.notes.iter().map(|note| escaped(note)).collect(),
+        merged.notes.iter().map(|note| (*note).to_owned()).collect(),
+        prose,
     );
-    field("Calls", call_lines(&merged, shown.live, markers));
-    field("Work", work_lines(&merged, markers));
+    field(
+        "Calls",
+        call_lines(&merged, shown.live, markers),
+        ToOwned::to_owned,
+    );
+    field("Work", work_lines(&merged, markers), ToOwned::to_owned);
     // Metadata that states no fact shows no section.
     let agent = merged
         .agent
         .map(|agent| agent_line(agent, markers))
         .filter(|line| !line.is_empty());
-    field("Agent", agent.into_iter().collect());
+    field("Agent", agent.into_iter().collect(), ToOwned::to_owned);
     Embed {
         kind: "rich",
         description: cut(&description.join("\n"), DESCRIPTION_LENGTH),
         fields,
+        footer: None,
     }
 }
 
@@ -476,7 +466,7 @@ fn work_line(item: &WorkItem, markers: &ActivityMarkers) -> String {
 fn agent_line(agent: &AgentInfo, markers: &ActivityMarkers) -> String {
     let mut parts = Vec::new();
     if let Some(model) = &agent.model {
-        parts.push(model_label(model, markers));
+        parts.push(plain(&cut(model, LABEL_LIMIT)));
     }
     if let Some(effort) = &agent.effort {
         parts.push(format!("effort {}", plain(&cut(effort, LABEL_LIMIT))));
@@ -491,18 +481,15 @@ fn agent_line(agent: &AgentInfo, markers: &ActivityMarkers) -> String {
             None => format!("context ≈ {} tokens", tokens(context.used)),
         });
     }
-    parts.join(" · ")
+    let brand = agent
+        .model
+        .as_deref()
+        .map_or("", |model| markers.brand(model));
+    model_line(brand, &parts)
 }
 
-/// Branding is an operator's explicit mapping, not inferred provider telemetry.
 fn model_label(model: &str, markers: &ActivityMarkers) -> String {
-    let marker = markers
-        .models
-        .iter()
-        .filter(|(prefix, _)| model.starts_with(prefix.as_str()))
-        .max_by_key(|(prefix, _)| prefix.len())
-        .map_or("", |(_, marker)| marker.as_str());
-    marked(marker, &plain(&cut(model, LABEL_LIMIT)))
+    marked(markers.brand(model), &plain(&cut(model, LABEL_LIMIT)))
 }
 
 /// A native relative start, or an estimated one said as such.
@@ -536,17 +523,21 @@ fn tokens(count: u64) -> String {
     }
 }
 
-/// Lines within `limit` characters, newest kept: older lines give way to
-/// one saying how many went.
-fn fitted(lines: &[String], limit: usize) -> String {
-    let joined = lines.join("\n");
+/// Lines within `limit` characters as `show` renders them, newest kept:
+/// older lines give way to one saying how many went.
+fn fitted(lines: &[String], limit: usize, show: fn(&str) -> String) -> String {
+    let joined = lines
+        .iter()
+        .map(|line| show(line))
+        .collect::<Vec<_>>()
+        .join("\n");
     if joined.chars().count() <= limit {
         return joined;
     }
     let mut kept = Vec::new();
     let mut length = 0;
     for line in lines.iter().rev() {
-        let line = cut(line, limit / 2);
+        let line = within(line, limit / 2, show);
         let added = line.chars().count() + 1;
         if length + added > limit - 20 {
             break;
@@ -560,17 +551,19 @@ fn fitted(lines: &[String], limit: usize) -> String {
     kept.join("\n")
 }
 
-/// Text a model wrote, shown as written but unable to format, mention or
-/// link anything.
-fn escaped(text: &str) -> String {
-    let mut shown = String::with_capacity(text.len());
-    for character in text.chars() {
-        if "\\*_~`|<>[]()#:@".contains(character) {
-            shown.push('\\');
+/// The line as `show` renders it within `limit` characters. It is cut before
+/// it is rendered, so a cut never splits what rendering made of it, and cut
+/// further while what it renders to is too long.
+fn within(line: &str, limit: usize, show: fn(&str) -> String) -> String {
+    let mut keep = limit.min(line.chars().count()).max(1);
+    loop {
+        let shown = show(&cut(line, keep));
+        let length = shown.chars().count();
+        if length <= limit || keep == 1 {
+            return shown;
         }
-        shown.push(character);
+        keep = keep.saturating_sub(length - limit).max(1);
     }
-    shown
 }
 
 /// Text that cannot format, mention or link anything: letters, digits and
@@ -596,15 +589,6 @@ fn tool_line(mark: &str, tool: &str, detail: Option<&str>) -> String {
         None => tool,
     };
     marked(mark, &text)
-}
-
-/// Empty markers omit their separating space too.
-fn marked(marker: &str, text: &str) -> String {
-    if marker.is_empty() {
-        text.to_owned()
-    } else {
-        format!("{marker} {text}")
-    }
 }
 
 fn cut(text: &str, limit: usize) -> String {

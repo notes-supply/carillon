@@ -1,0 +1,16 @@
+id: rust-boxed-error
+language: rust
+severity: error
+message: A boxed or shared dyn Error erases the cause.
+note: Use a typed error, or anyhow::Error where only a message and its sources are needed.
+rule:
+  kind: generic_type
+  all:
+    - has: { field: type, regex: "(^|::)(Box|Arc)$" }
+    - has:
+        field: type_arguments
+        # The trait object, alone or under its `+ Send + Sync` bounds.
+        has:
+          kind: dynamic_type
+          has: { field: trait, regex: "^((std|core)::)?(error::)?Error$" }
+          stopBy: { not: { kind: bounded_type } }

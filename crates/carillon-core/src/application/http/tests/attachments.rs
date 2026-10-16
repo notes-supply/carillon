@@ -1,10 +1,6 @@
 //! Events with attachments through core's authenticated HTTP admission, its
 //! capture workers, real SQLite and real files.
-use std::{
-    collections::BTreeSet,
-    os::unix::fs::PermissionsExt as _,
-    sync::{Arc, atomic::AtomicUsize},
-};
+use std::{collections::BTreeSet, os::unix::fs::PermissionsExt as _};
 
 use anyhow::bail;
 
@@ -20,7 +16,7 @@ fn with_limits(state: &mut Fixture, limits: AttachmentLimits) -> Result<()> {
     Ok(())
 }
 
-fn staging(state: &Fixture) -> std::path::PathBuf {
+fn staging(state: &Fixture) -> PathBuf {
     state
         .config
         .value
@@ -56,7 +52,7 @@ fn event(id: &str, content: &str, attachments: StagedAttachments) -> ExternalEve
         delivery_target_id: "test-destination".to_owned(),
         feedback_target_id: "test-feedback".to_owned(),
         content: content.to_owned(),
-        native: serde_json::Value::Null,
+        native: Value::Null,
         attachments: Some(attachments),
     }
 }
@@ -100,16 +96,22 @@ fn captures(state: &Fixture) -> Result<Vec<String>> {
     Ok(names)
 }
 
-/// Wait, without timers, until core reports the event's capture running:
-/// a paused test clock does not advance while a blocking copy runs.
-async fn wait_for_capture(state: &Fixture, event_id: &str) -> Result<()> {
-    for _ in 0..100_000 {
-        if matches!(status(state, event_id).await?, EventStatus::Capturing) {
-            return Ok(());
-        }
+/// Yield until `ready`: a paused clock stalls during a blocking copy, which load can slow down.
+async fn eventually(what: &str, ready: impl AsyncFn() -> Result<bool>) -> Result<()> {
+    let started = std::time::Instant::now();
+    while !ready().await? {
+        anyhow::ensure!(started.elapsed() < Duration::from_secs(30), "{what}");
         tokio::task::yield_now().await;
     }
-    bail!("the capture of {event_id} never started")
+    Ok(())
+}
+
+async fn wait_for_capture(state: &Fixture, event_id: &str) -> Result<()> {
+    eventually(&format!("{event_id} never started capturing"), async || {
+        let reported = status(state, event_id).await?;
+        Ok(matches!(reported, EventStatus::Capturing))
+    })
+    .await
 }
 
 #[tokio::test]
@@ -147,7 +149,7 @@ async fn files_are_captured_before_acceptance_and_dispatched_by_relative_path() 
     let dispatched = Arc::new(std::sync::Mutex::new(Vec::<TurnAttachment>::new()));
     let seen = dispatched.clone();
     run_next_turn(&state, "test-runtime", async |_, _, request| {
-        assert_eq!(std::path::Path::new(&request.attachment_root), root);
+        assert_eq!(Path::new(&request.attachment_root), root);
         assert!(request.input.is_empty());
         for attachment in &request.attachments {
             assert!(!attachment.path.starts_with('/'));
@@ -174,7 +176,7 @@ async fn files_are_captured_before_acceptance_and_dispatched_by_relative_path() 
     // Later turns of the conversation carry the root without files.
     accept(&state, "text later", "files").await?;
     run_next_turn(&state, "test-runtime", async |_, _, request| {
-        assert_eq!(std::path::Path::new(&request.attachment_root), root);
+        assert_eq!(Path::new(&request.attachment_root), root);
         assert!(request.attachments.is_empty());
         Ok(completed(request))
     })
@@ -447,7 +449,13 @@ async fn an_abandoned_submission_keeps_its_capture_and_worker_until_the_copy_set
     wait_for_capture(&state, "slow").await?;
     // The submitting connection goes away; core keeps capturing.
     first.abort();
-    assert!(first.await.is_err());
+    assert!(
+        first
+            .await
+            .err()
+            .context("the submission outlived its abort")?
+            .is_cancelled()
+    );
     assert!(matches!(
         status(&state, "slow").await?,
         EventStatus::Capturing
@@ -548,16 +556,10 @@ async fn a_capture_cancelled_while_publishing_makes_no_new_acceptance() -> Resul
             let state = state.clone();
             tokio::spawn(async move { submit(&state, event).await })
         };
-        for _ in 0..100_000 {
-            if signals.publishing.load(Ordering::SeqCst) {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        anyhow::ensure!(
-            signals.publishing.load(Ordering::SeqCst),
-            "the copy never reached publication"
-        );
+        eventually("the copy never reached publication", async || {
+            Ok(signals.publishing.load(Ordering::SeqCst))
+        })
+        .await?;
         tokio::time::advance(crate::intake::CAPTURE_DEADLINE * 2).await;
         for _ in 0..10 {
             tokio::task::yield_now().await;
@@ -665,58 +667,12 @@ async fn startup_reconciliation_keeps_accepted_files_and_removes_crash_leftovers
     let ran = Arc::new(AtomicUsize::new(0));
     let count = ran.clone();
     run_next_turn(&state, "test-runtime", async |_, _, request| {
-        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        count.fetch_add(1, Ordering::SeqCst);
         assert_eq!(request.correlation_id, receipt.turn_id);
         Ok(completed(request))
     })
     .await?;
-    assert_eq!(ran.load(std::sync::atomic::Ordering::SeqCst), 1);
-    Ok(())
-}
-
-#[tokio::test]
-async fn an_altered_capture_interrupts_its_turn_without_running_it() -> Result<()> {
-    let directory = tempdir()?;
-    let state = installation(directory.path())?;
-    let staged = stage(&state, "batch", &[("a", b"original")])?;
-    let receipt = submit(&state, event("altered", "read it", staged))
-        .await
-        .map_err(|error| anyhow!(error.message))?;
-    let inspection = state.core.inspect_turn(&receipt.turn_id)?.context("turn")?;
-    let file = state
-        .config
-        .value
-        .data_dir
-        .join("attachments")
-        .join(&inspection.attachments[0].path);
-    fs::set_permissions(&file, fs::Permissions::from_mode(0o640))?;
-    fs::write(&file, b"tampered")?;
-    let step = run_next_turn(&state, "test-runtime", async |_, _, _| {
-        Err(TurnFailure::Uncertain(anyhow!(
-            "the runtime must not be called"
-        )))
-    })
-    .await?;
-    assert_eq!(step, WorkerStep::Advanced);
-    let interrupted = state.core.inspect_turn(&receipt.turn_id)?.context("turn")?;
-    assert_eq!(interrupted.state, TurnState::Interrupted);
-    assert!(
-        interrupted
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("changed after it was accepted")),
-        "{:?}",
-        interrupted.error
-    );
-    let notice = state
-        .core
-        .claim_delivery("test-interface", "instance")?
-        .context("no interruption notice")?;
-    assert!(
-        notice.content.contains("changed or removed after"),
-        "{}",
-        notice.content
-    );
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
     Ok(())
 }
 
@@ -729,10 +685,7 @@ async fn offered(state: &Fixture, output: &str) -> Result<Vec<UnansweredTurn>> {
 
 /// Run the next turn, answering with the fields of `answer` as a runtime's
 /// response reads on the wire, and return the earlier files it was offered.
-async fn offered_answering(
-    state: &Fixture,
-    mut answer: serde_json::Value,
-) -> Result<Vec<UnansweredTurn>> {
+async fn offered_answering(state: &Fixture, mut answer: Value) -> Result<Vec<UnansweredTurn>> {
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let record = seen.clone();
     run_next_turn(state, "test-runtime", async move |_, _, request| {
@@ -1357,3 +1310,5 @@ async fn shutdown_waits_for_running_captures_to_settle() -> Result<()> {
     assert_eq!(refused.status, StatusCode::SERVICE_UNAVAILABLE);
     Ok(())
 }
+
+mod integrity;

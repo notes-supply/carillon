@@ -37,6 +37,7 @@ import {
   ContextTransferSchema,
   DelegatedNotificationSchema,
   MessageSchema,
+  NativeSelectionSchema,
   ProviderSessionDetachedSchema,
   ProviderSessionSchema,
   ProviderThreadSchema,
@@ -50,6 +51,7 @@ import {
   type BackgroundTask,
   type ContextTransfer,
   type Message,
+  type NativeSelection,
   type Projection,
   type ProviderSession,
   type ProviderThread,
@@ -60,6 +62,7 @@ import {
   type TurnItemOf,
 } from "./contracts.ts";
 import { T3Failure } from "./t3.ts";
+import { TASK_STATE, transferState } from "./watch/work.ts";
 
 /**
  * Where a turn's report of delegated work continues: the message the
@@ -82,7 +85,7 @@ export type Outcome =
   /** T3 waits for an approval or answer this runtime cannot give; `asked` says which. */
   | { readonly kind: "blocked"; readonly asked: string };
 
-export interface Retained {
+interface Retained {
   readonly runs: number;
   /** Calls under way: running, pending or waiting. */
   readonly running: number;
@@ -126,6 +129,8 @@ export interface TurnWatch {
   sessionShared(): boolean;
   /** Whether the thread has any message yet. */
   empty(): boolean;
+  /** The thread's own model selection, as last seen: the one its next run uses unless a dispatch names another. */
+  selection(): NativeSelection | undefined;
   outcome(): Outcome | undefined;
   /** Nothing of the turn still executes: no active run, no background work, and no report its live process still owes. */
   quiet(): boolean;
@@ -221,7 +226,7 @@ type ToolItem = TurnItemOf<
 >;
 type RequestItem = TurnItemOf<"user_input_request" | "approval_request">;
 
-export function isActive(run: Run): boolean {
+function isActive(run: Run): boolean {
   return ACTIVE.has(run.status);
 }
 
@@ -274,6 +279,7 @@ export function watchTurn(
 ): TurnWatch {
   let seen = false;
   let lastSequence: number | undefined;
+  let threadSelection: NativeSelection | undefined;
   /** The turn's run as last seen: its identity, kept through snapshots and reconnections. */
   let anchor: Run | undefined;
   /** Runs from the turn's onward, by ID, with the greatest ordinal tracked. */
@@ -616,7 +622,6 @@ export function watchTurn(
     if (run !== undefined) refold(run);
   }
 
-  /** Folds again a run a link arrived after, adopting the provider records it names. */
   function refold(run: Run): void {
     foldRun(run);
     pruneProviders();
@@ -634,10 +639,10 @@ export function watchTurn(
       turnRuns.set(run.id, run);
       earlier.delete(run.id);
       if (last === undefined || run.ordinal >= last.ordinal) last = run;
-      for (const [message, parent] of [...pendingLinks])
+      for (const [message, parent] of pendingLinks)
         if (parent === run.id) keepLink(message, parent);
       if (delivery != null) keepLink(delivery.messageId, run.id);
-      for (const transfer of [...recentTransfers.values()])
+      for (const transfer of recentTransfers.values())
         if (namesLinkedRun(transfer)) foldTransfer(transfer);
       return;
     }
@@ -681,7 +686,7 @@ export function watchTurn(
   /** Runs seen before the turn's own were filed as earlier; refile those from the turn onward. */
   function refile(): void {
     if (anchor === undefined) return;
-    for (const run of [...earlier.values()]) if (run.ordinal >= anchor.ordinal) foldRun(run);
+    for (const run of earlier.values()) if (run.ordinal >= anchor.ordinal) foldRun(run);
   }
 
   function foldMessage(message: Message): void {
@@ -1076,7 +1081,7 @@ export function watchTurn(
 
   function answer(): string {
     return [...assistant.values()]
-      .sort((left, right) => madeAt(left) - madeAt(right))
+      .toSorted((left, right) => madeAt(left) - madeAt(right))
       .map((message) => message.text.trim())
       .filter((text) => text.length > 0)
       .join("\n\n");
@@ -1113,6 +1118,10 @@ export function watchTurn(
           tool: "subagent",
           ...withDetail(item.title === null ? undefined : displayed(item.title)),
         };
+      default: {
+        const exhaustive: never = item;
+        return exhaustive;
+      }
     }
   }
 
@@ -1331,7 +1340,6 @@ export function watchTurn(
       : { kind: "completed", output: text };
   }
 
-  /** One of the turn's runs is executing now. */
   function ownRunExecuting(): boolean {
     for (const run of turnRuns.values()) if (executing(run)) return true;
     return false;
@@ -1410,6 +1418,7 @@ export function watchTurn(
           // Nothing of another thread is folded as this turn's.
           if (projection.thread.id !== threadId)
             throw new T3Failure("malformed", "T3 sent the snapshot of another thread");
+          threadSelection = projection.thread.modelSelection;
           for (const run of projection.runs) ofThread(run);
           // A snapshot lists the thread's runs whole: one that omits a run
           // this turn already observed, its own or a follow-up's parent, is
@@ -1463,7 +1472,7 @@ export function watchTurn(
           snapshotLinks = links;
           snapshotOpenings = opened;
           try {
-            for (const run of [...projection.runs].sort((a, b) => a.ordinal - b.ordinal))
+            for (const run of projection.runs.toSorted((a, b) => a.ordinal - b.ordinal))
               foldRun(run);
             refile();
           } finally {
@@ -1491,7 +1500,7 @@ export function watchTurn(
               .filter((task) => SETTLED_TASK.has(task.status))
               .map((task) => task.id),
           );
-          for (const task of [...listed].sort(
+          for (const task of listed.toSorted(
             (left, right) => Number(settledTask(left)) - Number(settledTask(right)),
           ))
             foldSubagent(task);
@@ -1613,6 +1622,13 @@ export function watchTurn(
             case "turn-item.updated":
               foldItem(payload);
               break;
+            case "thread.model-selection-updated":
+            case "thread.provider-switched": {
+              const selection = isRecord(payload) ? payload["modelSelection"] : undefined;
+              if (Check(NativeSelectionSchema, selection)) threadSelection = selection;
+              lastSequence = sequence;
+              return;
+            }
             default:
               lastSequence = sequence;
               return;
@@ -1647,6 +1663,7 @@ export function watchTurn(
     busy,
     sessionShared: () => busy() || otherTasks.size > 0,
     empty: () => !hasMessages,
+    selection: () => threadSelection,
     quiet,
     providerSession() {
       if (last?.providerThreadId == null) return undefined;
@@ -1743,6 +1760,10 @@ export function watchTurn(
         case "running":
         case "waiting":
           return undefined;
+        default: {
+          const exhaustive: never = last.status;
+          return exhaustive;
+        }
       }
     },
     activity() {
@@ -1830,36 +1851,6 @@ function phase(
   if (retrying) return "retrying";
   if (runningTools > 0) return "tools";
   return run.status === "waiting" || heldCalls > 0 ? "waiting" : "model";
-}
-
-const TASK_STATE: Readonly<Record<Subagent["status"], WorkItem["state"]>> = {
-  idle: "queued",
-  pending: "queued",
-  running: "running",
-  waiting: "waiting",
-  completed: "succeeded",
-  failed: "failed",
-  cancelled: "cancelled",
-  interrupted: "cancelled",
-};
-
-/** What a transfer's native status confirms: prepared is not consumed. */
-function transferState(status: string): WorkItem["state"] {
-  switch (status) {
-    case "pending":
-      return "running";
-    case "resolved_native":
-    case "resolved_portable":
-      return "waiting";
-    case "consumed":
-      return "succeeded";
-    case "failed":
-      return "failed";
-    case "superseded":
-      return "cancelled";
-    default:
-      return "unknown";
-  }
 }
 
 /** Claude's tool names and argument names in the vocabulary the shared description knows. */

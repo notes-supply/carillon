@@ -1,0 +1,15 @@
+id: rust-boxed-error
+valid:
+  - "fn run() -> anyhow::Result<()> { Ok(()) }"
+  - "fn handler() -> Box<dyn Fn()> { todo() }"
+  - "fn handler() -> Box<dyn Fn(&str) -> Result<(), ParseError>> { todo() }"
+  - "fn sink() -> Box<dyn FnMut(std::io::Error) + Send> { todo() }"
+  - "fn report() -> Box<dyn ErrorReport> { todo() }"
+invalid:
+  - "fn run() -> Result<(), Box<dyn Error>> { Ok(()) }"
+  - "fn run() -> Result<(), Box<dyn std::error::Error>> { Ok(()) }"
+  - "fn run() -> Result<(), Box<dyn Error + Send + Sync>> { Ok(()) }"
+  - "fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> { Ok(()) }"
+  - "fn run() -> Result<(), std::boxed::Box<dyn core::error::Error>> { Ok(()) }"
+  - "fn f() -> Arc<dyn Error + Send + Sync> { todo() }"
+  - "fn f() -> std::sync::Arc<dyn std::error::Error> { todo() }"

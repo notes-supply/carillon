@@ -61,7 +61,6 @@ pub(crate) struct Downloads {
 #[derive(Clone, Debug)]
 enum Cdn {
     Discord,
-    /// A local fixture server standing in for the CDN in tests.
     #[cfg(test)]
     Fixture(u16),
 }
@@ -157,9 +156,6 @@ enum Failure {
 impl Downloads {
     /// Prepare `staging`, removing what a previous instance left there.
     /// Call only once this instance owns the provider's state.
-    ///
-    /// # Errors
-    /// Returns filesystem errors.
     pub(crate) fn open(staging: PathBuf, policy: AttachmentPolicy) -> Result<Self> {
         match std::fs::remove_dir_all(&staging) {
             Ok(()) => {}
@@ -208,9 +204,6 @@ impl Downloads {
     }
 
     /// Check what Discord declared against the policy before fetching.
-    ///
-    /// # Errors
-    /// Returns the explanation for the message's sender.
     pub(crate) fn admit(&self, files: &[SourceAttachment]) -> Result<(), Refusal> {
         let policy = &self.policy;
         if !policy.enabled {
@@ -248,9 +241,6 @@ impl Downloads {
     /// first. With `http`, a file whose address expired is looked up once
     /// more on the same message; a replaced or deleted file fails the whole
     /// message.
-    ///
-    /// # Errors
-    /// Returns the explanation for the message's sender.
     pub(crate) async fn stage(
         &self,
         http: Option<&DiscordHttp>,

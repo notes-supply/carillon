@@ -8,14 +8,20 @@ export const SelectionSchema = Type.Object({
 });
 export type Selection = Static<typeof SelectionSchema>;
 
-/** A setting the model supports; `default` applies when no scope chose a supported value. */
+/** One value a setting accepts, as the runtime names it. Selections hold its `id`. */
+export const OptionChoiceSchema = Type.Object({ id: Type.String(), name: Type.String() });
+export type OptionChoice = Static<typeof OptionChoiceSchema>;
+/** A setting the model supports; the choice `default` applies when no scope chose a supported value. */
 export const ModelOptionSchema = Type.Object({
   id: Type.String(),
   name: Type.String(),
-  choices: Type.Array(Type.String()),
+  choices: Type.Array(OptionChoiceSchema),
   default: Type.String(),
 });
 export type ModelOption = Static<typeof ModelOptionSchema>;
+/** A provider of the runtime's models, as the runtime names it; `id` is what models' `provider` names. */
+export const ModelProviderSchema = Type.Object({ id: Type.String(), name: Type.String() });
+export type ModelProvider = Static<typeof ModelProviderSchema>;
 export const AvailableModelSchema = Type.Object({
   provider: Type.String(),
   model: Type.String(),
@@ -31,6 +37,7 @@ export const ScopeStateSchema = Type.Object({
 });
 export type ScopeState = Static<typeof ScopeStateSchema>;
 export const ModelStateSchema = Type.Object({
+  providers: Type.Array(ModelProviderSchema),
   available: Type.Array(AvailableModelSchema),
   agent: ScopeStateSchema,
   conversation: Type.Optional(ScopeStateSchema),
@@ -221,7 +228,6 @@ export const TurnActivitySchema = Type.Object({
 });
 export type TurnActivity = Static<typeof TurnActivitySchema>;
 
-/** A configured provider's registry identity. */
 export const ProviderIdentitySchema = Type.String({
   minLength: 1,
   maxLength: 128,

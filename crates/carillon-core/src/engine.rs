@@ -1,7 +1,9 @@
 //! Admission, runtime ownership, execution and delivery over one SQLite authority.
+mod ownership;
+
 use crate::{
     attachments::{self, Capture, Reconciled, Unusable},
-    db::{ClaimedTurn, Database, JobPage, TurnFiles},
+    db::{Admission, ClaimedTurn, Database, JobPage, TurnFiles},
     intake::Intake,
     resources,
 };
@@ -13,7 +15,15 @@ use carillon_protocol::model::{
     RuntimeTurnResponse, SelectedProvider, StateCounts, TurnActivity, TurnInspection, TurnSummary,
     UnansweredTurn,
 };
+use ownership::{Owner, stranded};
 use std::{path::PathBuf, sync::Arc};
+
+/// What admission decided before any capture work.
+enum Admitted {
+    Settled(EventReceipt),
+    /// Attachments to capture for a current agent before the turn is recorded.
+    Capturing(AgentOptions),
+}
 use tokio::sync::watch;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::warn;
@@ -27,13 +37,22 @@ pub struct RuntimeProvider {
     pub enabled: bool,
 }
 
-/// Application-supplied policy and owned storage locations for one agent.
+/// An agent conversations are admitted for: the runtime its new
+/// conversations run on and the resources its turns capture.
+#[derive(Clone, Debug)]
+pub struct AgentOptions {
+    pub id: String,
+    pub runtime: String,
+    /// `None` captures an empty resource snapshot: the runtime's own
+    /// resources alone apply.
+    pub resources: Option<PathBuf>,
+}
+
+/// Application-supplied policy and owned storage locations.
 #[derive(Clone, Debug)]
 pub struct CoreOptions {
     pub data_directory: PathBuf,
-    pub agent_id: String,
-    pub resource_root: PathBuf,
-    pub default_runtime: String,
+    pub agents: Vec<AgentOptions>,
     /// The runtimes core starts with; [`Core::set_runtimes`] replaces them
     /// while it serves.
     pub runtimes: Vec<RuntimeProvider>,
@@ -195,12 +214,31 @@ impl Core {
         self.work[lane as usize].send_replace(());
     }
 
-    /// Mark orphaned running turns interrupted, never replaying their input.
+    /// Recover running turns, then interrupt queued turns whose agent moved or was removed.
     /// Call only after acquiring exclusive worker ownership; opening another handle is not a restart.
     /// # Errors
     /// Returns storage errors.
     pub fn recover_interrupted(&self) -> Result<usize> {
-        self.database.recover_running_turns()
+        let mut recovered = self.database.recover_running_turns()?;
+        for (agent_id, runtime_id) in self.database.queued_owners()? {
+            if self
+                .agent(&agent_id)
+                .is_ok_and(|agent| agent.runtime == runtime_id)
+            {
+                continue;
+            }
+            let explanation = stranded(&runtime_id, &agent_id, None);
+            let observation_notice = format!(
+                "{explanation}\nWork already started there will not be reported here. Actions already taken may have had effects."
+            );
+            recovered += self.database.interrupt_queued(
+                &agent_id,
+                &runtime_id,
+                &explanation,
+                &observation_notice,
+            )?;
+        }
+        Ok(recovered)
     }
 
     /// Remove abandoned capture copies and captures no committed turn
@@ -232,10 +270,11 @@ impl Core {
     /// Admit an event from an already authenticated interface, before acknowledging it.
     /// Duplicate receipts do not recapture mutable resources or reconsider runtime ownership.
     ///
-    /// An event with attachments is accepted only once all its staged files
-    /// are captured and published. The capture belongs to core, not to the
-    /// caller: it continues if the caller goes away, a retry of the same
-    /// event waits for it instead of copying again, and at most the
+    /// An executable event with attachments is accepted only once all its
+    /// staged files are captured and published. Stranded conversations settle
+    /// with their explanation without capturing attachments. The capture
+    /// belongs to core: it continues if the caller goes away, a retry of
+    /// the same event waits for it instead of copying again, and at most the
     /// configured number run at once.
     /// # Errors
     /// Returns invalid input, unavailable runtime ownership, busy or full
@@ -251,22 +290,66 @@ impl Core {
                 "an interface identity is required".to_owned(),
             ));
         }
-        // Capture checks for an earlier acceptance itself.
-        if event.attachments.is_some() {
-            return self.intake.accept(self, interface, event).await;
+        let (arrived, received) = (interface.clone(), event.clone());
+        match self
+            .blocking(move |core| core.admission(&arrived, &received))
+            .await?
+        {
+            Admitted::Settled(receipt) => Ok(receipt),
+            Admitted::Capturing(agent) => self.intake.accept(self, interface, event, &agent).await,
         }
-        let (interface, event) = (interface.clone(), event.clone());
-        self.blocking(move |core| {
-            if let Some(receipt) = core
-                .database
-                .event_receipt(&interface.id, &event.event_id)?
-            {
-                return Ok(receipt);
+    }
+
+    /// Settles an event that needs no capture: an earlier receipt, a stranded
+    /// conversation's explanation, or a turn without attachments. An event
+    /// with attachments for a current agent is left to capture.
+    fn admission(
+        &self,
+        interface: &SelectedProvider,
+        event: &ExternalEvent,
+    ) -> Result<Admitted, CoreError> {
+        let owner = self.conversation_owner(
+            &interface.id,
+            &ModelQuery {
+                agent_id: event.agent_id.clone(),
+                audience_id: Some(event.audience_id.clone()),
+            },
+        )?;
+        // Read after the owner: a stranded notice moves its conversation in
+        // the transaction that records its receipt, so a duplicate that sees
+        // the move also sees the receipt.
+        if let Some(receipt) = self
+            .database
+            .event_receipt(&interface.id, &event.event_id)?
+        {
+            return Ok(Admitted::Settled(receipt));
+        }
+        let agent = match owner {
+            Owner::Current(agent) if event.attachments.is_some() => {
+                return Ok(Admitted::Capturing(agent.clone()));
             }
-            core.intake.ensure_in_order(&interface.id, &event)?;
-            core.commit(&interface, &event, None)
-        })
-        .await
+            Owner::Current(agent) => agent,
+            Owner::Stranded {
+                runtime_id,
+                current,
+            } => {
+                self.intake.ensure_in_order(&interface.id, event)?;
+                let current = current.map(|agent| agent.runtime.as_str());
+                return Ok(Admitted::Settled(self.database.accept_event(
+                    &interface.id,
+                    current.unwrap_or(&runtime_id),
+                    event,
+                    Admission::Stranded {
+                        previous_runtime: &runtime_id,
+                        explanation: &stranded(&runtime_id, &event.agent_id, current),
+                    },
+                    None,
+                )?));
+            }
+        };
+        self.intake.ensure_in_order(&interface.id, event)?;
+        self.commit(interface, event, agent, None)
+            .map(Admitted::Settled)
     }
 
     /// Record the turn, referencing a published capture of its attachments.
@@ -274,17 +357,11 @@ impl Core {
         &self,
         interface: &SelectedProvider,
         event: &ExternalEvent,
+        agent: &AgentOptions,
         capture: Option<&Capture>,
     ) -> Result<EventReceipt, CoreError> {
-        let runtime = self.runtime_for(
-            &interface.id,
-            &ModelQuery {
-                agent_id: event.agent_id.clone(),
-                audience_id: Some(event.audience_id.clone()),
-            },
-        )?;
-        let resources =
-            resources::materialize(&self.options.resource_root, &self.snapshot_store())?;
+        let runtime = self.enabled_runtime(&agent.runtime)?;
+        let resources = resources::materialize(agent.resources.as_deref(), &self.snapshot_store())?;
         let selected = SelectedProvider {
             id: runtime.id.clone(),
             role: "runtime".to_owned(),
@@ -297,8 +374,10 @@ impl Core {
             &interface.id,
             &runtime.id,
             event,
-            &providers,
-            &resources,
+            Admission::Queued {
+                providers: &providers,
+                resource_snapshot_id: &resources,
+            },
             capture,
         )?;
         if !receipt.duplicate {
@@ -327,25 +406,15 @@ impl Core {
             .map_or(EventStatus::Unknown, EventStatus::Accepted))
     }
 
-    /// Resolve the pinned conversation owner, or the default for a new conversation.
-    /// # Errors
-    /// Returns an unknown agent, missing/disabled owner or storage error.
-    pub fn runtime_for(
-        &self,
-        interface_id: &str,
-        query: &ModelQuery,
-    ) -> Result<RuntimeProvider, CoreError> {
-        if query.agent_id != self.options.agent_id {
-            return Err(CoreError::InvalidInput("unknown agent".to_owned()));
-        }
-        let owner = match &query.audience_id {
-            Some(audience) => {
-                self.database
-                    .conversation_runtime(interface_id, &query.agent_id, audience)?
-            }
-            None => None,
-        };
-        let id = owner.as_deref().unwrap_or(&self.options.default_runtime);
+    fn agent(&self, id: &str) -> Result<&AgentOptions, CoreError> {
+        self.options
+            .agents
+            .iter()
+            .find(|agent| agent.id == id)
+            .ok_or_else(|| CoreError::InvalidInput("unknown agent".to_owned()))
+    }
+
+    fn enabled_runtime(&self, id: &str) -> Result<RuntimeProvider, CoreError> {
         let runtime = self.runtime(id)?;
         if !runtime.enabled {
             return Err(CoreError::Conflict(
@@ -366,7 +435,7 @@ impl Core {
 
     /// Replaces the runtimes core admits work for and runs it by, as the
     /// application derived them from its registry. A runtime disabled from
-    /// now on admits no new conversation turn and starts no queued one;
+    /// now on admits no executable turn and starts no queued one;
     /// turns already running settle as they would. Workers hear of the
     /// change, so queued turns of a runtime enabled again are claimed.
     /// # Errors
@@ -382,7 +451,8 @@ impl Core {
     /// Claim and run a runtime's oldest claimable turn of `lane` through a
     /// caller-supplied runtime operation, and record its outcome once.
     /// The application must verify local transport prerequisites (such as
-    /// credentials) before this call.
+    /// credentials) before this call. After opening existing storage, recover
+    /// interrupted turns under exclusive ownership before starting workers.
     ///
     /// A message whose runtime provably never received it is queued again;
     /// any other failure ends it, never replaying work that may have run.
@@ -436,7 +506,7 @@ impl Core {
                     Unusable::Altered(message) => (message.clone(), ALTERED_ATTACHMENT),
                     Unusable::Unreadable(error) => (format!("{error:#}"), UNREADABLE_ATTACHMENT),
                 };
-                self.interrupt(turn, message.clone(), Some(explanation.to_owned()), None)
+                self.interrupt(turn, message.clone(), interrupted(Some(explanation)), None)
                     .await
                     .with_context(|| format!("record unrunnable turn {}", turn.turn_id))?;
                 warn!(turn_id = %turn.turn_id, error = %message, "captured attachment is not usable; turn not run");
@@ -481,7 +551,7 @@ impl Core {
         // `running`, which blocks only its conversation and is never claimed
         // again; startup recovery then records it as interrupted, or asks an
         // observation again.
-        let (error, explanation, activity) = match outcome {
+        let (error, notice, activity) = match outcome {
             Ok((follow_up, unanswered_left, attachments_left)) => {
                 if follow_up {
                     self.wake(Lane::Observations);
@@ -511,7 +581,7 @@ impl Core {
                 return self.requeue(turn, &failure).await;
             }
             Err(TurnFailure::Uncertain(failure) | TurnFailure::Unanswered(failure)) => {
-                (failure.to_string(), None, None)
+                (failure.to_string(), interrupted(None), None)
             }
             Err(TurnFailure::Reported(reported)) => {
                 let error = reported.diagnostic();
@@ -520,28 +590,31 @@ impl Core {
                     activity,
                     ..
                 } = *reported;
-                (error, explanation, kept_report(&turn.turn_id, activity))
+                (
+                    error,
+                    interrupted(explanation.as_deref()),
+                    kept_report(&turn.turn_id, activity),
+                )
             }
         };
-        self.interrupt(turn, error.clone(), explanation, activity)
+        self.interrupt(turn, error.clone(), notice, activity)
             .await
             .with_context(|| format!("record failure of turn {}", turn.turn_id))?;
         warn!(turn_id = %turn.turn_id, observation, %error, "turn did not complete");
         Ok(WorkerStep::Advanced)
     }
 
-    /// Records that a claimed turn did not complete; see [`Database::interrupt_turn`].
     async fn interrupt(
         &self,
         turn: &ClaimedTurn,
         error: String,
-        explanation: Option<String>,
+        notice: String,
         activity: Option<TurnActivity>,
     ) -> Result<()> {
         let turn = turn.clone();
         self.blocking(move |core| {
             core.database
-                .interrupt_turn(&turn, &error, explanation.as_deref(), activity.as_ref())
+                .interrupt_turn(&turn, &error, &notice, activity.as_ref())
         })
         .await
     }
@@ -620,7 +693,11 @@ impl Core {
     /// # Errors
     /// Returns a cursor that is not one of the interface's turns as invalid
     /// input, or storage errors.
-    pub fn jobs_at_work(&self, interface: &str, after: Option<&str>) -> Result<JobPage, CoreError> {
+    pub(crate) fn jobs_at_work(
+        &self,
+        interface: &str,
+        after: Option<&str>,
+    ) -> Result<JobPage, CoreError> {
         self.database
             .jobs_at_work(interface, after)?
             .ok_or_else(|| CoreError::InvalidInput("no such page of jobs".to_owned()))
@@ -659,7 +736,6 @@ impl Core {
         self.database.recent_turns(event_id, limit)
     }
 
-    /// Count execution states.
     /// # Errors
     /// Returns storage errors.
     pub fn turn_counts(&self) -> Result<StateCounts> {
@@ -788,9 +864,6 @@ impl Core {
                 crate::db::FOLLOW_UP_EVENT_PREFIX
             )));
         }
-        if event.agent_id != self.options.agent_id {
-            return Err(CoreError::InvalidInput("unknown agent".to_owned()));
-        }
         if let Some(staged) = &event.attachments {
             crate::intake::admit(&self.options.attachments, staged)?;
         }
@@ -804,7 +877,6 @@ pub enum WorkerStep {
     Backoff,
 }
 
-/// How a turn execution attempt failed.
 #[derive(Debug)]
 pub enum TurnFailure {
     /// The runtime provably never received the turn; running it again is safe.
@@ -820,10 +892,19 @@ pub enum TurnFailure {
     Reported(Box<Reported>),
 }
 
+/// What the conversation is told when a turn did not complete, with the
+/// runtime's explanation when it gave one.
+fn interrupted(explanation: Option<&str>) -> String {
+    const CONTINUE: &str = "Send another message to continue in this conversation. Actions already taken may have had effects.";
+    match explanation {
+        Some(explanation) => format!("That turn was interrupted: {explanation}\n{CONTINUE}"),
+        None => format!("That turn was interrupted. {CONTINUE}"),
+    }
+}
+
 /// What a runtime answered when it failed a turn.
 #[derive(Debug)]
 pub struct Reported {
-    /// The status it answered with.
     pub status: u16,
     /// Why, in words phrased for the conversation and safe to display, when
     /// the runtime gave such an explanation.
@@ -879,10 +960,13 @@ pub(crate) fn validate_response(
 }
 
 fn validate_options(options: &CoreOptions) -> Result<()> {
-    anyhow::ensure!(
-        !options.agent_id.is_empty() && !options.default_runtime.is_empty(),
-        "agent identity and default runtime are required"
-    );
+    let mut ids = std::collections::BTreeSet::new();
+    for agent in &options.agents {
+        anyhow::ensure!(
+            !agent.id.is_empty() && ids.insert(&agent.id) && !agent.runtime.is_empty(),
+            "agent identities must be nonempty and unique, each with a runtime"
+        );
+    }
     validate_runtimes(&options.runtimes)
 }
 

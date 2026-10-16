@@ -6,7 +6,6 @@
 import { createHash } from "node:crypto";
 import { Type, type Static } from "typebox";
 
-/** The orchestration protocol version this runtime speaks and requires. */
 export const ORCHESTRATION_PROTOCOL = 2;
 
 export const RPC = {
@@ -15,13 +14,15 @@ export const RPC = {
   getConfig: "server.getConfig",
   refreshProviders: "server.refreshProviders",
   createUploadUrl: "attachments.createUploadUrl",
+  getSettings: "server.getSettings",
+  updateSettings: "server.updateSettings",
 } as const;
 
 const Id = Type.String({ minLength: 1 });
 const Nullable = <T extends ReturnType<typeof Type.String>>(schema: T) =>
   Type.Union([schema, Type.Null()]);
 
-export const RunStatusSchema = Type.Union([
+const RunStatusSchema = Type.Union([
   Type.Literal("preparing"),
   Type.Literal("queued"),
   Type.Literal("starting"),
@@ -82,7 +83,7 @@ export const RuntimeRequestSchema = Type.Object({
 });
 export type RuntimeRequest = Static<typeof RuntimeRequestSchema>;
 
-export const BackgroundTaskSchema = Type.Object({
+const BackgroundTaskSchema = Type.Object({
   taskId: Id,
   kind: Type.Optional(Type.String()),
   description: Type.Optional(Type.String()),
@@ -186,7 +187,6 @@ export const SubagentSchema = Type.Object({
 });
 export type Subagent = Static<typeof SubagentSchema>;
 
-/** A transfer of conversation context between threads or providers. */
 export const ContextTransferSchema = Type.Object({
   id: Id,
   type: Type.String(),
@@ -199,7 +199,7 @@ export const ContextTransferSchema = Type.Object({
 });
 export type ContextTransfer = Static<typeof ContextTransferSchema>;
 
-export const ItemStatusSchema = Type.Union([
+const ItemStatusSchema = Type.Union([
   Type.Literal("idle"),
   Type.Literal("pending"),
   Type.Literal("running"),
@@ -209,7 +209,6 @@ export const ItemStatusSchema = Type.Union([
   Type.Literal("cancelled"),
   Type.Literal("interrupted"),
 ]);
-export type ItemStatus = Static<typeof ItemStatusSchema>;
 
 const itemBase = {
   id: Id,
@@ -332,9 +331,9 @@ export const WakeNotificationSchema = Type.Object({
 });
 
 /** A thread snapshot. Timeline items are checked one by one as they are folded. */
-export const ProjectionSchema = Type.Object({
+const ProjectionSchema = Type.Object({
   /** The thread's own record; its selection is what every run of the thread uses. */
-  thread: Type.Object({ id: Id, modelSelection: NativeSelectionSchema }),
+  thread: Type.Object({ id: Id, projectId: Id, modelSelection: NativeSelectionSchema }),
   runs: Type.Array(RunSchema),
   runtimeRequests: Type.Array(RuntimeRequestSchema),
   providerThreads: Type.Array(ProviderThreadSchema),
@@ -370,7 +369,13 @@ export const OptionDescriptorSchema = Type.Union([
     id: Id,
     label: Type.String({ minLength: 1 }),
     type: Type.Literal("select"),
-    options: Type.Array(Type.Object({ id: Id, isDefault: Type.Optional(Type.Boolean()) })),
+    options: Type.Array(
+      Type.Object({
+        id: Id,
+        label: Type.String({ minLength: 1 }),
+        isDefault: Type.Optional(Type.Boolean()),
+      }),
+    ),
     currentValue: Type.Optional(Id),
   }),
   Type.Object({
@@ -389,6 +394,7 @@ export type OptionDescriptor = Static<typeof OptionDescriptorSchema>;
  */
 export const ProviderSchema = Type.Object({
   instanceId: Id,
+  displayName: Type.Optional(Type.String({ minLength: 1 })),
   enabled: Type.Boolean(),
   installed: Type.Boolean(),
   status: Type.String(),
@@ -495,16 +501,28 @@ export interface NativeImage {
   readonly sizeBytes: number;
 }
 
+/** What one Carillon turn sends T3 as its message. */
+export interface MessageContent {
+  readonly text: string;
+  readonly images: readonly NativeImage[];
+  /**
+   * The selection the message's run takes, which T3 records with the run
+   * and makes the thread's own: the conversation's agent offers it.
+   */
+  readonly selection: NativeSelection;
+  /** The person's words T3 titles a thread's first message from, as its own composer does. */
+  readonly titleSeed?: string;
+}
+
 /**
  * One Carillon turn as one T3 message: the same turn always sends the same
- * command. The message carries no model selection, so it runs with the
- * thread's own, as T3 decides; behind active work it waits in T3's queue.
+ * command, its run on the selection it names; behind active work it waits
+ * in T3's queue.
  */
 export function messageDispatch(
   threadId: string,
   correlationId: string,
-  text: string,
-  images: readonly NativeImage[],
+  content: MessageContent,
   queued: boolean,
 ) {
   return {
@@ -514,14 +532,16 @@ export function messageDispatch(
     commandId: derivedId("dispatch", correlationId),
     threadId,
     messageId: derivedId("message", correlationId),
-    text,
-    attachments: images.map(({ type, id, name, mimeType, sizeBytes }) => ({
+    text: content.text,
+    attachments: content.images.map(({ type, id, name, mimeType, sizeBytes }) => ({
       type,
       id,
       name,
       mimeType,
       sizeBytes,
     })),
+    modelSelection: nativeSelection(content.selection),
+    ...(content.titleSeed === undefined ? {} : { titleSeed: content.titleSeed }),
     dispatchMode: { type: queued ? "queue_after_active" : "start_immediately" },
   } as const;
 }
@@ -595,4 +615,56 @@ function nativeSelection(selection: NativeSelection) {
     model: selection.model,
     options: (selection.options ?? []).map(({ id, value }) => ({ id, value })),
   };
+}
+
+/** The part of T3's settings a profile's instance is checked against. */
+export const ServerSettingsSchema = Type.Object({
+  providerInstances: Type.Optional(
+    Type.Record(
+      Type.String(),
+      Type.Object({
+        driver: Type.String(),
+        config: Type.Optional(Type.Object({ homePath: Type.Optional(Type.String()) })),
+      }),
+    ),
+  ),
+});
+
+/** A provider instance T3 creates, as its settings name it. */
+export interface InstanceDefinition {
+  readonly driver: string;
+  readonly displayName: string;
+  readonly homePath: string;
+  /** The harness's environment; T3 keeps a sensitive value, such as an API key, in its secret store. */
+  readonly environment: readonly {
+    readonly name: string;
+    readonly value: string;
+    readonly sensitive: boolean;
+  }[];
+}
+
+/** Creates a provider instance in T3's settings, which T3 starts without a restart. */
+export function instanceCreate(instanceId: string, instance: InstanceDefinition) {
+  return {
+    patch: {},
+    providerInstanceMutation: {
+      operation: "create",
+      instanceId,
+      instance: {
+        driver: instance.driver,
+        displayName: instance.displayName,
+        enabled: true,
+        config: { homePath: instance.homePath },
+        ...(instance.environment.length === 0
+          ? {}
+          : {
+              environment: instance.environment.map(({ name, value, sensitive }) => ({
+                name,
+                value,
+                sensitive,
+              })),
+            }),
+      },
+    },
+  } as const;
 }

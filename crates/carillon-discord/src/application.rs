@@ -1,7 +1,11 @@
 //! Gateway and operator HTTP assembly. Policies live in the component modules.
-use crate::conversations::{
-    AdmittedInteraction, InteractionSource, SourceAttachment, admit_interaction,
-};
+mod interactions;
+
+#[cfg(test)]
+use interactions::interaction_source;
+use interactions::{handle_interaction, run_interaction};
+
+use crate::conversations::{InteractionSource, SourceAttachment, admit_interaction};
 use crate::{
     attachments::Downloads,
     error::discord_failure_is_terminal,
@@ -23,8 +27,7 @@ use crate::{
     },
     delivery::{Feedback, PROMPT_FEEDBACK, Reactions, delivery_loop},
     module::{
-        ChangeError, Declared, DiscordApp, InteractionCalls, Module, ModuleFiles, Refusal, Status,
-        Submissions,
+        ChangeError, Declared, DiscordApp, Module, ModuleFiles, Refusal, Status, answer::answer,
     },
 };
 #[cfg(test)]
@@ -41,13 +44,12 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use carillon_discord_module::contract::{CardRequest, InteractionKind, Reply};
+use carillon_discord_module::contract::{CardRequest, Reply};
 use carillon_installation::config::{
     LoadedConfig, ProviderRole, RELEASE_VERSION, attachment_staging, read_token_file, token_matches,
 };
 use carillon_protocol::model::{
-    Delivery, DeliveryOutcome, DeliveryReconciliation, EventReceipt, Health, Job, ModelQuery,
-    TurnState,
+    Delivery, DeliveryOutcome, DeliveryReconciliation, EventReceipt, Health, Job, TurnState,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -63,16 +65,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use twilight_gateway::Event;
 use twilight_http::Client as DiscordHttp;
-use twilight_model::channel::ChannelType;
 use twilight_model::{
-    application::interaction::{
-        Interaction as DiscordInteraction, InteractionData, InteractionType,
-    },
-    channel::message::{Component, Embed, MessageFlags, MessageType, component::SelectMenuType},
-    http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType},
+    channel::message::{Embed, MessageType},
     id::Id,
 };
-use twilight_validate::component::{COMPONENT_COUNT, component_v1};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct SimulateResponse {
@@ -106,17 +102,24 @@ struct DiscordState {
     participation: Arc<Participation>,
     module: Arc<Module>,
     /// Absent in deterministic mode, where no Discord application exists.
-    app: Option<Arc<DiscordApp>>,
-    /// The reactions shown on messages, with the Discord application.
-    reactions: Option<Reactions>,
-    /// The conversation lanes `/command` submissions take their place in,
-    /// with the Discord application.
-    lanes: Option<Lanes>,
-    /// The provider's attachment downloads and staging, in either mode.
+    connection: Option<Connection>,
     downloads: Arc<Downloads>,
 }
 
-/// Everything `serve` needs besides the registry.
+#[derive(Clone)]
+struct Connection {
+    app: Arc<DiscordApp>,
+    reactions: Reactions,
+    /// The conversation lanes `/command` submissions take their place in.
+    lanes: Lanes,
+}
+
+impl DiscordState {
+    fn app(&self) -> Option<&DiscordApp> {
+        self.connection.as_ref().map(|connection| &*connection.app)
+    }
+}
+
 pub(crate) struct ServeOptions<'a> {
     pub provider_id: &'a str,
     pub token_file: &'a Path,
@@ -189,9 +192,7 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
         core,
         participation,
         module,
-        app: None,
-        reactions: None,
-        lanes: None,
+        connection: None,
         downloads,
     };
     info!(url = %provider.url, deterministic = options.deterministic, "Discord interface provider ready");
@@ -208,9 +209,6 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
     connect(state, listener, http, discord_token, reconciled, cards).await
 }
 
-/// Runs the provider against Discord: authenticates the bot, registers the
-/// Discord module's commands when they changed, then serves the gateway,
-/// deliveries, and the operator endpoints together.
 async fn connect(
     mut state: DiscordState,
     listener: TcpListener,
@@ -223,14 +221,16 @@ async fn connect(
     let identity = state.settings.current();
     let app = Arc::new(application(&http, &identity).await?);
     state.module.reconcile(&app).await?;
-    state.app = Some(app);
     let reactions = Reactions::new(http.clone(), state.settings.clone());
-    state.reactions = Some(reactions.clone());
     for target in reconciled.feedback_target_ids {
         reactions.outcome(&target, Feedback::Uncertain).await;
     }
     let (messages, receiver) = mpsc::channel(lanes::MAX_PENDING);
-    state.lanes = Some(Lanes::new(messages.clone()));
+    state.connection = Some(Connection {
+        app,
+        reactions: reactions.clone(),
+        lanes: Lanes::new(messages.clone()),
+    });
     let delivery_state = state.clone();
     let stopping = CancellationToken::new();
     let (settled, settlements) = mpsc::unbounded_channel();
@@ -428,7 +428,7 @@ async fn discord_operation(
             status: StatusCode::BAD_REQUEST,
             message: "Invalid Discord operation; check the action and its fields".to_owned(),
         })?;
-    let Some(app) = &state.app else {
+    let Some(app) = state.app() else {
         return Ok((StatusCode::SERVICE_UNAVAILABLE, Json(json!({"outcome":"unavailable","message":"Discord operations require a connected provider; deterministic mode does not call Discord."}))).into_response());
     };
     Ok(match operation.execute(&app.http, app.guild_id).await {
@@ -449,7 +449,6 @@ fn read_settings(state: &DiscordState) -> Result<DiscordConfig> {
     DiscordConfig::load(&state.installation, &state.health.id)
 }
 
-/// The settings serving, and how the provider's settings file differs.
 async fn settings_status(
     State(state): State<DiscordState>,
     headers: HeaderMap,
@@ -481,7 +480,7 @@ async fn apply_settings(
                 || read_settings(state),
                 |file| {
                     let source = file.module_source(&state.installation.root);
-                    state.module.apply(source, state.app.as_deref())
+                    state.module.apply(source, state.app())
                 },
             )
             .await
@@ -539,7 +538,6 @@ async fn apply_settings(
         .into_response())
 }
 
-/// Why the declared module could not serve, and what the operator can do.
 fn module_refusal(failure: ChangeError) -> (StatusCode, String) {
     error!(error = %failure, "Discord module change refused");
     match failure {
@@ -584,8 +582,6 @@ fn module_refusal(failure: ChangeError) -> (StatusCode, String) {
     }
 }
 
-/// The serving module, how the one the settings file declares compares,
-/// and whether its commands are registered.
 async fn module_status(
     State(state): State<DiscordState>,
     headers: HeaderMap,
@@ -599,7 +595,7 @@ async fn module_status(
             error: format!("the settings file is not valid: {error:#}"),
         },
     };
-    Ok(Json(state.module.status(state.app.as_deref(), declared)))
+    Ok(Json(state.module.status(state.app(), declared)))
 }
 
 async fn simulate(
@@ -756,8 +752,8 @@ async fn settle_own_delivery(
 }
 
 /// Runs an interaction exactly as the gateway would, returning the reply the
-/// user would see. Replies are checked against Discord's component model so
-/// a module producing unusable components fails here, not in production.
+/// user would see. Replies are checked as the gateway checks them, so a
+/// module producing an unusable reply fails here, not in production.
 async fn simulate_interaction(
     State(state): State<DiscordState>,
     headers: HeaderMap,
@@ -772,7 +768,7 @@ async fn simulate_interaction(
             status: StatusCode::BAD_GATEWAY,
             message: error.to_string(),
         })?;
-    validate_reply(&reply).map_err(|error| InterfaceError {
+    answer(&reply).map_err(|error| InterfaceError {
         status: StatusCode::BAD_GATEWAY,
         message: error.to_string(),
     })?;
@@ -860,7 +856,6 @@ fn take_event(
     }
 }
 
-/// Wait until every interaction already taken has been answered.
 async fn answered(interactions: &mut JoinSet<()>) {
     while let Some(finished) = interactions.join_next().await {
         reap(finished);
@@ -910,171 +905,6 @@ fn queue_message(
         }
         Err(mpsc::error::TrySendError::Full(())) => Ok(Err(inbound)),
         Err(mpsc::error::TrySendError::Closed(())) => bail!("Discord message worker stopped"),
-    }
-}
-
-/// The provider's view of a gateway interaction, or `None` for kinds the
-/// provider does not serve (pings, autocomplete, modals).
-fn interaction_source(interaction: &DiscordInteraction) -> Option<InteractionSource> {
-    let (kind, name, values, options) = match (&interaction.kind, interaction.data.as_ref()?) {
-        (InteractionType::ApplicationCommand, InteractionData::ApplicationCommand(data)) => (
-            InteractionKind::Command,
-            data.name.clone(),
-            Vec::new(),
-            serde_json::to_value(&data.options).unwrap_or(Value::Null),
-        ),
-        (InteractionType::MessageComponent, InteractionData::MessageComponent(data)) => (
-            InteractionKind::Component,
-            data.custom_id.clone(),
-            data.values.clone(),
-            Value::Null,
-        ),
-        _ => return None,
-    };
-    let channel = interaction.channel.as_ref()?;
-    let parent_channel_id = matches!(
-        channel.kind,
-        ChannelType::AnnouncementThread | ChannelType::PrivateThread | ChannelType::PublicThread
-    )
-    .then(|| channel.parent_id.map(|id| id.to_string()))
-    .flatten();
-    Some(InteractionSource {
-        guild_id: interaction.guild_id.map(|id| id.to_string()),
-        user_id: interaction.author_id()?.to_string(),
-        channel_id: channel.id.to_string(),
-        parent_channel_id,
-        kind,
-        name,
-        values,
-        options,
-    })
-}
-
-/// Runs an admitted interaction under the settings it was admitted with.
-async fn run_interaction(
-    state: &DiscordState,
-    admitted: AdmittedInteraction,
-    settings: Arc<DiscordConfig>,
-) -> Result<Reply> {
-    let mut calls = InteractionCalls::new(
-        state.core.clone(),
-        ModelQuery {
-            agent_id: settings.agent.clone(),
-            audience_id: admitted.audience_id,
-        },
-    );
-    // Without a Discord connection there is nowhere to anchor a submission.
-    if let (Some(app), Some(reactions), Some(lanes)) = (&state.app, &state.reactions, &state.lanes)
-    {
-        calls = calls.with_submissions(Submissions {
-            http: Arc::clone(&app.http),
-            reactions: reactions.clone(),
-            lanes: lanes.clone(),
-            origin: admitted.origin,
-            settings,
-        });
-    }
-    state.module.invoke(calls, admitted.interaction).await
-}
-
-/// Validate content and components before editing an acknowledgement.
-/// The reply's components as Discord accepts them: at most five action rows
-/// of buttons and select menus within Discord's limits, checked here so a
-/// module that exceeds them is reported instead of discovered as a rejected
-/// edit that leaves the acknowledgement hanging.
-fn validate_reply(reply: &Reply) -> Result<Vec<Component>> {
-    twilight_validate::message::content(&reply.content)
-        .context("Discord module reply has unusable content")?;
-    let components: Vec<Component> = serde_json::from_value(Value::Array(reply.components.clone()))
-        .context("Discord module reply has invalid components")?;
-    if components.len() > COMPONENT_COUNT {
-        bail!(
-            "Discord module reply has {} action rows; Discord allows {COMPONENT_COUNT}",
-            components.len()
-        );
-    }
-    for component in &components {
-        component_v1(component).context("Discord module reply has an unusable component")?;
-        // twilight checks the maxima; Discord also refuses an empty row or an
-        // empty select menu.
-        let Component::ActionRow(row) = component else {
-            bail!("Discord module reply has a component outside an action row");
-        };
-        if row.components.is_empty() {
-            bail!("Discord module reply has an empty action row");
-        }
-        for inner in &row.components {
-            if let Component::SelectMenu(menu) = inner
-                && menu.kind == SelectMenuType::Text
-                && menu.options.as_ref().is_none_or(Vec::is_empty)
-            {
-                bail!("Discord module reply has a select menu without options");
-            }
-        }
-    }
-    Ok(components)
-}
-
-/// Answers one gateway interaction: acknowledge within Discord's window,
-/// run the module, then edit the acknowledgement into the reply. Refusals
-/// and failures are told to the user in general terms and logged in full.
-async fn handle_interaction(state: DiscordState, interaction: DiscordInteraction) {
-    let Some(app) = state.app.clone() else {
-        return;
-    };
-    let Some(source) = interaction_source(&interaction) else {
-        return;
-    };
-    let client = app.http.interaction(app.application_id);
-    let deferred = InteractionResponse {
-        kind: if source.kind == InteractionKind::Component {
-            InteractionResponseType::DeferredUpdateMessage
-        } else {
-            InteractionResponseType::DeferredChannelMessageWithSource
-        },
-        data: Some(InteractionResponseData {
-            flags: Some(MessageFlags::EPHEMERAL),
-            ..InteractionResponseData::default()
-        }),
-    };
-    if let Err(error) = client
-        .create_response(interaction.id, &interaction.token, &deferred)
-        .await
-    {
-        warn!(%error, "Discord interaction acknowledgement failed");
-        return;
-    }
-    // The interaction keeps the settings it is admitted with.
-    let settings = state.settings.current();
-    let (content, components) = match admit_interaction(&settings, source) {
-        Ok(admitted) => match run_interaction(&state, admitted, settings).await {
-            Ok(reply) => match validate_reply(&reply) {
-                Ok(components) => (reply.content, components),
-                Err(error) => {
-                    error!(%error, "Discord module reply was unusable");
-                    (
-                        "The command produced an unusable reply.".to_owned(),
-                        Vec::new(),
-                    )
-                }
-            },
-            Err(error) => {
-                error!(%error, "Discord module invocation failed");
-                ("The command could not be completed.".to_owned(), Vec::new())
-            }
-        },
-        Err(refusal) => {
-            info!(reason = %refusal.message, "Discord interaction refused");
-            ("This command is not available here.".to_owned(), Vec::new())
-        }
-    };
-    if let Err(error) = client
-        .update_response(&interaction.token)
-        .content(Some(&content))
-        .components(Some(&components))
-        .await
-    {
-        warn!(%error, "Discord interaction reply failed");
     }
 }
 

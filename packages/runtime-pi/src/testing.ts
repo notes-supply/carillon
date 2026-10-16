@@ -1,12 +1,12 @@
 /** Service-test substitute. Does not exercise Pi or make model calls. */
-import type { AvailableModel, Selection } from "@carillon/protocol";
+import type { AvailableModel, ModelState, Selection } from "@carillon/protocol";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 import { Type } from "typebox";
 import { Parse } from "typebox/value";
 import { capturedPath } from "@carillon/runtime/attachments";
-import { ModelSelections } from "./model.ts";
+import { ModelSelections } from "@carillon/runtime/selections";
 import { Serial } from "@carillon/runtime/serial";
 import { conversationDirectory } from "./namespace.ts";
 import type { RuntimeOperations, TurnRequest, TurnResponse } from "@carillon/runtime/operations";
@@ -55,11 +55,17 @@ export async function createDeterministicRuntime(
     },
     async modelState(query) {
       shutdown.signal.throwIfAborted();
-      return await selections.state(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, query);
+      return {
+        ...DETERMINISTIC_CATALOGUE,
+        ...(await selections.state(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, query)),
+      };
     },
-    setModel(update) {
+    async setModel(update) {
       shutdown.signal.throwIfAborted();
-      return selections.update(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, update);
+      return {
+        ...DETERMINISTIC_CATALOGUE,
+        ...(await selections.update(DETERMINISTIC_MODELS, DETERMINISTIC_DEFAULT, update)),
+      };
     },
     commands() {
       shutdown.signal.throwIfAborted();
@@ -154,8 +160,7 @@ function isNodeError(value: unknown): value is NodeJS.ErrnoException {
   return value instanceof Error && "code" in value;
 }
 
-/** The catalog the deterministic provider substitute offers. */
-export const DETERMINISTIC_MODELS: readonly AvailableModel[] = [
+const DETERMINISTIC_MODELS: readonly AvailableModel[] = [
   { provider: "local", model: "echo", name: "Local echo", options: [] },
   {
     provider: "local",
@@ -165,13 +170,25 @@ export const DETERMINISTIC_MODELS: readonly AvailableModel[] = [
       {
         id: "thinking",
         name: "Thinking",
-        choices: ["off", "low", "medium", "high"],
+        choices: [
+          { id: "off", name: "Off" },
+          { id: "low", name: "Low" },
+          { id: "medium", name: "Medium" },
+          { id: "high", name: "High" },
+        ],
         default: "medium",
       },
     ],
   },
   { provider: "substitute", model: "fixed", name: "Substitute fixed", options: [] },
 ];
+const DETERMINISTIC_CATALOGUE: Pick<ModelState, "providers" | "available"> = {
+  providers: [
+    { id: "local", name: "Local" },
+    { id: "substitute", name: "Substitute" },
+  ],
+  available: [...DETERMINISTIC_MODELS],
+};
 
 export const DETERMINISTIC_DEFAULT: Selection = { provider: "local", model: "echo", options: {} };
 

@@ -8,9 +8,7 @@
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use anyhow::Result;
-use carillon_installation::config::{
-    AgentConfig, Config, CoreConfig, LoadedConfig, Provider, ProviderRole,
-};
+use carillon_installation::config::{Config, CoreConfig, LoadedConfig, Provider, ProviderRole};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, watch};
 
@@ -41,7 +39,6 @@ pub(crate) struct Difference {
     pub(crate) restart: Vec<String>,
 }
 
-/// One runtime as core serves it.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub(crate) struct ServingRuntime {
     pub(crate) id: String,
@@ -52,7 +49,6 @@ pub(crate) struct ServingRuntime {
     pub(crate) workers: RuntimeWorkers,
 }
 
-/// The registry serving, and how the file differs from it.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct RegistryStatus {
     pub(crate) runtimes: Vec<ServingRuntime>,
@@ -67,8 +63,9 @@ pub(crate) struct RegistryStatus {
 pub(crate) enum FileState {
     /// It reads as a registry; these fields differ from what serves.
     Read(Difference),
-    /// It does not read as a registry.
-    Invalid { error: String },
+    Invalid {
+        error: String,
+    },
 }
 
 /// A completed apply: the fields it changed, and the runtimes as they serve.
@@ -81,7 +78,6 @@ pub(crate) struct Applied {
 }
 
 impl ServingRuntime {
-    /// Each runtime of the serving registry, with its workers.
     pub(super) fn all(config: &LoadedConfig, census: &Census) -> Vec<Self> {
         config
             .value
@@ -127,20 +123,13 @@ impl Difference {
             data_dir,
             core,
             providers,
-            agent,
+            agents,
         } = file;
         let CoreConfig {
             listen,
             operator_token_hash,
             attachments,
         } = core;
-        let AgentConfig {
-            id,
-            name,
-            resource_root,
-            workspace,
-            runtime_provider,
-        } = agent;
         let mut restart = |changed: bool, field: &str| {
             if changed {
                 difference.restart.push(field.to_owned());
@@ -153,17 +142,9 @@ impl Difference {
             "core.operator_token_hash",
         );
         restart(*attachments != serving.core.attachments, "core.attachments");
-        restart(*id != serving.agent.id, "agent.id");
-        restart(*name != serving.agent.name, "agent.name");
-        restart(
-            *resource_root != serving.agent.resource_root,
-            "agent.resource_root",
-        );
-        restart(*workspace != serving.agent.workspace, "agent.workspace");
-        restart(
-            *runtime_provider != serving.agent.runtime_provider,
-            "agent.runtime_provider",
-        );
+        // Core admits for the agents it started with, and runtimes and
+        // interfaces read theirs at start: any change is a restart's.
+        restart(*agents != serving.agents, "agents");
         let before = serving
             .providers
             .iter()
@@ -225,7 +206,6 @@ impl Difference {
 /// Why an apply left the serving registry in place.
 #[derive(Debug)]
 pub(super) enum Refusal {
-    /// The file is not a valid registry.
     Invalid(anyhow::Error),
     /// The file changes fields only a restart applies.
     Restart(Difference),
@@ -233,7 +213,6 @@ pub(super) enum Refusal {
     Facts(anyhow::Error),
 }
 
-/// The registry that serves, and the file it came from.
 pub(super) struct Registry {
     path: PathBuf,
     serving: watch::Sender<Arc<LoadedConfig>>,
@@ -260,12 +239,11 @@ impl Registry {
         self.serving.subscribe()
     }
 
-    /// How the file differs from what serves now.
     /// # Errors
     /// Returns why the file is not a valid registry.
-    pub(super) fn compare(&self) -> Result<Difference> {
+    pub(super) fn compare(&self, serving: &LoadedConfig) -> Result<Difference> {
         let file = LoadedConfig::load(&self.path)?;
-        Ok(Difference::between(&self.current().value, &file.value))
+        Ok(Difference::between(&serving.value, &file.value))
     }
 
     /// Serves the file in place of the registry serving now, when they

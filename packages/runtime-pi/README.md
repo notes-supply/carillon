@@ -8,7 +8,7 @@ or provider discovery.
 import { createPiRuntime } from "@carillon/runtime-pi";
 
 const runtime = await createPiRuntime({
-  workspace: "/path/to/workspace",
+  agents: [{ id: "assistant", workspace: "/path/to/workspace" }],
   stateDirectory: "/path/to/pi-state",
 });
 try {
@@ -28,9 +28,14 @@ try {
 ```
 
 The state directory holds Pi's `auth.json`, settings, model catalogue, model
-selections and, by default, sessions; it needs a usable default model. The
-workspace must exist. Pass `modelRuntime`, `settings`, `selections` or
-`sessionDirectory` to supply your own collaborators.
+selections and, by default, sessions; it needs a usable default model. Each
+agent's workspace must exist; a turn of an agent the runtime does not serve
+is refused. The service keeps sessions in its component directory. Pass
+`modelRuntime`, `settings`, `selections` or `sessionDirectory` to supply your
+own collaborators.
+
+Service startup and `--check` require every agent's workspace and each declared
+`resources` root to be an existing directory.
 
 ## Behaviour
 
@@ -53,7 +58,12 @@ workspace must exist. Pass `modelRuntime`, `settings`, `selections` or
 - Pi's `codemode`, `tool_search` and MCP extensions load with their normal
   semantics. Enable code mode with `"defaultTools": ["+codemode"]` in the
   agent's `settings.json`. The service's MCP configuration is the
-  installation's `pi/mcp.json`.
+  installation's `pi/mcp.json`, read as each turn starts rather than captured
+  with it.
+- The agent's resources add to what Pi finds itself: `AGENTS.md` or
+  `CLAUDE.md` in the workspace and its parents, the workspace's `.pi/`,
+  `.agents/skills` up to its git root, and `~/.agents/skills`. Ordinary Pi
+  sessions never see the agent's resources.
 
 The release compiles all of this into `carillon-runtime-pi`; run with `pi` as
 its first argument, it is Pi's own command line (`carillon-pi`).
@@ -75,7 +85,8 @@ authority in that workspace.
 - [`session.ts`](src/session.ts), [`namespace.ts`](src/namespace.ts): native
   sessions, resources and conversation identity.
 - [`attachments.ts`](src/attachments.ts), [`activity.ts`](src/activity.ts),
-  [`model.ts`](src/model.ts): files, activity snapshots and selections.
+  [`../runtime/src/selections.ts`](../runtime/src/selections.ts): files,
+  activity snapshots and selections.
 - [`cli.ts`](src/cli.ts): the service's arguments, credentials and lifecycle.
 - [`testing.ts`](src/testing.ts): a deterministic stand-in for service tests,
   not Pi.

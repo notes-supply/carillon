@@ -136,7 +136,7 @@ install_release() {
   port=$1
   shift
   env "$@" "$RELEASE/install.sh" --guild-id 100 --bot-user-id 201 --user-id 200 \
-    --route 300:always:channel --workspace "$HOME/workspace" --base-port "$port"
+    --route 300:always:channel:assistant --workspace "$HOME/workspace" --base-port "$port"
 }
 simulate() {
   printf 'Authorization: Bearer %s\n' "$(cat "$INSTALLATION/credentials/discord-private.token")" \
@@ -205,7 +205,7 @@ grep -F 'another Carillon maintenance operation is running' "$TEST_ROOT/locked-e
 cmp "$SETTINGS" "$TEST_ROOT/settings-before"
 carillon discord module | grep -Fx 'discord-private serves the bundled Discord module: /model, /command.' >/dev/null
 carillon discord configure --guild-id 100 --bot-user-id 201 --user-id 200 --user-id 250 \
-  --route 300:always:channel >/dev/null
+  --route 300:always:channel:assistant >/dev/null
 grep -F '"250"' "$INSTALLATION/providers/discord-private.toml" >/dev/null
 # A restart drains core first, then stops the target with its services.
 carillon restart >"$TEST_ROOT/restart.log"
@@ -392,13 +392,14 @@ T3_SETTINGS=$INSTALLATION/providers/runtime-t3.toml
 T3_TOKEN=$INSTALLATION/credentials/t3.token
 t3_settings() {
   printf '%s\n' 'url = "http://127.0.0.1:1"' 'token_file = "credentials/t3.token"' \
-    'project_id = "agent"' '[model]' 'instance_id = "claudeAgent"' 'model = "claude-sonnet-5"' \
+    'profiles = ["carillon_claude"]' '[agents.assistant]' 'project_id = "agent"' \
+    '[agents.assistant.model]' 'instance_id = "carillon_claude"' 'model = "claude-sonnet-5"' \
     >"$T3_SETTINGS"
   printf '%s\n' t3-token >"$T3_TOKEN"
   chmod 0600 "$T3_SETTINGS" "$T3_TOKEN"
 }
 for state in empty:'the T3 token file is empty' missing:'credentials/t3.token' \
-  settings:'runtime-t3.toml: /model'; do
+  settings:'runtime-t3.toml: /agents/assistant/model'; do
   t3_settings
   case "${state%%:*}" in
     empty) : >"$T3_TOKEN" ;;
@@ -579,7 +580,7 @@ for existing in unrelated stale; do
   fi
   env HOME="$owner" XDG_CONFIG_HOME="$owner/.config" CARILLON_SKIP_SYSTEMD_RELOAD=1 \
     "$RELEASE/install.sh" --guild-id 100 --bot-user-id 201 --user-id 200 \
-    --route 300:always:channel --workspace "$owner/workspace" --base-port "$ALT_PORT" \
+    --route 300:always:channel:assistant --workspace "$owner/workspace" --base-port "$ALT_PORT" \
     >"$TEST_ROOT/$existing.log"
   if [ "$existing" = unrelated ]; then
     [ "$(cat "$owner/.local/bin/carillon")" = "$(printf '#!/bin/sh\necho unrelated')" ]

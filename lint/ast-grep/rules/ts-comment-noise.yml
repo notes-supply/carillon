@@ -1,0 +1,7 @@
+id: ts-comment-noise
+language: typescript
+severity: error
+message: Track unfinished work in an issue, and let modules divide the code instead of banners.
+rule:
+  kind: comment
+  regex: "\\b(TODO|FIXME|XXX|HACK)\\b|^/[/*]+\\s*[-=#*~]{4,}"

@@ -1,6 +1,7 @@
 //! The installation registry `carillon.toml`: core listener, provider
-//! registry, and the selected agent. Provider-owned settings live in the
-//! provider's own file under `providers/`.
+//! registry, and the agents interfaces route conversations to.
+//! Provider-owned settings live in the provider's own file under
+//! `providers/`.
 
 use std::{
     collections::BTreeSet,
@@ -28,7 +29,8 @@ pub struct Config {
     pub data_dir: PathBuf,
     pub core: CoreConfig,
     pub providers: Vec<Provider>,
-    pub agent: AgentConfig,
+    #[serde(default)]
+    pub agents: Vec<AgentConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -146,14 +148,37 @@ pub fn attachment_staging(data_dir: &Path, provider_id: &str) -> PathBuf {
     component_directory(data_dir, provider_id).join("incoming")
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// An agent: who answers a conversation an interface routes to it, on which
+/// runtime, in which workspace. Its runtime may hold further settings of
+/// its own for it, keyed by its ID.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AgentConfig {
     pub id: String,
     pub name: String,
-    pub resource_root: PathBuf,
+    /// The runtime provider a new conversation of the agent runs on.
+    pub runtime: String,
     pub workspace: PathBuf,
-    pub runtime_provider: String,
+    /// Carillon's resources for the agent, captured with each accepted
+    /// turn. An agent without them runs with its runtime's own resources
+    /// alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<PathBuf>,
+}
+
+impl AgentConfig {
+    /// Display name, with the ID when another agent has the same name.
+    #[must_use]
+    pub fn label<'a>(&self, agents: impl IntoIterator<Item = &'a Self>) -> String {
+        if agents
+            .into_iter()
+            .any(|other| other.id != self.id && other.name == self.name)
+        {
+            format!("{} ({})", self.name, self.id)
+        } else {
+            self.name.clone()
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -248,8 +273,12 @@ impl LoadedConfig {
         let mut value: Config =
             toml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
         value.data_dir = absolutize(&root, &value.data_dir);
-        value.agent.resource_root = absolutize(&root, &value.agent.resource_root);
-        value.agent.workspace = absolutize(&root, &value.agent.workspace);
+        for agent in &mut value.agents {
+            agent.workspace = absolutize(&root, &agent.workspace);
+            if let Some(resources) = &mut agent.resources {
+                *resources = absolutize(&root, resources);
+            }
+        }
         value.validate()?;
         value.validate_resource_state_separation()?;
         Ok(Self {
@@ -319,6 +348,32 @@ impl Config {
         Ok(provider)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when no agent has that identity.
+    pub fn agent(&self, id: &str) -> Result<&AgentConfig> {
+        self.agents
+            .iter()
+            .find(|agent| agent.id == id)
+            .with_context(|| format!("agent {id} is not configured"))
+    }
+
+    /// Each distinct resource directory the agents name, in registry order.
+    #[must_use]
+    pub fn resource_roots(&self) -> Vec<&Path> {
+        let mut roots: Vec<&Path> = Vec::new();
+        for root in self
+            .agents
+            .iter()
+            .filter_map(|agent| agent.resources.as_deref())
+        {
+            if !roots.contains(&root) {
+                roots.push(root);
+            }
+        }
+        roots
+    }
+
     fn validate_resource_state_separation(&self) -> Result<()> {
         // Core requires existing state; capture requires an existing resource
         // root. Let those boundaries diagnose absent paths, so diagnostics and
@@ -337,13 +392,25 @@ impl Config {
                 Err(error) => Err(error).with_context(|| format!("resolve {}", path.display())),
             }
         };
-        if let (Some(data), Some(resources)) = (
-            resolve(&self.data_dir)?,
-            resolve(&self.agent.resource_root)?,
-        ) {
+        let Some(data) = resolve(&self.data_dir)? else {
+            return Ok(());
+        };
+        for agent in &self.agents {
+            let Some(resources) = agent
+                .resources
+                .as_deref()
+                .map(resolve)
+                .transpose()?
+                .flatten()
+            else {
+                continue;
+            };
             for subtree in ["extensions", "skills"] {
                 if data.starts_with(resources.join(subtree)) {
-                    bail!("data_dir must not be inside selected agent resources ({subtree})");
+                    bail!(
+                        "data_dir must not be inside the resources of agent {} ({subtree})",
+                        agent.id
+                    );
                 }
             }
         }
@@ -363,9 +430,6 @@ impl Config {
             );
         }
         self.core.attachments.validate()?;
-        if self.agent.id.trim().is_empty() {
-            bail!("agent identity must not be empty");
-        }
         let mut provider_ids = BTreeSet::new();
         let mut listen_addresses = BTreeSet::from([self.core.listen]);
         for provider in &self.providers {
@@ -412,9 +476,33 @@ impl Config {
                 );
             }
         }
-        self.provider(&self.agent.runtime_provider, ProviderRole::Runtime)?;
+        let mut agent_ids = BTreeSet::new();
+        for agent in &self.agents {
+            validate_agent_identity(&agent.id)?;
+            if !agent_ids.insert(&agent.id) {
+                bail!("agent ID {} is configured more than once", agent.id);
+            }
+            if agent.name.trim().is_empty() {
+                bail!("agent {} must have a name", agent.id);
+            }
+            self.provider(&agent.runtime, ProviderRole::Runtime)
+                .with_context(|| format!("agent {} needs a configured runtime", agent.id))?;
+        }
         Ok(())
     }
+}
+
+/// Agent identities share provider identities' path-safe grammar: runtimes
+/// key their own files and settings by them.
+///
+/// # Errors
+///
+/// Returns an error unless the value is 1-128 bytes of ASCII letters, digits,
+/// `-` or `_`.
+pub fn validate_agent_identity(value: &str) -> Result<()> {
+    validate_provider_identity(value).map_err(|_| {
+        anyhow::anyhow!("agent identity must be 1-128 bytes of ASCII letters, digits, '-' or '_'")
+    })
 }
 
 /// # Errors
@@ -481,8 +569,9 @@ mod tests {
     #[test]
     fn provider_identity_uses_one_path_safe_slug_grammar() {
         for valid in ["a", "runtime-pi", "interface_2", "A9"] {
-            assert!(
-                validate_provider_identity(valid).is_ok(),
+            assert_eq!(
+                validate_provider_identity(valid).map_err(|error| error.to_string()),
+                Ok(()),
                 "{valid:?} should be valid"
             );
         }
@@ -500,8 +589,12 @@ mod tests {
             "with\ncontrol",
             &overlong,
         ] {
-            assert!(
-                validate_provider_identity(invalid).is_err(),
+            assert_eq!(
+                validate_provider_identity(invalid).map_err(|error| error.to_string()),
+                Err(
+                    "provider identity must be 1-128 bytes of ASCII letters, digits, '-' or '_'"
+                        .to_owned()
+                ),
                 "{invalid:?} should be invalid"
             );
         }

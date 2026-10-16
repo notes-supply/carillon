@@ -2,23 +2,14 @@
 //! operation, and the runtime workers following it, against a runtime whose
 //! turns wait for the case to release them.
 
-use std::{
-    collections::HashMap,
-    fs,
-    path::Path,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, fs, path::Path, sync::Mutex};
 
 use anyhow::Context as _;
 use tempfile::tempdir;
 use tokio::sync::oneshot;
 
 use super::{Fixture, completed, configured, installation};
-use crate::application::http::{
-    registry::{Difference, FileState},
-    workers::{self, Census},
-    *,
-};
+use crate::application::http::{registry::Difference, *};
 
 /// A runtime that keeps every turn until the case releases it, answering
 /// with or without a follow-up cursor, and records what it was given.
@@ -104,7 +95,6 @@ impl HeldRuntime {
         lock(&self.given).clone()
     }
 
-    /// Answers whatever it holds until core has `counts`.
     pub(super) async fn drain(&self, state: &AppState, wanted: (u64, u64, u64)) -> Result<()> {
         tokio::time::timeout(Duration::from_secs(10), async {
             while counts(state)? != wanted {
@@ -151,7 +141,6 @@ pub(super) fn edit(fixture: &mut Fixture, change: impl FnOnce(&mut Provider)) ->
     write(&fixture.config)
 }
 
-/// A handler's answer, or its refusal as an error.
 pub(super) fn ok<T>(answer: Result<T, ApiError>) -> Result<T> {
     answer.map_err(|refusal| anyhow!("{}: {}", refusal.status, refusal.message))
 }
@@ -168,7 +157,6 @@ pub(super) async fn apply(state: &AppState) -> Result<Applied, ApiError> {
         .map(|Json(applied)| applied)
 }
 
-/// Submits a message of `conversation` through the shared state.
 pub(super) async fn submit(
     state: &AppState,
     input: &str,
@@ -251,7 +239,10 @@ fn only_runtime_availability_and_concurrency_apply_live() -> Result<()> {
     file.providers[1].url = "http://127.0.0.1:9".to_owned();
     file.providers[1].token_hash = "0".repeat(64);
     file.core.listen.set_port(9);
-    file.agent.runtime_provider = "elsewhere".to_owned();
+    file.agents[0].runtime = "elsewhere".to_owned();
+    let mut added = file.agents[0].clone();
+    "added-agent".clone_into(&mut added.id);
+    file.agents.push(added);
     let mut extra = file.providers[1].clone();
     "another".clone_into(&mut extra.id);
     file.providers.push(extra);
@@ -260,7 +251,7 @@ fn only_runtime_availability_and_concurrency_apply_live() -> Result<()> {
         difference.restart,
         [
             "core.listen",
-            "agent.runtime_provider",
+            "agents",
             "providers.another (added)",
             "providers.test-interface.enabled",
             "providers.test-runtime.url",
@@ -305,7 +296,7 @@ async fn an_apply_serves_live_changes_whole_or_nothing_for_the_operator_alone() 
         refused.message
     );
     assert!(state.config().value.providers[1].enabled);
-    assert!(submit(&state, "still", "one").await.is_ok());
+    ok(submit(&state, "still", "one").await)?;
     // A file that does not read as a registry changes nothing either, and
     // says so without its credentials.
     fs::write(
@@ -533,14 +524,17 @@ async fn core_and_its_workers_follow_one_serving_registry() -> Result<()> {
         let provider = config.provider("test-runtime", ProviderRole::Runtime)?;
         assert_eq!(provider.enabled, enabled);
         // Core's engine has the derived facts, and nothing more.
-        let engine = state.core.runtime_for(
+        let engine = state.core.query_runtime(
             "test-interface",
             &ModelQuery {
                 agent_id: "test-agent".to_owned(),
                 audience_id: None,
             },
         );
-        assert_eq!(engine.is_ok(), enabled);
+        assert_eq!(
+            engine.err().map(|error| error.to_string()),
+            (!enabled).then(|| "conversation runtime provider is disabled".to_owned())
+        );
         let wanted = if enabled { parallel as usize } else { 0 };
         workers_are(&state, |runtime| runtime.messages.claiming == wanted).await?;
     }

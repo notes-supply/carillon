@@ -1,0 +1,28 @@
+id: rust-result-state-assert
+valid:
+  - 'fn t() { assert_eq!(live.is_ok(), captured.is_ok(), "mode"); }'
+  - 'fn t() { assert_eq!(parse("x").unwrap_err().to_string(), "x is not a number"); }'
+  - 'fn t() { assert!(matches!(parse("x"), Err(ParseError::Missing))); }'
+  - "fn t() { assert!(value.is_some()); }"
+  - "fn t() { assert!(read().is_err_and(|e| e.kind() == ErrorKind::NotFound)); }"
+invalid:
+  - "fn t() { assert!(result.is_err()); }"
+  - "fn t() { assert!(result.is_ok()); }"
+  - "fn t() { assert!(!result.is_err()); }"
+  - "fn t() { assert!(!result.is_ok()); }"
+  - 'fn t() { assert!(write().is_ok(), "writes"); }'
+  - 'fn t() { assert!(parse("x", 1).is_err(), "{x:?}"); }'
+  - "fn t() { debug_assert!(self.client.call().await.is_ok()); }"
+  - "fn t() { assert!(matches!(result, Ok(_))); }"
+  - "fn t() { assert!(matches!(result, Err(_))); }"
+  - 'fn t() { assert!(matches!(result, Err(_)), "fails"); }'
+  - 'fn t() { assert!(matches!(parse("x"), Ok(_)), "parses"); }'
+  - "fn t() { assert!(matches!(r, Err(..))); }"
+  - "fn t() { assert_eq!(r.is_err(), true); }"
+  - "fn t() { assert!(r.err().is_some()); }"
+  - "fn t() { assert!(r.ok().is_none()); }"
+  - "fn t() { assert!(r.ok().is_some()); }"
+  - 'fn t() { assert!(r.ok().is_none(), "rejected"); }'
+  - 'fn t() { assert!(r.ok().is_some(), "accepted"); }'
+  - "fn t() { debug_assert!(read().ok().is_none()); }"
+  - "fn t() { debug_assert!(read().ok().is_some()); }"
