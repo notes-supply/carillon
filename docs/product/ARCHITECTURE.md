@@ -108,6 +108,11 @@ validates the module (including drawing sample cards), registers commands if
 they changed, and only then swaps it in, with the rest of the settings. See
 the [Wasm host](../../crates/carillon-wasm/README.md).
 
+Module contract 5 carries the provider's configured markers with both card
+requests and admitted interactions. Interaction replies can include embeds
+and controls. The host validates reply and card embeds against Discord's
+limits and suppresses mentions when it sends them.
+
 ### Agent Discord operations
 
 The Discord provider's operator API also runs typed operations
@@ -130,8 +135,9 @@ Runtimes also answer:
 - `GET /v1/turns/{id}/activity` with a bounded snapshot of the running turn:
   phase, recent and running calls, published reasoning and delegated work.
   Tool output is never included.
-- `GET|PUT /v1/model` with the models they offer and the selection for the
-  agent or a conversation.
+- `GET|PUT /v1/model` with the models they offer, provider display names,
+  named option choices, and the selection for the agent or a conversation.
+  Selections hold provider, model and choice IDs.
 - `GET /v1/commands` with the engine's own commands. Invoking one sends its
   text verbatim.
 - `GET /v1/restart`: whether restarting now loses anything.

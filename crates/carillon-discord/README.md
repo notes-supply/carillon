@@ -8,6 +8,10 @@ model state, with no gateway, credentials or inference:
 mise run example:discord
 ```
 
+It prints the reply JSON for a conversation and for a thread route's main
+channel. The replies include the scope summaries, configured brand emotes
+and controls with provider and choice display names.
+
 ## Components
 
 - [`config`](src/config.rs): the provider's settings file and the settings it

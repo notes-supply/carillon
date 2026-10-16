@@ -239,8 +239,13 @@ it unset there.
 `/model` shows the models the runtime offers and lets an allowlisted user
 change the conversation's model and settings, or the agent's default for new
 conversations. Every channel routed to the agent shares that default. Outside
-a conversation `/model` changes only the default. `/command` runs one of the
-runtime's own commands or skills in the conversation, exactly as written:
+a conversation `/model` changes only the default. Its embed shows each
+selection and where it comes from. Controls use the runtime's provider,
+model and choice names, such as **Speed: Fast**, and name the scope they
+change. Reset returns that scope to its default.
+
+`/command` runs one of the runtime's own commands or skills in the
+conversation, exactly as written:
 `/command invocation:compact keep the decisions` sends `/compact keep the
 decisions`. Plain `/command` lists them.
 
@@ -299,6 +304,11 @@ edited at most every three seconds and stays as a summary when the work ends,
 or disappears when the work was only an answer. Turn cards off with
 `activity = false` in `providers/discord-private.toml` and restart Discord.
 
+Published reasoning and the live headline render balanced `**bold**`,
+`*italic*`, `_italic_` and inline code spans that open and close on one
+line. Other Markdown, mentions, links, custom emotes and timestamps in model
+text stay literal. A span cut by a length limit stays literal too.
+
 Markers default to:
 
 ```toml
@@ -325,6 +335,9 @@ default. Model badges map model-ID prefixes to emotes, longest prefix first:
 
 Use emote IDs that belong to your bot's application. After editing, run
 `carillon discord settings apply`; an invalid marker names the field to fix.
+The picker uses these same model badges in its summaries. Custom emotes also
+appear beside models and providers in its menus. A provider gets a menu
+badge when all its models share one.
 
 ### Discord module
 
