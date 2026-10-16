@@ -541,27 +541,29 @@ async function unsavedProfile(harness: string) {
   const runtime = await loaded(config);
   const endpoint = { url: fake.url, token: fake.token };
   const instanceId = `carillon_${harness}`;
+  // The assistant runs on the other harness's saved profile.
+  const saved = `carillon_${harness === "claude" ? "codex" : "claude"}`;
   fake.projects = [{ id: "agent", title: "Agent", workspaceRoot: workspace }];
   fake.providers = [
     ...fake.providers,
-    {
-      instanceId,
-      driver: harness === "claude" ? "claudeAgent" : "codex",
+    ...[instanceId, saved].map((id) => ({
+      instanceId: id,
+      driver: id === "carillon_claude" ? "claudeAgent" : "codex",
       enabled: true,
       installed: true,
       status: "ready",
       models: [{ slug: "profile-model", name: "Profile model", capabilities: null }],
-    },
+    })),
   ];
   const settings = [
     `url = "${fake.url}"`,
     'token_file = "credentials/t3.token"',
-    'profiles = ["claudeAgent"]',
+    `profiles = ["${saved}"]`,
     "[agents.assistant]",
     'project_id = "agent"',
     "[agents.assistant.model]",
-    'instance_id = "claudeAgent"',
-    'model = "claude-sonnet-5"',
+    `instance_id = "${saved}"`,
+    'model = "profile-model"',
   ].join("\n");
   await writeFile(runtime.providerFile, settings);
   await writeFile(join(root, "credentials", "t3.token"), fake.token);
@@ -578,7 +580,14 @@ it.each(["claude", "codex"])(
     );
     expect(found.status, found.stderr).toBe(0);
     const offer: unknown = JSON.parse(found.stdout);
-    expect(offer).toMatchObject({ models: [{ provider: "codex", model: "gpt-6-astra" }] });
+    // T3's ordinary instances, and neither Carillon profile.
+    expect(offer).toMatchObject({
+      models: [
+        { provider: "claudeAgent", model: "claude-sonnet-5" },
+        { provider: "claudeAgent", model: "claude-haiku-4-5" },
+        { provider: "codex", model: "gpt-6-astra" },
+      ],
+    });
   },
 );
 
