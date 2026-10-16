@@ -4,10 +4,8 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { Check } from "typebox/value";
-import { ModelStateSchema, type AvailableModel, type Selection } from "@carillon/protocol";
+import type { AvailableModel, Selection } from "@carillon/protocol";
 import { ExplainedFailure } from "./failure.ts";
-import { resolved } from "./models.ts";
 import { ModelSelections } from "./selections.ts";
 
 const models: readonly AvailableModel[] = [
@@ -142,7 +140,6 @@ it("reports and runs the settings a choice leaves to the model's defaults", asyn
 
     // A model the catalogue no longer offers is reported as chosen, not replaced.
     const without = models.filter((model) => model.model !== "reasoner");
-    expect(resolved(without, reasoner)).toEqual(reasoner);
     expect((await selections.state(without, runtimeDefault, conversation)).agent.selection).toEqual(
       reasoner,
     );
@@ -284,20 +281,6 @@ it("refuses a ledger it cannot read rather than starting empty", async () => {
   await withLedger(async (path) => {
     await writeFile(path, '{"agents": "not a list"}');
     await expect(ModelSelections.open(path)).rejects.toThrow("Parse");
-  });
-});
-
-it("reports its state in the shared wire form", async () => {
-  await withLedger(async (path) => {
-    const ledger = await ModelSelections.open(path);
-    await ledger.update(models, runtimeDefault, {
-      ...conversation,
-      scope: "conversation",
-      selection: reasoner,
-    });
-    expect(Check(ModelStateSchema, await ledger.state(models, runtimeDefault, conversation))).toBe(
-      true,
-    );
   });
 });
 

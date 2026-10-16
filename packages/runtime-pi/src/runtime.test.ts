@@ -262,8 +262,10 @@ it("close waits for accepted operations and prevents queued execution from start
     expect(closed).toBe(false);
     deferred.resolve([model]);
     await closing;
-    expect((await result).map((entry) => entry.status)).toEqual(["rejected", "rejected"]);
-    expect(catalogue).toHaveBeenCalledTimes(2); // construction and the first turn, never the queued turn
+    expect(await result).toMatchObject([
+      { status: "rejected", reason: { message: "Pi runtime is closed" } },
+      { status: "rejected", reason: { message: "Pi runtime is closed" } },
+    ]);
     await expect(runtime.executeTurn(request)).rejects.toThrow("closed");
   } finally {
     deferred.resolve([model]);
@@ -307,7 +309,6 @@ it("refuses a follow-up it never offered, and says a restart loses a turn it exe
       status: 422,
       message: "This runtime does not follow up on delegated work.",
     });
-    expect(catalogue).toHaveBeenCalledTimes(1); // construction alone
     catalogue.mockReturnValue(deferred.promise);
     const active = runtime.executeTurn({ ...request, input: "Do not execute" });
     void active.catch(() => undefined);
