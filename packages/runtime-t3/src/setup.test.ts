@@ -161,13 +161,14 @@ it("keeps the title on a rerun, and the model's options while the model stays th
     instanceId: "claudeAgent",
     model: "claude-sonnet-5",
   };
-  // Settings the operator tuned as documented, with another agent's.
+  // Settings the operator tuned as documented, with the assistant's.
   await writeFile(
     runtime.providerFile,
     [
       'url = "http://127.0.0.1:1"',
       'token_file = "credentials/t3.token"',
       'title = "Notes"',
+      'profiles = ["carillon_claude"]',
       "[agents.code]",
       'project_id = "agent"',
       "[agents.code.model]",
@@ -176,11 +177,11 @@ it("keeps the title on a rerun, and the model's options while the model stays th
       "[agents.code.model.options]",
       'effort = "high"',
       "thinking = true",
-      "[agents.other]",
+      "[agents.assistant]",
       'project_id = "other"',
-      "[agents.other.model]",
-      'instance_id = "codex"',
-      'model = "gpt-6-astra"',
+      "[agents.assistant.model]",
+      'instance_id = "carillon_claude"',
+      'model = "claude-sonnet-5"',
     ].join("\n"),
   );
 
@@ -198,7 +199,7 @@ it("keeps the title on a rerun, and the model's options while the model stays th
       { id: "thinking", value: true },
     ],
   });
-  expect(settings.agents.get("other")?.projectId).toBe("other");
+  expect(settings.agents.get("assistant")?.projectId).toBe("other");
   expect((await readFile(settings.tokenFile, "utf8")).trim()).toBe("rotated-token");
 
   // Another model starts from its own defaults; the title stays, and so does
@@ -217,6 +218,39 @@ it("keeps the title on a rerun, and the model's options while the model stays th
     model: "claude-haiku-4-5",
     options: [],
   });
+});
+
+it("drops an agent carillon.toml no longer gives the runtime, so the runtime still starts", async () => {
+  const fake = await fakeT3();
+  const { root, workspace, config } = await installation();
+  fake.projects = [{ id: "agent", title: "Agent", workspaceRoot: workspace }];
+  const endpoint = { url: fake.url, token: fake.token };
+  const sonnet = { projectId: "agent", instanceId: "claudeAgent", model: "claude-sonnet-5" };
+  // Plain T3 Code alone, for two projects, until a setup rerun keeps one.
+  const kept = (await readFile(config, "utf8")).replace(
+    /\[\[agents\]\]\nid = "assistant"[^[]*/u,
+    "",
+  );
+  await writeFile(
+    config,
+    [
+      kept,
+      "[[agents]]",
+      'id = "t3-dropped"',
+      'name = "T3 Code · Dropped"',
+      'runtime = "runtime-t3"',
+      `workspace = "${workspace}"`,
+    ].join("\n"),
+  );
+  for (const agentId of ["code", "t3-dropped"])
+    await configure(await loaded(config), endpoint, { ...sonnet, agentId });
+  await writeFile(config, kept);
+
+  const runtime = await loaded(config);
+  await configure(runtime, endpoint, { ...sonnet, agentId: "code" });
+  expect([...(await loadSettings(runtime.providerFile, root)).agents.keys()]).toEqual(["code"]);
+  const checked = await cli(["check", "--config", config], "");
+  expect(checked.status, checked.stderr).toBe(0);
 });
 
 it("refuses settings that do not read as valid before writing anything", async () => {

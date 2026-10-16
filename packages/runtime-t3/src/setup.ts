@@ -136,9 +136,10 @@ function agentOf(installation: Installation, id: string): Agent {
  * naming the token's file. The server must offer the project, rooted at the
  * agent's workspace, and the model, among the instances of the agent's kind:
  * the profiles for the assistant, the agent with resources, the others for
- * plain T3 Code. Other agents' settings and the profiles are kept, as are the
- * title and the agent's model options while its model stays the same;
- * settings that do not read as valid are refused before anything is written.
+ * plain T3 Code. The settings of the other agents this runtime serves and the
+ * profiles are kept, as are the title and the agent's model options while its
+ * model stays the same; settings that do not read as valid are refused before
+ * anything is written.
  *
  * The new settings are checked as the runtime reads them first. A token
  * other than the one they name goes to a new private file, and the settings
@@ -340,7 +341,8 @@ async function readExisting(installation: Installation): Promise<SettingsFile | 
 /**
  * Publishes the settings with `agents` and `profiles` for `endpoint`, the
  * rest as they were, naming the token's file as described at
- * {@link configure}.
+ * {@link configure}. Only the agents `carillon.toml` gives this runtime keep
+ * their settings: the runtime refuses to start with any other's.
  */
 async function publishSettings(
   installation: Installation,
@@ -363,12 +365,14 @@ async function publishSettings(
       ? existing.token_file
       : `credentials/t3.${crypto.randomUUID()}.token`;
   const unchanged = "the T3 settings and the token they name were not changed";
+  const serves = new Set(installation.agents.map(({ id }) => id));
+  const served = Object.entries(agents ?? {}).filter(([id]) => serves.has(id));
   const settings = stringify({
     url: endpoint.url,
     token_file: tokenFile,
     ...(existing?.title === undefined ? {} : { title: existing.title }),
     ...(profiles === undefined || profiles.length === 0 ? {} : { profiles }),
-    ...(agents === undefined ? {} : { agents }),
+    ...(served.length === 0 ? {} : { agents: Object.fromEntries(served) }),
   });
   try {
     parseSettings(installation.providerFile, settings);

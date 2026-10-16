@@ -110,8 +110,9 @@ model = "gpt-6.1-sol"
 
 Every agent of this runtime in `carillon.toml` needs its section, and there
 is no section for any other. Rerunning `configure` keeps the title, the
-profiles and the other agents, and keeps an agent's `[model.options]` while
-its model stays the same.
+profiles and the other agents of this runtime, and keeps an agent's
+`[model.options]` while its model stays the same. `configure` and `profile`
+drop the section of an agent `carillon.toml` no longer gives this runtime.
 
 Then `carillon start`. The runtime reads these files only when it starts,
 so after `configure` or a setup rerun changes them, a running Carillon needs
