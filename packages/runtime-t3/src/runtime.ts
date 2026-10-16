@@ -62,6 +62,7 @@ import {
   agentModels,
   catalog,
   fromNative,
+  ledgerUpdate,
   modelState,
   routed,
   sameSelection,
@@ -272,17 +273,17 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     const agent = agentOf(update.agent_id);
     if (update.scope === "agent")
       return connected(async (connection) => {
-        const { offered } = await readModels(connection, update, agent);
+        const models = await readModels(connection, update, agent);
         const settings = fromNative(agent.selection);
         const { agent: chosen } = await options.selections.update(
-          offered.available,
+          models.offered.available,
           settings,
-          update,
+          ledgerUpdate(models, update),
         );
         log(
           `agent ${update.agent_id}: default model ${update.selection === null ? "reset" : "set"}`,
         );
-        return currentState(connection, agentModels(offered, chosen, settings), update);
+        return currentState(connection, agentModels(models.offered, chosen, settings), update);
       });
     const audience = update.audience_id;
     if (audience === undefined)

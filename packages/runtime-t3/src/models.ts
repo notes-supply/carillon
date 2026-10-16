@@ -8,7 +8,14 @@
  * agent runs on. The agent default is the one `/model` chose for it, while
  * the agent runs on its instance, else the one its settings name.
  */
-import type { AvailableModel, ModelState, ScopeState, Selection } from "@carillon/protocol";
+import type {
+  AvailableModel,
+  ModelState,
+  ModelUpdate,
+  ScopeState,
+  Selection,
+} from "@carillon/protocol";
+import { ExplainedFailure } from "@carillon/runtime/failure";
 import { resolved } from "@carillon/runtime/models";
 import { Check } from "typebox/value";
 import {
@@ -131,6 +138,8 @@ export interface AgentModels {
   readonly offered: Catalog;
   /** The agent default, resolved against the catalogue, and whether `/model` chose it. */
   readonly agent: { readonly selection: Selection; readonly overridden: boolean };
+  /** The agent default as the ledger holds it, set aside while the agent may not run on it. */
+  readonly chosen: ScopeState;
 }
 
 /**
@@ -152,7 +161,23 @@ export function agentModels(
       chosen.selection !== null && offered.runsOn(chosen.selection.provider)
         ? { selection: chosen.selection, overridden: chosen.overridden }
         : { selection: resolved(offered.available, settings), overridden: false },
+    chosen,
   };
+}
+
+/**
+ * A change of the agent default as the ledger is to make it. Its `expected`
+ * is the default the person saw, the one the agent runs with, but the ledger
+ * compares the one it holds, which differs while that is set aside. So the
+ * person's view is checked here, and the ledger is handed the default it
+ * held when it was read, refusing the change if another came first.
+ */
+export function ledgerUpdate(models: AgentModels, update: ModelUpdate): ModelUpdate {
+  const { expected } = update;
+  if (expected === undefined || models.chosen.selection === null) return update;
+  if (!sameSelection(models.agent.selection, { ...expected, options: expected.options ?? {} }))
+    throw new ExplainedFailure(409, "The model settings changed.");
+  return { ...update, expected: models.chosen.selection };
 }
 
 /**

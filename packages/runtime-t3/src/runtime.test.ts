@@ -1050,6 +1050,15 @@ it("keeps the agent default `/model` chose only while the agent runs on its inst
   expect(run.modelSelection).toMatchObject({ instanceId: "codex", model: "gpt-6-astra" });
   answer(run, "Hello.");
   await reply;
+  // A change is checked against the default shown now, not the one set aside.
+  const astra = { provider: "codex", model: "gpt-6-astra", options: {} };
+  await expect(
+    runtime.setModel({ ...channel, scope: "agent", selection: astra, expected: haiku }),
+  ).rejects.toMatchObject({ status: 409, message: "The model settings changed." });
+  expect(
+    (await runtime.setModel({ ...channel, scope: "agent", selection: astra, expected: astra }))
+      .agent,
+  ).toEqual({ selection: astra, overridden: true });
 });
 
 it("routes a thread T3's UI moved onto an instance the assistant does not run on back to its default", async () => {
