@@ -112,11 +112,9 @@ struct DiscordState {
     /// The conversation lanes `/command` submissions take their place in,
     /// with the Discord application.
     lanes: Option<Lanes>,
-    /// The provider's attachment downloads and staging, in either mode.
     downloads: Arc<Downloads>,
 }
 
-/// Everything `serve` needs besides the registry.
 pub(crate) struct ServeOptions<'a> {
     pub provider_id: &'a str,
     pub token_file: &'a Path,
@@ -208,9 +206,6 @@ pub(crate) async fn serve(config: LoadedConfig, options: ServeOptions<'_>) -> Re
     connect(state, listener, http, discord_token, reconciled, cards).await
 }
 
-/// Runs the provider against Discord: authenticates the bot, registers the
-/// Discord module's commands when they changed, then serves the gateway,
-/// deliveries, and the operator endpoints together.
 async fn connect(
     mut state: DiscordState,
     listener: TcpListener,
@@ -449,7 +444,6 @@ fn read_settings(state: &DiscordState) -> Result<DiscordConfig> {
     DiscordConfig::load(&state.installation, &state.health.id)
 }
 
-/// The settings serving, and how the provider's settings file differs.
 async fn settings_status(
     State(state): State<DiscordState>,
     headers: HeaderMap,
@@ -539,7 +533,6 @@ async fn apply_settings(
         .into_response())
 }
 
-/// Why the declared module could not serve, and what the operator can do.
 fn module_refusal(failure: ChangeError) -> (StatusCode, String) {
     error!(error = %failure, "Discord module change refused");
     match failure {
@@ -584,8 +577,6 @@ fn module_refusal(failure: ChangeError) -> (StatusCode, String) {
     }
 }
 
-/// The serving module, how the one the settings file declares compares,
-/// and whether its commands are registered.
 async fn module_status(
     State(state): State<DiscordState>,
     headers: HeaderMap,
@@ -860,7 +851,6 @@ fn take_event(
     }
 }
 
-/// Wait until every interaction already taken has been answered.
 async fn answered(interactions: &mut JoinSet<()>) {
     while let Some(finished) = interactions.join_next().await {
         reap(finished);
@@ -977,7 +967,6 @@ async fn run_interaction(
     state.module.invoke(calls, admitted.interaction).await
 }
 
-/// Validate content and components before editing an acknowledgement.
 /// The reply's components as Discord accepts them: at most five action rows
 /// of buttons and select menus within Discord's limits, checked here so a
 /// module that exceeds them is reported instead of discovered as a rejected

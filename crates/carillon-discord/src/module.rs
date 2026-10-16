@@ -408,10 +408,6 @@ impl ModuleFiles {
 
     /// The bytes of the module `source` names, read only one byte past the
     /// size [`prepare`] refuses.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the file cannot be read.
     pub(crate) fn read(&self, source: &Source) -> Result<Vec<u8>> {
         let path = match source {
             Source::Bundled => &self.bundled,
@@ -635,10 +631,6 @@ impl Module {
     /// definitions, then activate. A module that already serves has its
     /// registration repeated when the record does not show it. Only a change
     /// takes the maintenance lock.
-    ///
-    /// # Errors
-    ///
-    /// Returns why the serving module was left in place.
     pub(crate) async fn apply(
         &self,
         source: Source,
@@ -689,10 +681,6 @@ impl Module {
 
     /// Registers the serving definitions unless the record shows Discord
     /// already holds them.
-    ///
-    /// # Errors
-    ///
-    /// Returns why the definitions could not be registered.
     pub(crate) async fn reconcile(&self, app: &DiscordApp) -> Result<Registration, ChangeError> {
         let _changes = self.changes.lock().await;
         let definitions = self.current().definitions.clone();
@@ -731,7 +719,6 @@ impl Module {
         self.current().summary()
     }
 
-    /// Runs one interaction through the module.
     pub(crate) async fn invoke(
         &self,
         calls: InteractionCalls,
@@ -756,10 +743,6 @@ impl Module {
     /// show, or `None` when a settled job's card goes. The module makes no
     /// native call, and what it answers is checked against Discord's embed
     /// limits. A failure shows nothing new; the card keeps what it showed.
-    ///
-    /// # Errors
-    ///
-    /// Returns why the module gave no usable card.
     pub(crate) async fn render_card(&self, request: &CardRequest) -> Result<Option<Embed>> {
         let generation = self.current();
         card(&self.host, &generation.module, request).await
@@ -852,10 +835,6 @@ impl Module {
 
 /// Validates `bytes` as a Discord module this provider can serve, without
 /// serving it: the names of the commands it defines, or why it is unusable.
-///
-/// # Errors
-///
-/// Returns why the module is unusable.
 pub(crate) async fn check(bytes: &[u8]) -> Result<Vec<String>> {
     let generation = prepare(&Host::new()?, bytes, Source::Bundled).await?;
     Ok(command_names(&generation.definitions))
@@ -961,8 +940,6 @@ async fn card(
     }
 }
 
-/// [`Invocation::Card`] by reference, so a card request is serialized
-/// without first being copied.
 #[derive(Serialize)]
 enum InvocationRef<'a> {
     Card(&'a CardRequest),
@@ -1279,7 +1256,6 @@ pub(crate) mod tests {
         }
     }
 
-    /// Commands whose release module defines `names` and replies `reply`.
     pub(crate) async fn release_commands(
         root: &Path,
         names: &[&str],
@@ -1317,7 +1293,7 @@ pub(crate) mod tests {
 
     /// A Discord API that answers command registration with whatever status
     /// `status` holds when the request arrives, with an error body in
-    /// Discord's shape for failures, counting the requests it receives.
+    /// Discord's shape for failures.
     pub(crate) async fn registration_server(
         status: Arc<AtomicU16>,
     ) -> anyhow::Result<(
@@ -1455,7 +1431,7 @@ pub(crate) mod tests {
         let path = root.join("custom.wasm");
         let declared = custom(root, "custom.wasm");
 
-        // A missing or unusable candidate changes nothing, and takes no lock.
+        // A missing or unusable candidate changes nothing.
         let unread: fn(&Declared) -> bool = |declared| matches!(declared, Declared::Unknown { .. });
         let other: fn(&Declared) -> bool = |declared| {
             matches!(
@@ -2267,7 +2243,7 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// Calls that submit through `server`, as the person in channel `400`,
+    /// Calls that submit through `router`, as the person in channel `400`,
     /// with the reactions they show.
     async fn submitting(
         router: Router,

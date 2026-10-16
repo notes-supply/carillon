@@ -622,7 +622,6 @@ fn job(origin: &str, channel: &str, accepted_at: i64, turns: Vec<JobTurn>) -> Jo
     }
 }
 
-/// A job whose message's turn runs, its channel its name.
 fn running(origin: &str, channel: &str, accepted_at: i64, activity: Option<TurnActivity>) -> Job {
     job(
         origin,

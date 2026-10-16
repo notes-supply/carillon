@@ -1833,7 +1833,6 @@ async fn simulate(
     .await
 }
 
-/// Send `message` through deterministic simulation.
 async fn simulate_message(
     state: &DiscordState,
     message: &Value,
