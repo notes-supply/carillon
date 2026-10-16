@@ -2,8 +2,9 @@
 
 Runs Carillon turns on a [T3 Code](https://github.com/pingdotgg/t3code) server
 instead of Pi, as another client of the threads T3's own UI shows. It serves
-the same runtime boundary as Pi through [`@carillon/runtime`](../runtime/README.md)
-and stores the agent defaults in `model-selection.json` in its component directory.
+the same runtime boundary as Pi through [`@carillon/runtime`](../runtime/README.md).
+T3 keeps the conversations; the runtime keeps only the agent defaults
+`/model` chose, in `model-selection.json` in its component directory.
 
 ## Set it up
 
@@ -176,10 +177,11 @@ first turn.
     Carillon's next turn.
   - The agent default is what the agent's new conversations start with, in
     every channel routed to it. `/model` outside a thread changes it. The
-    runtime keeps that choice in its component directory, and the agent's
-    `model` in the settings above applies until then. A choice on an
-    instance the agent no longer runs on, such as a profile's after the
-    agent lost its resources, gives way to the settings' model.
+    runtime keeps that choice in `model-selection.json` in its component
+    directory, and the agent's `model` in the settings above applies until
+    then. A choice on an instance the agent no longer runs on, such as a
+    profile's after the agent lost its resources, gives way to the
+    settings' model.
   - A change is refused while the conversation is busy.
 - **Commands.** `/command` lists what T3's composer offers in the agent's
   workspace and sends an invocation verbatim.
