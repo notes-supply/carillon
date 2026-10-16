@@ -614,7 +614,10 @@ async fn setup_that_ends_unanswered_writes_nothing() -> anyhow::Result<()> {
     let config = fresh(directory.path())?;
     let address = discord(Arc::new(Discord::default())).await?;
     let (result, _) = run(&config, address, &[TOKEN, "1"]).await;
-    assert!(result.is_err());
+    assert_eq!(
+        result.map_err(|error| error.to_string()),
+        Err("no answer to Channels the agent answers in".to_owned())
+    );
     assert!(bot_tokens(&config)?.is_empty());
     assert!(!config.provider_config_path("discord-private")?.exists());
     Ok(())
@@ -908,7 +911,6 @@ async fn owners_sharing_a_name_are_told_apart_and_the_one_chosen_is_admitted() -
 async fn saved_settings_are_offered_for_keeping_only_while_their_bot_signs_in() -> anyhow::Result<()>
 {
     let address = discord(Arc::new(Discord::default())).await?;
-    // Settings for bot `bot`, saved with `token` in the canonical file.
     let installation = |root: &Path, bot: &str, token: &str| -> anyhow::Result<LoadedConfig> {
         let config = crate::config::tests::installation(root, "discord-private", 46_600)?;
         let mut settings = DiscordConfig::read(&config, "discord-private")?;
@@ -919,7 +921,6 @@ async fn saved_settings_are_offered_for_keeping_only_while_their_bot_signs_in() 
     };
     let keep = "Keep the saved Discord bot and settings?";
 
-    // The token signs in as the saved bot: kept as it is.
     let directory = tempfile::tempdir()?;
     let config = installation(directory.path(), "201", TOKEN)?;
     let before = saved_files(&config)?;
@@ -947,13 +948,12 @@ async fn saved_settings_are_offered_for_keeping_only_while_their_bot_signs_in() 
         let config = installation(directory.path(), bot, token)?;
         let before = saved_files(&config)?;
         let (result, shown) = run(&config, address, &[]).await;
-        assert!(result.is_err());
+        assert_eq!(
+            result.map_err(|error| error.to_string()),
+            Err("no answer to Bot token (Enter keeps the saved one):".to_owned())
+        );
         assert!(shown.contains(said), "{shown}");
         assert!(!shown.contains(keep), "{shown}");
-        assert!(
-            shown.contains("Bot token (Enter keeps the saved one):"),
-            "{shown}"
-        );
         assert_eq!(saved_files(&config)?, before);
     }
 

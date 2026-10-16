@@ -47,7 +47,10 @@ async fn a_route_is_saved_only_once_the_bot_may_answer_there_as_its_mode_needs()
     let config = fresh(directory.path())?;
     let address = discord(Arc::new(without_role())).await?;
     let (result, shown) = run(&config, address, &[TOKEN, "1", "2", "2"]).await;
-    assert!(result.is_err());
+    assert_eq!(
+        result.map_err(|error| error.to_string()),
+        Err("no answer to Press Enter to check again.".to_owned())
+    );
     assert!(
         shown.contains(
             "The bot cannot answer in #agent: allow it View Channel in the channel's settings."
