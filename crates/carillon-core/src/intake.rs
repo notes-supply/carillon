@@ -311,7 +311,6 @@ fn late() -> CoreError {
     CoreError::Unavailable("capturing these attachments did not finish in time".into())
 }
 
-/// Core's answer to a capture that failed.
 fn refusal(error: CaptureError) -> CoreError {
     match error {
         CaptureError::Invalid(message) => CoreError::InvalidInput(message),

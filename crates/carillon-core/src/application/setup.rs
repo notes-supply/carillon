@@ -139,8 +139,6 @@ enum Assistant {
     None,
 }
 
-/// Sets up the installation at `home`, asking `questions`.
-///
 /// # Errors
 ///
 /// Returns an error when a question goes unanswered, a provider's program

@@ -330,8 +330,6 @@ fn t3_gets_the_assistant_with_its_profile_and_a_t3_code_agent_per_project() -> a
     Ok(())
 }
 
-/// Models of one T3 instance that share a name are told apart by their
-/// slugs, and the one chosen is the one configured.
 #[test]
 fn models_sharing_a_name_are_told_apart_and_the_one_chosen_is_configured() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
@@ -373,7 +371,6 @@ fn models_sharing_a_name_are_told_apart_and_the_one_chosen_is_configured() -> an
     Ok(())
 }
 
-/// With nothing chosen for T3 to run, setup says so instead of registering it.
 #[test]
 fn t3_with_nothing_to_run_is_refused_or_left_out() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;

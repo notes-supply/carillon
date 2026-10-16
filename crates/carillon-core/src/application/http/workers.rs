@@ -35,16 +35,13 @@ use crate::Lane;
 /// the queue; messages are unaffected.
 pub(super) const OBSERVATION_WORKERS: usize = 4;
 
-/// The workers of one runtime's lane.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub(crate) struct Workers {
-    /// Workers claiming turns.
     pub(crate) claiming: usize,
     /// Retired workers still settling the turn they hold.
     pub(crate) settling: usize,
 }
 
-/// The workers of one runtime, by lane.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub(crate) struct RuntimeWorkers {
     pub(crate) messages: Workers,
@@ -78,12 +75,10 @@ impl Pause {
     }
 }
 
-/// The pause in force now, if any.
 fn in_force(pause: &watch::Sender<Option<Pause>>) -> Option<Pause> {
     pause.borrow().filter(|pause| pause.live(Instant::now()))
 }
 
-/// The workers the registry asks for, by runtime and lane.
 fn wanted(config: &LoadedConfig) -> BTreeMap<(String, Lane), usize> {
     let mut wanted = BTreeMap::new();
     for runtime in config
@@ -183,7 +178,6 @@ impl Supervisor {
         self.publish(config);
     }
 
-    /// Tells who asks how every runtime's workers stand.
     fn publish(&self, config: &Arc<LoadedConfig>) {
         let mut runtimes = wanted(config)
             .into_keys()

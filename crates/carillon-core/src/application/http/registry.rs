@@ -39,7 +39,6 @@ pub(crate) struct Difference {
     pub(crate) restart: Vec<String>,
 }
 
-/// One runtime as core serves it.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub(crate) struct ServingRuntime {
     pub(crate) id: String,
@@ -50,7 +49,6 @@ pub(crate) struct ServingRuntime {
     pub(crate) workers: RuntimeWorkers,
 }
 
-/// The registry serving, and how the file differs from it.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct RegistryStatus {
     pub(crate) runtimes: Vec<ServingRuntime>,
@@ -65,8 +63,9 @@ pub(crate) struct RegistryStatus {
 pub(crate) enum FileState {
     /// It reads as a registry; these fields differ from what serves.
     Read(Difference),
-    /// It does not read as a registry.
-    Invalid { error: String },
+    Invalid {
+        error: String,
+    },
 }
 
 /// A completed apply: the fields it changed, and the runtimes as they serve.
@@ -79,7 +78,6 @@ pub(crate) struct Applied {
 }
 
 impl ServingRuntime {
-    /// Each runtime of the serving registry, with its workers.
     pub(super) fn all(config: &LoadedConfig, census: &Census) -> Vec<Self> {
         config
             .value
@@ -208,7 +206,6 @@ impl Difference {
 /// Why an apply left the serving registry in place.
 #[derive(Debug)]
 pub(super) enum Refusal {
-    /// The file is not a valid registry.
     Invalid(anyhow::Error),
     /// The file changes fields only a restart applies.
     Restart(Difference),
@@ -216,7 +213,6 @@ pub(super) enum Refusal {
     Facts(anyhow::Error),
 }
 
-/// The registry that serves, and the file it came from.
 pub(super) struct Registry {
     path: PathBuf,
     serving: watch::Sender<Arc<LoadedConfig>>,
@@ -243,7 +239,6 @@ impl Registry {
         self.serving.subscribe()
     }
 
-    /// How the file differs from what serves now.
     /// # Errors
     /// Returns why the file is not a valid registry.
     pub(super) fn compare(&self) -> Result<Difference> {

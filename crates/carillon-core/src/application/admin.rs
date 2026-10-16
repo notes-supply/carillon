@@ -167,7 +167,6 @@ pub(super) fn initialize(
 /// assistant, with the installation's resources.
 pub(super) const ASSISTANT: &str = "assistant";
 
-/// Carillon's assistant on `runtime`, working in `workspace`.
 #[must_use]
 pub(super) fn assistant(runtime: Runtime, workspace: &Path) -> AgentConfig {
     AgentConfig {
@@ -247,7 +246,6 @@ fn default_providers(
     ])
 }
 
-/// The bundled `runtime` as the registry lists it, on `port`, with `token`.
 fn runtime_provider(runtime: Runtime, port: u16, token: &str) -> Result<Provider> {
     Ok(Provider {
         id: runtime.id().to_owned(),
@@ -278,7 +276,6 @@ fn create_installation_directories(root: &Path, runtime: Runtime) -> Result<()> 
     create_runtime_directories(root, runtime)
 }
 
-/// The directories the bundled `runtime` keeps its state in.
 fn create_runtime_directories(root: &Path, runtime: Runtime) -> Result<()> {
     private_directory(&root.join("state/components").join(runtime.id()))?;
     // Pi keeps its sign-in and settings apart from the owner's ~/.pi.
@@ -288,7 +285,6 @@ fn create_runtime_directories(root: &Path, runtime: Runtime) -> Result<()> {
     Ok(())
 }
 
-/// Creates `path`, with any missing parent, readable by the owner alone.
 fn private_directory(path: &Path) -> Result<()> {
     fs::create_dir_all(path)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
@@ -586,7 +582,6 @@ fn ensure_stopped(config: &LoadedConfig) -> Result<ServiceLock> {
     Ok(lock)
 }
 
-/// Archive `directory` below `root`, leaving out the `scratch` directories.
 fn append_directory<W: std::io::Write>(
     archive: &mut Builder<W>,
     root: &Path,
@@ -1316,7 +1311,6 @@ mod tests {
         Ok(())
     }
 
-    /// A core over an initialized installation, as the service opens it.
     fn installed_core(config: &LoadedConfig) -> Result<crate::Core> {
         use carillon_installation::config::AttachmentLimits;
 

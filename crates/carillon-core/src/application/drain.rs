@@ -23,7 +23,6 @@ use super::{
     operations::{Action, Services, operator_url},
 };
 
-/// How a drain is paced.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Pace {
     /// How long core keeps the pause should this command stop renewing it.

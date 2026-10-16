@@ -354,7 +354,6 @@ async fn provider(home: &Path, id: &str, action: ProviderAction) -> Result<()> {
     Ok(())
 }
 
-/// Shows the registry core serves, or has core serve `carillon.toml`.
 async fn registry(config: &LoadedConfig, action: Option<RegistryAction>) -> Result<()> {
     let Some(RegistryAction::Apply) = action else {
         print_registry(&registry_status(config).await?);
@@ -519,7 +518,6 @@ async fn print_inspection(config: &LoadedConfig, turn_id: &str) -> Result<()> {
     print_pretty(&inspection)
 }
 
-/// Each runtime as core serves it.
 fn print_runtimes(applied: &Applied) {
     for runtime in &applied.runtimes {
         print_runtime(runtime);
@@ -599,8 +597,6 @@ mod tests {
 
     use anyhow::{Context, Result};
 
-    /// A provider command that writes the installation's files runs under
-    /// its maintenance lock, and never while another operation holds it.
     #[test]
     fn a_locked_provider_command_runs_only_under_the_maintenance_lock() -> Result<()> {
         use carillon_installation::maintenance::MaintenanceLock;

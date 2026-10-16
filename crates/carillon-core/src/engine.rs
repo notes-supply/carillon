@@ -548,7 +548,6 @@ impl Core {
         Ok(WorkerStep::Advanced)
     }
 
-    /// Records that a claimed turn did not complete; see [`Database::interrupt_turn`].
     async fn interrupt(
         &self,
         turn: &ClaimedTurn,
@@ -677,7 +676,6 @@ impl Core {
         self.database.recent_turns(event_id, limit)
     }
 
-    /// Count execution states.
     /// # Errors
     /// Returns storage errors.
     pub fn turn_counts(&self) -> Result<StateCounts> {
@@ -820,7 +818,6 @@ pub enum WorkerStep {
     Backoff,
 }
 
-/// How a turn execution attempt failed.
 #[derive(Debug)]
 pub enum TurnFailure {
     /// The runtime provably never received the turn; running it again is safe.
@@ -839,7 +836,6 @@ pub enum TurnFailure {
 /// What a runtime answered when it failed a turn.
 #[derive(Debug)]
 pub struct Reported {
-    /// The status it answered with.
     pub status: u16,
     /// Why, in words phrased for the conversation and safe to display, when
     /// the runtime gave such an explanation.

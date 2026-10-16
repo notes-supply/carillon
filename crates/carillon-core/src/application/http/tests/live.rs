@@ -95,7 +95,6 @@ impl HeldRuntime {
         lock(&self.given).clone()
     }
 
-    /// Answers whatever it holds until core has `counts`.
     pub(super) async fn drain(&self, state: &AppState, wanted: (u64, u64, u64)) -> Result<()> {
         tokio::time::timeout(Duration::from_secs(10), async {
             while counts(state)? != wanted {
@@ -142,7 +141,6 @@ pub(super) fn edit(fixture: &mut Fixture, change: impl FnOnce(&mut Provider)) ->
     write(&fixture.config)
 }
 
-/// A handler's answer, or its refusal as an error.
 pub(super) fn ok<T>(answer: Result<T, ApiError>) -> Result<T> {
     answer.map_err(|refusal| anyhow!("{}: {}", refusal.status, refusal.message))
 }
@@ -159,7 +157,6 @@ pub(super) async fn apply(state: &AppState) -> Result<Applied, ApiError> {
         .map(|Json(applied)| applied)
 }
 
-/// Submits a message of `conversation` through the shared state.
 pub(super) async fn submit(
     state: &AppState,
     input: &str,

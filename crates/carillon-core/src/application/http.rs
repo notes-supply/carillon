@@ -56,7 +56,6 @@ struct AppState {
 }
 
 impl AppState {
-    /// The serving registry, read once by each request.
     fn config(&self) -> Arc<LoadedConfig> {
         self.registry.current()
     }
@@ -202,7 +201,6 @@ pub(super) async fn serve(path: PathBuf, config: LoadedConfig) -> Result<()> {
     Ok(())
 }
 
-/// Core's provider and operator API over `state`.
 fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))

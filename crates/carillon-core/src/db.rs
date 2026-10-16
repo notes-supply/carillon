@@ -4,7 +4,7 @@
 //! ```text
 //! turn:      queued -> running -> completed
 //!                   ^         \-> interrupted
-//!                   \--------- running (runtime provably never reached)
+//!                   \--------- running
 //!
 //! delivery:  pending -> delivering -> delivered
 //!                                 \-> uncertain (ack lost or claim abandoned)
@@ -93,7 +93,6 @@ pub struct JobPage {
     pub next: Option<String>,
 }
 
-/// One earlier turn's captured files.
 #[derive(Clone, Debug)]
 pub(crate) struct TurnFiles {
     pub(crate) turn_id: String,
@@ -239,7 +238,6 @@ impl Database {
         Ok(captures)
     }
 
-    /// Whether a committed turn references this capture.
     pub(crate) fn capture_referenced(&self, capture: &str) -> Result<bool> {
         Ok(self.connect()?.query_row(
             "SELECT EXISTS(SELECT 1 FROM turn_attachments WHERE capture_id = ?1)",
@@ -1642,7 +1640,6 @@ mod tests {
         )
     }
 
-    /// A runtime's final report that counted `calls` calls.
     fn report(calls: u32) -> Result<TurnActivity> {
         Ok(serde_json::from_value(json!({
             "phase": "model",
@@ -1747,7 +1744,6 @@ mod tests {
         );
         assert!(parent.finished_at >= Some(continued.origin.accepted_at));
         assert_eq!(parent.activity, Some(report(2)?));
-        // Sends the next answer, as `outcome` says it went.
         let send = |outcome| -> Result<Delivery> {
             let delivery = database
                 .claim_delivery("discord", "instance")?

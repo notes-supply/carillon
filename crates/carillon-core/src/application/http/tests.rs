@@ -33,7 +33,6 @@ fn installation(root: &Path) -> Result<Fixture> {
     use carillon_installation::config::{AgentConfig, Config, CoreConfig, hash_token};
 
     // Core tests use opaque provider IDs, without a Discord or Pi installation.
-    // Native session state belongs to the runtime.
     let resources = root.join("resources");
     fs::create_dir(&resources)?;
     fs::write(resources.join("SYSTEM.md"), "test instructions")?;
@@ -1820,7 +1819,6 @@ async fn a_claim_waiting_for_the_database_writer_is_not_made_once_stopping() -> 
     Ok(())
 }
 
-/// A runtime serving `/v1/turns` with a fixed failure response, counting calls.
 async fn failing_runtime(
     state: &Fixture,
     status: StatusCode,

@@ -11,7 +11,6 @@ use carillon_protocol::model::{StagedAttachments, StagedFile};
 
 use super::{Cancel, CaptureError, CapturedFile, check, reconcile, store, validate_store};
 
-/// Open the staged batch of `interface` and capture it.
 fn capture(
     data: &Path,
     interface: &str,
@@ -25,7 +24,6 @@ fn staging(data: &Path) -> PathBuf {
     data.join("components/interface/incoming")
 }
 
-/// Stage `files` as batch `batch` of interface `interface`.
 fn stage(data: &Path, batch: &str, files: &[&[u8]]) -> Result<StagedAttachments> {
     let directory = staging(data).join(batch);
     fs::create_dir_all(&directory)?;

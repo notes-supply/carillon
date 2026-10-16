@@ -510,8 +510,6 @@ mod tests {
         Ok(())
     }
 
-    /// A core configured at `listen`, answering an apply the way `answer`
-    /// says and counting the requests it receives.
     async fn applying_core(
         answer: Option<&'static [u8]>,
     ) -> Result<(
