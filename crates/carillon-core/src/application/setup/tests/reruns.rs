@@ -68,6 +68,10 @@ fn a_pi_assistant_moves_to_t3_by_resources_and_none_drops_it() -> anyhow::Result
         project.workspace
     );
     sign_in_to_pi(&home, true, &mut Unasked)?;
+    std::fs::write(
+        home.join("providers/runtime-t3.toml"),
+        "[agents.t3-notes]\nproject_id = 'notes'\n",
+    )?;
     agents(&home, &options(), Assistant::None, &[&project])?;
     let loaded = LoadedConfig::load(&path)?;
     assert_eq!(loaded.value.agents.len(), 1);

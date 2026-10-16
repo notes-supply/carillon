@@ -213,6 +213,9 @@ Pi signs in through its own interface; the T3 runtime makes the assistant's
 profiles, an agent for each T3 project T3 Code channels work in, and their
 settings; and the Discord provider learns the bot from its token and offers
 servers, channels and people by name, asking who answers in each channel.
+Setup reruns retain a plain T3 agent's ID by its saved T3 project ID. New
+projects receive IDs that avoid both existing agents and saved project bindings,
+so keeping a Discord route cannot silently move it to a different project.
 The user target wants every bundled runtime's unit; one the registry doesn't
 list ends at once, as a disabled one does.
 

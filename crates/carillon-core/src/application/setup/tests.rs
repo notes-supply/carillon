@@ -539,4 +539,5 @@ fn equally_named_agents_get_distinct_model_prompts_and_their_chosen_models() -> 
     Ok(())
 }
 
+mod projects;
 mod reruns;

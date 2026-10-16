@@ -7,6 +7,7 @@
 //! order. A rerun keeps what is already set up when asked to.
 
 use std::{
+    collections::BTreeMap,
     io::Write as _,
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
@@ -564,6 +565,7 @@ fn agents<'a>(
         .context("the installation's agents were not changed")?;
     register_runtime(&config_path, runtime)?;
     let config: Config = toml::from_str(&std::fs::read_to_string(&config_path)?)?;
+    let projects = saved_projects(home)?;
     let existing = config.agents.iter().find(|agent| agent.resources.is_some());
     let mut registry: Vec<AgentConfig> = config
         .agents
@@ -584,8 +586,7 @@ fn agents<'a>(
         registry.push(agent);
     }
     for &project in code {
-        let taken: Vec<&str> = registry.iter().map(|agent| agent.id.as_str()).collect();
-        let id = unique(&taken, &format!("t3-{}", slug(&project.title)));
+        let id = project_agent_id(&config.agents, &registry, &projects, project);
         let agent = AgentConfig {
             id,
             name: format!("T3 Code · {}", project.title),
@@ -601,6 +602,52 @@ fn agents<'a>(
     }
     set_agents(&config_path, registry)?;
     Ok(t3)
+}
+
+#[derive(Deserialize)]
+struct ProjectSettings {
+    project_id: String,
+}
+
+fn saved_projects(home: &Path) -> Result<BTreeMap<String, ProjectSettings>> {
+    #[derive(Deserialize)]
+    struct Settings {
+        #[serde(default)]
+        agents: BTreeMap<String, ProjectSettings>,
+    }
+    let path = home.join("providers/runtime-t3.toml");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
+    let settings: Settings =
+        toml::from_str(&text).with_context(|| format!("read projects from {}", path.display()))?;
+    Ok(settings.agents)
+}
+
+fn project_agent_id(
+    existing: &[AgentConfig],
+    registry: &[AgentConfig],
+    projects: &BTreeMap<String, ProjectSettings>,
+    project: &Project,
+) -> String {
+    if let Some(agent) = existing.iter().find(|agent| {
+        agent.runtime == Runtime::T3.id()
+            && agent.resources.is_none()
+            && projects
+                .get(&agent.id)
+                .is_some_and(|saved| saved.project_id == project.id)
+    }) {
+        return agent.id.clone();
+    }
+    let taken: Vec<&str> = existing
+        .iter()
+        .chain(registry)
+        .map(|agent| agent.id.as_str())
+        .chain(projects.keys().map(String::as_str))
+        .collect();
+    unique(&taken, &format!("t3-{}", slug(&project.title)))
 }
 
 /// `base`, or the first of `base-2`, `base-3` and so on not in `taken`.
