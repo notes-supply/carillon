@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn runtime_cutover_interrupts_pinned_conversations() -> Result<()> {
+async fn runtime_cutover_resumes_the_same_conversation_after_the_notice() -> Result<()> {
     let directory = tempdir()?;
     let mut state = installation(directory.path())?;
     let mut replacement = state
@@ -19,7 +19,7 @@ async fn runtime_cutover_interrupts_pinned_conversations() -> Result<()> {
     state.core.database = Database::open(&state.config.value.data_dir.join("carillon.sqlite3"))?;
     assert_eq!(configured(&state).core.recover_interrupted()?, 1);
     let second = accept(&state, "two", "conversation").await?;
-    let fresh = accept(&state, "fresh", "new-conversation").await?;
+    let fresh = accept(&state, "fresh", "conversation").await?;
     run_next_turn(&state, "replacement", async |_, _, request| {
         assert_eq!(request.correlation_id, fresh.turn_id);
         Ok(completed(request))
@@ -39,7 +39,11 @@ async fn runtime_cutover_interrupts_pinned_conversations() -> Result<()> {
             .context("missing cutover notice")?;
         assert_eq!(
             notice.content,
-            "This conversation ran on test-runtime, which no longer runs test-agent. Start a new conversation."
+            if receipt.turn_id == first.turn_id {
+                "This conversation ran on test-runtime, which no longer runs test-agent."
+            } else {
+                "This conversation ran on test-runtime, which no longer runs test-agent. Your next message starts a new conversation on replacement."
+            }
         );
     }
     let counts = state.core.database.turn_counts()?;
@@ -80,7 +84,7 @@ async fn runtime_cutover_observation_explains_unreported_work_and_possible_effec
         .context("missing observation refusal")?;
     assert_eq!(
         notice.content,
-        "This conversation ran on test-runtime, which no longer runs test-agent. Start a new conversation.\nWork already started there will not be reported here. Actions already taken may have had effects."
+        "This conversation ran on test-runtime, which no longer runs test-agent.\nWork already started there will not be reported here. Actions already taken may have had effects."
     );
     assert_eq!(state.core.database.turn_counts()?.interrupted, 1);
     Ok(())
@@ -125,11 +129,11 @@ async fn startup_recovers_running_messages_once_and_settles_stranded_observation
         ),
         (
             queued.turn_id,
-            "This conversation ran on test-runtime, which no longer runs test-agent. Start a new conversation.",
+            "This conversation ran on test-runtime, which no longer runs test-agent.",
         ),
         (
             observation.turn_id,
-            "This conversation ran on test-runtime, which no longer runs test-agent. Start a new conversation.\nWork already started there will not be reported here. Actions already taken may have had effects.",
+            "This conversation ran on test-runtime, which no longer runs test-agent.\nWork already started there will not be reported here. Actions already taken may have had effects.",
         ),
     ] {
         let notice = core
@@ -159,7 +163,7 @@ async fn removed_agent_messages_keep_the_notice_and_original_receipt() -> Result
     assert_eq!(notice.turn_state, TurnState::Interrupted);
     assert_eq!(
         notice.content,
-        "This conversation ran on test-runtime, which no longer runs test-agent. Start a new conversation."
+        "This conversation ran on test-runtime, which no longer runs test-agent."
     );
     for (event_id, turn_id) in [("first", original.turn_id), ("later", later.turn_id)] {
         let duplicate = accept_for(&state, "test-agent", event_id, "conversation").await?;
@@ -211,13 +215,14 @@ async fn stranded_conversation_accepts_http_input_without_its_former_runtime() -
 
     let directory = tempdir()?;
     let mut state = installation(directory.path())?;
-    let original = accept(&state, "original", "pinned").await?;
+    let original = accept(&state, "original", "pinned-disabled").await?;
+    accept(&state, "other-original", "pinned-removed").await?;
     let mut replacement = state.config.value.providers[1].clone();
     replacement.id = "replacement".to_owned();
     state.config.value.providers.push(replacement);
     state.config.value.agents[0].runtime = "replacement".to_owned();
     state.config.value.providers[1].enabled = false;
-    assert_eq!(configured(&state).core.recover_interrupted()?, 1);
+    assert_eq!(configured(&state).core.recover_interrupted()?, 2);
     for id in ["disabled", "removed"] {
         let router = Router::new()
             .route("/v1/events", post(accept_event))
@@ -234,7 +239,7 @@ async fn stranded_conversation_accepts_http_input_without_its_former_runtime() -
                         event_id: id.to_owned(),
                         agent_id: "test-agent".to_owned(),
                         user_id: "test-user".to_owned(),
-                        audience_id: "pinned".to_owned(),
+                        audience_id: format!("pinned-{id}"),
                         delivery_target_id: "target".to_owned(),
                         feedback_target_id: "feedback".to_owned(),
                         content: "new input".to_owned(),
@@ -255,10 +260,14 @@ async fn stranded_conversation_accepts_http_input_without_its_former_runtime() -
         assert_eq!(notice.turn_state, TurnState::Interrupted);
         assert_eq!(
             notice.content,
-            "This conversation ran on test-runtime, which no longer runs test-agent. Start a new conversation."
+            "This conversation ran on test-runtime, which no longer runs test-agent. Your next message starts a new conversation on replacement."
         );
         accept(&state, &format!("unrelated-{id}"), "unrelated").await?;
-        assert!(accept(&state, "original", "pinned").await?.duplicate);
+        assert!(
+            accept(&state, "original", "pinned-disabled")
+                .await?
+                .duplicate
+        );
         assert_eq!(
             state
                 .core

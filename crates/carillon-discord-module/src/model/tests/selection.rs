@@ -649,13 +649,13 @@ fn unavailable_settings_and_unknown_controls_are_reported() -> Result<(), String
 }
 
 #[test]
-fn stranded_model_settings_only_tell_people_to_start_a_new_conversation() -> Result<(), String> {
+fn stranded_model_settings_relay_the_runtime_switch_explanation() -> Result<(), String> {
     let mut host = runtime(true);
-    host.failure = Some("This conversation ran on old-runtime, which no longer runs assistant. Start a new conversation.".to_owned());
+    host.failure = Some("This conversation ran on old-runtime, which no longer runs assistant. Your next message starts a new conversation on new-runtime.".to_owned());
     let reply = expect_reply(interact(&mut host, &command(true)))?;
     assert_eq!(
         reply.content,
-        "Model settings are unavailable: This conversation ran on old-runtime, which no longer runs assistant. Start a new conversation."
+        "Model settings are unavailable: This conversation ran on old-runtime, which no longer runs assistant. Your next message starts a new conversation on new-runtime."
     );
     assert!(reply.components.is_empty());
     Ok(())

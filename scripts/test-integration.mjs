@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { testChannelCutover } from "./test-runtime-cutover.mjs";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
@@ -1241,10 +1242,7 @@ async function testActivityVisibility() {
 }
 
 /**
- * The T3 runtime against the fake T3 server: one run calls a tool and
- * answers, another fails before any call. New conversations run on T3 while
- * the registry names it the agent's runtime; both reports reach core's
- * record of their jobs and the Discord provider's work cards.
+ * T3 tool calls and failures reach core's jobs and Discord's work cards.
  */
 async function testT3ActivityThroughDelivery() {
   const { startFakeT3 } = await import(
@@ -1322,7 +1320,7 @@ effort = "low"
       return found;
     };
 
-    // Channel 302 opens a new conversation per message.
+    await testChannelCutover({ fake, simulateRoute, opened });
     const answered = simulateRoute("t3-activity", "302", null, "check the build");
     const first = await opened();
     const call = fake.tool(first.thread, first.run, {

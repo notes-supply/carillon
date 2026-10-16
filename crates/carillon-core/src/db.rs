@@ -1082,7 +1082,7 @@ fn conversation_runtime(
         .query_row(
             "SELECT runtime_id FROM turns
          WHERE interface_id = ?1 AND agent_id = ?2 AND audience_id = ?3
-         ORDER BY acceptance_sequence LIMIT 1",
+         ORDER BY acceptance_sequence DESC LIMIT 1",
             params![interface_id, agent_id, audience_id],
             |row| row.get(0),
         )
@@ -1271,64 +1271,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn acceptance_pins_conversations_and_rejects_owner_changes() -> Result<()> {
-        let directory = tempdir()?;
-        let database = Database::create(&directory.path().join("state.sqlite3"))?;
-        assert_eq!(
-            database.conversation_runtime("discord", "agent", "conversation")?,
-            None
-        );
-        accept(&database, "one", "conversation")?;
-        assert_eq!(
-            database
-                .conversation_runtime("discord", "agent", "conversation")?
-                .as_deref(),
-            Some("runtime")
-        );
-        assert_eq!(
-            database.conversation_runtime("other-interface", "agent", "conversation")?,
-            None
-        );
-        assert_eq!(
-            database.conversation_runtime("discord", "other-agent", "conversation")?,
-            None
-        );
-        let second = event("two", "conversation");
-        crate::assert_refused(
-            database.accept_event(
-                "discord",
-                "replacement",
-                &second,
-                Admission::Queued {
-                    providers: &json!([]),
-                    resource_snapshot_id: "resources",
-                },
-                None,
-            ),
-            "conversation is owned by runtime runtime, not replacement",
-        )?;
-        assert!(database.event_receipt("discord", "two")?.is_none());
-        assert_eq!(database.recent_turns(None, 10)?.len(), 1);
-        // A stale runtime selection must not prevent recovery of an existing receipt.
-        assert!(
-            database
-                .accept_event(
-                    "discord",
-                    "replacement",
-                    &event("one", "conversation"),
-                    Admission::Queued {
-                        providers: &json!([]),
-                        resource_snapshot_id: "resources",
-                    },
-                    None
-                )?
-                .duplicate
-        );
-        accept(&database, "two", "conversation")?;
-        assert_eq!(database.recent_turns(None, 10)?.len(), 2);
-        Ok(())
-    }
+    mod ownership;
 
     #[test]
     fn a_repeated_event_returns_its_first_queued_turn() -> Result<()> {

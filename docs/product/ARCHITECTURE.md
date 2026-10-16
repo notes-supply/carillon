@@ -17,7 +17,7 @@ share:
   files;
 - the agents conversations belong to, each with the runtime its new
   conversations start on;
-- conversations and the runtime each one is pinned to;
+- conversations and the runtime of each one's latest turn;
 - turns (queued, running, completed, interrupted) and the observations core
   queues when a runtime says delegated work will report later;
 - delivery intents and their outcomes;
@@ -58,9 +58,13 @@ retired worker settles its turn before it ends.
 Agent assignments are fixed for core's lifetime. If an agent moves to
 another runtime or is removed at restart, further messages in its old
 conversations are accepted directly as interrupted turns. The receipt,
-interruption and explanation's delivery intent commit together. Neither
+interruption and explanation's delivery intent commit together. For a moved
+agent, that settled turn records the current runtime as owner. The next message
+in the same conversation starts a fresh native conversation there. Removed
+agents have no new runtime, so further messages remain stranded. Neither
 admission nor delivery needs the former runtime enabled or configured.
-Model and command queries return the same explanation as a conflict.
+Model and command queries return the explanation as a conflict without
+changing ownership. Startup settlement also preserves the former owner.
 New conversations use the agent's current runtime.
 
 A turn whose outcome can't be proved, or that its runtime reports as failed,

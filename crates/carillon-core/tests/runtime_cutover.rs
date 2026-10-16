@@ -60,8 +60,7 @@ fn interface() -> SelectedProvider {
     }
 }
 
-const EXPLANATION: &str =
-    "This conversation ran on old, which no longer runs agent. Start a new conversation.";
+const EXPLANATION: &str = "This conversation ran on old, which no longer runs agent.";
 
 async fn queued_cutover(agent_runtime: Option<&str>, former_enabled: Option<bool>) -> Result<()> {
     let directory = tempfile::tempdir()?;
@@ -167,14 +166,22 @@ async fn stranded_admission(former_enabled: Option<bool>) -> Result<()> {
         .inspect_turn(&receipt.turn_id)?
         .context("missing turn")?;
     assert_eq!(turn.state, TurnState::Interrupted);
-    assert_eq!(turn.error.as_deref(), Some(EXPLANATION));
+    assert_eq!(
+        turn.error.as_deref(),
+        Some(
+            "This conversation ran on old, which no longer runs agent. Your next message starts a new conversation on new."
+        )
+    );
     assert_eq!(turn.providers, original.providers);
     assert_eq!(turn.resource_snapshot_id, original.resource_snapshot_id);
     let notice = core
         .claim_turn_delivery("discord", "instance", &receipt.turn_id)?
         .context("missing immediate notice")?;
     assert_eq!(notice.turn_state, TurnState::Interrupted);
-    assert_eq!(notice.content, EXPLANATION);
+    assert_eq!(
+        notice.content,
+        "This conversation ran on old, which no longer runs agent. Your next message starts a new conversation on new."
+    );
     core.storage_settled().await;
     Ok(())
 }
@@ -225,16 +232,12 @@ async fn concurrent_stranded_duplicates_return_the_first_receipt() -> Result<()>
 }
 
 #[tokio::test]
-async fn changed_agent_runtime_explains_old_conversations_without_dispatching() -> Result<()> {
+async fn moved_agent_strands_once_then_runs_the_same_channel_on_its_current_runtime() -> Result<()>
+{
     let directory = tempfile::tempdir()?;
     let mut options = options(directory.path());
     let core = Core::create(options.clone())?;
-    let interface = SelectedProvider {
-        id: "discord".to_owned(),
-        role: "interface".to_owned(),
-        version: "test".to_owned(),
-        url: "in-process".to_owned(),
-    };
+    let interface = interface();
     let event = event();
     core.accept(&interface, &event).await?;
     let stopping = CancellationToken::new();
@@ -263,23 +266,25 @@ async fn changed_agent_runtime_explains_old_conversations_without_dispatching() 
     };
     core.accept(&interface, &later).await?;
     assert!(core.accept(&interface, &queued).await?.duplicate);
-    for lane in [Lane::Messages, Lane::Observations] {
+    for runtime in ["old", "new"] {
         assert_eq!(
-            core.run_next("old", lane, &stopping, async |_| {
-                unreachable!("old runtime received a turn after cutover")
+            core.run_next(runtime, Lane::Messages, &stopping, async |_| {
+                unreachable!("the notice must not dispatch to either runtime")
             })
             .await?,
             WorkerStep::Idle
         );
     }
-    let explanation =
-        "This conversation ran on old, which no longer runs agent. Start a new conversation.";
-    let observation = "This conversation ran on old, which no longer runs agent. Start a new conversation.\nWork already started there will not be reported here. Actions already taken may have had effects.";
+    let explanation = "This conversation ran on old, which no longer runs agent.";
+    let observation = "This conversation ran on old, which no longer runs agent.\nWork already started there will not be reported here. Actions already taken may have had effects.";
     for (state, content) in [
         (TurnState::Completed, "answer"),
         (TurnState::Interrupted, observation),
         (TurnState::Interrupted, explanation),
-        (TurnState::Interrupted, explanation),
+        (
+            TurnState::Interrupted,
+            "This conversation ran on old, which no longer runs agent. Your next message starts a new conversation on new.",
+        ),
     ] {
         let delivery = core
             .claim_delivery("discord", "instance")?
@@ -296,29 +301,80 @@ async fn changed_agent_runtime_explains_old_conversations_without_dispatching() 
             },
         )?;
     }
-    let fresh = core
-        .accept(
-            &interface,
-            &ExternalEvent {
-                event_id: "fresh".to_owned(),
-                audience_id: "fresh".to_owned(),
-                ..event
-            },
-        )
-        .await?;
-    assert_eq!(
-        core.run_next("new", Lane::Messages, &stopping, async |request| Ok(
-            answer(request)
-        ))
-        .await?,
-        WorkerStep::Advanced
-    );
-    assert_eq!(
-        core.inspect_turn(&fresh.turn_id)?
-            .context("missing fresh turn")?
-            .state,
-        TurnState::Completed
-    );
+    for event_id in ["next", "still-new"] {
+        let receipt = core
+            .accept(
+                &interface,
+                &ExternalEvent {
+                    event_id: event_id.to_owned(),
+                    ..event.clone()
+                },
+            )
+            .await?;
+        assert_eq!(receipt.state, TurnState::Queued);
+        assert_eq!(
+            core.run_next("new", Lane::Messages, &stopping, async |request| {
+                assert_eq!(request.correlation_id, receipt.turn_id);
+                assert_eq!(request.audience_id, event.audience_id);
+                Ok(answer(request))
+            })
+            .await?,
+            WorkerStep::Advanced
+        );
+        assert_eq!(
+            core.inspect_turn(&receipt.turn_id)?
+                .context("missing turn")?
+                .state,
+            TurnState::Completed
+        );
+    }
+    let duplicate = core.accept(&interface, &later).await?;
+    assert!(duplicate.duplicate);
+    assert_eq!(duplicate.state, TurnState::Interrupted);
+    core.storage_settled().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn removed_agent_stays_stranded_in_the_same_channel() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let mut options = options(directory.path());
+    let core = Core::create(options.clone())?;
+    core.accept(&interface(), &event()).await?;
+    core.storage_settled().await;
+    drop(core);
+    options.agents.clear();
+    let core = Core::open(options)?;
+    core.recover_interrupted()?;
+    for event_id in ["notice", "still-stranded"] {
+        let receipt = core
+            .accept(
+                &interface(),
+                &ExternalEvent {
+                    event_id: event_id.to_owned(),
+                    ..event()
+                },
+            )
+            .await?;
+        assert_eq!(receipt.state, TurnState::Interrupted);
+        let notice = core
+            .claim_turn_delivery("discord", "instance", &receipt.turn_id)?
+            .context("missing removed-agent notice")?;
+        assert!(notice.content.contains("no longer runs agent"));
+        assert!(!notice.content.contains("Your next message"));
+        for runtime in ["old", "new"] {
+            assert_eq!(
+                core.run_next(
+                    runtime,
+                    Lane::Messages,
+                    &CancellationToken::new(),
+                    async |_| { unreachable!("removed agent received work") }
+                )
+                .await?,
+                WorkerStep::Idle
+            );
+        }
+    }
     core.storage_settled().await;
     Ok(())
 }

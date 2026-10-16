@@ -69,14 +69,20 @@ async fn stranded_attachments_keep_the_notice_and_receipt_without_capturing() ->
         assert_eq!(notice.feedback_target_id, attached.feedback_target_id);
         assert_eq!(
             notice.content,
-            "This conversation ran on test-runtime, which no longer runs test-agent. Start a new conversation."
+            if removed {
+                "This conversation ran on test-runtime, which no longer runs test-agent."
+            } else {
+                "This conversation ran on test-runtime, which no longer runs test-agent. Your next message starts a new conversation on replacement."
+            }
         );
-        let text = accept_for(&state, "test-agent", "text", "files").await?;
-        let text_notice = state
-            .core
-            .claim_turn_delivery("test-interface", "instance", &text.turn_id)?
-            .context("missing text notice")?;
-        assert_eq!(text_notice.content, notice.content);
+        if removed {
+            let text = accept_for(&state, "test-agent", "text", "files").await?;
+            let text_notice = state
+                .core
+                .claim_turn_delivery("test-interface", "instance", &text.turn_id)?
+                .context("missing text notice")?;
+            assert_eq!(text_notice.content, notice.content);
+        }
 
         fs::remove_dir_all(staging(&state))?;
         for (event_id, turn_id) in [
@@ -97,7 +103,10 @@ async fn stranded_attachments_keep_the_notice_and_receipt_without_capturing() ->
         }
         assert!(!state.config.value.data_dir.join("attachments").exists());
         assert_eq!(state.core.delivery_counts()?.pending, 0);
-        assert_eq!(state.core.delivery_counts()?.active, 2);
+        assert_eq!(
+            state.core.delivery_counts()?.active,
+            if removed { 2 } else { 1 }
+        );
     }
     Ok(())
 }
@@ -174,7 +183,7 @@ async fn runtime_cutover_precedes_attachment_validation() -> Result<()> {
         .context("missing runtime cutover notice")?;
     assert_eq!(
         notice.content,
-        "This conversation ran on test-runtime, which no longer runs test-agent. Start a new conversation."
+        "This conversation ran on test-runtime, which no longer runs test-agent."
     );
     Ok(())
 }

@@ -246,6 +246,11 @@ async fn model_and_command_calls_refuse_stranded_conversations_before_transport(
     let directory = tempdir()?;
     let (mut state, mut received, mut services) = model_fixture(directory.path()).await?;
     for availability in ["enabled", "disabled", "removed", "removed agent"] {
+        let explanation = if availability == "removed agent" {
+            "This conversation ran on test-runtime, which no longer runs test-agent."
+        } else {
+            "This conversation ran on test-runtime, which no longer runs test-agent. Your next message starts a new conversation on replacement."
+        };
         match availability {
             "disabled" => state.config.value.providers[1].enabled = false,
             "removed" => {
@@ -260,20 +265,14 @@ async fn model_and_command_calls_refuse_stranded_conversations_before_transport(
         ] {
             let (status, body) = model_call(&state, "GET", uri, true, None).await?;
             assert_eq!(status, StatusCode::CONFLICT, "{availability} {uri}");
-            assert_eq!(
-                body["error"],
-                "This conversation ran on test-runtime, which no longer runs test-agent. Start a new conversation."
-            );
+            assert_eq!(body["error"], explanation);
         }
         for scope in ["conversation", "agent"] {
             let update = json!({"agent_id": "test-agent", "audience_id": "pinned", "scope": scope, "selection": null});
             let (status, body) =
                 model_call(&state, "PUT", "/v1/model", true, Some(&update)).await?;
             assert_eq!(status, StatusCode::CONFLICT);
-            assert_eq!(
-                body["error"],
-                "This conversation ran on test-runtime, which no longer runs test-agent. Start a new conversation."
-            );
+            assert_eq!(body["error"], explanation);
         }
         assert_eq!(received.try_recv(), Err(TryRecvError::Empty));
     }

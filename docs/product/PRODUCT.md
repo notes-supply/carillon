@@ -31,13 +31,14 @@ Carillon turns into a native agent engine and owns its sessions, models,
 tools and settings. Core keeps only what they share: admission, conversation
 identity, turn state, the runtime that owns each conversation, and delivery.
 
-A conversation belongs to the agent of the route it began in, and is
-pinned to the runtime that took its first turn. Changing an agent's runtime
-starts new conversations on the new runtime. Its old conversations end
-with an explanation that asks the user to start a new conversation. Removing
-an agent ends its conversations the same way. Messages there receive a
-receipt and the explanation even if the former runtime is disabled or
-removed. An otherwise current conversation whose runtime is unavailable
+A conversation belongs to the agent of the route it began in and the runtime
+of its latest turn. After an agent moves runtimes, the first message in an old
+conversation receives an interruption notice and transfers ownership to the
+current runtime. The next message starts a fresh native conversation there,
+including in a Discord channel that keeps one conversation. Removing an agent
+leaves its conversations stranded. Messages there receive a receipt and an
+explanation even if the former runtime is disabled or removed.
+An otherwise current conversation whose runtime is unavailable
 refuses new work. Changing an agent's T3 project also ends conversations that
 already have T3 threads. Their messages, queued turns, follow-up observations,
 model requests, and commands receive an explanation asking for a new conversation.

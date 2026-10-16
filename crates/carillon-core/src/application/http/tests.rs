@@ -1056,7 +1056,7 @@ async fn startup_interrupts_old_runtime_work_without_replaying_it() -> Result<()
             assert!(
                 turn.error
                     .context("missing explanation")?
-                    .contains("Start a new conversation.")
+                    .contains("no longer runs test-agent.")
             );
         }
         assert_eq!(received.try_recv(), Err(TryRecvError::Empty));

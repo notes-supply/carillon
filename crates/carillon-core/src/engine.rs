@@ -227,7 +227,7 @@ impl Core {
             {
                 continue;
             }
-            let explanation = stranded(&runtime_id, &agent_id);
+            let explanation = stranded(&runtime_id, &agent_id, None);
             let observation_notice = format!(
                 "{explanation}\nWork already started there will not be reported here. Actions already taken may have had effects."
             );
@@ -326,14 +326,19 @@ impl Core {
                 return Ok(Admitted::Capturing(agent.clone()));
             }
             Owner::Current(agent) => agent,
-            Owner::Stranded(runtime_id) => {
+            Owner::Stranded {
+                runtime_id,
+                current,
+            } => {
                 self.intake.ensure_in_order(&interface.id, event)?;
+                let current = current.map(|agent| agent.runtime.as_str());
                 return Ok(Admitted::Settled(self.database.accept_event(
                     &interface.id,
-                    &runtime_id,
+                    current.unwrap_or(&runtime_id),
                     event,
                     Admission::Stranded {
-                        explanation: &stranded(&runtime_id, &event.agent_id),
+                        previous_runtime: &runtime_id,
+                        explanation: &stranded(&runtime_id, &event.agent_id, current),
                     },
                     None,
                 )?));

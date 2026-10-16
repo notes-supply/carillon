@@ -10,6 +10,7 @@ pub(crate) enum Admission<'a> {
         resource_snapshot_id: &'a str,
     },
     Stranded {
+        previous_runtime: &'a str,
         explanation: &'a str,
     },
 }
@@ -34,12 +35,18 @@ impl Database {
             return Ok(receipt);
         }
 
+        let expected_owner = match admission {
+            Admission::Queued { .. } => runtime_id,
+            Admission::Stranded {
+                previous_runtime, ..
+            } => previous_runtime,
+        };
         if let Some(owner) = conversation_runtime(
             &transaction,
             interface_id,
             &event.agent_id,
             &event.audience_id,
-        )? && owner != runtime_id
+        )? && owner != expected_owner
         {
             bail!("conversation is owned by runtime {owner}, not {runtime_id}");
         }
@@ -52,11 +59,11 @@ impl Database {
                 resource_snapshot_id.to_owned(),
                 None,
             ),
-            Admission::Stranded { explanation } => {
+            Admission::Stranded { explanation, .. } => {
                 let (providers, resources) = transaction.query_row(
                     "SELECT provider_snapshot_json, resource_snapshot_id FROM turns
                      WHERE interface_id = ?1 AND agent_id = ?2 AND audience_id = ?3
-                     ORDER BY acceptance_sequence LIMIT 1",
+                     ORDER BY acceptance_sequence DESC LIMIT 1",
                     params![interface_id, event.agent_id, event.audience_id],
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
                 )?;

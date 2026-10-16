@@ -39,13 +39,16 @@ mise run example:core
 Storage calls are synchronous. Async paths run SQLite writes and resource
 snapshots on Tokio's blocking pool.
 
-Conversations remain pinned to their original runtime. If the agent moves to
-another runtime or is removed, core accepts further messages as interrupted
-turns and commits their explanation and delivery intent with the receipt.
+The latest turn owns a conversation's runtime assignment. If the agent moves
+runtimes, core accepts the first later message as interrupted and records it
+under the current runtime. The next message in the same audience starts a fresh
+native conversation there. If the agent is removed, messages remain stranded.
+The interruption, explanation and delivery intent commit with the receipt.
 This needs no enabled or configured former runtime and captures no new agent
 resources or attachments. An unknown agent cannot start a conversation or
 begin attachment capture. Duplicate events keep their original turn. Model
-and command queries instead return the explanation as a conflict. New
+and command queries instead return the explanation as a conflict without
+transferring ownership. Startup settlement preserves the former runtime too. New
 conversations use the agent's configured runtime. Agent assignments change
 only on restart; `set_runtimes` changes runtime availability live.
 
