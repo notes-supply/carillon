@@ -41,8 +41,10 @@ Without Discord options, the installer asks at the terminal:
    and the projects T3 Code channels work in: each becomes an agent that
    is plain T3 Code through Discord. For each harness of the assistant it
    makes Carillon's profile, a T3 instance whose home is
-   `~/.local/share/carillon/profiles/HARNESS`, and signs it in: with the
-   harness's own login in that home, an API key, or a compatible endpoint
+   `${XDG_DATA_HOME:-~/.local/share}/carillon/profiles/HARNESS` by default.
+   T3's instance `config.homePath` owns the path for an existing profile.
+   Setup signs it in with the harness's own login in that home, an API key,
+   or a compatible endpoint
    and its token. Then it asks each agent's default model.
 4. **Pi** opens when an agent runs on it: sign in with `/login`,
    choose the agent's model with `/model` and press Ctrl+S on it, then
@@ -72,10 +74,21 @@ Pi sign-in is skipped when no agent runs on Pi.
 
 Each T3 profile keeps its own real `skills/` directory. Carillon links each
 `skills/NAME` to the assistant's `resources/skills/NAME`. The instructions
-file links to `resources/AGENTS.md`. Startup and `carillon runtime-t3 check`
-add new links, remove obsolete links, and update links after resources move.
-Only directories containing `SKILL.md` are shared. Harness files and directories stay in the profile. A conflicting name stops
-the check. Each T3 runtime permits at most one agent with resources.
+file links to `resources/AGENTS.md`. Serve startup reads each saved profile's
+homePath from T3, then adds new links, removes obsolete links, and updates
+links after resources move before accepting turns. A saved profile missing
+from T3 or without a homePath stops startup. Only directories containing
+`SKILL.md` are shared. Harness files and directories stay in the profile.
+A conflicting name stops startup. Each T3 runtime permits at most one agent
+with resources.
+
+Profiles belong to the user and are shared across installations. Setup creates
+or validates each T3 instance and creates its home for sign-in, leaving links
+untouched. `carillon runtime-t3 check` reads settings and the token without
+reaching T3 or changing links. Setting up or checking another installation
+therefore leaves the serving installation's resources linked. Starting an
+installation reconciles the links to its resources. Only one installation's
+services run at a time.
 
 `carillon runtime-t3 discover --agent ID --url URL` reads the token on
 standard input and returns that agent's model offer. The saved `profiles`

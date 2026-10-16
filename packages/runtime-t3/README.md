@@ -21,7 +21,8 @@ Issue a token in T3 with `t3 auth session issue --label Carillon
 ### Profiles
 
 A profile is a T3 instance of Carillon's own, `carillon_claude` or
-`carillon_codex`, whose home is
+`carillon_codex`. T3's instance `config.homePath` owns its home path. Setup
+defaults a new instance to
 `${XDG_DATA_HOME:-~/.local/share}/carillon/profiles/HARNESS`:
 
 ```text
@@ -38,12 +39,22 @@ A profile is a T3 instance of Carillon's own, `carillon_claude` or
 
 The links make the assistant's resources the one copy of Carillon's
 instructions and skills. `carillon discord tools install` puts the Discord
-skill there. Startup and `carillon runtime-t3 check` reconcile each profile's
-links. They add new skills, remove obsolete links, and update links after
-resources move. The harness keeps a real `skills/` directory for its own
-skills. Only directories containing `SKILL.md` are shared. A name that conflicts with a harness file or directory is refused.
+skill there. Serve startup reads each saved profile's homePath from T3 and
+reconciles its links before accepting turns. It adds new skills, removes
+obsolete links, and updates links after resources move. A saved profile
+missing from T3 or without a homePath stops startup. The harness keeps a real
+`skills/` directory for its own skills. Only directories containing `SKILL.md`
+are shared. A name that conflicts with a harness file or directory is refused.
 Neither the shared workspace nor your own Claude or Codex sees Carillon's
 profile resources.
+
+Profiles belong to the user and are shared across Carillon installations.
+`profile` creates or validates the T3 instance and creates its home for sign-in.
+It leaves resource links untouched, as does `carillon runtime-t3 check`, so
+setting up or checking another installation does not change the serving
+installation's instructions or skills. Starting an installation switches the
+links to that installation's resources. Only one installation's services run
+at a time.
 
 A profile signs in in one of three ways:
 
@@ -67,8 +78,9 @@ carillon runtime-t3 configure --url http://127.0.0.1:3773 --agent t3-notes \
   --project PROJECT_ID --model codex/gpt-6.1-sol < t3.token
 ```
 
-`profile` prints the profile's instance and home, as JSON. `--with-key`
-reads an API key from a second line of standard input, and `--endpoint URL`
+`profile` prints `{instanceId, home}` as JSON, using T3's homePath for an
+existing instance. `--with-key` reads an API key from a second line of
+standard input, and `--endpoint URL`
 gives the endpoint it is for. An existing instance refuses a supplied key or
 endpoint. Its environment is changed in T3 settings.
 
@@ -94,8 +106,9 @@ than the one the settings name goes to a new private file in
 the old ones, those keep their token.
 
 `carillon runtime-t3 check` reads the saved settings and token as startup
-reads them, without reaching T3. Setup offers to keep them only when it
-passes, and an update checks them before it stops anything. A disabled or
+reads them, without reaching T3 or changing profile links. Setup offers to
+keep them only when it passes, and an update checks them before it stops
+anything. A disabled or
 unregistered runtime, which does not start, passes. The token is read from
 standard input only.
 
@@ -139,7 +152,9 @@ Startup fails closed:
   match;
 - the settings must be valid, and every agent's workspace a directory;
 - at most one agent on the runtime has resources;
-- Carillon's profile links must reconcile without replacing harness files;
+- each saved profile must exist in T3 with a homePath and the expected harness;
+- Carillon's profile links must reconcile at those homes without replacing
+  harness files;
 - T3 must speak orchestration protocol 2 and accept the token.
 
 Each conversation is pinned to the runtime that took its first turn. When

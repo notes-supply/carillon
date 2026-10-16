@@ -91,16 +91,18 @@ it("setting up an existing profile preserves the serving installation's links an
   expect(await readlink(join(home, "CLAUDE.md"))).toBe(join(live, "AGENTS.md"));
   expect(await readlink(join(home, "skills", "status"))).toBe(join(live, "skills", "status"));
   expect(await readdir(join(root, "agent"))).toEqual(["AGENTS.md"]);
+});
 
-  const moved = join(root, "moved-home");
-  fake.instances.set("carillon_claude", { driver: "claudeAgent", config: { homePath: moved } });
+it("profile returns T3's homePath for native sign-in when it differs from setup's default", async () => {
+  const { config, home, fake } = await prepared();
   const made = await cli(
     ["profile", "--config", config, "--url", fake.url, "--harness", "claude"],
     `${fake.token}\n`,
   );
   expect(made.status, made.stderr).toBe(0);
-  expect(JSON.parse(made.stdout)).toEqual({ instanceId: "carillon_claude", home: moved });
-  expect(await readdir(moved)).toEqual([]);
+  const result: unknown = JSON.parse(made.stdout);
+  expect(result).toEqual({ instanceId: "carillon_claude", home });
+  expect(await readdir(home)).toEqual([]);
 });
 
 it.each([
@@ -133,3 +135,30 @@ it("a harness file conflict prevents startup from accepting any turn", async () 
     await lstat(join(root, "data", "carillon", "profiles")).catch(() => undefined),
   ).toBeUndefined();
 });
+
+it.each(["carillon_claude", "carillon_codex"])(
+  "startup refuses unsaved %s for plain T3 Code",
+  async (instanceId) => {
+    const { root, config, fake } = await prepared();
+    await writeFile(
+      config,
+      (await readFile(config, "utf8")).replace(/\[\[agents\]\]\nid = "assistant"[^[]*/u, ""),
+    );
+    await writeFile(
+      join(root, "providers", "runtime-t3.toml"),
+      [
+        `url = "${fake.url}"`,
+        'token_file = "credentials/t3.token"',
+        "[agents.code]",
+        'project_id = "agent"',
+        "[agents.code.model]",
+        `instance_id = "${instanceId}"`,
+        'model = "profile-model"',
+      ].join("\n"),
+    );
+    const started = await serve(config);
+    expect(started.status).toBe(1);
+    expect(started.stdout).not.toContain("runtime-t3 ready");
+    expect(started.stderr).toContain("/agents/code/model");
+  },
+);

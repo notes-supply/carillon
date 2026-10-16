@@ -5,7 +5,7 @@
  * resources. The T3 token is given as a value, never as an argument, and
  * written only to a private credential file the runtime's settings name.
  */
-import { open, readFile, realpath, rename, rm } from "node:fs/promises";
+import { mkdir, open, readFile, realpath, rename, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type { AvailableModel } from "@carillon/protocol";
 import type { Agent, Installation } from "@carillon/runtime/installation";
@@ -24,7 +24,7 @@ import {
   assistantResources,
   HARNESSES,
   profileHome,
-  reconcileProfile,
+  instanceHome,
   type Harness,
 } from "./profiles.ts";
 import { offers, parseSettings, readSettings, type SettingsFile } from "./settings.ts";
@@ -227,13 +227,11 @@ export interface ProfileChoice {
 
 /**
  * Makes Carillon's profile for a harness on the server at `endpoint`: the T3
- * instance `carillon_HARNESS`, whose home holds the harness's own state,
- * with links to the assistant's resources: its instructions to their
- * `AGENTS.md`, each shared skill into its own `skills` directory, so Carillon's instructions
- * and skills have one copy, its resources. T3 then gets the instance, created
- * live, and the runtime's settings name it a profile. Each step keeps what an
- * earlier run made as it should be, and refuses what is otherwise. Returns
- * the instance and home.
+ * instance `carillon_HARNESS`, whose home holds the harness's own state.
+ * T3 owns an existing instance's homePath; new instances use the setup user's
+ * XDG data directory. Creates the home for sign-in and saves the profile ID,
+ * leaving resource links untouched until the runtime starts serving.
+ * Returns the instance and home for the harness's native sign-in.
  */
 export async function profile(
   installation: Installation,
@@ -249,8 +247,7 @@ export async function profile(
       `no agent of ${installation.runtime.id} in carillon.toml has resources for a profile to share`,
     );
   const instanceId = `carillon_${choice.harness}`;
-  const home = profileHome(choice.harness);
-  await reconcileProfile(choice.harness, resources);
+  let home: string;
   const connection = await connect(endpoint);
   try {
     const settings: unknown = await connection.call(RPC.getSettings, {});
@@ -260,6 +257,13 @@ export async function profile(
         "T3 described its settings in a form this runtime does not understand",
       );
     const instance = settings.providerInstances?.[instanceId];
+    home =
+      instance === undefined ? profileHome(choice.harness) : instanceHome(choice.harness, instance);
+    if (instance !== undefined && (choice.key !== undefined || choice.endpoint !== undefined))
+      throw new Error(
+        `T3 already has profile ${instanceId}; change its environment in T3 settings. The supplied key or endpoint was not applied`,
+      );
+    await mkdir(home, { recursive: true, mode: 0o700 });
     if (instance === undefined)
       await connection.call(
         RPC.updateSettings,
@@ -269,17 +273,6 @@ export async function profile(
           homePath: home,
           environment: environmentOf(harness, choice),
         }),
-      );
-    else if (
-      instance.driver !== harness.driver ||
-      resolve(instance.config?.homePath ?? "") !== home
-    )
-      throw new Error(
-        `T3 already has an instance ${instanceId} that is not this profile; remove or rename it in T3, then set the profile up again`,
-      );
-    else if (choice.key !== undefined || choice.endpoint !== undefined)
-      throw new Error(
-        `T3 already has profile ${instanceId}; change its environment in T3 settings. The supplied key or endpoint was not applied`,
       );
   } finally {
     connection.close();

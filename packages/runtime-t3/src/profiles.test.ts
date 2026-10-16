@@ -15,9 +15,9 @@ import { expect, it } from "vitest";
 import { configure, discover, profile } from "./setup.ts";
 import { reconcileProfile } from "./profiles.ts";
 import { loadSettings } from "./settings.ts";
-import { cli, fakeT3, installation, loaded } from "./setup-fixtures.ts";
+import { cli, fakeT3, installation, loaded, serve } from "./setup-fixtures.ts";
 
-it("makes a Carillon profile: a T3 instance whose home links to the assistant's resources", async () => {
+it("makes a Carillon profile and its sign-in home, leaving resource links for startup", async () => {
   const fake = await fakeT3();
   const { root, workspace, config } = await installation();
   const runtime = await loaded(config);
@@ -30,11 +30,7 @@ it("makes a Carillon profile: a T3 instance whose home links to the assistant's 
     instanceId: "carillon_claude",
     home,
   });
-  expect(await readlink(join(home, "CLAUDE.md"))).toBe(join(root, "agent", "AGENTS.md"));
-  expect((await lstat(join(home, "skills"))).isDirectory()).toBe(true);
-  expect(await readlink(join(home, "skills", "status"))).toBe(
-    join(root, "agent", "skills", "status"),
-  );
+  expect(await readdir(home)).toEqual([]);
   expect((await stat(home)).mode & 0o777).toBe(0o700);
   // T3 holds the instance, its key a secret of its own, never the runtime's.
   expect(fake.instances.get("carillon_claude")).toEqual({
@@ -64,7 +60,7 @@ it("makes a Carillon profile: a T3 instance whose home links to the assistant's 
       { name: "OPENAI_API_KEY", value: "proxy-token", sensitive: true },
     ],
   });
-  expect(await readlink(join(codexHome, "AGENTS.md"))).toBe(join(root, "agent", "AGENTS.md"));
+  expect(await readdir(codexHome)).toEqual([]);
   fake.instances.delete("carillon_codex");
 
   // Making it again keeps what is there.
@@ -95,21 +91,18 @@ it("makes a Carillon profile: a T3 instance whose home links to the assistant's 
   ).rejects.toThrow(/no usable model/u);
 
   // What is not this profile is refused, with T3 left as it was.
-  fake.instances.set("carillon_codex", { driver: "codex", config: { homePath: "/elsewhere" } });
+  fake.instances.set("carillon_codex", { driver: "claudeAgent", config: { homePath: codexHome } });
   await expect(profile(runtime, endpoint, { harness: "codex" })).rejects.toThrow(
     /not this profile/u,
   );
   expect(fake.instances.get("carillon_codex")).toEqual({
-    driver: "codex",
-    config: { homePath: "/elsewhere" },
+    driver: "claudeAgent",
+    config: { homePath: codexHome },
   });
-  // So is a home holding the owner's own file where the link should be.
-  await rm(join(codexHome, "AGENTS.md"));
+  fake.instances.set("carillon_codex", { driver: "codex", config: { homePath: codexHome } });
   await writeFile(join(codexHome, "AGENTS.md"), "the owner's own");
-  await expect(profile(runtime, endpoint, { harness: "codex" })).rejects.toThrow(
-    /is not a link to/u,
-  );
-  expect((await lstat(join(codexHome, "AGENTS.md"))).isFile()).toBe(true);
+  await profile(runtime, endpoint, { harness: "codex" });
+  expect(await readFile(join(codexHome, "AGENTS.md"), "utf8")).toBe("the owner's own");
   // Only an agent with resources has something to share.
   await writeFile(
     config,
@@ -121,14 +114,16 @@ it("makes a Carillon profile: a T3 instance whose home links to the assistant's 
 });
 
 async function savedProfile(): Promise<{ root: string; config: string; home: string }> {
+  const fake = await fakeT3();
   const { root, config } = await installation();
   const data = join(root, "data");
   const home = join(data, "carillon", "profiles", "claude");
-  await writeFile(join(root, "credentials", "t3.token"), "saved-token\n");
+  fake.instances.set("carillon_claude", { driver: "claudeAgent", config: { homePath: home } });
+  await writeFile(join(root, "credentials", "t3.token"), fake.token);
   await writeFile(
     join(root, "providers", "runtime-t3.toml"),
     [
-      'url = "http://127.0.0.1:1"',
+      `url = "${fake.url}"`,
       'token_file = "credentials/t3.token"',
       'profiles = ["carillon_claude"]',
       "[agents.assistant]",
@@ -146,7 +141,7 @@ async function savedProfile(): Promise<{ root: string; config: string; home: str
   return { root, config, home };
 }
 
-it("reconciles skill links through startup checks, preserves harness skills, and follows restored resources", async () => {
+it("reconciles skill links at startup, preserves harness skills, and follows restored resources", async () => {
   const { root, config, home } = await savedProfile();
   const resources = join(root, "agent");
   await mkdir(join(resources, "skills", "first"), { recursive: true });
@@ -157,11 +152,11 @@ it("reconciles skill links through startup checks, preserves harness skills, and
   await writeFile(join(resources, "skills", ".system", "native"), "Old leaked harness data");
   await writeFile(join(resources, "skills", "marker"), "Old leaked harness marker");
   await symlink(join(resources, "skills"), join(home, "skills"));
-  const check = async () => {
-    const checked = await cli(["check", "--config", config], "");
+  const start = async () => {
+    const checked = await serve(config);
     expect(checked.status, checked.stderr).toBe(0);
   };
-  await check();
+  await start();
   const skills = join(home, "skills");
   expect((await lstat(skills)).isDirectory()).toBe(true);
   expect(await readlink(join(skills, "first"))).toBe(join(resources, "skills", "first"));
@@ -175,7 +170,7 @@ it("reconciles skill links through startup checks, preserves harness skills, and
   await rm(join(resources, "skills", "first"), { recursive: true });
   await mkdir(join(resources, "skills", "second"));
   await writeFile(join(resources, "skills", "second", "SKILL.md"), "Second skill");
-  await check();
+  await start();
   expect((await readdir(skills)).toSorted()).toEqual([".system", "external", "second"]);
   expect(await readlink(join(skills, "second"))).toBe(join(resources, "skills", "second"));
 
@@ -185,10 +180,10 @@ it("reconciles skill links through startup checks, preserves harness skills, and
     config,
     (await readFile(config, "utf8")).replace('resources = "agent"', 'resources = "restored-agent"'),
   );
-  await check();
+  await start();
   expect(await readlink(join(home, "CLAUDE.md"))).toBe(join(restored, "AGENTS.md"));
   expect(await readlink(join(skills, "second"))).toBe(join(restored, "skills", "second"));
-  await check();
+  await start();
   expect((await readdir(skills)).toSorted()).toEqual([".system", "external", "second"]);
   expect(await readFile(join(skills, ".system", "native"), "utf8")).toBe("The harness's own");
   expect(await readlink(join(skills, "external"))).toBe(join(root, "workspace"));
@@ -197,7 +192,7 @@ it("reconciles skill links through startup checks, preserves harness skills, and
   await writeFile(join(skills, "conflict", "native"), "Keep this skill");
   await mkdir(join(restored, "skills", "conflict"));
   await writeFile(join(restored, "skills", "conflict", "SKILL.md"), "Carillon's skill");
-  const conflict = await cli(["check", "--config", config], "");
+  const conflict = await serve(config);
   expect(conflict.status).toBe(1);
   expect(conflict.stderr).toContain("is not a link to");
   expect(await readFile(join(skills, "conflict", "native"), "utf8")).toBe("Keep this skill");
@@ -260,7 +255,7 @@ it("concurrent reconciles create and replace shared links without losing native 
   }
   const overlap = async (source: string) => {
     const results = await Promise.allSettled(
-      Array.from({ length: 16 }, () => reconcileProfile("claude", source)),
+      Array.from({ length: 16 }, () => reconcileProfile("claude", home, source)),
     );
     for (const result of results) expect(result).toEqual({ status: "fulfilled", value: undefined });
     expect(await readlink(join(home, "CLAUDE.md"))).toBe(join(source, "AGENTS.md"));
@@ -297,7 +292,7 @@ it("shares linked skill directories and linked manifests at their source names",
   await symlink(external, join(source, "linked-directory"));
   await mkdir(join(source, "linked-manifest"));
   await symlink(join(external, "SKILL.md"), join(source, "linked-manifest", "SKILL.md"));
-  const checked = await cli(["check", "--config", config], "");
+  const checked = await serve(config);
   expect(checked.status, checked.stderr).toBe(0);
   for (const name of ["linked-directory", "linked-manifest"]) {
     expect(await readlink(join(home, "skills", name))).toBe(join(source, name));
@@ -335,7 +330,7 @@ it("removes only its abandoned temporary skill links after a crashed reconciliat
   await symlink(join(root, "native"), join(home, "skills", native));
   await writeFile(join(home, "skills", `.status.${crypto.randomUUID()}.tmp`), "native file");
   const before = await readdir(join(home, "skills"));
-  const checked = await cli(["check", "--config", config], "");
+  const checked = await serve(config);
   expect(checked.status, checked.stderr).toBe(0);
   expect((await readdir(join(home, "skills"))).toSorted()).toEqual(
     [...before.filter((name) => name !== temporary && name !== stale), "status"].toSorted(),

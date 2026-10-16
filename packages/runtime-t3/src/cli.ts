@@ -16,7 +16,7 @@ import packageInfo from "../package.json" with { type: "json" };
 import { join } from "node:path";
 import { text } from "node:stream/consumers";
 import { configure, discover, profile } from "./setup.ts";
-import { HARNESSES, isHarness, reconcileProfiles } from "./profiles.ts";
+import { assistantResources, HARNESSES, isHarness, reconcileProfiles } from "./profiles.ts";
 import { loadSettings, offers, origin, type T3Settings } from "./settings.ts";
 import { connectT3, T3Failure, type T3Endpoint } from "./t3.ts";
 
@@ -45,7 +45,12 @@ async function serve(values: readonly string[]): Promise<void> {
   const { settings, endpoint, agents } = await saved(installation);
   // Fail closed before listening: the server must speak the verified
   // protocol and accept the credential, or this runtime does not start.
-  (await connectT3(endpoint)).close();
+  const connection = await connectT3(endpoint);
+  try {
+    await reconcileProfiles(installation, settings.profiles, connection);
+  } finally {
+    connection.close();
+  }
   await mkdir(installation.componentDirectory, { recursive: true, mode: 0o700 });
   const runtime = createT3Runtime({
     endpoint,
@@ -102,7 +107,7 @@ async function saved(installation: Installation): Promise<{
   agents: ReadonlyMap<string, T3Agent>;
 }> {
   const settings = await loadSettings(installation.providerFile, installation.root);
-  await reconcileProfiles(installation, settings.profiles);
+  assistantResources(installation);
   const agents = new Map<string, T3Agent>();
   for (const agent of installation.agents) {
     const workspace = await stat(agent.workspace).then(
@@ -214,8 +219,8 @@ async function configureCommand(values: readonly string[]): Promise<void> {
 
 /**
  * `profile --url URL --harness claude|codex [--with-key [--endpoint URL]]`:
- * Carillon's profile for the harness in T3, sharing the assistant's
- * resources, printed as JSON. With `--with-key`, a second line of standard
+ * Carillon's profile for the harness in T3, printed as JSON. Resource links
+ * are reconciled at serve startup. With `--with-key`, a second line of standard
  * input is the harness's API key, for its own service or the compatible
  * `--endpoint`.
  */
@@ -262,7 +267,7 @@ async function serving(
 /**
  * `check`: whether the saved settings and T3 token read as startup reads
  * them, for the installation `--config` names, or `CARILLON_HOME`'s. It
- * reaches no T3 server and reconciles the profile links. A runtime that would not serve,
+ * reaches no T3 server and leaves profile links untouched. A runtime that would not serve,
  * disabled or not registered, starts from nothing, so it passes.
  */
 async function checkCommand(values: readonly string[]): Promise<void> {

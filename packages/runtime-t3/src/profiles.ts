@@ -12,6 +12,10 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import type { Installation } from "@carillon/runtime/installation";
+import type { Static } from "typebox";
+import { Check } from "typebox/value";
+import { RPC, ServerSettingsSchema } from "./contracts.ts";
+import { T3Failure, type T3Connection } from "./t3.ts";
 
 /** The harnesses Carillon makes profiles for, as T3 drives them. */
 export const HARNESSES = {
@@ -41,7 +45,7 @@ export function isHarness(value: string): value is Harness {
   return Object.hasOwn(HARNESSES, value);
 }
 
-/** Where the harness's profile lives: its home, under the XDG data directory. */
+/** The default home for a new profile, under the setup user's XDG data directory. */
 export function profileHome(harness: Harness): string {
   const data = process.env["XDG_DATA_HOME"];
   return resolve(
@@ -50,6 +54,24 @@ export function profileHome(harness: Harness): string {
     "profiles",
     harness,
   );
+}
+
+/** T3's authoritative home for an existing Carillon profile, refusing incomplete or conflicting instances. */
+export function instanceHome(
+  harness: Harness,
+  instance: NonNullable<Static<typeof ServerSettingsSchema>["providerInstances"]>[string],
+): string {
+  const instanceId = `carillon_${harness}`;
+  if (instance.driver !== HARNESSES[harness].driver)
+    throw new Error(
+      `T3 instance ${instanceId} is not this profile; correct its driver in T3 settings`,
+    );
+  const home = instance.config?.homePath;
+  if (home === undefined || home.trim().length === 0)
+    throw new Error(
+      `T3 profile ${instanceId} has no homePath; set its config.homePath in T3 settings`,
+    );
+  return home;
 }
 
 /** The runtime's sole assistant resources, if it serves an assistant. */
@@ -62,20 +84,36 @@ export function assistantResources(installation: Installation): string | undefin
   return assistants[0]?.resources;
 }
 
-/** Reconciles every Carillon profile before the runtime starts. */
+/** Reconciles saved profiles at T3's homes before the runtime starts serving. */
 export async function reconcileProfiles(
   installation: Installation,
   profiles: ReadonlySet<string>,
+  connection: T3Connection,
 ): Promise<void> {
   const resources = assistantResources(installation);
-  if (resources === undefined) return;
-  for (const harness of Object.keys(HARNESSES).filter(isHarness))
-    if (profiles.has(`carillon_${harness}`)) await reconcileProfile(harness, resources);
+  if (resources === undefined || profiles.size === 0) return;
+  const settings: unknown = await connection.call(RPC.getSettings, {});
+  if (!Check(ServerSettingsSchema, settings))
+    throw new T3Failure("malformed", "T3 described unreadable provider settings");
+  const homes = [...profiles].map((instanceId) => {
+    const harness = Object.keys(HARNESSES)
+      .filter(isHarness)
+      .find((name) => instanceId === `carillon_${name}`);
+    if (harness === undefined) throw new Error(`unsupported Carillon profile ${instanceId}`);
+    const instance = settings.providerInstances?.[instanceId];
+    if (instance === undefined)
+      throw new Error(`T3 has no saved profile ${instanceId}; set the profile up again`);
+    return { harness, home: instanceHome(harness, instance) };
+  });
+  for (const { harness, home } of homes) await reconcileProfile(harness, home, resources);
 }
 
 /** Shares Carillon's skills without giving it ownership of the harness's skills directory. */
-export async function reconcileProfile(harness: Harness, resources: string): Promise<void> {
-  const home = profileHome(harness);
+export async function reconcileProfile(
+  harness: Harness,
+  home: string,
+  resources: string,
+): Promise<void> {
   const instructions = join(home, HARNESSES[harness].instructions);
   const previousInstructions = await targetOf(instructions);
   const previousResources =
@@ -171,9 +209,7 @@ async function link(path: string, target: string, previous: string | undefined):
       : undefined;
     if (actual === target) return;
     if (actual === undefined || actual !== previous)
-      throw new Error(
-        `${path} is not a link to ${target}; move it away, then set the profile up again`,
-      );
+      throw new Error(`${path} is not a link to ${target}; move it away, then restart the runtime`);
   }
   for (;;) {
     const temporary = join(dirname(path), `.${basename(path)}.${crypto.randomUUID()}.tmp`);

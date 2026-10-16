@@ -176,7 +176,10 @@ while any fence stands.
 Its agents are of two kinds. Carillon's assistant runs on Carillon's own T3
 instances, its profiles: each has a home of its own whose instructions and
 skills link to the assistant's resources, so the harness loads them natively
-and no other T3 thread sees them; its messages carry where the person wrote
+and no other T3 thread sees them. T3's instance `config.homePath` owns the home
+path. Profiles are shared across installations of the same user. Serve startup
+reconciles the saved profiles' links before accepting turns; setup and preflight
+checks leave them untouched. The assistant's messages carry where the person wrote
 them. Every other agent is plain T3 Code, on every other instance, given the
 person's text as written, its threads titled by T3. Each message names the
 selection its run takes: the thread's while it is on one of the agent's
