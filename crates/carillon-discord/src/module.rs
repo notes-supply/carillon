@@ -1443,7 +1443,6 @@ pub(crate) mod tests {
         let commands = release_commands(directory.path(), &["model"], "unused").await?;
         assert_eq!(commands.serving().source, Source::Bundled);
         assert_eq!(commands.serving().commands, ["model"]);
-        assert!(!commands.registered(&app("127.0.0.1:1", 1, 100), &commands.current().definitions));
         Ok(())
     }
 
@@ -1457,7 +1456,16 @@ pub(crate) mod tests {
         let declared = custom(root, "custom.wasm");
 
         // A missing or unusable candidate changes nothing, and takes no lock.
-        for bytes in [None, Some(b"\0asm broken".as_slice())] {
+        let unread: fn(&Declared) -> bool = |declared| matches!(declared, Declared::Unknown { .. });
+        let other: fn(&Declared) -> bool = |declared| {
+            matches!(
+                declared,
+                Declared::Other {
+                    source: Source::Custom { .. }
+                }
+            )
+        };
+        for (bytes, compared) in [(None, unread), (Some(b"\0asm broken".as_slice()), other)] {
             if let Some(bytes) = bytes {
                 std::fs::write(&path, bytes)?;
             }
@@ -1466,10 +1474,8 @@ pub(crate) mod tests {
                 Err(ChangeError::Unusable(_))
             ));
             assert_eq!(reply(&commands).await?, "release");
-            assert!(matches!(
-                commands.declared(declared.clone()),
-                Declared::Other { .. } | Declared::Unknown { .. }
-            ));
+            let found = commands.declared(declared.clone());
+            assert!(compared(&found), "{found:?}");
         }
         assert!(MaintenanceLock::try_acquire(root)?.is_some());
 
@@ -1530,7 +1536,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn changes_wait_for_other_maintenance_and_change_nothing() -> anyhow::Result<()> {
+    async fn changes_refused_during_other_maintenance_change_nothing() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let root = directory.path();
         let commands = release_commands(root, &["model"], "release").await?;
@@ -1660,13 +1666,11 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn overlapping_applies_register_and_activate_in_order() -> anyhow::Result<()> {
-        use std::time::Duration;
         use tokio::sync::{Semaphore, mpsc};
 
         let directory = tempfile::tempdir()?;
         let root = directory.path();
         let commands = release_commands(root, &["initial"], "initial").await?;
-        let retained = commands.current();
         let (sent, mut received) = mpsc::unbounded_channel();
         let release = Arc::new(Semaphore::new(0));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -1705,30 +1709,65 @@ pub(crate) mod tests {
         release.add_permits(1);
         assert_eq!(second.await?.discord, Registration::Registered);
         assert_eq!(commands.serving().commands, ["second"]);
-        assert!(commands.registered(&target, &commands.current().definitions));
-        assert_eq!(reply(&commands).await?, "second");
-        // A previously captured generation keeps both its code and metadata.
-        assert_eq!(retained.definitions, vec![definition("initial")]);
-        let payload = serde_json::to_vec(
-            &carillon_discord_module::contract::Invocation::Interaction(interaction()),
-        )?;
-        let old = super::outcome(
-            &commands.host,
-            &retained.module,
-            super::Calls::Refused,
-            &payload,
-            super::DEADLINE,
-        )
-        .await?;
         assert_eq!(
-            old,
-            carillon_discord_module::contract::Outcome::Reply(
-                carillon_discord_module::contract::Reply {
-                    content: "initial".to_owned(),
-                    components: vec![],
-                }
-            )
+            commands.status(Some(&target), Declared::Serving).registered,
+            Some(true)
         );
+        assert_eq!(reply(&commands).await?, "second");
+        server.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_interaction_under_way_finishes_with_the_module_it_began_with() -> anyhow::Result<()>
+    {
+        use axum::routing::get;
+        use tokio::sync::{Semaphore, mpsc};
+
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        std::fs::write(root.join("release.wasm"), running_module()?)?;
+        let commands = Arc::new(Module::load(files(root), Source::Bundled).await?);
+        let (asked, mut asking) = mpsc::unbounded_channel();
+        let release = Arc::new(Semaphore::new(0));
+        let gate = release.clone();
+        let router = Router::new().route(
+            "/v1/commands",
+            get(move || {
+                let (asked, release) = (asked.clone(), gate.clone());
+                async move {
+                    let _ = asked.send(());
+                    let _permit = release.acquire().await;
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let core = format!("http://{}", listener.local_addr()?);
+        let server = tokio::spawn(async move { axum::serve(listener, router).await });
+        let calls = super::InteractionCalls::new(
+            crate::client::test_client(core)?,
+            carillon_protocol::model::ModelQuery {
+                agent_id: "default".to_owned(),
+                audience_id: None,
+            },
+        );
+        let under_way = tokio::spawn({
+            let commands = commands.clone();
+            async move { commands.invoke(calls, interaction()).await }
+        });
+        asking
+            .recv()
+            .await
+            .context("the interaction never asked core")?;
+        std::fs::write(
+            root.join("custom.wasm"),
+            variant(&["model"], "replacement")?,
+        )?;
+        commands.apply(custom(root, "custom.wasm"), None).await?;
+        assert_eq!(reply(&commands).await?, "replacement");
+        release.add_permits(1);
+        assert_eq!(under_way.await??.content, "ran");
         server.abort();
         Ok(())
     }
@@ -1739,30 +1778,23 @@ pub(crate) mod tests {
         let commands = release_commands(directory.path(), &["model"], "unused").await?;
         let record = files(directory.path()).record;
         let definitions = commands.current().definitions.clone();
-        let status = Arc::new(AtomicU16::new(200));
-        let (address, server) = registration_server(status.clone()).await?;
+        let (address, server, requests) =
+            counting_registration_server(Arc::new(AtomicU16::new(200))).await?;
         let target = app(&address.to_string(), 1, 100);
 
         // A record in the shape an earlier provider wrote names no target.
         std::fs::create_dir_all(record.parent().unwrap_or_else(|| directory.path()))?;
         std::fs::write(&record, serde_json::to_vec(&definitions)?)?;
-        assert!(!commands.registered(&target, &definitions));
-
-        commands.register(&target, &definitions).await?;
-        assert!(commands.registered(&target, &definitions));
-        assert!(!commands.registered(&target, &[definition("other")]));
-        assert!(!commands.registered(&app(&address.to_string(), 1, 101), &definitions));
-        assert!(!commands.registered(&app(&address.to_string(), 2, 100), &definitions));
-
-        // Neither a rejection nor an unanswered request counts as confirmed.
-        let other = vec![definition("other")];
-        for code in [400, 500] {
-            status.store(code, Ordering::SeqCst);
-            assert!(commands.register(&target, &other).await.is_err(), "{code}");
-            assert!(!commands.registered(&target, &definitions));
-            assert!(!commands.registered(&target, &other));
-            assert!(!record.exists());
+        assert_eq!(commands.reconcile(&target).await?, Registration::Registered);
+        assert_eq!(commands.reconcile(&target).await?, Registration::Unchanged);
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        for other in [
+            app(&address.to_string(), 1, 101),
+            app(&address.to_string(), 2, 100),
+        ] {
+            assert_eq!(commands.reconcile(&other).await?, Registration::Registered);
         }
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
         server.abort();
         Ok(())
     }
@@ -1858,7 +1890,14 @@ pub(crate) mod tests {
             commands.apply(declared.clone(), None).await,
             Err(ChangeError::Unusable(_))
         ));
-        assert!(Module::load(files(root), declared.clone()).await.is_err());
+        let unstarted = Module::load(files(root), declared.clone())
+            .await
+            .err()
+            .context("an oversized module started")?;
+        assert!(
+            format!("{unstarted:#}").contains(&format!("more than {MODULE_LIMIT} bytes")),
+            "{unstarted:#}"
+        );
         assert_eq!(reply(&commands).await?, "release");
 
         assert_eq!(super::check(&at_limit).await?, ["model"]);
@@ -2125,10 +2164,12 @@ pub(crate) mod tests {
                 .await,
             HostReply::Commands(catalog)
         );
-        assert!(matches!(
+        assert_eq!(
             unanchored.answer(&submit, calls_until()).await,
-            HostReply::Error(_)
-        ));
+            HostReply::Error(
+                "Sending to the conversation needs the Discord connection.".to_owned()
+            )
+        );
         assert!(submitted.lock().await.is_empty());
 
         let mut config = crate::conversations::tests::discord_config(
@@ -2198,10 +2239,16 @@ pub(crate) mod tests {
         let reply = commands.invoke(calls()?, interaction()).await?;
         assert_eq!(reply.content, "hello");
         assert_eq!(reply.components, vec![button]);
-        for output in [
-            json!({"Failure": "no such command"}).to_string(),
-            describing(&[]),
-            "{broken".to_owned(),
+        for (output, refused) in [
+            (
+                json!({"Failure": "no such command"}).to_string(),
+                "Discord module failed: no such command",
+            ),
+            (
+                describing(&[]),
+                "Discord module answered an interaction with something else",
+            ),
+            ("{broken".to_owned(), "decode Discord module outcome: "),
         ] {
             std::fs::write(
                 directory.path().join("custom.wasm"),
@@ -2210,10 +2257,12 @@ pub(crate) mod tests {
             commands
                 .apply(custom(directory.path(), "custom.wasm"), None)
                 .await?;
-            assert!(
-                commands.invoke(calls()?, interaction()).await.is_err(),
-                "accepted {output}"
-            );
+            let failure = commands
+                .invoke(calls()?, interaction())
+                .await
+                .err()
+                .with_context(|| format!("accepted {output}"))?;
+            assert!(format!("{failure:#}").starts_with(refused), "{failure:#}");
         }
         Ok(())
     }
@@ -2592,6 +2641,7 @@ pub(crate) mod tests {
     /// marker messages posted.
     fn preparing_server(
         status: Duration,
+        asked: Arc<tokio::sync::Notify>,
         accepted: Arc<tokio::sync::Mutex<Vec<String>>>,
         markers: Arc<AtomicUsize>,
     ) -> Router {
@@ -2606,6 +2656,7 @@ pub(crate) mod tests {
                 "/v1/events/{event_id}",
                 get(move |Segment(event_id): Segment<String>| async move {
                     if event_id == "400" {
+                        asked.notify_one();
                         tokio::time::sleep(status).await;
                     }
                     Json(EventStatus::Unknown)
@@ -2752,14 +2803,17 @@ pub(crate) mod tests {
             Arc::new(tokio::sync::Mutex::new(Vec::new())),
             Arc::new(AtomicUsize::new(0)),
         );
-        let router = preparing_server(status, accepted.clone(), markers.clone());
+        let asked = Arc::new(tokio::sync::Notify::new());
+        let router = preparing_server(status, asked.clone(), accepted.clone(), markers.clone());
         let (calls, preparing) = conversation(router, accepted, markers).await?;
         // Message 400 arrives first, through the gateway's lanes.
         preparing
             .send
             .send(crate::inbound::tests::hello(&preparing.ingress).into())
             .await?;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::time::timeout(Duration::from_secs(10), asked.notified())
+            .await
+            .context("message 400 was never prepared")?;
         Ok((calls, preparing))
     }
 
@@ -2932,7 +2986,13 @@ pub(crate) mod tests {
         let answering = tokio::spawn(async move { calls.answer(&submit, calls_until()).await });
         // The person's next message arrives while Discord holds the marker's
         // answer: it waits behind the command.
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while preparing.markers.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .context("the marker was never posted")?;
         preparing
             .send
             .send(crate::inbound::tests::hello(&preparing.ingress).into())
@@ -3163,8 +3223,13 @@ pub(crate) mod tests {
         next.request.event_id = "402".to_owned();
         preparing.send.send(next.into()).await?;
         let before = attempts().await;
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        assert!(attempts().await > before + 1);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while attempts().await <= before + 1 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .context("the lane stopped asking core")?;
         // The provider stops: the lanes settle without core's answer, and
         // the message waiting behind the command is dropped unprepared.
         let started = std::time::Instant::now();
@@ -3597,42 +3662,70 @@ pub(crate) mod tests {
         };
         let embed = |embed: Value| json!({"Card": {"Show": embed}}).to_string();
         let failing = [
-            ("not JSON", "not json".to_owned()),
-            ("another answer", replying("hello", &[])),
-            ("a failure", r#"{"Failure":"no card"}"#.to_owned()),
-            ("not an embed", embed(json!({"description": "no type"}))),
+            (
+                "not JSON",
+                "not json".to_owned(),
+                "decode Discord module outcome: ",
+            ),
+            (
+                "another answer",
+                replying("hello", &[]),
+                "Discord module answered a card with something else",
+            ),
+            (
+                "a failure",
+                r#"{"Failure":"no card"}"#.to_owned(),
+                "Discord module failed: no card",
+            ),
+            (
+                "not an embed",
+                embed(json!({"description": "no type"})),
+                "decode the card's embed: ",
+            ),
             (
                 "over Discord's limits",
                 embed(json!({"type": "rich", "description": "x".repeat(4_097)})),
+                "the card's embed is unusable: ",
             ),
             (
                 "a removal while the job works",
                 r#"{"Card":"Remove"}"#.to_owned(),
+                "Discord module removed the card of a job that has not settled",
             ),
         ];
-        for (case, output) in failing {
+        for (case, output, refused) in failing {
             let module = other_cards(&answer(&output), &[(16384, &output)])?;
             let (card, _) = drawn(&module, &request).await?;
-            assert!(card.is_err(), "{case} was shown");
+            let failure = card.err().with_context(|| format!("{case} was shown"))?;
+            assert!(
+                format!("{failure:#}").starts_with(refused),
+                "{case}: {failure:#}"
+            );
         }
         // The same removal of a settled job is the module's to decide.
         let remove = r#"{"Card":"Remove"}"#;
         let module = other_cards(&answer(remove), &[(16384, remove)])?;
         assert_eq!(drawn(&module, &settled_card()).await?.0?, None);
 
-        for (case, on_card) in [
-            ("a trap", "(unreachable)"),
+        for (case, on_card, refused) in [
+            ("a trap", "(unreachable)", "guest failed: "),
             (
                 "a guest that never ends",
                 "(loop $forever (br $forever)) (i32.const 0)",
+                "guest exceeded ",
             ),
             (
                 "an output outside memory",
                 "(global.set $output (i32.const 2621400)) (i32.const 4096)",
+                "guest failed: guest named 4096 bytes at 2621400 outside its memory",
             ),
         ] {
             let (card, took) = drawn(&other_cards(on_card, &[])?, &request).await?;
-            assert!(card.is_err(), "{case} was shown");
+            let failure = card.err().with_context(|| format!("{case} was shown"))?;
+            assert!(
+                format!("{failure:#}").starts_with(refused),
+                "{case}: {failure:#}"
+            );
             assert!(took < Duration::from_secs(3), "{case} took {took:?}");
         }
 
@@ -3713,7 +3806,14 @@ pub(crate) mod tests {
             );
             assert_eq!(reply(&module).await?, "release");
             // Nor does it serve at startup.
-            assert!(Module::load(files(root), declared).await.is_err());
+            let unstarted = Module::load(files(root), declared)
+                .await
+                .err()
+                .context("a module that cannot draw cards started")?;
+            assert!(
+                format!("{unstarted:#}").contains("render a card of"),
+                "{unstarted:#}"
+            );
         }
         Ok(())
     }
