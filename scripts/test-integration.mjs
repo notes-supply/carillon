@@ -11,6 +11,7 @@ import {
   open,
   readdir,
   readFile,
+  readlink,
   rename,
   rm,
   stat,
@@ -1239,6 +1240,14 @@ async function testT3ActivityThroughDelivery() {
     new URL("../packages/runtime-t3/src/fake.ts", import.meta.url).href
   );
   const fake = await startFakeT3();
+  // The assistant runs on its Claude profile, whose home T3's settings name.
+  const profileHome = join(root, "profiles", "claude");
+  const claude = fake.providers.find((provider) => provider.instanceId === "claudeAgent");
+  fake.providers.push({ ...claude, instanceId: "carillon_claude" });
+  fake.instances.set("carillon_claude", {
+    driver: "claudeAgent",
+    config: { homePath: profileHome },
+  });
   const original = await readFile(configPath(), "utf8");
   let discordSettings;
   const settings = join(installation, "providers/runtime-t3.toml");
@@ -1266,13 +1275,13 @@ enabled = true
       settings,
       `url = "${fake.url}"
 token_file = "credentials/t3.token"
-profiles = ["claudeAgent"]
+profiles = ["carillon_claude"]
 
 [agents.assistant]
 project_id = "project-1"
 
 [agents.assistant.model]
-instance_id = "claudeAgent"
+instance_id = "carillon_claude"
 model = "claude-sonnet-5"
 
 [agents.assistant.model.options]
@@ -1281,6 +1290,10 @@ effort = "low"
     );
     await restart("core");
     await start("runtime-t3");
+    assert.equal(
+      await readlink(join(profileHome, "CLAUDE.md")),
+      join(installation, "agents/default/AGENTS.md"),
+    );
     // The example module draws these cards: the bundled text, coloured.
     discordSettings = await readFile(providerConfigPath());
     run("--home", installation, "discord", "module", "enable", exampleModule);
