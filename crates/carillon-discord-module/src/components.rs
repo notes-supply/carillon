@@ -43,8 +43,8 @@ pub fn choice(label: &str, value: &str, description: Option<&str>, default: bool
     option
 }
 
-/// The option with the marker as its emoji. Only a custom emote becomes one:
-/// Discord refuses a symbol that is not an emoji, and markers may be either.
+/// The option with a custom emote or Unicode emoji as its badge. Other
+/// configured symbols stay in text because Discord refuses them as emoji.
 pub fn branded(mut option: Value, marker: &str) -> Value {
     let emote = marker
         .strip_prefix("<a:")
@@ -53,6 +53,8 @@ pub fn branded(mut option: Value, marker: &str) -> Value {
         .and_then(|(animated, emote)| Some((animated, emote.strip_suffix('>')?.split_once(':')?)));
     if let Some((animated, (name, id))) = emote {
         option["emoji"] = json!({ "id": id, "name": name, "animated": animated });
+    } else if emojis::get(marker).is_some() {
+        option["emoji"] = json!({ "name": marker });
     }
     option
 }

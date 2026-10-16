@@ -335,9 +335,10 @@ default. Model badges map model-ID prefixes to emotes, longest prefix first:
 
 Use emote IDs that belong to your bot's application. After editing, run
 `carillon discord settings apply`; an invalid marker names the field to fix.
-The picker uses these same model badges in its summaries. Custom emotes also
-appear beside models and providers in its menus. A provider gets a menu
-badge when all its models share one.
+The picker uses these same model badges in its summaries. Custom emotes and
+Unicode emoji also appear beside models and providers in its menus. Other
+symbols stay in the summary text. A provider gets a menu badge when all its
+models share one.
 
 ### Discord module
 

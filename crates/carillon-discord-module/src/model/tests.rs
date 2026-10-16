@@ -570,14 +570,13 @@ fn brand_emotes_come_from_the_providers_markers() -> Result<(), String> {
     );
     let claude = json!({ "id": "111", "name": "claude", "animated": false });
     let provider = provider_control("conversation", "anthropic");
-    // A Unicode marker shows in the text only: Discord refuses an option
-    // emoji that is not an emoji, and markers may be other symbols.
+    let unicode = json!({ "name": "✳️" });
     assert_eq!(
         options(&reply, &provider)
             .iter()
             .map(|option| &option["emoji"])
             .collect::<Vec<_>>(),
-        [&claude, &Value::Null]
+        [&claude, &unicode]
     );
     assert!(
         options(&reply, "model:model:conversation")
@@ -590,6 +589,15 @@ fn brand_emotes_come_from_the_providers_markers() -> Result<(), String> {
     host.state.agent.selection = Some(selection("openai", "gpt", None));
     let reply = expect_reply(interact(&mut host, &gpt))?;
     assert!(shown(&reply).contains("Default for new conversations\n✳️ gpt name\n"));
+    gpt.markers.models.insert("gpt".to_owned(), "•".to_owned());
+    let reply = expect_reply(interact(&mut host, &gpt))?;
+    assert!(shown(&reply).contains("Default for new conversations\n• gpt name\n"));
+    assert!(
+        options(&reply, &provider)
+            .iter()
+            .find(|option| option["label"] == "OpenAI")
+            .is_some_and(|option| option.get("emoji").is_none())
+    );
     Ok(())
 }
 
