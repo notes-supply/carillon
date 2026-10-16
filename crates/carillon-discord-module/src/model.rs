@@ -798,10 +798,11 @@ fn describe(
         return "No model selected".to_owned();
     };
     let setting = |name: &str, value: &str| {
-        escaped(&shorten(
-            &format!("{} {}", name.to_lowercase(), value.to_lowercase()),
-            TEXT_LIMIT,
-        ))
+        format!(
+            "{}: {}",
+            escaped(&shorten(name, TEXT_LIMIT)),
+            escaped(&shorten(value, TEXT_LIMIT))
+        )
     };
     let parts: Vec<String> = match find_model(state, &selection.provider, &selection.model) {
         Some(model) => iter::once(escaped(&shorten(display_name(model), TEXT_LIMIT)))

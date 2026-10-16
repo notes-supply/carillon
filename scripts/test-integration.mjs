@@ -525,7 +525,7 @@ async function testModelPicker() {
   ]);
   assert.match(
     seen(chosen),
-    /^This conversation\nLocal reasoner · thinking medium\n-# set for this/u,
+    /^This conversation\nLocal reasoner · Thinking: Medium\n-# set for this/u,
   );
   const thinking = customIds(chosen).find((id) => id.startsWith("model:option:conversation:"));
   assert.ok(thinking, "the reasoner's thinking setting is offered");
@@ -539,7 +539,7 @@ async function testModelPicker() {
   assert.match(defaulted.delivery.content, /model local\/reasoner \(thinking=medium\)\.$/u);
 
   const reasoner =
-    /This conversation\nLocal reasoner · thinking high\n-# set for this conversation/u;
+    /This conversation\nLocal reasoner · Thinking: High\n-# set for this conversation/u;
   const tuned = await interact("305", null, "component", thinking, [
     value(chosen, thinking, "Thinking: High"),
   ]);
@@ -625,7 +625,7 @@ async function testModelPicker() {
     value(shown, "model:model:conversation", "reasoner"),
   ]);
   const confirmed =
-    /Default for new conversations\nLocal reasoner · thinking medium\n-# set with \/model/u;
+    /Default for new conversations\nLocal reasoner · Thinking: Medium\n-# set with \/model/u;
   assert.match(seen(during), confirmed);
   assert.match(seen(await interact("305", null, "command", "model")), confirmed);
   const released = await held.release();
@@ -1854,7 +1854,6 @@ async function interact(channelId, parentChannelId, kind, name, values = [], opt
   return JSON.parse(body);
 }
 
-/** The first control of each action row. */
 /** A reply as a person reads it: its text, then its embeds' notes, sections and hints. */
 function seen(reply) {
   return [
@@ -1869,6 +1868,7 @@ function seen(reply) {
     .join("\n");
 }
 
+/** The first control of each action row. */
 function customIds(reply) {
   return reply.components.map((row) => row.components[0].custom_id);
 }

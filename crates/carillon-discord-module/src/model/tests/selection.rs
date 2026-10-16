@@ -137,7 +137,7 @@ fn provider_removal_and_paging_do_not_retarget_a_selection() -> Result<(), Strin
         let reply = expect_reply(interact(&mut host, &control))?;
         assert!(shown(&reply).starts_with(
             "⚠️ That provider is no longer available; the list below is current.\n\
-             This conversation\nsonnet name · thinking medium\n"
+             This conversation\nsonnet name · Thinking: Medium\n"
         ));
         assert_eq!(
             showing(&reply, &provider_control("conversation", "anthropic")).as_deref(),
@@ -243,7 +243,7 @@ fn scope_switching_and_defaults_apply_to_the_displayed_scope() -> Result<(), Str
     ))?;
     assert!(
         shown(&reply).ends_with(
-            "Default for new conversations\nopus name · thinking off\n-# set with /model"
+            "Default for new conversations\nopus name · Thinking: Off\n-# set with /model"
         )
     );
     let reply = expect_reply(interact(&mut host, &component("model:default:agent", &[])))?;
@@ -414,7 +414,7 @@ fn a_setting_from_an_old_panel_never_targets_a_different_model() -> Result<(), S
         assert!(shown(&reply).starts_with(
             "⚠️ That setting is no longer available; the controls below are current.\n"
         ));
-        assert!(shown(&reply).contains("\nopus name · thinking off\n"));
+        assert!(shown(&reply).contains("\nopus name · Thinking: Off\n"));
         assert_eq!(host.state, before);
         assert_eq!(&host.requests[calls..], &[HostRequest::ModelState]);
     }
@@ -460,7 +460,7 @@ fn a_selection_missing_from_the_catalogue_leaves_no_empty_control() -> Result<()
     });
     let reply = expect_reply(interact(&mut host, &command(true)))?;
     assert!(shown(&reply).starts_with(
-        "This conversation\ngone · thinking high · not currently available\n\
+        "This conversation\ngone · thinking: high · not currently available\n\
          -# set for this conversation\n"
     ));
     assert_eq!(
@@ -575,7 +575,7 @@ fn a_refused_change_shows_the_current_state_without_retrying() -> Result<(), Str
     // shows the other writer's change and controls bound to it.
     assert!(shown(&reply).starts_with(
         "⚠️ Your change was not confirmed: The model settings changed.\n\
-         This conversation\nopus name · thinking high\n"
+         This conversation\nopus name · Thinking: High\n"
     ));
     assert!(custom_ids(&reply).contains(&option_control(
         "conversation",

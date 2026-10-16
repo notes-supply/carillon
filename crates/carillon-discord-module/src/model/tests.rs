@@ -222,7 +222,7 @@ fn a_read_only_scope_shows_its_selection_without_controls() -> Result<(), String
     host.state.agent.read_only = true;
     let reply = expect_reply(interact(&mut host, &command(true)))?;
     assert!(shown(&reply).ends_with(
-        "Default for new conversations\nsonnet name · thinking medium\n-# set by the runtime"
+        "Default for new conversations\nsonnet name · Thinking: Medium\n-# set by the runtime"
     ));
     assert!(custom_ids(&reply).contains(&"model:model:conversation".to_owned()));
 
@@ -465,9 +465,9 @@ fn in_a_conversation_both_scopes_show_and_the_controls_change_the_conversation()
     let reply = expect_reply(interact(&mut host, &command(true)))?;
     assert_eq!(
         shown(&reply),
-        "This conversation\nsonnet name · thinking medium\n\
+        "This conversation\nsonnet name · Thinking: Medium\n\
          -# follows the default for new conversations\n\
-         Default for new conversations\nsonnet name · thinking medium\n-# runtime default"
+         Default for new conversations\nsonnet name · Thinking: Medium\n-# runtime default"
     );
     let provider = provider_control("conversation", "anthropic");
     assert_eq!(option_labels(&reply, &provider), ["Anthropic", "OpenAI"]);
@@ -534,7 +534,7 @@ fn outside_a_conversation_only_the_default_for_new_conversations_is_offered() ->
     let reply = expect_reply(interact(&mut host, &command(false)))?;
     assert_eq!(
         shown(&reply),
-        "Default for new conversations\nsonnet name · thinking medium\n-# runtime default\n\
+        "Default for new conversations\nsonnet name · Thinking: Medium\n-# runtime default\n\
          Use /model inside a conversation to choose its model."
     );
     assert_eq!(
@@ -566,7 +566,7 @@ fn brand_emotes_come_from_the_providers_markers() -> Result<(), String> {
     let reply = expect_reply(interact(&mut host, &interaction))?;
     assert!(
         shown(&reply)
-            .starts_with("This conversation\n<:claude:111> sonnet name · thinking medium\n")
+            .starts_with("This conversation\n<:claude:111> sonnet name · Thinking: Medium\n")
     );
     let claude = json!({ "id": "111", "name": "claude", "animated": false });
     let provider = provider_control("conversation", "anthropic");
@@ -620,7 +620,7 @@ fn choices_read_as_the_runtime_names_them_and_send_their_ids() -> Result<(), Str
         &mut host,
         &component(&speed, &[&fingerprint(&["priority"])]),
     ))?;
-    assert!(shown(&reply).starts_with("This conversation\ngpt name · speed fast\n"));
+    assert!(shown(&reply).starts_with("This conversation\ngpt name · Speed: Fast\n"));
     assert_eq!(
         option_labels(&reply, &speed),
         ["Speed: Standard", "Speed: Fast"]
@@ -701,7 +701,7 @@ fn choosing_a_model_starts_from_its_defaults_and_settings_pin_the_view() -> Resu
         }
     );
     assert!(shown(&reply).starts_with(
-        "This conversation\nopus name · thinking high\n-# set for this conversation\n"
+        "This conversation\nopus name · Thinking: High\n-# set for this conversation\n"
     ));
     Ok(())
 }
