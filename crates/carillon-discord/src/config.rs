@@ -45,7 +45,6 @@ pub struct DiscordConfig {
     pub(crate) activity: bool,
     #[serde(default)]
     pub(crate) activity_markers: ActivityMarkers,
-    /// Files uploaded with admitted messages.
     #[serde(default)]
     pub(crate) attachments: AttachmentPolicy,
     #[serde(default = "enabled")]
@@ -58,7 +57,6 @@ pub struct DiscordConfig {
     pub(crate) failed_emoji: String,
     #[serde(default = "uncertain_emoji")]
     pub(crate) uncertain_emoji: String,
-    /// The Discord module to serve instead of the bundled one.
     #[serde(default, skip_serializing_if = "ModuleSetting::is_unset")]
     pub(crate) module: ModuleSetting,
 }
@@ -582,7 +580,6 @@ impl Settings {
         }))
     }
 
-    /// The settings serving now.
     #[must_use]
     pub(crate) fn current(&self) -> Arc<DiscordConfig> {
         self.0.current.borrow().clone()
@@ -656,7 +653,6 @@ impl Settings {
     }
 }
 
-/// The settings that serve, and how the settings file differs from them.
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct Status {
     pub serving: DiscordConfig,
@@ -684,7 +680,6 @@ pub(crate) struct Applied {
 /// Why an apply left the serving settings and module in place.
 #[derive(Debug)]
 pub(crate) enum Refusal {
-    /// The file is not valid settings for this provider.
     Invalid(anyhow::Error),
     /// The file changes fields only a restart applies.
     Restart(Difference),

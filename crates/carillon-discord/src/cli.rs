@@ -394,7 +394,6 @@ fn uploads(files: &[PathBuf]) -> Result<Vec<Upload>> {
         .collect()
 }
 
-/// The release's `lib` directory, beside the directory of this program.
 fn release_library() -> Result<PathBuf> {
     Ok(release()?.join("lib"))
 }
@@ -880,7 +879,6 @@ impl Operator {
     }
 }
 
-/// The reason an error answer gives.
 fn refusal(bytes: &[u8]) -> String {
     serde_json::from_slice::<serde_json::Value>(bytes)
         .ok()

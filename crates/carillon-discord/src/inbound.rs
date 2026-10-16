@@ -178,7 +178,6 @@ impl Ingress {
         }
     }
 
-    /// Why preparation that ended early did not finish.
     fn unfinished(&self) -> Refusal {
         Refusal(
             if self.stopping.is_cancelled() {

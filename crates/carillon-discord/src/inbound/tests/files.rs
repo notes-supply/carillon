@@ -312,7 +312,6 @@ fn admitted(ingress: &crate::inbound::Ingress, request: IncomingMessage) -> Queu
     }
 }
 
-/// Run lanes over `messages` until all settle.
 async fn run(
     world: &World,
     config: crate::config::DiscordConfig,
@@ -1070,7 +1069,6 @@ fn script(world: &World, change: impl FnOnce(&mut Core)) -> Result<()> {
     Ok(())
 }
 
-/// When each `entry` happened.
 fn times(world: &World, entry: &str) -> Result<Vec<Instant>> {
     Ok(world
         .core

@@ -24,7 +24,6 @@ use std::{
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-/// Message preparation with staging under `directory`.
 pub(crate) fn ingress(
     core: crate::client::CoreClient,
     config: crate::config::DiscordConfig,
@@ -421,7 +420,6 @@ async fn configuration_rejection_does_not_block_the_next_message_in_its_conversa
             .collect::<Vec<_>>(),
         ["submit 400", "submit 401"]
     );
-    // Observe actual failure feedback before the next message's admission.
     let failure = requests
         .iter()
         .position(|request| {
@@ -527,9 +525,10 @@ async fn a_stopping_provider_starts_no_attempt() -> anyhow::Result<()> {
         }
     })
     .await?;
-    // It now waits to try again, until a quarter second after its attempt. This test's own wait ends earlier, and the runtime's only
-    // thread is then held past both: the runtime ends them together, this
-    // one first, so the submission finds its wait over and the stop together.
+    // It now waits to try again, until a quarter second after its attempt.
+    // This test's own wait ends earlier, and the runtime's only thread is
+    // then held past both: the runtime ends them together, this one first,
+    // so the submission finds its wait over and the stop together.
     tokio::time::sleep(Duration::from_millis(100)).await;
     let earlier = tokio::time::sleep(Duration::from_millis(50));
     tokio::spawn(async { std::thread::sleep(super::RETRY + Duration::from_millis(50)) });
