@@ -1140,12 +1140,10 @@ async fn an_acknowledged_interaction_is_answered_before_the_provider_returns() -
     tokio::time::timeout(Duration::from_secs(5), asked.notified()).await?;
     let answering = super::answered(&mut interactions);
     tokio::pin!(answering);
-    assert!(
-        tokio::time::timeout(Duration::from_millis(200), &mut answering)
-            .await
-            .is_err(),
-        "the provider returned while an acknowledged interaction was still running"
-    );
+    tokio::time::timeout(Duration::from_millis(200), &mut answering)
+        .await
+        .err()
+        .context("the provider returned while an acknowledged interaction was still running")?;
     release.notify_one();
     tokio::time::timeout(Duration::from_secs(10), answering).await?;
     let replies = replies

@@ -42,8 +42,16 @@ fn failed_participation_write_leaves_memory_and_disk_unchanged() -> Result<()> {
     let original = fs::read(&path)?;
     let temporary = path.with_extension("json.tmp");
     fs::create_dir(&temporary)?;
-    assert!(participation.adopt("401", "300").is_err());
-    assert!(participation.remember_created("500", "500", "300").is_err());
+    for result in [
+        participation.adopt("401", "300"),
+        participation.remember_created("500", "500", "300"),
+    ] {
+        let error = result
+            .err()
+            .context("persisted participation despite an obstructed write")?
+            .downcast::<std::io::Error>()?;
+        assert_eq!(error.kind(), std::io::ErrorKind::IsADirectory);
+    }
     assert_eq!(participation.parent_route("401"), None);
     assert_eq!(participation.created_thread("500"), None);
     assert_eq!(fs::read(&path)?, original);

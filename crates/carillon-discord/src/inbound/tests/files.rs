@@ -918,7 +918,8 @@ async fn a_full_gateway_queue_refuses_only_messages_admission_would_activate() -
             .any(|entry| entry.contains("/messages/93/reactions/"))
         {
             assert!(trace.iter().all(|entry| entry.contains("93")), "{trace:?}");
-            assert!(explanation(&trace, "93")?.contains("too busy"), "{trace:?}");
+            let reply = explanation(&trace, "93").context("missing explanation")?;
+            assert!(reply.contains("too busy"), "{trace:?}");
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -978,8 +979,8 @@ async fn stopping_while_core_captures_a_replay_waits_for_its_outcome() -> Result
         assert_eq!(looked_up(&trace, id), 3, "{trace:?}");
     }
     // Neither is told to send it again; nothing was fetched or submitted.
-    assert!(explanation(&trace, "150").is_err(), "{trace:?}");
-    assert!(explanation(&trace, "151").is_err(), "{trace:?}");
+    assert_eq!(explanation(&trace, "150"), None, "{trace:?}");
+    assert_eq!(explanation(&trace, "151"), None, "{trace:?}");
     assert!(
         !trace.iter().any(|entry| entry.starts_with("submit ")),
         "{trace:?}"
@@ -1049,7 +1050,7 @@ async fn a_known_capture_core_will_not_report_on_stays_uncertain() -> Result<()>
             .is_empty(),
         "downloaded a message core was capturing"
     );
-    assert!(explanation(&trace, "152").is_err(), "{trace:?}");
+    assert_eq!(explanation(&trace, "152"), None, "{trace:?}");
     assert!(
         trace
             .iter()
@@ -1082,7 +1083,7 @@ fn times(world: &World, entry: &str) -> Result<Vec<Instant>> {
 }
 
 /// The explanation sent in reply to `message`.
-fn explanation(trace: &[String], message: &str) -> Result<String> {
+fn explanation(trace: &[String], message: &str) -> Option<String> {
     trace
         .iter()
         .find(|entry| {
@@ -1090,7 +1091,6 @@ fn explanation(trace: &[String], message: &str) -> Result<String> {
                 && entry.contains(&format!("\"message_id\":\"{message}\""))
         })
         .cloned()
-        .with_context(|| format!("no explanation for {message} in {trace:?}"))
 }
 
 async fn released(world: &World) -> Result<()> {
@@ -1141,7 +1141,7 @@ async fn preparation_that_outlasts_its_deadline_ends_without_submitting() -> Res
         !trace.iter().any(|entry| entry.starts_with("submit")),
         "{trace:?}"
     );
-    assert!(explanation(&trace, "85")?.contains("in time"));
+    assert!(explanation(&trace, "85").is_some_and(|reply| reply.contains("in time")));
     position(
         &trace,
         "PUT /api/v10/channels/300/messages/85/reactions/%E2%9D%8C",
@@ -1214,9 +1214,9 @@ async fn expired_submissions_are_settled_by_core_before_their_lane_moves_on() ->
     let next = times(&world, "submit 91")?.into_iter().min();
     assert!(settled.is_some() && settled < next, "{settled:?} {next:?}");
     let trace = trace(&world)?;
-    assert!(explanation(&trace, "90").is_err(), "{trace:?}");
+    assert_eq!(explanation(&trace, "90"), None, "{trace:?}");
     // The second was never accepted, and its sender is told.
-    assert!(explanation(&trace, "95")?.contains("in time"));
+    assert!(explanation(&trace, "95").is_some_and(|reply| reply.contains("in time")));
     released(&world).await
 }
 
@@ -1320,7 +1320,7 @@ async fn stopping_settles_what_core_may_hold_and_drops_the_rest() -> Result<()> 
         .known
         .contains(&"110".to_owned());
     assert!(settled, "{trace:?}");
-    assert!(explanation(&trace, "110").is_err(), "{trace:?}");
+    assert_eq!(explanation(&trace, "110"), None, "{trace:?}");
     // The waiting message is dropped, and the interrupted download is not
     // submitted; its sender is told.
     assert!(
@@ -1329,7 +1329,7 @@ async fn stopping_settles_what_core_may_hold_and_drops_the_rest() -> Result<()> 
             .any(|entry| entry == "submit 111" || entry == "submit 112"),
         "{trace:?}"
     );
-    let stopped = explanation(&trace, "112")?;
+    let stopped = explanation(&trace, "112").context("missing explanation")?;
     assert!(stopped.contains("restarting"), "{stopped}");
     released(&world).await?;
     drop(send);
@@ -1380,8 +1380,8 @@ async fn stopping_settles_text_submissions_and_tells_senders_what_core_lacks() -
             "{trace:?}"
         );
     }
-    assert!(explanation(&trace, "130").is_err(), "{trace:?}");
-    let stopped = explanation(&trace, "131")?;
+    assert_eq!(explanation(&trace, "130"), None, "{trace:?}");
+    let stopped = explanation(&trace, "131").context("missing explanation")?;
     assert!(stopped.contains("restarting"), "{stopped}");
     // The waiting message is dropped, as before.
     assert!(
@@ -1444,10 +1444,10 @@ async fn stopping_during_the_replay_lookup_settles_text_by_cores_answer() -> Res
             .collect::<Vec<_>>()
     };
     // The held message keeps its first admission's feedback alone.
-    assert!(explanation(&trace, "140").is_err(), "{trace:?}");
+    assert_eq!(explanation(&trace, "140"), None, "{trace:?}");
     assert!(reactions("140").is_empty(), "{trace:?}");
     // The sender of the one core does not hold is told.
-    let stopped = explanation(&trace, "141")?;
+    let stopped = explanation(&trace, "141").context("missing explanation")?;
     assert!(stopped.contains("restarting"), "{stopped}");
     assert!(
         reactions("141")
@@ -1456,7 +1456,7 @@ async fn stopping_during_the_replay_lookup_settles_text_by_cores_answer() -> Res
         "{trace:?}"
     );
     // The one core cannot answer for stays uncertain, never "not accepted".
-    assert!(explanation(&trace, "142").is_err(), "{trace:?}");
+    assert_eq!(explanation(&trace, "142"), None, "{trace:?}");
     assert!(
         reactions("142")
             .iter()
@@ -1612,7 +1612,7 @@ async fn a_text_whose_conversation_never_opens_is_refused_in_time() -> Result<()
         "{trace:?}"
     );
     // Its sender is told, in words that fit a text.
-    let explained = explanation(&trace, "87")?;
+    let explained = explanation(&trace, "87").context("missing explanation")?;
     assert!(
         explained.contains("in time") && !explained.contains("attachments"),
         "{explained}"

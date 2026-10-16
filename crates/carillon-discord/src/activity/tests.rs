@@ -1649,14 +1649,10 @@ async fn a_failed_progress_identity_save_does_not_create_a_second_card_after_res
         let saved = saved.clone();
         move |seen, earlier| {
             if seen.method == Method::POST && earlier == 0 {
-                assert!(
-                    std::fs::rename(&records, &saved).is_ok(),
-                    "save the pre-creation checkpoint"
-                );
-                assert!(
-                    std::fs::create_dir(&records).is_ok(),
-                    "obstruct the identity publication"
-                );
+                let saved = std::fs::rename(&records, &saved).map_err(|error| error.kind());
+                assert_eq!(saved, Ok(()), "save the pre-creation checkpoint");
+                let obstructed = std::fs::create_dir(&records).map_err(|error| error.kind());
+                assert_eq!(obstructed, Ok(()), "obstruct the identity publication");
             }
             Reply::Success
         }
