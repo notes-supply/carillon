@@ -224,11 +224,6 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
     return model;
   }
 
-  /**
-   * The turn's activity is visible from before preparation, and removed
-   * however it ends; its final report is taken first, with the answer or
-   * the failure.
-   */
   /** The workspace of the turn's agent; a turn of another agent is refused before anything runs. */
   function workspaceOf(request: TurnRequest): string {
     const workspace = workspaces.get(request.agent_id);
@@ -237,6 +232,11 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
     return workspace;
   }
 
+  /**
+   * The turn's activity is visible from before preparation, and removed
+   * however it ends; its final report is taken first, with the answer or
+   * the failure.
+   */
   async function executePi(request: TurnRequest, signal: AbortSignal): Promise<TurnResponse> {
     const workspace = workspaceOf(request);
     const activity = trackActivity(workspace);
