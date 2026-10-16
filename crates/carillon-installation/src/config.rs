@@ -554,8 +554,9 @@ mod tests {
     #[test]
     fn provider_identity_uses_one_path_safe_slug_grammar() {
         for valid in ["a", "runtime-pi", "interface_2", "A9"] {
-            assert!(
-                validate_provider_identity(valid).is_ok(),
+            assert_eq!(
+                validate_provider_identity(valid).map_err(|error| error.to_string()),
+                Ok(()),
                 "{valid:?} should be valid"
             );
         }
@@ -573,8 +574,12 @@ mod tests {
             "with\ncontrol",
             &overlong,
         ] {
-            assert!(
-                validate_provider_identity(invalid).is_err(),
+            assert_eq!(
+                validate_provider_identity(invalid).map_err(|error| error.to_string()),
+                Err(
+                    "provider identity must be 1-128 bytes of ASCII letters, digits, '-' or '_'"
+                        .to_owned()
+                ),
                 "{invalid:?} should be invalid"
             );
         }

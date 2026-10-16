@@ -95,7 +95,7 @@ mod tests {
                 .context("the service saw no request")?,
             "GET /v1/status HTTP/1.1"
         );
-        assert!(proxied.try_recv().is_err(), "a request went to the proxy");
+        assert_eq!(proxied.try_recv(), Err(mpsc::TryRecvError::Empty));
         Ok(())
     }
 }
