@@ -35,16 +35,44 @@ fn a_models_emphasis_and_inline_code_render() {
 }
 
 #[test]
-fn code_inside_emphasis_keeps_its_literal_markers() {
-    let (headline, reasoning) = shown(
-        "**Checking `**/*.rs` files**",
-        &["*Compare `a*b` with `a_b`* and **keep `**` literal**".to_owned()],
-    );
-    assert_eq!(headline, "**Checking `**/*.rs` files**");
-    assert_eq!(
-        reasoning,
-        "*Compare `a*b` with `a_b`* and **keep `**` literal**"
-    );
+fn enclosing_markers_inside_code_cannot_expose_model_markdown() {
+    for (input, expected) in [
+        (
+            "**Note `x** [docs](https://evil.example) y`**",
+            r"**Note \`x** \[docs\]\(https\://evil.example\) y\`\*\*",
+        ),
+        (
+            "*Note `x* [docs](https://evil.example) y`*",
+            r"*Note \`x* \[docs\]\(https\://evil.example\) y\`\*",
+        ),
+        (
+            "_Note `x_ [docs](https://evil.example) y`_",
+            r"_Note \`x_ \[docs\]\(https\://evil.example\) y\`\_",
+        ),
+        (
+            "**Checking `**/*.rs` files**",
+            r"**Checking \`**/\*.rs\` files\*\*",
+        ),
+    ] {
+        let (headline, reasoning) = shown(input, &[input.to_owned()]);
+        assert_eq!(headline, expected, "{input}");
+        assert_eq!(reasoning, expected, "{input}");
+    }
+    for (input, expected) in [
+        ("<@200> @everyone", r"\<\@200\> \@everyone"),
+        ("https://evil.example", r"https\://evil.example"),
+        ("||secret||", r"\|\|secret\|\|"),
+        ("<t:1790000000:R>", r"\<t\:1790000000\:R\>"),
+        ("<:emote:123>", r"\<\:emote\:123\>"),
+        ("# heading > quote - list", r"\# heading \> quote - list"),
+    ] {
+        for (marker, escaped) in [("**", r"\*\*"), ("*", r"\*"), ("_", r"\_")] {
+            let source = format!("{marker}Note `x{marker} {input} y`{marker}");
+            let expected = format!("{marker}Note \\`x{marker} {expected} y\\`{escaped}");
+            let (_, reasoning) = shown("Working", std::slice::from_ref(&source));
+            assert_eq!(reasoning, expected, "{source}");
+        }
+    }
 }
 
 #[test]
