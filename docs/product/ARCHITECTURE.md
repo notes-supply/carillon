@@ -58,8 +58,12 @@ retired worker settles its turn before it ends.
 A turn whose outcome can't be proved, or that its runtime reports as failed,
 becomes interrupted. Core never replays it; the next message continues the
 native session. An observation that got no answer is asked again instead,
-since it only reads. Startup records turns still marked running as
-interrupted. Delivery is a separate outbox, so a lost interface never reruns
+since it only reads. Startup interrupts running messages and requeues
+running observations. It then interrupts queued turns whose agent moved to
+another runtime or was removed, without needing their former runtime's
+workers. Observations also warn that work already started there will not
+be reported here and that actions already taken may have had effects.
+Delivery is a separate outbox, so a lost interface never reruns
 the model, and a delivery claimed by a crashed interface becomes uncertain.
 
 ### Maintenance drain

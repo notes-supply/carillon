@@ -31,7 +31,10 @@ mise run example:core
 - `jobs_at_work` and `named_jobs` read an interface's jobs: a message's turn
   and the observations that reported its delegated work.
 - `recover_interrupted` and `reconcile_attachments` are for exclusive
-  startup, before events are accepted.
+  startup, before events are accepted. Recovery interrupts queued turns whose
+  agent moved or was removed, including observations, even if their former
+  runtime is disabled or no longer configured. Running messages keep their
+  restart notice; running observations return to the queue before this check.
 
 Storage calls are synchronous. Async paths run SQLite writes and resource
 snapshots on Tokio's blocking pool.

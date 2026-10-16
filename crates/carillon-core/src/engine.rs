@@ -207,12 +207,31 @@ impl Core {
         self.work[lane as usize].send_replace(());
     }
 
-    /// Mark orphaned running turns interrupted, never replaying their input.
+    /// Recover running turns, then interrupt queued turns whose agent moved or was removed.
     /// Call only after acquiring exclusive worker ownership; opening another handle is not a restart.
     /// # Errors
     /// Returns storage errors.
     pub fn recover_interrupted(&self) -> Result<usize> {
-        self.database.recover_running_turns()
+        let mut recovered = self.database.recover_running_turns()?;
+        for (agent_id, runtime_id) in self.database.queued_owners()? {
+            if self
+                .agent(&agent_id)
+                .is_ok_and(|agent| agent.runtime == runtime_id)
+            {
+                continue;
+            }
+            let explanation = stranded(&runtime_id, &agent_id);
+            let observation_notice = format!(
+                "{explanation}\nWork already started there will not be reported here. Actions already taken may have had effects."
+            );
+            recovered += self.database.interrupt_queued(
+                &agent_id,
+                &runtime_id,
+                &explanation,
+                &observation_notice,
+            )?;
+        }
+        Ok(recovered)
     }
 
     /// Remove abandoned capture copies and captures no committed turn

@@ -146,7 +146,10 @@ pub(super) async fn serve(path: PathBuf, config: LoadedConfig) -> Result<()> {
     // Interface processes may outlive core. Their claims remain recoverable;
     // interface-instance reconciliation handles abandoned claims instead.
     if recovered_turns > 0 {
-        warn!(recovered_turns, "running turns were interrupted by restart");
+        warn!(
+            recovered_turns,
+            "turns were interrupted by restart or agent changes"
+        );
     }
     // Exclusive: the service lock is held and nothing is accepted yet.
     let reconciled = core.reconcile_attachments()?;
