@@ -6,7 +6,6 @@
 import { createHash } from "node:crypto";
 import { Type, type Static } from "typebox";
 
-/** The orchestration protocol version this runtime speaks and requires. */
 export const ORCHESTRATION_PROTOCOL = 2;
 
 export const RPC = {
@@ -188,7 +187,6 @@ export const SubagentSchema = Type.Object({
 });
 export type Subagent = Static<typeof SubagentSchema>;
 
-/** A transfer of conversation context between threads or providers. */
 export const ContextTransferSchema = Type.Object({
   id: Id,
   type: Type.String(),

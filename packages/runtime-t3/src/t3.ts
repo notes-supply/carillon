@@ -69,7 +69,6 @@ export type Connect = (endpoint: T3Endpoint, options?: ConnectOptions) => Promis
 
 export const DEFAULT_TIMEOUT_MS = 30_000;
 
-/** Opens a connection, or fails naming why the server cannot be used. */
 export const connectT3: Connect = async (endpoint, options = {}) => {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const { signal } = options;

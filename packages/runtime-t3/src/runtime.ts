@@ -94,7 +94,6 @@ const OriginSchema = Type.Object({
   }),
 });
 
-/** An agent whose conversations the runtime runs on T3. */
 export interface T3Agent {
   /** The T3 project whose workspace root is the agent's workspace. */
   readonly projectId: string;

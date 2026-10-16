@@ -55,7 +55,6 @@ const SettingsSchema = Type.Object(
 export type SettingsFile = Static<typeof SettingsSchema>;
 type AgentSettingsFile = Static<typeof AgentSettingsSchema>;
 
-/** An agent as the runtime runs it. */
 interface AgentSettings {
   readonly projectId: string;
   /** The agent default from the settings: what new threads start with until `/model` changes it. */

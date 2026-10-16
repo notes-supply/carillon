@@ -214,7 +214,6 @@ it("keeps a conversation's turns in one T3 thread and sends the person's text as
     expect(dispatch["modelSelection"]).toEqual(thread().modelSelection);
   // The thread is opened by the same command each turn, replayed under its receipt.
   expect(fake.commands.filter((command) => command.type === "thread.create")).toHaveLength(2);
-  // Each turn asks T3 for a bounded snapshot and a completion marker.
   expect(fake.subscriptions).toEqual([
     { afterSequence: undefined, bounded: true, marker: true },
     { afterSequence: undefined, bounded: true, marker: true },
@@ -231,7 +230,6 @@ it("recovers a dispatch whose answer was lost by reading the run back, without d
   expect((await result).output).toBe("hi");
   expect(dispatches()).toHaveLength(1);
   expect(thread().runs).toHaveLength(1);
-  // The reconnection resumed from the folded sequence instead of reloading the thread.
   expect(fake.subscriptions.map((subscription) => typeof subscription.afterSequence)).toEqual([
     "undefined",
     "number",
@@ -561,7 +559,6 @@ it("describes the running turn to its own interface, bounded and redacted, from 
     ],
     tool_calls: 2,
     notes: ["Reading the system file first, to see the agent's instructions."],
-    // The run's own selection: the model and Claude's effort option.
     agent: { model: "claude-sonnet-5", effort: "low" },
   });
   // T3 dated both ends of each call.
@@ -703,7 +700,6 @@ it("uploads only the bytes core captured, failing a turn whose image changed sin
     message:
       "The attached file photo.png changed after Carillon received it; please send it again.",
   });
-  // Nothing was granted, uploaded or dispatched.
   expect(fake.uploads.size).toBe(0);
   expect(dispatches()).toHaveLength(0);
 
@@ -789,7 +785,6 @@ it("never follows T3's upload redirect to another origin", async () => {
       (error: unknown) => error,
     )
     .finally(() => elsewhere.close());
-  // No image byte reached the other origin, and the turn failed as T3 refused it.
   expect(reached).toEqual([]);
   expect(failure).toMatchObject({
     status: 502,

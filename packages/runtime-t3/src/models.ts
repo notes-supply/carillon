@@ -21,7 +21,6 @@ import {
 } from "./contracts.ts";
 import { T3Failure } from "./t3.ts";
 
-/** A boolean setting's choices, as the catalogue offers them. */
 const ON = "on";
 const OFF = "off";
 

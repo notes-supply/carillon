@@ -578,7 +578,6 @@ it("refuses stream sequences that are not integers before they move the replay c
     "T3 sent a thread event this runtime does not understand",
   );
   expect(watch.sequence()).toBe(4);
-  // The next integer event is still folded.
   watch.apply(event(5, "run.updated", run("completed")));
   expect(watch.sequence()).toBe(5);
   expect(watch.outcome()?.kind).toBe("completed");
@@ -590,7 +589,6 @@ it("refuses a snapshot whose history flag is not a boolean before folding any of
   expect(() =>
     watch.apply({ ...snapshot({ runs: [run("completed")] }, 6), hasMoreHistory: "yes" }),
   ).toThrow("T3 sent a thread snapshot this runtime does not understand");
-  // The cursor and the run are the earlier snapshot's.
   expect(watch.sequence()).toBe(4);
   expect(watch.outcome()).toBeUndefined();
 });
@@ -1847,6 +1845,7 @@ it.each([false, true])(
 );
 
 it.each([
+  // A was still owed, too: one unlinked wake cannot discharge both A and B.
   {
     inside: false,
     outcome: {
@@ -3426,13 +3425,11 @@ it("shows each child once, whichever origin T3 gives it, beside its item and ros
   );
   const activity = watch.activity();
   expect(activity.running).toEqual([]);
-  // Each child once, as its delegation, beside the report T3's own task owes.
   expect(activity.work?.items.map((work) => [work.id, work.kind, work.label])).toEqual([
     ["native", "delegation", "Explore"],
     ["owned", "delegation", "Research"],
     ["report:message-1", "task", "report back to this conversation"],
   ]);
-  // Both items still count as the parent's calls.
   expect(activity.tool_calls).toBe(2);
 });
 

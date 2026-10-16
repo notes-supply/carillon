@@ -621,7 +621,6 @@ export function watchTurn(
     if (run !== undefined) refold(run);
   }
 
-  /** Folds again a run a link arrived after, adopting the provider records it names. */
   function refold(run: Run): void {
     foldRun(run);
     pruneProviders();
@@ -1340,7 +1339,6 @@ export function watchTurn(
       : { kind: "completed", output: text };
   }
 
-  /** One of the turn's runs is executing now. */
   function ownRunExecuting(): boolean {
     for (const run of turnRuns.values()) if (executing(run)) return true;
     return false;
