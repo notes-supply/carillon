@@ -55,15 +55,16 @@ be edited by hand.
 ```sh
 carillon runtime-t3 discover --url http://127.0.0.1:3773 < t3.token   # projects and models, as JSON
 carillon runtime-t3 profile --url http://127.0.0.1:3773 --harness claude < t3.token
-                                        # then: CLAUDE_CONFIG_DIR=HOME claude auth login
+CLAUDE_CONFIG_DIR=~/.local/share/carillon/profiles/claude claude auth login
 carillon runtime-t3 configure --url http://127.0.0.1:3773 --agent assistant \
   --project PROJECT_ID --model carillon_claude/claude-fable-5-1 < t3.token
 carillon runtime-t3 configure --url http://127.0.0.1:3773 --agent t3-notes \
   --project PROJECT_ID --model codex/gpt-6.1-sol < t3.token
 ```
 
-`profile --with-key` reads an API key from a second line of standard input,
-and `--endpoint URL` gives the endpoint it is for.
+`profile` prints the profile's instance and home, as JSON. `--with-key`
+reads an API key from a second line of standard input, and `--endpoint URL`
+gives the endpoint it is for.
 
 `configure` checks two things with T3:
 
