@@ -129,7 +129,7 @@ fn setup_added_pi_child() -> anyhow::Result<()> {
         _ => Shown::default(),
     };
     setup(Path::new(&home), &options, &mut questions)?;
-    println!("{}", questions.shown.join("\n"));
+    println!("{}", questions.seen.join("\n"));
     Ok(())
 }
 
