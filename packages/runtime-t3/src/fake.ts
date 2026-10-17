@@ -26,6 +26,7 @@ import {
   type TurnItem,
 } from "./contracts.ts";
 import { FAKE_PROVIDERS } from "./fake/providers.ts";
+import { InstanceCreateSchema, reportedInstances, type FakeInstance } from "./fake/settings.ts";
 
 /** A timeline item as the fake stores it: any kind, with whatever fields a test gives. */
 export interface FakeItem {
@@ -115,8 +116,7 @@ export interface FakeT3 {
   protocolVersion: number;
   /** The provider instances `server.getConfig` and `server.refreshProviders` list, as T3 describes them. */
   providers: unknown[];
-  /** The provider instances T3's settings hold, by ID, as `server.getSettings` lists them. */
-  readonly instances: Map<string, unknown>;
+  readonly instances: Map<string, FakeInstance>;
   /** The projects T3's authenticated shell snapshot lists. */
   projects: { id: string; title: string; workspaceRoot: string }[];
   /** Processes the command, then drops the socket before answering. */
@@ -832,25 +832,23 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
       case "server.getSettings":
         exit(socket, id, {
           _tag: "Success",
-          value: { providerInstances: Object.fromEntries(fake.instances) },
+          value: { providerInstances: reportedInstances(fake.instances) },
         });
         return;
       case "server.updateSettings": {
         // As T3: a created instance must be new; it applies at once.
-        const mutation = isRecord(payload) ? payload["providerInstanceMutation"] : undefined;
         if (
-          !isRecord(mutation) ||
-          mutation["operation"] !== "create" ||
-          typeof mutation["instanceId"] !== "string" ||
-          fake.instances.has(mutation["instanceId"])
+          !Check(InstanceCreateSchema, payload) ||
+          fake.instances.has(payload.providerInstanceMutation.instanceId)
         ) {
           rejectRequest(socket, id, "ServerSettingsError", "create-provider-instance");
           return;
         }
-        fake.instances.set(mutation["instanceId"], mutation["instance"]);
+        const { instanceId, instance } = payload.providerInstanceMutation;
+        fake.instances.set(instanceId, instance);
         exit(socket, id, {
           _tag: "Success",
-          value: { providerInstances: Object.fromEntries(fake.instances) },
+          value: { providerInstances: reportedInstances(fake.instances) },
         });
         return;
       }

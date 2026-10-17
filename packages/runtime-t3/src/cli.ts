@@ -16,7 +16,13 @@ import packageInfo from "../package.json" with { type: "json" };
 import { join } from "node:path";
 import { text } from "node:stream/consumers";
 import { configure, discover, profile } from "./setup.ts";
-import { assistantResources, HARNESSES, isHarness, reconcileProfiles } from "./profiles.ts";
+import {
+  assistantResources,
+  profileChoice,
+  type SignInRequest,
+  profileHarnesses,
+  reconcileProfiles,
+} from "./profiles.ts";
 import { loadSettings, offers, origin, type T3Settings } from "./settings.ts";
 import { connectT3, T3Failure, type T3Endpoint } from "./t3.ts";
 
@@ -218,36 +224,40 @@ async function configureCommand(values: readonly string[]): Promise<void> {
 }
 
 /**
- * `profile --url URL --harness claude|codex [--with-key [--endpoint URL]]`:
+ * `profile --url URL --harness HARNESS [--with-key [--endpoint URL]]`:
  * Carillon's profile for the harness in T3, printed as JSON. Resource links
  * are reconciled at serve startup. With `--with-key`, a second line of standard
  * input is the harness's API key, for its own service or the compatible
- * `--endpoint`.
+ * `--endpoint`; a harness whose profile shares your own sign-in refuses both.
  */
 async function profileCommand(values: readonly string[]): Promise<void> {
   const args = parseArguments(values, ["with-key"]);
   const url = originArgument(args);
-  const harness = requiredArgument(args, "harness");
-  if (!isHarness(harness))
-    throw new Error(`--harness must be one of ${Object.keys(HARNESSES).join(", ")}`);
-  const { installation } = await serving(args);
-  const [secret = "", key] = (await input()).split("\n").map((line) => line.trim());
-  if (secret.length === 0) throw new Error("the T3 token on standard input is empty");
-  if (args.has("with-key") && (key === undefined || key.length === 0))
-    throw new Error("--with-key needs the API key on the second line of standard input");
   const endpoint = args.get("endpoint");
   if (endpoint !== undefined && !args.has("with-key"))
     throw new Error("--endpoint is for a key: give --with-key too");
-  const made = await profile(
-    installation,
-    { url, token: secret },
-    {
-      harness,
-      ...(args.has("with-key") && key !== undefined ? { key } : {}),
-      ...(endpoint === undefined ? {} : { endpoint }),
-    },
-  );
+  const request: SignInRequest = !args.has("with-key")
+    ? { kind: "account" }
+    : endpoint === undefined
+      ? { kind: "api-key" }
+      : { kind: "compatible-endpoint", endpoint };
+  const choose = profileChoice(requiredArgument(args, "harness"), request);
+  const { installation } = await serving(args);
+  const [secret = "", key = ""] = (await input()).split("\n").map((line) => line.trim());
+  if (secret.length === 0) throw new Error("the T3 token on standard input is empty");
+  if (request.kind !== "account" && key.length === 0)
+    throw new Error("--with-key needs the API key on the second line of standard input");
+  const made = await profile(installation, { url, token: secret }, choose(key));
   process.stdout.write(`${JSON.stringify(made)}\n`);
+}
+
+/**
+ * `harnesses`: the harnesses Carillon makes profiles for and how each signs
+ * in, as JSON, for `carillon setup`. It reads no installation and reaches no
+ * T3 server.
+ */
+function harnessesCommand(): void {
+  process.stdout.write(`${JSON.stringify(profileHarnesses())}\n`);
 }
 
 /** The runtime `--provider` names, as the installation registers it and serving. */
@@ -309,6 +319,7 @@ const commands = {
   discover: discoverCommand,
   configure: configureCommand,
   profile: profileCommand,
+  harnesses: harnessesCommand,
   check: checkCommand,
 };
 const [command, ...rest] = process.argv.slice(2);

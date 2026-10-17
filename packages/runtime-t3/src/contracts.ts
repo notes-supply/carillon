@@ -617,54 +617,34 @@ function nativeSelection(selection: NativeSelection) {
   };
 }
 
-/** The part of T3's settings a profile's instance is checked against. */
+/**
+ * The part of T3's settings a profile's instance is checked against: its
+ * driver, and where it keeps the home, `config.homePath` or a variable of
+ * its environment. T3 reports a sensitive variable's value as empty, with
+ * `valueRedacted`.
+ */
 export const ServerSettingsSchema = Type.Object({
   providerInstances: Type.Optional(
     Type.Record(
       Type.String(),
       Type.Object({
         driver: Type.String(),
-        config: Type.Optional(Type.Object({ homePath: Type.Optional(Type.String()) })),
+        config: Type.Optional(
+          Type.Object({
+            homePath: Type.Optional(Type.String()),
+            serverUrl: Type.Optional(Type.String()),
+          }),
+        ),
+        environment: Type.Optional(
+          Type.Array(
+            Type.Object({
+              name: Type.String(),
+              value: Type.String(),
+              valueRedacted: Type.Optional(Type.Boolean()),
+            }),
+          ),
+        ),
       }),
     ),
   ),
 });
-
-/** A provider instance T3 creates, as its settings name it. */
-export interface InstanceDefinition {
-  readonly driver: string;
-  readonly displayName: string;
-  readonly homePath: string;
-  /** The harness's environment; T3 keeps a sensitive value, such as an API key, in its secret store. */
-  readonly environment: readonly {
-    readonly name: string;
-    readonly value: string;
-    readonly sensitive: boolean;
-  }[];
-}
-
-/** Creates a provider instance in T3's settings, which T3 starts without a restart. */
-export function instanceCreate(instanceId: string, instance: InstanceDefinition) {
-  return {
-    patch: {},
-    providerInstanceMutation: {
-      operation: "create",
-      instanceId,
-      instance: {
-        driver: instance.driver,
-        displayName: instance.displayName,
-        enabled: true,
-        config: { homePath: instance.homePath },
-        ...(instance.environment.length === 0
-          ? {}
-          : {
-              environment: instance.environment.map(({ name, value, sensitive }) => ({
-                name,
-                value,
-                sensitive,
-              })),
-            }),
-      },
-    },
-  } as const;
-}
