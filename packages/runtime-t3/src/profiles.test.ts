@@ -11,11 +11,35 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { expect, it } from "vitest";
+import { assertType, expect, it } from "vitest";
 import { configure, discover, profile } from "./setup.ts";
-import { reconcileProfile } from "./profiles.ts";
+import {
+  HOME_VARIABLES,
+  profileChoice,
+  profileHarnesses,
+  profileIds,
+  reconcileProfile,
+  type HarnessDefinition,
+  type ProfileChoice,
+  type SignInRequest,
+} from "./profiles.ts";
 import { loadSettings } from "./settings.ts";
 import { cli, fakeT3, installation, loaded, serve } from "./setup-fixtures.ts";
+
+function login(harness: "claude" | "codex"): ProfileChoice {
+  return { kind: "own-account", harness, credentials: { kind: "account" } };
+}
+
+function withKey(harness: "claude" | "codex", key: string, endpoint?: string): ProfileChoice {
+  return {
+    kind: "own-account",
+    harness,
+    credentials:
+      endpoint === undefined
+        ? { kind: "api-key", key }
+        : { kind: "compatible-endpoint", endpoint, key },
+  };
+}
 
 it("makes a Carillon profile and its sign-in home, leaving resource links for startup", async () => {
   const fake = await fakeT3();
@@ -26,7 +50,7 @@ it("makes a Carillon profile and its sign-in home, leaving resource links for st
   await writeFile(join(root, "agent", "skills", "status", "SKILL.md"), "Carillon status");
   // Profiles live under the XDG data directory, by harness.
   const home = join(root, "data", "carillon", "profiles", "claude");
-  expect(await profile(runtime, endpoint, { harness: "claude", key: "sk-test" })).toEqual({
+  expect(await profile(runtime, endpoint, withKey("claude", "sk-test"))).toEqual({
     instanceId: "carillon_claude",
     home,
   });
@@ -46,11 +70,11 @@ it("makes a Carillon profile and its sign-in home, leaving resource links for st
   );
 
   // A compatible endpoint's address is the harness's, its token a secret.
-  const proxied = await profile(runtime, endpoint, {
-    harness: "codex",
-    key: "proxy-token",
-    endpoint: "https://proxy.example",
-  });
+  const proxied = await profile(
+    runtime,
+    endpoint,
+    withKey("codex", "proxy-token", "https://proxy.example"),
+  );
   const codexHome = join(root, "data", "carillon", "profiles", "codex");
   expect(proxied).toEqual({ instanceId: "carillon_codex", home: codexHome });
   expect(fake.instances.get("carillon_codex")).toMatchObject({
@@ -64,7 +88,7 @@ it("makes a Carillon profile and its sign-in home, leaving resource links for st
   fake.instances.delete("carillon_codex");
 
   // Making it again keeps what is there.
-  await profile(runtime, endpoint, { harness: "claude" });
+  await profile(runtime, endpoint, login("claude"));
   expect(fake.instances.size).toBe(1);
 
   // The assistant then runs on it, and plain T3 Code no longer may.
@@ -92,23 +116,21 @@ it("makes a Carillon profile and its sign-in home, leaving resource links for st
 
   // What is not this profile is refused, with T3 left as it was.
   fake.instances.set("carillon_codex", { driver: "claudeAgent", config: { homePath: codexHome } });
-  await expect(profile(runtime, endpoint, { harness: "codex" })).rejects.toThrow(
-    /not this profile/u,
-  );
+  await expect(profile(runtime, endpoint, login("codex"))).rejects.toThrow(/not this profile/u);
   expect(fake.instances.get("carillon_codex")).toEqual({
     driver: "claudeAgent",
     config: { homePath: codexHome },
   });
   fake.instances.set("carillon_codex", { driver: "codex", config: { homePath: codexHome } });
   await writeFile(join(codexHome, "AGENTS.md"), "the owner's own");
-  await profile(runtime, endpoint, { harness: "codex" });
+  await profile(runtime, endpoint, login("codex"));
   expect(await readFile(join(codexHome, "AGENTS.md"), "utf8")).toBe("the owner's own");
   // Only an agent with resources has something to share.
   await writeFile(
     config,
     (await readFile(config, "utf8")).replace(/\[\[agents\]\]\nid = "assistant"[^[]*/u, ""),
   );
-  await expect(profile(await loaded(config), endpoint, { harness: "claude" })).rejects.toThrow(
+  await expect(profile(await loaded(config), endpoint, login("claude"))).rejects.toThrow(
     /has resources/u,
   );
 });
@@ -214,11 +236,7 @@ it("refuses supplied credentials on an existing profile without reporting succes
   const fake = await fakeT3();
   const { config } = await installation();
   const runtime = await loaded(config);
-  await profile(
-    runtime,
-    { url: fake.url, token: fake.token },
-    { harness: "claude", key: "original-key" },
-  );
+  await profile(runtime, { url: fake.url, token: fake.token }, withKey("claude", "original-key"));
   const before = await readFile(runtime.providerFile, "utf8");
   for (const extra of [[], ["--endpoint", "https://proxy.example"]]) {
     const refused = await cli(
@@ -328,7 +346,7 @@ it("discovers profile existence from T3 even when the saved list disagrees", asy
   const { config } = await installation();
   const runtime = await loaded(config);
   const endpoint = { url: fake.url, token: fake.token };
-  await profile(runtime, endpoint, { harness: "claude", key: "original-key" });
+  await profile(runtime, endpoint, withKey("claude", "original-key"));
   expect((await discover(endpoint)).profiles).toEqual(["carillon_claude"]);
   fake.instances.delete("carillon_claude");
   expect((await loadSettings(runtime.providerFile, runtime.root)).profiles).toEqual(
@@ -360,4 +378,267 @@ it("removes only its abandoned temporary skill links after a crashed reconciliat
   );
   expect(await readlink(join(home, "skills", "status"))).toBe(join(source, "status"));
   expect(await readlink(join(home, "skills", native))).toBe(join(root, "native"));
+});
+
+it("makes an OpenCode profile at home in its instance's environment, sharing the user's own OpenCode sign-in", async () => {
+  const fake = await fakeT3();
+  const { root, config } = await installation();
+  const runtime = await loaded(config);
+  const endpoint = { url: fake.url, token: fake.token };
+  const home = join(root, "data", "carillon", "profiles", "opencode");
+  const shared: ProfileChoice = { kind: "shared-account", harness: "opencode" };
+  expect(await profile(runtime, endpoint, shared)).toEqual({
+    instanceId: "carillon_opencode",
+    home,
+  });
+  expect(await readdir(home)).toEqual([]);
+  expect((await stat(home)).mode & 0o777).toBe(0o700);
+  expect(fake.instances.get("carillon_opencode")).toStrictEqual({
+    driver: "opencode",
+    displayName: "OpenCode · Carillon",
+    enabled: true,
+    environment: [
+      { name: "OPENCODE_CONFIG_DIR", value: home, sensitive: false },
+      { name: "OPENCODE_DISABLE_CLAUDE_CODE", value: "1", sensitive: false },
+    ],
+  });
+  expect((await loadSettings(runtime.providerFile, root)).profiles).toEqual(
+    new Set(["carillon_opencode"]),
+  );
+  await profile(runtime, endpoint, shared);
+  expect(fake.instances.size).toBe(1);
+
+  const moved = join(root, "elsewhere", "opencode");
+  const instance = {
+    driver: "opencode",
+    environment: [
+      { name: "OPENCODE_DISABLE_CLAUDE_CODE", value: "1", sensitive: false },
+      { name: "OPENCODE_CONFIG_DIR", value: moved, sensitive: false },
+    ],
+  };
+  fake.instances.set("carillon_opencode", instance);
+  expect(await profile(runtime, endpoint, shared)).toEqual({
+    instanceId: "carillon_opencode",
+    home: moved,
+  });
+  expect(await readdir(moved)).toEqual([]);
+  expect(fake.instances.get("carillon_opencode")).toBe(instance);
+});
+
+it.each([
+  ["another driver", { driver: "codex", config: { homePath: "/unused" } }, /not this profile/u],
+  ["no home variable", { driver: "opencode" }, /has no OPENCODE_CONFIG_DIR/u],
+  [
+    "a blank home variable",
+    { driver: "opencode", environment: [{ name: "OPENCODE_CONFIG_DIR", value: " " }] },
+    /has no OPENCODE_CONFIG_DIR/u,
+  ],
+  [
+    "a relative home",
+    { driver: "opencode", environment: [{ name: "OPENCODE_CONFIG_DIR", value: "profiles/oc" }] },
+    /OPENCODE_CONFIG_DIR must be an absolute path/u,
+  ],
+  [
+    "a home T3 would not expand",
+    { driver: "opencode", environment: [{ name: "OPENCODE_CONFIG_DIR", value: "~/opencode" }] },
+    /OPENCODE_CONFIG_DIR must be an absolute path/u,
+  ],
+  [
+    "a home kept secret",
+    {
+      driver: "opencode",
+      environment: [{ name: "OPENCODE_CONFIG_DIR", value: "/profiles/oc", sensitive: true }],
+    },
+    /keeps OPENCODE_CONFIG_DIR secret/u,
+  ],
+  [
+    "a home set twice",
+    {
+      driver: "opencode",
+      environment: [
+        { name: "OPENCODE_CONFIG_DIR", value: "/profiles/oc" },
+        { name: "OPENCODE_CONFIG_DIR", value: "/profiles/other" },
+      ],
+    },
+    /sets OPENCODE_CONFIG_DIR more than once/u,
+  ],
+  [
+    "no flag against Claude's files",
+    { driver: "opencode", environment: [{ name: "OPENCODE_CONFIG_DIR", value: "/profiles/oc" }] },
+    /must set OPENCODE_DISABLE_CLAUDE_CODE=1/u,
+  ],
+  [
+    "the flag off",
+    {
+      driver: "opencode",
+      environment: [
+        { name: "OPENCODE_CONFIG_DIR", value: "/profiles/oc" },
+        { name: "OPENCODE_DISABLE_CLAUDE_CODE", value: "0" },
+      ],
+    },
+    /must set OPENCODE_DISABLE_CLAUDE_CODE=1/u,
+  ],
+  [
+    "a server of its own",
+    {
+      driver: "opencode",
+      config: { serverUrl: "http://127.0.0.1:4096" },
+      environment: [
+        { name: "OPENCODE_CONFIG_DIR", value: "/profiles/oc" },
+        { name: "OPENCODE_DISABLE_CLAUDE_CODE", value: "1" },
+      ],
+    },
+    /names a serverUrl/u,
+  ],
+])(
+  "refuses an existing OpenCode instance with %s, naming it, and leaves T3 as it was",
+  async (_label, instance, refusal) => {
+    const fake = await fakeT3();
+    const { root, config } = await installation();
+    const runtime = await loaded(config);
+    fake.instances.set("carillon_opencode", instance);
+    await expect(
+      profile(
+        runtime,
+        { url: fake.url, token: fake.token },
+        { kind: "shared-account", harness: "opencode" },
+      ),
+    ).rejects.toThrow(refusal);
+    await expect(
+      profile(
+        runtime,
+        { url: fake.url, token: fake.token },
+        { kind: "shared-account", harness: "opencode" },
+      ),
+    ).rejects.toThrow(/carillon_opencode/u);
+    expect(fake.instances.get("carillon_opencode")).toBe(instance);
+    expect(await readdir(join(root, "providers"))).toEqual([]);
+    await expect(lstat(join(root, "data"))).rejects.toMatchObject({ code: "ENOENT" });
+  },
+);
+
+it("refuses an unknown harness, or a key for an OpenCode profile, before reading the installation or standard input", async () => {
+  const fake = await fakeT3();
+  const { root } = await installation();
+  const absent = join(root, "absent", "carillon.toml");
+  const shared = /shares your own OpenCode sign-in.*`opencode auth login`/u;
+  for (const [harness, refusal] of [
+    [["--harness", "cursor"], /--harness must be one of/u],
+    [["--harness", "opencode", "--with-key"], shared],
+    [["--harness", "opencode", "--with-key", "--endpoint", "https://proxy.example"], shared],
+  ] as const) {
+    const refused = await cli(
+      ["profile", "--config", absent, "--url", fake.url, ...harness],
+      `${fake.token}\nsecret-key\n`,
+    );
+    expect(refused.status).toBe(1);
+    expect(refused.stdout).toBe("");
+    expect(refused.stderr).toMatch(refusal);
+    expect(refused.stderr).not.toContain("secret-key");
+    expect(fake.instances.size).toBe(0);
+  }
+});
+
+it("adopts every harness's profile at the home it created it with, in each way it signs in", async () => {
+  for (const { id: harness, signIn } of profileHarnesses()) {
+    const variable = HOME_VARIABLES.get(harness);
+    expect(variable).toEqual(expect.any(String));
+    const requests: SignInRequest[] =
+      signIn.kind === "own-account"
+        ? [
+            { kind: "account" },
+            { kind: "api-key" },
+            { kind: "compatible-endpoint", endpoint: "https://proxy.example" },
+          ]
+        : [{ kind: "account" }];
+    for (const request of requests) {
+      const fake = await fakeT3();
+      const { config } = await installation();
+      const runtime = await loaded(config);
+      const endpoint = { url: fake.url, token: fake.token };
+      const made = await profile(runtime, endpoint, profileChoice(harness, request)("k"));
+      expect(made.instanceId).toBe(`carillon_${harness}`);
+      const instance = fake.instances.get(made.instanceId);
+      const environment = instance?.environment ?? [];
+      const names = environment.map(({ name }) => name);
+      expect(new Set(names).size).toBe(names.length);
+      const homePath = instance?.config?.["homePath"];
+      expect([
+        ...(homePath === undefined ? [] : [homePath]),
+        ...environment.filter(({ name }) => name === variable).map(({ value }) => value),
+      ]).toEqual([made.home]);
+      expect(
+        environment.filter(({ sensitive }) => sensitive === true).map(({ value }) => value),
+      ).toEqual(request.kind === "account" ? [] : ["k"]);
+      expect(environment.some(({ value }) => value === "https://proxy.example")).toBe(
+        request.kind === "compatible-endpoint",
+      );
+      const adopted = profileChoice(harness, { kind: "account" })("");
+      expect(await profile(runtime, endpoint, adopted)).toEqual(made);
+    }
+  }
+});
+
+it("the table's types refuse a placement or sign-in T3 cannot run", () => {
+  const own = {
+    kind: "own-account",
+    program: "p",
+    login: [],
+    status: [],
+    key: "K",
+    endpoint: "E",
+    endpointKey: "T",
+  } as const;
+  const shared = { kind: "shared-account", program: "p", login: [] } as const;
+  const rest = { name: "N", instructions: "AGENTS.md", fixedEnvironment: {} } as const;
+  assertType<HarnessDefinition[]>([
+    { ...rest, driver: "claudeAgent", home: "homePath", signIn: own },
+    { ...rest, driver: "opencode", home: { variable: "OPENCODE_CONFIG_DIR" }, signIn: shared },
+    {
+      ...rest,
+      driver: "opencode",
+      // @ts-expect-error T3's opencode driver has no config.homePath
+      home: "homePath",
+      signIn: shared,
+    },
+    {
+      ...rest,
+      driver: "codex",
+      // @ts-expect-error T3 sets CODEX_HOME from config.homePath itself
+      home: { variable: "CODEX_HOME" },
+      signIn: own,
+    },
+    {
+      ...rest,
+      driver: "codex",
+      // @ts-expect-error a driver with config.homePath keeps no variable in its environment
+      home: { variable: "OPENCODE_CONFIG_DIR" },
+      signIn: own,
+    },
+    {
+      ...rest,
+      driver: "opencode",
+      home: { variable: "OPENCODE_CONFIG_DIR" },
+      // @ts-expect-error a shared sign-in has no status check of its own
+      signIn: { ...shared, status: ["auth", "list"] },
+    },
+  ]);
+  assertType<ProfileChoice[]>([
+    { kind: "shared-account", harness: "opencode" },
+    // @ts-expect-error a profile sharing the user's sign-in takes no key
+    { kind: "own-account", harness: "opencode", credentials: { kind: "api-key", key: "k" } },
+    {
+      kind: "own-account",
+      harness: "claude",
+      // @ts-expect-error a compatible endpoint always comes with its key
+      credentials: { kind: "compatible-endpoint", endpoint: "https://proxy.example" },
+    },
+  ]);
+});
+
+it("lists the harnesses for setup as the file core's setup tests read", async () => {
+  await expect(`${JSON.stringify(profileHarnesses(), null, 2)}\n`).toMatchFileSnapshot(
+    "./harnesses.json",
+  );
+  expect(profileHarnesses().map(({ instanceId }) => instanceId)).toEqual(profileIds());
 });

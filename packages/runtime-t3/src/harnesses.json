@@ -1,0 +1,51 @@
+[
+  {
+    "id": "claude",
+    "name": "Claude",
+    "instanceId": "carillon_claude",
+    "signIn": {
+      "kind": "own-account",
+      "homeVariable": "CLAUDE_CONFIG_DIR",
+      "program": "claude",
+      "login": [
+        "auth",
+        "login"
+      ],
+      "status": [
+        "auth",
+        "status"
+      ]
+    }
+  },
+  {
+    "id": "codex",
+    "name": "Codex",
+    "instanceId": "carillon_codex",
+    "signIn": {
+      "kind": "own-account",
+      "homeVariable": "CODEX_HOME",
+      "program": "codex",
+      "login": [
+        "login",
+        "--device-auth"
+      ],
+      "status": [
+        "login",
+        "status"
+      ]
+    }
+  },
+  {
+    "id": "opencode",
+    "name": "OpenCode",
+    "instanceId": "carillon_opencode",
+    "signIn": {
+      "kind": "shared-account",
+      "program": "opencode",
+      "login": [
+        "auth",
+        "login"
+      ]
+    }
+  }
+]

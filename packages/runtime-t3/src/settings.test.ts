@@ -2,6 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
+import { profileIds } from "./profiles.ts";
 import { loadSettings } from "./settings.ts";
 
 const directories: string[] = [];
@@ -75,12 +76,12 @@ it("reads the profiles and each agent's settings, refusing a repeated or unknown
       ['url = "http://127.0.0.1:3773"', 'token_file = "credentials/t3.token"', ...lines].join("\n"),
     );
   await file(
-    'profiles = ["carillon_claude", "carillon_codex"]',
+    `profiles = ${JSON.stringify(profileIds())}`,
     ...agent("assistant", "carillon_codex"),
     ...agent("code", "claudeAgent"),
   );
   const loaded = await loadSettings(path, root);
-  expect(loaded.profiles).toEqual(new Set(["carillon_claude", "carillon_codex"]));
+  expect(loaded.profiles).toEqual(new Set(profileIds()));
   expect(loaded.agents.get("assistant")).toEqual({
     projectId: "project",
     selection: { instanceId: "carillon_codex", model: "m", options: [] },
