@@ -707,3 +707,67 @@ async fn download_memory() -> Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "public-network TLS matrix; credential-free CDN client only"]
+async fn public_tls_trust_matrix() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let downloads = Downloads::open(
+        directory.path().join("staging"),
+        AttachmentPolicy::default(),
+    )?;
+    let client = &downloads.client;
+    for (host, accepted) in [
+        ("example.com", true),
+        ("wrong.host.badssl.com", false),
+        ("self-signed.badssl.com", false),
+        ("dv-g3b-emudhra.we-have-a-problem.com", false),
+        ("dv-g3c-emudhra.we-have-a-problem.com", false),
+        ("ov-g3b-emudhra.we-have-a-problem.com", false),
+        ("ov-g3c-emudhra.we-have-a-problem.com", false),
+        ("ev-g3b-emudhra.we-have-a-problem.com", false),
+        ("ev-g3c-emudhra.we-have-a-problem.com", false),
+        ("dv-g3b-aaa-emudhra.we-have-a-problem.com", false),
+        ("dv-g3c-aaa-emudhra.we-have-a-problem.com", false),
+        ("ov-g3b-aaa-emudhra.we-have-a-problem.com", false),
+        ("ov-g3c-aaa-emudhra.we-have-a-problem.com", false),
+        ("ev-g3b-aaa-emudhra.we-have-a-problem.com", false),
+        ("ev-g3c-aaa-emudhra.we-have-a-problem.com", false),
+        ("dv-g3b-noct-emudhra.we-have-a-problem.com", false),
+        ("dv-g3b-aaa-noct-emudhra.we-have-a-problem.com", false),
+    ] {
+        let result = client
+            .get(format!("https://{host}/"))
+            .timeout(std::time::Duration::from_secs(15))
+            .send()
+            .await;
+        match result {
+            Ok(response) => {
+                anyhow::ensure!(
+                    accepted,
+                    "{host}: unexpectedly trusted ({})",
+                    response.status()
+                );
+                anyhow::ensure!(
+                    response.status().is_success(),
+                    "{host}: invalid control response"
+                );
+                let body = response.bytes().await?;
+                anyhow::ensure!(!body.is_empty(), "{host}: empty control body");
+                println!("{host}: accepted valid control");
+            }
+            Err(error) => {
+                let detail = format!("{error:?}");
+                let certificate_error = detail.to_ascii_lowercase().contains("certificate")
+                    || detail.contains("UnknownIssuer")
+                    || detail.contains("CertNotValidForName");
+                anyhow::ensure!(
+                    !accepted && certificate_error,
+                    "{host}: inconclusive TLS result: {detail}"
+                );
+                println!("{host}: certificate rejected: {detail}");
+            }
+        }
+    }
+    Ok(())
+}
