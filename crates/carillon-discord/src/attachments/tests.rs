@@ -759,7 +759,16 @@ async fn public_tls_trust_matrix() -> Result<()> {
             Err(error) => {
                 let certificate = std::iter::successors(
                     Some(&error as &(dyn std::error::Error + 'static)),
-                    |error| error.source(),
+                    |error| {
+                        if let Some(inner) = error
+                            .downcast_ref::<std::io::Error>()
+                            .and_then(std::io::Error::get_ref)
+                        {
+                            Some(inner as &(dyn std::error::Error + 'static))
+                        } else {
+                            error.source()
+                        }
+                    },
                 )
                 .find_map(|error| error.downcast_ref::<rustls::Error>())
                 .and_then(|error| match error {
