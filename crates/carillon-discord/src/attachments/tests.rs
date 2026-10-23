@@ -707,3 +707,95 @@ async fn download_memory() -> Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "public-network TLS matrix; credential-free CDN client only"]
+async fn public_tls_trust_matrix() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let downloads = Downloads::open(
+        directory.path().join("staging"),
+        AttachmentPolicy::default(),
+    )?;
+    let client = &downloads.client;
+    for (host, accepted) in [
+        ("example.com", true),
+        ("wrong.host.badssl.com", false),
+        ("self-signed.badssl.com", false),
+        ("dv-g3b-emudhra.we-have-a-problem.com", false),
+        ("dv-g3c-emudhra.we-have-a-problem.com", false),
+        ("ov-g3b-emudhra.we-have-a-problem.com", false),
+        ("ov-g3c-emudhra.we-have-a-problem.com", false),
+        ("ev-g3b-emudhra.we-have-a-problem.com", false),
+        ("ev-g3c-emudhra.we-have-a-problem.com", false),
+        ("dv-g3b-aaa-emudhra.we-have-a-problem.com", false),
+        ("dv-g3c-aaa-emudhra.we-have-a-problem.com", false),
+        ("ov-g3b-aaa-emudhra.we-have-a-problem.com", false),
+        ("ov-g3c-aaa-emudhra.we-have-a-problem.com", false),
+        ("ev-g3b-aaa-emudhra.we-have-a-problem.com", false),
+        ("ev-g3c-aaa-emudhra.we-have-a-problem.com", false),
+        ("dv-g3b-noct-emudhra.we-have-a-problem.com", false),
+        ("dv-g3b-aaa-noct-emudhra.we-have-a-problem.com", false),
+    ] {
+        let result = client
+            .get(format!("https://{host}/"))
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await;
+        match result {
+            Ok(response) => {
+                anyhow::ensure!(
+                    accepted,
+                    "{host}: unexpectedly trusted ({})",
+                    response.status()
+                );
+                anyhow::ensure!(
+                    response.status().is_success(),
+                    "{host}: invalid control response"
+                );
+                let body = response.bytes().await?;
+                anyhow::ensure!(!body.is_empty(), "{host}: empty control body");
+                println!("{host}: accepted valid control");
+            }
+            Err(error) => {
+                let certificate = std::iter::successors(
+                    Some(&error as &(dyn std::error::Error + 'static)),
+                    |error| {
+                        if let Some(inner) = error
+                            .downcast_ref::<std::io::Error>()
+                            .and_then(std::io::Error::get_ref)
+                        {
+                            Some(inner as &(dyn std::error::Error + 'static))
+                        } else {
+                            error.source()
+                        }
+                    },
+                )
+                .find_map(|error| error.downcast_ref::<rustls::Error>())
+                .and_then(|error| match error {
+                    rustls::Error::InvalidCertificate(certificate) => Some(certificate),
+                    _ => None,
+                });
+                let expected = match (host, certificate) {
+                    (
+                        "wrong.host.badssl.com",
+                        Some(rustls::CertificateError::NotValidForNameContext { .. }),
+                    )
+                    | ("self-signed.badssl.com", Some(rustls::CertificateError::UnknownIssuer)) => {
+                        true
+                    }
+                    (_, Some(rustls::CertificateError::Other(error))) => {
+                        error.0.downcast_ref::<webpki::Error>()
+                            == Some(&webpki::Error::CertDistrusted)
+                    }
+                    _ => false,
+                };
+                anyhow::ensure!(
+                    !accepted && expected,
+                    "{host}: inconclusive TLS result: {error:?}"
+                );
+                println!("{host}: expected certificate rejection: {certificate:?}");
+            }
+        }
+    }
+    Ok(())
+}

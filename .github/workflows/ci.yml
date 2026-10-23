@@ -7,6 +7,11 @@ on:
   merge_group:
   # A full run on main builds a release candidate whatever changed.
   workflow_dispatch:
+    inputs:
+      public_tls:
+        description: Run the credential-free public certificate matrix
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -98,6 +103,9 @@ jobs:
           # saves no workspace crates, and the next run needn't start cold.
           cache-on-failure: true
       - run: mise run check:rust
+      - name: Check the public TLS certificate fixtures when requested
+        if: github.event_name == 'workflow_dispatch' && inputs.public_tls
+        run: mise exec -- cargo test --locked -p carillon-discord --lib public_tls_trust_matrix -- --ignored --nocapture
 
   ts:
     needs: plan

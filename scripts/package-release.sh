@@ -91,7 +91,7 @@ install -m 0644 "$PHOTON/photon_rs_bg.wasm" "$STAGE/bin/"
 # Licences travel in licenses/, which installation keeps in app/licenses:
 # Carillon's own (Apache-2.0, also the standard text for packages that
 # publish none), the standard MIT text (SPDX), Bun's (oven-sh/bun LICENSE.md
-# at bun-v1.4.2), Pi's, and notices for the Rust crates and npm packages.
+# at bun-v1.4.4), Pi's, and notices for the Rust crates and npm packages.
 install -m 0644 LICENSE "$STAGE/licenses/Apache-2.0.txt"
 install -m 0644 licenses/pi-coding-agent.txt licenses/bun.md licenses/MIT.txt "$STAGE/licenses/"
 cargo about generate --locked --fail -c licenses/about.toml licenses/rust.hbs -o "$STAGE/licenses/rust.txt"
