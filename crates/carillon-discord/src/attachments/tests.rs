@@ -738,7 +738,7 @@ async fn public_tls_trust_matrix() -> Result<()> {
     ] {
         let result = client
             .get(format!("https://{host}/"))
-            .timeout(std::time::Duration::from_secs(15))
+            .timeout(Duration::from_secs(15))
             .send()
             .await;
         match result {
