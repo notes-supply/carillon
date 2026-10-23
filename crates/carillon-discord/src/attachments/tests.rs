@@ -757,15 +757,34 @@ async fn public_tls_trust_matrix() -> Result<()> {
                 println!("{host}: accepted valid control");
             }
             Err(error) => {
-                let detail = format!("{error:?}");
-                let certificate_error = detail.to_ascii_lowercase().contains("certificate")
-                    || detail.contains("UnknownIssuer")
-                    || detail.contains("CertNotValidForName");
+                let certificate = std::iter::successors(
+                    Some(&error as &(dyn std::error::Error + 'static)),
+                    |error| error.source(),
+                )
+                .find_map(|error| error.downcast_ref::<rustls::Error>())
+                .and_then(|error| match error {
+                    rustls::Error::InvalidCertificate(certificate) => Some(certificate),
+                    _ => None,
+                });
+                let expected = match (host, certificate) {
+                    (
+                        "wrong.host.badssl.com",
+                        Some(rustls::CertificateError::NotValidForNameContext { .. }),
+                    )
+                    | ("self-signed.badssl.com", Some(rustls::CertificateError::UnknownIssuer)) => {
+                        true
+                    }
+                    (_, Some(rustls::CertificateError::Other(error))) => {
+                        error.0.downcast_ref::<webpki::Error>()
+                            == Some(&webpki::Error::CertDistrusted)
+                    }
+                    _ => false,
+                };
                 anyhow::ensure!(
-                    !accepted && certificate_error,
-                    "{host}: inconclusive TLS result: {detail}"
+                    !accepted && expected,
+                    "{host}: inconclusive TLS result: {error:?}"
                 );
-                println!("{host}: certificate rejected: {detail}");
+                println!("{host}: expected certificate rejection: {certificate:?}");
             }
         }
     }

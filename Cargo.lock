@@ -255,7 +255,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "carillon-card-colours"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 dependencies = [
  "carillon-discord-module",
  "carillon-protocol",
@@ -264,7 +264,7 @@ dependencies = [
 
 [[package]]
 name = "carillon-core"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -294,7 +294,7 @@ dependencies = [
 
 [[package]]
 name = "carillon-discord"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -308,6 +308,8 @@ dependencies = [
  "futures-util",
  "hex",
  "reqwest",
+ "rustls",
+ "rustls-webpki",
  "serde",
  "serde_json",
  "sha2",
@@ -331,14 +333,14 @@ dependencies = [
 
 [[package]]
 name = "carillon-discord-bundled"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 dependencies = [
  "carillon-discord-module",
 ]
 
 [[package]]
 name = "carillon-discord-module"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 dependencies = [
  "anyhow",
  "carillon-protocol",
@@ -351,7 +353,7 @@ dependencies = [
 
 [[package]]
 name = "carillon-installation"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 dependencies = [
  "anyhow",
  "fs2",
@@ -368,7 +370,7 @@ dependencies = [
 
 [[package]]
 name = "carillon-protocol"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 dependencies = [
  "anyhow",
  "serde",
@@ -377,7 +379,7 @@ dependencies = [
 
 [[package]]
 name = "carillon-wasm"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 dependencies = [
  "anyhow",
  "tokio",

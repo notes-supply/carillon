@@ -41,6 +41,8 @@ uuid.workspace = true
 [dev-dependencies]
 # A local gateway for the shard's resume and close in tests.
 futures-util = { version = "0.3.34", features = ["sink"] }
+rustls = { version = "0.23", default-features = false }
+webpki = { package = "rustls-webpki", version = "0.103", default-features = false }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tokio-websockets = { version = "0.13.3", default-features = false, features = ["fastrand", "server", "sha1_smol"] }
