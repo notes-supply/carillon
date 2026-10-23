@@ -110,7 +110,6 @@ export function cleanup(action: () => Promise<void>): void {
   cleanups.push(action);
 }
 
-/** Starts the real runtime CLI and stops it once it reports ready. */
 export async function serve(config: string): Promise<{
   status: number | null;
   stdout: string;
@@ -134,15 +133,19 @@ export async function serve(config: string): Promise<{
       )
       .replace('url = "http://127.0.0.1:1"', `url = "http://127.0.0.1:${String(address.port)}"`),
   );
-  const child = spawn(process.execPath, [
-    join(import.meta.dirname, "cli.ts"),
-    "--config",
-    config,
-    "--provider",
-    "runtime-t3",
-    "--token-file",
-    tokenFile,
-  ]);
+  const child = spawn(
+    process.execPath,
+    [
+      join(import.meta.dirname, "cli.ts"),
+      "--config",
+      config,
+      "--provider",
+      "runtime-t3",
+      "--token-file",
+      tokenFile,
+    ],
+    { cwd: dirname(config) },
+  );
   const timeout = setTimeout(() => child.kill("SIGKILL"), 5_000);
   let stdout = "";
   let stderr = "";

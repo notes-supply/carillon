@@ -33,19 +33,23 @@ Without Discord options, the installer asks at the terminal:
 1. **The runtimes.** Pi, a T3 Code server already running on this machine,
    or both (`--runtime pi` and `--runtime t3` answer it).
 2. **The assistant.** What runs Carillon's assistant, the agent with
-   Discord's context and Carillon's resources: Pi, or T3 with Claude, Codex
-   or both, each signed in for Carillon alone. With T3 there may be no
-   assistant at all, and only T3 Code channels.
+   Discord's context and Carillon's resources: Pi, or T3 with a Carillon
+   profile on Claude, Codex, OpenCode or several of them. With T3 there may
+   be no assistant at all, and only T3 Code channels.
 3. **T3** asks for its address and a token (`t3 auth session issue --label
    Carillon --token-only` prints one), the project the assistant works in,
    and the projects T3 Code channels work in: each becomes an agent that
    is plain T3 Code through Discord. For each harness of the assistant it
    makes Carillon's profile, a T3 instance whose home is
    `${XDG_DATA_HOME:-~/.local/share}/carillon/profiles/HARNESS` by default.
-   T3's instance `config.homePath` owns the path for an existing profile.
-   Setup signs it in with the harness's own login in that home, an API key,
-   or a compatible endpoint
-   and its token. Then it asks each agent's default model.
+   T3 owns where an existing profile's home is: `config.homePath` for
+   Claude and Codex, the `OPENCODE_CONFIG_DIR` variable of the instance's
+   environment for OpenCode. A Claude or Codex profile signs in with its
+   own login in that home, an API key, or a compatible endpoint and its
+   token. An OpenCode profile shares your own OpenCode sign-in: setup offers
+   `opencode auth login` to add a provider, and OpenCode's free models need
+   none, so the offer can be declined. Then it asks each agent's default
+   model.
 4. **Pi** opens when an agent runs on it: sign in with `/login`,
    choose the agent's model with `/model` and press Ctrl+S on it, then
    leave with Ctrl+D. Setup checks that Pi is ready and offers to open it
@@ -82,9 +86,15 @@ Pi sign-in is skipped when no agent runs on Pi.
 Each T3 profile keeps its own real `skills/` directory. Carillon links each
 `skills/NAME` to the assistant's `resources/skills/NAME`. The instructions
 file links to `resources/AGENTS.md`. Serve startup reads each saved profile's
-homePath from T3, then adds new links, removes obsolete links, and updates
+home from T3, then adds new links, removes obsolete links, and updates
 links after resources move before accepting turns. A saved profile missing
-from T3 or without a homePath stops startup. Only directories containing
+from T3, or whose instance does not say where its home is, stops startup
+before any link is written: a Claude or Codex instance needs its
+`config.homePath`; an OpenCode instance needs `OPENCODE_CONFIG_DIR` set
+once, not secret, as an absolute path, with `OPENCODE_DISABLE_CLAUDE_CODE=1`
+and no `serverUrl`, so that T3 starts OpenCode with that environment. The
+error names the instance and the setting to correct in T3 settings; setup
+does not rewrite an existing instance. Only directories containing
 `SKILL.md` are shared. Harness files and directories stay in the profile.
 A conflicting name or a symlink in the source `AGENTS.md` or `skills/` tree stops
 startup. This includes linked skill directories, manifests, and nested resources,
@@ -92,18 +102,28 @@ which core's admission snapshots also refuse. Each T3 runtime permits at most
 one agent with resources.
 
 Profiles belong to the user and are shared across installations. Setup creates
-or validates each T3 instance and creates its home for sign-in, leaving links
-untouched. `carillon runtime-t3 check` reads settings and the token without
-reaching T3 or changing links. Setting up or checking another installation
-therefore leaves the serving installation's resources linked. Starting an
-installation reconciles the links to its resources. Only one installation's
-services run at a time.
+or validates each T3 instance and creates its home, where a Claude or Codex
+profile signs in, leaving links untouched. `carillon runtime-t3 check` reads
+settings and the token without reaching T3 or changing links. Setting up or
+checking another installation therefore leaves the serving installation's
+resources linked. Starting an installation reconciles the links to its
+resources. Only one installation's services run at a time.
+
+An OpenCode profile isolates less than a Claude or Codex one.
+`OPENCODE_CONFIG_DIR` replaces your global OpenCode configuration, and
+`OPENCODE_DISABLE_CLAUDE_CODE=1` keeps your `~/.claude` instructions and
+skills out, but OpenCode always loads your `~/.agents/skills`, and its
+sign-in, sessions and data stay in
+`${XDG_DATA_HOME:-~/.local/share}/opencode`, shared with your own OpenCode.
+A profile listing models is not proof that a paid provider is signed in; its
+free models need none.
 
 `carillon runtime-t3 discover --agent ID --url URL` reads the token on
 standard input and returns that agent's model offer. The saved `profiles`
 list decides which instances the assistant may use. Plain T3 Code excludes
-saved profiles and the reserved `carillon_claude` and `carillon_codex` IDs,
-even when they are absent from that list.
+saved profiles and the reserved `carillon_HARNESS` IDs (`carillon_claude`,
+`carillon_codex` and `carillon_opencode`), even when they are absent from
+that list.
 
 The installer creates `~/.carillon` (or `CARILLON_HOME`), registers the user
 services (`carillon.target` with core, Discord and both runtimes; a
@@ -515,7 +535,8 @@ application. Configuration, credentials, sessions and other data stay in the
 installation directory; delete it yourself if you no longer need it.
 
 T3 profile homes under `${XDG_DATA_HOME:-~/.local/share}/carillon/profiles`
-also stay, with their sign-ins, sessions, and settings. T3 keeps the
-`carillon_claude` and `carillon_codex` instances and their keys in its secret
-store. Remove those separately in T3 settings and remove the profile homes
-when no longer needed.
+also stay, with Claude's and Codex's sign-ins, sessions and settings;
+OpenCode's stay in `${XDG_DATA_HOME:-~/.local/share}/opencode`, which is your
+own OpenCode's too. T3 keeps the `carillon_HARNESS` instances and their keys
+in its secret store. Remove those separately in T3 settings and remove the
+profile homes when no longer needed.

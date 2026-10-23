@@ -4,10 +4,29 @@ use anyhow::Context as _;
 use carillon_installation::config::{Config, LoadedConfig, ProviderRole};
 
 use super::{
-    Assistant, Harnesses, Options, Runtime, initialize, keep_t3, registered_runtimes, run,
-    set_up_t3, setup,
+    Assistant, Options, Runtime, initialize, keep_t3,
+    profiles::{Harness, Harnesses},
+    registered_runtimes, run, set_up_t3, setup,
 };
 use crate::application::admin::{ASSISTANT, backup, register_runtime, set_provider};
+
+/// The harnesses the T3 runtime lists, as its own tests snapshot them: the
+/// one wire shape both sides read.
+const CATALOG: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../packages/runtime-t3/src/harnesses.json"
+));
+
+fn listed() -> anyhow::Result<Vec<Harness>> {
+    Ok(serde_json::from_str(CATALOG)?)
+}
+
+fn harness(id: &str) -> anyhow::Result<Harness> {
+    listed()?
+        .into_iter()
+        .find(|harness| harness.id == id)
+        .with_context(|| format!("the runtime lists no harness {id}"))
+}
 
 #[test]
 fn a_secret_goes_on_standard_input_and_a_failure_is_its_one_line() -> anyhow::Result<()> {
@@ -104,25 +123,36 @@ fn a_disabled_runtime_stops_setup_before_it_opens_anything() -> anyhow::Result<(
 }
 
 /// Questions answered in order from `answers`; the first left without one
-/// ends the run. Confirmations take their default, a choice is a 0-based
-/// index, a multiple choice 0-based indexes joined by commas, and what was
-/// shown and asked is kept, a choice's options before its question.
+/// ends the run. Confirmations take `confirmations` in order, then their
+/// default. A choice is a 0-based index, a multiple choice 0-based indexes
+/// joined by commas. What was shown and asked is kept, a choice's options
+/// before its question, and a run that has shown 1000 lines fails instead
+/// of looping.
 #[derive(Default)]
 struct Shown {
-    shown: Vec<String>,
-    answers: std::collections::VecDeque<&'static str>,
+    seen: Vec<String>,
+    answers: std::collections::VecDeque<String>,
+    confirmations: std::collections::VecDeque<bool>,
 }
 
 impl Shown {
-    fn answering(answers: &[&'static str]) -> Self {
+    fn answering(answers: &[&str]) -> Self {
         Self {
-            shown: Vec::new(),
-            answers: answers.iter().copied().collect(),
+            seen: Vec::new(),
+            answers: answers.iter().map(|&answer| answer.to_owned()).collect(),
+            confirmations: std::collections::VecDeque::new(),
         }
     }
 
-    fn next(&mut self, question: &str) -> anyhow::Result<&'static str> {
-        self.shown.push(question.to_owned());
+    fn confirming(answers: &[&str], confirmations: &[bool]) -> Self {
+        Self {
+            confirmations: confirmations.iter().copied().collect(),
+            ..Self::answering(answers)
+        }
+    }
+
+    fn next(&mut self, question: &str) -> anyhow::Result<String> {
+        self.seen.push(question.to_owned());
         self.answers
             .pop_front()
             .ok_or_else(|| anyhow::anyhow!("stopped at {question}"))
@@ -131,7 +161,7 @@ impl Shown {
 
 impl carillon_installation::prompt::Questions for Shown {
     fn say(&mut self, text: &str) -> anyhow::Result<()> {
-        self.shown.push(text.to_owned());
+        self.seen.push(text.to_owned());
         Ok(())
     }
 
@@ -140,21 +170,22 @@ impl carillon_installation::prompt::Questions for Shown {
         Ok(if answer.is_empty() {
             default.unwrap_or_default().to_owned()
         } else {
-            answer.to_owned()
+            answer
         })
     }
 
     fn secret(&mut self, question: &str) -> anyhow::Result<String> {
-        Ok(self.next(question)?.to_owned())
+        self.next(question)
     }
 
     fn confirm(&mut self, question: &str, default: bool) -> anyhow::Result<bool> {
-        self.shown.push(question.to_owned());
-        Ok(default)
+        self.seen.push(question.to_owned());
+        anyhow::ensure!(self.seen.len() < 1000, "kept asking {question}");
+        Ok(self.confirmations.pop_front().unwrap_or(default))
     }
 
     fn choose(&mut self, question: &str, options: &[String], _: usize) -> anyhow::Result<usize> {
-        self.shown.extend(options.iter().cloned());
+        self.seen.extend(options.iter().cloned());
         Ok(self.next(question)?.parse()?)
     }
 
@@ -164,7 +195,7 @@ impl carillon_installation::prompt::Questions for Shown {
         options: &[String],
         _: &[usize],
     ) -> anyhow::Result<Vec<usize>> {
-        self.shown.extend(options.iter().cloned());
+        self.seen.extend(options.iter().cloned());
         self.next(question)?
             .split(',')
             .filter(|index| !index.is_empty())
@@ -203,7 +234,7 @@ fn saved_t3_settings_are_offered_only_when_the_runtime_reads_them() -> anyhow::R
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))?;
         let mut questions = Shown::default();
         assert_eq!(keep_t3(&home, &program, &mut questions)?, kept);
-        assert_eq!(questions.shown, shown);
+        assert_eq!(questions.seen, shown);
     }
     Ok(())
 }
@@ -222,8 +253,6 @@ fn a_rerun_keeps_the_runtimes_the_installation_registers() -> anyhow::Result<()>
     Ok(())
 }
 
-/// A fake `carillon-runtime-t3` that records its arguments and standard
-/// input, discovers `offer`, and makes profiles in `profiles/`.
 fn fake_t3(directory: &Path, offer: &serde_json::Value) -> anyhow::Result<std::path::PathBuf> {
     let mut offer = offer.clone();
     if offer.get("profiles").is_none() {
@@ -232,6 +261,7 @@ fn fake_t3(directory: &Path, offer: &serde_json::Value) -> anyhow::Result<std::p
     let program = directory.join("carillon-runtime-t3");
     let calls = directory.join("calls");
     let profiles = directory.join("profiles");
+    std::fs::write(directory.join("harnesses.json"), CATALOG)?;
     if let Some(offers) = offer
         .get("agentModels")
         .and_then(serde_json::Value::as_object)
@@ -249,8 +279,9 @@ fn fake_t3(directory: &Path, offer: &serde_json::Value) -> anyhow::Result<std::p
         &program,
         format!(
             "#!/bin/sh\n{{ echo \"$*\"; cat | sed 's/^/  stdin: /'; }} >>'{calls}'\ncase \"$1\" in\n  \
+             harnesses) cat '{directory}/harnesses.json' ;;\n  \
              discover) agent=; while [ \"$#\" -gt 0 ]; do if [ \"$1\" = --agent ]; then shift; agent=$1; fi; shift; done; if [ -n \"$agent\" ] && [ -f '{directory}/offer-'\"$agent\"'.json' ]; then cat '{directory}/offer-'\"$agent\"'.json'; else printf '%s' '{offer}'; fi ;;\n  \
-             profile) printf '{{\"instanceId\":\"carillon_claude\",\"home\":\"{profiles}/claude\"}}' ;;\n  \
+             profile) harness=; while [ \"$#\" -gt 0 ]; do if [ \"$1\" = --harness ]; then shift; harness=$1; fi; shift; done; printf '{{\"instanceId\":\"carillon_%s\",\"home\":\"{profiles}/%s\"}}' \"$harness\" \"$harness\" ;;\n  \
              configure) echo \"configured $3 $4\" ;;\n  check) exit 0 ;;\n  *) exit 2 ;;\nesac\n",
             directory = directory.display(),
             calls = calls.display(),
@@ -298,7 +329,7 @@ fn t3_gets_the_assistant_with_its_profile_and_a_t3_code_agent_per_project() -> a
     set_up_t3(
         &home,
         &options(),
-        &Assistant::T3(Harnesses::chosen(&[0]).context("Claude was chosen")?),
+        &Assistant::T3(Harnesses::chosen(listed()?, &[0]).context("Claude was chosen")?),
         &program,
         &mut questions,
     )?;
@@ -350,12 +381,7 @@ fn t3_gets_the_assistant_with_its_profile_and_a_t3_code_agent_per_project() -> a
         assert!(calls.contains(&expected), "{expected}\nnot in\n{calls}");
     }
     // The key is the harness's, given to its program on standard input alone.
-    assert!(
-        !questions
-            .shown
-            .iter()
-            .any(|shown| shown.contains("sk-test"))
-    );
+    assert!(!questions.seen.iter().any(|shown| shown.contains("sk-test")));
     Ok(())
 }
 
@@ -388,9 +414,9 @@ fn models_sharing_a_name_are_told_apart_and_the_one_chosen_is_configured() -> an
         "Which model should T3 Code · Agent start new conversations with?",
     ];
     assert!(
-        questions.shown.windows(4).any(|shown| shown == options),
+        questions.seen.windows(4).any(|shown| shown == options),
         "{:?}",
-        questions.shown
+        questions.seen
     );
     let calls = std::fs::read_to_string(directory.path().join("calls"))?;
     assert!(calls.contains("--model claudeAgent/sonnet-b"), "{calls}");
@@ -432,7 +458,7 @@ fn t3_with_nothing_to_run_is_refused_or_left_out() -> anyhow::Result<()> {
     set_up_t3(&home, &options(), &Assistant::Pi, &program, &mut questions)?;
     assert!(
         questions
-            .shown
+            .seen
             .contains(&"T3 Code has no agents to configure.".to_owned())
     );
     Ok(())
@@ -521,11 +547,11 @@ fn equally_named_agents_get_distinct_model_prompts_and_their_chosen_models() -> 
         "T3 Code · Other",
     ] {
         assert!(
-            questions.shown.contains(&format!(
+            questions.seen.contains(&format!(
                 "Which model should {label} start new conversations with?"
             )),
             "{:?}",
-            questions.shown
+            questions.seen
         );
     }
     let calls = std::fs::read_to_string(directory.path().join("calls"))?;
@@ -540,5 +566,6 @@ fn equally_named_agents_get_distinct_model_prompts_and_their_chosen_models() -> 
 }
 
 mod added_pi;
+mod profiles;
 mod projects;
 mod reruns;

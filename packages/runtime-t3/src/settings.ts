@@ -5,9 +5,7 @@ import { Type, type Static } from "typebox";
 import { Check, Errors } from "typebox/value";
 import { parse as parseToml, TomlError } from "smol-toml";
 import type { NativeSelection } from "./contracts.ts";
-import { HARNESSES } from "./profiles.ts";
-
-const PROFILE_IDS = new Set(Object.keys(HARNESSES).map((harness) => `carillon_${harness}`));
+import { isProfileId, profileIds } from "./profiles.ts";
 
 const SelectionSchema = Type.Object(
   {
@@ -44,7 +42,7 @@ const SettingsSchema = Type.Object(
     title: Type.Optional(Type.String({ minLength: 1, maxLength: 60 })),
     /** Carillon's own T3 instances, whose homes hold its profile. */
     profiles: Type.Optional(
-      Type.Array(Type.String({ pattern: `^(?:${[...PROFILE_IDS].join("|")})$` }), {
+      Type.Array(Type.String({ pattern: `^(?:${profileIds().join("|")})$` }), {
         uniqueItems: true,
       }),
     ),
@@ -113,7 +111,7 @@ export function offers(
 ): boolean {
   return assistant
     ? profiles.has(instanceId)
-    : !profiles.has(instanceId) && !PROFILE_IDS.has(instanceId);
+    : !profiles.has(instanceId) && !isProfileId(instanceId);
 }
 
 /** The settings file at `path`, checked strictly, or undefined when there is none. */

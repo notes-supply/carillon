@@ -189,8 +189,15 @@ memory, and the runtime refuses a drained restart while any fence stands.
 Its agents are of two kinds. Carillon's assistant runs on Carillon's own T3
 instances, its profiles: each has a home of its own whose instructions and
 skills link to the assistant's resources, so the harness loads them natively
-and no other T3 thread sees them. T3's instance `config.homePath` owns the home
-path. Profiles are shared across installations of the same user. Serve startup
+and no other T3 thread sees them. An OpenCode profile also loads the user's
+own `~/.agents/skills`, and shares the user's OpenCode sign-in, sessions and
+data. The T3 runtime's harness table is the one list of harnesses: T3
+instances, reserved IDs, discovery and startup derive from it, and `carillon
+setup` reads it through `carillon-runtime-t3 harnesses` instead of keeping a
+list of its own. T3's instance owns the home path: `config.homePath` for the
+Claude and Codex drivers, which have one, and the `OPENCODE_CONFIG_DIR`
+variable of the instance's environment for OpenCode's, which does not.
+Profiles are shared across installations of the same user. Serve startup
 reconciles the saved profiles' links before accepting turns. It refuses symlinks
 in the source `AGENTS.md` and `skills/` tree, including skill directories,
 manifests, and nested resources, as admission snapshots do. Setup and preflight
@@ -211,8 +218,11 @@ runtime keeps its own settings for its agents. Both files reject unknown
 fields.
 
 Setup registers the Discord provider and the runtimes chosen, Pi, T3 or
-both, and asks what runs Carillon's assistant: Pi, or T3 with Claude or Codex
-signed in for Carillon alone. Each provider's own program sets up its part:
+both, and asks what runs Carillon's assistant: Pi, or T3 with a Carillon
+profile on the harnesses the T3 runtime lists, Claude, Codex and OpenCode. A
+Claude or Codex profile signs in for Carillon alone; an OpenCode profile
+shares the user's own OpenCode sign-in. Each provider's own program sets up
+its part:
 Pi signs in through its own interface; the T3 runtime makes the assistant's
 profiles, an agent for each T3 project T3 Code channels work in, and their
 settings; and the Discord provider learns the bot from its token and offers

@@ -5,27 +5,22 @@
  * resources. The T3 token is given as a value, never as an argument, and
  * written only to a private credential file the runtime's settings name.
  */
-import { mkdir, open, readFile, realpath, rename, rm } from "node:fs/promises";
+import { open, readFile, realpath, rename, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type { AvailableModel } from "@carillon/protocol";
 import type { Agent, Installation } from "@carillon/runtime/installation";
 import { stringify } from "smol-toml";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
-import {
-  instanceCreate,
-  ORCHESTRATION_PROTOCOL,
-  RPC,
-  ServerSettingsSchema,
-  type InstanceDefinition,
-} from "./contracts.ts";
+import { ORCHESTRATION_PROTOCOL, RPC } from "./contracts.ts";
 import { catalog } from "./models.ts";
 import {
   assistantResources,
-  HARNESSES,
-  profileHome,
-  instanceHome,
-  type Harness,
+  ensureProfile,
+  isProfileId,
+  serverSettings,
+  type Profile,
+  type ProfileChoice,
 } from "./profiles.ts";
 import { offers, parseSettings, readSettings, type SettingsFile } from "./settings.ts";
 import { connectT3, DEFAULT_TIMEOUT_MS, T3Failure, type Connect, type T3Endpoint } from "./t3.ts";
@@ -85,13 +80,9 @@ export async function discover(
   try {
     for (const instanceId of refresh) await connection.call(RPC.refreshProviders, { instanceId });
     const { available } = catalog(await connection.call(RPC.getConfig, {}));
-    const settings: unknown = await connection.call(RPC.getSettings, {});
-    if (!Check(ServerSettingsSchema, settings))
-      throw new T3Failure("malformed", "T3 described unreadable provider settings");
+    const settings = await serverSettings(connection);
     return {
-      profiles: Object.keys(settings.providerInstances ?? {}).filter((id) =>
-        Object.keys(HARNESSES).some((harness) => id === `carillon_${harness}`),
-      ),
+      profiles: Object.keys(settings.providerInstances ?? {}).filter(isProfileId),
       projects: await projects(endpoint),
       models:
         agent === undefined
@@ -216,84 +207,27 @@ export async function configure(
   }).then(() => project);
 }
 
-/** A Carillon profile: a T3 instance of its own for one harness. */
-export interface ProfileChoice {
-  readonly harness: Harness;
-  /** An API key the harness signs in with instead of its own login. */
-  readonly key?: string;
-  /** A compatible endpoint the key belongs to, instead of the harness's own. */
-  readonly endpoint?: string;
-}
-
-/**
- * Makes Carillon's profile for a harness on the server at `endpoint`: the T3
- * instance `carillon_HARNESS`, whose home holds the harness's own state.
- * T3 owns an existing instance's homePath; new instances use the setup user's
- * XDG data directory. Creates the home for sign-in and saves the profile ID,
- * leaving resource links untouched until the runtime starts serving.
- * Returns the instance and home for the harness's native sign-in.
- */
 export async function profile(
   installation: Installation,
   endpoint: T3Endpoint,
   choice: ProfileChoice,
   connect: Connect = connectT3,
-): Promise<{ readonly instanceId: string; readonly home: string }> {
+): Promise<Profile> {
   const existing = await readExisting(installation);
-  const harness = HARNESSES[choice.harness];
-  const resources = assistantResources(installation);
-  if (resources === undefined)
+  if (assistantResources(installation) === undefined)
     throw new Error(
       `no agent of ${installation.runtime.id} in carillon.toml has resources for a profile to share`,
     );
-  const instanceId = `carillon_${choice.harness}`;
-  let home: string;
   const connection = await connect(endpoint);
+  let made: Profile;
   try {
-    const settings: unknown = await connection.call(RPC.getSettings, {});
-    if (!Check(ServerSettingsSchema, settings))
-      throw new T3Failure(
-        "malformed",
-        "T3 described its settings in a form this runtime does not understand",
-      );
-    const instance = settings.providerInstances?.[instanceId];
-    home =
-      instance === undefined ? profileHome(choice.harness) : instanceHome(choice.harness, instance);
-    if (instance !== undefined && (choice.key !== undefined || choice.endpoint !== undefined))
-      throw new Error(
-        `T3 already has profile ${instanceId}; change its environment in T3 settings. The supplied key or endpoint was not applied`,
-      );
-    await mkdir(home, { recursive: true, mode: 0o700 });
-    if (instance === undefined)
-      await connection.call(
-        RPC.updateSettings,
-        instanceCreate(instanceId, {
-          driver: harness.driver,
-          displayName: harness.name,
-          homePath: home,
-          environment: environmentOf(harness, choice),
-        }),
-      );
+    made = await ensureProfile(connection, choice);
   } finally {
     connection.close();
   }
-  const profiles = [...new Set([...(existing?.profiles ?? []), instanceId])];
+  const profiles = [...new Set([...(existing?.profiles ?? []), made.instanceId])];
   await publishSettings(installation, endpoint, existing, existing?.agents, profiles);
-  return { instanceId, home };
-}
-
-/** The profile's sign-in, as the harness's environment: none for its own login. */
-function environmentOf(
-  harness: (typeof HARNESSES)[Harness],
-  choice: ProfileChoice,
-): InstanceDefinition["environment"] {
-  if (choice.key === undefined) return [];
-  if (choice.endpoint === undefined)
-    return [{ name: harness.key, value: choice.key, sensitive: true }];
-  return [
-    { name: harness.endpoint, value: choice.endpoint, sensitive: false },
-    { name: harness.endpointKey, value: choice.key, sensitive: true },
-  ];
+  return made;
 }
 
 async function readExisting(installation: Installation): Promise<SettingsFile | undefined> {
