@@ -126,8 +126,12 @@ pub enum ControlAction {
     Stop,
 }
 
+impl ControlAction {
+    pub const ALL: [Self; 3] = [Self::Steer, Self::Interrupt, Self::Stop];
+}
+
 /// The most controls one activity snapshot offers: each action once.
-pub const CONTROL_LIMIT: usize = 3;
+pub const CONTROL_LIMIT: usize = ControlAction::ALL.len();
 
 /// An interface's request to control the turn of an event it submitted.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]

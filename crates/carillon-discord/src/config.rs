@@ -712,6 +712,12 @@ impl Settings {
         self.0.current.borrow().clone()
     }
 
+    /// The settings serving, changed whenever an apply changes them.
+    #[must_use]
+    pub(crate) fn watch(&self) -> watch::Receiver<Arc<DiscordConfig>> {
+        self.0.current.subscribe()
+    }
+
     /// What serves, and how the file `read` returns differs from it.
     /// `module_differs` says whether the module the file declares is not the
     /// one serving, which its bytes decide as well as its declaration.

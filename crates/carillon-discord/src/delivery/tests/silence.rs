@@ -112,12 +112,13 @@ async fn a_silent_delivery_sends_nothing_and_shows_how_its_turn_ended() -> anyho
     let (requests, acks) = deliver(vec![steered, stopped]).await?;
     let mut requests = requests;
     requests.sort();
-    let mut expected = vec![
-        reaction("DELETE", "400", "👀"),
-        reaction("PUT", "400", "↪️"),
-        reaction("DELETE", "401", "👀"),
-        reaction("PUT", "401", "⏹️"),
-    ];
+    let mut expected = ["400", "401"]
+        .into_iter()
+        .flat_map(|message| {
+            ["⏩", "⏭️", "🛑", "👀"].map(|emoji| reaction("DELETE", message, emoji))
+        })
+        .chain([reaction("PUT", "400", "↪️"), reaction("PUT", "401", "⏹️")])
+        .collect::<Vec<_>>();
     expected.sort();
     assert_eq!(requests, expected);
     assert_eq!(

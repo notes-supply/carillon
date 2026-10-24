@@ -1,7 +1,9 @@
 //! The control reactions on a job's message while its turn waits in the
 //! runtime that holds it: offered while the runtime's snapshot offers them,
-//! withdrawn once it does not. The reactions themselves belong to
-//! [`Reactions`], which also withdraws them before the message's outcome.
+//! withdrawn once it does not. [`Reactions`] records which control emoji a
+//! message may show, and removes them before the message's outcome.
+
+use std::collections::BTreeSet;
 
 use carillon_protocol::{
     model::{ActivityPhase, JobTurn, TurnState},
@@ -11,7 +13,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use super::Known;
-use crate::delivery::Reactions;
+use crate::delivery::{Reactions, control_emoji};
 
 /// The turn runs in its runtime, waiting behind other work there.
 pub(super) fn waits(turn: &JobTurn) -> bool {
@@ -32,44 +34,59 @@ fn wanted(known: &Known) -> Vec<ControlAction> {
         .unwrap_or_default()
 }
 
-/// Keeps a job's message offering what its readings say, until the job is
-/// over or no longer followed, then withdraws what it offered. A stopping
-/// provider leaves its reactions as they are.
+/// Keeps a job's message offering what its readings say, as the settings
+/// serving name the controls, until the job is over or no longer followed,
+/// then withdraws every control it may show. The message's controls are
+/// taken up only to offer one: until then, whatever it may show is left to
+/// its outcome to withdraw. A stopping provider leaves its reactions as they
+/// are.
 pub(super) fn offer(
     reactions: &Reactions,
     view: &watch::Receiver<Known>,
     stopping: &CancellationToken,
 ) -> impl Future<Output = ()> + Send + 'static {
     let (reactions, mut view, stopping) = (reactions.clone(), view.clone(), stopping.clone());
+    let mut settings = reactions.settings().watch();
     async move {
-        let (mut message, mut offered) = (None, Vec::new());
+        let mut controls = None;
+        // The control emoji Discord last took in full.
+        let mut shown = None;
         loop {
-            let (wanted, over) = {
+            let config = settings.borrow_and_update().clone();
+            let wanted = {
                 let known = view.borrow_and_update();
-                if message.is_none() {
-                    message = known.job().and_then(|job| job.feedback_target_id.clone());
+                if known.is_over() {
+                    break;
                 }
-                (wanted(&known), known.is_over())
+                let wanted = control_emoji(&config, &wanted(&known));
+                if controls.is_none() && !wanted.is_empty() {
+                    controls = known
+                        .job()
+                        .and_then(|job| job.feedback_target_id.as_deref())
+                        .filter(|message| !message.is_empty())
+                        .map(|message| reactions.controls(message, &config));
+                }
+                wanted
             };
-            if let Some(message) = &message
-                && wanted != offered
+            if let Some(controls) = &controls
+                && shown.as_ref() != Some(&wanted)
             {
-                reactions.offer_controls(message, &wanted).await;
-                offered = wanted;
+                shown = controls.reconcile(&wanted).await.then_some(wanted);
             }
-            if over {
-                break;
-            }
-            match stopping.run_until_cancelled(view.changed()).await {
+            let changed = async {
+                tokio::select! {
+                    read = view.changed() => read.is_ok(),
+                    _ = settings.changed() => true,
+                }
+            };
+            match stopping.run_until_cancelled(changed).await {
                 None => return,
-                Some(Err(_)) => break,
-                Some(Ok(())) => {}
+                Some(false) => break,
+                Some(true) => {}
             }
         }
-        if let Some(message) = &message
-            && !offered.is_empty()
-        {
-            reactions.offer_controls(message, &[]).await;
+        if let Some(controls) = &controls {
+            controls.reconcile(&BTreeSet::new()).await;
         }
     }
 }

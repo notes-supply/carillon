@@ -36,9 +36,13 @@ and controls with provider and choice display names.
 - [`delivery`](src/delivery.rs): sends answers (split at Discord's limit, with
   mentions disabled) from core's outbox, and owns the bot's reactions as
   best-effort feedback: a message's processing and outcome reactions and the
-  controls it offers, withdrawn before its outcome shows. A steered or
-  stopped turn sends nothing and shows its reaction; a turn without a message
-  behind it, which its runtime opened, gets none.
+  controls it offers. From a message's admission, or its first offer of
+  controls, until its outcome, it records the control emoji the message may
+  show, every one it added and has not seen removed, and removes them before
+  the outcome shows; a message it neither admitted nor offered controls may
+  show every configured control, so those are removed once. A steered or stopped turn sends nothing
+  and shows its reaction; a turn without a message behind it, which its
+  runtime opened, gets none.
 - [`controls`](src/controls.rs): admits a control reaction as a message is
   admitted, by guild and user, maps its emoji to steer, interrupt or stop,
   and has core relay it to the runtime holding the message's turn.
@@ -47,7 +51,11 @@ and controls with provider and choice display names.
   and recorded in `activity-cards.json` so a restart carries on with the same
   card. Every Discord call is bounded, including rate-limit waits. It types
   while a job's turn runs, not while it waits in its runtime, and offers the
-  controls the runtime's snapshot lists while it waits.
+  controls the runtime's snapshot lists while it waits. Offering the first
+  control on a message this process did not admit removes the others an
+  earlier process may have left; a failed change is tried again at the next
+  read, and new control emoji replace the previous ones on messages showing
+  controls.
 - [`module`](src/module.rs): hosts the replaceable Discord module (commands,
   controls and cards) and switches to the one the settings declare under the
   maintenance lock. The guest library lives in
