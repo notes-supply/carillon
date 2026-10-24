@@ -237,6 +237,13 @@
         ],
         "partial": false
       }
+    },
+    {
+      "phase": "queued",
+      "running": [],
+      "recent": [],
+      "tool_calls": 0,
+      "controls": ["steer", "interrupt", "stop"]
     }
   ],
   "invalid_activities": [
@@ -579,6 +586,20 @@
         ],
         "partial": false
       }
+    },
+    {
+      "phase": "queued",
+      "running": [],
+      "recent": [],
+      "tool_calls": 0,
+      "controls": ["steer", "interrupt", "stop", "steer"]
+    },
+    {
+      "phase": "queued",
+      "running": [],
+      "recent": [],
+      "tool_calls": 0,
+      "controls": ["pause"]
     }
   ]
 }

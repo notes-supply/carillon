@@ -2,6 +2,7 @@ import { expect, it } from "vitest";
 import { Check, Parse } from "typebox/value";
 import activity from "../fixtures/activity.json" with { type: "json" };
 import commands from "../fixtures/commands.json" with { type: "json" };
+import held from "../fixtures/held.json" with { type: "json" };
 import fixtures from "../fixtures/models.json" with { type: "json" };
 import turns from "../fixtures/turns.json" with { type: "json" };
 import {
@@ -9,8 +10,11 @@ import {
   ModelStateSchema,
   ModelQuerySchema,
   ModelUpdateSchema,
+  RuntimeTurnControlSchema,
   RuntimeTurnRequestSchema,
   TurnActivitySchema,
+  TurnOpeningSchema,
+  TurnOutcomeSchema,
 } from "./index.ts";
 
 it("preserves the shared Rust/TypeScript model wire fixtures", () => {
@@ -39,4 +43,14 @@ it("preserves the shared Rust/TypeScript command catalogue fixtures", () => {
   for (const value of commands.catalogs) expect(Parse(CommandCatalogSchema, value)).toEqual(value);
   for (const value of commands.invalid_catalogs)
     expect(Check(CommandCatalogSchema, value)).toBe(false);
+});
+
+it("preserves the shared Rust/TypeScript held turn fixtures", () => {
+  for (const value of held.outcomes) expect(Parse(TurnOutcomeSchema, value)).toEqual(value);
+  for (const value of held.invalid_outcomes) expect(Check(TurnOutcomeSchema, value)).toBe(false);
+  for (const value of held.openings) expect(Parse(TurnOpeningSchema, value)).toEqual(value);
+  for (const value of held.invalid_openings) expect(Check(TurnOpeningSchema, value)).toBe(false);
+  for (const value of held.controls) expect(Parse(RuntimeTurnControlSchema, value)).toEqual(value);
+  for (const value of held.invalid_controls)
+    expect(Check(RuntimeTurnControlSchema, value)).toBe(false);
 });

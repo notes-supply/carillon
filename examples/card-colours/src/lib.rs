@@ -69,6 +69,7 @@ mod tests {
                     accepted_at: 1_790_000_000,
                 },
                 target_id: "1".to_owned(),
+                feedback_target_id: None,
                 turns: vec![JobTurn {
                     turn_id: "turn".to_owned(),
                     state,

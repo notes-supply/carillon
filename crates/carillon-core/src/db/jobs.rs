@@ -82,6 +82,7 @@ impl Database {
 /// The latest turns of the interface's jobs that the JSON array `?2` names
 /// by origin, at most `?3` of each, in the order named.
 pub(super) const JOB_TURNS: &str = "SELECT o.id, o.runtime_id, o.accepted_at, o.target_id,
+        NULLIF(o.feedback_target_id, ''),
         t.id, t.state, t.accepted_at, t.finished_at, t.activity_json, d.state
     FROM json_each(?2) named
     JOIN turns o ON o.id = named.value
@@ -122,6 +123,7 @@ fn jobs(
                         accepted_at: row.get(2)?,
                     },
                     target_id: row.get(3)?,
+                    feedback_target_id: row.get(4)?,
                     turns: Vec::new(),
                     earlier: false,
                 },
@@ -129,12 +131,12 @@ fn jobs(
         }
         if let Some((_, job)) = jobs.last_mut() {
             job.turns.push(JobTurn {
-                turn_id: row.get(4)?,
-                state: state_column(row, 5)?,
-                accepted_at: row.get(6)?,
-                finished_at: row.get(7)?,
-                activity: optional_json_column(row, 8)?,
-                delivery: optional_state_column(row, 9)?,
+                turn_id: row.get(5)?,
+                state: state_column(row, 6)?,
+                accepted_at: row.get(7)?,
+                finished_at: row.get(8)?,
+                activity: optional_json_column(row, 9)?,
+                delivery: optional_state_column(row, 10)?,
             });
         }
     }

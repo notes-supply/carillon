@@ -34,6 +34,7 @@ fn answer(id: i64, turn_state: TurnState) -> Delivery {
         target_id: "300".to_owned(),
         feedback_target_id: "300:400".to_owned(),
         content: format!("answer {id}"),
+        silence: None,
         origin: Origin {
             turn_id: format!("turn-{id}"),
             accepted_at: 1_790_000_000,

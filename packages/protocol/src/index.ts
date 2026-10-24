@@ -1,6 +1,9 @@
 /** Shared wire schemas. Runtime-specific option values remain runtime-owned. */
 import { Type, type Static } from "typebox";
 
+/** Header naming the configured provider on provider-to-core requests. */
+export const PROVIDER_HEADER = "x-carillon-provider";
+
 export const SelectionSchema = Type.Object({
   provider: Type.String({ minLength: 1 }),
   model: Type.String({ minLength: 1 }),
@@ -198,6 +201,17 @@ export const AgentInfoSchema = Type.Object({
   context: Type.Optional(ContextUseSchema),
 });
 export type AgentInfo = Static<typeof AgentInfoSchema>;
+/**
+ * What a person may do with a message that waits behind a running turn:
+ * hand it to the running turn now, end the running turn and run it next, or
+ * not run it at all.
+ */
+export const ControlActionSchema = Type.Union([
+  Type.Literal("steer"),
+  Type.Literal("interrupt"),
+  Type.Literal("stop"),
+]);
+export type ControlAction = Static<typeof ControlActionSchema>;
 export const TurnActivitySchema = Type.Object({
   phase: ActivityPhaseSchema,
   /** The model's own latest public commentary, when it wrote any. */
@@ -225,6 +239,8 @@ export const TurnActivitySchema = Type.Object({
    * observed, but not all of it.
    */
   partial: Type.Optional(Type.Boolean()),
+  /** What a person may do with the turn while it waits. */
+  controls: Type.Optional(Type.Array(ControlActionSchema, { maxItems: 3 })),
 });
 export type TurnActivity = Static<typeof TurnActivitySchema>;
 
@@ -283,3 +299,68 @@ export const RuntimeTurnRequestSchema = Type.Object({
   follow_up: Type.Optional(Type.Unknown()),
 });
 export type RuntimeTurnRequest = Static<typeof RuntimeTurnRequestSchema>;
+
+/**
+ * How a durable runtime says a turn it holds ended. `steered` and `stopped`
+ * send nothing to the conversation; a failure's `explanation` is shown as
+ * given.
+ */
+export const TurnOutcomeSchema = Type.Union([
+  Type.Object(
+    {
+      outcome: Type.Literal("answered"),
+      output: Type.String({ pattern: "\\S" }),
+      activity: Type.Optional(TurnActivitySchema),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      outcome: Type.Literal("failed"),
+      explanation: Type.Optional(Type.String({ minLength: 1 })),
+      activity: Type.Optional(TurnActivitySchema),
+    },
+    { additionalProperties: false },
+  ),
+  Type.Object({ outcome: Type.Literal("steered") }, { additionalProperties: false }),
+  Type.Object({ outcome: Type.Literal("stopped") }, { additionalProperties: false }),
+]);
+export type TurnOutcome = Static<typeof TurnOutcomeSchema>;
+
+/**
+ * A turn a durable runtime opens in an existing conversation of its own, for
+ * a schedule or a subagent's report. The same `key` opens one turn.
+ */
+export const TurnOpeningSchema = Type.Object(
+  {
+    interface_id: ProviderIdentitySchema,
+    agent_id: Type.String({ minLength: 1 }),
+    audience_id: Type.String({ minLength: 1 }),
+    key: Type.String({ minLength: 1 }),
+    /** What the turn is for, recorded as its input. */
+    label: Type.Optional(Type.String({ minLength: 1 })),
+  },
+  { additionalProperties: false },
+);
+export type TurnOpening = Static<typeof TurnOpeningSchema>;
+
+/** What core recorded of a turn it accepted or a runtime opened. */
+export const TurnReceiptSchema = Type.Object({
+  event_id: Type.String(),
+  turn_id: Type.String({ minLength: 1 }),
+  state: Type.Union([
+    Type.Literal("queued"),
+    Type.Literal("running"),
+    Type.Literal("completed"),
+    Type.Literal("interrupted"),
+  ]),
+  duplicate: Type.Boolean(),
+});
+export type TurnReceipt = Static<typeof TurnReceiptSchema>;
+
+/** Core's relay of a person's control of a turn the runtime holds. */
+export const RuntimeTurnControlSchema = Type.Object(
+  { interface_id: ProviderIdentitySchema, action: ControlActionSchema },
+  { additionalProperties: false },
+);
+export type RuntimeTurnControl = Static<typeof RuntimeTurnControlSchema>;

@@ -1,0 +1,169 @@
+{
+  "outcomes": [
+    {
+      "outcome": "answered",
+      "output": "Done: the tests pass."
+    },
+    {
+      "outcome": "answered",
+      "output": "Done.",
+      "activity": {
+        "phase": "model",
+        "running": [],
+        "recent": [
+          {
+            "tool": "bash",
+            "detail": "make",
+            "ok": false,
+            "duration_ms": 900
+          }
+        ],
+        "tool_calls": 1
+      }
+    },
+    {
+      "outcome": "failed"
+    },
+    {
+      "outcome": "failed",
+      "explanation": "The model provider refused the request.",
+      "activity": {
+        "phase": "model",
+        "running": [],
+        "recent": [
+          {
+            "tool": "bash",
+            "detail": "make",
+            "ok": false,
+            "duration_ms": 900
+          }
+        ],
+        "tool_calls": 1
+      }
+    },
+    {
+      "outcome": "steered"
+    },
+    {
+      "outcome": "stopped"
+    }
+  ],
+  "invalid_outcomes": [
+    {
+      "outcome": "answered"
+    },
+    {
+      "outcome": "answered",
+      "output": ""
+    },
+    {
+      "outcome": "answered",
+      "output": " \n "
+    },
+    {
+      "outcome": "answered",
+      "output": "Done.",
+      "follow_up": {
+        "cursor": 1
+      }
+    },
+    {
+      "outcome": "failed",
+      "explanation": ""
+    },
+    {
+      "outcome": "steered",
+      "output": "Done."
+    },
+    {
+      "outcome": "stopped",
+      "reason": "asked"
+    },
+    {
+      "outcome": "completed",
+      "output": "Done."
+    },
+    {
+      "output": "Done."
+    }
+  ],
+  "openings": [
+    {
+      "interface_id": "discord-private",
+      "agent_id": "default",
+      "audience_id": "discord-100-300",
+      "key": "schedule:daily:2026-10-24"
+    },
+    {
+      "interface_id": "discord-private",
+      "agent_id": "default",
+      "audience_id": "discord-100-300",
+      "key": "subagent:7",
+      "label": "The review subagent reported."
+    }
+  ],
+  "invalid_openings": [
+    {
+      "interface_id": "discord-private",
+      "agent_id": "default",
+      "audience_id": "discord-100-300"
+    },
+    {
+      "interface_id": "discord-private",
+      "agent_id": "default",
+      "audience_id": "discord-100-300",
+      "key": ""
+    },
+    {
+      "interface_id": "",
+      "agent_id": "default",
+      "audience_id": "discord-100-300",
+      "key": "k"
+    },
+    {
+      "interface_id": "discord-private",
+      "agent_id": "default",
+      "audience_id": "discord-100-300",
+      "key": "k",
+      "label": ""
+    },
+    {
+      "interface_id": "discord-private",
+      "agent_id": "default",
+      "audience_id": "discord-100-300",
+      "key": "k",
+      "user_id": "200"
+    }
+  ],
+  "controls": [
+    {
+      "interface_id": "discord-private",
+      "action": "steer"
+    },
+    {
+      "interface_id": "discord-private",
+      "action": "interrupt"
+    },
+    {
+      "interface_id": "discord-private",
+      "action": "stop"
+    }
+  ],
+  "invalid_controls": [
+    {
+      "interface_id": "discord-private",
+      "action": "pause"
+    },
+    {
+      "interface_id": "discord-private"
+    },
+    {
+      "action": "stop"
+    },
+    {
+      "interface_id": "discord-private",
+      "action": "stop",
+      "turn_id": "turn-1"
+    }
+  ]
+}

@@ -5,6 +5,7 @@ use carillon_protocol::{
         CommandCatalog, RuntimeModelQuery, RuntimeModelUpdate, RuntimeTurnRequest, TurnActivity,
     },
     models::ModelState,
+    turns::{RuntimeTurnControl, TurnOpening, TurnOutcome},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -162,6 +163,42 @@ fn only_a_whole_readiness_says_a_runtime_can_restart() -> Result<()> {
         serde_json::json!({}),
     ] {
         refused::<RestartReadiness>(&value)?;
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct HeldFixtures {
+    outcomes: Vec<Value>,
+    invalid_outcomes: Vec<Value>,
+    openings: Vec<Value>,
+    invalid_openings: Vec<Value>,
+    controls: Vec<Value>,
+    invalid_controls: Vec<Value>,
+}
+
+#[test]
+fn shared_held_turn_wire_fixtures() -> Result<()> {
+    let fixtures: HeldFixtures = serde_json::from_str(include_str!(
+        "../../../packages/protocol/fixtures/held.json"
+    ))?;
+    for value in &fixtures.outcomes {
+        round_trip::<TurnOutcome>(value)?;
+    }
+    for value in &fixtures.invalid_outcomes {
+        refused::<TurnOutcome>(value)?;
+    }
+    for value in &fixtures.openings {
+        round_trip::<TurnOpening>(value)?;
+    }
+    for value in &fixtures.invalid_openings {
+        refused::<TurnOpening>(value)?;
+    }
+    for value in &fixtures.controls {
+        round_trip::<RuntimeTurnControl>(value)?;
+    }
+    for value in &fixtures.invalid_controls {
+        refused::<RuntimeTurnControl>(value)?;
     }
     Ok(())
 }

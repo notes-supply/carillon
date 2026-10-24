@@ -771,8 +771,7 @@ async fn workers_hear_of_claimable_turns_in_their_own_lane() -> Result<()> {
     })
     .await?;
     assert_eq!(changed(), (Some(false), Some(false)));
-    // A finished message frees its conversation's next one, and its cursor
-    // queues an observation.
+    // A finished message frees its conversation's next one, and its cursor queues an observation.
     run_next_turn(&state, "test-runtime", async |_, _, request| {
         Ok(RuntimeTurnResponse {
             follow_up: Some(serde_json::json!({"message": "m", "after": 1})),
@@ -1901,6 +1900,7 @@ async fn job_reads_show_only_the_callers_jobs_with_runtime_snapshots() -> Result
             {
                 "origin": {"turn_id": running.turn_id, "accepted_at": accepted(0)},
                 "target_id": "test-destination",
+                "feedback_target_id": "test-feedback",
                 "turns": [{
                     "turn_id": running.turn_id,
                     "state": "running",
@@ -1916,6 +1916,7 @@ async fn job_reads_show_only_the_callers_jobs_with_runtime_snapshots() -> Result
             {
                 "origin": {"turn_id": queued.turn_id, "accepted_at": accepted(1)},
                 "target_id": "test-destination",
+                "feedback_target_id": "test-feedback",
                 "turns": [{
                     "turn_id": queued.turn_id,
                     "state": "queued",
@@ -2212,8 +2213,7 @@ async fn a_cut_off_answer_asks_an_observation_again_but_never_replays_an_executa
             .map(|turn| turn.state))
     };
 
-    // The answer's body is cut off: the observation goes back to its queue,
-    // with nothing delivered.
+    // The answer's body is cut off: the observation goes back to its queue, with nothing delivered.
     run_next_observation(&state, "test-runtime", async |_, _, request| {
         call_runtime(&state.client, &runtime, "unused", request).await
     })

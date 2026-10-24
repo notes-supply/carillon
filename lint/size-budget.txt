@@ -3,11 +3,10 @@
 1314 crates/carillon-core/src/application/http/tests/attachments.rs
 1997 crates/carillon-core/src/db.rs
 1137 crates/carillon-discord/src/activity.rs
-2545 crates/carillon-discord/src/activity/tests.rs
+2496 crates/carillon-discord/src/activity/tests.rs
 1205 crates/carillon-discord/src/application/tests.rs
 1046 crates/carillon-discord/src/cli.rs
 1776 crates/carillon-discord/src/inbound/tests/files.rs
-1035 crates/carillon-discord/src/module.rs
 1114 crates/carillon-discord/src/operations.rs
 1039 crates/carillon-discord/src/setup/tests.rs
 1152 packages/runtime-t3/src/fake.ts

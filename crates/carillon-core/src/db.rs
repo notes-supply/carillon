@@ -299,6 +299,7 @@ impl Database {
                 target_id TEXT NOT NULL,
                 feedback_target_id TEXT NOT NULL,
                 content TEXT NOT NULL,
+                silence TEXT,
                 state TEXT NOT NULL,
                 native_ref TEXT,
                 claim_owner TEXT,
@@ -489,8 +490,7 @@ impl Database {
     /// this turn left running, under the event identity
     /// [`FOLLOW_UP_EVENT_PREFIX`] and the turn's ID: same conversation,
     /// target, runtime and origin, carrying the cursor and nothing an
-    /// interface sent. It does not hold back the conversation's later
-    /// messages.
+    /// interface sent. It does not hold back the conversation's later messages.
     pub(crate) fn complete_turn(
         &self,
         turn: &ClaimedTurn,
@@ -571,8 +571,7 @@ impl Database {
     }
 
     /// Returns a running turn to the queue. Only valid when the runtime
-    /// provably never received the work, or for an observation, which only
-    /// reads.
+    /// provably never received the work, or for an observation, which only reads.
     pub(crate) fn requeue_turn(&self, turn: &ClaimedTurn) -> Result<()> {
         let changed = self.connect()?.execute(
             "UPDATE turns SET state = 'queued' WHERE id = ?1 AND runtime_id = ?2 AND state = 'running'",
@@ -646,7 +645,7 @@ impl Database {
         let delivery = transaction
             .query_row(
                 "SELECT d.id, d.turn_id, d.target_id, d.feedback_target_id, d.content, t.state,
-                        o.id, o.accepted_at
+                        o.id, o.accepted_at, d.silence
                  FROM deliveries d
                  JOIN turns t ON t.id = d.turn_id
                  JOIN turns o ON o.id = t.origin_turn_id
@@ -667,6 +666,7 @@ impl Database {
                             turn_id: row.get(6)?,
                             accepted_at: row.get(7)?,
                         },
+                        silence: optional_state_column(row, 8)?,
                     })
                 },
             )

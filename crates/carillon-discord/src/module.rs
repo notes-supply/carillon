@@ -21,18 +21,15 @@ use tokio::time::{Instant, timeout_at};
 
 use anyhow::{Context as _, Result, bail};
 use carillon_discord_module::contract::{
-    ActivityMarkers, CONTRACT, Card, CardRequest, Description, HostReply, HostRequest, Intent,
-    Interaction, Invocation, Outcome, Reply,
+    CONTRACT, Card, CardRequest, Description, HostReply, HostRequest, Intent, Interaction,
+    Invocation, Outcome, Reply,
 };
 use carillon_installation::{
     config::LoadedConfig,
     filesystem::{PublishError, atomic_write, remove, sync_ancestors},
     maintenance::MaintenanceLock,
 };
-use carillon_protocol::model::{
-    ActivityPhase, DeliveryState, Job, JobTurn, ModelQuery, ModelScope, ModelUpdate, Origin,
-    TurnActivity, TurnState,
-};
+use carillon_protocol::model::{ModelQuery, ModelScope, ModelUpdate};
 use carillon_wasm::{Host, Module as Compiled, Native};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -893,7 +890,7 @@ async fn prepare(host: &Host<Calls>, bytes: &[u8], source: Source) -> Result<Gen
     }
     // A module that cannot show a job at work, nor end a settled job's card,
     // would leave every card stale.
-    for (case, request) in smoke_cards() {
+    for (case, request) in smoke::cards() {
         card(host, &module, &request)
             .await
             .with_context(|| format!("render a card of {case}"))?;
@@ -943,65 +940,6 @@ enum InvocationRef<'a> {
     Card(&'a CardRequest),
 }
 
-/// Jobs a module must show on a card before it serves: one at work, and
-/// settled ones with and without a summary to keep.
-fn smoke_cards() -> [(&'static str, CardRequest); 3] {
-    let turn = |state, activity: Option<TurnActivity>, delivery| JobTurn {
-        turn_id: "turn".to_owned(),
-        state,
-        accepted_at: 1_790_000_000,
-        finished_at: (state != TurnState::Running).then_some(1_790_000_045),
-        activity,
-        delivery,
-    };
-    let request = |turn| CardRequest {
-        job: Job {
-            origin: Origin {
-                turn_id: "turn".to_owned(),
-                accepted_at: 1_790_000_000,
-            },
-            target_id: "1".to_owned(),
-            turns: vec![turn],
-            earlier: false,
-        },
-        seen: None,
-        markers: ActivityMarkers::default(),
-    };
-    let answer = TurnActivity {
-        phase: ActivityPhase::Model,
-        headline: Some("Answering.".to_owned()),
-        running: Vec::new(),
-        recent: Vec::new(),
-        tool_calls: 0,
-        work: None,
-        notes: Vec::new(),
-        agent: None,
-        partial: false,
-    };
-    [
-        (
-            "a job at work",
-            request(turn(TurnState::Running, Some(answer.clone()), None)),
-        ),
-        (
-            "a stopped job",
-            request(turn(
-                TurnState::Interrupted,
-                None,
-                Some(DeliveryState::Delivered),
-            )),
-        ),
-        (
-            "an answered job",
-            request(turn(
-                TurnState::Completed,
-                Some(answer),
-                Some(DeliveryState::Delivered),
-            )),
-        ),
-    ]
-}
-
 async fn outcome(
     host: &Host<Calls>,
     module: &Compiled,
@@ -1030,6 +968,7 @@ fn command(definition: &Value) -> Result<Command> {
 pub(crate) mod answer;
 #[cfg(test)]
 mod measurement;
+mod smoke;
 
 #[cfg(test)]
 pub(crate) mod tests;
