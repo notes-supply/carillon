@@ -29,7 +29,7 @@ import {
 import { resolved, validated } from "@carillon/runtime/models";
 import {
   commandFinished,
-  type RuntimeOperations,
+  type AnswerRuntime,
   type TurnRequest,
   type TurnResponse,
 } from "@carillon/runtime/operations";
@@ -149,7 +149,7 @@ interface Stop {
   readonly requestOpen: boolean;
 }
 
-export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
+export function createT3Runtime(options: T3RuntimeOptions): AnswerRuntime {
   const connect = options.connect ?? connectT3;
   const reconnect = options.reconnect ?? DEFAULT_RECONNECT;
   const settleMs = options.settleMs ?? DEFAULT_SETTLE_MS;
@@ -357,20 +357,21 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     );
   }
 
+  function execute(request: TurnRequest, signal?: AbortSignal): Promise<TurnResponse> {
+    const run = () => {
+      const combined =
+        signal === undefined ? shutdown.signal : AbortSignal.any([signal, shutdown.signal]);
+      combined.throwIfAborted();
+      return executeT3(request, combined);
+    };
+    // A follow-up turn only reads T3's records, so it runs beside the conversation's turns.
+    return track(() =>
+      request.follow_up === undefined ? inThread(conversationId(request), run) : run(),
+    );
+  }
+
   return {
-    executeTurn(request, signal) {
-      const run = () => {
-        const combined =
-          signal === undefined ? shutdown.signal : AbortSignal.any([signal, shutdown.signal]);
-        combined.throwIfAborted();
-        return executeT3(request, combined);
-      };
-      // A follow-up turn only reads T3's records, so it runs beside the
-      // conversation's turns rather than ahead of or behind them.
-      return track(() =>
-        request.follow_up === undefined ? inThread(conversationId(request), run) : run(),
-      );
-    },
+    turns: { mode: "answer", execute },
     activity(correlationId, interfaceId) {
       const turn = executing.get(correlationId);
       return turn?.interfaceId === interfaceId ? turn.watch.activity() : undefined;
@@ -809,8 +810,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
         return;
       }
       if (held === "rejected") {
-        // Definitive: nothing of this turn was committed, so there is
-        // nothing on T3 to doubt.
+        // Definitive: nothing of this turn was committed, so there is nothing on T3 to doubt.
         progress.dispatched = false;
         log(`turn ${request.correlation_id}: T3 holds a rejected receipt for the message`);
         throw new ExplainedFailure(

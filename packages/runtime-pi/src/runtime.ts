@@ -44,7 +44,7 @@ import { Serial } from "@carillon/runtime/serial";
 import { createPiExecutionSession, promptSession } from "./session.ts";
 import {
   commandFinished,
-  type RuntimeOperations,
+  type AnswerRuntime,
   type TurnRequest,
   type TurnResponse,
 } from "@carillon/runtime/operations";
@@ -69,7 +69,7 @@ export interface PiRuntimeOptions {
 /** Construction is explicit; importing this module does not discover providers or open files.
  * Supplied collaborators remain caller-owned. close() cancels/settles work, but does not destroy them.
  */
-export async function createPiRuntime(options: PiRuntimeOptions): Promise<RuntimeOperations> {
+export async function createPiRuntime(options: PiRuntimeOptions): Promise<AnswerRuntime> {
   const workspaces = new Map(options.agents.map((agent) => [agent.id, resolve(agent.workspace)]));
   const stateDirectory = resolve(options.stateDirectory);
   const sessionDirectory = resolve(options.sessionDirectory ?? join(stateDirectory, "sessions"));
@@ -111,21 +111,24 @@ export async function createPiRuntime(options: PiRuntimeOptions): Promise<Runtim
   }
 
   return {
-    executeTurn(request, signal) {
-      // Pi hands core no follow-up cursor, so a follow-up turn is none of
-      // its own: run as ordinary input, it would answer what nobody asked.
-      if (request.follow_up !== undefined)
-        return Promise.reject(
-          new ExplainedFailure(422, "This runtime does not follow up on delegated work."),
+    turns: {
+      mode: "answer",
+      execute(request, signal) {
+        // Pi hands core no follow-up cursor, so a follow-up turn is none of
+        // its own: run as ordinary input, it would answer what nobody asked.
+        if (request.follow_up !== undefined)
+          return Promise.reject(
+            new ExplainedFailure(422, "This runtime does not follow up on delegated work."),
+          );
+        return track(() =>
+          turns.run(async () => {
+            const combined =
+              signal === undefined ? shutdown.signal : AbortSignal.any([signal, shutdown.signal]);
+            combined.throwIfAborted();
+            return executePi(request, combined);
+          }),
         );
-      return track(() =>
-        turns.run(async () => {
-          const combined =
-            signal === undefined ? shutdown.signal : AbortSignal.any([signal, shutdown.signal]);
-          combined.throwIfAborted();
-          return executePi(request, combined);
-        }),
-      );
+      },
     },
     activity(correlationId, interfaceId) {
       const turn = executing.get(correlationId);

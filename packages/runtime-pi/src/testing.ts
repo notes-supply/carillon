@@ -9,7 +9,7 @@ import { capturedPath } from "@carillon/runtime/attachments";
 import { ModelSelections } from "@carillon/runtime/selections";
 import { Serial } from "@carillon/runtime/serial";
 import { conversationDirectory } from "./namespace.ts";
-import type { RuntimeOperations, TurnRequest, TurnResponse } from "@carillon/runtime/operations";
+import type { AnswerRuntime, TurnRequest, TurnResponse } from "@carillon/runtime/operations";
 interface DeterministicSession {
   readonly turns: readonly {
     readonly correlation_id: string;
@@ -31,24 +31,27 @@ const DeterministicSessionSchema = Type.Object({
 export async function createDeterministicRuntime(
   stateDirectory: string,
   sessionDirectory: string,
-): Promise<RuntimeOperations> {
+): Promise<AnswerRuntime> {
   await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
   const selections = await ModelSelections.open(join(stateDirectory, "model-selection.json"));
   const turns = new Serial();
   const shutdown = new AbortController();
   let executing = 0;
   return {
-    async executeTurn(request, signal) {
-      executing += 1;
-      try {
-        return await turns.run(() => {
-          shutdown.signal.throwIfAborted();
-          signal?.throwIfAborted();
-          return executeDeterministic(request);
-        });
-      } finally {
-        executing -= 1;
-      }
+    turns: {
+      mode: "answer",
+      async execute(request, signal) {
+        executing += 1;
+        try {
+          return await turns.run(() => {
+            shutdown.signal.throwIfAborted();
+            signal?.throwIfAborted();
+            return executeDeterministic(request);
+          });
+        } finally {
+          executing -= 1;
+        }
+      },
     },
     activity() {
       return undefined;

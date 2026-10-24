@@ -1,6 +1,7 @@
 import {
   turnIntent,
   type CommandCatalog,
+  type ControlAction,
   type ModelQuery,
   type ModelUpdate,
   type ModelState,
@@ -58,8 +59,31 @@ export type RestartReadiness =
   | { readonly state: "ready" }
   | { readonly state: "unready"; readonly reason: string };
 
-export interface RuntimeOperations {
-  executeTurn(request: TurnRequest, signal?: AbortSignal): Promise<TurnResponse>;
+/** Runs each turn to its answer while core waits: T3's contract until it holds its turns. */
+export interface AnswerTurns {
+  readonly mode: "answer";
+  execute(request: TurnRequest, signal?: AbortSignal): Promise<TurnResponse>;
+}
+
+/**
+ * Keeps each turn core hands over and settles it later through core's
+ * client. `submit` resolves once the turn is kept, and the same correlation
+ * ID again is the same turn. `control` acts on a turn the runtime holds for
+ * that interface, as a person asked.
+ */
+export interface InboxTurns {
+  readonly mode: "inbox";
+  submit(request: TurnRequest): Promise<void>;
+  control?(turnId: string, interfaceId: string, action: ControlAction): Promise<void>;
+}
+
+export type TurnHandling = AnswerTurns | InboxTurns;
+
+/** A runtime that answers each turn while core waits. */
+export type AnswerRuntime = RuntimeOperations<AnswerTurns>;
+
+export interface RuntimeOperations<Turns extends TurnHandling = TurnHandling> {
+  readonly turns: Turns;
   /** The latest activity of a turn this instance is executing for that interface. */
   activity(correlationId: string, interfaceId: string): TurnActivity | undefined;
   modelState(query: ModelQuery): Promise<ModelState>;

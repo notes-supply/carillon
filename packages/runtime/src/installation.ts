@@ -24,6 +24,10 @@ export interface Agent {
 
 export interface Installation {
   readonly root: string;
+  /** Where core serves its provider API, on loopback. */
+  readonly coreUrl: string;
+  /** The runtime holds the turns it accepts and settles them through core. */
+  readonly durable: boolean;
   /** The runtime's private state directory, `<data_dir>/components/<id>`. */
   readonly componentDirectory: string;
   /** The agents whose new conversations run on this runtime, in registry order. */
@@ -47,10 +51,14 @@ const ProviderSchema = Type.Object({
   url: Type.String({ minLength: 1 }),
   token_hash: Type.String({ pattern: "^[a-f0-9]{64}$" }),
   enabled: Type.Boolean(),
+  durable: Type.Optional(Type.Boolean()),
 });
 const FileConfigSchema = Type.Object({
   data_dir: Type.String(),
-  core: Type.Object({ operator_token_hash: Type.String({ pattern: "^[a-f0-9]{64}$" }) }),
+  core: Type.Object({
+    listen: Type.String({ minLength: 1 }),
+    operator_token_hash: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+  }),
   agents: Type.Optional(
     Type.Array(
       Type.Object({
@@ -96,6 +104,8 @@ export async function loadInstallation(
   for (const provider of interfaces) providerAddress(provider.url);
   return {
     root,
+    coreUrl: coreUrl(parsed.core.listen),
+    durable: runtime.durable ?? false,
     componentDirectory: join(resolve(root, parsed.data_dir), "components", providerId),
     agents: (parsed.agents ?? [])
       .filter((agent) => agent.runtime === providerId)
@@ -110,6 +120,16 @@ export async function loadInstallation(
     operatorTokenHash: parsed.core.operator_token_hash,
     providerFile: join(root, "providers", `${providerId}.toml`),
   };
+}
+
+/**
+ * Core's address as a local client reaches it: a wildcard listener on the
+ * loopback address of its family, and any other on loopback only.
+ */
+function coreUrl(listen: string): string {
+  const url = `http://${listen.replace(/^0\.0\.0\.0:/u, "127.0.0.1:").replace(/^\[::\]:/u, "[::1]:")}`;
+  providerAddress(url);
+  return url;
 }
 
 /** Why a runtime serves nothing, as its log says it. */

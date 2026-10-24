@@ -65,6 +65,7 @@ async function serve(values: readonly string[]): Promise<void> {
     runtime,
     token,
     providerId: installation.runtime.id,
+    durable: installation.durable,
     provider: "t3",
     version: packageInfo.version,
     features: ["native-continuations"],

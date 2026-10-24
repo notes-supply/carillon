@@ -14,22 +14,25 @@ afterEach(() => {
 /** A runtime whose turns fail with the input as the provider's explanation, and whose model changes are refused quoting the requested option. */
 async function serve() {
   const runtime: RuntimeOperations = {
-    executeTurn: (request) =>
-      Promise.reject(
-        request.input === "internal"
-          ? new Error(`extension state at /private/state rejected ${key}`)
-          : request.input === "closing"
-            ? new RuntimeClosed("runtime is closed")
-            : request.input === "reported internal"
-              ? reported(new Error(`state at /private/state rejected ${key}`))
-              : request.input === "reported value"
-                ? reportedValue(`the session's state rejected ${key}`)
-                : request.input === "reported closing"
-                  ? reported(new RuntimeClosed("runtime is closed"))
-                  : request.input.startsWith("reported ")
-                    ? reported(new ExplainedFailure(502, request.input.slice(9)))
-                    : new ExplainedFailure(502, request.input),
-      ),
+    turns: {
+      mode: "answer",
+      execute: (request) =>
+        Promise.reject(
+          request.input === "internal"
+            ? new Error(`extension state at /private/state rejected ${key}`)
+            : request.input === "closing"
+              ? new RuntimeClosed("runtime is closed")
+              : request.input === "reported internal"
+                ? reported(new Error(`state at /private/state rejected ${key}`))
+                : request.input === "reported value"
+                  ? reportedValue(`the session's state rejected ${key}`)
+                  : request.input === "reported closing"
+                    ? reported(new RuntimeClosed("runtime is closed"))
+                    : request.input.startsWith("reported ")
+                      ? reported(new ExplainedFailure(502, request.input.slice(9)))
+                      : new ExplainedFailure(502, request.input),
+        ),
+    },
     activity: (correlationId, interfaceId) =>
       correlationId === "turn/1" && interfaceId === "discord-private"
         ? { phase: "tools", running: [], recent: [{ tool: "read", ok: true }], tool_calls: 1 }
@@ -54,6 +57,7 @@ async function serve() {
     runtime,
     token: "test-only",
     providerId: "runtime-pi",
+    durable: false,
     provider: "deterministic-local-substitute",
     version: "9.9.9-test",
     features: [],

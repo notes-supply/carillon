@@ -49,7 +49,7 @@ it.each([
       config,
       stringify({
         data_dir: "state",
-        core: { operator_token_hash: hash },
+        core: { listen: "127.0.0.1:1", operator_token_hash: hash },
         providers: [
           {
             id: "runtime-pi",
