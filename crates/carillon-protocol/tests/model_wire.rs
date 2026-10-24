@@ -68,6 +68,14 @@ fn shared_model_wire_fixtures() -> Result<()> {
 struct ActivityFixtures {
     activities: Vec<Value>,
     invalid_activities: Vec<Value>,
+    lenient_controls: Vec<LenientControls>,
+}
+
+/// A snapshot whose controls a runtime may not send, and how core reads it.
+#[derive(Deserialize)]
+struct LenientControls {
+    sent: Value,
+    read: Value,
 }
 
 #[test]
@@ -80,6 +88,12 @@ fn shared_activity_wire_fixtures() -> Result<()> {
     }
     for value in &fixtures.invalid_activities {
         refused::<TurnActivity>(value)?;
+    }
+    // A bad control list never costs the snapshot: unknown and repeated
+    // controls are skipped.
+    for LenientControls { sent, read } in &fixtures.lenient_controls {
+        let activity: TurnActivity = serde_json::from_value(sent.clone())?;
+        assert_eq!(serde_json::to_value(activity)?, *read);
     }
     Ok(())
 }

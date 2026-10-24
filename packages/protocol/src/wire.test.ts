@@ -31,6 +31,11 @@ it("preserves the shared Rust/TypeScript activity wire fixtures", () => {
   for (const value of activity.activities) expect(Parse(TurnActivitySchema, value)).toEqual(value);
   for (const value of activity.invalid_activities)
     expect(Check(TurnActivitySchema, value)).toBe(false);
+  // A runtime lists each known control once; core reads any list it gets.
+  for (const { sent, read } of activity.lenient_controls) {
+    expect(Check(TurnActivitySchema, sent)).toBe(false);
+    expect(Parse(TurnActivitySchema, read)).toEqual(read);
+  }
 });
 
 it("preserves the shared Rust/TypeScript runtime turn fixtures", () => {

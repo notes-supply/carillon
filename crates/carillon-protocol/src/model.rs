@@ -500,25 +500,35 @@ pub struct TurnActivity {
     /// observed, but not all of it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub partial: bool,
-    /// What a person may do with the turn while it waits, at most
-    /// [`CONTROL_LIMIT`].
+    /// What a person may do with the turn while it waits, each once, so at
+    /// most [`CONTROL_LIMIT`]. A runtime's list is read leniently.
     #[serde(
         default,
-        deserialize_with = "bounded_controls",
+        deserialize_with = "distinct_controls",
         skip_serializing_if = "Vec::is_empty"
     )]
     pub controls: Vec<ControlAction>,
 }
 
-fn bounded_controls<'de, D>(deserializer: D) -> Result<Vec<ControlAction>, D::Error>
+/// The controls a runtime lists that this build knows, each kept once where
+/// it first appears: a repeated or unknown one costs the snapshot nothing.
+fn distinct_controls<'de, D>(deserializer: D) -> Result<Vec<ControlAction>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let controls = Vec::<ControlAction>::deserialize(deserializer)?;
-    if controls.len() > CONTROL_LIMIT {
-        return Err(serde::de::Error::custom(format!(
-            "at most {CONTROL_LIMIT} controls are allowed"
-        )));
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Listed {
+        Known(ControlAction),
+        Unknown(serde::de::IgnoredAny),
+    }
+    let mut controls = Vec::with_capacity(CONTROL_LIMIT);
+    for listed in Vec::<Listed>::deserialize(deserializer)? {
+        if let Listed::Known(action) = listed
+            && !controls.contains(&action)
+        {
+            controls.push(action);
+        }
     }
     Ok(controls)
 }

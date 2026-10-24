@@ -239,8 +239,8 @@ export const TurnActivitySchema = Type.Object({
    * observed, but not all of it.
    */
   partial: Type.Optional(Type.Boolean()),
-  /** What a person may do with the turn while it waits. */
-  controls: Type.Optional(Type.Array(ControlActionSchema, { maxItems: 3 })),
+  /** What a person may do with the turn while it waits, each once. */
+  controls: Type.Optional(Type.Array(ControlActionSchema, { maxItems: 3, uniqueItems: true })),
 });
 export type TurnActivity = Static<typeof TurnActivitySchema>;
 
