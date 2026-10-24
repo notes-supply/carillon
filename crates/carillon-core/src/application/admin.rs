@@ -241,6 +241,7 @@ fn default_providers(
             token_hash: hash_token(discord_token),
             enabled: true,
             parallel_turns: None,
+            durable: false,
         },
         runtime_provider(runtime, checked_port(base_port, 2)?, runtime_token)?,
     ])
@@ -255,6 +256,7 @@ fn runtime_provider(runtime: Runtime, port: u16, token: &str) -> Result<Provider
         token_hash: hash_token(token),
         enabled: true,
         parallel_turns: None,
+        durable: false,
     })
 }
 
@@ -1305,6 +1307,7 @@ mod tests {
                 version: "test".to_owned(),
                 url: "http://127.0.0.1:1".to_owned(),
                 enabled: true,
+                durable: false,
             }],
             attachments: AttachmentLimits {
                 free_space_mib: 0,
@@ -1647,17 +1650,5 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn provider_command_rejects_unsafe_identity_before_mutation() -> Result<()> {
-        let directory = tempdir()?;
-        let root = directory.path().join("installation");
-        let config_path = initialize_test_installation(&root, directory.path(), 44_000)?;
-        let before = fs::read(&config_path)?;
-        crate::assert_refused(
-            set_provider(&config_path, "../escape", false),
-            "provider identity must be 1-128 bytes",
-        )?;
-        assert_eq!(fs::read(&config_path)?, before);
-        Ok(())
-    }
+    mod providers;
 }

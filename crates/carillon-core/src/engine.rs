@@ -35,6 +35,8 @@ pub struct RuntimeProvider {
     pub version: String,
     pub url: String,
     pub enabled: bool,
+    /// It holds the turns it accepts and settles them itself.
+    pub durable: bool,
 }
 
 /// An agent conversations are admitted for: the runtime its new

@@ -50,6 +50,7 @@ pub(crate) fn installation(
             token_hash: hash_token(id),
             enabled: true,
             parallel_turns: None,
+            durable: false,
         });
     }
     fs::write(root.join("credentials").join("operator.token"), "operator")?;

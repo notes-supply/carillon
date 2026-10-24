@@ -56,6 +56,7 @@ fn installation(root: &Path) -> Result<Fixture> {
             token_hash: hash_token("test-only"),
             enabled: true,
             parallel_turns: None,
+            durable: false,
         })
     })
     .collect::<Result<Vec<_>>>()?;
@@ -204,73 +205,6 @@ fn completed(request: RuntimeTurnRequest) -> RuntimeTurnResponse {
         activity: None,
         attachments_left: false,
     }
-}
-
-#[test]
-fn configuration_rejects_malformed_provider_endpoints_before_startup() -> Result<()> {
-    let directory = tempdir()?;
-    let mut state = installation(directory.path())?;
-    let path = directory.path().join("carillon.toml");
-    for index in 0..state.config.value.providers.len() {
-        let original = state.config.value.providers[index].url.clone();
-        for url in [
-            "not-a-url",
-            "",
-            "https://127.0.0.1:3000",
-            "http://localhost:3000",
-            "http://127.0.0.1",
-            "http://127.0.0.1:99999",
-            "http://127.0.0.1:3000/path",
-            "http://user@127.0.0.1:3000",
-            "http://127.0.0.1:3000?query",
-            "http://0.0.0.0:3000",
-            "http://192.168.1.2:3000",
-            "http://[::]:3000",
-            "http://[2001:db8::1]:3000",
-            "http://127.0.0.1:0",
-            "http://[::1]:0",
-        ] {
-            state.config.value.providers[index].url = url.to_owned();
-            fs::write(&path, toml::to_string(&state.config.value)?)?;
-            crate::assert_refused(LoadedConfig::load(&path), "invalid URL for provider")?;
-        }
-        for url in [
-            "http://127.0.0.1:3000",
-            "http://127.2.3.4:3000",
-            "http://[::1]:3000",
-        ] {
-            state.config.value.providers[index].url = url.to_owned();
-            fs::write(&path, toml::to_string(&state.config.value)?)?;
-            LoadedConfig::load(&path)?;
-        }
-        state.config.value.providers[index].url = original;
-    }
-    // Concurrent conversations are a bounded runtime setting.
-    for index in 0..state.config.value.providers.len() {
-        let runtime = state.config.value.providers[index].role == ProviderRole::Runtime;
-        for (parallel, valid) in [(0, false), (1, runtime), (16, runtime), (17, false)] {
-            state.config.value.providers[index].parallel_turns = Some(parallel);
-            fs::write(&path, toml::to_string(&state.config.value)?)?;
-            let id = &state.config.value.providers[index].id;
-            assert_eq!(
-                LoadedConfig::load(&path)
-                    .err()
-                    .map(|error| error.to_string()),
-                (!valid).then(|| format!(
-                    "provider {id} parallel_turns must be between 1 and 16, on a runtime"
-                )),
-                "parallel_turns {parallel}"
-            );
-        }
-        state.config.value.providers[index].parallel_turns = None;
-    }
-    state.config.value.core.listen.set_port(0);
-    fs::write(&path, toml::to_string(&state.config.value)?)?;
-    crate::assert_refused(
-        LoadedConfig::load(&path),
-        "core listen port must be nonzero",
-    )?;
-    Ok(())
 }
 
 #[tokio::test]
@@ -2106,6 +2040,7 @@ async fn job_reads_answer_promptly_when_several_runtimes_cannot_describe_their_t
     Ok(())
 }
 mod attachments;
+mod configuration;
 mod live;
 mod maintenance;
 

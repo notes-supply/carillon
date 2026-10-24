@@ -195,6 +195,10 @@ pub struct Provider {
     /// runs one turn at a time, in order. Absent means one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallel_turns: Option<u32>,
+    /// For a runtime that holds the turns it accepts and settles them
+    /// itself: core hands it each turn and waits for no answer.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub durable: bool,
 }
 
 /// The most conversations one runtime may be configured to run at once.
@@ -472,6 +476,14 @@ impl Config {
             {
                 bail!(
                     "provider {} parallel_turns must be between 1 and {MAX_PARALLEL_TURNS}, on a runtime",
+                    provider.id
+                );
+            }
+            if provider.durable
+                && (provider.role != ProviderRole::Runtime || provider.parallel_turns.is_some())
+            {
+                bail!(
+                    "provider {} durable is for a runtime, which then orders its own turns without parallel_turns",
                     provider.id
                 );
             }
