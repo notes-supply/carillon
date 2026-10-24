@@ -135,3 +135,74 @@ async fn an_admitted_control_asks_core_to_relay_it_for_the_message() -> anyhow::
     );
     Ok(())
 }
+
+/// Every log line at warning or above, as an operator's log would show it.
+#[derive(Clone, Default)]
+struct Warnings(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Warnings {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn only_an_unexpected_refusal_of_a_control_is_a_warning() -> anyhow::Result<()> {
+    let answers = Arc::new(Mutex::new(vec![
+        StatusCode::INTERNAL_SERVER_ERROR,
+        StatusCode::CONFLICT,
+        StatusCode::NOT_FOUND,
+    ]));
+    let app = Router::new().route(
+        "/v1/events/{event_id}/control",
+        post(move || {
+            let status = answers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop()
+                .unwrap_or(StatusCode::NO_CONTENT);
+            async move { status }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let core = test_client(format!("http://{address}"))?;
+    let warnings = Warnings::default();
+    let writer = warnings.clone();
+    let _logging = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || writer.clone())
+            .finish(),
+    );
+    let logged = || {
+        String::from_utf8_lossy(
+            &warnings
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+        .into_owned()
+    };
+    for _ in 0..2 {
+        relay(core.clone(), "400".to_owned(), ControlAction::Steer).await;
+    }
+    assert_eq!(logged(), "");
+    relay(core, "400".to_owned(), ControlAction::Steer).await;
+    server.abort();
+    assert!(
+        logged().contains("a turn control was not taken"),
+        "{}",
+        logged()
+    );
+    Ok(())
+}

@@ -2,8 +2,9 @@
 //! that holds it. Admission is the same as a message's; core relays an
 //! admitted control to the runtime, which decides.
 
+use axum::http::StatusCode;
 use carillon_protocol::turns::ControlAction;
-use tracing::warn;
+use tracing::{debug, warn};
 use twilight_model::gateway::GatewayReaction;
 
 use crate::{client::CoreClient, config::DiscordConfig, conversations::admit_identity};
@@ -25,10 +26,17 @@ pub(crate) fn admitted(
 
 /// Asks core to relay `action` on the turn of the message `message_id` to
 /// its runtime. A refusal shows nothing: the message's reactions say how its
-/// turn stands.
+/// turn stands. A control of a turn that no longer waits, or of a message
+/// with no turn, is routine, since people react as turns move on.
 pub(crate) async fn relay(core: CoreClient, message_id: String, action: ControlAction) {
-    if let Err(failure) = core.control(&message_id, action).await {
-        warn!(status = %failure.status, error = %failure.message, message_id, ?action, "a turn control was not taken");
+    let Err(failure) = core.control(&message_id, action).await else {
+        return;
+    };
+    let (status, error) = (failure.status, failure.message);
+    if matches!(status, StatusCode::NOT_FOUND | StatusCode::CONFLICT) {
+        debug!(%status, error, message_id, ?action, "a turn control was not taken");
+    } else {
+        warn!(%status, error, message_id, ?action, "a turn control was not taken");
     }
 }
 
