@@ -1,7 +1,8 @@
 /**
- * One agent on pi-durable: its harness, the turns core hands over, and the
- * controls people use on them. Each turn's message is submitted to its
- * conversation's inbox, and a delivery task settles the turn with core.
+ * One agent on pi-durable: its harness, the turns core hands over or the
+ * runtime opens, and the controls people use on them. Each turn's message is
+ * submitted to its conversation's inbox, and a delivery task settles the turn
+ * with core.
  */
 import { copyJson } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -15,6 +16,7 @@ import {
   LiveDoc,
   type ConversationId,
   type Extension,
+  type HarnessOptions,
   type Storage,
   type SubmissionId,
   type TaskId,
@@ -27,6 +29,7 @@ import type { ControlAction, TurnActivity } from "@carillon/protocol";
 import type { CoreClient } from "@carillon/runtime/core";
 import { diagnostic, ExplainedFailure, RuntimeClosed } from "@carillon/runtime/failure";
 import type { TurnRequest } from "@carillon/runtime/operations";
+import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { watchActivity, type ConversationActivity } from "./activity.ts";
 import { prepareAttachments, type InlineImagePolicy, type ModelImages } from "./attachments.ts";
@@ -43,9 +46,11 @@ import {
   MESSAGE,
   Resources,
   Sessions,
+  Store,
   Turns,
 } from "./documents.ts";
 import type { Catalogue, ModelChoice, ModelChoices } from "./models.ts";
+import { OPENING, openingTask, type Opening } from "./opening.ts";
 import {
   carillonExtension,
   isUserExtension,
@@ -54,11 +59,20 @@ import {
   type Extensions,
   type Snapshot,
 } from "./resources.ts";
+import { createSchedulesExtension, SCHEDULE } from "./schedules.ts";
 
 const context = BACKGROUND_CONTEXT;
 const INTERRUPTED = "[Carillon] This message interrupted your previous answer.";
+const STOPPED = "[Carillon] The person stopped your previous answer.";
+const ENDED =
+  "[Carillon] Your previous answer was stopped: what it ran for was cancelled or turned off.";
 /** The most times a run is aborted again because its task handed over meanwhile. */
 const ABORT_ATTEMPTS = 5;
+/** The runtime's own tasks a crash loop parked, which run again at startup. */
+const RETRIED = new Set([DELIVERY, OPENING, SCHEDULE]);
+
+/** The harness clock and timers; the system's by default. */
+export type Clock = Pick<HarnessOptions, "now" | "setTimer">;
 
 export interface AgentOptions {
   readonly id: string;
@@ -73,6 +87,7 @@ export interface AgentOptions {
   readonly builtIns: readonly Extension[];
   /** What settings select when they name no extensions. */
   readonly defaults: readonly string[];
+  readonly clock?: Clock;
 }
 
 export interface DurableAgent {
@@ -99,6 +114,8 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
   const watches = new Map<ConversationId, Promise<ConversationActivity>>();
   const watched = new Map<ConversationId, ConversationActivity>();
   let latest: Snapshot | undefined;
+  /** Whether the snapshot recorded before startup no longer loads, so no snapshot says what is selected. */
+  let unloaded = false;
   /** Whether adopting the latest snapshot kept an old user extension or left a module out. */
   let incomplete = false;
 
@@ -114,12 +131,37 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
         ? undefined
         : watched.get(input.conversation)?.of(input.submission);
     },
+    selects,
     settle: (turn, outcome) => options.core.settle(turn, outcome),
     released: release,
   });
+  const opening = openingTask({
+    core: options.core,
+    key: (key) => `${options.id}:${nonce}:${key}`,
+    selects,
+    placed: (conversation, requestId) =>
+      harness.commit(
+        async (tx) => (await tx.submissionByRequest(conversation, requestId))?.id,
+        context,
+      ),
+    place,
+    track,
+    stop: async (conversation, submission) => {
+      await inOrder(conversation, () => stop(conversation, submission, ENDED));
+    },
+  });
   const extensions: Extensions = {
-    carillon: carillonExtension(() => latest, workspace, [delivery]),
-    builtIn: options.builtIns,
+    carillon: carillonExtension(() => latest, workspace, [delivery, opening]),
+    builtIn: [
+      ...options.builtIns,
+      createSchedulesExtension({
+        opening,
+        selects,
+        cancel: async (task) => {
+          await harness.abortTask(task, context);
+        },
+      }),
+    ],
     defaults: options.defaults,
   };
   for (const extension of [extensions.carillon, ...extensions.builtIn]) registry.install(extension);
@@ -141,18 +183,26 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
       onReport: (error, info) => {
         console.error(`agent ${options.id}: ${info.type}: ${diagnostic(error)}`);
       },
+      ...options.clock,
     },
     context,
   );
+  const nonce = await harness.commit(async (tx) => {
+    const store = await tx.doc(Store);
+    store.nonce ??= randomUUID();
+    return store.nonce;
+  }, context);
 
   // Nothing runs before resume, so every live delivery is held before it can
   // finish, and the latest snapshot's extensions are installed first. One
-  // that no longer loads leaves the defaults until the next is admitted.
+  // that no longer loads leaves the defaults until the next is admitted, and
+  // what is selected unknown.
   const recorded = (await harness.snapshot(Resources, context))?.root;
   if (recorded !== undefined)
     try {
       await adopt(await loadSnapshot(recorded, workspace, extensions));
     } catch (failure) {
+      unloaded = true;
       console.error(
         `agent ${options.id}: resources ${recorded}: ${diagnostic(failure)}; using the default extensions`,
       );
@@ -208,19 +258,9 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
             );
             return;
           case "stop":
-            switch (await harness.abortSubmission(submission, context, conversation)) {
-              case "aborted":
-                return;
-              case "already_placed":
-                if (!(await abortRun(conversation, submission)))
-                  throw new ExplainedFailure(409, "That message was already answered.");
-                if ((await waitingMessages(conversation)).length > 0)
-                  await kick(conversation, "[Carillon] The person stopped your previous answer.");
-                return;
-              case "settled":
-              case "not_found":
-                throw new ExplainedFailure(409, "That message was already answered.");
-            }
+            if (!(await stop(conversation, submission, STOPPED)))
+              throw new ExplainedFailure(409, "That message was already answered.");
+            return;
         }
       });
     },
@@ -309,21 +349,12 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
       },
       context,
     );
-    const input: DeliveryInput = {
+    await track({
       turn: request.correlation_id,
       interface_id: request.interface_id,
       conversation,
       submission: submission.id,
-    };
-    await harness.commit(async (tx) => {
-      const turn = await tx.doc(Turns, request.correlation_id, null);
-      turn.task ??= await tx.createTask(delivery, input, {
-        ownership: { kind: "conversation" },
-        conversationId: conversation,
-        background: true,
-      });
-    }, context);
-    hold(input);
+    });
     // In interrupt mode, once handed over and after the conversation's
     // earlier controls, a message still waiting ends the run it waits behind.
     if (!admitted && snapshot.busy === "interrupt")
@@ -336,15 +367,68 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
   }
 
   /**
-   * Startup: parked deliveries run again, and a run that crashed the
-   * process too often is given up, its messages failed. Returns the runs
-   * given up, whose aborts finish once tasks run.
+   * Places the input of a turn the runtime opened in its conversation, as a
+   * follow-up on the model its Carillon conversation chose. The opening's key
+   * is its request ID, so it is placed once.
+   */
+  async function place(
+    conversation: ConversationId,
+    turn: string,
+    opened: Opening,
+  ): Promise<SubmissionId> {
+    const info = await harness.snapshot(ConversationInfo, conversation, context);
+    if (info === undefined)
+      throw new Error(`conversation ${String(conversation)} serves no Carillon conversation`);
+    const { interface_id, agent_id, audience_id } = info;
+    const choice = await options.choices.forTurn({ interface_id, agent_id, audience_id });
+    await harness.commit(async (tx) => {
+      if (!runs(await tx.doc(AgentDoc, conversation), choice))
+        await configure(tx, conversation, choice);
+    }, context);
+    const submission = await (
+      await handle(conversation)
+    ).submit(
+      {
+        type: "input",
+        content: opened.content,
+        requestId: opened.key,
+        whenBusy: "followUp",
+        entry: { kind: MESSAGE, data: { turn } },
+      },
+      context,
+    );
+    return submission.id;
+  }
+
+  /** Whether the agent selects the extension; undefined while no snapshot that loads says. */
+  function selects(name: string): boolean | undefined {
+    if (latest !== undefined) return latest.selected.includes(name);
+    return unloaded ? undefined : options.defaults.includes(name);
+  }
+
+  /** Holds the turn until its delivery task, created once, settles it. */
+  async function track(input: DeliveryInput): Promise<void> {
+    await harness.commit(async (tx) => {
+      const turn = await tx.doc(Turns, input.turn, null);
+      turn.task ??= await tx.createTask(delivery, input, {
+        ownership: { kind: "conversation" },
+        conversationId: input.conversation,
+        background: true,
+      });
+    }, context);
+    hold(input);
+  }
+
+  /**
+   * Startup: parked deliveries, openings and schedules run again, and a
+   * run that crashed the process too often is given up, its messages
+   * failed. Returns the runs given up, whose aborts finish once tasks run.
    */
   async function recover(tasks: readonly TaskInspection[]): Promise<TaskId[]> {
     const crashed = new Set<ConversationId>();
     for (const { record, state } of tasks) {
       if (state.kind !== "blocked" || state.reason !== "restart_limit") continue;
-      if (record.kind === DELIVERY) await harness.retryTask(record.id, context);
+      if (RETRIED.has(record.kind)) await harness.retryTask(record.id, context);
       else if (record.kind === "pi.generation" || record.kind === "pi.tool")
         crashed.add(record.conversationId);
     }
@@ -495,6 +579,30 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
     await toSteers(conversation);
     if (ended && (await waitingMessages(conversation)).length > 0) await kick(conversation, note);
     else await ensureFlowing(conversation);
+  }
+
+  /**
+   * Stops a turn's message: withdraws it while it waits, or ends the run
+   * it is in, after which waiting messages run with `note`. False once it
+   * was answered.
+   */
+  async function stop(
+    conversation: ConversationId,
+    submission: SubmissionId,
+    note: string,
+  ): Promise<boolean> {
+    switch (await harness.abortSubmission(submission, context, conversation)) {
+      case "aborted":
+        return true;
+      case "already_placed":
+        break;
+      case "settled":
+      case "not_found":
+        return false;
+    }
+    if (!(await abortRun(conversation, submission))) return false;
+    if ((await waitingMessages(conversation)).length > 0) await kick(conversation, note);
+    return true;
   }
 
   /** Turns waiting follow-ups into steers: only `submission`, or every one; false when it no longer waits. */

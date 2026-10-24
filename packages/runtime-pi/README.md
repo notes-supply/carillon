@@ -26,6 +26,19 @@ with `pi` as its first argument, the same executable is Pi's own command line
   `steered`. A run the person stopped is `stopped`. A failed run gives the
   provider's explanation where it may be shown; no available model says to
   choose one with `/model`.
+- **Opened turns.** Output no message prompted, such as a schedule's run,
+  comes in a turn the runtime opens with core (`POST /v1/runtime/turns`).
+  A background task of the conversation opens it under a key holding the
+  agent's ID and a nonce of its store, so no other agent, and no store
+  recreated in its place, shares it. The key opens and places the turn
+  once across restarts; its input waits as a follow-up on the model its
+  conversation chose, and the turn settles like any other, with its cards,
+  typing and stop. Work that has ended, such as a cancelled schedule's run,
+  opens no turn, unless core was asked already and may have opened one. A
+  turn core has settled already is left alone, one whose work ended before
+  it was placed is settled `stopped`, and one whose work ended while it was
+  placed is stopped as a person stops it. An unreachable core is asked
+  again with backoff; an opening core refuses for good is given up.
 - **Busy conversations.** `settings.json`'s `busy` decides what a message does
   while the agent answers in its conversation: `steer` (the default) joins
   the running answer after its current tool round, `queue` waits for it, and
@@ -73,7 +86,8 @@ earlier. Each snapshot is read once:
   `extensions` is a list that selects exactly those, or `add` and `remove`
   over the default: `coding`, `tool-search`, and `discord` when Carillon has
   a Discord provider. The built-in extensions are `coding` (read, write, edit
-  and bash), `codemode`, `tool-search` and `discord`.
+  and bash), `codemode`, `tool-search`, `discord` and [`schedules`](#schedules),
+  which no default selects.
 
 - user extensions it lists as `extensions/<file>.js`, `.mjs` or `.ts`: a
   module whose default export is a pi-durable extension object, with its
@@ -88,7 +102,32 @@ its task names that no installed module of the snapshot defines, and each
 later admission adopts the snapshot again, so a module the kept one blocked
 installs, and takes its tasks over, once the old one can go.
 A recorded snapshot that no longer loads at startup is logged, and the agent
-uses the default extensions until the next one is admitted.
+uses the default extensions until the next one is admitted; what it selects
+is unknown meanwhile, so schedules wait for it.
+
+## Schedules
+
+`schedules` gives the agent `schedule`, `schedule_list` and
+`schedule_cancel`. A schedule runs its prompt in the conversation that made
+it, once at an ISO 8601 time or on a cron expression of five fields, so at
+most once a minute, in the time zone it names or, as it was when the
+schedule was made, the machine's. Each run opens a turn whose prompt says
+it is a scheduled run. As in cron, a schedule that runs more than daily
+runs through the hour daylight-saving time repeats as it falls back once,
+not twice.
+
+A schedule is a background task of its conversation: stopping an answer
+leaves it, and it sleeps durably until it is due. A restart resumes it, and
+runs missed while the runtime was down happen once, not once per missed
+time. Each run's turn is opened and placed before the schedule is next due,
+counted from then, so one run is under way at a time, and a run that waited
+for an unreachable core is followed by none it held up. Until then a
+schedule that runs once can still be cancelled. A run core refuses to open
+for good is skipped. Once the agent's settings no longer select
+`schedules`, each schedule ends when it is next due, and a run whose turn
+is still opening is stopped, as it is when its schedule is cancelled. While
+the agent's recorded resources no longer load at startup, what is selected
+is unknown: a due schedule waits for the next message whose resources load.
 
 ## Deterministic mode
 
@@ -105,6 +144,9 @@ A message `hold <path>` is answered once that file exists.
 - [`agent.ts`](src/agent.ts): one agent's harness, admission, startup
   recovery, busy modes and controls.
 - [`delivery.ts`](src/delivery.ts): the task that settles each turn with core.
+- [`opening.ts`](src/opening.ts): the task that opens a turn for input no
+  message brought.
+- [`schedules.ts`](src/schedules.ts): the `schedules` extension and its task.
 - [`resources.ts`](src/resources.ts), [`attachments.ts`](src/attachments.ts),
   [`activity.ts`](src/activity.ts), [`models.ts`](src/models.ts): snapshots
   and settings, files, activity, and the catalogue.

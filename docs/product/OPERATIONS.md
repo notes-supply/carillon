@@ -281,6 +281,23 @@ running answer and answers the new message, with every waiting one, next.
 A waiting message offers reactions to steer it in, interrupt for it, or stop
 it.
 
+### What Pi can do besides answer
+
+The assistant's `settings.json` selects more of Pi's built-in extensions.
+None of these is selected by default:
+
+```json
+{ "extensions": { "add": ["schedules"] } }
+```
+
+- `schedules` lets the assistant run a prompt later in the same
+  conversation, once or on a cron expression, such as "every weekday at 9".
+  Each run's answer arrives as a message of its own, like any answer.
+  Schedules survive restarts; a run missed while Pi was down happens once
+  when it starts again, and runs held up while core was unreachable happen
+  once when it is back. Remove `schedules` to end each one when it is next
+  due.
+
 ## Discord
 
 `/model` shows the models the runtime offers and lets an allowlisted user

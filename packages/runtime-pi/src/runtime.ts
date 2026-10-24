@@ -12,7 +12,7 @@ import type { InboxTurns, RuntimeOperations } from "@carillon/runtime/operations
 import { ModelSelections } from "@carillon/runtime/selections";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { openAgent, type DurableAgent } from "./agent.ts";
+import { openAgent, type Clock, type DurableAgent } from "./agent.ts";
 import { DEFAULT_INLINE_IMAGES, type InlineImagePolicy } from "./attachments.ts";
 import { checkDefault, modelChoices, type Catalogue } from "./models.ts";
 
@@ -32,6 +32,7 @@ export interface PiRuntimeOptions {
   readonly inlineImages?: InlineImagePolicy;
   /** An agent's storage; its SQLite file by default. */
   readonly storage?: (agentId: string) => Promise<Storage>;
+  readonly clock?: Clock;
 }
 
 /** Refuses to start, before any storage opens, unless the runtime default model can run. */
@@ -64,6 +65,7 @@ export async function createPiRuntime(
           inlineImages: options.inlineImages ?? DEFAULT_INLINE_IMAGES,
           builtIns: options.builtIns,
           defaults: options.defaults,
+          ...(options.clock === undefined ? {} : { clock: options.clock }),
         }),
       );
   } catch (failure) {

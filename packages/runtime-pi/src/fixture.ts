@@ -4,7 +4,9 @@ import {
   fauxAssistantMessage,
   fauxProvider,
   Type,
+  type FauxResponseFactory,
   type FauxResponseStep,
+  type Message,
   type MutableModels,
 } from "@earendil-works/pi-ai";
 import {
@@ -12,6 +14,7 @@ import {
   defineTool,
   MemoryStorage,
   type Extension,
+  type SetTimer,
   type Storage,
 } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
@@ -24,6 +27,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Parse } from "typebox/value";
+import type { Clock } from "./agent.ts";
 import type { Catalogue } from "./models.ts";
 import { createPiRuntime } from "./runtime.ts";
 
@@ -47,17 +51,30 @@ export interface Fixture {
   snapshot(files: Record<string, string>): Promise<string>;
   /** The outcome core received for the turn, once it did. */
   outcome(turnId: string): Promise<TurnOutcome>;
-  /** Closes the runtime and opens it again over the same storage. */
-  restart(): Promise<Fixture>;
+  /** Hands the agent a message in a turn of its own, and returns its answer. */
+  ask(turnId: string, input: string, overrides?: Partial<TurnRequest>): Promise<string>;
+  /** The turns the runtime asked core to open, in order. */
+  openings(): unknown[];
+  /**
+   * Closes the runtime and opens it again once `meanwhile` is done, over
+   * the same storage or, `fresh`, new storage in its place.
+   */
+  restart(changes?: {
+    readonly meanwhile?: () => unknown;
+    readonly fresh?: true;
+  }): Promise<Fixture>;
   close(): Promise<void>;
 }
 
 interface FixtureOptions {
   /** SQLite storage in the component directory; memory otherwise. */
   readonly durable?: boolean;
+  /** The agents' IDs; `default` alone without them. */
+  readonly agents?: readonly string[];
   readonly builtIns?: readonly Extension[];
   readonly defaults?: readonly string[];
   readonly answers?: FauxResponseStep[];
+  readonly clock?: Clock;
 }
 
 export async function startFixture(options: FixtureOptions = {}): Promise<Fixture> {
@@ -75,16 +92,19 @@ export async function startFixture(options: FixtureOptions = {}): Promise<Fixtur
     runtimeDefault: () => ({ provider: model.provider.id, model: "scripted", options: {} }),
     defaultThinking: () => "medium",
   };
-  const memory = new MemoryStorage();
-  const storage = (): Promise<Storage> =>
-    options.durable === true
-      ? openNodeSqliteStorage(join(componentDirectory, "agents", "default.sqlite"))
-      : Promise.resolve(memory);
+  const memories = new Map<string, MemoryStorage>();
+  function storage(agentId: string): Promise<Storage> {
+    if (options.durable === true)
+      return openNodeSqliteStorage(join(componentDirectory, "agents", `${agentId}.sqlite`));
+    const memory = memories.get(agentId) ?? new MemoryStorage();
+    memories.set(agentId, memory);
+    return Promise.resolve(memory);
+  }
   let snapshots = 0;
 
   async function open(): Promise<Fixture> {
     const runtime = await createPiRuntime({
-      agents: [{ id: "default", workspace }],
+      agents: (options.agents ?? ["default"]).map((id) => ({ id, workspace })),
       componentDirectory,
       catalogue,
       core: createCoreClient({ url: core.url, providerId: "runtime-pi", token: "test-only" }),
@@ -92,8 +112,9 @@ export async function startFixture(options: FixtureOptions = {}): Promise<Fixtur
       builtIns: options.builtIns ?? [],
       defaults: options.defaults ?? [],
       storage,
+      ...(options.clock === undefined ? {} : { clock: options.clock }),
     });
-    return {
+    const fixture: Fixture = {
       runtime,
       core,
       model,
@@ -129,8 +150,22 @@ export async function startFixture(options: FixtureOptions = {}): Promise<Fixtur
         }
         throw new Error(`core received no outcome of turn ${turnId}`);
       },
-      async restart() {
+      async ask(turnId, input, overrides) {
+        await runtime.turns.submit(fixture.turn(turnId, input, overrides));
+        const outcome = await fixture.outcome(turnId);
+        if (outcome.outcome !== "answered")
+          throw new Error(`turn ${turnId} was ${outcome.outcome}`);
+        return outcome.output;
+      },
+      openings: () =>
+        core.received.filter((call) => call.path === "/v1/runtime/turns").map((call) => call.body),
+      async restart({ meanwhile, fresh } = {}) {
         await runtime.close();
+        await meanwhile?.();
+        if (fresh === true) {
+          memories.clear();
+          await rm(join(componentDirectory, "agents"), { recursive: true, force: true });
+        }
         return open();
       },
       async close() {
@@ -139,12 +174,41 @@ export async function startFixture(options: FixtureOptions = {}): Promise<Fixtur
         await rm(directory, { recursive: true, force: true });
       },
     };
+    return fixture;
   }
   return open();
 }
 
+/** The texts of a person's message or a tool's result. */
+export function textsOf(message: Message | undefined): string[] {
+  if (message === undefined || message.role === "assistant" || message.role === "system") return [];
+  if (typeof message.content === "string") return [message.content];
+  return message.content.flatMap((part) => (part.type === "text" ? [part.text] : []));
+}
+
+/**
+ * A harness clock that moves only as the test advances it, firing the
+ * timers then due. It declines timers that only free memory.
+ */
+export function fakeClock(start: string) {
+  let time = Date.parse(start);
+  const armed = new Set<{ readonly due: number; readonly fire: () => void }>();
+  const setTimer: SetTimer = (fire, delayMs, { background }) => {
+    if (background) return undefined;
+    const timer = { due: time + delayMs, fire };
+    armed.add(timer);
+    if (delayMs <= 0) queueMicrotask(() => advance(0));
+    return () => armed.delete(timer);
+  };
+  function advance(ms: number): void {
+    time += ms;
+    for (const timer of armed) if (timer.due <= time && armed.delete(timer)) timer.fire();
+  }
+  return { now: () => time, setTimer, advance };
+}
+
 /** A scripted answer that waits for `gate`, or its request's abort, before answering `text`. */
-export function heldAnswer(text: string, gate: Promise<void>): FauxResponseStep {
+export function heldAnswer(text: string, gate: Promise<void>): FauxResponseFactory {
   return async (_context, options) => {
     await Promise.race([gate, aborted(options?.signal)]);
     return fauxAssistantMessage(text);
