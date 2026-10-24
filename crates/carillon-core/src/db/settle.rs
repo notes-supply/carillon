@@ -88,7 +88,8 @@ impl Database {
                         notice,
                         activity,
                     } => (None, Some(error), notice, activity),
-                    Settlement::Silent(_) => (None, None, "", None),
+                    Settlement::Silent(Silence::Steered) => (None, None, "", None),
+                    Settlement::Silent(Silence::Stopped) => (None, Some("stopped"), "", None),
                 };
                 let now = timestamp()?;
                 transaction.execute(

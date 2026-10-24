@@ -104,11 +104,15 @@ async fn each_outcome_settles_its_turn_and_delivery_once() -> Result<()> {
             .starts_with("That turn was interrupted. ")
     );
     assert!(deliveries[3].content.is_empty() && deliveries[4].content.is_empty());
-    let inspected = state.core.inspect_turn(&turns[1])?.context("no turn")?;
+    let error = |turn| -> Result<Option<String>> {
+        Ok(state.core.inspect_turn(turn)?.context("no turn")?.error)
+    };
     assert_eq!(
-        inspected.error.as_deref(),
+        error(&turns[1])?.as_deref(),
         Some("runtime reported failure: The model refused.")
     );
+    assert_eq!(error(&turns[3])?, None);
+    assert_eq!(error(&turns[4])?.as_deref(), Some("stopped"));
     let page = state.core.jobs_at_work("test-interface", None)?;
     assert!(page.jobs.is_empty());
     let named = state.core.named_jobs("test-interface", &turns[..1])?;
