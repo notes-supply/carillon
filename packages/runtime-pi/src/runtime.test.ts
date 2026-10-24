@@ -245,7 +245,7 @@ it("keeps a running turn's model when an update commits while its catalogue is r
     // The turn starts, and its catalogue read is slow.
     const slow = Promise.withResolvers<readonly Model<typeof model.api>[]>();
     catalogue.mockReturnValueOnce(slow.promise);
-    const turn = runtime.executeTurn({
+    const turn = runtime.turns.execute({
       ...query,
       correlation_id: "running",
       input: "hello",
@@ -297,10 +297,10 @@ it("close waits for accepted operations and prevents queued execution from start
     attachment_root: root,
   };
   try {
-    const active = runtime.executeTurn(request);
+    const active = runtime.turns.execute(request);
     // The first call has entered the serial queue and is waiting for its catalogue.
     await Promise.resolve();
-    const queued = runtime.executeTurn({
+    const queued = runtime.turns.execute({
       ...request,
       audience_id: "queued",
       correlation_id: "two",
@@ -321,7 +321,7 @@ it("close waits for accepted operations and prevents queued execution from start
     // The active turn opened its conversation; the queued one never started.
     const sessions = join(root, "state", "sessions");
     expect(await readdir(sessions)).toEqual([basename(conversationDirectory(sessions, request))]);
-    await expect(runtime.executeTurn(request)).rejects.toThrow("closed");
+    await expect(runtime.turns.execute(request)).rejects.toThrow("closed");
   } finally {
     deferred.resolve([model]);
     await runtime.close();
@@ -359,7 +359,7 @@ it("refuses a follow-up it never offered, and says a restart loses a turn it exe
     expect(runtime.restartReadiness()).toEqual({ state: "ready" });
     // Pi hands core no cursor: a follow-up is not run as ordinary input.
     await expect(
-      runtime.executeTurn({ ...request, follow_up: { cursor: 1 } }),
+      runtime.turns.execute({ ...request, follow_up: { cursor: 1 } }),
     ).rejects.toMatchObject({
       status: 422,
       message: "This runtime does not follow up on delegated work.",
@@ -368,7 +368,7 @@ it("refuses a follow-up it never offered, and says a restart loses a turn it exe
     const sessions = join(root, "state", "sessions");
     expect(await readdir(sessions)).toEqual([]);
     catalogue.mockReturnValue(deferred.promise);
-    const active = runtime.executeTurn({ ...request, input: "Do not execute" });
+    const active = runtime.turns.execute({ ...request, input: "Do not execute" });
     void active.catch(() => undefined);
     await vi.waitFor(() => {
       expect(runtime.restartReadiness()).toEqual({

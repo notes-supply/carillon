@@ -1,8 +1,10 @@
 //! The core service: admission, the turn lifecycle worker, and the delivery
 //! outbox, served over the loopback provider API.
 
+mod controls;
 mod maintenance;
 mod registry;
+mod runtime;
 #[cfg(test)]
 mod tests;
 mod workers;
@@ -209,6 +211,9 @@ fn router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/v1/events", post(accept_event))
         .route("/v1/events/{event_id}", get(event_status))
+        .route("/v1/events/{event_id}/control", post(controls::control))
+        .route("/v1/runtime/turns", post(runtime::open))
+        .route("/v1/runtime/turns/{id}/outcome", post(runtime::outcome))
         .route("/v1/jobs", get(jobs))
         .route("/v1/deliveries", get(claim_delivery))
         .route("/v1/deliveries/reconcile", post(reconcile_delivery_claims))
@@ -381,13 +386,18 @@ async fn relay_model_call(request: RequestBuilder) -> Result<Response, ApiError>
             }
         })?;
     let status = response.status();
-    let body = response.json::<Value>().await.map_err(|error| {
-        warn!(%error, %status, "runtime model or command response was not JSON");
+    let unusable = |error: &dyn std::fmt::Display| {
+        warn!(%error, %status, "runtime model, command or control response was not JSON");
         ApiError::new(
             StatusCode::BAD_GATEWAY,
             "The runtime gave an unusable answer.",
         )
-    })?;
+    };
+    let body = response.bytes().await.map_err(|error| unusable(&error))?;
+    if body.is_empty() {
+        return Ok(status.into_response());
+    }
+    let body = serde_json::from_slice::<Value>(&body).map_err(|error| unusable(&error))?;
     Ok((status, Json(body)).into_response())
 }
 
@@ -514,7 +524,8 @@ async fn runtime_activity(
 /// already claimed runs to its outcome; none is claimed after the
 /// cancellation. An observation only reads, and may wait hours on native
 /// work: once `set_aside` is cancelled, for maintenance or shutdown, core
-/// stops waiting for its answer and asks again later.
+/// stops waiting for its answer and asks again later. A durable runtime's
+/// one worker is its dispatcher instead.
 async fn runtime_worker(
     state: AppState,
     runtime_id: String,
@@ -522,6 +533,14 @@ async fn runtime_worker(
     stopping: CancellationToken,
     set_aside: CancellationToken,
 ) {
+    // Restart-only, so as it was when the worker started.
+    if state
+        .config()
+        .provider(&runtime_id, ProviderRole::Runtime)
+        .is_ok_and(|runtime| runtime.durable)
+    {
+        return runtime::dispatcher(state, runtime_id, stopping).await;
+    }
     // A runtime that gave an observation no answer is asked again after a
     // pause, not in a tight loop.
     let backoff = match lane {

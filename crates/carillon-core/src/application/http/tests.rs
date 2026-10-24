@@ -56,6 +56,7 @@ fn installation(root: &Path) -> Result<Fixture> {
             token_hash: hash_token("test-only"),
             enabled: true,
             parallel_turns: None,
+            durable: false,
         })
     })
     .collect::<Result<Vec<_>>>()?;
@@ -204,73 +205,6 @@ fn completed(request: RuntimeTurnRequest) -> RuntimeTurnResponse {
         activity: None,
         attachments_left: false,
     }
-}
-
-#[test]
-fn configuration_rejects_malformed_provider_endpoints_before_startup() -> Result<()> {
-    let directory = tempdir()?;
-    let mut state = installation(directory.path())?;
-    let path = directory.path().join("carillon.toml");
-    for index in 0..state.config.value.providers.len() {
-        let original = state.config.value.providers[index].url.clone();
-        for url in [
-            "not-a-url",
-            "",
-            "https://127.0.0.1:3000",
-            "http://localhost:3000",
-            "http://127.0.0.1",
-            "http://127.0.0.1:99999",
-            "http://127.0.0.1:3000/path",
-            "http://user@127.0.0.1:3000",
-            "http://127.0.0.1:3000?query",
-            "http://0.0.0.0:3000",
-            "http://192.168.1.2:3000",
-            "http://[::]:3000",
-            "http://[2001:db8::1]:3000",
-            "http://127.0.0.1:0",
-            "http://[::1]:0",
-        ] {
-            state.config.value.providers[index].url = url.to_owned();
-            fs::write(&path, toml::to_string(&state.config.value)?)?;
-            crate::assert_refused(LoadedConfig::load(&path), "invalid URL for provider")?;
-        }
-        for url in [
-            "http://127.0.0.1:3000",
-            "http://127.2.3.4:3000",
-            "http://[::1]:3000",
-        ] {
-            state.config.value.providers[index].url = url.to_owned();
-            fs::write(&path, toml::to_string(&state.config.value)?)?;
-            LoadedConfig::load(&path)?;
-        }
-        state.config.value.providers[index].url = original;
-    }
-    // Concurrent conversations are a bounded runtime setting.
-    for index in 0..state.config.value.providers.len() {
-        let runtime = state.config.value.providers[index].role == ProviderRole::Runtime;
-        for (parallel, valid) in [(0, false), (1, runtime), (16, runtime), (17, false)] {
-            state.config.value.providers[index].parallel_turns = Some(parallel);
-            fs::write(&path, toml::to_string(&state.config.value)?)?;
-            let id = &state.config.value.providers[index].id;
-            assert_eq!(
-                LoadedConfig::load(&path)
-                    .err()
-                    .map(|error| error.to_string()),
-                (!valid).then(|| format!(
-                    "provider {id} parallel_turns must be between 1 and 16, on a runtime"
-                )),
-                "parallel_turns {parallel}"
-            );
-        }
-        state.config.value.providers[index].parallel_turns = None;
-    }
-    state.config.value.core.listen.set_port(0);
-    fs::write(&path, toml::to_string(&state.config.value)?)?;
-    crate::assert_refused(
-        LoadedConfig::load(&path),
-        "core listen port must be nonzero",
-    )?;
-    Ok(())
 }
 
 #[tokio::test]
@@ -481,7 +415,7 @@ async fn credential_drift_leaves_work_queued_until_repaired() -> Result<()> {
         assert!(turn.delivery_state.is_none());
     }
     state.core.database = Database::open(&state.config.value.data_dir.join("carillon.sqlite3"))?;
-    assert_eq!(state.core.database.recover_running_turns()?, 0);
+    assert_eq!(state.core.database.recover_running_turns(&[], "")?, 0);
     fs::write(&credential, "test-only\n")?;
     let mut calls = 0;
     assert_eq!(
@@ -771,8 +705,7 @@ async fn workers_hear_of_claimable_turns_in_their_own_lane() -> Result<()> {
     })
     .await?;
     assert_eq!(changed(), (Some(false), Some(false)));
-    // A finished message frees its conversation's next one, and its cursor
-    // queues an observation.
+    // A finished message frees its conversation's next one, and its cursor queues an observation.
     run_next_turn(&state, "test-runtime", async |_, _, request| {
         Ok(RuntimeTurnResponse {
             follow_up: Some(serde_json::json!({"message": "m", "after": 1})),
@@ -790,46 +723,6 @@ async fn workers_hear_of_claimable_turns_in_their_own_lane() -> Result<()> {
     })
     .await?;
     assert_eq!(changed(), (Some(false), Some(false)));
-    Ok(())
-}
-
-/// An interface may name its events anything but the identities core gives
-/// its own follow-up observations; otherwise one sent after a parent's
-/// receipt would make the parent's completion fail, losing its answer.
-#[tokio::test]
-async fn an_interface_cannot_take_a_follow_up_identity_from_a_parent_turn() -> Result<()> {
-    let directory = tempdir()?;
-    let state = installation(directory.path())?;
-    let parent = accept(&state, "parent", "conversation").await?;
-    let internal = format!("follow-up:{}", parent.turn_id);
-    let claimed = accept(&state, &internal, "conversation").await;
-    let step = run_next_turn(&state, "test-runtime", async |_, _, request| {
-        Ok(RuntimeTurnResponse {
-            follow_up: Some(json!({"after": 1})),
-            ..completed(request)
-        })
-    })
-    .await;
-    // The parent completed with its answer, and its observation is queued.
-    step?;
-    let inspection = state
-        .core
-        .inspect_turn(&parent.turn_id)?
-        .context("missing parent")?;
-    assert_eq!(inspection.state, TurnState::Completed);
-    assert_eq!(inspection.output.as_deref(), Some("reply to parent"));
-    let observation = state
-        .core
-        .database
-        .event_receipt("test-interface", &internal)?
-        .context("missing observation")?;
-    assert_eq!(observation.state, TurnState::Queued);
-    assert_ne!(observation.turn_id, parent.turn_id);
-    // The interface's event was refused at admission, before anything was recorded.
-    let refusal = claimed
-        .err()
-        .context("an interface took a follow-up identity")?;
-    assert!(refusal.to_string().contains("reserved"), "{refusal}");
     Ok(())
 }
 
@@ -1413,7 +1306,7 @@ async fn failed_outcome_write_waits_for_restart_without_blocking_other_conversat
     );
 
     state.core.database = Database::open(&path)?;
-    assert_eq!(state.core.database.recover_running_turns()?, 1);
+    assert_eq!(state.core.database.recover_running_turns(&[], "")?, 1);
     run_next_turn(&state, "test-runtime", async |_, _, request| {
         assert_eq!(request.correlation_id, successor.turn_id);
         Ok(completed(request))
@@ -1449,7 +1342,7 @@ async fn cancelled_execution_is_interrupted_after_reopening_while_queued_work_re
             .is_cancelled()
     );
     state.core.database = Database::open(&state.config.value.data_dir.join("carillon.sqlite3"))?;
-    assert_eq!(state.core.database.recover_running_turns()?, 1);
+    assert_eq!(state.core.database.recover_running_turns(&[], "")?, 1);
     assert_eq!(
         state
             .core
@@ -1591,7 +1484,7 @@ async fn a_closing_runtime_gives_no_answer_rather_than_a_failure() -> Result<()>
         post(|| async { (StatusCode::SERVICE_UNAVAILABLE, Json(json!({}))) }),
     );
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
-    let request = state.core.runtime_request(&turn, Vec::new());
+    let request = state.core.runtime_request(&turn.turn, Vec::new());
     let outcome = call_runtime(&state.client, &runtime, "unused", request).await;
     // Work may have run, so it is not `Retry`; an observation is asked again.
     assert!(
@@ -1652,7 +1545,7 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
         "malformed",
         "mismatch",
     ] {
-        let mut request = state.core.runtime_request(&turn, Vec::new());
+        let mut request = state.core.runtime_request(&turn.turn, Vec::new());
         request.input = input.to_owned();
         let outcome = call_runtime(&state.client, &runtime, "unused", request).await;
         assert!(
@@ -1661,7 +1554,7 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
         );
     }
     // An explanation is not proof that no model work ran: it is not `Retry`.
-    let mut request = state.core.runtime_request(&turn, Vec::new());
+    let mut request = state.core.runtime_request(&turn.turn, Vec::new());
     request.input = "explained".to_owned();
     let outcome = call_runtime(&state.client, &runtime, "unused", request).await;
     let Err(TurnFailure::Reported(reported)) = &outcome else {
@@ -1673,7 +1566,7 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
         &state.client,
         &runtime,
         "unused",
-        state.core.runtime_request(&turn, Vec::new()),
+        state.core.runtime_request(&turn.turn, Vec::new()),
     )
     .await
     .map_err(|failure| match failure {
@@ -1682,7 +1575,7 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
         | TurnFailure::Uncertain(error) => error,
         TurnFailure::Reported(reported) => anyhow!("{reported:?}"),
     })?;
-    assert_eq!(response.correlation_id, turn.turn_id);
+    assert_eq!(response.correlation_id, turn.turn.turn_id);
     server.abort();
     // Reserve a local TCP port without listening, so refusal cannot hit another service.
     let socket = tokio::net::TcpSocket::new_v4()?;
@@ -1693,7 +1586,7 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
             &state.client,
             &runtime,
             "unused",
-            state.core.runtime_request(&turn, Vec::new())
+            state.core.runtime_request(&turn.turn, Vec::new())
         )
         .await,
         Err(TurnFailure::Retry(_))
@@ -1901,6 +1794,7 @@ async fn job_reads_show_only_the_callers_jobs_with_runtime_snapshots() -> Result
             {
                 "origin": {"turn_id": running.turn_id, "accepted_at": accepted(0)},
                 "target_id": "test-destination",
+                "feedback_target_id": "test-feedback",
                 "turns": [{
                     "turn_id": running.turn_id,
                     "state": "running",
@@ -1916,6 +1810,7 @@ async fn job_reads_show_only_the_callers_jobs_with_runtime_snapshots() -> Result
             {
                 "origin": {"turn_id": queued.turn_id, "accepted_at": accepted(1)},
                 "target_id": "test-destination",
+                "feedback_target_id": "test-feedback",
                 "turns": [{
                     "turn_id": queued.turn_id,
                     "state": "queued",
@@ -2105,8 +2000,12 @@ async fn job_reads_answer_promptly_when_several_runtimes_cannot_describe_their_t
     Ok(())
 }
 mod attachments;
+mod configuration;
+mod durable;
+mod held;
 mod live;
 mod maintenance;
+mod reserved;
 
 /// A runtime endpoint written at the socket level: while `cut` is set it sends
 /// a successful answer's headers and only the start of its body, then closes;
@@ -2212,8 +2111,7 @@ async fn a_cut_off_answer_asks_an_observation_again_but_never_replays_an_executa
             .map(|turn| turn.state))
     };
 
-    // The answer's body is cut off: the observation goes back to its queue,
-    // with nothing delivered.
+    // The answer's body is cut off: the observation goes back to its queue, with nothing delivered.
     run_next_observation(&state, "test-runtime", async |_, _, request| {
         call_runtime(&state.client, &runtime, "unused", request).await
     })
@@ -2389,12 +2287,12 @@ async fn a_turn_takes_as_long_as_its_runtime_and_ends_when_its_caller_stops() ->
         &state.client,
         &runtime,
         "unused",
-        state.core.runtime_request(&turn, Vec::new()),
+        state.core.runtime_request(&turn.turn, Vec::new()),
     )
     .await;
     // No transport deadline cuts the work short.
     assert!(
-        matches!(&response, Ok(answer) if answer.correlation_id == turn.turn_id),
+        matches!(&response, Ok(answer) if answer.correlation_id == turn.turn.turn_id),
         "{response:?}"
     );
     assert!(started.elapsed() >= Duration::from_mins(31));
@@ -2408,7 +2306,7 @@ async fn a_turn_takes_as_long_as_its_runtime_and_ends_when_its_caller_stops() ->
         .context("the answered request did not end")?;
     // A caller that stops, as a stopping worker does, ends the request at
     // the runtime, which takes it as cancellation.
-    let request = state.core.runtime_request(&turn, Vec::new());
+    let request = state.core.runtime_request(&turn.turn, Vec::new());
     let (client, cancelled) = (state.client.clone(), runtime.clone());
     let call =
         tokio::spawn(async move { call_runtime(&client, &cancelled, "unused", request).await });
@@ -2561,7 +2459,7 @@ async fn a_failed_turns_report_crosses_the_runtime_boundary_with_or_without_an_e
     );
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
     let call = async |input: &str| {
-        let mut request = state.core.runtime_request(&turn, Vec::new());
+        let mut request = state.core.runtime_request(&turn.turn, Vec::new());
         request.input = input.to_owned();
         call_runtime(&state.client, &runtime, "unused", request).await
     };

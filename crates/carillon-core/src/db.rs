@@ -8,7 +8,8 @@
 //!                   \--------- running (not received, or unanswered observation)
 //!
 //! delivery:  pending -> delivering -> delivered
-//!                                 \-> uncertain (ack lost or claim abandoned)
+//!               ^                 \-> uncertain (ack lost or claim abandoned)
+//!               \--------------------- claim of a silence abandoned
 //! ```
 //!
 //! Invariants:
@@ -16,10 +17,10 @@
 //! - One accepted event is one turn row, keyed by (interface, event); the row
 //!   carries what the event said and what happened to it.
 //! - Messages in one conversation (interface, agent, audience) run in
-//!   acceptance order. Only queued or running predecessors block later
-//!   messages. An observation (a turn whose `follow_up_json` holds a
-//!   runtime's cursor) neither waits for messages nor holds them back.
-//!   Session continuity belongs to the runtime.
+//!   acceptance order. Only queued or running predecessors on the same
+//!   runtime block later messages. An observation (a turn whose
+//!   `follow_up_json` holds a runtime's cursor) neither waits for messages
+//!   nor holds them back. Session continuity belongs to the runtime.
 //! - Every turn names its origin: a message turn itself, and an observation
 //!   the origin of the turn that queued it, recorded in the same
 //!   transaction, so a chain of observations keeps the message's identity.
@@ -35,9 +36,17 @@
 //!   is never referenced.
 
 mod admission;
+mod dispatch;
+mod jobs;
+mod opening;
 mod recovery;
+mod settle;
 
 pub(crate) use admission::Admission;
+pub(crate) use dispatch::QueuedTurn;
+pub(crate) use jobs::JobPage;
+pub(crate) use opening::{Opened, RUNTIME_EVENT_PREFIX};
+pub(crate) use settle::{Settled, Settlement};
 
 use std::{
     os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
@@ -56,9 +65,8 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use carillon_protocol::model::{
-    Delivery, DeliveryOutcome, DeliveryState, EventReceipt, ExternalEvent, JOB_READ_LIMIT,
-    JOB_TURN_LIMIT, Job, JobTurn, Origin, RuntimeTurnResponse, StateCounts, TurnActivity,
-    TurnInspection, TurnState, TurnSummary,
+    Delivery, DeliveryOutcome, DeliveryState, EventReceipt, ExternalEvent, Origin,
+    RuntimeTurnResponse, StateCounts, TurnActivity, TurnInspection, TurnState, TurnSummary,
 };
 
 use crate::{
@@ -72,30 +80,12 @@ pub(crate) struct Database {
 }
 
 /// A queued turn after this process moved it to `running`. Holding one is the
-/// permission to execute runtime work and to record its outcome.
+/// permission to execute runtime work and to record its outcome, so only a
+/// claim makes one.
 #[derive(Clone, Debug)]
 pub(crate) struct ClaimedTurn {
-    pub turn_id: String,
-    pub interface_id: String,
-    pub agent_id: String,
-    pub audience_id: String,
-    pub runtime_id: String,
-    pub target_id: String,
-    pub feedback_target_id: String,
-    pub input: String,
-    pub resource_snapshot_id: String,
-    pub native: Value,
-    /// The runtime's cursor, on an observation; `None` on a message.
-    pub follow_up: Option<Value>,
-    pub attachments: Vec<CapturedFile>,
-}
-
-/// A page of an interface's jobs at work, each with the ID of the runtime
-/// that owns it, and where the next page begins when more follow.
-#[derive(Debug)]
-pub(crate) struct JobPage {
-    pub(crate) jobs: Vec<(String, Job)>,
-    pub(crate) next: Option<String>,
+    pub(crate) turn: QueuedTurn,
+    _claim: (),
 }
 
 #[derive(Clone, Debug)]
@@ -306,6 +296,7 @@ impl Database {
                 target_id TEXT NOT NULL,
                 feedback_target_id TEXT NOT NULL,
                 content TEXT NOT NULL,
+                silence TEXT,
                 state TEXT NOT NULL,
                 native_ref TEXT,
                 claim_owner TEXT,
@@ -356,13 +347,12 @@ impl Database {
     /// Claims a runtime's oldest claimable turn of a lane and marks it
     /// running.
     ///
-    /// A message is claimable only when its conversation has no earlier
-    /// message queued or running, which serializes each conversation FIFO.
+    /// A message is claimable only when its conversation has no earlier message
+    /// queued or running on its runtime, which serializes each conversation FIFO.
     /// Interrupted turns are terminal and never hold later messages. An
     /// observation only reads native records, so it neither waits for
     /// messages nor holds them back. Once `stopping` is cancelled none is
-    /// claimed, even by a caller that was waiting for the database writer
-    /// when it was.
+    /// claimed, even by a caller that was waiting for the database writer when it was.
     pub(crate) fn claim(
         &self,
         runtime_id: &str,
@@ -380,6 +370,7 @@ impl Database {
                      WHERE earlier.interface_id = t.interface_id
                        AND earlier.agent_id = t.agent_id
                        AND earlier.audience_id = t.audience_id
+                       AND earlier.runtime_id = t.runtime_id
                        AND earlier.state IN ('queued', 'running')
                        AND earlier.acceptance_sequence < t.acceptance_sequence
                        AND earlier.follow_up_json IS NULL
@@ -400,22 +391,7 @@ impl Database {
             return Ok(None);
         }
         let turn = transaction
-            .query_row(query, [runtime_id], |row| {
-                Ok(ClaimedTurn {
-                    turn_id: row.get(0)?,
-                    interface_id: row.get(1)?,
-                    agent_id: row.get(2)?,
-                    audience_id: row.get(3)?,
-                    runtime_id: row.get(4)?,
-                    target_id: row.get(5)?,
-                    feedback_target_id: row.get(6)?,
-                    input: row.get(7)?,
-                    resource_snapshot_id: row.get(8)?,
-                    native: json_column(row, 9)?,
-                    follow_up: optional_json_column(row, 10)?,
-                    attachments: Vec::new(),
-                })
-            })
+            .query_row(query, [runtime_id], dispatch::queued_turn)
             .optional()?;
         let Some(mut turn) = turn else {
             transaction.commit()?;
@@ -430,7 +406,7 @@ impl Database {
         }
         turn.attachments = captured_files(&transaction, Some(&turn.turn_id))?;
         transaction.commit()?;
-        Ok(Some(turn))
+        Ok(Some(ClaimedTurn { turn, _claim: () }))
     }
 
     /// Files of `turn`'s conversation, accepted before it, that no completed
@@ -439,7 +415,7 @@ impl Database {
     /// `bytes` bytes. The rest wait for later turns.
     pub(crate) fn unnoted_files(
         &self,
-        turn: &ClaimedTurn,
+        turn: &QueuedTurn,
         files: u32,
         bytes: u64,
     ) -> Result<Vec<TurnFiles>> {
@@ -496,11 +472,10 @@ impl Database {
     /// this turn left running, under the event identity
     /// [`FOLLOW_UP_EVENT_PREFIX`] and the turn's ID: same conversation,
     /// target, runtime and origin, carrying the cursor and nothing an
-    /// interface sent. It does not hold back the conversation's later
-    /// messages.
+    /// interface sent. It does not hold back the conversation's later messages.
     pub(crate) fn complete_turn(
         &self,
-        turn: &ClaimedTurn,
+        ClaimedTurn { turn, .. }: &ClaimedTurn,
         response: &RuntimeTurnResponse,
     ) -> Result<()> {
         let mut connection = self.connect()?;
@@ -549,7 +524,7 @@ impl Database {
     /// is the runtime's final report of the failed turn, when it gave one.
     pub(crate) fn interrupt_turn(
         &self,
-        turn: &ClaimedTurn,
+        ClaimedTurn { turn, .. }: &ClaimedTurn,
         error: &str,
         notice: &str,
         activity: Option<&TurnActivity>,
@@ -578,9 +553,8 @@ impl Database {
     }
 
     /// Returns a running turn to the queue. Only valid when the runtime
-    /// provably never received the work, or for an observation, which only
-    /// reads.
-    pub(crate) fn requeue_turn(&self, turn: &ClaimedTurn) -> Result<()> {
+    /// provably never received the work, or for an observation, which only reads.
+    pub(crate) fn requeue_turn(&self, ClaimedTurn { turn, .. }: &ClaimedTurn) -> Result<()> {
         let changed = self.connect()?.execute(
             "UPDATE turns SET state = 'queued' WHERE id = ?1 AND runtime_id = ?2 AND state = 'running'",
             params![turn.turn_id, turn.runtime_id],
@@ -592,8 +566,8 @@ impl Database {
     }
 
     /// Releases delivery claims held by other, presumed dead, instances of an
-    /// interface as uncertain, and returns the feedback targets of every
-    /// uncertain delivery so the new instance can surface them.
+    /// interface as uncertain, or as pending for a silence, which sends no
+    /// message, and returns the feedback targets of every uncertain delivery.
     pub(crate) fn reconcile_delivery_claims(
         &self,
         interface_id: &str,
@@ -602,20 +576,19 @@ impl Database {
         let mut connection = self.connect()?;
         let transaction = write_transaction(&mut connection)?;
         transaction.execute(
-            "UPDATE deliveries SET state = 'uncertain', claim_owner = NULL, updated_at = ?3
+            "UPDATE deliveries SET claim_owner = NULL, updated_at = ?3,
+                 state = CASE WHEN silence IS NULL THEN 'uncertain' ELSE 'pending' END
              WHERE interface_id = ?1 AND state = 'delivering'
                AND (claim_owner IS NULL OR claim_owner <> ?2)",
             params![interface_id, owner, timestamp()?],
         )?;
-        let targets = {
-            let mut statement = transaction.prepare(
+        let targets = transaction
+            .prepare(
                 "SELECT DISTINCT feedback_target_id FROM deliveries
                  WHERE interface_id = ?1 AND state = 'uncertain' AND feedback_target_id <> ''",
-            )?;
-            statement
-                .query_map([interface_id], |row| row.get(0))?
-                .collect::<Result<Vec<String>, _>>()?
-        };
+            )?
+            .query_map([interface_id], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
         transaction.commit()?;
         Ok(targets)
     }
@@ -653,7 +626,7 @@ impl Database {
         let delivery = transaction
             .query_row(
                 "SELECT d.id, d.turn_id, d.target_id, d.feedback_target_id, d.content, t.state,
-                        o.id, o.accepted_at
+                        o.id, o.accepted_at, d.silence
                  FROM deliveries d
                  JOIN turns t ON t.id = d.turn_id
                  JOIN turns o ON o.id = t.origin_turn_id
@@ -674,6 +647,7 @@ impl Database {
                             turn_id: row.get(6)?,
                             accepted_at: row.get(7)?,
                         },
+                        silence: optional_state_column(row, 8)?,
                     })
                 },
             )
@@ -789,70 +763,6 @@ impl Database {
         Ok(Some(inspection))
     }
 
-    /// A page of one interface's jobs at work, each with the runtime that
-    /// owns it, in the order their turns at work were accepted: at most
-    /// [`JOB_READ_LIMIT`] after the job whose turn at work was `after`, and
-    /// that turn's ID to read the next page from when more follow. A job has
-    /// at most one turn at work, its newest, so every job at work is on one
-    /// page. `None` when `after` is not one of the interface's turns.
-    pub(crate) fn jobs_at_work(
-        &self,
-        interface_id: &str,
-        after: Option<&str>,
-    ) -> Result<Option<JobPage>> {
-        let mut connection = self.connect()?;
-        let transaction = connection.transaction()?;
-        let after = match after {
-            None => 0,
-            Some(turn) => match transaction
-                .query_row(
-                    "SELECT acceptance_sequence FROM turns WHERE id = ?1 AND interface_id = ?2",
-                    params![turn, interface_id],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()?
-            {
-                Some(sequence) => sequence,
-                None => return Ok(None),
-            },
-        };
-        let mut at_work = transaction
-            .prepare(
-                "SELECT id, origin_turn_id FROM turns
-                 WHERE interface_id = ?1 AND state IN ('queued', 'running')
-                   AND acceptance_sequence > ?2
-                 ORDER BY acceptance_sequence LIMIT ?3",
-            )?
-            .query_map(
-                params![interface_id, after, i64::try_from(JOB_READ_LIMIT + 1)?],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )?
-            .collect::<Result<Vec<_>, _>>()?;
-        let next = (at_work.len() > JOB_READ_LIMIT).then(|| {
-            at_work.truncate(JOB_READ_LIMIT);
-            at_work[JOB_READ_LIMIT - 1].0.clone()
-        });
-        let origins = at_work
-            .into_iter()
-            .map(|(_, origin)| origin)
-            .collect::<Vec<_>>();
-        let jobs = jobs(&transaction, interface_id, &origins)?;
-        Ok(Some(JobPage { jobs, next }))
-    }
-
-    /// The interface's jobs among `named`, by their origin, however they
-    /// stand, in the order named. A name that is not the origin of one of
-    /// the interface's jobs names nothing.
-    pub(crate) fn named_jobs(
-        &self,
-        interface_id: &str,
-        named: &[String],
-    ) -> Result<Vec<(String, Job)>> {
-        let mut connection = self.connect()?;
-        let transaction = connection.transaction()?;
-        jobs(&transaction, interface_id, named)
-    }
-
     pub(crate) fn turn_counts(&self) -> Result<StateCounts> {
         let connection = self.connect()?;
         let mut statement =
@@ -958,7 +868,7 @@ fn write_transaction(connection: &mut Connection) -> Result<Transaction<'_>> {
 /// a delivery row yet, so a conflict here is a real invariant violation.
 fn enqueue_delivery(
     transaction: &Transaction<'_>,
-    turn: &ClaimedTurn,
+    turn: &QueuedTurn,
     content: &str,
     now: i64,
 ) -> Result<()> {
@@ -976,75 +886,6 @@ fn enqueue_delivery(
         ],
     )?;
     Ok(())
-}
-
-/// The latest turns of the interface's jobs that the JSON array `?2` names
-/// by origin, at most `?3` of each, in the order named.
-const JOB_TURNS: &str = "SELECT o.id, o.runtime_id, o.accepted_at, o.target_id,
-        t.id, t.state, t.accepted_at, t.finished_at, t.activity_json, d.state
-    FROM json_each(?2) named
-    JOIN turns o ON o.id = named.value
-    JOIN turns t ON t.id IN (
-      SELECT recent.id FROM turns recent WHERE recent.origin_turn_id = o.id
-      ORDER BY recent.acceptance_sequence DESC LIMIT ?3)
-    LEFT JOIN deliveries d ON d.turn_id = t.id
-    WHERE o.interface_id = ?1 AND o.origin_turn_id = o.id
-    ORDER BY named.key, t.acceptance_sequence";
-
-/// The interface's jobs that `origins` begin, in that order, each with the
-/// runtime that owns it and its [`JOB_TURN_LIMIT`] latest turns: one
-/// statement over the `turns_origin` index reads at most one turn more of
-/// each job than it lists, however long the job.
-fn jobs(
-    transaction: &Transaction<'_>,
-    interface_id: &str,
-    origins: &[String],
-) -> Result<Vec<(String, Job)>> {
-    let mut statement = transaction.prepare(JOB_TURNS)?;
-    let mut rows = statement.query(params![
-        interface_id,
-        serde_json::to_string(origins)?,
-        i64::try_from(JOB_TURN_LIMIT + 1)?,
-    ])?;
-    let mut jobs: Vec<(String, Job)> = Vec::new();
-    while let Some(row) = rows.next()? {
-        let origin: String = row.get(0)?;
-        if jobs
-            .last()
-            .is_none_or(|(_, job)| job.origin.turn_id != origin)
-        {
-            jobs.push((
-                row.get(1)?,
-                Job {
-                    origin: Origin {
-                        turn_id: origin,
-                        accepted_at: row.get(2)?,
-                    },
-                    target_id: row.get(3)?,
-                    turns: Vec::new(),
-                    earlier: false,
-                },
-            ));
-        }
-        if let Some((_, job)) = jobs.last_mut() {
-            job.turns.push(JobTurn {
-                turn_id: row.get(4)?,
-                state: state_column(row, 5)?,
-                accepted_at: row.get(6)?,
-                finished_at: row.get(7)?,
-                activity: optional_json_column(row, 8)?,
-                delivery: optional_state_column(row, 9)?,
-            });
-        }
-    }
-    // The turn read beyond the limit only says that earlier ones exist.
-    for (_, job) in &mut jobs {
-        if job.turns.len() > JOB_TURN_LIMIT {
-            job.turns.remove(0);
-            job.earlier = true;
-        }
-    }
-    Ok(jobs)
 }
 
 /// A turn's final report as stored. The engine keeps it within
@@ -1207,6 +1048,7 @@ mod tests {
             database
                 .claim("runtime", Lane::Messages, &CancellationToken::new())?
                 .context("next message blocked")?
+                .turn
                 .turn_id,
             next.turn_id
         );
@@ -1224,7 +1066,7 @@ mod tests {
         )?);
         assert_eq!(
             database
-                .inspect_turn(&turn.turn_id)?
+                .inspect_turn(&turn.turn.turn_id)?
                 .context("missing turn")?
                 .state,
             TurnState::Interrupted
@@ -1300,27 +1142,27 @@ mod tests {
         let report = database
             .claim("runtime", Lane::Observations, &CancellationToken::new())?
             .context("observation missing")?;
-        assert_eq!(report.input, "");
-        assert_eq!(report.follow_up, Some(cursor));
-        assert_eq!(report.native, json!({}));
+        assert_eq!(report.turn.input, "");
+        assert_eq!(report.turn.follow_up, Some(cursor));
+        assert_eq!(report.turn.native, json!({}));
         assert_eq!(
             (
-                report.audience_id.as_str(),
-                report.target_id.as_str(),
-                report.feedback_target_id.as_str()
+                report.turn.audience_id.as_str(),
+                report.turn.target_id.as_str(),
+                report.turn.feedback_target_id.as_str()
             ),
             (
-                first.audience_id.as_str(),
-                first.target_id.as_str(),
-                first.feedback_target_id.as_str()
+                first.turn.audience_id.as_str(),
+                first.turn.target_id.as_str(),
+                first.turn.feedback_target_id.as_str()
             )
         );
         assert_eq!(
             database
-                .event_receipt("discord", &format!("follow-up:{}", first.turn_id))?
+                .event_receipt("discord", &format!("follow-up:{}", first.turn.turn_id))?
                 .context("follow-up receipt missing")?
                 .turn_id,
-            report.turn_id
+            report.turn.turn_id
         );
         // While it observes, the conversation's next messages run, in order.
         accept(&database, "two", "conversation")?;
@@ -1361,11 +1203,11 @@ mod tests {
             .context("second turn missing")?;
         // A restart returns the running observation to its queue; the
         // executable turn that was running is interrupted, as ever.
-        assert_eq!(database.recover_running_turns()?, 1);
+        assert_eq!(database.recover_running_turns(&[], "")?, 1);
         let resumed = database
             .claim("runtime", Lane::Observations, &CancellationToken::new())?
             .context("observation not resumed")?;
-        assert_eq!(resumed.turn_id, report.turn_id);
+        assert_eq!(resumed.turn.turn_id, report.turn.turn_id);
         complete(&database, &resumed, "the report")?;
         let mut contents = Vec::new();
         while let Some(delivery) = database.claim_delivery("discord", "instance")? {
@@ -1411,7 +1253,7 @@ mod tests {
         database.complete_turn(
             &first,
             &RuntimeTurnResponse {
-                correlation_id: first.turn_id.clone(),
+                correlation_id: first.turn.turn_id.clone(),
                 output: "delegated".to_owned(),
                 follow_up: Some(cursor.clone()),
                 unanswered_left: false,
@@ -1437,7 +1279,7 @@ mod tests {
         database.complete_turn(
             turn,
             &RuntimeTurnResponse {
-                correlation_id: turn.turn_id.clone(),
+                correlation_id: turn.turn.turn_id.clone(),
                 output: output.to_owned(),
                 follow_up: None,
                 unanswered_left: false,
@@ -1514,18 +1356,18 @@ mod tests {
             .claim("runtime", Lane::Messages, &CancellationToken::new())?
             .context("first turn missing")?;
         let message = job(&database, &[])?;
-        assert_eq!(message.origin.turn_id, first.turn_id);
+        assert_eq!(message.origin.turn_id, first.turn.turn_id);
         assert_eq!(message.target_id, "channel");
         assert_eq!(
             turns(&message),
-            [(first.turn_id.clone(), TurnState::Running, None, None)]
+            [(first.turn.turn_id.clone(), TurnState::Running, None, None)]
         );
         let answer = |turn: &super::ClaimedTurn, follow_up: Option<serde_json::Value>, calls| {
             database.complete_turn(
                 turn,
                 &RuntimeTurnResponse {
-                    correlation_id: turn.turn_id.clone(),
-                    output: format!("answer of {}", turn.turn_id),
+                    correlation_id: turn.turn.turn_id.clone(),
+                    output: format!("answer of {}", turn.turn.turn_id),
                     follow_up,
                     unanswered_left: false,
                     attachments_left: false,
@@ -1563,11 +1405,11 @@ mod tests {
         let reading = database
             .claim("runtime", Lane::Observations, &CancellationToken::new())?
             .context("observation missing")?;
-        assert_eq!(reading.turn_id, observation.turn_id);
+        assert_eq!(reading.turn.turn_id, observation.turn_id);
         answer(&reading, Some(json!({"after": 2})), 0)?;
         assert_eq!(
             send(DeliveryOutcome::Delivered)?.origin.turn_id,
-            first.turn_id
+            first.turn.turn_id
         );
         let last = database
             .claim("runtime", Lane::Observations, &CancellationToken::new())?
@@ -1576,24 +1418,24 @@ mod tests {
         // Ended, its last answer not yet sent: core no longer lists the job
         // as at work, and a read naming it shows how it stands.
         assert!(at_work(&database, "discord")?.is_empty());
-        let ended = job(&database, &[&first.turn_id])?;
+        let ended = job(&database, &[&first.turn.turn_id])?;
         assert_eq!(
             turns(&ended),
             [
                 (
-                    first.turn_id.clone(),
+                    first.turn.turn_id.clone(),
                     TurnState::Completed,
                     Some(DeliveryState::Delivered),
                     Some(2)
                 ),
                 (
-                    reading.turn_id,
+                    reading.turn.turn_id,
                     TurnState::Completed,
                     Some(DeliveryState::Delivered),
                     Some(0)
                 ),
                 (
-                    last.turn_id,
+                    last.turn.turn_id,
                     TurnState::Completed,
                     Some(DeliveryState::Pending),
                     None
@@ -1601,7 +1443,7 @@ mod tests {
             ]
         );
         send(DeliveryOutcome::Uncertain)?;
-        let settled = job(&database, &[&first.turn_id])?;
+        let settled = job(&database, &[&first.turn.turn_id])?;
         assert_eq!(
             settled.turns.last().and_then(|turn| turn.delivery),
             Some(DeliveryState::Uncertain)
@@ -1627,12 +1469,12 @@ mod tests {
             .claim_delivery("discord", "instance")?
             .context("notice missing")?;
         assert_eq!(notice.turn_state, TurnState::Interrupted);
-        assert_eq!(notice.origin.turn_id, failed.turn_id);
-        let stopped = job(&database, &[&failed.turn_id])?;
+        assert_eq!(notice.origin.turn_id, failed.turn.turn_id);
+        let stopped = job(&database, &[&failed.turn.turn_id])?;
         assert_eq!(
             turns(&stopped),
             [(
-                failed.turn_id,
+                failed.turn.turn_id,
                 TurnState::Interrupted,
                 Some(DeliveryState::Delivering),
                 Some(1)
@@ -1647,16 +1489,16 @@ mod tests {
         database.complete_turn(
             turn,
             &RuntimeTurnResponse {
-                correlation_id: turn.turn_id.clone(),
+                correlation_id: turn.turn.turn_id.clone(),
                 output: "delegated".to_owned(),
-                follow_up: Some(json!({"after": turn.turn_id})),
+                follow_up: Some(json!({"after": turn.turn.turn_id})),
                 unanswered_left: false,
                 activity: None,
                 attachments_left: false,
             },
         )?;
         Ok(database
-            .event_receipt("discord", &format!("follow-up:{}", turn.turn_id))?
+            .event_receipt("discord", &format!("follow-up:{}", turn.turn.turn_id))?
             .context("observation missing")?
             .turn_id)
     }
@@ -1691,7 +1533,7 @@ mod tests {
         let first = database
             .claim("runtime", Lane::Messages, &CancellationToken::new())?
             .context("first turn missing")?;
-        assert_eq!(first.turn_id, one.turn_id);
+        assert_eq!(first.turn.turn_id, one.turn_id);
         let observation = continue_with_observation(&database, &first)?;
         let named = [
             other.turn_id.clone(),
@@ -1756,7 +1598,7 @@ mod tests {
         let mut turn = database
             .claim("runtime", Lane::Messages, &CancellationToken::new())?
             .context("message missing")?;
-        let mut chain = vec![turn.turn_id.clone()];
+        let mut chain = vec![turn.turn.turn_id.clone()];
         for _ in 0..3 * JOB_TURN_LIMIT {
             chain.push(continue_with_observation(&database, &turn)?);
             turn = database
@@ -1782,7 +1624,8 @@ mod tests {
         // A job's turns are found through the origin index, never by a scan
         // of turns or by following the job's chain.
         let connection = database.connect()?;
-        let mut plan = connection.prepare(&format!("EXPLAIN QUERY PLAN {}", super::JOB_TURNS))?;
+        let mut plan =
+            connection.prepare(&format!("EXPLAIN QUERY PLAN {}", super::jobs::JOB_TURNS))?;
         let steps = plan
             .query_map(params!["discord", "[]", 9], |row| row.get::<_, String>(3))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1830,7 +1673,7 @@ mod tests {
         database.complete_turn(
             &first,
             &RuntimeTurnResponse {
-                correlation_id: first.turn_id.clone(),
+                correlation_id: first.turn.turn_id.clone(),
                 output: "first reply".to_owned(),
                 follow_up: None,
                 unanswered_left: false,
@@ -1849,7 +1692,7 @@ mod tests {
              BEGIN SELECT RAISE(ABORT, 'injected delivery failure'); END;",
         )?;
         let response = RuntimeTurnResponse {
-            correlation_id: second.turn_id.clone(),
+            correlation_id: second.turn.turn_id.clone(),
             output: "second reply".to_owned(),
             follow_up: None,
             unanswered_left: false,
@@ -1862,14 +1705,14 @@ mod tests {
             .context("injected failure did not fire")?;
         assert!(failure.to_string().contains("injected delivery failure"));
         let inspection = database
-            .inspect_turn(&second.turn_id)?
+            .inspect_turn(&second.turn.turn_id)?
             .context("second turn disappeared")?;
         assert_eq!(inspection.state, TurnState::Running);
         assert_eq!(inspection.output, None);
         assert_eq!(
             database.connect()?.query_row(
                 "SELECT COUNT(*) FROM deliveries WHERE turn_id = ?1",
-                [&second.turn_id],
+                [&second.turn.turn_id],
                 |row| row.get::<_, u32>(0),
             )?,
             0
@@ -1880,7 +1723,7 @@ mod tests {
         database.complete_turn(&second, &response)?;
         assert_eq!(
             database
-                .inspect_turn(&second.turn_id)?
+                .inspect_turn(&second.turn.turn_id)?
                 .context("missing turn")?
                 .state,
             TurnState::Completed
@@ -1914,7 +1757,7 @@ mod tests {
             let first = database
                 .claim("runtime", Lane::Messages, &CancellationToken::new())?
                 .context("first missing")?;
-            assert_eq!(first.turn_id, "z-first");
+            assert_eq!(first.turn.turn_id, "z-first");
             assert!(
                 database
                     .claim("runtime", Lane::Messages, &CancellationToken::new())?
@@ -1924,7 +1767,7 @@ mod tests {
             let second = database
                 .claim("runtime", Lane::Messages, &CancellationToken::new())?
                 .context("second missing")?;
-            assert_eq!(second.turn_id, "a-second");
+            assert_eq!(second.turn.turn_id, "a-second");
         }
         Ok(())
     }
@@ -1937,8 +1780,8 @@ mod tests {
         database
             .claim("runtime", Lane::Messages, &CancellationToken::new())?
             .context("missing turn")?;
-        assert_eq!(database.recover_running_turns()?, 1);
-        assert_eq!(database.recover_running_turns()?, 0);
+        assert_eq!(database.recover_running_turns(&[], "")?, 1);
+        assert_eq!(database.recover_running_turns(&[], "")?, 0);
         assert!(
             database
                 .claim("runtime", Lane::Messages, &CancellationToken::new())?
@@ -1950,6 +1793,7 @@ mod tests {
             database
                 .claim("runtime", Lane::Messages, &CancellationToken::new())?
                 .context("blocked")?
+                .turn
                 .turn_id,
             next.turn_id
         );
@@ -1970,7 +1814,7 @@ mod tests {
             database.complete_turn(
                 &turn,
                 &RuntimeTurnResponse {
-                    correlation_id: turn.turn_id.clone(),
+                    correlation_id: turn.turn.turn_id.clone(),
                     output: output.to_owned(),
                     follow_up: None,
                     unanswered_left: false,
@@ -2037,7 +1881,7 @@ mod tests {
             database.complete_turn(
                 &turn,
                 &RuntimeTurnResponse {
-                    correlation_id: turn.turn_id.clone(),
+                    correlation_id: turn.turn.turn_id.clone(),
                     output: output.to_owned(),
                     follow_up: None,
                     unanswered_left: false,
@@ -2045,7 +1889,7 @@ mod tests {
                     attachments_left: false,
                 },
             )?;
-            turns.push(turn.turn_id);
+            turns.push(turn.turn.turn_id.clone());
         }
         let wanted = database
             .claim_turn_delivery("discord", "instance", &turns[1])?
@@ -2107,7 +1951,7 @@ mod tests {
             .claim("runtime", Lane::Messages, &CancellationToken::new())?
             .context("requeued turn could not be claimed again")?;
         let response = RuntimeTurnResponse {
-            correlation_id: requeued.turn_id.clone(),
+            correlation_id: requeued.turn.turn_id.clone(),
             output: "done".to_owned(),
             follow_up: None,
             unanswered_left: false,
@@ -2125,7 +1969,7 @@ mod tests {
             "was not running",
         )?;
         let inspection = database
-            .inspect_turn(&requeued.turn_id)?
+            .inspect_turn(&requeued.turn.turn_id)?
             .context("completed turn disappeared")?;
         assert_eq!(inspection.state, TurnState::Completed);
         assert_eq!(inspection.delivery_state, Some(DeliveryState::Pending));

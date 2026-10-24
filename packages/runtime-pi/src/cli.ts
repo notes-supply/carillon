@@ -118,6 +118,7 @@ async function main(values: readonly string[]): Promise<void> {
     runtime,
     token,
     providerId: config.runtime.id,
+    durable: config.durable,
     provider: deterministic ? "deterministic-local-substitute" : "pi",
     version: packageInfo.version,
     features: ["native-continuations", "native-extensions", "skills"],

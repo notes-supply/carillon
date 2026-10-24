@@ -32,6 +32,7 @@ async fn conversation() -> Result<()> {
             version: "example".to_owned(),
             url: "in-process".to_owned(),
             enabled: true,
+            durable: false,
         }],
         attachments: AttachmentLimits::default(),
     })?;

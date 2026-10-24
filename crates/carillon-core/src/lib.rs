@@ -10,8 +10,8 @@ mod runtime_client;
 
 pub use attachments::Reconciled;
 pub use engine::{
-    AgentOptions, Core, CoreError, CoreOptions, Lane, Reported, RuntimeProvider, TurnFailure,
-    WorkerStep,
+    AgentOptions, Core, CoreError, CoreOptions, InboxFailure, Lane, Reported, RuntimeProvider,
+    Stalled, TurnFailure, WorkerStep,
 };
 pub use runtime_client::RuntimeClient;
 

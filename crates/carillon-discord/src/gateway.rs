@@ -41,11 +41,13 @@ use twilight_gateway::{
 /// The dispatches the provider handles, and the session facts it reports.
 const EVENTS: EventTypeFlags = EventTypeFlags::MESSAGE_CREATE
     .union(EventTypeFlags::INTERACTION_CREATE)
+    .union(EventTypeFlags::REACTION_ADD)
     .union(EventTypeFlags::READY)
     .union(EventTypeFlags::RESUMED)
     .union(EventTypeFlags::GATEWAY_INVALIDATE_SESSION);
 const INTENTS: Intents = Intents::GUILDS
     .union(Intents::GUILD_MESSAGES)
+    .union(Intents::GUILD_MESSAGE_REACTIONS)
     .union(Intents::MESSAGE_CONTENT);
 /// How long a stop waits for Discord to close the connection.
 const CLOSE_BOUND: Duration = Duration::from_secs(5);

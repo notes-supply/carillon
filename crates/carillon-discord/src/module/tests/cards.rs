@@ -9,6 +9,7 @@ fn working_card(headline: &str) -> CardRequest {
                 accepted_at: 1_790_000_000,
             },
             target_id: "300".to_owned(),
+            feedback_target_id: None,
             turns: vec![carillon_protocol::model::JobTurn {
                 turn_id: "job".to_owned(),
                 state: carillon_protocol::model::TurnState::Running,
@@ -24,6 +25,7 @@ fn working_card(headline: &str) -> CardRequest {
                     notes: Vec::new(),
                     agent: None,
                     partial: false,
+                    controls: Vec::new(),
                 }),
                 delivery: None,
             }],

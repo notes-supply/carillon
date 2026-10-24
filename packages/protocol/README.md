@@ -2,7 +2,9 @@
 
 Rust uses [`carillon-protocol`](../../crates/carillon-protocol/src/lib.rs) and
 TypeScript `@carillon/protocol` for the JSON core, interfaces and runtimes
-exchange: turns, activity reports, jobs, model selection and commands.
+exchange: turns, activity reports, jobs, model selection and commands, and
+what a durable runtime says of the turns it holds: their outcomes, the turns
+it opens and the controls relayed to it.
 Providers own what option values mean; Pi, for example, translates
 `thinking`. The Discord module's own invocation contract is
 [`contract.rs`](../../crates/carillon-discord-module/src/contract.rs).

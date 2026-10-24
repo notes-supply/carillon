@@ -48,7 +48,7 @@ async function started(correlation: string, server: FakeT3 = fake) {
 }
 
 async function seed(agentId = "default") {
-  const response = runtime.executeTurn(
+  const response = runtime.turns.execute(
     turn("first", "Remember this project.", { agent_id: agentId }),
   );
   const { thread, run } = await started("first");
@@ -70,7 +70,7 @@ it.each(["default", "code"])(
     await restart({ projectId: NEXT_PROJECT });
     const received = fake.received.length;
     await refused(
-      runtime.executeTurn(
+      runtime.turns.execute(
         turn("queued", "An already queued request.", { agent_id: agentId }),
         AbortSignal.timeout(500),
       ),
@@ -96,7 +96,7 @@ it.each(["default", "code"])(
 
     for (const correlation of ["second", "later"]) {
       await restart({ projectId: NEXT_PROJECT });
-      const response = runtime.executeTurn(
+      const response = runtime.turns.execute(
         turn(correlation, "Use the new project.", { agent_id: agentId }),
       );
       const fresh = await started(correlation);
@@ -117,7 +117,7 @@ it.each(["default", "code"])(
     expect(sent[1]?.["titleSeed"]).toBe(agentId === "code" ? "Use the new project." : undefined);
 
     await restart({ projectId: PROJECT });
-    const resumed = runtime.executeTurn(
+    const resumed = runtime.turns.execute(
       turn("resumed", "Back to the original.", { agent_id: agentId }),
     );
     const original = await started("resumed");
@@ -134,7 +134,7 @@ it("keeps the native thread identity independent of the project", async () => {
   const other = await startFakeT3();
   try {
     await restart({ url: other.url, projectId: NEXT_PROJECT });
-    const response = runtime.executeTurn(turn("next", "Start again."));
+    const response = runtime.turns.execute(turn("next", "Start again."));
     const next = await started("next", other);
     other.assistant(next.thread.id, next.run.id, "Started.");
     other.complete(next.thread.id, next.run.id);
@@ -183,7 +183,7 @@ it.each([
     expect(old.modelSelection.model).toBe("claude-sonnet-5");
     expect(await runtime.modelState(defaultQuery)).toEqual(before);
 
-    await refused(runtime.executeTurn(turn("cutover", "Start in the current project.")));
+    await refused(runtime.turns.execute(turn("cutover", "Start in the current project.")));
     const next = projectThread();
     next.modelSelection = { instanceId: "claudeAgent", model: "claude-haiku-4-5", options: [] };
     const commands = fake.received.length;
@@ -204,7 +204,7 @@ it.each([
     expect(state.agent.selection?.model).toBe(
       operation === "agent model" ? "claude-haiku-4-5" : "claude-sonnet-5",
     );
-    const response = runtime.executeTurn(turn("selected", "Use this model."));
+    const response = runtime.turns.execute(turn("selected", "Use this model."));
     const selected = await started("selected");
     expect(selected.thread.id).toBe(next.id);
     expect(selected.thread.modelSelection.model).toBe(state.conversation?.selection?.model);
@@ -225,7 +225,7 @@ it.each(["default", "code"])(
     await restart({ projectId: NEXT_PROJECT });
     const received = fake.received.length;
     await refused(
-      runtime.executeTurn(
+      runtime.turns.execute(
         turn("command", "/compact", { agent_id: agentId, native: { intent: "command" } }),
         AbortSignal.timeout(500),
       ),
@@ -233,9 +233,9 @@ it.each(["default", "code"])(
     expect(fake.received).toHaveLength(received);
     expect(fake.threads.size).toBe(1);
 
-    await refused(runtime.executeTurn(turn("cutover", "Move projects.", { agent_id: agentId })));
+    await refused(runtime.turns.execute(turn("cutover", "Move projects.", { agent_id: agentId })));
     const next = projectThread(agentId);
-    const response = runtime.executeTurn(
+    const response = runtime.turns.execute(
       turn("next-command", "/compact", { agent_id: agentId, native: { intent: "command" } }),
     );
     const command = await started("next-command");
@@ -252,7 +252,7 @@ it.each(["default", "code"])(
 );
 
 it("refuses observations of delegated work from the previous project without stopping that work", async () => {
-  const response = runtime.executeTurn(turn("first", "Delegate the work."));
+  const response = runtime.turns.execute(turn("first", "Delegate the work."));
   const { thread, run } = await started("first");
   const task = fake.delegate(thread.id, run.id, { title: "Old project work" });
   fake.assistant(thread.id, run.id, "Started.");
@@ -264,17 +264,17 @@ it("refuses observations of delegated work from the previous project without sto
   fake.assistant(thread.id, wake.id, "Old work finished.");
   fake.complete(thread.id, wake.id);
   const received = fake.received.length;
-  await refused(runtime.executeTurn(turn("observation", "", { follow_up: initial.follow_up })));
+  await refused(runtime.turns.execute(turn("observation", "", { follow_up: initial.follow_up })));
   expect(fake.received).toHaveLength(received);
   expect(fake.interrupts).toEqual([]);
   expect(fake.detached).toEqual([]);
   expect(fake.threads.size).toBe(1);
   expect(runtime.activity("observation", conversation.interface_id)).toBeUndefined();
 
-  await refused(runtime.executeTurn(turn("cutover", "Move projects.")));
+  await refused(runtime.turns.execute(turn("cutover", "Move projects.")));
   const next = projectThread();
   const after = fake.received.length;
-  const observation = runtime.executeTurn(
+  const observation = runtime.turns.execute(
     turn("observation-after", "", { follow_up: initial.follow_up }),
   );
   await expect(observation).rejects.toMatchObject({ status: 502 });
@@ -286,7 +286,7 @@ it("refuses observations of delegated work from the previous project without sto
   expect(fake.interrupts).toEqual([]);
   expect(fake.detached).toEqual([]);
 
-  const currentResponse = runtime.executeTurn(turn("current", "Delegate in this project."));
+  const currentResponse = runtime.turns.execute(turn("current", "Delegate in this project."));
   const current = await started("current");
   const currentTask = fake.delegate(next.id, current.run.id, { title: "Current project work" });
   fake.assistant(next.id, current.run.id, "Delegated.");
@@ -296,14 +296,17 @@ it("refuses observations of delegated work from the previous project without sto
   const currentWake = fake.finishDelegation(next.id, currentTask.id);
   fake.assistant(next.id, currentWake.id, "Current work finished.");
   fake.complete(next.id, currentWake.id);
-  const currentObserved = runtime.executeTurn(
+  const currentObserved = runtime.turns.execute(
     turn("current-observation", "", { follow_up: currentTurn.follow_up }),
   );
   expect((await currentObserved).output).toBe("Current work finished.");
   await restart({ projectId: PROJECT });
   expect(
-    (await runtime.executeTurn(turn("original-observation", "", { follow_up: initial.follow_up })))
-      .output,
+    (
+      await runtime.turns.execute(
+        turn("original-observation", "", { follow_up: initial.follow_up }),
+      )
+    ).output,
   ).toBe("Old work finished.");
 });
 
@@ -332,7 +335,7 @@ it("checks the watched snapshot before dispatch or activity even when the owners
     },
   });
   const received = fake.received.length;
-  await refused(runtime.executeTurn(turn("watched", "Old work."), AbortSignal.timeout(500)));
+  await refused(runtime.turns.execute(turn("watched", "Old work."), AbortSignal.timeout(500)));
   expect(snapshots).toBe(3);
   expect(fake.received).toHaveLength(received);
   expect(fake.threads.size).toBe(1);

@@ -27,6 +27,7 @@ pub(super) fn runtime_facts(config: &LoadedConfig) -> Vec<RuntimeProvider> {
             version: provider.version.clone(),
             url: provider.url.clone(),
             enabled: provider.enabled,
+            durable: provider.durable,
         })
         .collect()
 }
@@ -46,6 +47,8 @@ pub(crate) struct ServingRuntime {
     pub(crate) enabled: bool,
     /// How many of its conversations run at once while it is enabled.
     pub(crate) parallel_turns: u32,
+    /// It holds its turns and orders them itself.
+    pub(crate) durable: bool,
     pub(crate) workers: RuntimeWorkers,
 }
 
@@ -88,6 +91,7 @@ impl ServingRuntime {
                 id: provider.id.clone(),
                 enabled: provider.enabled,
                 parallel_turns: provider.parallel_turns(),
+                durable: provider.durable,
                 workers: census
                     .runtimes
                     .get(&provider.id)
@@ -175,6 +179,7 @@ impl Difference {
             token_hash,
             enabled,
             parallel_turns,
+            durable,
         } = file;
         let mut changed = |changed: bool, field: &str, live: bool| {
             if changed {
@@ -190,6 +195,9 @@ impl Difference {
         changed(*version != serving.version, "version", false);
         changed(*url != serving.url, "url", false);
         changed(*token_hash != serving.token_hash, "token_hash", false);
+        // Turns a durable runtime holds have no worker, and recovery keeps
+        // them only for a runtime durable when core starts.
+        changed(*durable != serving.durable, "durable", false);
         // An interface's flag decides whether its program serves at all, and
         // core refuses a disabled interface's calls: only a restart of both
         // changes it without stranding the deliveries it holds.

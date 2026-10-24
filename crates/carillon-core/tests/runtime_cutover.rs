@@ -20,6 +20,7 @@ fn options(root: &std::path::Path) -> CoreOptions {
                 version: "test".to_owned(),
                 url: "in-process".to_owned(),
                 enabled: true,
+                durable: false,
             })
             .into(),
         attachments: AttachmentLimits::default(),
@@ -99,6 +100,7 @@ async fn queued_cutover(agent_runtime: Option<&str>, former_enabled: Option<bool
         version: "test".to_owned(),
         url: "in-process".to_owned(),
         enabled: true,
+        durable: false,
     }])?;
     for lane in [Lane::Messages, Lane::Observations] {
         assert_eq!(

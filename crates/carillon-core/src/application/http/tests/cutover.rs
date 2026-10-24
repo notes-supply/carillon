@@ -132,7 +132,7 @@ async fn startup_recovers_running_messages_once_and_settles_stranded_observation
             "This conversation ran on test-runtime, which no longer runs test-agent.",
         ),
         (
-            observation.turn_id,
+            observation.turn.turn_id,
             "This conversation ran on test-runtime, which no longer runs test-agent.\nWork already started there will not be reported here. Actions already taken may have had effects.",
         ),
     ] {

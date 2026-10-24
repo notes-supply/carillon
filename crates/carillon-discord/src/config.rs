@@ -15,8 +15,10 @@ use carillon_installation::config::{
     LoadedConfig, ProviderRole, absolutize, component_directory, validate_agent_identity,
 };
 use carillon_installation::{filesystem::atomic_write, maintenance::MaintenanceLock};
+use carillon_protocol::turns::ControlAction;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, watch};
+use twilight_model::channel::message::EmojiReactionType;
 use unicode_general_category::{GeneralCategory, get_general_category};
 
 use crate::module::{Change, ChangeError, Source};
@@ -57,6 +59,23 @@ pub struct DiscordConfig {
     pub(crate) failed_emoji: String,
     #[serde(default = "uncertain_emoji")]
     pub(crate) uncertain_emoji: String,
+    /// Shown on a message its runtime steered into the turn running before
+    /// it, whose answer covers it.
+    #[serde(default = "steered_emoji")]
+    pub(crate) steered_emoji: String,
+    /// Shown on a message whose turn was stopped.
+    #[serde(default = "stopped_emoji")]
+    pub(crate) stopped_emoji: String,
+    /// Offered on a message waiting behind a running turn: hand it to that
+    /// turn now.
+    #[serde(default = "steer_emoji")]
+    pub(crate) steer_emoji: String,
+    /// Offered likewise: end the running turn and run this message next.
+    #[serde(default = "interrupt_emoji")]
+    pub(crate) interrupt_emoji: String,
+    /// Offered likewise: do not run this message.
+    #[serde(default = "stop_emoji")]
+    pub(crate) stop_emoji: String,
     #[serde(default, skip_serializing_if = "ModuleSetting::is_unset")]
     pub(crate) module: ModuleSetting,
 }
@@ -101,6 +120,26 @@ fn failed_emoji() -> String {
 
 fn uncertain_emoji() -> String {
     "⚠️".to_owned()
+}
+
+fn steered_emoji() -> String {
+    "↪️".to_owned()
+}
+
+fn stopped_emoji() -> String {
+    "⏹️".to_owned()
+}
+
+fn steer_emoji() -> String {
+    "⏩".to_owned()
+}
+
+fn interrupt_emoji() -> String {
+    "⏭️".to_owned()
+}
+
+fn stop_emoji() -> String {
+    "🛑".to_owned()
 }
 
 /// Inline card markers, independent of the provider's reaction emoji. The
@@ -319,6 +358,18 @@ impl DiscordEmoji {
         }
         Ok(Self::Unicode(value.to_owned()))
     }
+
+    /// The same reaction to Discord: a custom emoji by its ID, a Unicode
+    /// one with or without its variation selector.
+    fn same(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Unicode(one), Self::Unicode(other)) => {
+                one.replace('\u{fe0f}', "") == other.replace('\u{fe0f}', "")
+            }
+            (Self::Custom { id: one, .. }, Self::Custom { id: other, .. }) => one == other,
+            _ => false,
+        }
+    }
 }
 
 impl DiscordConfig {
@@ -346,8 +397,44 @@ impl DiscordConfig {
             delivered_emoji: delivered_emoji(),
             failed_emoji: failed_emoji(),
             uncertain_emoji: uncertain_emoji(),
+            steered_emoji: steered_emoji(),
+            stopped_emoji: stopped_emoji(),
+            steer_emoji: steer_emoji(),
+            interrupt_emoji: interrupt_emoji(),
+            stop_emoji: stop_emoji(),
             module: ModuleSetting::default(),
         }
+    }
+
+    /// The reaction offered for `action`.
+    pub(crate) fn control_emoji(&self, action: ControlAction) -> &str {
+        match action {
+            ControlAction::Steer => &self.steer_emoji,
+            ControlAction::Interrupt => &self.interrupt_emoji,
+            ControlAction::Stop => &self.stop_emoji,
+        }
+    }
+
+    /// The action a person's reaction asks for, when it is one of the
+    /// controls.
+    pub(crate) fn control_action(&self, reaction: &EmojiReactionType) -> Option<ControlAction> {
+        let reaction = match reaction {
+            EmojiReactionType::Unicode { name } => DiscordEmoji::Unicode(name.clone()),
+            EmojiReactionType::Custom { id, name, .. } => DiscordEmoji::Custom {
+                name: name.clone().unwrap_or_default(),
+                id: id.get(),
+            },
+        };
+        [
+            ControlAction::Steer,
+            ControlAction::Interrupt,
+            ControlAction::Stop,
+        ]
+        .into_iter()
+        .find(|action| {
+            DiscordEmoji::parse(self.control_emoji(*action))
+                .is_ok_and(|emoji| emoji.same(&reaction))
+        })
     }
 
     /// The bot token's file these settings name, resolved against the
@@ -439,13 +526,31 @@ impl DiscordConfig {
                 bail!("Discord route channel IDs must be valid and unique");
             }
         }
-        for emoji in [
+        let feedback = [
             &self.processing_emoji,
             &self.delivered_emoji,
             &self.failed_emoji,
             &self.uncertain_emoji,
-        ] {
-            DiscordEmoji::parse(emoji)?;
+            &self.steered_emoji,
+            &self.stopped_emoji,
+        ]
+        .map(|emoji| DiscordEmoji::parse(emoji))
+        .into_iter()
+        .collect::<Result<Vec<_>>>()?;
+        let controls = [&self.steer_emoji, &self.interrupt_emoji, &self.stop_emoji]
+            .map(|emoji| DiscordEmoji::parse(emoji))
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+        for (index, control) in controls.iter().enumerate() {
+            if feedback
+                .iter()
+                .chain(&controls[..index])
+                .any(|other| other.same(control))
+            {
+                bail!(
+                    "steer_emoji, interrupt_emoji and stop_emoji must differ from each other and from the feedback emoji"
+                );
+            }
         }
         validate_activity_markers(&self.activity_markers)?;
         if self.module.enabled
@@ -501,6 +606,11 @@ impl Difference {
             delivered_emoji,
             failed_emoji,
             uncertain_emoji,
+            steered_emoji,
+            stopped_emoji,
+            steer_emoji,
+            interrupt_emoji,
+            stop_emoji,
             module,
         } = file;
         let mut difference = Self::default();
@@ -543,6 +653,23 @@ impl Difference {
                 "uncertain_emoji",
                 true,
             ),
+            (
+                *steered_emoji != serving.steered_emoji,
+                "steered_emoji",
+                true,
+            ),
+            (
+                *stopped_emoji != serving.stopped_emoji,
+                "stopped_emoji",
+                true,
+            ),
+            (*steer_emoji != serving.steer_emoji, "steer_emoji", true),
+            (
+                *interrupt_emoji != serving.interrupt_emoji,
+                "interrupt_emoji",
+                true,
+            ),
+            (*stop_emoji != serving.stop_emoji, "stop_emoji", true),
             (*module != serving.module, "module", true),
         ] {
             if changed {
@@ -583,6 +710,12 @@ impl Settings {
     #[must_use]
     pub(crate) fn current(&self) -> Arc<DiscordConfig> {
         self.0.current.borrow().clone()
+    }
+
+    /// The settings serving, changed whenever an apply changes them.
+    #[must_use]
+    pub(crate) fn watch(&self) -> watch::Receiver<Arc<DiscordConfig>> {
+        self.0.current.subscribe()
     }
 
     /// What serves, and how the file `read` returns differs from it.

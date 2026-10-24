@@ -63,7 +63,7 @@ it("reads the conversation's model from its native thread against T3's catalogue
   ).not.toHaveProperty("conversation");
 
   // A selection made in T3's own UI is the conversation's.
-  const reply = runtime.executeTurn(turn("turn-1", "hi"));
+  const reply = runtime.turns.execute(turn("turn-1", "hi"));
   answer(await started("turn-1"), "Hello.");
   await reply;
   thread().modelSelection = { instanceId: "claudeAgent", model: "claude-haiku-4-5", options: [] };
@@ -89,7 +89,7 @@ it("changes the thread's own selection, which later messages inherit, and reads 
     options: [],
   });
 
-  const reply = runtime.executeTurn(turn("turn-1", "Which model?"));
+  const reply = runtime.turns.execute(turn("turn-1", "Which model?"));
   answer(await started("turn-1"), "Haiku.");
   await reply;
   expect(dispatches()[0]).toMatchObject({
@@ -186,7 +186,7 @@ it("keeps the agent default `/model` chooses, which new threads start with", asy
   const changed = await runtime.setModel({ ...channel, scope: "agent", selection: haiku });
   expect(changed.agent).toEqual({ selection: { ...haiku, options: {} }, overridden: true });
   // A new conversation's thread opens with it, and its message names it.
-  const reply = runtime.executeTurn(turn("turn-1", "hi"));
+  const reply = runtime.turns.execute(turn("turn-1", "hi"));
   answer(await started("turn-1"), "Hello.");
   await reply;
   expect(thread().modelSelection).toMatchObject({
@@ -246,7 +246,7 @@ it("keeps the agent default `/model` chose only while the agent runs on its inst
     selection: { provider: "codex", model: "gpt-6-astra", options: {} },
     overridden: false,
   });
-  const reply = runtime.executeTurn(turn("turn-1", "hi"));
+  const reply = runtime.turns.execute(turn("turn-1", "hi"));
   const run = await started("turn-1");
   expect(run.modelSelection).toMatchObject({ instanceId: "codex", model: "gpt-6-astra" });
   answer(run, "Hello.");
@@ -263,7 +263,7 @@ it("keeps the agent default `/model` chose only while the agent runs on its inst
 });
 
 it("routes a thread T3's UI moved onto an instance the assistant does not run on back to its default", async () => {
-  const first = runtime.executeTurn(turn("turn-1", "hi"));
+  const first = runtime.turns.execute(turn("turn-1", "hi"));
   answer(await started("turn-1"), "Hello.");
   await first;
   // An ordinary account's instance, chosen in T3's own picker.
@@ -272,7 +272,7 @@ it("routes a thread T3's UI moved onto an instance the assistant does not run on
     selection: agentDefault,
     overridden: false,
   });
-  const second = runtime.executeTurn(turn("turn-2", "again"));
+  const second = runtime.turns.execute(turn("turn-2", "again"));
   const run = await started("turn-2");
   expect(run.modelSelection).toMatchObject({ instanceId: "claudeAgent", model: "claude-sonnet-5" });
   expect(thread().modelSelection.instanceId).toBe("claudeAgent");
@@ -306,7 +306,7 @@ it("refuses changes it cannot make, without sending them to T3", async () => {
   expect(modelSets()).toEqual([]);
 
   // While a turn of the conversation runs, or anything else works on its thread.
-  const reply = runtime.executeTurn(turn("turn-1", "work"));
+  const reply = runtime.turns.execute(turn("turn-1", "work"));
   const run = await started("turn-1");
   await expect(
     change({ provider: "claudeAgent", model: "claude-haiku-4-5" }),

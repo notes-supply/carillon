@@ -1190,15 +1190,15 @@ async fn expired_submissions_are_settled_by_core_before_their_lane_moves_on() ->
     )
     .await?;
     let deadline = started + DEADLINE;
+    let calls = trace(&world)?;
+    let last = |entry: &str| calls.iter().rposition(|call| call == entry);
     for event in ["90", "95"] {
         let submitted = times(&world, &format!("submit {event}"))?;
-        // Retried with backoff, but no attempt started after the deadline;
-        // after it, only core is asked.
+        // Retried with backoff, none after the deadline; after the last, only core is asked.
         assert!(submitted.len() > 1, "{event}: {submitted:?}");
         assert!(submitted.iter().all(|at| *at < deadline), "{event}");
-        let last = submitted.iter().max().copied();
-        let asked = times(&world, &format!("status {event}"))?;
-        assert!(asked.iter().any(|at| Some(*at) > last), "{event}");
+        let (submit, status) = (format!("submit {event}"), format!("status {event}"));
+        assert!(last(&status) > last(&submit), "{event}: {calls:?}");
     }
     // The first message's lane waited while core was still capturing it,
     // then moved on once core had accepted it.
@@ -1210,13 +1210,11 @@ async fn expired_submissions_are_settled_by_core_before_their_lane_moves_on() ->
         .get("90")
         .copied();
     assert_eq!(capturing, Some(0));
-    let settled = times(&world, "status 90")?.into_iter().max();
-    let next = times(&world, "submit 91")?.into_iter().min();
-    assert!(settled.is_some() && settled < next, "{settled:?} {next:?}");
-    let trace = trace(&world)?;
-    assert_eq!(explanation(&trace, "90"), None, "{trace:?}");
+    let next = calls.iter().position(|call| call == "submit 91");
+    assert!(last("status 90") < next, "{calls:?}");
+    assert_eq!(explanation(&calls, "90"), None, "{calls:?}");
     // The second was never accepted, and its sender is told.
-    assert!(explanation(&trace, "95").is_some_and(|reply| reply.contains("in time")));
+    assert!(explanation(&calls, "95").is_some_and(|reply| reply.contains("in time")));
     released(&world).await
 }
 

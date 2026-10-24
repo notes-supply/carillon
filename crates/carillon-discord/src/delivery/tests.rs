@@ -34,6 +34,7 @@ fn answer(id: i64, turn_state: TurnState) -> Delivery {
         target_id: "300".to_owned(),
         feedback_target_id: "300:400".to_owned(),
         content: format!("answer {id}"),
+        silence: None,
         origin: Origin {
             turn_id: format!("turn-{id}"),
             accepted_at: 1_790_000_000,
@@ -775,6 +776,8 @@ async fn a_skipped_outcome_leaves_a_replayed_message_to_the_settings_serving() -
         reactions.show_outcome(format!("300:{message}"), Feedback::Delivered);
     }
     reactions.show_outcome("300:400".to_owned(), Feedback::Failed);
+    // The skipped outcome still frees the message's record of controls.
+    assert!(super::lock(&reactions.0.controls).is_empty());
     // The operator then serves other reactions, and the gateway replays the
     // message, which is admitted again and answered.
     settings
@@ -884,17 +887,23 @@ async fn a_stopping_provider_ends_its_reactions_within_the_grace() -> anyhow::Re
     tokio::time::sleep(Duration::from_millis(300)).await;
     server.abort();
     // 402's outcome was shown; 401's and 406's were cut while removing the
-    // processing reaction, so their outcome reactions never followed.
+    // controls an earlier process may have left, so their outcome reactions
+    // never followed.
     let mut received = received.lock().await.clone();
     received.sort();
     assert_eq!(
         received,
         [
-            format!("DELETE 401 {processing}"),
+            "DELETE 401 ⏩".to_owned(),
+            "DELETE 402 ⏩".to_owned(),
+            "DELETE 402 ⏭️".to_owned(),
             format!("DELETE 402 {processing}"),
-            format!("DELETE 406 {processing}"),
+            "DELETE 402 🛑".to_owned(),
+            "DELETE 406 ⏩".to_owned(),
             format!("PUT 402 {delivered}"),
         ]
     );
     Ok(())
 }
+
+mod silence;

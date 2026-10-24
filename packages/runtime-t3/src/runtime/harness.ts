@@ -6,7 +6,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { RuntimeOperations } from "@carillon/runtime/operations";
+import type { AnswerRuntime } from "@carillon/runtime/operations";
 import { ModelSelections } from "@carillon/runtime/selections";
 import { afterEach, beforeEach, vi } from "vitest";
 import { derivedId, type Run } from "../contracts.ts";
@@ -23,7 +23,7 @@ export const selection = {
 export let fake: FakeT3;
 export let resources: string;
 let selections: ModelSelections;
-export let runtime: RuntimeOperations;
+export let runtime: AnswerRuntime;
 
 beforeEach(async () => {
   fake = await startFakeT3();

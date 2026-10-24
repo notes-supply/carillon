@@ -1,11 +1,11 @@
 /** Direct native Pi execution: no Carillon HTTP server or Discord. */
 import { parseArgs } from "node:util";
 import { join, resolve } from "node:path";
-import type { RuntimeOperations } from "@carillon/runtime/operations";
+import type { AnswerRuntime } from "@carillon/runtime/operations";
 import { createPiRuntime } from "@carillon/runtime-pi";
 
 /** The same example is exercised with Pi's real adapter and a controlled model in tests. */
-export async function runSessionExample(runtime: RuntimeOperations, resourceRoot: string) {
+export async function runSessionExample(runtime: AnswerRuntime, resourceRoot: string) {
   const conversation = {
     interface_id: "example",
     agent_id: "example",
@@ -13,12 +13,12 @@ export async function runSessionExample(runtime: RuntimeOperations, resourceRoot
     resource_root: resourceRoot,
     attachment_root: join(resourceRoot, "attachments"),
   };
-  const first = await runtime.executeTurn({
+  const first = await runtime.turns.execute({
     ...conversation,
     correlation_id: "example-first",
     input: "Remember the word carillon. Reply briefly.",
   });
-  const second = await runtime.executeTurn({
+  const second = await runtime.turns.execute({
     ...conversation,
     correlation_id: "example-second",
     input: "Which word did I ask you to remember?",

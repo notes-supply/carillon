@@ -237,6 +237,13 @@
         ],
         "partial": false
       }
+    },
+    {
+      "phase": "queued",
+      "running": [],
+      "recent": [],
+      "tool_calls": 0,
+      "controls": ["steer", "interrupt", "stop"]
     }
   ],
   "invalid_activities": [
@@ -578,6 +585,71 @@
           }
         ],
         "partial": false
+      }
+    }
+  ],
+  "lenient_controls": [
+    {
+      "sent": {
+        "phase": "queued",
+        "running": [],
+        "recent": [],
+        "tool_calls": 0,
+        "controls": ["pause"]
+      },
+      "read": {
+        "phase": "queued",
+        "running": [],
+        "recent": [],
+        "tool_calls": 0
+      }
+    },
+    {
+      "sent": {
+        "phase": "queued",
+        "running": [],
+        "recent": [],
+        "tool_calls": 0,
+        "controls": ["stop", "stop"]
+      },
+      "read": {
+        "phase": "queued",
+        "running": [],
+        "recent": [],
+        "tool_calls": 0,
+        "controls": ["stop"]
+      }
+    },
+    {
+      "sent": {
+        "phase": "queued",
+        "running": [],
+        "recent": [],
+        "tool_calls": 0,
+        "controls": ["steer", "interrupt", "stop", "steer"]
+      },
+      "read": {
+        "phase": "queued",
+        "running": [],
+        "recent": [],
+        "tool_calls": 0,
+        "controls": ["steer", "interrupt", "stop"]
+      }
+    },
+    {
+      "sent": {
+        "phase": "queued",
+        "running": [],
+        "recent": [],
+        "tool_calls": 0,
+        "controls": ["stop", "pause", "steer", "stop"]
+      },
+      "read": {
+        "phase": "queued",
+        "running": [],
+        "recent": [],
+        "tool_calls": 0,
+        "controls": ["stop", "steer"]
       }
     }
   ]
