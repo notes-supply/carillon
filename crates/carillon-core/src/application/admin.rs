@@ -39,13 +39,6 @@ Never expose credentials or place secrets in messages, prompts, sessions, ordina
 
 Treat each conversation according to context supplied by its interface. Do not import assumptions from unrelated conversations.
 ";
-const NATIVE_EXTENSION: &str = r#"export default function carillonContext(pi) {
-  pi.on("before_agent_start", async (event) => ({
-    systemPrompt: `${event.systemPrompt}\n\nCarillon native extension active: preserve audience and turn continuity.`,
-  }));
-}
-"#;
-const SKILL: &str = "---\nname: carillon-status\ndescription: Explain Carillon component and continuity status when the operator asks.\n---\n\nReport component identity, resource selection, and delivery certainty plainly.\n";
 
 /// The bundled runtime an installation's agent runs on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -140,12 +133,6 @@ pub(super) fn initialize(
         atomic_write(&agent.join("SYSTEM.md"), DEFAULT_SYSTEM.as_bytes(), 0o640)?;
         atomic_write(&agent.join("AGENTS.md"), DEFAULT_CONTEXT.as_bytes(), 0o640)?;
         atomic_write(&agent.join("settings.json"), b"{}\n", 0o640)?;
-        atomic_write(
-            &root.join("examples/carillon-context.js"),
-            NATIVE_EXTENSION.as_bytes(),
-            0o640,
-        )?;
-        atomic_write(&root.join("examples/SKILL.md"), SKILL.as_bytes(), 0o640)?;
         Database::create(&root.join("state/carillon.sqlite3"))?;
         sync_tree(root)?;
         // Rename replaces an empty target directory atomically, but refuses a
@@ -256,7 +243,8 @@ fn runtime_provider(runtime: Runtime, port: u16, token: &str) -> Result<Provider
         token_hash: hash_token(token),
         enabled: true,
         parallel_turns: None,
-        durable: false,
+        // Pi holds the turns core hands it; T3 answers while core waits.
+        durable: runtime == Runtime::Pi,
     })
 }
 
@@ -268,7 +256,6 @@ fn create_installation_directories(root: &Path, runtime: Runtime) -> Result<()> 
         "providers",
         "logs",
         "state/components/discord-private",
-        "examples",
     ] {
         private_directory(&root.join(directory))?;
     }
@@ -328,23 +315,6 @@ fn write_config(config_path: &Path, config: &Config) -> Result<()> {
         toml::to_string_pretty(config)?.as_bytes(),
         mode,
     )?;
-    Ok(())
-}
-
-/// Copies the example extension and skill into the resources of every agent
-/// that has them.
-pub(super) fn enable_demo_resources(config: &LoadedConfig) -> Result<()> {
-    let extension = config.root.join("examples/carillon-context.js");
-    let skill = config.root.join("examples/SKILL.md");
-    if !extension.exists() || !skill.exists() {
-        bail!("installation does not contain the first-release example resources");
-    }
-    for root in config.value.resource_roots() {
-        fs::create_dir_all(root.join("extensions"))?;
-        fs::create_dir_all(root.join("skills/carillon-status"))?;
-        fs::copy(&extension, root.join("extensions/carillon-context.js"))?;
-        fs::copy(&skill, root.join("skills/carillon-status/SKILL.md"))?;
-    }
     Ok(())
 }
 

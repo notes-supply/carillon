@@ -25,7 +25,7 @@ use tracing_subscriber::EnvFilter;
 use carillon_installation::maintenance::ServiceLock;
 
 use super::{
-    admin::{Runtime, backup, enable_demo_resources, initialize as init, restore, set_provider},
+    admin::{Runtime, backup, initialize as init, restore, set_provider},
     drain::{Pace, drain, stop},
     http::{Applied, RegistryStatus, check, serve},
     operations::{
@@ -181,8 +181,6 @@ and applies when Carillon restarts.")]
         #[command(subcommand)]
         action: Option<RegistryAction>,
     },
-    /// Add the example Pi extension and Agent Skill to the agent resources.
-    EnableDemoResources,
     /// List recent turns from the running core.
     Recent {
         /// Only the turn for this external event.
@@ -306,10 +304,6 @@ pub(crate) async fn run() -> Result<()> {
         } => update(&home()?, &archive, wait.timeout(), drained.force).await?,
         Command::Provider { id, action } => provider(&home()?, &id, action).await?,
         Command::Registry { action } => registry(&load(&home()?)?, action).await?,
-        Command::EnableDemoResources => {
-            enable_demo_resources(&load(&home()?)?)?;
-            println!("Pi-native extension and Agent Skill enabled");
-        }
         Command::Recent { event_id, limit } => {
             print_recent(&load(&home()?)?, event_id.as_deref(), limit).await?;
         }
