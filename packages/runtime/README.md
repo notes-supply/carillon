@@ -31,5 +31,5 @@ depend on it; it imports neither. Import modules by path
   protocol's size limit and marks it `partial` when it had to drop anything.
 - [`installation.ts`](src/installation.ts), [`endpoint.ts`](src/endpoint.ts),
   [`serial.ts`](src/serial.ts): registry and credential loading, including
-  core's loopback address and the runtime's `durable`, loopback address
-  checks, and one-at-a-time execution.
+  the runtime's `durable` and, for a durable runtime only, core's loopback
+  address; loopback address checks; and one-at-a-time execution.

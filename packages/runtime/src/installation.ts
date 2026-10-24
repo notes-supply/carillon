@@ -22,12 +22,17 @@ export interface Agent {
   readonly resources?: string;
 }
 
-export interface Installation {
+/**
+ * A durable runtime holds the turns it accepts and settles them through
+ * core, which it reaches at `coreUrl`, on loopback. Any other runtime only
+ * answers core, and needs no address of it.
+ */
+export type Durability =
+  | { readonly durable: false }
+  | { readonly durable: true; readonly coreUrl: string };
+
+export type Installation = Durability & {
   readonly root: string;
-  /** Where core serves its provider API, on loopback. */
-  readonly coreUrl: string;
-  /** The runtime holds the turns it accepts and settles them through core. */
-  readonly durable: boolean;
   /** The runtime's private state directory, `<data_dir>/components/<id>`. */
   readonly componentDirectory: string;
   /** The agents whose new conversations run on this runtime, in registry order. */
@@ -37,7 +42,7 @@ export interface Installation {
   readonly operatorTokenHash: string;
   /** The runtime's own settings file, `providers/<id>.toml`; it may not exist. */
   readonly providerFile: string;
-}
+};
 
 const ProviderIdentitySchema = Type.String({
   minLength: 1,
@@ -102,10 +107,13 @@ export async function loadInstallation(
   );
   // Extensions receive these endpoints with the operator credential.
   for (const provider of interfaces) providerAddress(provider.url);
+  const durability: Durability =
+    runtime.durable === true
+      ? { durable: true, coreUrl: coreUrl(parsed.core.listen) }
+      : { durable: false };
   return {
+    ...durability,
     root,
-    coreUrl: coreUrl(parsed.core.listen),
-    durable: runtime.durable ?? false,
     componentDirectory: join(resolve(root, parsed.data_dir), "components", providerId),
     agents: (parsed.agents ?? [])
       .filter((agent) => agent.runtime === providerId)

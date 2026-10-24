@@ -81,16 +81,14 @@ it("lists the agents whose conversations start on the runtime, paths resolved", 
   expect(loaded.componentDirectory).toBe(join(root, "data", "components", "runtime-t3"));
 });
 
-it("reaches core on loopback and reads whether the runtime holds its turns", async () => {
-  const loaded = await loadInstallation(await registry("http://127.0.0.1:3102"), "runtime-t3");
-  if (typeof loaded === "string") throw new Error(`an enabled runtime was reported ${loaded}`);
-  expect([loaded.coreUrl, loaded.durable]).toEqual(["http://127.0.0.1:3100", false]);
-  const durable = await loadInstallation(
-    await registry("http://127.0.0.1:3102", true, true, { durable: "durable = true\n" }),
+it("reaches core on loopback only when the runtime holds its turns", async () => {
+  const durable = "durable = true\n";
+  const loaded = await loadInstallation(
+    await registry("http://127.0.0.1:3102", true, true, { durable }),
     "runtime-t3",
   );
-  if (typeof durable === "string") throw new Error(`an enabled runtime was reported ${durable}`);
-  expect(durable.durable).toBe(true);
+  if (typeof loaded === "string") throw new Error(`an enabled runtime was reported ${loaded}`);
+  expect(loaded).toMatchObject({ durable: true, coreUrl: "http://127.0.0.1:3100" });
   // A core listening on every address is reached on loopback.
   for (const [listen, url] of [
     ["0.0.0.0:3100", "http://127.0.0.1:3100"],
@@ -98,17 +96,27 @@ it("reaches core on loopback and reads whether the runtime holds its turns", asy
     ["[::1]:3100", "http://[::1]:3100"],
   ]) {
     const wildcard = await loadInstallation(
-      await registry("http://127.0.0.1:3102", true, true, { listen }),
+      await registry("http://127.0.0.1:3102", true, true, { listen, durable }),
       "runtime-t3",
     );
     if (typeof wildcard === "string")
       throw new Error(`an enabled runtime was reported ${wildcard}`);
-    expect(wildcard.coreUrl).toBe(url);
+    expect(wildcard).toMatchObject({ coreUrl: url });
   }
-  await expect(
-    loadInstallation(
-      await registry("http://127.0.0.1:3102", true, true, { listen: "192.0.2.1:3100" }),
-      "runtime-t3",
-    ),
-  ).rejects.toThrow(/provider URL must use an HTTP loopback socket address/u);
+  const remote = await registry("http://127.0.0.1:3102", true, true, {
+    listen: "192.0.2.1:3100",
+    durable,
+  });
+  await expect(loadInstallation(remote, "runtime-t3")).rejects.toThrow(
+    /provider URL must use an HTTP loopback socket address/u,
+  );
+  // A runtime that only answers core never needs its address.
+  const answering = await loadInstallation(
+    await registry("http://127.0.0.1:3102", true, true, { listen: "192.0.2.1:3100" }),
+    "runtime-t3",
+  );
+  if (typeof answering === "string")
+    throw new Error(`an enabled runtime was reported ${answering}`);
+  expect(answering.durable).toBe(false);
+  expect("coreUrl" in answering).toBe(false);
 });
