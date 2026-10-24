@@ -5,12 +5,15 @@
   "license": "Apache-2.0",
   "bin": "./src/cli.ts",
   "type": "module",
-  "exports": "./src/index.ts",
   "dependencies": {
+    "@carillon/discord-pi": "workspace:*",
     "@carillon/protocol": "workspace:*",
     "@carillon/runtime": "workspace:*",
-    "@earendil-works/pi-ai": "1.0.0",
-    "@earendil-works/pi-coding-agent": "1.0.0",
+    "@earendil-works/chord": "1.4.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-codemode": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@earendil-works/pi-durable": "1.4.0",
     "smol-toml": "1.6.0",
     "typebox": "1.0.65",
     "ws": "8.21.3"
