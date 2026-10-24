@@ -16,7 +16,11 @@ import {
 export type Settled = "recorded" | "superseded" | "unknown";
 
 export interface CoreClient {
-  /** Settles a turn this runtime holds, waiting out core's restarts and failures. */
+  /**
+   * Settles a turn this runtime holds. A core that is unreachable, busy,
+   * failing or not yet holding this runtime's credential is asked again;
+   * any other refusal, such as an invalid or oversized outcome, throws.
+   */
   readonly settle: (turnId: string, outcome: TurnOutcome) => Promise<Settled>;
   /** Opens a running turn in one of this runtime's conversations, or finds the one its key opened. */
   readonly open: (opening: TurnOpening) => Promise<TurnReceipt>;
@@ -53,7 +57,7 @@ export function createCoreClient(options: CoreClientOptions): CoreClient {
         if (response?.status === 204) return "recorded";
         if (response?.status === 409) return "superseded";
         if (response?.status === 404) return "unknown";
-        if (response !== undefined && response.status < 500)
+        if (response !== undefined && !retried(response.status))
           throw new Error(`core refused the outcome of turn ${turnId}: ${await refusal(response)}`);
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
@@ -65,6 +69,10 @@ export function createCoreClient(options: CoreClientOptions): CoreClient {
     },
   };
 }
+
+/** Statuses a later attempt can change. */
+const retried = (status: number) =>
+  status === 401 || status === 403 || status === 408 || status === 429 || status >= 500;
 
 /** Core's explanation of a refusal, or its status when it gave none. */
 async function refusal(response: Response): Promise<string> {

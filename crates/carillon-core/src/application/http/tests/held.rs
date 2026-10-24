@@ -39,17 +39,15 @@ async fn only_the_durable_runtime_holding_a_turn_settles_it() -> Result<()> {
             "{caller:?}"
         );
     }
+    assert_eq!(state_of(&state, &held.turn_id)?, TurnState::Running);
+    // Disabled, it still settles what it accepted before.
     fixture.config.value.providers[1].enabled = false;
     let disabled = configured(&fixture);
     assert_eq!(
         settle(&disabled, RUNTIME, &held.turn_id, &answer).await?,
-        StatusCode::FORBIDDEN
-    );
-    assert_eq!(state_of(&state, &held.turn_id)?, TurnState::Running);
-    assert_eq!(
-        settle(&state, RUNTIME, &held.turn_id, &answer).await?,
         StatusCode::NO_CONTENT
     );
+    assert_eq!(state_of(&state, &held.turn_id)?, TurnState::Completed);
     Ok(())
 }
 

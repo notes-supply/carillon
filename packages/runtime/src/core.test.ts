@@ -35,18 +35,23 @@ it("settles a turn once and says how core took each outcome", async () => {
   });
 });
 
-it("waits out core's failures and restarts, but not its refusals", async () => {
+it("waits out a core that cannot settle yet and throws on a permanent refusal", async () => {
   const fake = await core();
   const { settle } = client(fake.url);
-  fake.answer(503, 500);
+  fake.answer(503, 401, 403);
   expect(await settle("turn-1", { outcome: "stopped" })).toBe("recorded");
-  expect(fake.received).toHaveLength(3);
+  fake.answer(408, 429);
+  expect(await settle("turn-4", { outcome: "steered" })).toBe("recorded");
+  expect(fake.received).toHaveLength(7);
   fake.answer(400);
   await expect(settle("turn-2", { outcome: "answered", output: " " })).rejects.toThrow(
     "core refused the outcome of turn turn-2: answered 400",
   );
-  fake.answer(403);
-  await expect(settle("turn-2", { outcome: "stopped" })).rejects.toThrow(/answered 403/u);
+  fake.answer(413);
+  await expect(settle("turn-2", { outcome: "answered", output: "x" })).rejects.toThrow(
+    "core refused the outcome of turn turn-2: answered 413",
+  );
+  expect(fake.received).toHaveLength(9);
   // A core that is not listening yet is asked again until it is.
   const reserved = createServer().listen(0, "127.0.0.1");
   await once(reserved, "listening");

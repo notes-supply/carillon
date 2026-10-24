@@ -21,8 +21,8 @@ depend on it; it imports neither. Import modules by path
   entry's `durable` does not declare. Callers get only the displayable part
   of an explanation; other failures are logged, redacted.
 - [`core.ts`](src/core.ts): an inbox runtime's client of core, with its own
-  credential: `settle` a turn it holds (retrying core's failures and
-  restarts) and `open` one of its own. [`testing.ts`](src/testing.ts) is a
+  credential: `settle` a turn it holds (asking again on every answer but a
+  settlement or a 400) and `open` one of its own. [`testing.ts`](src/testing.ts) is a
   small fake core for runtime tests.
 - [`failure.ts`](src/failure.ts): `ExplainedFailure`, `RuntimeClosed` and the
   best-effort rules for what of an explanation may be shown.

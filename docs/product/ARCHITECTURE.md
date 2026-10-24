@@ -313,7 +313,8 @@ people and places before any runtime work. After admission, every service
 has the installing user's ordinary authority, including files, groups and
 sudo. Carillon adds no permission system of its own; runtime extensions can
 add approval or confinement. Runtimes call core with their own registry
-credential, the one core presents to them: only an enabled durable runtime
-may, to settle its own turns and open turns in its own conversations. The
+credential, the one core presents to them: only a durable runtime may. It
+settles its own turns, even once disabled, since it accepted them, and while
+enabled opens turns in its own conversations. The
 Wasm sandbox bounds the Discord module's memory and time; it doesn't limit
 the owner.

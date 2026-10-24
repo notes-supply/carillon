@@ -19,8 +19,9 @@ use tokio_util::sync::CancellationToken;
 use super::{ApiError, AppState, authorize, provider_identity, runtime_token};
 use crate::{RuntimeClient, WorkerStep, db::Settled};
 
-/// The enabled durable runtime a call names, authenticated by the same
-/// credential core presents to it.
+/// The durable runtime a call names, authenticated by the same credential
+/// core presents to it. It may be disabled: it still settles the turns it
+/// accepted before.
 fn runtime_provider<'a>(
     headers: &HeaderMap,
     config: &'a LoadedConfig,
@@ -29,9 +30,6 @@ fn runtime_provider<'a>(
     let provider = config
         .provider(id, ProviderRole::Runtime)
         .map_err(|_| ApiError::forbidden("unknown runtime provider"))?;
-    if !provider.enabled {
-        return Err(ApiError::forbidden("runtime provider is disabled"));
-    }
     if !provider.durable {
         return Err(ApiError::forbidden(
             "only a durable runtime settles or opens turns",
@@ -48,9 +46,9 @@ fn body<T: DeserializeOwned>(bytes: &Bytes, what: &str) -> Result<T, ApiError> {
         .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, format!("invalid {what}: {error}")))
 }
 
-/// Settles a turn the calling runtime holds: 204 once recorded, now or as
-/// the same outcome before; 409 when the turn ended another way; 404 when
-/// the runtime holds no such turn.
+/// Settles a turn the calling runtime holds, enabled or not: 204 once
+/// recorded, now or as the same outcome before; 409 when the turn ended
+/// another way; 404 when the runtime holds no such turn.
 pub(super) async fn outcome(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -74,13 +72,19 @@ pub(super) async fn outcome(
 }
 
 /// Opens a running turn in one of the calling runtime's conversations, for
-/// it to settle later, or returns the receipt of the one its key opened.
+/// it to settle later, or returns the receipt of the one its key opened. A
+/// disabled runtime opens none.
 pub(super) async fn open(
     State(state): State<AppState>,
     headers: HeaderMap,
     bytes: Bytes,
 ) -> Result<Json<EventReceipt>, ApiError> {
-    let runtime = runtime_provider(&headers, &state.config())?.id.clone();
+    let config = state.config();
+    let runtime = runtime_provider(&headers, &config)?;
+    if !runtime.enabled {
+        return Err(ApiError::forbidden("runtime provider is disabled"));
+    }
+    let runtime = runtime.id.clone();
     let opening: TurnOpening = body(&bytes, "turn opening")?;
     Ok(Json(
         state
