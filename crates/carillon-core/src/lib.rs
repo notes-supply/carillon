@@ -11,7 +11,7 @@ mod runtime_client;
 pub use attachments::Reconciled;
 pub use engine::{
     AgentOptions, Core, CoreError, CoreOptions, InboxFailure, Lane, Reported, RuntimeProvider,
-    TurnFailure, WorkerStep,
+    Stalled, TurnFailure, WorkerStep,
 };
 pub use runtime_client::RuntimeClient;
 

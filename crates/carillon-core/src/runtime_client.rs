@@ -109,8 +109,9 @@ impl RuntimeClient {
     /// be taken is handed over again.
     /// # Errors
     /// Returns `Later` for a turn that may not have arrived or that the
-    /// runtime asked to have later (5xx, 408 or 429), and `Refused` for any
-    /// other answer than 202.
+    /// runtime asked to have later (5xx, 408 or 429), `Misinstalled` for an
+    /// answer no turn explains (401, 403, 404, 405 or another 2xx), and
+    /// `Refused` for any other.
     pub async fn submit(&self, request: &RuntimeTurnRequest) -> Result<(), InboxFailure> {
         let response = self
             .client
@@ -135,6 +136,19 @@ impl RuntimeClient {
         {
             return Err(InboxFailure::Later(anyhow!(
                 "runtime provider answered {status}"
+            )));
+        }
+        if status.is_success()
+            || matches!(
+                status,
+                StatusCode::UNAUTHORIZED
+                    | StatusCode::FORBIDDEN
+                    | StatusCode::NOT_FOUND
+                    | StatusCode::METHOD_NOT_ALLOWED
+            )
+        {
+            return Err(InboxFailure::Misinstalled(anyhow!(
+                "runtime provider answered {status} at /v1/inbox"
             )));
         }
         let failure = response.json::<RuntimeFailure>().await.unwrap_or_default();

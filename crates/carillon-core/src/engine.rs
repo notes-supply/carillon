@@ -17,7 +17,7 @@ use carillon_protocol::model::{
     RuntimeTurnResponse, SelectedProvider, StateCounts, TurnActivity, TurnInspection, TurnSummary,
     UnansweredTurn,
 };
-pub use dispatch::InboxFailure;
+pub use dispatch::{InboxFailure, Stalled};
 use ownership::{Owner, stranded};
 use std::{path::PathBuf, sync::Arc};
 

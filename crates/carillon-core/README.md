@@ -28,8 +28,10 @@ mise run example:core
 - `dispatch_next(runtime, stopping, submit)` hands a durable runtime its
   oldest queued message, with no wait for the conversation's earlier turns.
   The turn becomes running once the runtime takes it; `InboxFailure::Later`
-  leaves it queued to be handed over again, in order, and `Refused`
-  interrupts it with the runtime's explanation.
+  and `Misinstalled` leave it queued to be handed over again, in order, and
+  `Refused` interrupts it with the runtime's explanation. The dispatcher
+  backs off from 1 to 60 seconds while its runtime takes nothing, logging
+  each new kind of failure and the recovery once.
 - `claim_delivery`, `acknowledge_delivery` and `reconcile_deliveries` keep each
   delivery with the interface instance that claimed it, and never treat an
   uncertain send as safe to repeat.

@@ -14,7 +14,7 @@ use super::{
     live::{lock, ok, operator, submit},
     run_next_turn,
 };
-use crate::application::http::*;
+use crate::{InboxFailure, Stalled, application::http::*};
 
 /// A durable runtime that keeps every turn core hands it, answering each
 /// hand-over with the next scripted answer (202 once they run out), and
@@ -131,7 +131,7 @@ pub(super) fn add_runtime(
     fixture.config.value.validate()
 }
 
-pub(super) async fn dispatch(state: &AppState) -> Result<WorkerStep> {
+pub(super) async fn dispatch(state: &AppState) -> Result<WorkerStep, Stalled> {
     runtime::dispatch_next(state, "test-runtime", &CancellationToken::new()).await
 }
 
@@ -236,25 +236,52 @@ async fn a_turn_the_runtime_did_not_take_stays_queued_and_is_handed_over_again()
     let (mut fixture, state) = durable(directory.path(), &runtime)?;
     let first = ok(submit(&state, "one", "conversation").await)?;
     ok(submit(&state, "two", "elsewhere").await)?;
-    runtime.answer([
-        (StatusCode::INTERNAL_SERVER_ERROR, json!({})),
-        (StatusCode::SERVICE_UNAVAILABLE, json!({})),
-        (StatusCode::REQUEST_TIMEOUT, json!({})),
-        (StatusCode::TOO_MANY_REQUESTS, json!({})),
-    ]);
-    for _ in 0..4 {
-        assert_eq!(dispatch(&state).await?, WorkerStep::Backoff);
+    let later = [
+        StatusCode::INTERNAL_SERVER_ERROR,
+        StatusCode::SERVICE_UNAVAILABLE,
+        StatusCode::REQUEST_TIMEOUT,
+        StatusCode::TOO_MANY_REQUESTS,
+    ];
+    // An inbox that is not installed as core expects is no fault of the turn.
+    let misinstalled = [
+        StatusCode::UNAUTHORIZED,
+        StatusCode::FORBIDDEN,
+        StatusCode::NOT_FOUND,
+        StatusCode::METHOD_NOT_ALLOWED,
+        StatusCode::OK,
+    ];
+    runtime.answer(
+        later
+            .into_iter()
+            .chain(misinstalled)
+            .map(|status| (status, json!({}))),
+    );
+    for _ in later {
+        assert!(matches!(
+            dispatch(&state).await,
+            Err(Stalled::Inbox(InboxFailure::Later(_)))
+        ));
+        assert_eq!(state_of(&state, &first.turn_id)?, TurnState::Queued);
+    }
+    for _ in misinstalled {
+        assert!(matches!(
+            dispatch(&state).await,
+            Err(Stalled::Inbox(InboxFailure::Misinstalled(_)))
+        ));
         assert_eq!(state_of(&state, &first.turn_id)?, TurnState::Queued);
     }
     // Nothing behind it overtakes it.
-    assert_eq!(runtime.handed(), ["one"; 4]);
+    assert_eq!(runtime.handed(), ["one"; 9]);
     assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
     assert_eq!(state_of(&state, &first.turn_id)?, TurnState::Running);
-    assert_eq!(runtime.request(4)?.correlation_id, first.turn_id);
+    assert_eq!(runtime.request(9)?.correlation_id, first.turn_id);
     // A runtime core cannot reach has not taken the next one either.
     fixture.config.value.providers[1].url = "http://127.0.0.1:9".to_owned();
     let unreachable = configured(&fixture);
-    assert_eq!(dispatch(&unreachable).await?, WorkerStep::Backoff);
+    assert!(matches!(
+        dispatch(&unreachable).await,
+        Err(Stalled::Inbox(InboxFailure::Later(_)))
+    ));
     assert_eq!(unreachable.core.turn_counts()?.pending, 1);
     Ok(())
 }
@@ -272,7 +299,7 @@ async fn a_refused_turn_is_interrupted_with_the_runtimes_explanation() -> Result
             StatusCode::UNPROCESSABLE_ENTITY,
             json!({"error": "That agent is not set up here."}),
         ),
-        (StatusCode::OK, json!({})),
+        (StatusCode::CONFLICT, json!({})),
     ]);
     for _ in 0..3 {
         assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
@@ -491,4 +518,35 @@ async fn a_drain_ends_while_turns_are_held_and_outcomes_are_recorded_during_it()
     stopping.cancel();
     supervisor.await?;
     Ok(())
+}
+
+#[test]
+fn a_dispatcher_backs_off_up_to_a_minute_and_logs_each_new_failure_once() {
+    let unavailable = || Stalled::Inbox(InboxFailure::Later(anyhow!("unreachable")));
+    let mut failing = runtime::Failing::default();
+    let waits = (0..8)
+        .map(|_| failing.after(&unavailable()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        waits
+            .iter()
+            .map(|(wait, _)| wait.as_secs())
+            .collect::<Vec<_>>(),
+        [1, 2, 4, 8, 16, 32, 60, 60]
+    );
+    assert_eq!(waits.iter().filter(|(_, new)| *new).count(), 1);
+    // Another kind of failure is logged again, without starting over.
+    let misinstalled = Stalled::Inbox(InboxFailure::Misinstalled(anyhow!("401")));
+    assert_eq!(
+        failing.after(&misinstalled),
+        (Duration::from_secs(60), true)
+    );
+    let storage = Stalled::Core(anyhow!("database is locked"));
+    assert_eq!(failing.after(&storage), (Duration::from_secs(60), true));
+    assert!(failing.recovered());
+    assert!(!failing.recovered());
+    assert_eq!(
+        failing.after(&unavailable()),
+        (Duration::from_secs(1), true)
+    );
 }

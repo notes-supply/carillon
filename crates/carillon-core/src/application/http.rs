@@ -524,7 +524,8 @@ async fn runtime_activity(
 /// already claimed runs to its outcome; none is claimed after the
 /// cancellation. An observation only reads, and may wait hours on native
 /// work: once `set_aside` is cancelled, for maintenance or shutdown, core
-/// stops waiting for its answer and asks again later.
+/// stops waiting for its answer and asks again later. A durable runtime's
+/// one worker is its dispatcher instead.
 async fn runtime_worker(
     state: AppState,
     runtime_id: String,
@@ -532,6 +533,14 @@ async fn runtime_worker(
     stopping: CancellationToken,
     set_aside: CancellationToken,
 ) {
+    // Restart-only, so as it was when the worker started.
+    if state
+        .config()
+        .provider(&runtime_id, ProviderRole::Runtime)
+        .is_ok_and(|runtime| runtime.durable)
+    {
+        return runtime::dispatcher(state, runtime_id, stopping).await;
+    }
     // A runtime that gave an observation no answer is asked again after a
     // pause, not in a tight loop.
     let backoff = match lane {
@@ -539,40 +548,31 @@ async fn runtime_worker(
         Lane::Observations => Duration::from_secs(5),
     };
     let mut work = state.core.work(lane);
-    // Restart-only, so as it was when the worker started.
-    let durable = state
-        .config()
-        .provider(&runtime_id, ProviderRole::Runtime)
-        .is_ok_and(|runtime| runtime.durable);
     while !stopping.is_cancelled() {
         work.mark_unchanged();
-        let step = if durable {
-            runtime::dispatch_next(&state, &runtime_id, &stopping).await
-        } else {
-            run_next(
-                &state,
-                &runtime_id,
-                lane,
-                &stopping,
-                async |runtime, token, request| {
-                    let observation = request.follow_up.is_some();
-                    let call = call_runtime(&state.client, runtime, token, request);
-                    if !observation {
-                        return call.await;
-                    }
-                    set_aside
-                        .run_until_cancelled(call)
-                        .await
-                        .unwrap_or_else(|| {
-                            Err(TurnFailure::Unanswered(anyhow!(
-                                "observation set aside: core paused its workers or is stopping"
-                            )))
-                        })
-                },
-            )
-            .await
-        };
-        match step {
+        match run_next(
+            &state,
+            &runtime_id,
+            lane,
+            &stopping,
+            async |runtime, token, request| {
+                let observation = request.follow_up.is_some();
+                let call = call_runtime(&state.client, runtime, token, request);
+                if !observation {
+                    return call.await;
+                }
+                set_aside
+                    .run_until_cancelled(call)
+                    .await
+                    .unwrap_or_else(|| {
+                        Err(TurnFailure::Unanswered(anyhow!(
+                            "observation set aside: core paused its workers or is stopping"
+                        )))
+                    })
+            },
+        )
+        .await
+        {
             Ok(WorkerStep::Advanced) => {}
             Ok(WorkerStep::Idle) => {
                 // The sender lives as long as `state`, which this task holds.

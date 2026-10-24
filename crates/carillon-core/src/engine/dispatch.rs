@@ -12,18 +12,37 @@ use crate::{
 };
 
 /// Why a durable runtime does not hold a turn core handed it.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum InboxFailure {
     /// It may not have arrived, or the runtime asked for it later: it stays
     /// queued and is handed over again, in order. The runtime takes a turn
     /// it already holds as the same one.
+    #[error("runtime provider did not take a turn: {0:#}")]
     Later(anyhow::Error),
+    /// The runtime's inbox does not answer as core expects, such as a
+    /// credential it refuses or a route it lacks: an installation fault for
+    /// the operator, not this turn's. It stays queued as for `Later`.
+    #[error("runtime provider's inbox is not installed as core expects: {0:#}")]
+    Misinstalled(anyhow::Error),
     /// The runtime refused it, with an explanation safe to display when it
     /// gave one: the turn is interrupted.
+    #[error("runtime provider refused the turn with {status}")]
     Refused {
         status: u16,
         explanation: Option<String>,
     },
+}
+
+/// Why a durable runtime's dispatcher hands nothing over for now: its queued
+/// turns wait, in order, until it tries again.
+#[derive(Debug, thiserror::Error)]
+pub enum Stalled {
+    /// The runtime did not take the turn, and did not refuse it.
+    #[error(transparent)]
+    Inbox(InboxFailure),
+    /// Core's registry or storage failed.
+    #[error("{0:#}")]
+    Core(#[from] anyhow::Error),
 }
 
 impl Core {
@@ -33,14 +52,19 @@ impl Core {
     /// settles it; nothing here waits for its work. Once `stopping` is
     /// cancelled nothing more is handed over.
     /// # Errors
-    /// Returns registry or storage errors; the turn then stays queued.
+    /// Returns why the turn stays queued: the runtime did not take it, or
+    /// registry or storage errors.
     pub async fn dispatch_next(
         &self,
         runtime_id: &str,
         stopping: &CancellationToken,
         submit: impl AsyncFnOnce(RuntimeTurnRequest) -> Result<(), InboxFailure>,
-    ) -> Result<WorkerStep> {
-        if !self.runtime(runtime_id)?.enabled {
+    ) -> Result<WorkerStep, Stalled> {
+        if !self
+            .runtime(runtime_id)
+            .map_err(anyhow::Error::from)?
+            .enabled
+        {
             return Ok(WorkerStep::Backoff);
         }
         let Some(turn) = self.database.next_dispatch(runtime_id)? else {
@@ -66,9 +90,8 @@ impl Core {
                     .with_context(|| format!("record that turn {} is held", turn.turn_id))?;
                 Ok(WorkerStep::Advanced)
             }
-            Err(InboxFailure::Later(failure)) => {
-                warn!(turn_id = %turn.turn_id, error = %format!("{failure:#}"), "runtime did not take the turn; it is handed over again");
-                Ok(WorkerStep::Backoff)
+            Err(failure @ (InboxFailure::Later(_) | InboxFailure::Misinstalled(_))) => {
+                Err(Stalled::Inbox(failure))
             }
             Err(InboxFailure::Refused {
                 status,
