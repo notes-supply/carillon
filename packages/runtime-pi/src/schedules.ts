@@ -24,7 +24,7 @@ import { Check } from "typebox/value";
 import { backoff } from "./delivery.ts";
 import type { OpeningTask } from "./opening.ts";
 
-const SCHEDULES = "schedules";
+export const SCHEDULES = "schedules";
 export const SCHEDULE = "carillon.schedule";
 
 const ScheduleInputSchema = Type.Object({

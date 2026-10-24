@@ -287,7 +287,7 @@ The assistant's `settings.json` selects more of Pi's built-in extensions.
 None of these is selected by default:
 
 ```json
-{ "extensions": { "add": ["schedules"] } }
+{ "extensions": { "add": ["schedules", "subagents"] } }
 ```
 
 - `schedules` lets the assistant run a prompt later in the same
@@ -297,6 +297,11 @@ None of these is selected by default:
   when it starts again, and runs held up while core was unreachable happen
   once when it is back. Remove `schedules` to end each one when it is next
   due.
+- `subagents` lets the assistant hand a task to a helper that starts with
+  its model and tools but none of the conversation's history. The helper
+  works in the background by default, and its result arrives later as a
+  message of its own; stopping the answer that started it doesn't stop the
+  helper.
 
 ## Discord
 

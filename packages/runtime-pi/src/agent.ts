@@ -60,6 +60,7 @@ import {
   type Snapshot,
 } from "./resources.ts";
 import { createSchedulesExtension, SCHEDULE } from "./schedules.ts";
+import { createSubagentsExtension, REPORTER } from "./subagents.ts";
 
 const context = BACKGROUND_CONTEXT;
 const INTERRUPTED = "[Carillon] This message interrupted your previous answer.";
@@ -69,7 +70,7 @@ const ENDED =
 /** The most times a run is aborted again because its task handed over meanwhile. */
 const ABORT_ATTEMPTS = 5;
 /** The runtime's own tasks a crash loop parked, which run again at startup. */
-const RETRIED = new Set([DELIVERY, OPENING, SCHEDULE]);
+const RETRIED = new Set([DELIVERY, OPENING, SCHEDULE, REPORTER]);
 
 /** The harness clock and timers; the system's by default. */
 export type Clock = Pick<HarnessOptions, "now" | "setTimer">;
@@ -161,6 +162,7 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
           await harness.abortTask(task, context);
         },
       }),
+      createSubagentsExtension({ opening }),
     ],
     defaults: options.defaults,
   };
@@ -420,9 +422,10 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
   }
 
   /**
-   * Startup: parked deliveries, openings and schedules run again, and a
-   * run that crashed the process too often is given up, its messages
-   * failed. Returns the runs given up, whose aborts finish once tasks run.
+   * Startup: parked deliveries, openings, schedules and subagents run
+   * again, and a run that crashed the process too often is given up, its
+   * messages failed. Returns the runs given up, whose aborts finish once
+   * tasks run.
    */
   async function recover(tasks: readonly TaskInspection[]): Promise<TaskId[]> {
     const crashed = new Set<ConversationId>();

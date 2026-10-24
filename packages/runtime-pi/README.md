@@ -26,19 +26,20 @@ with `pi` as its first argument, the same executable is Pi's own command line
   `steered`. A run the person stopped is `stopped`. A failed run gives the
   provider's explanation where it may be shown; no available model says to
   choose one with `/model`.
-- **Opened turns.** Output no message prompted, such as a schedule's run,
-  comes in a turn the runtime opens with core (`POST /v1/runtime/turns`).
-  A background task of the conversation opens it under a key holding the
-  agent's ID and a nonce of its store, so no other agent, and no store
-  recreated in its place, shares it. The key opens and places the turn
-  once across restarts; its input waits as a follow-up on the model its
-  conversation chose, and the turn settles like any other, with its cards,
-  typing and stop. Work that has ended, such as a cancelled schedule's run,
-  opens no turn, unless core was asked already and may have opened one. A
-  turn core has settled already is left alone, one whose work ended before
-  it was placed is settled `stopped`, and one whose work ended while it was
-  placed is stopped as a person stops it. An unreachable core is asked
-  again with backoff; an opening core refuses for good is given up.
+- **Opened turns.** Output no message prompted, such as a schedule's run
+  or a subagent's report, comes in a turn the runtime opens with core
+  (`POST /v1/runtime/turns`). A background task of the conversation opens
+  it under a key holding the agent's ID and a nonce of its store, so no
+  other agent, and no store recreated in its place, shares it. The key
+  opens and places the turn once across restarts; its input waits as a
+  follow-up on the model its conversation chose, and the turn settles like
+  any other, with its cards, typing and stop. Work that has ended, such as
+  a cancelled schedule's run, opens no turn, unless core was asked already
+  and may have opened one. A turn core has settled already is left alone,
+  one whose work ended before it was placed is settled `stopped`, and one
+  whose work ended while it was placed is stopped as a person stops it. An
+  unreachable core is asked again with backoff; an opening core refuses for
+  good is given up.
 - **Busy conversations.** `settings.json`'s `busy` decides what a message does
   while the agent answers in its conversation: `steer` (the default) joins
   the running answer after its current tool round, `queue` waits for it, and
@@ -86,8 +87,9 @@ earlier. Each snapshot is read once:
   `extensions` is a list that selects exactly those, or `add` and `remove`
   over the default: `coding`, `tool-search`, and `discord` when Carillon has
   a Discord provider. The built-in extensions are `coding` (read, write, edit
-  and bash), `codemode`, `tool-search`, `discord` and [`schedules`](#schedules),
-  which no default selects.
+  and bash), `codemode`, `tool-search`, `discord`, and
+  [`schedules`](#schedules) and [`subagents`](#subagents), which no default
+  selects.
 
 - user extensions it lists as `extensions/<file>.js`, `.mjs` or `.ts`: a
   module whose default export is a pi-durable extension object, with its
@@ -129,6 +131,21 @@ is still opening is stopped, as it is when its schedule is cancelled. While
 the agent's recorded resources no longer load at startup, what is selected
 is unknown: a due schedule waits for the next message whose resources load.
 
+## Subagents
+
+`subagents` gives the agent `subagent {task, wait?}`, which runs the task in
+a child conversation that starts as a copy of the agent's own, without
+`subagents` or `schedules`. The child serves the same Carillon
+conversation, so tools such as Discord's work there as in its parent. In
+the background, the default, the call returns at once and a reporter task
+of the conversation owns the child: stopping the answer that started it
+leaves the child working. Once the child answers, the reporter's opening
+places the answer, or why there is none, as a follow-up in a turn under
+the key `subagent:<task>`; stopping that turn stops only the report, and a
+report core refuses for good is given up. With `wait: true`, the call owns
+the child and returns its answer as its result, and stopping the answer
+that waits for it aborts the child.
+
 ## Deterministic mode
 
 `--deterministic` runs the real runtime on scripted local models (`local/echo`,
@@ -146,7 +163,8 @@ A message `hold <path>` is answered once that file exists.
 - [`delivery.ts`](src/delivery.ts): the task that settles each turn with core.
 - [`opening.ts`](src/opening.ts): the task that opens a turn for input no
   message brought.
-- [`schedules.ts`](src/schedules.ts): the `schedules` extension and its task.
+- [`schedules.ts`](src/schedules.ts), [`subagents.ts`](src/subagents.ts): the
+  `schedules` and `subagents` extensions and their tasks.
 - [`resources.ts`](src/resources.ts), [`attachments.ts`](src/attachments.ts),
   [`activity.ts`](src/activity.ts), [`models.ts`](src/models.ts): snapshots
   and settings, files, activity, and the catalogue.
