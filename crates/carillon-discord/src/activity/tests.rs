@@ -370,9 +370,8 @@ impl Substitute {
         let (delivering, heard) = mpsc::unbounded_channel();
         let monitor = activity_monitor(
             self.client.clone(),
-            http,
             self.module.clone(),
-            settings,
+            Reactions::new(http, settings),
             CardRecords::open(records.to_path_buf()),
             heard,
             CancellationToken::new(),
@@ -392,20 +391,19 @@ impl Substitute {
         let core = self.client.clone();
         let (delivering, heard) = mpsc::unbounded_channel();
         let stopping = CancellationToken::new();
-        let settings = crate::config::Settings::new(config);
+        let reactions = Reactions::new(http.clone(), crate::config::Settings::new(config));
         let delivered = delivery_loop(
             core.clone(),
-            Reactions::new(http.clone(), settings.clone()),
-            http.clone(),
+            reactions.clone(),
+            http,
             delivering,
             stopping.clone(),
         );
         let records = CardRecords::open(records.to_path_buf());
         let monitor = activity_monitor(
             core,
-            http,
             self.module.clone(),
-            settings,
+            reactions,
             records,
             heard,
             stopping.clone(),
@@ -2493,4 +2491,5 @@ async fn a_module_that_draws_no_card_costs_no_answer_and_leaves_cards_for_the_ne
     Ok(())
 }
 
+mod controls;
 mod typing;

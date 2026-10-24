@@ -30,8 +30,9 @@
 //! message, or that one nobody can name may exist. A restart goes on with
 //! the recorded cards from what core recorded of their jobs.
 mod call;
+mod controls;
 
-use crate::{client::CoreClient, config::Settings, module::Module};
+use crate::{client::CoreClient, config::Settings, delivery::Reactions, module::Module};
 use anyhow::{Context as _, Result};
 use call::{Call, Wanted, bounded, done, job_wanted};
 use carillon_discord_module::contract::{CardRequest, Seen};
@@ -123,11 +124,12 @@ impl Known {
         }
     }
 
-    /// The channel a running turn of the job answers in.
+    /// The channel a running turn of the job answers in, unless the turn
+    /// waits in its runtime behind other work.
     fn running_in(&self) -> Option<Id<ChannelMarker>> {
         let job = self.job()?;
         job.at_work()
-            .filter(|turn| turn.state == TurnState::Running)?;
+            .filter(|turn| turn.state == TurnState::Running && !controls::waits(turn))?;
         job.target_id.parse().ok()
     }
 }
@@ -267,27 +269,28 @@ struct Cards {
 /// Follows this provider's jobs until `delivering` closes. Cards recorded
 /// before this start are taken up again. Without readable
 /// `records`, or with activity cards turned off when the monitor starts,
-/// there are no cards, only typing: recorded cards and their records are
-/// left as they are. Each job shows typing when the settings serving as it
-/// is first followed say so. Once
+/// there are no cards, only typing and controls: recorded cards and their
+/// records are left as they are. The monitor works with the Discord client
+/// and settings of `reactions`. Each job shows typing when the settings
+/// serving as it is first followed say so, and offers through `reactions`
+/// the controls its runtime offers while its turn waits there. Once
 /// `stopping`, nothing more is read, typed or made a card; when `delivering`
 /// closes, core is read once more and the cards of jobs that settled get up
 /// to [`FINAL_DRAIN`] to show their summaries, and every other card stays
 /// recorded for the next start.
 pub(crate) async fn activity_monitor(
     core: CoreClient,
-    http: Arc<DiscordHttp>,
     module: Arc<Module>,
-    settings: Settings,
+    reactions: Reactions,
     records: Option<CardRecords>,
     mut delivering: mpsc::UnboundedReceiver<Delivering>,
     stopping: CancellationToken,
 ) {
-    let typist = http.clone();
+    let (typist, settings) = (reactions.http().clone(), reactions.settings().clone());
     let cards = records
         .filter(|_| settings.current().activity)
         .map(|records| Cards {
-            http,
+            http: typist.clone(),
             module,
             settings: settings.clone(),
             records: Arc::new(records),
@@ -297,6 +300,7 @@ pub(crate) async fn activity_monitor(
     let mut jobs = BTreeMap::new();
     let follow = |tasks: &mut JoinSet<()>, job_id: &str, known: Known, old: Option<Recorded>| {
         let (view, watched) = watch::channel(known);
+        tasks.spawn(controls::offer(&reactions, &watched, &stopping));
         if settings.current().typing {
             tasks.spawn(keep_typing(
                 typist.clone(),

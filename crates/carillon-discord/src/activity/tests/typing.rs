@@ -55,3 +55,33 @@ async fn disabled_cards_still_type_name_no_jobs_and_leave_records_alone() -> any
     assert_eq!(std::fs::read(&records)?, before);
     Ok(())
 }
+
+#[tokio::test]
+async fn a_turn_waiting_in_its_runtime_shows_no_typing_until_it_runs() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let records = directory.path().join("activity-cards.json");
+    let discord = Substitute::start(succeed()).await?;
+    let accepted = now() - 60;
+    let waiting = TurnActivity {
+        phase: ActivityPhase::Queued,
+        ..tools(None, &[], &[])
+    };
+    discord.record(vec![running("waiting", "300", accepted, Some(waiting))]);
+    let mut configured = config(true);
+    configured.activity = false;
+    let mut provider = discord.provider(discord.http(false), configured, &records);
+    discord.read_taken(1).await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        discord
+            .matching(&Method::POST, "/channels/300/typing")
+            .is_empty()
+    );
+    let make = tools(None, &[("bash", "make")], &[]);
+    discord.record(vec![running("waiting", "300", accepted, Some(make))]);
+    discord
+        .wait_for(&Method::POST, "/channels/300/typing", 1)
+        .await?;
+    provider.stop().await?;
+    Ok(())
+}

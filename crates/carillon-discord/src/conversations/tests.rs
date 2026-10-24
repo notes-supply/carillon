@@ -377,6 +377,11 @@ pub(crate) fn discord_config(
         delivered_emoji: "✅".to_owned(),
         failed_emoji: "❌".to_owned(),
         uncertain_emoji: "⚠️".to_owned(),
+        steered_emoji: "↪️".to_owned(),
+        stopped_emoji: "⏹️".to_owned(),
+        steer_emoji: "⏩".to_owned(),
+        interrupt_emoji: "⏭️".to_owned(),
+        stop_emoji: "🛑".to_owned(),
         module: crate::config::ModuleSetting::default(),
     }
 }

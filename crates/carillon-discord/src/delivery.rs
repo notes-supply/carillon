@@ -5,7 +5,10 @@ use crate::{
     config::{DiscordConfig, DiscordEmoji, Settings},
 };
 use anyhow::{Context, Result, bail};
-use carillon_protocol::model::{Delivery, DeliveryOutcome, ExternalEvent, TurnState};
+use carillon_protocol::{
+    model::{Delivery, DeliveryOutcome, ExternalEvent, TurnState},
+    turns::{ControlAction, Silence},
+};
 use std::{
     collections::{HashMap, hash_map::Entry},
     sync::{Arc, Mutex, PoisonError},
@@ -50,6 +53,17 @@ pub(crate) enum Feedback {
     Delivered,
     Failed,
     Uncertain,
+    Steered,
+    Stopped,
+}
+
+impl From<Silence> for Feedback {
+    fn from(silence: Silence) -> Self {
+        match silence {
+            Silence::Steered => Self::Steered,
+            Silence::Stopped => Self::Stopped,
+        }
+    }
 }
 
 /// A message's reactions, in order: its processing reaction, then the
@@ -69,6 +83,11 @@ pub(crate) enum Feedback {
 /// [`Reactions::stop`]: processing requests, one per message at a time, at
 /// most [`OUTCOMES`] outcome reactions, and the lanes' overload refusals.
 /// After the stop nothing is sent, not even an outcome a caller awaits.
+///
+/// They also own the control reactions a message offers while its turn
+/// waits in its runtime, changed one request at a time, and withdraw them
+/// before the message's outcome shows. A message without a feedback target,
+/// such as a turn its runtime opened, gets no reaction at all.
 ///
 /// A message's reactions follow the settings it was admitted with, so its
 /// outcome replaces the processing reaction that was added, whichever emoji
@@ -90,6 +109,9 @@ struct Owned {
     unanswered: Mutex<HashMap<String, watch::Receiver<()>>>,
     /// Slots for the outcome reactions shown beside work.
     outcomes: Arc<Semaphore>,
+    /// The control emoji each message offers, by feedback target, changed by
+    /// one request at a time.
+    controls: Mutex<HashMap<String, Arc<tokio::sync::Mutex<Vec<String>>>>>,
     tasks: TaskTracker,
     stopped: CancellationToken,
 }
@@ -102,6 +124,7 @@ impl Reactions {
             admitted: Mutex::new(HashMap::new()),
             unanswered: Mutex::new(HashMap::new()),
             outcomes: Arc::new(Semaphore::new(OUTCOMES)),
+            controls: Mutex::new(HashMap::new()),
             tasks: TaskTracker::new(),
             stopped: CancellationToken::new(),
         }))
@@ -178,10 +201,14 @@ impl Reactions {
         Some(ended)
     }
 
-    /// The settings serving, which the provider's tests admit messages with.
-    #[cfg(test)]
+    /// The settings serving, which feedback follows.
     pub(crate) fn settings(&self) -> &Settings {
         &self.0.settings
+    }
+
+    /// The Discord client feedback is sent with.
+    pub(crate) fn http(&self) -> &Arc<DiscordHttp> {
+        &self.0.http
     }
 
     /// Runs `feedback` as a task these reactions own, until it ends or they
@@ -242,15 +269,21 @@ impl Reactions {
 
     async fn show(&self, target: &str, feedback: Feedback, config: Arc<DiscordConfig>) {
         let Owned { http, stopped, .. } = &*self.0;
-        if !config.reactions {
+        if target.is_empty() {
             return;
         }
         let emoji = match feedback {
             Feedback::Delivered => &config.delivered_emoji,
             Feedback::Failed => &config.failed_emoji,
             Feedback::Uncertain => &config.uncertain_emoji,
+            Feedback::Steered => &config.steered_emoji,
+            Feedback::Stopped => &config.stopped_emoji,
         };
         let shown = stopped.run_until_cancelled(async {
+            self.change_controls(target, Vec::new()).await;
+            if !config.reactions {
+                return;
+            }
             self.after_processing(target).await;
             if let Err(failure) =
                 delete_feedback_reaction(http, target, &config.processing_emoji).await
@@ -281,6 +314,65 @@ impl Reactions {
             this.show(&target, feedback, config).await;
             drop(slot);
         });
+    }
+
+    /// Offers `actions` on the message as the reactions the settings serving
+    /// name for them, withdrawing those it offered before and no longer
+    /// does: none withdraws them all. With reactions turned off nothing is
+    /// offered.
+    pub(crate) async fn offer_controls(&self, target: &str, actions: &[ControlAction]) {
+        let config = self.0.settings.current();
+        let wanted = actions
+            .iter()
+            .filter(|_| config.reactions)
+            .map(|action| config.control_emoji(*action).to_owned())
+            .collect();
+        self.0
+            .stopped
+            .run_until_cancelled(self.change_controls(target, wanted))
+            .await;
+    }
+
+    /// Makes the message's control reactions `wanted`, after any change
+    /// under way. A reaction Discord may not have removed stays recorded, so
+    /// a later change removes it.
+    async fn change_controls(&self, target: &str, wanted: Vec<String>) {
+        if target.is_empty() {
+            return;
+        }
+        let offer = {
+            let mut controls = lock(&self.0.controls);
+            if wanted.is_empty() && !controls.contains_key(target) {
+                return;
+            }
+            controls.entry(target.to_owned()).or_default().clone()
+        };
+        let mut offered = offer.lock().await;
+        let http = &self.0.http;
+        let mut kept = Vec::new();
+        for emoji in offered.drain(..) {
+            if wanted.contains(&emoji) {
+                kept.push(emoji);
+            } else if let Err(failure) = delete_feedback_reaction(http, target, &emoji).await {
+                warn!(error = %failure, %target, "Discord control reaction removal failed");
+                kept.push(emoji);
+            }
+        }
+        for emoji in wanted {
+            if kept.contains(&emoji) {
+                continue;
+            }
+            if let Err(failure) = create_feedback_reaction(http, target, &emoji).await {
+                warn!(error = %failure, %target, "Discord control reaction failed");
+            }
+            kept.push(emoji);
+        }
+        *offered = kept;
+        let mut controls = lock(&self.0.controls);
+        // Nobody else waits on an empty offer: it is forgotten.
+        if offered.is_empty() && Arc::strong_count(&offer) == 2 {
+            controls.remove(target);
+        }
     }
 
     /// Ends the feedback under way when the provider stops: its tasks get
@@ -490,6 +582,11 @@ async fn attempt_delivery(
     http: &DiscordHttp,
     delivery: &Delivery,
 ) -> (DeliveryOutcome, Option<String>, Feedback) {
+    // A turn steered into another or stopped sends nothing: its message
+    // shows how it ended.
+    if let Some(silence) = delivery.silence {
+        return (DeliveryOutcome::Delivered, None, silence.into());
+    }
     let channel = match delivery.target_id.parse::<Id<ChannelMarker>>() {
         Ok(channel) => channel,
         Err(failure) => {

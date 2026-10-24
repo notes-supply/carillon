@@ -21,6 +21,7 @@ use crate::{
     activity::{CardRecords, activity_monitor},
     client::CoreClient,
     config::{self, DiscordConfig, Settings, state_directory},
+    controls,
     conversations::{
         IncomingMessage, Participation, admit_identity, admit_message,
         prepare_deterministic_conversation,
@@ -252,9 +253,8 @@ async fn connect(
     // last a stop lets it finish, and then finishes the cards those settle.
     let mut monitoring = tokio::spawn(activity_monitor(
         state.core.clone(),
-        http.clone(),
         state.module.clone(),
-        state.settings.clone(),
+        reactions.clone(),
         cards,
         heard,
         stopping.clone(),
@@ -850,6 +850,15 @@ fn take_event(
             // here is answered before the provider stops, and Discord takes
             // its acknowledgement only once, so a replay never runs it again.
             interactions.spawn(handle_interaction(state.clone(), interaction.0));
+            None
+        }
+        // Like an interaction, a control is a task the provider finishes
+        // before it stops.
+        Event::ReactionAdd(reaction) => {
+            if let Some(action) = controls::admitted(&state.settings.current(), &reaction) {
+                let message = reaction.message_id.to_string();
+                interactions.spawn(controls::relay(state.core.clone(), message, action));
+            }
             None
         }
         _ => None,

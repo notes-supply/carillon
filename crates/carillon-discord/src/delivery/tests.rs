@@ -899,3 +899,5 @@ async fn a_stopping_provider_ends_its_reactions_within_the_grace() -> anyhow::Re
     );
     Ok(())
 }
+
+mod silence;

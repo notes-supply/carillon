@@ -8,6 +8,7 @@ use carillon_protocol::model::{
     PROVIDER_HEADER,
 };
 use carillon_protocol::models::ModelState;
+use carillon_protocol::turns::{ControlAction, TurnControl};
 use reqwest::{Client, IntoUrl, Method, RequestBuilder, Url};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -150,6 +151,26 @@ impl CoreClient {
         let page: JobPage =
             core_json(self.request(Method::GET, url), "read named jobs from core").await?;
         Ok(page.jobs)
+    }
+
+    /// Asks core to relay a person's control of the running turn `event_id`
+    /// became to the runtime holding it.
+    pub(crate) async fn control(
+        &self,
+        event_id: &str,
+        action: ControlAction,
+    ) -> Result<(), InterfaceError> {
+        let mut url = Url::parse(&self.url("/v1/events"))
+            .map_err(|error| InterfaceError::protocol(error.to_string()))?;
+        url.path_segments_mut()
+            .map_err(|()| InterfaceError::protocol("core URL cannot have a path".to_owned()))?
+            .extend([event_id, "control"]);
+        let request = self
+            .request(Method::POST, url)
+            .timeout(MODEL_CALL_TIMEOUT)
+            .json(&TurnControl { action });
+        core_send(request, "control a turn through core").await?;
+        Ok(())
     }
 
     pub(crate) fn authenticates(&self, token: &str) -> bool {

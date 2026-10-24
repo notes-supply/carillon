@@ -34,12 +34,20 @@ and controls with provider and choice display names.
   conversation's messages and `/command` submissions in arrival order, with
   bounded queues.
 - [`delivery`](src/delivery.rs): sends answers (split at Discord's limit, with
-  mentions disabled) from core's outbox, and owns reactions as best-effort
-  feedback.
+  mentions disabled) from core's outbox, and owns the bot's reactions as
+  best-effort feedback: a message's processing and outcome reactions and the
+  controls it offers, withdrawn before its outcome shows. A steered or
+  stopped turn sends nothing and shows its reaction; a turn without a message
+  behind it, which its runtime opened, gets none.
+- [`controls`](src/controls.rs): admits a control reaction as a message is
+  admitted, by guild and user, maps its emoji to steer, interrupt or stop,
+  and has core relay it to the runtime holding the message's turn.
 - [`activity`](src/activity.rs): one card per job, drawn by the module from
   core's record of the job, kept as a summary or removed when the job ends,
   and recorded in `activity-cards.json` so a restart carries on with the same
-  card. Every Discord call is bounded, including rate-limit waits.
+  card. Every Discord call is bounded, including rate-limit waits. It types
+  while a job's turn runs, not while it waits in its runtime, and offers the
+  controls the runtime's snapshot lists while it waits.
 - [`module`](src/module.rs): hosts the replaceable Discord module (commands,
   controls and cards) and switches to the one the settings declare under the
   maintenance lock. The guest library lives in
