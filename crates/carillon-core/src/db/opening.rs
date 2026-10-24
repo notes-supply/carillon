@@ -4,7 +4,7 @@ use carillon_protocol::{
 };
 
 use super::{
-    Database, OptionalExtension, Result, event_receipt, params, timestamp, write_transaction,
+    Database, OptionalExtension, Result, params, state_column, timestamp, write_transaction,
 };
 
 /// How the event identities of turns runtimes open begin, followed by the
@@ -16,6 +16,8 @@ pub(crate) const RUNTIME_EVENT_PREFIX: &str = "runtime:";
 #[derive(Debug)]
 pub(crate) enum Opened {
     Receipt(EventReceipt),
+    /// The key opened a turn in another conversation.
+    Elsewhere,
     /// The agent runs on another runtime now, or no longer exists.
     Moved,
     /// The conversation has no turn yet.
@@ -25,11 +27,11 @@ pub(crate) enum Opened {
 }
 
 impl Database {
-    /// Returns the receipt of the turn the same key opened before, or else
-    /// records a running turn `runtime_id` opened in a conversation whose
-    /// latest turn is its own and whose agent runs there now, as
-    /// `agent_runtime` says, with that turn's target and snapshots and
-    /// nothing a person sent.
+    /// Returns the receipt of the turn the same key opened before in the
+    /// same conversation, or else records a running turn `runtime_id`
+    /// opened in a conversation whose latest turn is its own and whose agent
+    /// runs there now, as `agent_runtime` says, with that turn's target and
+    /// snapshots and nothing a person sent.
     pub(crate) fn open_turn(
         &self,
         runtime_id: &str,
@@ -39,9 +41,30 @@ impl Database {
         let event_id = format!("{RUNTIME_EVENT_PREFIX}{runtime_id}:{}", opening.key);
         let mut connection = self.connect()?;
         let transaction = write_transaction(&mut connection)?;
-        if let Some(receipt) = event_receipt(&transaction, &opening.interface_id, &event_id)? {
-            transaction.commit()?;
-            return Ok(Opened::Receipt(receipt));
+        let earlier = transaction
+            .query_row(
+                "SELECT id, state, agent_id = ?3 AND audience_id = ?4 FROM turns
+                 WHERE interface_id = ?1 AND event_id = ?2",
+                params![
+                    opening.interface_id,
+                    event_id,
+                    opening.agent_id,
+                    opening.audience_id
+                ],
+                |row| Ok((row.get::<_, String>(0)?, state_column(row, 1)?, row.get(2)?)),
+            )
+            .optional()?;
+        match earlier {
+            Some((turn_id, state, true)) => {
+                return Ok(Opened::Receipt(EventReceipt {
+                    event_id,
+                    turn_id,
+                    state,
+                    duplicate: true,
+                }));
+            }
+            Some((_, _, false)) => return Ok(Opened::Elsewhere),
+            None => {}
         }
         if agent_runtime != Some(runtime_id) {
             return Ok(Opened::Moved);

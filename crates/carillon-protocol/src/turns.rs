@@ -93,7 +93,7 @@ impl FromStr for Silence {
 
 /// A turn a durable runtime opens in an existing conversation of its own,
 /// for a schedule or a subagent's report. `key` makes it idempotent: the
-/// same key opens one turn.
+/// same key opens one turn, and another conversation using it is refused.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TurnOpening {

@@ -51,12 +51,12 @@ impl Core {
         }
     }
 
-    /// Returns the receipt of the turn the same key opened, or else opens a
-    /// running turn `runtime_id` will settle, in an existing conversation of
-    /// its own whose agent runs there now.
+    /// Returns the receipt of the turn the same key opened in the same
+    /// conversation, or else opens a running turn `runtime_id` will settle,
+    /// in an existing conversation of its own whose agent runs there now.
     /// # Errors
-    /// Returns a conversation that is not the runtime's as a conflict, or
-    /// storage errors.
+    /// Returns a conversation that is not the runtime's, or a key another
+    /// conversation used, as a conflict, or storage errors.
     pub(crate) fn open_turn(
         &self,
         runtime_id: &str,
@@ -71,6 +71,10 @@ impl Core {
             .open_turn(runtime_id, agent_runtime, opening)?
         {
             Opened::Receipt(receipt) => Ok(receipt),
+            Opened::Elsewhere => Err(CoreError::Conflict(format!(
+                "the key {} opened a turn in another conversation",
+                opening.key
+            ))),
             Opened::Moved => Err(CoreError::Conflict(format!(
                 "{} does not run on {runtime_id}",
                 opening.agent_id

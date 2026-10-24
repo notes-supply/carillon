@@ -77,8 +77,8 @@ reply. The outcome and its delivery commit together, once; the same outcome
 again is recorded, another is refused. A turn still queued is settled too,
 since the runtime may hold a turn whose 202 core never recorded. A durable
 runtime may also open a running turn in a conversation whose agent runs on
-it, for a schedule or a subagent's report, idempotent by its key; such a turn
-has no person or message behind it. Interfaces may not use event IDs that
+it, for a schedule or a subagent's report, idempotent by its key, which no
+other conversation may reuse; such a turn has no person or message behind it. Interfaces may not use event IDs that
 begin `runtime:`.
 
 Agent assignments are fixed for core's lifetime. If an agent moves to
