@@ -16,10 +16,10 @@
 //! - One accepted event is one turn row, keyed by (interface, event); the row
 //!   carries what the event said and what happened to it.
 //! - Messages in one conversation (interface, agent, audience) run in
-//!   acceptance order. Only queued or running predecessors block later
-//!   messages. An observation (a turn whose `follow_up_json` holds a
-//!   runtime's cursor) neither waits for messages nor holds them back.
-//!   Session continuity belongs to the runtime.
+//!   acceptance order. Only queued or running predecessors on the same
+//!   runtime block later messages. An observation (a turn whose
+//!   `follow_up_json` holds a runtime's cursor) neither waits for messages
+//!   nor holds them back. Session continuity belongs to the runtime.
 //! - Every turn names its origin: a message turn itself, and an observation
 //!   the origin of the turn that queued it, recorded in the same
 //!   transaction, so a chain of observations keeps the message's identity.
@@ -349,13 +349,12 @@ impl Database {
     /// Claims a runtime's oldest claimable turn of a lane and marks it
     /// running.
     ///
-    /// A message is claimable only when its conversation has no earlier
-    /// message queued or running, which serializes each conversation FIFO.
+    /// A message is claimable only when its conversation has no earlier message
+    /// queued or running on its runtime, which serializes each conversation FIFO.
     /// Interrupted turns are terminal and never hold later messages. An
     /// observation only reads native records, so it neither waits for
     /// messages nor holds them back. Once `stopping` is cancelled none is
-    /// claimed, even by a caller that was waiting for the database writer
-    /// when it was.
+    /// claimed, even by a caller that was waiting for the database writer when it was.
     pub(crate) fn claim(
         &self,
         runtime_id: &str,
@@ -373,6 +372,7 @@ impl Database {
                      WHERE earlier.interface_id = t.interface_id
                        AND earlier.agent_id = t.agent_id
                        AND earlier.audience_id = t.audience_id
+                       AND earlier.runtime_id = t.runtime_id
                        AND earlier.state IN ('queued', 'running')
                        AND earlier.acceptance_sequence < t.acceptance_sequence
                        AND earlier.follow_up_json IS NULL
