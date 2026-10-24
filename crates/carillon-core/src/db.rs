@@ -43,6 +43,7 @@ mod recovery;
 mod settle;
 
 pub(crate) use admission::Admission;
+pub(crate) use dispatch::QueuedTurn;
 pub(crate) use jobs::JobPage;
 pub(crate) use opening::{Opened, RUNTIME_EVENT_PREFIX};
 pub(crate) use settle::{Settled, Settlement};
@@ -78,24 +79,13 @@ pub(crate) struct Database {
     path: PathBuf,
 }
 
-/// A turn this process took to run: a queued one it moved to `running`,
-/// which permits executing runtime work and recording its outcome, or a
-/// durable runtime's queued one it is handing over.
+/// A queued turn after this process moved it to `running`. Holding one is the
+/// permission to execute runtime work and to record its outcome, so only a
+/// claim makes one.
 #[derive(Clone, Debug)]
 pub(crate) struct ClaimedTurn {
-    pub turn_id: String,
-    pub interface_id: String,
-    pub agent_id: String,
-    pub audience_id: String,
-    pub runtime_id: String,
-    pub target_id: String,
-    pub feedback_target_id: String,
-    pub input: String,
-    pub resource_snapshot_id: String,
-    pub native: Value,
-    /// The runtime's cursor, on an observation; `None` on a message.
-    pub follow_up: Option<Value>,
-    pub attachments: Vec<CapturedFile>,
+    pub(crate) turn: QueuedTurn,
+    _claim: (),
 }
 
 #[derive(Clone, Debug)]
@@ -416,7 +406,7 @@ impl Database {
         }
         turn.attachments = captured_files(&transaction, Some(&turn.turn_id))?;
         transaction.commit()?;
-        Ok(Some(turn))
+        Ok(Some(ClaimedTurn { turn, _claim: () }))
     }
 
     /// Files of `turn`'s conversation, accepted before it, that no completed
@@ -425,7 +415,7 @@ impl Database {
     /// `bytes` bytes. The rest wait for later turns.
     pub(crate) fn unnoted_files(
         &self,
-        turn: &ClaimedTurn,
+        turn: &QueuedTurn,
         files: u32,
         bytes: u64,
     ) -> Result<Vec<TurnFiles>> {
@@ -485,7 +475,7 @@ impl Database {
     /// interface sent. It does not hold back the conversation's later messages.
     pub(crate) fn complete_turn(
         &self,
-        turn: &ClaimedTurn,
+        ClaimedTurn { turn, .. }: &ClaimedTurn,
         response: &RuntimeTurnResponse,
     ) -> Result<()> {
         let mut connection = self.connect()?;
@@ -534,7 +524,7 @@ impl Database {
     /// is the runtime's final report of the failed turn, when it gave one.
     pub(crate) fn interrupt_turn(
         &self,
-        turn: &ClaimedTurn,
+        ClaimedTurn { turn, .. }: &ClaimedTurn,
         error: &str,
         notice: &str,
         activity: Option<&TurnActivity>,
@@ -564,7 +554,7 @@ impl Database {
 
     /// Returns a running turn to the queue. Only valid when the runtime
     /// provably never received the work, or for an observation, which only reads.
-    pub(crate) fn requeue_turn(&self, turn: &ClaimedTurn) -> Result<()> {
+    pub(crate) fn requeue_turn(&self, ClaimedTurn { turn, .. }: &ClaimedTurn) -> Result<()> {
         let changed = self.connect()?.execute(
             "UPDATE turns SET state = 'queued' WHERE id = ?1 AND runtime_id = ?2 AND state = 'running'",
             params![turn.turn_id, turn.runtime_id],
@@ -878,7 +868,7 @@ fn write_transaction(connection: &mut Connection) -> Result<Transaction<'_>> {
 /// a delivery row yet, so a conflict here is a real invariant violation.
 fn enqueue_delivery(
     transaction: &Transaction<'_>,
-    turn: &ClaimedTurn,
+    turn: &QueuedTurn,
     content: &str,
     now: i64,
 ) -> Result<()> {
@@ -1058,6 +1048,7 @@ mod tests {
             database
                 .claim("runtime", Lane::Messages, &CancellationToken::new())?
                 .context("next message blocked")?
+                .turn
                 .turn_id,
             next.turn_id
         );
@@ -1075,7 +1066,7 @@ mod tests {
         )?);
         assert_eq!(
             database
-                .inspect_turn(&turn.turn_id)?
+                .inspect_turn(&turn.turn.turn_id)?
                 .context("missing turn")?
                 .state,
             TurnState::Interrupted
@@ -1151,27 +1142,27 @@ mod tests {
         let report = database
             .claim("runtime", Lane::Observations, &CancellationToken::new())?
             .context("observation missing")?;
-        assert_eq!(report.input, "");
-        assert_eq!(report.follow_up, Some(cursor));
-        assert_eq!(report.native, json!({}));
+        assert_eq!(report.turn.input, "");
+        assert_eq!(report.turn.follow_up, Some(cursor));
+        assert_eq!(report.turn.native, json!({}));
         assert_eq!(
             (
-                report.audience_id.as_str(),
-                report.target_id.as_str(),
-                report.feedback_target_id.as_str()
+                report.turn.audience_id.as_str(),
+                report.turn.target_id.as_str(),
+                report.turn.feedback_target_id.as_str()
             ),
             (
-                first.audience_id.as_str(),
-                first.target_id.as_str(),
-                first.feedback_target_id.as_str()
+                first.turn.audience_id.as_str(),
+                first.turn.target_id.as_str(),
+                first.turn.feedback_target_id.as_str()
             )
         );
         assert_eq!(
             database
-                .event_receipt("discord", &format!("follow-up:{}", first.turn_id))?
+                .event_receipt("discord", &format!("follow-up:{}", first.turn.turn_id))?
                 .context("follow-up receipt missing")?
                 .turn_id,
-            report.turn_id
+            report.turn.turn_id
         );
         // While it observes, the conversation's next messages run, in order.
         accept(&database, "two", "conversation")?;
@@ -1216,7 +1207,7 @@ mod tests {
         let resumed = database
             .claim("runtime", Lane::Observations, &CancellationToken::new())?
             .context("observation not resumed")?;
-        assert_eq!(resumed.turn_id, report.turn_id);
+        assert_eq!(resumed.turn.turn_id, report.turn.turn_id);
         complete(&database, &resumed, "the report")?;
         let mut contents = Vec::new();
         while let Some(delivery) = database.claim_delivery("discord", "instance")? {
@@ -1262,7 +1253,7 @@ mod tests {
         database.complete_turn(
             &first,
             &RuntimeTurnResponse {
-                correlation_id: first.turn_id.clone(),
+                correlation_id: first.turn.turn_id.clone(),
                 output: "delegated".to_owned(),
                 follow_up: Some(cursor.clone()),
                 unanswered_left: false,
@@ -1288,7 +1279,7 @@ mod tests {
         database.complete_turn(
             turn,
             &RuntimeTurnResponse {
-                correlation_id: turn.turn_id.clone(),
+                correlation_id: turn.turn.turn_id.clone(),
                 output: output.to_owned(),
                 follow_up: None,
                 unanswered_left: false,
@@ -1365,18 +1356,18 @@ mod tests {
             .claim("runtime", Lane::Messages, &CancellationToken::new())?
             .context("first turn missing")?;
         let message = job(&database, &[])?;
-        assert_eq!(message.origin.turn_id, first.turn_id);
+        assert_eq!(message.origin.turn_id, first.turn.turn_id);
         assert_eq!(message.target_id, "channel");
         assert_eq!(
             turns(&message),
-            [(first.turn_id.clone(), TurnState::Running, None, None)]
+            [(first.turn.turn_id.clone(), TurnState::Running, None, None)]
         );
         let answer = |turn: &super::ClaimedTurn, follow_up: Option<serde_json::Value>, calls| {
             database.complete_turn(
                 turn,
                 &RuntimeTurnResponse {
-                    correlation_id: turn.turn_id.clone(),
-                    output: format!("answer of {}", turn.turn_id),
+                    correlation_id: turn.turn.turn_id.clone(),
+                    output: format!("answer of {}", turn.turn.turn_id),
                     follow_up,
                     unanswered_left: false,
                     attachments_left: false,
@@ -1414,11 +1405,11 @@ mod tests {
         let reading = database
             .claim("runtime", Lane::Observations, &CancellationToken::new())?
             .context("observation missing")?;
-        assert_eq!(reading.turn_id, observation.turn_id);
+        assert_eq!(reading.turn.turn_id, observation.turn_id);
         answer(&reading, Some(json!({"after": 2})), 0)?;
         assert_eq!(
             send(DeliveryOutcome::Delivered)?.origin.turn_id,
-            first.turn_id
+            first.turn.turn_id
         );
         let last = database
             .claim("runtime", Lane::Observations, &CancellationToken::new())?
@@ -1427,24 +1418,24 @@ mod tests {
         // Ended, its last answer not yet sent: core no longer lists the job
         // as at work, and a read naming it shows how it stands.
         assert!(at_work(&database, "discord")?.is_empty());
-        let ended = job(&database, &[&first.turn_id])?;
+        let ended = job(&database, &[&first.turn.turn_id])?;
         assert_eq!(
             turns(&ended),
             [
                 (
-                    first.turn_id.clone(),
+                    first.turn.turn_id.clone(),
                     TurnState::Completed,
                     Some(DeliveryState::Delivered),
                     Some(2)
                 ),
                 (
-                    reading.turn_id,
+                    reading.turn.turn_id,
                     TurnState::Completed,
                     Some(DeliveryState::Delivered),
                     Some(0)
                 ),
                 (
-                    last.turn_id,
+                    last.turn.turn_id,
                     TurnState::Completed,
                     Some(DeliveryState::Pending),
                     None
@@ -1452,7 +1443,7 @@ mod tests {
             ]
         );
         send(DeliveryOutcome::Uncertain)?;
-        let settled = job(&database, &[&first.turn_id])?;
+        let settled = job(&database, &[&first.turn.turn_id])?;
         assert_eq!(
             settled.turns.last().and_then(|turn| turn.delivery),
             Some(DeliveryState::Uncertain)
@@ -1478,12 +1469,12 @@ mod tests {
             .claim_delivery("discord", "instance")?
             .context("notice missing")?;
         assert_eq!(notice.turn_state, TurnState::Interrupted);
-        assert_eq!(notice.origin.turn_id, failed.turn_id);
-        let stopped = job(&database, &[&failed.turn_id])?;
+        assert_eq!(notice.origin.turn_id, failed.turn.turn_id);
+        let stopped = job(&database, &[&failed.turn.turn_id])?;
         assert_eq!(
             turns(&stopped),
             [(
-                failed.turn_id,
+                failed.turn.turn_id,
                 TurnState::Interrupted,
                 Some(DeliveryState::Delivering),
                 Some(1)
@@ -1498,16 +1489,16 @@ mod tests {
         database.complete_turn(
             turn,
             &RuntimeTurnResponse {
-                correlation_id: turn.turn_id.clone(),
+                correlation_id: turn.turn.turn_id.clone(),
                 output: "delegated".to_owned(),
-                follow_up: Some(json!({"after": turn.turn_id})),
+                follow_up: Some(json!({"after": turn.turn.turn_id})),
                 unanswered_left: false,
                 activity: None,
                 attachments_left: false,
             },
         )?;
         Ok(database
-            .event_receipt("discord", &format!("follow-up:{}", turn.turn_id))?
+            .event_receipt("discord", &format!("follow-up:{}", turn.turn.turn_id))?
             .context("observation missing")?
             .turn_id)
     }
@@ -1542,7 +1533,7 @@ mod tests {
         let first = database
             .claim("runtime", Lane::Messages, &CancellationToken::new())?
             .context("first turn missing")?;
-        assert_eq!(first.turn_id, one.turn_id);
+        assert_eq!(first.turn.turn_id, one.turn_id);
         let observation = continue_with_observation(&database, &first)?;
         let named = [
             other.turn_id.clone(),
@@ -1607,7 +1598,7 @@ mod tests {
         let mut turn = database
             .claim("runtime", Lane::Messages, &CancellationToken::new())?
             .context("message missing")?;
-        let mut chain = vec![turn.turn_id.clone()];
+        let mut chain = vec![turn.turn.turn_id.clone()];
         for _ in 0..3 * JOB_TURN_LIMIT {
             chain.push(continue_with_observation(&database, &turn)?);
             turn = database
@@ -1682,7 +1673,7 @@ mod tests {
         database.complete_turn(
             &first,
             &RuntimeTurnResponse {
-                correlation_id: first.turn_id.clone(),
+                correlation_id: first.turn.turn_id.clone(),
                 output: "first reply".to_owned(),
                 follow_up: None,
                 unanswered_left: false,
@@ -1701,7 +1692,7 @@ mod tests {
              BEGIN SELECT RAISE(ABORT, 'injected delivery failure'); END;",
         )?;
         let response = RuntimeTurnResponse {
-            correlation_id: second.turn_id.clone(),
+            correlation_id: second.turn.turn_id.clone(),
             output: "second reply".to_owned(),
             follow_up: None,
             unanswered_left: false,
@@ -1714,14 +1705,14 @@ mod tests {
             .context("injected failure did not fire")?;
         assert!(failure.to_string().contains("injected delivery failure"));
         let inspection = database
-            .inspect_turn(&second.turn_id)?
+            .inspect_turn(&second.turn.turn_id)?
             .context("second turn disappeared")?;
         assert_eq!(inspection.state, TurnState::Running);
         assert_eq!(inspection.output, None);
         assert_eq!(
             database.connect()?.query_row(
                 "SELECT COUNT(*) FROM deliveries WHERE turn_id = ?1",
-                [&second.turn_id],
+                [&second.turn.turn_id],
                 |row| row.get::<_, u32>(0),
             )?,
             0
@@ -1732,7 +1723,7 @@ mod tests {
         database.complete_turn(&second, &response)?;
         assert_eq!(
             database
-                .inspect_turn(&second.turn_id)?
+                .inspect_turn(&second.turn.turn_id)?
                 .context("missing turn")?
                 .state,
             TurnState::Completed
@@ -1766,7 +1757,7 @@ mod tests {
             let first = database
                 .claim("runtime", Lane::Messages, &CancellationToken::new())?
                 .context("first missing")?;
-            assert_eq!(first.turn_id, "z-first");
+            assert_eq!(first.turn.turn_id, "z-first");
             assert!(
                 database
                     .claim("runtime", Lane::Messages, &CancellationToken::new())?
@@ -1776,7 +1767,7 @@ mod tests {
             let second = database
                 .claim("runtime", Lane::Messages, &CancellationToken::new())?
                 .context("second missing")?;
-            assert_eq!(second.turn_id, "a-second");
+            assert_eq!(second.turn.turn_id, "a-second");
         }
         Ok(())
     }
@@ -1802,6 +1793,7 @@ mod tests {
             database
                 .claim("runtime", Lane::Messages, &CancellationToken::new())?
                 .context("blocked")?
+                .turn
                 .turn_id,
             next.turn_id
         );
@@ -1822,7 +1814,7 @@ mod tests {
             database.complete_turn(
                 &turn,
                 &RuntimeTurnResponse {
-                    correlation_id: turn.turn_id.clone(),
+                    correlation_id: turn.turn.turn_id.clone(),
                     output: output.to_owned(),
                     follow_up: None,
                     unanswered_left: false,
@@ -1889,7 +1881,7 @@ mod tests {
             database.complete_turn(
                 &turn,
                 &RuntimeTurnResponse {
-                    correlation_id: turn.turn_id.clone(),
+                    correlation_id: turn.turn.turn_id.clone(),
                     output: output.to_owned(),
                     follow_up: None,
                     unanswered_left: false,
@@ -1897,7 +1889,7 @@ mod tests {
                     attachments_left: false,
                 },
             )?;
-            turns.push(turn.turn_id);
+            turns.push(turn.turn.turn_id.clone());
         }
         let wanted = database
             .claim_turn_delivery("discord", "instance", &turns[1])?
@@ -1959,7 +1951,7 @@ mod tests {
             .claim("runtime", Lane::Messages, &CancellationToken::new())?
             .context("requeued turn could not be claimed again")?;
         let response = RuntimeTurnResponse {
-            correlation_id: requeued.turn_id.clone(),
+            correlation_id: requeued.turn.turn_id.clone(),
             output: "done".to_owned(),
             follow_up: None,
             unanswered_left: false,
@@ -1977,7 +1969,7 @@ mod tests {
             "was not running",
         )?;
         let inspection = database
-            .inspect_turn(&requeued.turn_id)?
+            .inspect_turn(&requeued.turn.turn_id)?
             .context("completed turn disappeared")?;
         assert_eq!(inspection.state, TurnState::Completed);
         assert_eq!(inspection.delivery_state, Some(DeliveryState::Pending));

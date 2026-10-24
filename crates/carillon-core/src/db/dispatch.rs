@@ -1,13 +1,34 @@
 use rusqlite::Row;
+use serde_json::Value;
 
 use super::{
-    ClaimedTurn, Database, OptionalExtension, Result, captured_files, json_column,
+    CapturedFile, Database, OptionalExtension, Result, captured_files, json_column,
     optional_json_column, write_transaction,
 };
 
+/// A queued turn as core hands it to a runtime: as a claim takes it, or as
+/// a durable runtime's dispatcher hands it over, leaving it queued until the
+/// runtime takes it.
+#[derive(Clone, Debug)]
+pub(crate) struct QueuedTurn {
+    pub turn_id: String,
+    pub interface_id: String,
+    pub agent_id: String,
+    pub audience_id: String,
+    pub runtime_id: String,
+    pub target_id: String,
+    pub feedback_target_id: String,
+    pub input: String,
+    pub resource_snapshot_id: String,
+    pub native: Value,
+    /// The runtime's cursor, on an observation; `None` on a message.
+    pub follow_up: Option<Value>,
+    pub attachments: Vec<CapturedFile>,
+}
+
 /// A queued turn as a claim selects it, without its files.
-pub(super) fn queued_turn(row: &Row<'_>) -> rusqlite::Result<ClaimedTurn> {
-    Ok(ClaimedTurn {
+pub(super) fn queued_turn(row: &Row<'_>) -> rusqlite::Result<QueuedTurn> {
+    Ok(QueuedTurn {
         turn_id: row.get(0)?,
         interface_id: row.get(1)?,
         agent_id: row.get(2)?,
@@ -27,7 +48,7 @@ impl Database {
     /// A durable runtime's oldest queued message, left queued: the runtime
     /// orders its conversations itself, so no earlier turn holds it back.
     /// One dispatcher per runtime hands its turns over in acceptance order.
-    pub(crate) fn next_dispatch(&self, runtime_id: &str) -> Result<Option<ClaimedTurn>> {
+    pub(crate) fn next_dispatch(&self, runtime_id: &str) -> Result<Option<QueuedTurn>> {
         let connection = self.connect()?;
         let turn = connection
             .query_row(
@@ -50,7 +71,7 @@ impl Database {
     /// Records that the durable runtime holds `turn`: it runs there, and its
     /// files are in the runtime's conversation. A turn the runtime settled
     /// before this was recorded keeps its outcome.
-    pub(crate) fn dispatched(&self, turn: &ClaimedTurn) -> Result<()> {
+    pub(crate) fn dispatched(&self, turn: &QueuedTurn) -> Result<()> {
         let mut connection = self.connect()?;
         let transaction = write_transaction(&mut connection)?;
         transaction.execute(

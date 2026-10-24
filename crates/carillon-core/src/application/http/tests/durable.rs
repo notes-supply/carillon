@@ -448,7 +448,7 @@ async fn a_runtime_made_durable_takes_its_running_message_and_answers_no_observa
     let state = configured(&fixture);
     assert_eq!(state.core.recover_interrupted()?, 2);
     assert_eq!(
-        state_of(&state, &observation.turn_id)?,
+        state_of(&state, &observation.turn.turn_id)?,
         TurnState::Interrupted
     );
     let notices = delivered(&state)?;

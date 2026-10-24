@@ -146,10 +146,10 @@ fn a_conversations_messages_wait_only_for_its_own_runtimes_turns() -> Result<()>
     let claimed = database
         .claim("replacement", Lane::Messages, &CancellationToken::new())?
         .context("the other runtime's turn held the message back")?;
-    assert_eq!(claimed.turn_id, next.turn_id);
+    assert_eq!(claimed.turn.turn_id, next.turn_id);
     assert_eq!(
         database
-            .inspect_turn(&held.turn_id)?
+            .inspect_turn(&held.turn.turn_id)?
             .context("missing held turn")?
             .state,
         TurnState::Running

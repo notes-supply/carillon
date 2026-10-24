@@ -1484,7 +1484,7 @@ async fn a_closing_runtime_gives_no_answer_rather_than_a_failure() -> Result<()>
         post(|| async { (StatusCode::SERVICE_UNAVAILABLE, Json(json!({}))) }),
     );
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
-    let request = state.core.runtime_request(&turn, Vec::new());
+    let request = state.core.runtime_request(&turn.turn, Vec::new());
     let outcome = call_runtime(&state.client, &runtime, "unused", request).await;
     // Work may have run, so it is not `Retry`; an observation is asked again.
     assert!(
@@ -1545,7 +1545,7 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
         "malformed",
         "mismatch",
     ] {
-        let mut request = state.core.runtime_request(&turn, Vec::new());
+        let mut request = state.core.runtime_request(&turn.turn, Vec::new());
         request.input = input.to_owned();
         let outcome = call_runtime(&state.client, &runtime, "unused", request).await;
         assert!(
@@ -1554,7 +1554,7 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
         );
     }
     // An explanation is not proof that no model work ran: it is not `Retry`.
-    let mut request = state.core.runtime_request(&turn, Vec::new());
+    let mut request = state.core.runtime_request(&turn.turn, Vec::new());
     request.input = "explained".to_owned();
     let outcome = call_runtime(&state.client, &runtime, "unused", request).await;
     let Err(TurnFailure::Reported(reported)) = &outcome else {
@@ -1566,7 +1566,7 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
         &state.client,
         &runtime,
         "unused",
-        state.core.runtime_request(&turn, Vec::new()),
+        state.core.runtime_request(&turn.turn, Vec::new()),
     )
     .await
     .map_err(|failure| match failure {
@@ -1575,7 +1575,7 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
         | TurnFailure::Uncertain(error) => error,
         TurnFailure::Reported(reported) => anyhow!("{reported:?}"),
     })?;
-    assert_eq!(response.correlation_id, turn.turn_id);
+    assert_eq!(response.correlation_id, turn.turn.turn_id);
     server.abort();
     // Reserve a local TCP port without listening, so refusal cannot hit another service.
     let socket = tokio::net::TcpSocket::new_v4()?;
@@ -1586,7 +1586,7 @@ async fn runtime_http_boundary_classifies_and_validates_responses() -> Result<()
             &state.client,
             &runtime,
             "unused",
-            state.core.runtime_request(&turn, Vec::new())
+            state.core.runtime_request(&turn.turn, Vec::new())
         )
         .await,
         Err(TurnFailure::Retry(_))
@@ -2287,12 +2287,12 @@ async fn a_turn_takes_as_long_as_its_runtime_and_ends_when_its_caller_stops() ->
         &state.client,
         &runtime,
         "unused",
-        state.core.runtime_request(&turn, Vec::new()),
+        state.core.runtime_request(&turn.turn, Vec::new()),
     )
     .await;
     // No transport deadline cuts the work short.
     assert!(
-        matches!(&response, Ok(answer) if answer.correlation_id == turn.turn_id),
+        matches!(&response, Ok(answer) if answer.correlation_id == turn.turn.turn_id),
         "{response:?}"
     );
     assert!(started.elapsed() >= Duration::from_mins(31));
@@ -2306,7 +2306,7 @@ async fn a_turn_takes_as_long_as_its_runtime_and_ends_when_its_caller_stops() ->
         .context("the answered request did not end")?;
     // A caller that stops, as a stopping worker does, ends the request at
     // the runtime, which takes it as cancellation.
-    let request = state.core.runtime_request(&turn, Vec::new());
+    let request = state.core.runtime_request(&turn.turn, Vec::new());
     let (client, cancelled) = (state.client.clone(), runtime.clone());
     let call =
         tokio::spawn(async move { call_runtime(&client, &cancelled, "unused", request).await });
@@ -2459,7 +2459,7 @@ async fn a_failed_turns_report_crosses_the_runtime_boundary_with_or_without_an_e
     );
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
     let call = async |input: &str| {
-        let mut request = state.core.runtime_request(&turn, Vec::new());
+        let mut request = state.core.runtime_request(&turn.turn, Vec::new());
         request.input = input.to_owned();
         call_runtime(&state.client, &runtime, "unused", request).await
     };

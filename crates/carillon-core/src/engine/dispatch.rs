@@ -8,7 +8,7 @@ use tracing::warn;
 use super::{ALTERED_ATTACHMENT, Core, UNREADABLE_ATTACHMENT, WorkerStep, interrupted};
 use crate::{
     attachments::Unusable,
-    db::{ClaimedTurn, Settlement},
+    db::{QueuedTurn, Settlement},
 };
 
 /// Why a durable runtime does not hold a turn core handed it.
@@ -116,7 +116,7 @@ impl Core {
     /// conversation why.
     async fn refuse(
         &self,
-        turn: &ClaimedTurn,
+        turn: &QueuedTurn,
         error: String,
         explanation: Option<&str>,
     ) -> Result<()> {

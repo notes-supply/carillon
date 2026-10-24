@@ -5,7 +5,7 @@ mod settle;
 
 use crate::{
     attachments::{self, Capture, Reconciled, Unusable},
-    db::{Admission, ClaimedTurn, Database, JobPage, TurnFiles},
+    db::{Admission, ClaimedTurn, Database, JobPage, QueuedTurn, TurnFiles},
     intake::Intake,
     resources,
 };
@@ -489,15 +489,15 @@ impl Core {
             return Ok(WorkerStep::Backoff);
         }
         let (runtime, stopping) = (runtime_id.to_owned(), stopping.clone());
-        let Some(turn) = self
+        let Some(claimed) = self
             .blocking(move |core| core.database.claim(&runtime, lane, &stopping))
             .await?
         else {
             return Ok(WorkerStep::Idle);
         };
-        let step = self.run(&turn, submit).await?;
+        let step = self.run(&claimed, submit).await?;
         // A message that left `running` frees its conversation's next one.
-        if step == WorkerStep::Advanced && turn.follow_up.is_none() {
+        if step == WorkerStep::Advanced && claimed.turn.follow_up.is_none() {
             self.wake(Lane::Messages);
         }
         Ok(step)
@@ -505,7 +505,7 @@ impl Core {
 
     async fn run(
         &self,
-        turn: &ClaimedTurn,
+        claim @ ClaimedTurn { turn, .. }: &ClaimedTurn,
         submit: impl AsyncFnOnce(RuntimeTurnRequest) -> Result<RuntimeTurnResponse, TurnFailure>,
     ) -> Result<WorkerStep> {
         let observation = turn.follow_up.is_some();
@@ -518,7 +518,7 @@ impl Core {
                     Unusable::Altered(message) => (message.clone(), ALTERED_ATTACHMENT),
                     Unusable::Unreadable(error) => (format!("{error:#}"), UNREADABLE_ATTACHMENT),
                 };
-                self.interrupt(turn, message.clone(), interrupted(Some(explanation)), None)
+                self.interrupt(claim, message.clone(), interrupted(Some(explanation)), None)
                     .await
                     .with_context(|| format!("record unrunnable turn {}", turn.turn_id))?;
                 warn!(turn_id = %turn.turn_id, error = %message, "captured attachment is not usable; turn not run");
@@ -552,7 +552,7 @@ impl Core {
                 response.unanswered_left,
                 response.attachments_left,
             );
-            let claimed = turn.clone();
+            let claimed = claim.clone();
             self.blocking(move |core| core.database.complete_turn(&claimed, &response))
                 .await
                 .map_err(TurnFailure::Uncertain)?;
@@ -588,9 +588,9 @@ impl Core {
                 }
                 return Ok(WorkerStep::Advanced);
             }
-            Err(TurnFailure::Retry(failure)) => return self.requeue(turn, &failure).await,
+            Err(TurnFailure::Retry(failure)) => return self.requeue(claim, &failure).await,
             Err(TurnFailure::Unanswered(failure)) if observation => {
-                return self.requeue(turn, &failure).await;
+                return self.requeue(claim, &failure).await;
             }
             Err(TurnFailure::Uncertain(failure) | TurnFailure::Unanswered(failure)) => {
                 (failure.to_string(), interrupted(None), None)
@@ -609,7 +609,7 @@ impl Core {
                 )
             }
         };
-        self.interrupt(turn, error.clone(), notice, activity)
+        self.interrupt(claim, error.clone(), notice, activity)
             .await
             .with_context(|| format!("record failure of turn {}", turn.turn_id))?;
         warn!(turn_id = %turn.turn_id, observation, %error, "turn did not complete");
@@ -633,8 +633,8 @@ impl Core {
 
     /// Returns a turn whose runtime gave no answer to the queue, for its
     /// worker to claim again after backing off.
-    async fn requeue(&self, turn: &ClaimedTurn, failure: &anyhow::Error) -> Result<WorkerStep> {
-        let claimed = turn.clone();
+    async fn requeue(&self, claim: &ClaimedTurn, failure: &anyhow::Error) -> Result<WorkerStep> {
+        let (claimed, turn) = (claim.clone(), &claim.turn);
         self.blocking(move |core| core.database.requeue_turn(&claimed))
             .await
             .with_context(|| format!("requeue turn {}", turn.turn_id))?;
@@ -771,7 +771,7 @@ impl Core {
 
     pub(crate) fn runtime_request(
         &self,
-        turn: &ClaimedTurn,
+        turn: &QueuedTurn,
         unanswered: Vec<UnansweredTurn>,
     ) -> RuntimeTurnRequest {
         RuntimeTurnRequest {
@@ -834,9 +834,9 @@ impl Core {
         .context("check earlier attachments")
     }
 
-    /// Re-read a claimed turn's captured files before any runtime sees them,
+    /// Re-read a turn's captured files before any runtime sees them,
     /// off the async reactor.
-    async fn check_attachments(&self, turn: &ClaimedTurn) -> Result<(), Unusable> {
+    async fn check_attachments(&self, turn: &QueuedTurn) -> Result<(), Unusable> {
         if turn.attachments.is_empty() {
             return Ok(());
         }
