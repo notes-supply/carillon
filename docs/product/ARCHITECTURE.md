@@ -109,7 +109,8 @@ also warn that work
 already started there will not be reported here and that actions already
 taken may have had effects. Delivery is a separate outbox, so a lost
 interface never reruns the model, and a delivery claimed by a crashed
-interface becomes uncertain.
+interface becomes uncertain. A silence sends no message, so it is delivered
+again instead.
 
 ### Maintenance drain
 

@@ -141,6 +141,45 @@ async fn each_outcome_settles_its_turn_and_delivery_once() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn a_silence_a_crashed_interface_claimed_is_delivered_again() -> Result<()> {
+    let directory = tempdir()?;
+    let runtime = DurableRuntime::start().await?;
+    let (_fixture, state) = durable(directory.path(), &runtime)?;
+    let outcomes = [
+        ("one", json!({"outcome": "answered", "output": "Done."})),
+        ("two", json!({"outcome": "stopped"})),
+    ];
+    for (input, outcome) in &outcomes {
+        let receipt = ok(submit(&state, input, input).await)?;
+        assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
+        assert_eq!(
+            settle(&state, RUNTIME, &receipt.turn_id, outcome).await?,
+            StatusCode::NO_CONTENT
+        );
+    }
+    for _ in &outcomes {
+        state
+            .core
+            .claim_delivery("test-interface", "crashed")?
+            .context("no delivery")?;
+    }
+    // A sent message may have gone out; a silence sends none.
+    let reconciled = state
+        .core
+        .reconcile_deliveries("test-interface", "instance")?;
+    assert_eq!(reconciled.feedback_target_ids, ["test-feedback"]);
+    let again = delivered(&state)?;
+    assert_eq!(
+        again
+            .iter()
+            .map(|delivery| delivery.silence)
+            .collect::<Vec<_>>(),
+        [Some(Silence::Stopped)]
+    );
+    Ok(())
+}
+
 async fn open_turn(
     state: &AppState,
     (runtime, token): (&str, &str),

@@ -8,7 +8,8 @@
 //!                   \--------- running (not received, or unanswered observation)
 //!
 //! delivery:  pending -> delivering -> delivered
-//!                                 \-> uncertain (ack lost or claim abandoned)
+//!               ^                 \-> uncertain (ack lost or claim abandoned)
+//!               \--------------------- claim of a silence abandoned
 //! ```
 //!
 //! Invariants:
@@ -575,8 +576,8 @@ impl Database {
     }
 
     /// Releases delivery claims held by other, presumed dead, instances of an
-    /// interface as uncertain, and returns the feedback targets of every
-    /// uncertain delivery so the new instance can surface them.
+    /// interface as uncertain, or as pending for a silence, which sends no
+    /// message, and returns the feedback targets of every uncertain delivery.
     pub(crate) fn reconcile_delivery_claims(
         &self,
         interface_id: &str,
@@ -585,20 +586,19 @@ impl Database {
         let mut connection = self.connect()?;
         let transaction = write_transaction(&mut connection)?;
         transaction.execute(
-            "UPDATE deliveries SET state = 'uncertain', claim_owner = NULL, updated_at = ?3
+            "UPDATE deliveries SET claim_owner = NULL, updated_at = ?3,
+                 state = CASE WHEN silence IS NULL THEN 'uncertain' ELSE 'pending' END
              WHERE interface_id = ?1 AND state = 'delivering'
                AND (claim_owner IS NULL OR claim_owner <> ?2)",
             params![interface_id, owner, timestamp()?],
         )?;
-        let targets = {
-            let mut statement = transaction.prepare(
+        let targets = transaction
+            .prepare(
                 "SELECT DISTINCT feedback_target_id FROM deliveries
                  WHERE interface_id = ?1 AND state = 'uncertain' AND feedback_target_id <> ''",
-            )?;
-            statement
-                .query_map([interface_id], |row| row.get(0))?
-                .collect::<Result<Vec<String>, _>>()?
-        };
+            )?
+            .query_map([interface_id], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
         transaction.commit()?;
         Ok(targets)
     }
