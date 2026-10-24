@@ -49,6 +49,7 @@ import {
   Store,
   Turns,
 } from "./documents.ts";
+import type { McpServer } from "./mcp.ts";
 import type { Catalogue, ModelChoice, ModelChoices } from "./models.ts";
 import { OPENING, openingTask, type Opening } from "./opening.ts";
 import {
@@ -88,6 +89,8 @@ export interface AgentOptions {
   readonly builtIns: readonly Extension[];
   /** What settings select when they name no extensions. */
   readonly defaults: readonly string[];
+  /** The MCP servers, each a built-in extension whose tools change as it connects. */
+  readonly mcp: readonly McpServer[];
   readonly clock?: Clock;
 }
 
@@ -163,10 +166,14 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
         },
       }),
       createSubagentsExtension({ opening }),
+      ...options.mcp.map((server) => server.extension()),
     ],
     defaults: options.defaults,
   };
   for (const extension of [extensions.carillon, ...extensions.builtIn]) registry.install(extension);
+  const unsubscribes = options.mcp.map((server) =>
+    server.subscribe(() => registry.install(server.extension())),
+  );
 
   const harness = await Harness.open(
     options.storage,
@@ -279,6 +286,7 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
 
     async close() {
       closing = true;
+      for (const unsubscribe of unsubscribes) unsubscribe();
       await Promise.all(queues.values());
       await Promise.allSettled(
         [...watches.values()].map(async (started) => (await started).stop()),
@@ -492,6 +500,7 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
         );
     }
     latest = snapshot;
+    for (const server of options.mcp) if (snapshot.selected.includes(server.name)) server.use();
     incomplete = kept.size > 0 || waiting.length > 0;
   }
 

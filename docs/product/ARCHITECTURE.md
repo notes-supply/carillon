@@ -224,8 +224,11 @@ survive restarts. A message that arrives while the agent answers in its
 conversation steers that answer, waits for it or interrupts it, as the
 agent's settings choose, and people steer, interrupt or stop a waiting
 message. Steers placed into one answer settle with it: the newest carries
-it. Pi's sign-in, catalogue and default model live in `CARILLON_HOME/pi`,
-apart from `~/.pi`. See the [Pi guide](../../packages/runtime-pi/README.md).
+it. An agent's settings may select schedules, subagents and the MCP servers
+of `CARILLON_HOME/pi/mcp.json` as built-in extensions; a schedule's run and
+a background subagent's report come in turns Pi opens. Pi's sign-in,
+catalogue and default model live in `CARILLON_HOME/pi`, apart from `~/.pi`.
+See the [Pi guide](../../packages/runtime-pi/README.md).
 
 **T3** (`carillon-runtime-t3`) runs turns on a T3 Code server as another
 client of the threads T3's own UI shows. It stores nothing durable of a

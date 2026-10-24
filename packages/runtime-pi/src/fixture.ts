@@ -28,6 +28,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Parse } from "typebox/value";
 import type { Clock } from "./agent.ts";
+import type { McpServer } from "./mcp.ts";
 import type { Catalogue } from "./models.ts";
 import { createPiRuntime } from "./runtime.ts";
 
@@ -57,11 +58,13 @@ export interface Fixture {
   openings(): unknown[];
   /**
    * Closes the runtime and opens it again once `meanwhile` is done, over
-   * the same storage or, `fresh`, new storage in its place.
+   * the same storage or, `fresh`, new storage in its place, and with `mcp`
+   * as its MCP servers once given.
    */
   restart(changes?: {
     readonly meanwhile?: () => unknown;
     readonly fresh?: true;
+    readonly mcp?: readonly McpServer[];
   }): Promise<Fixture>;
   close(): Promise<void>;
 }
@@ -75,6 +78,7 @@ interface FixtureOptions {
   readonly defaults?: readonly string[];
   readonly answers?: FauxResponseStep[];
   readonly clock?: Clock;
+  readonly mcp?: readonly McpServer[];
 }
 
 export async function startFixture(options: FixtureOptions = {}): Promise<Fixture> {
@@ -102,7 +106,7 @@ export async function startFixture(options: FixtureOptions = {}): Promise<Fixtur
   }
   let snapshots = 0;
 
-  async function open(): Promise<Fixture> {
+  async function open(mcp = options.mcp): Promise<Fixture> {
     const runtime = await createPiRuntime({
       agents: (options.agents ?? ["default"]).map((id) => ({ id, workspace })),
       componentDirectory,
@@ -113,6 +117,7 @@ export async function startFixture(options: FixtureOptions = {}): Promise<Fixtur
       defaults: options.defaults ?? [],
       storage,
       ...(options.clock === undefined ? {} : { clock: options.clock }),
+      ...(mcp === undefined ? {} : { mcp }),
     });
     const fixture: Fixture = {
       runtime,
@@ -159,14 +164,14 @@ export async function startFixture(options: FixtureOptions = {}): Promise<Fixtur
       },
       openings: () =>
         core.received.filter((call) => call.path === "/v1/runtime/turns").map((call) => call.body),
-      async restart({ meanwhile, fresh } = {}) {
+      async restart({ meanwhile, fresh, mcp: servers = mcp } = {}) {
         await runtime.close();
         await meanwhile?.();
         if (fresh === true) {
           memories.clear();
           await rm(join(componentDirectory, "agents"), { recursive: true, force: true });
         }
-        return open();
+        return open(servers);
       },
       async close() {
         await runtime.close();

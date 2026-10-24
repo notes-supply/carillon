@@ -88,8 +88,10 @@ earlier. Each snapshot is read once:
   over the default: `coding`, `tool-search`, and `discord` when Carillon has
   a Discord provider. The built-in extensions are `coding` (read, write, edit
   and bash), `codemode`, `tool-search`, `discord`, and
-  [`schedules`](#schedules) and [`subagents`](#subagents), which no default
-  selects.
+  [`schedules`](#schedules), [`subagents`](#subagents) and
+  [`mcp:<server>`](#mcp-servers) for each server of `mcp.json`, which no
+  default selects. Selecting an `mcp:` server that `mcp.json` lacks is
+  refused like any unknown name.
 
 - user extensions it lists as `extensions/<file>.js`, `.mjs` or `.ts`: a
   module whose default export is a pi-durable extension object, with its
@@ -146,6 +148,41 @@ report core refuses for good is given up. With `wait: true`, the call owns
 the child and returns its answer as its result, and stopping the answer
 that waits for it aborts the child.
 
+## MCP servers
+
+`mcp.json` in the state directory configures MCP servers. It holds their
+credentials, so it is never part of an agent's resources, and, as ssh does
+with a private key, the runtime refuses to start with one that other users
+may read or write: keep it mode 0600. It takes a subset of the usual shape,
+a program over stdio or a Streamable HTTP endpoint at an `http:` or `https:`
+URL:
+
+```json
+{
+  "mcpServers": {
+    "files": { "command": "mcp-files", "args": ["--root", "/srv"], "env": {}, "cwd": "/srv" },
+    "notes": { "url": "https://mcp.example.com/mcp", "headers": { "authorization": "Bearer …" } }
+  }
+}
+```
+
+A server's name is words of `a`-`z` and `0`-`9` joined by `-`, such as
+`remote-notes`, so no two servers' tool names are alike. A file that is not
+valid stops the runtime at startup, saying why; without the file there are
+no servers. Each server is the extension `mcp:<server>`, on one connection
+the runtime's agents share. It connects once a snapshot selects it, and its
+tools, named `mcp__<server>__<tool>`, are deferred, so `tool-search` finds
+and loads them. While it is disconnected it offers no tools, and it
+connects again with backoff, which starts over only after a connection held
+for a minute. Losing the session or the transport, as when the server's
+session expired, the network failed, a response stream ended without its
+answer or the server-to-client stream could not be reopened, disconnects it
+too, and it initializes anew. A request the server refuses, such as with
+HTTP 429, fails alone. A failed call's error, or the text of a failed
+result, reaches the model and the log bounded, its credentials redacted; a
+failed result's images reach the model as they are. The runtime closes the
+connections as it stops, also one still connecting.
+
 ## Deterministic mode
 
 `--deterministic` runs the real runtime on scripted local models (`local/echo`,
@@ -165,6 +202,7 @@ A message `hold <path>` is answered once that file exists.
   message brought.
 - [`schedules.ts`](src/schedules.ts), [`subagents.ts`](src/subagents.ts): the
   `schedules` and `subagents` extensions and their tasks.
+- [`mcp.ts`](src/mcp.ts): `mcp.json` and each MCP server's extension.
 - [`resources.ts`](src/resources.ts), [`attachments.ts`](src/attachments.ts),
   [`activity.ts`](src/activity.ts), [`models.ts`](src/models.ts): snapshots
   and settings, files, activity, and the catalogue.

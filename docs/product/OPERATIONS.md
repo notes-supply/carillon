@@ -287,7 +287,7 @@ The assistant's `settings.json` selects more of Pi's built-in extensions.
 None of these is selected by default:
 
 ```json
-{ "extensions": { "add": ["schedules", "subagents"] } }
+{ "extensions": { "add": ["schedules", "subagents", "mcp:files"] } }
 ```
 
 - `schedules` lets the assistant run a prompt later in the same
@@ -302,6 +302,26 @@ None of these is selected by default:
   works in the background by default, and its result arrives later as a
   message of its own; stopping the answer that started it doesn't stop the
   helper.
+- `mcp:<server>` gives the assistant the tools of an MCP server, which it
+  finds with tool search. Configure servers in `CARILLON_HOME/pi/mcp.json`,
+  then `carillon restart`. It holds their credentials, so make it readable
+  only by you, `chmod 600`; Pi refuses to start with one other users may
+  read or write, as ssh refuses such a key:
+
+  ```json
+  {
+    "mcpServers": {
+      "files": { "command": "mcp-files", "args": ["--root", "/srv"] },
+      "notes": { "url": "https://mcp.example.com/mcp", "headers": { "authorization": "Bearer …" } }
+    }
+  }
+  ```
+
+  A server, named in lowercase words joined by `-`, runs a program
+  (`command`, with optional `args`, `env` and `cwd`) or is reached at an
+  `http:` or `https:` `url` (with optional `headers`). Pi refuses to start
+  with a file it cannot use, and `carillon logs runtime-pi` says why. A
+  server Pi loses offers no tools until it reconnects.
 
 ## Discord
 

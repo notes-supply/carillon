@@ -19,6 +19,7 @@ import {
 } from "./attachments.ts";
 import { deterministicCatalogue } from "./deterministic.ts";
 import { ConversationInfo } from "./documents.ts";
+import { createMcpServer, loadMcpConfig, mcpTransport } from "./mcp.ts";
 import { checkDefault, openPiCatalogue } from "./models.ts";
 import { createPiRuntime } from "./runtime.ts";
 import { createCoreClient } from "@carillon/runtime/core";
@@ -109,6 +110,9 @@ export async function main(values: readonly string[], embedded?: Embedded): Prom
     );
   const listenAddress = providerAddress(config.runtime.url);
   const token = await loadRuntimeCredential(requiredArgument(args, "token-file"), config.runtime);
+  const mcp = [...(await loadMcpConfig(join(stateDirectory, "mcp.json")))].map(([name, server]) =>
+    createMcpServer(name, () => mcpTransport(server)),
+  );
   const catalogue = await openCatalogue();
   const images =
     embedded === undefined
@@ -154,6 +158,7 @@ export async function main(values: readonly string[], embedded?: Embedded): Prom
     ],
     // Carillon's interface providers are its Discord providers.
     defaults: ["coding", "tool-search", ...(config.interfaces.length > 0 ? ["discord"] : [])],
+    mcp,
     inlineImages,
   });
   const server = createRuntimeServer({
@@ -184,6 +189,7 @@ export async function main(values: readonly string[], embedded?: Embedded): Prom
   } finally {
     const stopped = new Promise<void>((done) => server.close(() => done()));
     await runtime.close();
+    await Promise.allSettled(mcp.map((server) => server.close()));
     await sandbox.close();
     server.closeAllConnections();
     await stopped;
