@@ -271,10 +271,20 @@ async fn a_runtime_opens_no_turn_in_a_conversation_that_is_not_its_own() -> Resu
             "{body}"
         );
     }
+    let before = open_turn(&state, RUNTIME, &opening("conversation", "before"))
+        .await?
+        .map_err(|status| anyhow!("refused with {status}"))?;
     // An agent that moved to another runtime at a restart is not opened for
-    // there, nor here.
+    // there, nor here, though a turn its key opened before is still found.
     fixture.config.value.agents[0].runtime = "other-runtime".to_owned();
     let moved = configured(&fixture);
+    let again = open_turn(&moved, RUNTIME, &opening("conversation", "before"))
+        .await?
+        .map_err(|status| anyhow!("refused with {status}"))?;
+    assert_eq!(
+        (again.turn_id.as_str(), again.duplicate),
+        (before.turn_id.as_str(), true)
+    );
     for caller in [RUNTIME, ("other-runtime", "other-only")] {
         assert_eq!(
             open_turn(&moved, caller, &opening("conversation", "after"))
@@ -295,7 +305,7 @@ async fn a_runtime_opens_no_turn_in_a_conversation_that_is_not_its_own() -> Resu
         .err(),
         Some(StatusCode::FORBIDDEN)
     );
-    assert_eq!(state.core.turn_counts()?.active, 0);
+    assert_eq!(state.core.turn_counts()?.active, 1);
     Ok(())
 }
 

@@ -3,11 +3,11 @@
 
 use anyhow::Result;
 use carillon_protocol::{
-    model::{EventReceipt, ModelQuery, TurnState},
+    model::{EventReceipt, TurnState},
     turns::{Silence, TurnOpening, TurnOutcome},
 };
 
-use super::{Core, CoreError, RuntimeProvider, interrupted, kept_report, ownership::Owner};
+use super::{Core, CoreError, RuntimeProvider, interrupted, kept_report};
 use crate::db::{Opened, Settled, Settlement};
 
 impl Core {
@@ -51,32 +51,30 @@ impl Core {
         }
     }
 
-    /// Opens a running turn `runtime_id` will settle, in an existing
-    /// conversation whose agent runs there now, or returns the receipt of
-    /// the turn the same key opened.
+    /// Returns the receipt of the turn the same key opened, or else opens a
+    /// running turn `runtime_id` will settle, in an existing conversation of
+    /// its own whose agent runs there now.
     /// # Errors
-    /// Returns an unknown agent as invalid input, a conversation that is not
-    /// the runtime's as a conflict, or storage errors.
+    /// Returns a conversation that is not the runtime's as a conflict, or
+    /// storage errors.
     pub(crate) fn open_turn(
         &self,
         runtime_id: &str,
         opening: &TurnOpening,
     ) -> Result<EventReceipt, CoreError> {
-        let query = ModelQuery {
-            agent_id: opening.agent_id.clone(),
-            audience_id: Some(opening.audience_id.clone()),
-        };
-        match self.conversation_owner(&opening.interface_id, &query)? {
-            Owner::Current(agent) if agent.runtime == runtime_id => {}
-            Owner::Current(_) | Owner::Stranded { .. } => {
-                return Err(CoreError::Conflict(format!(
-                    "{} does not run on {runtime_id}",
-                    opening.agent_id
-                )));
-            }
-        }
-        match self.database.open_turn(runtime_id, opening)? {
+        let agent_runtime = self
+            .agent(&opening.agent_id)
+            .ok()
+            .map(|agent| agent.runtime.as_str());
+        match self
+            .database
+            .open_turn(runtime_id, agent_runtime, opening)?
+        {
             Opened::Receipt(receipt) => Ok(receipt),
+            Opened::Moved => Err(CoreError::Conflict(format!(
+                "{} does not run on {runtime_id}",
+                opening.agent_id
+            ))),
             Opened::NoConversation => Err(CoreError::Conflict(
                 "a runtime opens turns only in an existing conversation".to_owned(),
             )),

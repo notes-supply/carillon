@@ -16,6 +16,8 @@ pub(crate) const RUNTIME_EVENT_PREFIX: &str = "runtime:";
 #[derive(Debug)]
 pub(crate) enum Opened {
     Receipt(EventReceipt),
+    /// The agent runs on another runtime now, or no longer exists.
+    Moved,
     /// The conversation has no turn yet.
     NoConversation,
     /// The conversation's latest turn is another runtime's.
@@ -23,17 +25,26 @@ pub(crate) enum Opened {
 }
 
 impl Database {
-    /// Records a running turn `runtime_id` opened in a conversation whose
-    /// latest turn is its own, with that turn's target and snapshots and
-    /// nothing a person sent, or returns the receipt of the turn the same key
-    /// opened before.
-    pub(crate) fn open_turn(&self, runtime_id: &str, opening: &TurnOpening) -> Result<Opened> {
+    /// Returns the receipt of the turn the same key opened before, or else
+    /// records a running turn `runtime_id` opened in a conversation whose
+    /// latest turn is its own and whose agent runs there now, as
+    /// `agent_runtime` says, with that turn's target and snapshots and
+    /// nothing a person sent.
+    pub(crate) fn open_turn(
+        &self,
+        runtime_id: &str,
+        agent_runtime: Option<&str>,
+        opening: &TurnOpening,
+    ) -> Result<Opened> {
         let event_id = format!("{RUNTIME_EVENT_PREFIX}{runtime_id}:{}", opening.key);
         let mut connection = self.connect()?;
         let transaction = write_transaction(&mut connection)?;
         if let Some(receipt) = event_receipt(&transaction, &opening.interface_id, &event_id)? {
             transaction.commit()?;
             return Ok(Opened::Receipt(receipt));
+        }
+        if agent_runtime != Some(runtime_id) {
+            return Ok(Opened::Moved);
         }
         let latest = transaction
             .query_row(
