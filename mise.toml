@@ -92,11 +92,6 @@ run = "cargo build --locked --profile wasm --target wasm32-unknown-unknown -p ca
 description = "Run a durable conversation with temporary SQLite and an in-process test runtime"
 run = "cargo run -p carillon-core --example conversation"
 
-[tasks."example:pi"]
-description = "Run a native Pi conversation directly (requires configured credentials)"
-depends = ["install"]
-run = "bun packages/runtime-pi/examples/session.ts"
-
 [tasks."test:integration"]
 description = "Test local core, Discord, Pi and T3 runtime services together"
 depends = ["install", "build:module"]

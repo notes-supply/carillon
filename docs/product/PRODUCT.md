@@ -53,11 +53,18 @@ native state between engines or T3 projects.
 - **Files.** A message is accepted with all its files or not at all. Files
   are kept with the turn and checked before it runs; nothing is extracted or
   executed on arrival.
-- **Turns.** Core stores each accepted turn before acknowledging it, runs it
-  once on its runtime, and stores the answer and its delivery together. A
-  turn whose outcome can't be proved is marked interrupted and never
-  replayed; the conversation is told, and the next message carries on with
-  the same native session. Delivery retries without rerunning the model.
+- **Turns.** Core stores each accepted turn before acknowledging it, hands it
+  once to its runtime, and stores the answer and its delivery together. Pi
+  holds the turns it accepts and finishes them across its own restarts; a
+  tool call a crash cut off is reported to the model as interrupted, never
+  repeated. On T3, a turn whose outcome can't be proved is marked
+  interrupted and never replayed. Either way the conversation is told, and
+  the next message carries on with the same native conversation. Delivery
+  retries without rerunning the model.
+- **Busy conversations.** A message that arrives while Pi answers in its
+  conversation steers that answer by default, or waits for it or interrupts
+  it, as the agent's settings choose. People can steer a waiting message in,
+  interrupt for it, or stop it, with reactions.
 - **Visibility.** While a turn runs, a card shows its current tool calls,
   recent ones and delegated work, never tool output or private reasoning.
   It stays as a summary when the work ends.

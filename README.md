@@ -5,8 +5,9 @@ A self-hosted AI agent you talk to in Discord, powered by
 
 Chat in channels or threads, attach files and images, pick models with
 `/model` and run the agent's own commands with `/command`. A card shows what
-the agent is doing while it works. Conversations and replies survive
-restarts.
+the agent is doing while it works. Send another message while it answers to
+steer it, and react to steer, interrupt or stop a waiting one. Conversations,
+replies and, on Pi, answers in progress survive restarts.
 
 Carillon runs on your Linux machine as user services, with your own
 permissions: the agent can do whatever your account can. It's a public beta,
@@ -43,8 +44,8 @@ particular release, run `sh -s -- --version 0.1.0-beta.2` instead of `sh`.
 
 The [operations guide](docs/product/OPERATIONS.md) covers installing without
 questions or from the downloaded archive, everyday commands, configuration,
-updates and backups. The agent's [Discord tools](packages/discord-pi/README.md)
-are optional.
+updates and backups. On Pi, the agent has [Discord tools](packages/discord-pi/README.md)
+it loads when it needs them.
 
 ## Development
 

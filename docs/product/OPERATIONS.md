@@ -258,13 +258,28 @@ restart applies the file and this release accepts the module it declares.
 
 T3 can run several conversations at once: set `parallel_turns` (1 to 16) on
 the `runtime-t3` entry and run `carillon registry apply`. Each conversation
-still runs one turn at a time, in order. Pi runs one turn at a time, so leave
-it unset there.
+still runs one turn at a time, in order.
 
-A runtime marked `durable = true` holds the turns it accepts and orders them
-itself, so it takes no `parallel_turns`. Changing `durable` needs
-`carillon restart`, and a runtime refuses to start when its entry says
-otherwise than its program does.
+A runtime marked `durable = true`, as setup registers Pi, holds the turns it
+accepts and orders them itself, so it takes no `parallel_turns`: Pi answers
+in every conversation at once. Changing `durable` needs `carillon restart`,
+and a runtime refuses to start when its entry says otherwise than its
+program does.
+
+### Messages while Pi answers
+
+A message that arrives while Pi answers in its conversation steers that
+answer by default: Pi reads it after its current tool call and answers both
+together. The agent's `settings.json` changes that:
+
+```json
+{ "busy": "queue" }
+```
+
+`queue` answers it after the running answer, and `interrupt` ends the
+running answer and answers the new message, with every waiting one, next.
+A waiting message offers reactions to steer it in, interrupt for it, or stop
+it.
 
 ## Discord
 
@@ -443,19 +458,25 @@ send them again.
 
 ### Agent Discord tools
 
-An optional [Pi extension and skill](../../packages/discord-pi/README.md) let
-the assistant read and manage the Discord server with the bot's permissions.
-They go into the assistant's resources, which Carillon's T3 profiles share,
-so T3 Code channels never see them. Setup doesn't install them, because they
-can administer the server; install them yourself:
+The [Discord tools](../../packages/discord-pi/README.md) let the assistant
+read and manage the Discord server with the bot's permissions. On Pi they
+are a built-in extension the assistant selects by default; remove it in the
+assistant's `settings.json` to turn them off:
 
-```sh
-carillon stop
-carillon discord tools install
-carillon start
+```json
+{ "extensions": { "remove": ["discord"] } }
 ```
 
-Run it again after an update to refresh them.
+On T3 the assistant uses `carillon discord call` as the Discord skill
+explains. Setup doesn't install the skill, because the tools can administer
+the server; install it into the assistant's resources, which Carillon's T3
+profiles share, so T3 Code channels never see it:
+
+```sh
+carillon discord tools install
+```
+
+Run it again after an update to refresh it.
 
 ## When things fail
 
@@ -467,8 +488,11 @@ Run it again after an update to refresh them.
 - **A reply may not have arrived.** Delivery has its own outbox: an answer
   is never generated twice. If Discord crashed mid-send, the message gets the
   uncertain reaction.
-- **A runtime crashes.** Its service restarts it. Pi continues the saved
-  session with the next message.
+- **A runtime crashes.** Its service restarts it. Pi finishes the answers it
+  held: a model call runs again, and a tool call it cut off is reported to
+  the model as interrupted rather than repeated. A message that keeps
+  crashing it is given up after five tries and fails. T3 continues with the
+  next message.
 - **Core can't save an outcome** (disk full, for example). The turn stays
   marked running until core restarts, which records it as interrupted.
 - **Delegated T3 work** reports later in its own message, even across
