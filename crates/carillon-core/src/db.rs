@@ -35,11 +35,16 @@
 //!   is never referenced.
 
 mod admission;
+mod dispatch;
 mod jobs;
+mod opening;
 mod recovery;
+mod settle;
 
 pub(crate) use admission::Admission;
 pub(crate) use jobs::JobPage;
+pub(crate) use opening::{Opened, RUNTIME_EVENT_PREFIX};
+pub(crate) use settle::{Settled, Settlement};
 
 use std::{
     os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
@@ -72,8 +77,9 @@ pub(crate) struct Database {
     path: PathBuf,
 }
 
-/// A queued turn after this process moved it to `running`. Holding one is the
-/// permission to execute runtime work and to record its outcome.
+/// A turn this process took to run: a queued one it moved to `running`,
+/// which permits executing runtime work and recording its outcome, or a
+/// durable runtime's queued one it is handing over.
 #[derive(Clone, Debug)]
 pub(crate) struct ClaimedTurn {
     pub turn_id: String,
@@ -394,22 +400,7 @@ impl Database {
             return Ok(None);
         }
         let turn = transaction
-            .query_row(query, [runtime_id], |row| {
-                Ok(ClaimedTurn {
-                    turn_id: row.get(0)?,
-                    interface_id: row.get(1)?,
-                    agent_id: row.get(2)?,
-                    audience_id: row.get(3)?,
-                    runtime_id: row.get(4)?,
-                    target_id: row.get(5)?,
-                    feedback_target_id: row.get(6)?,
-                    input: row.get(7)?,
-                    resource_snapshot_id: row.get(8)?,
-                    native: json_column(row, 9)?,
-                    follow_up: optional_json_column(row, 10)?,
-                    attachments: Vec::new(),
-                })
-            })
+            .query_row(query, [runtime_id], dispatch::queued_turn)
             .optional()?;
         let Some(mut turn) = turn else {
             transaction.commit()?;
@@ -1221,7 +1212,7 @@ mod tests {
             .context("second turn missing")?;
         // A restart returns the running observation to its queue; the
         // executable turn that was running is interrupted, as ever.
-        assert_eq!(database.recover_running_turns()?, 1);
+        assert_eq!(database.recover_running_turns(&[])?, 1);
         let resumed = database
             .claim("runtime", Lane::Observations, &CancellationToken::new())?
             .context("observation not resumed")?;
@@ -1798,8 +1789,8 @@ mod tests {
         database
             .claim("runtime", Lane::Messages, &CancellationToken::new())?
             .context("missing turn")?;
-        assert_eq!(database.recover_running_turns()?, 1);
-        assert_eq!(database.recover_running_turns()?, 0);
+        assert_eq!(database.recover_running_turns(&[])?, 1);
+        assert_eq!(database.recover_running_turns(&[])?, 0);
         assert!(
             database
                 .claim("runtime", Lane::Messages, &CancellationToken::new())?

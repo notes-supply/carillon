@@ -1,8 +1,10 @@
 //! The core service: admission, the turn lifecycle worker, and the delivery
 //! outbox, served over the loopback provider API.
 
+mod controls;
 mod maintenance;
 mod registry;
+mod runtime;
 #[cfg(test)]
 mod tests;
 mod workers;
@@ -209,6 +211,9 @@ fn router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/v1/events", post(accept_event))
         .route("/v1/events/{event_id}", get(event_status))
+        .route("/v1/events/{event_id}/control", post(controls::control))
+        .route("/v1/runtime/turns", post(runtime::open))
+        .route("/v1/runtime/turns/{id}/outcome", post(runtime::outcome))
         .route("/v1/jobs", get(jobs))
         .route("/v1/deliveries", get(claim_delivery))
         .route("/v1/deliveries/reconcile", post(reconcile_delivery_claims))
@@ -381,13 +386,18 @@ async fn relay_model_call(request: RequestBuilder) -> Result<Response, ApiError>
             }
         })?;
     let status = response.status();
-    let body = response.json::<Value>().await.map_err(|error| {
-        warn!(%error, %status, "runtime model or command response was not JSON");
+    let unusable = |error: &dyn std::fmt::Display| {
+        warn!(%error, %status, "runtime model, command or control response was not JSON");
         ApiError::new(
             StatusCode::BAD_GATEWAY,
             "The runtime gave an unusable answer.",
         )
-    })?;
+    };
+    let body = response.bytes().await.map_err(|error| unusable(&error))?;
+    if body.is_empty() {
+        return Ok(status.into_response());
+    }
+    let body = serde_json::from_slice::<Value>(&body).map_err(|error| unusable(&error))?;
     Ok((status, Json(body)).into_response())
 }
 
@@ -529,31 +539,40 @@ async fn runtime_worker(
         Lane::Observations => Duration::from_secs(5),
     };
     let mut work = state.core.work(lane);
+    // Restart-only, so as it was when the worker started.
+    let durable = state
+        .config()
+        .provider(&runtime_id, ProviderRole::Runtime)
+        .is_ok_and(|runtime| runtime.durable);
     while !stopping.is_cancelled() {
         work.mark_unchanged();
-        match run_next(
-            &state,
-            &runtime_id,
-            lane,
-            &stopping,
-            async |runtime, token, request| {
-                let observation = request.follow_up.is_some();
-                let call = call_runtime(&state.client, runtime, token, request);
-                if !observation {
-                    return call.await;
-                }
-                set_aside
-                    .run_until_cancelled(call)
-                    .await
-                    .unwrap_or_else(|| {
-                        Err(TurnFailure::Unanswered(anyhow!(
-                            "observation set aside: core paused its workers or is stopping"
-                        )))
-                    })
-            },
-        )
-        .await
-        {
+        let step = if durable {
+            runtime::dispatch_next(&state, &runtime_id, &stopping).await
+        } else {
+            run_next(
+                &state,
+                &runtime_id,
+                lane,
+                &stopping,
+                async |runtime, token, request| {
+                    let observation = request.follow_up.is_some();
+                    let call = call_runtime(&state.client, runtime, token, request);
+                    if !observation {
+                        return call.await;
+                    }
+                    set_aside
+                        .run_until_cancelled(call)
+                        .await
+                        .unwrap_or_else(|| {
+                            Err(TurnFailure::Unanswered(anyhow!(
+                                "observation set aside: core paused its workers or is stopping"
+                            )))
+                        })
+                },
+            )
+            .await
+        };
+        match step {
             Ok(WorkerStep::Advanced) => {}
             Ok(WorkerStep::Idle) => {
                 // The sender lives as long as `state`, which this task holds.

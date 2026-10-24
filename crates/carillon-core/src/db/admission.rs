@@ -1,6 +1,6 @@
 use super::{
-    Capture, Database, EventReceipt, ExternalEvent, Result, TurnState, Value, bail,
-    conversation_runtime, event_receipt, params, timestamp, write_transaction,
+    Capture, Database, EventReceipt, ExternalEvent, OptionalExtension, Result, TurnState, Value,
+    bail, conversation_runtime, event_receipt, params, state_column, timestamp, write_transaction,
 };
 
 #[derive(Clone, Copy)]
@@ -16,6 +16,23 @@ pub(crate) enum Admission<'a> {
 }
 
 impl Database {
+    /// The turn an interface's event became, how it stands and the runtime
+    /// that has it.
+    pub(crate) fn event_turn(
+        &self,
+        interface_id: &str,
+        event_id: &str,
+    ) -> Result<Option<(String, TurnState, String)>> {
+        Ok(self
+            .connect()?
+            .query_row(
+                "SELECT id, state, runtime_id FROM turns WHERE interface_id = ?1 AND event_id = ?2",
+                params![interface_id, event_id],
+                |row| Ok((row.get(0)?, state_column(row, 1)?, row.get(2)?)),
+            )
+            .optional()?)
+    }
+
     /// Records an admitted event and its initial outcome, or returns the receipt of
     /// the turn a previous submission of the same event already created.
     /// A published capture of the event's attachments is referenced only by

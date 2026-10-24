@@ -415,7 +415,7 @@ async fn credential_drift_leaves_work_queued_until_repaired() -> Result<()> {
         assert!(turn.delivery_state.is_none());
     }
     state.core.database = Database::open(&state.config.value.data_dir.join("carillon.sqlite3"))?;
-    assert_eq!(state.core.database.recover_running_turns()?, 0);
+    assert_eq!(state.core.database.recover_running_turns(&[])?, 0);
     fs::write(&credential, "test-only\n")?;
     let mut calls = 0;
     assert_eq!(
@@ -723,46 +723,6 @@ async fn workers_hear_of_claimable_turns_in_their_own_lane() -> Result<()> {
     })
     .await?;
     assert_eq!(changed(), (Some(false), Some(false)));
-    Ok(())
-}
-
-/// An interface may name its events anything but the identities core gives
-/// its own follow-up observations; otherwise one sent after a parent's
-/// receipt would make the parent's completion fail, losing its answer.
-#[tokio::test]
-async fn an_interface_cannot_take_a_follow_up_identity_from_a_parent_turn() -> Result<()> {
-    let directory = tempdir()?;
-    let state = installation(directory.path())?;
-    let parent = accept(&state, "parent", "conversation").await?;
-    let internal = format!("follow-up:{}", parent.turn_id);
-    let claimed = accept(&state, &internal, "conversation").await;
-    let step = run_next_turn(&state, "test-runtime", async |_, _, request| {
-        Ok(RuntimeTurnResponse {
-            follow_up: Some(json!({"after": 1})),
-            ..completed(request)
-        })
-    })
-    .await;
-    // The parent completed with its answer, and its observation is queued.
-    step?;
-    let inspection = state
-        .core
-        .inspect_turn(&parent.turn_id)?
-        .context("missing parent")?;
-    assert_eq!(inspection.state, TurnState::Completed);
-    assert_eq!(inspection.output.as_deref(), Some("reply to parent"));
-    let observation = state
-        .core
-        .database
-        .event_receipt("test-interface", &internal)?
-        .context("missing observation")?;
-    assert_eq!(observation.state, TurnState::Queued);
-    assert_ne!(observation.turn_id, parent.turn_id);
-    // The interface's event was refused at admission, before anything was recorded.
-    let refusal = claimed
-        .err()
-        .context("an interface took a follow-up identity")?;
-    assert!(refusal.to_string().contains("reserved"), "{refusal}");
     Ok(())
 }
 
@@ -1346,7 +1306,7 @@ async fn failed_outcome_write_waits_for_restart_without_blocking_other_conversat
     );
 
     state.core.database = Database::open(&path)?;
-    assert_eq!(state.core.database.recover_running_turns()?, 1);
+    assert_eq!(state.core.database.recover_running_turns(&[])?, 1);
     run_next_turn(&state, "test-runtime", async |_, _, request| {
         assert_eq!(request.correlation_id, successor.turn_id);
         Ok(completed(request))
@@ -1382,7 +1342,7 @@ async fn cancelled_execution_is_interrupted_after_reopening_while_queued_work_re
             .is_cancelled()
     );
     state.core.database = Database::open(&state.config.value.data_dir.join("carillon.sqlite3"))?;
-    assert_eq!(state.core.database.recover_running_turns()?, 1);
+    assert_eq!(state.core.database.recover_running_turns(&[])?, 1);
     assert_eq!(
         state
             .core
@@ -2041,8 +2001,11 @@ async fn job_reads_answer_promptly_when_several_runtimes_cannot_describe_their_t
 }
 mod attachments;
 mod configuration;
+mod durable;
+mod held;
 mod live;
 mod maintenance;
+mod reserved;
 
 /// A runtime endpoint written at the socket level: while `cut` is set it sends
 /// a successful answer's headers and only the start of its body, then closes;

@@ -1237,7 +1237,7 @@ mod tests {
                         db.claim("runtime-pi", Lane::Messages, &CancellationToken::new())?
                             .is_some()
                     );
-                    assert_eq!(db.recover_running_turns()?, 1);
+                    assert_eq!(db.recover_running_turns(&[])?, 1);
                     TurnState::Interrupted
                 } else {
                     TurnState::Queued

@@ -1,5 +1,7 @@
 //! Admission, runtime ownership, execution and delivery over one SQLite authority.
+mod dispatch;
 mod ownership;
+mod settle;
 
 use crate::{
     attachments::{self, Capture, Reconciled, Unusable},
@@ -15,6 +17,7 @@ use carillon_protocol::model::{
     RuntimeTurnResponse, SelectedProvider, StateCounts, TurnActivity, TurnInspection, TurnSummary,
     UnansweredTurn,
 };
+pub use dispatch::InboxFailure;
 use ownership::{Owner, stranded};
 use std::{path::PathBuf, sync::Arc};
 
@@ -221,7 +224,13 @@ impl Core {
     /// # Errors
     /// Returns storage errors.
     pub fn recover_interrupted(&self) -> Result<usize> {
-        let mut recovered = self.database.recover_running_turns()?;
+        let runtimes = self.runtimes.borrow().clone();
+        let durable = runtimes.iter().filter(|runtime| runtime.durable);
+        let mut recovered = self.database.recover_running_turns(
+            &durable
+                .map(|runtime| runtime.id.as_str())
+                .collect::<Vec<_>>(),
+        )?;
         for (agent_id, runtime_id) in self.database.queued_owners()? {
             if self
                 .agent(&agent_id)
@@ -857,13 +866,15 @@ impl Core {
                     .to_owned(),
             ));
         }
-        if event
-            .event_id
-            .starts_with(crate::db::FOLLOW_UP_EVENT_PREFIX)
+        if let Some(prefix) = [
+            crate::db::FOLLOW_UP_EVENT_PREFIX,
+            crate::db::RUNTIME_EVENT_PREFIX,
+        ]
+        .into_iter()
+        .find(|prefix| event.event_id.starts_with(prefix))
         {
             return Err(CoreError::InvalidInput(format!(
-                "event identities starting {} are reserved for core",
-                crate::db::FOLLOW_UP_EVENT_PREFIX
+                "event identities starting {prefix} are reserved for core"
             )));
         }
         if let Some(staged) = &event.attachments {

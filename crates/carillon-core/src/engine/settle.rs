@@ -1,0 +1,118 @@
+//! What durable runtimes tell core of the turns they hold, and the turns an
+//! interface may control there.
+
+use anyhow::Result;
+use carillon_protocol::{
+    model::{EventReceipt, ModelQuery, TurnState},
+    turns::{Silence, TurnOpening, TurnOutcome},
+};
+
+use super::{Core, CoreError, RuntimeProvider, interrupted, kept_report, ownership::Owner};
+use crate::db::{Opened, Settled, Settlement};
+
+impl Core {
+    /// Settles a turn `runtime_id` holds as it says the turn ended, with the
+    /// delivery that tells its conversation, once.
+    /// # Errors
+    /// Returns storage errors.
+    pub(crate) fn settle(
+        &self,
+        runtime_id: &str,
+        turn_id: &str,
+        outcome: TurnOutcome,
+    ) -> Result<Settled> {
+        let settle = |settlement| self.database.settle_held(runtime_id, turn_id, settlement);
+        match outcome {
+            TurnOutcome::Answered { output, activity } => {
+                let activity = kept_report(turn_id, activity);
+                settle(Settlement::Answered {
+                    output: &output,
+                    activity: activity.as_ref(),
+                })
+            }
+            TurnOutcome::Failed {
+                explanation,
+                activity,
+            } => {
+                let explanation = explanation.filter(|explanation| !explanation.trim().is_empty());
+                let error = explanation.as_ref().map_or_else(
+                    || "runtime provider failed the turn with no explanation".to_owned(),
+                    |explanation| format!("runtime reported failure: {explanation}"),
+                );
+                let activity = kept_report(turn_id, activity);
+                settle(Settlement::Failed {
+                    error: &error,
+                    notice: &interrupted(explanation.as_deref()),
+                    activity: activity.as_ref(),
+                })
+            }
+            TurnOutcome::Steered {} => settle(Settlement::Silent(Silence::Steered)),
+            TurnOutcome::Stopped {} => settle(Settlement::Silent(Silence::Stopped)),
+        }
+    }
+
+    /// Opens a running turn `runtime_id` will settle, in an existing
+    /// conversation whose agent runs there now, or returns the receipt of
+    /// the turn the same key opened.
+    /// # Errors
+    /// Returns an unknown agent as invalid input, a conversation that is not
+    /// the runtime's as a conflict, or storage errors.
+    pub(crate) fn open_turn(
+        &self,
+        runtime_id: &str,
+        opening: &TurnOpening,
+    ) -> Result<EventReceipt, CoreError> {
+        let query = ModelQuery {
+            agent_id: opening.agent_id.clone(),
+            audience_id: Some(opening.audience_id.clone()),
+        };
+        match self.conversation_owner(&opening.interface_id, &query)? {
+            Owner::Current(agent) if agent.runtime == runtime_id => {}
+            Owner::Current(_) | Owner::Stranded { .. } => {
+                return Err(CoreError::Conflict(format!(
+                    "{} does not run on {runtime_id}",
+                    opening.agent_id
+                )));
+            }
+        }
+        match self.database.open_turn(runtime_id, opening)? {
+            Opened::Receipt(receipt) => Ok(receipt),
+            Opened::NoConversation => Err(CoreError::Conflict(
+                "a runtime opens turns only in an existing conversation".to_owned(),
+            )),
+            Opened::OwnedBy(owner) => Err(CoreError::Conflict(format!(
+                "the conversation runs on {owner}, not {runtime_id}"
+            ))),
+        }
+    }
+
+    /// The durable runtime holding the running turn of an interface's
+    /// event, and the turn's ID: `None` when the interface submitted no such
+    /// event.
+    /// # Errors
+    /// Returns a turn that is not running on an enabled durable runtime as a
+    /// conflict, or storage errors.
+    pub(crate) fn controlled(
+        &self,
+        interface_id: &str,
+        event_id: &str,
+    ) -> Result<Option<(RuntimeProvider, String)>, CoreError> {
+        let Some((turn_id, state, runtime_id)) =
+            self.database.event_turn(interface_id, event_id)?
+        else {
+            return Ok(None);
+        };
+        if state != TurnState::Running {
+            return Err(CoreError::Conflict(
+                "that message's turn is not running".to_owned(),
+            ));
+        }
+        let runtime = self.enabled_runtime(&runtime_id)?;
+        if !runtime.durable {
+            return Err(CoreError::Conflict(format!(
+                "runtime provider {runtime_id} offers no controls"
+            )));
+        }
+        Ok(Some((runtime, turn_id)))
+    }
+}

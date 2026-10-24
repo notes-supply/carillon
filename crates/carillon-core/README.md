@@ -25,6 +25,11 @@ mise run example:core
   is cancelled it claims nothing more; a claimed turn still settles. `work(lane)`
   changes when a turn may have become claimable, so workers wait instead of
   polling.
+- `dispatch_next(runtime, stopping, submit)` hands a durable runtime its
+  oldest queued message, with no wait for the conversation's earlier turns.
+  The turn becomes running once the runtime takes it; `InboxFailure::Later`
+  leaves it queued to be handed over again, in order, and `Refused`
+  interrupts it with the runtime's explanation.
 - `claim_delivery`, `acknowledge_delivery` and `reconcile_deliveries` keep each
   delivery with the interface instance that claimed it, and never treat an
   uncertain send as safe to repeat.
@@ -52,6 +57,17 @@ transferring ownership. Startup settlement preserves the former runtime too. New
 conversations use the agent's configured runtime. Agent assignments change
 only on restart; `set_runtimes` changes runtime availability live.
 
+A durable runtime holds the turns it takes and settles each itself, with
+its own credential: answered, failed, steered into the running turn or
+stopped. The outcome and its delivery commit together, once; the same
+outcome again is recorded, another is refused. Steered and stopped turns
+deliver nothing to send, only their silence. It may also open a running
+turn in one of its own conversations, idempotent by its key, and core
+relays an interface's control of a running turn to it without keeping
+anything of the control. Its running turns survive core's restarts, and no
+worker waits on them. Another runtime's turns never hold back a
+conversation's messages.
+
 A runtime operation's failure decides what happens next.
 `TurnFailure::Retry` means the runtime provably never received the turn, so
 it is queued again. `Unanswered` asks an observation again and interrupts a
@@ -60,13 +76,18 @@ explanation when it gave one. An interrupted turn is never replayed.
 
 ## Where things live
 
-- [`engine.rs`](src/engine.rs): public operations and policy.
-- [`db.rs`](src/db.rs): every lifecycle write, in SQLite transactions.
+- [`engine.rs`](src/engine.rs): public operations and policy;
+  [`engine/dispatch.rs`](src/engine/dispatch.rs) and
+  [`engine/settle.rs`](src/engine/settle.rs) hand turns to durable runtimes
+  and record what they say of them.
+- [`db.rs`](src/db.rs): every lifecycle write, in SQLite transactions, with
+  its submodules for admission, job reads, recovery and held turns.
 - [`resources.rs`](src/resources.rs), [`attachments.rs`](src/attachments.rs),
   [`intake.rs`](src/intake.rs): captured resources and files.
 - [`runtime_client.rs`](src/runtime_client.rs): the HTTP runtime transport.
 - [`application/`](src/application): the `carillon` command and service. In
   `http/`, `registry.rs` serves the registry and its live apply,
-  `workers.rs` supervises the runtime workers, and `maintenance.rs` serves the
-  maintenance pause. `drain.rs`, `operations.rs` and `update.rs` run restarts,
+  `workers.rs` supervises the runtime workers, `maintenance.rs` serves the
+  maintenance pause, `runtime.rs` serves durable runtimes' calls and their
+  dispatcher, and `controls.rs` relays turn controls. `drain.rs`, `operations.rs` and `update.rs` run restarts,
   services and updates.
