@@ -1,28 +1,27 @@
-// The packaged runtime with real Pi: attached images reach inference as Pi's
-// normalized native input and every file is listed. Controlled local inference.
+// The packaged runtime: attached images reach inference prepared for the
+// model by the embedded Photon, and every file is listed. Controlled local
+// inference.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { realpathSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { deflateSync } from "node:zlib";
+import { startFakeCore } from "../packages/runtime/src/testing.ts";
 
 const release = resolve(
   process.argv[2] ?? assert.fail("usage: node scripts/test-images.mjs RELEASE_DIRECTORY"),
 );
-const pi = realpathSync(
-  resolve(
-    import.meta.dirname,
-    "../packages/runtime-pi/node_modules/@earendil-works/pi-coding-agent",
-  ),
+const durable = realpathSync(
+  resolve(import.meta.dirname, "../packages/runtime-pi/node_modules/@earendil-works/pi-durable"),
 );
 const photon = dirname(
-  createRequire(join(pi, "package.json")).resolve("@silvia-odwyer/photon-node/package.json"),
+  createRequire(join(durable, "package.json")).resolve("@silvia-odwyer/photon/package.json"),
 );
 const namespace = ["--user", "--map-root-user", "--mount"];
 const hidePhoton = spawnSync("unshare", [...namespace, "true"]).status === 0;
@@ -81,6 +80,7 @@ function png(width, height) {
 }
 
 let runtime;
+const core = await startFakeCore();
 try {
   const state = join(root, "pi");
   const resources = join(root, "resources");
@@ -89,7 +89,7 @@ try {
   await mkdir(state, { recursive: true });
   await mkdir(resources);
   await mkdir(join(store, capture), { recursive: true });
-  // Large enough that Pi must decode and resize it, not pass it through.
+  // Larger than the model takes, so it must be decoded and resized.
   const files = [
     { name: "wide.png", bytes: png(2400, 300) },
     { name: "notes.txt", bytes: Buffer.from("plain notes") },
@@ -123,7 +123,7 @@ try {
   await writeFile(tokenFile, token, { mode: 0o600 });
   await writeFile(
     config,
-    `data_dir = "state"\n[core]\nlisten = "127.0.0.1:1"\noperator_token_hash = "${hash}"\n[[agents]]\nid = "default"\nname = "Fixture"\nruntime = "runtime-pi"\nworkspace = ${JSON.stringify(root)}\nresources = "resources"\n[[providers]]\nid = "runtime-pi"\nrole = "runtime"\nversion = "0.0.0"\nurl = "${url}"\ntoken_hash = "${hash}"\nenabled = true\n`,
+    `data_dir = "state"\n[core]\nlisten = "${core.url.replace("http://", "")}"\noperator_token_hash = "${hash}"\n[[agents]]\nid = "default"\nname = "Fixture"\nruntime = "runtime-pi"\nworkspace = ${JSON.stringify(root)}\nresources = "resources"\n[[providers]]\nid = "runtime-pi"\nrole = "runtime"\nversion = "0.0.0"\nurl = "${url}"\ntoken_hash = "${hash}"\nenabled = true\ndurable = true\n`,
   );
   let logs = "";
   const program = [
@@ -137,9 +137,8 @@ try {
     "--state-dir",
     state,
   ];
-  // A compiled Pi first loads Photon from the build tree it was built in,
-  // which installed owners cannot read. Hide that tree in a private mount
-  // namespace, where available, so only the release's own copy can serve.
+  // Hide the build tree's Photon in a private mount namespace, where
+  // available, so only the copy the executable embeds can serve.
   const [command, ...args] = hidePhoton
     ? [
         "unshare",
@@ -170,7 +169,7 @@ try {
     } catch {}
     await new Promise((done) => setTimeout(done, 50));
   }
-  const result = await fetch(`${url}/v1/turns`, {
+  const result = await fetch(`${url}/v1/inbox`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify({
@@ -190,8 +189,13 @@ try {
     }),
     signal: AbortSignal.timeout(30_000),
   });
-  assert.equal(result.status, 200, `${await result.clone().text()}\n${logs}`);
-  assert.equal((await result.json()).output, "images checked");
+  assert.equal(result.status, 202, `${await result.clone().text()}\n${logs}`);
+  const path = "/v1/runtime/turns/packaged-images/outcome";
+  for (const deadline = Date.now() + 30_000; !core.received.some((call) => call.path === path);) {
+    if (Date.now() > deadline) throw new Error(`no outcome: ${logs}`);
+    await new Promise((done) => setTimeout(done, 50));
+  }
+  assert.equal(core.received.find((call) => call.path === path).body.output, "images checked");
   assert.equal(requests.length, 1, logs);
   const users = requests[0].messages.filter((message) => message.role === "user");
   const parts = users.flatMap((message) =>
@@ -203,14 +207,17 @@ try {
     .map((part) => part.text)
     .join("\n");
   assert.equal(images.length, 1, text);
-  // Pi decoded and resized it with the packaged Photon module.
-  assert.match(text, /\[Image: original 2400x300, displayed at 2000x250\./u, text);
-  assert.doesNotMatch(text, /Image omitted/u);
+  // Resized to the model's default 2000 pixels with the embedded Photon.
+  const prepared = Buffer.from(
+    images[0].image_url.url.replace(/^data:image\/png;base64,/u, ""),
+    "base64",
+  );
+  assert.equal(prepared.readUInt32BE(16), 2000);
+  assert.equal(prepared.readUInt32BE(20), 250);
   assert.match(text, /name: "wide\.png"; .*sent inline as an image/u);
   assert.match(text, /name: "notes\.txt"; .*; file$/mu);
-  assert.ok((await readFile(join(release, "bin/photon_rs_bg.wasm"))).length > 0);
   console.log(
-    `runtime: packaged Pi normalized an attached image natively and listed every file (local inference fixture; ${hidePhoton ? "build-tree Photon hidden, release copy used" : "build-tree Photon visible: no user namespaces here"})`,
+    `runtime: the packaged runtime prepared an attached image for the model and listed every file (local inference fixture; ${hidePhoton ? "build-tree Photon hidden, embedded copy used" : "build-tree Photon visible: no user namespaces here"})`,
   );
 } finally {
   if (runtime && runtime.exitCode === null) {
@@ -220,5 +227,6 @@ try {
   }
   provider.closeAllConnections();
   await new Promise((done) => provider.close(done));
+  await core.close();
   await rm(root, { recursive: true, force: true });
 }

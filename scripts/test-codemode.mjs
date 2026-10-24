@@ -1,4 +1,5 @@
-// Packaged executables, real Pi/QuickJS/tools, controlled local inference.
+// Packaged executables: Pi's command line and the durable runtime, each with
+// real QuickJS and tools, against controlled local inference.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -7,6 +8,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { startFakeCore } from "../packages/runtime/src/testing.ts";
 
 const release = resolve(
   process.argv[2] ?? assert.fail("usage: node scripts/test-codemode.mjs RELEASE_DIRECTORY"),
@@ -49,6 +51,16 @@ provider.listen(0, "127.0.0.1");
 await once(provider, "listening");
 const endpoint = `http://127.0.0.1:${provider.address().port}/v1`;
 let active;
+/** The outcome core received for a turn, once the runtime posted it. */
+async function settled(core, turn, logs) {
+  const path = `/v1/runtime/turns/${turn}/outcome`;
+  for (const deadline = Date.now() + 20_000; Date.now() < deadline;) {
+    const received = core.received.find((call) => call.path === path);
+    if (received !== undefined) return received.body;
+    await new Promise((done) => setTimeout(done, 50));
+  }
+  throw new Error(`no outcome of ${turn}: ${logs}`);
+}
 async function stopChild() {
   if (active && active.exitCode === null) {
     const exited = once(active, "exit");
@@ -71,7 +83,11 @@ try {
       codemode: { mode: "only" },
     };
     await writeFile(join(state, "settings.json"), JSON.stringify(settings));
-    await writeFile(join(resources, "settings.json"), JSON.stringify(settings));
+    // The runtime's scripts call its coding tools.
+    await writeFile(
+      join(resources, "settings.json"),
+      JSON.stringify({ extensions: ["coding", "codemode"] }),
+    );
     await writeFile(
       join(state, "models.json"),
       JSON.stringify({
@@ -111,12 +127,13 @@ try {
       await once(probe, "listening");
       const url = `http://127.0.0.1:${probe.address().port}`;
       await new Promise((done) => probe.close(done));
+      const core = await startFakeCore();
       const config = join(work, "carillon.toml");
       const tokenFile = join(work, "runtime.token");
       await writeFile(tokenFile, token, { mode: 0o600 });
       await writeFile(
         config,
-        `data_dir = "state"\n[core]\nlisten = "127.0.0.1:1"\noperator_token_hash = "${hash}"\n[[agents]]\nid = "default"\nname = "Fixture"\nruntime = "runtime-pi"\nworkspace = ${JSON.stringify(work)}\nresources = "resources"\n[[providers]]\nid = "runtime-pi"\nrole = "runtime"\nversion = "0.0.0"\nurl = "${url}"\ntoken_hash = "${hash}"\nenabled = true\n`,
+        `data_dir = "state"\n[core]\nlisten = "${core.url.replace("http://", "")}"\noperator_token_hash = "${hash}"\n[[agents]]\nid = "default"\nname = "Fixture"\nruntime = "runtime-pi"\nworkspace = ${JSON.stringify(work)}\nresources = "resources"\n[[providers]]\nid = "runtime-pi"\nrole = "runtime"\nversion = "0.0.0"\nurl = "${url}"\ntoken_hash = "${hash}"\nenabled = true\ndurable = true\n`,
       );
       active = spawn(
         join(release, "bin/carillon-runtime-pi"),
@@ -147,7 +164,7 @@ try {
         } catch {}
         await new Promise((done) => setTimeout(done, 50));
       }
-      const result = await fetch(`${url}/v1/turns`, {
+      const result = await fetch(`${url}/v1/inbox`, {
         method: "POST",
         headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
         body: JSON.stringify({
@@ -161,23 +178,25 @@ try {
         }),
         signal: AbortSignal.timeout(20_000),
       });
-      assert.equal(result.status, 200, `${await result.clone().text()}\n${logs}`);
-      assert.equal((await result.json()).output, "packaged code mode checked");
+      assert.equal(result.status, 202, `${await result.clone().text()}\n${logs}`);
+      const outcome = await settled(core, "packaged-code-check", logs);
+      assert.equal(outcome.output, "packaged code mode checked", logs);
       await stopChild();
+      await core.close();
     }
     assert.equal(await readFile(join(work, "result.txt"), "utf8"), "after", logs);
     const sent = observations.slice(firstRequest);
     assert.equal(sent.length, 2, logs);
-    assert.deepEqual(
-      sent[0].tools.map((tool) => tool.function.name),
-      ["codemode"],
-    );
-    // Pi finds its documentation beside the executable, as it tells the model.
-    const system = sent[0].messages.find((message) => message.role === "system")?.content ?? "";
-    const docs = { readme: join(release, "bin/README.md"), docs: join(release, "bin/docs") };
-    assert.match(system, new RegExp(`Main documentation: ${RegExp.escape(docs.readme)}$`, "mu"));
-    assert.match(system, new RegExp(`Additional docs: ${RegExp.escape(docs.docs)}$`, "mu"));
-    assert.ok((await stat(docs.readme)).isFile() && (await stat(docs.docs)).isDirectory());
+    const tools = sent[0].tools.map((tool) => tool.function.name);
+    if (kind === "cli") {
+      assert.deepEqual(tools, ["codemode"]);
+      // Pi finds its documentation beside the executable, as it tells the model.
+      const system = sent[0].messages.find((message) => message.role === "system")?.content ?? "";
+      const docs = { readme: join(release, "bin/README.md"), docs: join(release, "bin/docs") };
+      assert.match(system, new RegExp(`Main documentation: ${RegExp.escape(docs.readme)}$`, "mu"));
+      assert.match(system, new RegExp(`Additional docs: ${RegExp.escape(docs.docs)}$`, "mu"));
+      assert.ok((await stat(docs.readme)).isFile() && (await stat(docs.docs)).isDirectory());
+    } else assert.ok(tools.includes("codemode"), tools.join(", "));
     const nested = sent[1].messages
       .filter((message) => message.role === "tool")
       .map((message) => message.content)
@@ -186,7 +205,7 @@ try {
     assert.match(nested, /packaged-bash/u, logs);
     assert.match(nested, /after/u, logs);
     console.log(
-      `${kind}: packaged native codemode worker, only-mode declarations, write/edit/read/bash and model-visible results passed (local inference fixture)`,
+      `${kind}: packaged codemode worker, write/edit/read/bash and model-visible results passed (local inference fixture)`,
     );
   }
 } finally {

@@ -23,6 +23,14 @@ STAGE="$ROOT/target/package/carillon-$VERSION"
 PI_DIST=packages/runtime-pi/node_modules/@earendil-works/pi-coding-agent/dist
 PI_PACKAGE=${PI_DIST%/dist}
 BUNDLE="$ROOT/target/pi-bundle"
+# A compiled executable cannot read installed packages, so it embeds the
+# WebAssembly pi-durable prepares images and runs code mode with, and the
+# Discord skill the Discord tools return.
+resolve() {
+  node -p 'require.resolve(process.argv[2], {paths: [require("fs").realpathSync(process.argv[1])]})' "$1" "$2"
+}
+DURABLE_PHOTON=$(resolve packages/runtime-pi/node_modules/@earendil-works/pi-durable @silvia-odwyer/photon/photon_rs_bg.wasm)
+QUICKJS=$(resolve packages/runtime-pi/node_modules/@earendil-works/pi-codemode quickjs-wasi/quickjs.wasm)
 
 rm -rf "$STAGE"
 mkdir -p "$STAGE/bin/theme" "$STAGE/bin/assets" "$STAGE/lib/examples" "$STAGE/licenses" \
@@ -31,27 +39,36 @@ mkdir -p "$STAGE/bin/theme" "$STAGE/bin/assets" "$STAGE/lib/examples" "$STAGE/li
 # One executable serves the runtime and, as `carillon-runtime-pi pi …`, Pi's own
 # command line. Each mode is imported only once chosen: Pi's Bun entry, which
 # restores a sandboxed environment and runs Pi's runtime setup before its CLI,
-# or that runtime setup (Bun OAuth flows, Bedrock, embedded QuickJS) before the
-# runtime's CLI. Pi reads its arguments without the mode's.
+# or that runtime setup (Bun OAuth flows, Bedrock) before the runtime's CLI,
+# given the embedded files. Pi reads its arguments without the mode's.
 rm -rf "$BUNDLE"
 mkdir -p "$BUNDLE/src/extensions/codemode" "$BUNDLE/src/utils"
 cat >"$BUNDLE/carillon-runtime-pi.ts" <<ENTRY
+import photon from "$DURABLE_PHOTON" with { type: "file" };
+import quickjs from "$QUICKJS" with { type: "file" };
+import discordSkill from "$ROOT/packages/discord-pi/skill/SKILL.md" with { type: "text" };
 if (process.argv[2] === "pi") {
   process.argv.splice(2, 1);
   await import("$ROOT/$PI_DIST/bun/cli.js");
 } else {
   await import("$ROOT/$PI_DIST/bun/runtime-setup.js");
-  await import("$ROOT/packages/runtime-pi/src/cli.ts");
+  const { main } = await import("$ROOT/packages/runtime-pi/src/cli.ts");
+  await main(process.argv.slice(2), {
+    photon,
+    quickjs,
+    codemodeWorker: "./src/extensions/codemode/worker.ts",
+    discordSkill,
+  });
 }
 ENTRY
 # Pi's worker specifiers use its source layout, so keep those entrypoint
-# identities even when building from npm's dist.
+# identities even when building from npm's dist. pi-durable's code mode runs
+# the same pi-codemode worker.
 printf 'import "%s";\n' "$ROOT/$PI_DIST/extensions/codemode/worker.js" \
   >"$BUNDLE/src/extensions/codemode/worker.ts"
 printf 'import "%s";\n' "$ROOT/$PI_DIST/utils/image-resize-worker.js" \
   >"$BUNDLE/src/utils/image-resize-worker.ts"
 
-bun build --target=bun packages/discord-pi/src/index.ts --outfile "$STAGE/lib/carillon-discord-pi.js"
 install -m 0644 packages/discord-pi/skill/SKILL.md "$STAGE/lib/carillon-discord-SKILL.md"
 
 cargo build --release --locked --target "$TARGET" --target-dir "$ROOT/target" --bin carillon --bin carillon-discord

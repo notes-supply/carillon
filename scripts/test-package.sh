@@ -31,11 +31,19 @@ mkdir -p "$PI/dist/modes/interactive/theme" "$PI/dist/modes/interactive/assets" 
 for path in package.json README.md CHANGELOG.md dist/modes/interactive/theme/theme.json dist/modes/interactive/assets/image.png docs/README.md; do
   printf fixture >"$PI/$path"
 done
-# Pi's image library, resolved from Pi's own dependencies.
+# Pi's image library, resolved from Pi's own dependencies, and the WebAssembly
+# the runtime embeds, from pi-durable's and pi-codemode's.
 PHOTON=$PI/node_modules/@silvia-odwyer/photon-node
 mkdir -p "$PHOTON"
 printf '{"name":"@silvia-odwyer/photon-node","main":"photon_rs.js"}\n' >"$PHOTON/package.json"
 printf photon >"$PHOTON/photon_rs_bg.wasm"
+DURABLE=$FIXTURE/packages/runtime-pi/node_modules/@earendil-works/pi-durable
+mkdir -p "$DURABLE/node_modules/@silvia-odwyer/photon" "$FIXTURE/packages/runtime-pi/node_modules/@earendil-works/pi-codemode/node_modules/quickjs-wasi"
+printf '{"name":"@silvia-odwyer/photon"}\n' >"$DURABLE/node_modules/@silvia-odwyer/photon/package.json"
+printf wasm >"$DURABLE/node_modules/@silvia-odwyer/photon/photon_rs_bg.wasm"
+QUICKJS=$FIXTURE/packages/runtime-pi/node_modules/@earendil-works/pi-codemode/node_modules/quickjs-wasi
+printf '{"name":"quickjs-wasi"}\n' >"$QUICKJS/package.json"
+printf wasm >"$QUICKJS/quickjs.wasm"
 REAL_BUN=$(command -v bun)
 export REAL_BUN
 cat >"$COMMANDS/toolchain" <<'COMMAND'
@@ -127,7 +135,7 @@ for arch in x86_64 aarch64; do
   tar -xOf "$archive" carillon-1.2.3/MANIFEST >"$TEST_ROOT/$arch.manifest"
   for line in 'x install.sh' 'x bin/carillon' 'x bin/carillon-discord' 'x bin/carillon-register-services' \
     'r lib/carillon_discord_module.wasm' 'r lib/examples/card-colours.wasm' \
-    'r lib/carillon-discord-pi.js' 'r lib/carillon-discord-SKILL.md' \
+    'r lib/carillon-discord-SKILL.md' \
     'r bin/photon_rs_bg.wasm' 'r systemd/example.service' 'r licenses/Apache-2.0.txt' \
     'r licenses/MIT.txt' 'r licenses/bun.md' 'r licenses/pi-coding-agent.txt' \
     'r licenses/rust.txt' 'r licenses/npm.txt'; do
@@ -136,7 +144,12 @@ for arch in x86_64 aarch64; do
   [ "$(wc -l <"$TEST_ROOT/$arch.manifest")" -eq \
     "$(tar -tzvf "$archive" | grep -c '^-' | awk '{ print $1 - 1 }')" ]
   [ "$(wc -l <"$TEST_ROOT/$arch.cargo")" -eq 2 ]
-  [ "$(wc -l <"$TEST_ROOT/$arch.bun")" -eq 3 ]
+  [ "$(wc -l <"$TEST_ROOT/$arch.bun")" -eq 2 ]
+  # The runtime's entry embeds what installed packages would have given it.
+  for embedded in "$DURABLE/node_modules/@silvia-odwyer/photon/photon_rs_bg.wasm" \
+    "$QUICKJS/quickjs.wasm" "$FIXTURE/packages/discord-pi/skill/SKILL.md"; do
+    grep -F "$embedded" "$FIXTURE/target/pi-bundle/carillon-runtime-pi.ts" >/dev/null
+  done
   # No compiled provider loads a bunfig.toml from where it is started.
   [ "$(grep -c -- '--compile ' "$TEST_ROOT/$arch.bun")" -eq 2 ]
   if grep -- '--compile ' "$TEST_ROOT/$arch.bun" | grep -v -- '--no-compile-autoload-bunfig'; then

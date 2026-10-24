@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const SHIPPED = ["@carillon/runtime-pi", "@carillon/runtime-t3", "@carillon/discord-pi"];
+const SHIPPED = ["@carillon/runtime-pi", "@carillon/runtime-t3"];
 // Standard texts in the release for packages that publish no licence file.
 const STANDARD = { MIT: "licenses/MIT.txt", "Apache-2.0": "licenses/Apache-2.0.txt" };
 const release = process.argv[2];
@@ -47,5 +47,5 @@ const sections = packages.map(({ name, version, license, author, homepage, path 
   return `${"=".repeat(80)}\n${heading}\n\n${body}\n`;
 });
 process.stdout.write(
-  `npm packages built into carillon-runtime-pi, carillon-runtime-t3 and\ncarillon-discord-pi.js, with their licences. Generated from pnpm's listing\nof their production dependencies.\n\n${sections.join("\n")}`,
+  `npm packages built into carillon-runtime-pi and carillon-runtime-t3, with\ntheir licences. Generated from pnpm's listing of their production\ndependencies.\n\n${sections.join("\n")}`,
 );
