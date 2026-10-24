@@ -124,8 +124,8 @@ impl UnitsLock {
 }
 
 /// Exclusive lock over an installation's durable state directory. Core
-/// holds one while serving; backup and the Discord tools installation take
-/// it to prove core is stopped and to keep it from starting meanwhile.
+/// holds one while serving; backup takes it to prove core is stopped and to
+/// keep it from starting meanwhile.
 #[derive(Debug)]
 pub struct ServiceLock {
     _lock: Locked,
