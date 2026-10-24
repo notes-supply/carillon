@@ -1,67 +1,34 @@
 /**
- * What an executing turn is doing, derived from native Pi session events and
- * bounded for display. Tool inputs are described by the shared runtime
- * package's deny-by-default descriptions, beside Pi's tool semantics here.
+ * What a held turn is doing, from the agent events pi-durable derives from
+ * each commit of its conversation, bounded for display. Tool inputs are
+ * described by the shared runtime package's deny-by-default descriptions.
+ * Steers placed into a run share its activity.
  *
- * Pi has no session event for child agents: a tool that runs other tools
- * (nested calls carry `parentToolCallId`) is still one tool call, not a
- * delegation. A participating extension that runs child agents reports
- * their lifecycle explicitly as `carillon:work` facts on the session's event
- * bus (see {@link WORK_CHANNEL}); unsupported extensions keep the ordinary
- * tool view.
- *
- * The model's thinking, as Pi streams it, becomes the turn's notes: each
+ * The model's thinking, as it streams, becomes the turn's notes: each
  * thinking block one bounded note from its beginning, never the answer.
- *
- * A call's start is Pi's own event; reported work has no start of its own,
- * so its start is when it was first reported running, marked as an
- * estimate. Durations are measured on the monotonic clock, so a wall clock
- * that steps cannot make them wrong, and work keeps the duration it
- * finished with, however often its end is reported again.
- * What the session says about its model, thinking level and context comes
- * from the runtime through {@link ActivityTracker.agent}.
+ * A call's start is when this process saw it start, on the monotonic
+ * clock, so a wall clock that steps cannot make durations wrong.
  */
-import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import type { Context } from "@earendil-works/chord";
+import type { AssistantMessage, Models } from "@earendil-works/pi-ai";
+import {
+  watchEvents,
+  type AgentEvent,
+  type AgentState,
+  type ConversationId,
+  type Harness,
+  type InboxItem,
+  type SubmissionId,
+} from "@earendil-works/pi-durable";
 import {
   NOTE_LENGTH,
-  WORK_ITEM_LIMIT,
-  WorkItemSchema,
   type ActivityPhase,
   type AgentInfo,
   type FinishedTool,
   type RunningTool,
   type TurnActivity,
-  type WorkItem,
 } from "@carillon/protocol";
-import {
-  commentary,
-  describe,
-  displayed,
-  keepNote,
-  summarizeWork,
-  toolName,
-} from "@carillon/runtime/activity";
-import { Type } from "typebox";
-import { Check } from "typebox/value";
-
-/**
- * The event-bus channel on which a participating Pi extension reports the
- * work it runs for the current turn: `{ id, kind, label, state, parent?,
- * actor? }` with the shared work vocabulary, one fact per change, the same
- * `id` for the same work. Each session (and so each turn) has its own bus.
- */
-export const WORK_CHANNEL = "carillon:work";
-
-const WorkReportSchema = Type.Object({
-  id: WorkItemSchema.properties.id,
-  kind: WorkItemSchema.properties.kind,
-  label: Type.String({ minLength: 1, maxLength: 1000 }),
-  state: WorkItemSchema.properties.state,
-  parent: Type.Optional(WorkItemSchema.properties.id),
-  actor: Type.Optional(Type.String({ minLength: 1, maxLength: 1000 })),
-});
-const FINISHED_WORK: ReadonlySet<WorkItem["state"]> = new Set(["succeeded", "failed", "cancelled"]);
-const WORK_LABEL_LIMIT = 100;
+import { commentary, describe, keepNote, toolName } from "@carillon/runtime/activity";
 
 /** The most finished calls a snapshot lists; older calls are only counted. */
 const RECENT_CALLS = 5;
@@ -69,41 +36,38 @@ const RECENT_CALLS = 5;
 const RUNNING_CALLS = 8;
 
 export interface ActivityTracker {
-  observe(event: AgentSessionEvent): void;
+  observe(event: AgentEvent): void;
   agent(info: AgentInfo): void;
-  /**
-   * One fact a participating extension reported on {@link WORK_CHANNEL}.
-   * A fact outside the shared vocabulary is ignored, never guessed at.
-   */
-  report(fact: unknown): void;
   snapshot(): TurnActivity;
 }
 
-/** Tracks one turn from before its session exists until it settles. */
+/** Tracks one run from its start until it ends. */
 export function trackActivity(workspace: string): ActivityTracker {
-  let phase: ActivityPhase = "starting";
+  let phase: ActivityPhase = "model";
   let headline: string | undefined;
   let toolCalls = 0;
   const running = new Map<string, RunningTool>();
   const recent: FinishedTool[] = [];
   const idle = (): ActivityPhase => (running.size > 0 ? "tools" : "model");
-  /** Reported work by ID, at most the snapshot limit; never more, even when all of it is live. */
-  const work = new Map<string, WorkItem>();
-  /** Some reported work could not be retained. */
-  let partialWork = false;
-  /** When each running call and reported work started, on the monotonic clock, for its duration. */
   const startedMs = new Map<string, number>();
-  const workStartedMs = new Map<string, number>();
-  /** Thinking blocks by message and content index: their streamed text, and their notes. */
+  /** Thinking blocks of the streaming message by content index: their text so far. */
   let messages = 0;
-  const thinking = new Map<string, string>();
+  const thinking = new Map<number, string>();
   const notes = new Map<string, string>();
   let agent: AgentInfo | undefined;
+
+  function think(contentIndex: number, text: string): void {
+    // A note shows a block's beginning, so only that much is kept while it streams.
+    const kept = text.slice(0, 2 * NOTE_LENGTH);
+    thinking.set(contentIndex, kept);
+    keepNote(notes, `${String(messages)}:${String(contentIndex)}`, kept);
+  }
 
   return {
     observe(event) {
       switch (event.type) {
-        case "agent_start":
+        case "run_start":
+        case "turn_start":
         case "auto_retry_end":
         case "compaction_end":
           phase = idle();
@@ -112,26 +76,37 @@ export function trackActivity(workspace: string): ActivityTracker {
           phase = "retrying";
           break;
         case "compaction_start":
-          phase = "compacting";
+          if (event.blocking) phase = "compacting";
           break;
         case "message_start":
           messages += 1;
+          thinking.clear();
           break;
-        case "message_update": {
-          // Only completed public text; thinking is the notes'.
-          const update = event.assistantMessageEvent;
-          if (update.type === "text_end") headline = commentary(update.content) ?? headline;
-          else if (update.type === "thinking_delta" || update.type === "thinking_end") {
-            const block = `${String(messages)}:${String(update.contentIndex)}`;
-            // A note shows a block's beginning, so only that much is kept while it streams.
-            const text =
-              update.type === "thinking_end"
-                ? update.content
-                : `${thinking.get(block) ?? ""}${update.delta}`.slice(0, 2 * NOTE_LENGTH);
-            if (update.type === "thinking_end") thinking.delete(block);
-            else thinking.set(block, text);
-            keepNote(notes, block, text);
-          }
+        case "message_update":
+          for (const change of event.changes)
+            if (change.type === "thinking_delta")
+              think(
+                change.contentIndex,
+                `${thinking.get(change.contentIndex) ?? ""}${change.delta}`,
+              );
+            else if (
+              (change.type === "thinking_start" || change.type === "block") &&
+              change.block.type === "thinking"
+            )
+              think(change.contentIndex, change.block.thinking);
+            else if (change.type === "message")
+              for (const [index, block] of change.message.content.entries())
+                if (block.type === "thinking") think(index, block.thinking);
+          break;
+        case "message_end": {
+          const message = event.entry.model?.[0];
+          if (message?.role !== "assistant") break;
+          for (const [index, block] of message.content.entries())
+            if (block.type === "thinking") think(index, block.thinking);
+          const text = message.content.flatMap((block) =>
+            block.type === "text" ? [block.text] : [],
+          );
+          headline = commentary(text.join("\n")) ?? headline;
           break;
         }
         case "tool_execution_start": {
@@ -151,10 +126,12 @@ export function trackActivity(workspace: string): ActivityTracker {
           const startedAt = startedMs.get(event.toolCallId);
           running.delete(event.toolCallId);
           startedMs.delete(event.toolCallId);
+          const result = event.entry?.model?.[0];
+          const failed = event.result?.isError ?? (result?.role === "toolResult" && result.isError);
           recent.push({
             tool: started?.tool ?? toolName(event.toolName),
             ...(started?.detail === undefined ? {} : { detail: started.detail }),
-            ok: !event.isError,
+            ok: !failed,
             ...(startedAt === undefined
               ? {}
               : { duration_ms: Math.round(performance.now() - startedAt) }),
@@ -163,65 +140,23 @@ export function trackActivity(workspace: string): ActivityTracker {
           phase = idle();
           break;
         }
-        // Starts, ends and deltas of turns and messages say nothing a card
-        // shows; tool output is never described.
-        case "agent_end":
-        case "agent_settled":
-        case "turn_start":
+        // Ends, writes, spend and running output say nothing a card shows.
+        case "snapshot":
+        case "run_end":
         case "turn_end":
-        case "message_end":
         case "tool_execution_update":
-        case "bash_execution_update":
-        case "queue_update":
+        case "inbox_update":
+        case "submission":
+        case "deferred_poll":
         case "entry_appended":
-        case "session_info_changed":
-        case "thinking_level_changed":
-        case "summarization_retry_scheduled":
-        case "summarization_retry_attempt_start":
-        case "summarization_retry_finished":
+        case "agent_changed":
+        case "usage_changed":
+        case "task_failed":
           break;
       }
     },
     agent(info) {
       agent = info;
-    },
-    report(fact) {
-      if (!Check(WorkReportSchema, fact)) return;
-      const known = work.get(fact.id);
-      if (known === undefined && work.size >= WORK_ITEM_LIMIT) {
-        // Make room only by forgetting finished work, oldest first; either
-        // way the report no longer covers all the work it saw.
-        partialWork = true;
-        const finished = [...work.values()].find((item) => FINISHED_WORK.has(item.state));
-        if (finished === undefined) return;
-        work.delete(finished.id);
-        workStartedMs.delete(finished.id);
-      }
-      const actor = fact.actor === undefined ? undefined : toolName(fact.actor);
-      const elapsed = performance.now();
-      if (fact.state === "running" && !workStartedMs.has(fact.id))
-        workStartedMs.set(fact.id, elapsed);
-      const startedMs = workStartedMs.get(fact.id);
-      const startedAt =
-        known?.started_at ?? (fact.state === "running" ? Math.floor(Date.now() / 1000) : undefined);
-      // Work keeps the duration it finished with when its end is reported again.
-      const duration = !FINISHED_WORK.has(fact.state)
-        ? undefined
-        : known !== undefined && FINISHED_WORK.has(known.state)
-          ? known.duration_ms
-          : startedMs === undefined
-            ? undefined
-            : Math.round(elapsed - startedMs);
-      work.set(fact.id, {
-        id: fact.id,
-        kind: fact.kind,
-        label: displayed(fact.label, WORK_LABEL_LIMIT) ?? fact.kind,
-        state: fact.state,
-        ...(fact.parent === undefined ? {} : { parent: fact.parent }),
-        ...(actor === undefined ? {} : { actor }),
-        ...(startedAt === undefined ? {} : { started_at: startedAt, estimated: true }),
-        ...(duration === undefined ? {} : { duration_ms: duration }),
-      });
     },
     snapshot() {
       return {
@@ -230,12 +165,175 @@ export function trackActivity(workspace: string): ActivityTracker {
         running: [...running.values()].slice(0, RUNNING_CALLS),
         recent: [...recent],
         tool_calls: toolCalls,
-        ...(work.size === 0 && !partialWork
-          ? {}
-          : { work: summarizeWork([...work.values()], partialWork) }),
         ...(notes.size === 0 ? {} : { notes: [...notes.values()] }),
         ...(agent === undefined ? {} : { agent }),
       };
+    },
+  };
+}
+
+/** A message waiting behind a running answer: a follow-up waits for it to end, a steer for its next tool round. */
+type Waiting = "followUp" | "steer";
+
+/** What a person may do with a waiting message; a steer already joins the running answer. */
+const QUEUED: Record<Waiting, TurnActivity> = {
+  followUp: {
+    phase: "queued",
+    running: [],
+    recent: [],
+    tool_calls: 0,
+    controls: ["steer", "interrupt", "stop"],
+  },
+  steer: {
+    phase: "queued",
+    running: [],
+    recent: [],
+    tool_calls: 0,
+    controls: ["interrupt", "stop"],
+  },
+};
+
+/** The waiting messages of an inbox, without its writes. */
+function waiting(
+  items: readonly { readonly id: SubmissionId; readonly mode: InboxItem["mode"] }[],
+): Map<SubmissionId, Waiting> {
+  return new Map(items.flatMap((item) => (item.mode === "write" ? [] : [[item.id, item.mode]])));
+}
+
+/** The activity of the messages a conversation holds, kept current from its events. */
+export interface ConversationActivity {
+  /** A held message's activity: waiting in the inbox, or what its run does. */
+  of(submission: SubmissionId): TurnActivity | undefined;
+  /** The message is settled with core and needs no more watching. */
+  forget(submission: SubmissionId): void;
+  /** Whether a tool call runs now. */
+  readonly calling: boolean;
+  stop(): Promise<void>;
+}
+
+export async function watchActivity(
+  harness: Harness,
+  conversationId: ConversationId,
+  workspace: string,
+  models: Models,
+  context: Context,
+): Promise<ConversationActivity> {
+  const stream = await watchEvents(harness, conversationId, context);
+  let queued = new Map<SubmissionId, Waiting>();
+  let inputs = new Set<SubmissionId>();
+  let agentState: AgentState = {};
+  let usage: AssistantMessage["usage"] | undefined;
+  let run: ActivityTracker | undefined;
+  /** Runs that ended, by their messages, until each message is settled with core. */
+  const ended = new Map<SubmissionId, ActivityTracker>();
+  const calls = new Set<string>();
+
+  const agentInfo = (): AgentInfo | undefined => {
+    const ref = agentState.model;
+    if (ref === undefined) return undefined;
+    const model = models.getModel(ref.provider, ref.modelId);
+    return {
+      model: toolName(ref.modelId),
+      ...(model?.reasoning === true && agentState.thinkingLevel !== undefined
+        ? { effort: agentState.thinkingLevel }
+        : {}),
+      ...(usage === undefined
+        ? {}
+        : {
+            context: {
+              used: usage.totalTokens,
+              ...(model === undefined ? {} : { window: model.contextWindow }),
+            },
+          }),
+    };
+  };
+  const describeAgent = () => {
+    const info = agentInfo();
+    if (info !== undefined) run?.agent(info);
+  };
+
+  function apply(event: AgentEvent): void {
+    switch (event.type) {
+      case "snapshot":
+        queued = waiting(event.inbox);
+        inputs = new Set(event.run?.inputs ?? []);
+        if (inputs.size > 0) run ??= trackActivity(workspace);
+        agentState = event.agent;
+        calls.clear();
+        for (const slot of [...event.tools, ...event.nestedTools])
+          if (slot.status === "running") calls.add(slot.callId);
+        describeAgent();
+        return;
+      case "inbox_update":
+        queued = waiting(event.items);
+        return;
+      case "run_start":
+        inputs = new Set(event.inputs);
+        run = trackActivity(workspace);
+        describeAgent();
+        break;
+      case "run_end":
+        for (const input of event.inputs) if (run !== undefined) ended.set(input, run);
+        inputs = new Set();
+        run = undefined;
+        return;
+      case "submission":
+        if (event.record.status === "placed" && run !== undefined) inputs.add(event.record.id);
+        return;
+      case "agent_changed":
+        agentState = event.agent;
+        describeAgent();
+        return;
+      case "message_end": {
+        const message = event.entry.model?.[0];
+        if (message?.role === "assistant") usage = message.usage;
+        break;
+      }
+      case "tool_execution_start":
+        calls.add(event.toolCallId);
+        break;
+      case "tool_execution_end":
+        calls.delete(event.toolCallId);
+        break;
+      case "turn_start":
+      case "turn_end":
+      case "message_start":
+      case "message_update":
+      case "tool_execution_update":
+      case "auto_retry_start":
+      case "auto_retry_end":
+      case "deferred_poll":
+      case "entry_appended":
+      case "usage_changed":
+      case "task_failed":
+      case "compaction_start":
+      case "compaction_end":
+        break;
+    }
+    run?.observe(event);
+    if (event.type === "message_end") describeAgent();
+  }
+
+  apply(stream.snapshot);
+  stream.start((events) => {
+    for (const event of events) apply(event);
+    return Promise.resolve();
+  });
+  return {
+    of(submission) {
+      const mode = queued.get(submission);
+      if (mode !== undefined) return QUEUED[mode];
+      if (inputs.has(submission)) return run?.snapshot();
+      return ended.get(submission)?.snapshot();
+    },
+    forget(submission) {
+      ended.delete(submission);
+    },
+    get calling() {
+      return calls.size > 0;
+    },
+    async stop() {
+      await stream.stop();
     },
   };
 }

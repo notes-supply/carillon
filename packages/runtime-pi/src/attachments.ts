@@ -1,20 +1,17 @@
 /**
- * A turn's captured files as Pi sees them: a note listing every file by its
- * path relative to the installation's attachment directory, and suitable
- * images as Pi's native image input. Pi itself normalizes those images for
- * whichever model runs, after extensions have chosen it; files are never
- * read for the model beyond the bytes of images inlined here.
+ * A turn's captured files as the model sees them: a note listing every file
+ * by its path relative to the installation's attachment directory, and
+ * suitable images inline, prepared for the model the turn runs; files are
+ * never read for the model beyond the bytes of images inlined here.
  */
 import type { ImageContent } from "@earendil-works/pi-ai";
-import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import type { ImageLimits, ImageProcessor } from "@earendil-works/pi-durable/tools";
 import type { TurnAttachment } from "@carillon/protocol";
 import { capturedPath, detectImage, HEADER_BYTES, readPrefix } from "@carillon/runtime/attachments";
 import { resolve } from "node:path";
 import { Type, type Static } from "typebox";
 
 const MIB = 1024 * 1024;
-export const ATTACHMENT_NOTE = "carillon-attachments";
-const SECTION = "carillon_attachments";
 const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 const KEPT =
   "Each is kept read-only at its path below the attachment directory named in your " +
@@ -41,11 +38,16 @@ export const DEFAULT_INLINE_IMAGES: InlineImagePolicy = {
 };
 
 export interface PreparedAttachments {
-  /** Native image input, in message order. */
+  /** Images for the model, in message order. */
   readonly images: ImageContent[];
   /** The model-facing list of every file, when there are any. */
   readonly note?: string;
 }
+
+/** How the turn's model takes images: prepared to its limits, or not at all. */
+export type ModelImages =
+  | { readonly kind: "inline"; readonly processor: ImageProcessor; readonly limits: ImageLimits }
+  | { readonly kind: "none" };
 
 type Presentation =
   | { readonly kind: "inline"; readonly image: ImageContent }
@@ -57,6 +59,7 @@ export async function prepareAttachments(
   root: string,
   attachments: readonly TurnAttachment[],
   policy: InlineImagePolicy,
+  model: ModelImages,
 ): Promise<PreparedAttachments> {
   if (attachments.length === 0) return { images: [] };
   const images: ImageContent[] = [];
@@ -67,6 +70,7 @@ export async function prepareAttachments(
       capturedPath(root, attachment),
       attachment,
       policy,
+      model,
       images.length,
       inlineBytes,
     );
@@ -87,23 +91,11 @@ export async function prepareAttachments(
   };
 }
 
-/**
- * The note for files of an earlier message that never reached the model,
- * such as one a command consumed. They are listed as files: their images
- * belonged to that message.
- */
-export function earlierNote(attachments: readonly TurnAttachment[]): string {
-  return [
-    "[Carillon attachments] The person attached these files to an earlier message that did " +
-      `not reach you. ${KEPT} ${LABELS}`,
-    ...attachments.map((attachment, index) => describe(index, attachment, { kind: "file" })),
-  ].join("\n");
-}
-
 async function present(
   path: string,
   attachment: TurnAttachment,
   policy: InlineImagePolicy,
+  model: ModelImages,
   inlined: number,
   inlineBytes: number,
 ): Promise<Presentation> {
@@ -111,6 +103,7 @@ async function present(
   const detected = header === undefined ? undefined : detectImage(header);
   if (detected === undefined) return { kind: "file" };
   const notInline = (reason: string): Presentation => ({ kind: "image-file", reason });
+  if (model.kind === "none") return notInline("the model reads no images");
   if (inlined >= policy.max_count)
     return notInline(`only ${String(policy.max_count)} images per message are passed inline`);
   if (attachment.size > policy.max_image_mib * MIB)
@@ -124,13 +117,13 @@ async function present(
     );
   const bytes = await readPrefix(path, attachment.size);
   if (bytes?.length !== attachment.size) return notInline("it could not be read");
+  const prepared = await model.processor
+    .prepare(bytes, detected.mediaType, model.limits)
+    .catch(() => undefined);
+  if (prepared === undefined) return notInline("it could not be prepared for the model");
   return {
     kind: "inline",
-    image: {
-      type: "image",
-      data: Buffer.from(bytes).toString("base64"),
-      mimeType: detected.mediaType,
-    },
+    image: { type: "image", data: prepared.data, mimeType: prepared.mimeType },
   };
 }
 
@@ -175,29 +168,14 @@ function size(bytes: number): string {
 }
 
 /**
- * Native context for attachment notes: while the conversation has any,
- * including one this turn brings, the current attachment directory is in the
- * system prompt, so the relative paths of notes resolve after reopening or
- * relocation.
+ * The prompt section of a conversation that has had files, so the relative
+ * paths of its notes resolve after relocation.
  */
-export function attachmentContext(root: string, thisTurn: boolean): ExtensionFactory {
-  const section =
+export function attachmentSection(root: string): string {
+  return (
     `Files people attach in this conversation are kept in ${resolve(root)}. ` +
     "Attachment notes give each file's path relative to that directory. Read the files there " +
     "with your normal tools, and copy one elsewhere before changing it: the kept original " +
-    "stays as it was received.";
-  return (pi) => {
-    pi.on("before_agent_start", (event, context) => {
-      const noted =
-        thisTurn ||
-        context.sessionManager
-          .getBranch()
-          .some((entry) => entry.type === "custom_message" && entry.customType === ATTACHMENT_NOTE);
-      if (!noted) return;
-      event.systemPromptOptions.sections = {
-        ...event.systemPromptOptions.sections,
-        [SECTION]: section,
-      };
-    });
-  };
+    "stays as it was received."
+  );
 }

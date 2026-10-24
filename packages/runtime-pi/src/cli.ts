@@ -1,17 +1,27 @@
 import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
+import { CodemodeSandbox, loadQuickJSWasm } from "@earendil-works/pi-codemode";
+import { createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
+import { createPhotonImages } from "@earendil-works/pi-durable/images";
+import { createNodePhotonImages } from "@earendil-works/pi-durable/images/node";
+import { createToolSearchExtension } from "@earendil-works/pi-durable/tool-search";
+import { createCodingTools } from "@earendil-works/pi-durable/tools";
+import { createDiscordExtension, DISCORD_SKILL } from "@carillon/discord-pi";
 import { once } from "node:events";
 import { readFile, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { Type } from "typebox";
 import { Check, Errors } from "typebox/value";
 import { parse as parseToml } from "smol-toml";
-import { createPiRuntime } from "./index.ts";
 import {
   DEFAULT_INLINE_IMAGES,
   InlineImagePolicySchema,
   type InlineImagePolicy,
 } from "./attachments.ts";
-import { createDeterministicRuntime } from "./testing.ts";
+import { deterministicCatalogue } from "./deterministic.ts";
+import { ConversationInfo } from "./documents.ts";
+import { checkDefault, openPiCatalogue } from "./models.ts";
+import { createPiRuntime } from "./runtime.ts";
+import { createCoreClient } from "@carillon/runtime/core";
 import { createRuntimeServer } from "@carillon/runtime/http";
 import packageInfo from "../package.json" with { type: "json" };
 import { providerAddress } from "@carillon/runtime/endpoint";
@@ -33,7 +43,19 @@ const ProviderFileSchema = Type.Object(
   { additionalProperties: false },
 );
 
-async function main(values: readonly string[]): Promise<void> {
+/**
+ * Files a compiled executable embeds, which it cannot find in installed
+ * packages: Photon's and QuickJS's WebAssembly, code mode's worker entry,
+ * and the Discord skill's text.
+ */
+interface Embedded {
+  readonly photon: string;
+  readonly quickjs: string;
+  readonly codemodeWorker: string;
+  readonly discordSkill: string;
+}
+
+export async function main(values: readonly string[], embedded?: Embedded): Promise<void> {
   const args = parseArguments(values, ["deterministic", "check"]);
   const providerId = requiredArgument(args, "provider");
   const config = await loadInstallation(requiredArgument(args, "config"), providerId);
@@ -63,21 +85,14 @@ async function main(values: readonly string[]): Promise<void> {
   }
   const deterministic = args.has("deterministic");
   const stateDirectory = resolve(requiredArgument(args, "state-dir"));
-  // Sessions of every agent, apart by their conversation's identity.
-  const sessionDirectory = join(config.componentDirectory, "sessions");
   if (!deterministic) registerBunOAuthFlows();
+  const openCatalogue = () =>
+    deterministic ? Promise.resolve(deterministicCatalogue()) : openPiCatalogue(stateDirectory);
   // The check is the runtime's own startup check: Pi is signed in and its
   // default model is available. Nothing listens.
   if (args.has("check")) {
     try {
-      const runtime = await createPiRuntime({
-        agents: config.agents,
-        stateDirectory,
-        sessionDirectory,
-        allowModelNetwork: true,
-        inlineImages,
-      });
-      await runtime.close();
+      await checkDefault(await openCatalogue());
     } catch (failure) {
       process.stderr.write(
         `Pi is not ready: ${failure instanceof Error ? failure.message : String(failure)}\n`,
@@ -88,32 +103,59 @@ async function main(values: readonly string[]): Promise<void> {
     process.stdout.write("Pi is signed in and has a default model.\n");
     return;
   }
+  if (!config.durable)
+    throw new Error(
+      `runtime provider ${providerId} holds its turns and needs durable = true in carillon.toml`,
+    );
   const listenAddress = providerAddress(config.runtime.url);
   const token = await loadRuntimeCredential(requiredArgument(args, "token-file"), config.runtime);
-  const runtime = deterministic
-    ? await createDeterministicRuntime(stateDirectory, sessionDirectory)
-    : await createPiRuntime({
-        agents: config.agents,
-        stateDirectory,
-        sessionDirectory,
-        allowModelNetwork: true,
-        inlineImages,
-        extensionContext: (request) => {
-          const provider = config.interfaces.find((item) => item.id === request.interface_id);
-          return {
-            interface_id: request.interface_id,
-            native: request.native,
-            connection:
-              provider === undefined
-                ? undefined
-                : {
-                    url: provider.url,
-                    token_file: join(config.root, "credentials", "operator.token"),
-                    token_hash: config.operatorTokenHash,
-                  },
-          };
-        },
-      });
+  const catalogue = await openCatalogue();
+  const images =
+    embedded === undefined
+      ? await createNodePhotonImages()
+      : createPhotonImages(await readFile(embedded.photon));
+  const sandbox = new CodemodeSandbox(
+    embedded === undefined
+      ? {}
+      : { wasm: loadQuickJSWasm(embedded.quickjs), workerUrl: embedded.codemodeWorker },
+  );
+  const discord = createDiscordExtension({
+    guidance: embedded?.discordSkill ?? (await readFile(DISCORD_SKILL, "utf8")),
+    // The conversation's own interface, with the operator credential's file:
+    // host data, never the model's.
+    async context(api, context) {
+      const conversation = await api.snapshot(ConversationInfo, api.conversationId, context);
+      const provider = config.interfaces.find((item) => item.id === conversation?.interface_id);
+      return {
+        interface_id: conversation?.interface_id,
+        native: conversation?.native,
+        connection:
+          provider === undefined
+            ? undefined
+            : {
+                url: provider.url,
+                token_file: join(config.root, "credentials", "operator.token"),
+                token_hash: config.operatorTokenHash,
+              },
+      };
+    },
+  });
+  const runtime = await createPiRuntime({
+    agents: config.agents,
+    componentDirectory: config.componentDirectory,
+    catalogue,
+    core: createCoreClient({ url: config.coreUrl, providerId: config.runtime.id, token }),
+    images,
+    builtIns: [
+      { ...createCodingTools({ images }), name: "coding" },
+      createCodemodeExtension({ sandbox }),
+      createToolSearchExtension(),
+      discord,
+    ],
+    // Carillon's interface providers are its Discord providers.
+    defaults: ["coding", "tool-search", ...(config.interfaces.length > 0 ? ["discord"] : [])],
+    inlineImages,
+  });
   const server = createRuntimeServer({
     runtime,
     token,
@@ -121,7 +163,7 @@ async function main(values: readonly string[]): Promise<void> {
     durable: config.durable,
     provider: deterministic ? "deterministic-local-substitute" : "pi",
     version: packageInfo.version,
-    features: ["native-continuations", "native-extensions", "skills"],
+    features: ["native-extensions", "skills"],
     agents: config.agents,
   });
   try {
@@ -142,6 +184,7 @@ async function main(values: readonly string[]): Promise<void> {
   } finally {
     const stopped = new Promise<void>((done) => server.close(() => done()));
     await runtime.close();
+    await sandbox.close();
     server.closeAllConnections();
     await stopped;
   }
@@ -172,4 +215,4 @@ async function loadInlineImages(path: string): Promise<InlineImagePolicy> {
   return policy;
 }
 
-await main(process.argv.slice(2));
+if (import.meta.main) await main(process.argv.slice(2));

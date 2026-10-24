@@ -72,15 +72,18 @@ export class ModelSelections {
     runtimeDefault: Selection,
     query: ModelQuery,
   ): Promise<Selection> {
-    return resolved(available, await this.chosen(runtimeDefault, query));
+    return resolved(available, (await this.chosen(runtimeDefault, query)) ?? runtimeDefault);
   }
 
   /**
-   * The nearest scope's choice, else the runtime default, before it is
-   * resolved against a catalogue. It is read in order with updates, from the
-   * call on, so an update made later never changes it.
+   * The nearest scope's choice, else the runtime default if there is one,
+   * before it is resolved against a catalogue. It is read in order with
+   * updates, from the call on, so an update made later never changes it.
    */
-  async chosen(runtimeDefault: Selection, query: ModelQuery): Promise<Selection> {
+  async chosen(
+    runtimeDefault: Selection | undefined,
+    query: ModelQuery,
+  ): Promise<Selection | undefined> {
     return this.#writes.run(async () => {
       await this.refresh();
       return (

@@ -1,471 +1,111 @@
-import { ModelRuntime, SettingsManager } from "@earendil-works/pi-coding-agent";
-import type {
-  AgentSession,
-  AgentSessionEvent,
-  SessionManager,
-} from "@earendil-works/pi-coding-agent";
-import {
-  clampThinkingLevel,
-  getSupportedThinkingLevels,
-  type Api,
-  type AssistantMessage,
-  type ImageContent,
-  type Model,
-  type ModelThinkingLevel,
-} from "@earendil-works/pi-ai";
-import type {
-  AgentInfo,
-  AvailableModel,
-  CommandCatalog,
-  ModelProvider,
-  Selection,
-  ModelQuery,
-  ModelUpdate,
-  ModelState,
-} from "@carillon/protocol";
-import { existsSync } from "node:fs";
+/**
+ * Carillon's Pi runtime on pi-durable. Each agent's conversations live in
+ * one harness over `<component>/agents/<agent>.sqlite`; the runtime holds
+ * every turn core hands over and settles it through core's client.
+ */
+import type { Extension, Storage } from "@earendil-works/pi-durable";
+import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import type { ImageProcessor } from "@earendil-works/pi-durable/tools";
+import type { CoreClient } from "@carillon/runtime/core";
+import { ExplainedFailure } from "@carillon/runtime/failure";
+import type { InboxTurns, RuntimeOperations } from "@carillon/runtime/operations";
+import { ModelSelections } from "@carillon/runtime/selections";
 import { mkdir } from "node:fs/promises";
-import { join, resolve } from "node:path";
-import { trackActivity, type ActivityTracker } from "./activity.ts";
-import {
-  ATTACHMENT_NOTE,
-  attachmentContext,
-  DEFAULT_INLINE_IMAGES,
-  earlierNote,
-  prepareAttachments,
-  type InlineImagePolicy,
-} from "./attachments.ts";
-import { ModelSelections, type ModelScopes } from "@carillon/runtime/selections";
-import { resolved } from "@carillon/runtime/models";
-import { openConversation } from "./namespace.ts";
-import { finalReport, toolName } from "@carillon/runtime/activity";
-import { ExplainedFailure, RuntimeClosed, withReport } from "@carillon/runtime/failure";
-import { Serial } from "@carillon/runtime/serial";
-import { createPiExecutionSession, promptSession } from "./session.ts";
-import {
-  commandFinished,
-  type AnswerRuntime,
-  type TurnRequest,
-  type TurnResponse,
-} from "@carillon/runtime/operations";
+import { join } from "node:path";
+import { openAgent, type DurableAgent } from "./agent.ts";
+import { DEFAULT_INLINE_IMAGES, type InlineImagePolicy } from "./attachments.ts";
+import { checkDefault, modelChoices, type Catalogue } from "./models.ts";
 
 export interface PiRuntimeOptions {
-  /** The agents the runtime serves, each with the existing directory its sessions work in. */
+  /** The agents the runtime serves, each with the existing directory its tools work in. */
   readonly agents: readonly { readonly id: string; readonly workspace: string }[];
-  readonly stateDirectory: string;
-  /** Defaults to sessions under stateDirectory. The service supplies its installation path. */
-  readonly sessionDirectory?: string;
-  readonly modelRuntime?: ModelRuntime;
-  readonly settings?: SettingsManager;
-  readonly selections?: ModelSelections;
-  /** Explicitly opt into catalogue network discovery during construction. */
-  readonly allowModelNetwork?: boolean;
-  /** Host-supplied native-extension context; no integration knowledge in the runtime. */
-  readonly extensionContext?: (request: TurnRequest) => unknown;
-  /** Which attached images are passed to Pi inline; the rest stay files. */
+  /** The runtime's private state: agents' storage and Carillon's model selections. */
+  readonly componentDirectory: string;
+  readonly catalogue: Catalogue;
+  readonly core: CoreClient;
+  readonly images: ImageProcessor;
+  /** The built-in extensions, named as agents' settings select them. */
+  readonly builtIns: readonly Extension[];
+  /** What agents' settings select when they name no extensions. */
+  readonly defaults: readonly string[];
+  /** Which attached images are passed inline; the rest stay files. */
   readonly inlineImages?: InlineImagePolicy;
+  /** An agent's storage; its SQLite file by default. */
+  readonly storage?: (agentId: string) => Promise<Storage>;
 }
 
-/** Construction is explicit; importing this module does not discover providers or open files.
- * Supplied collaborators remain caller-owned. close() cancels/settles work, but does not destroy them.
- */
-export async function createPiRuntime(options: PiRuntimeOptions): Promise<AnswerRuntime> {
-  const workspaces = new Map(options.agents.map((agent) => [agent.id, resolve(agent.workspace)]));
-  const stateDirectory = resolve(options.stateDirectory);
-  const sessionDirectory = resolve(options.sessionDirectory ?? join(stateDirectory, "sessions"));
-  await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
-  await mkdir(sessionDirectory, { recursive: true, mode: 0o700 });
-  const settings = options.settings ?? SettingsManager.create(stateDirectory, stateDirectory);
-  const modelRuntime =
-    options.modelRuntime ??
-    (await ModelRuntime.create({
-      authPath: join(stateDirectory, "auth.json"),
-      modelsPath: join(stateDirectory, "models.json"),
-      modelsStorePath: join(stateDirectory, "models-store.json"),
-      allowModelNetwork: options.allowModelNetwork ?? false,
-      modelRefreshTimeoutMs: 15_000,
-    }));
-  const selections =
-    options.selections ??
-    (await ModelSelections.open(join(stateDirectory, "model-selection.json")));
-  const turns = new Serial();
-  const shutdown = new AbortController();
-  const pending = new Set<Promise<unknown>>();
-  /** Executing turns by correlation ID, from before preparation until they settle. */
-  const executing = new Map<
-    string,
-    { readonly interfaceId: string; readonly activity: ActivityTracker }
-  >();
-  const THINKING_OPTION = "thinking";
-  await selectedPiModel();
+/** Refuses to start, before any storage opens, unless the runtime default model can run. */
+export async function createPiRuntime(
+  options: PiRuntimeOptions,
+): Promise<RuntimeOperations<InboxTurns>> {
+  await mkdir(join(options.componentDirectory, "agents"), { recursive: true, mode: 0o700 });
+  const selections = await ModelSelections.open(
+    join(options.componentDirectory, "model-selection.json"),
+  );
+  await checkDefault(options.catalogue);
+  const choices = modelChoices(options.catalogue, selections);
+  const storage =
+    options.storage ??
+    ((agentId: string) =>
+      openNodeSqliteStorage(join(options.componentDirectory, "agents", `${agentId}.sqlite`)));
+  const agents = new Map<string, DurableAgent>();
+  try {
+    for (const agent of options.agents)
+      agents.set(
+        agent.id,
+        await openAgent({
+          id: agent.id,
+          workspace: agent.workspace,
+          storage: await storage(agent.id),
+          catalogue: options.catalogue,
+          choices,
+          core: options.core,
+          images: options.images,
+          inlineImages: options.inlineImages ?? DEFAULT_INLINE_IMAGES,
+          builtIns: options.builtIns,
+          defaults: options.defaults,
+        }),
+      );
+  } catch (failure) {
+    await Promise.allSettled([...agents.values()].map((agent) => agent.close()));
+    throw failure;
+  }
 
-  async function track<T>(operation: () => Promise<T>): Promise<T> {
-    shutdown.signal.throwIfAborted();
-    const promise = operation();
-    pending.add(promise);
-    try {
-      return await promise;
-    } finally {
-      pending.delete(promise);
-    }
+  function agentOf(id: string): DurableAgent {
+    const agent = agents.get(id);
+    if (agent === undefined)
+      throw new ExplainedFailure(422, "This conversation's agent does not run on Pi here.");
+    return agent;
   }
 
   return {
     turns: {
-      mode: "answer",
-      execute(request, signal) {
-        // Pi hands core no follow-up cursor, so a follow-up turn is none of
-        // its own: run as ordinary input, it would answer what nobody asked.
-        if (request.follow_up !== undefined)
-          return Promise.reject(
-            new ExplainedFailure(422, "This runtime does not follow up on delegated work."),
-          );
-        return track(() =>
-          turns.run(async () => {
-            const combined =
-              signal === undefined ? shutdown.signal : AbortSignal.any([signal, shutdown.signal]);
-            combined.throwIfAborted();
-            return executePi(request, combined);
-          }),
-        );
+      mode: "inbox",
+      submit: async (request) => agentOf(request.agent_id).submit(request),
+      async control(turnId, interfaceId, action) {
+        for (const agent of agents.values())
+          if (await agent.knows(turnId)) return agent.control(turnId, interfaceId, action);
+        throw new ExplainedFailure(404, "This runtime holds no such message.");
       },
     },
     activity(correlationId, interfaceId) {
-      const turn = executing.get(correlationId);
-      return turn?.interfaceId === interfaceId ? turn.activity.snapshot() : undefined;
+      for (const agent of agents.values()) {
+        const activity = agent.activity(correlationId, interfaceId);
+        if (activity !== undefined) return activity;
+      }
+      return undefined;
     },
-    modelState(query: ModelQuery): Promise<ModelState> {
-      return track(() =>
-        offered((available) => selections.state(available, runtimeDefault(), query)),
-      );
-    },
-    setModel(update: ModelUpdate): Promise<ModelState> {
-      return track(() =>
-        offered((available) => selections.update(available, runtimeDefault(), update)),
-      );
-    },
-    // Pi runs its own commands, prompt templates and skills from a message's
-    // text; this runtime does not list them yet.
-    commands(): Promise<CommandCatalog> {
-      return track(() => Promise.resolve({ commands: [] }));
-    },
+    modelState: (query) => choices.state(query),
+    setModel: (update) => choices.update(update),
+    // The durable runtime runs no commands of its own yet.
+    commands: () => Promise.resolve({ commands: [] }),
     restartReadiness() {
-      return executing.size === 0
-        ? { state: "ready" }
-        : { state: "unready", reason: `${String(executing.size)} turn(s) still executing` };
+      return [...agents.values()].some((agent) => agent.calling)
+        ? { state: "unready", reason: "a tool call is running" }
+        : { state: "ready" };
     },
     async close() {
-      shutdown.abort(new RuntimeClosed("Pi runtime is closed"));
-      await Promise.allSettled(pending);
+      await Promise.allSettled([...agents.values()].map((agent) => agent.close()));
     },
   };
-
-  /** The scopes `read` gives, with the catalogue it read them against. */
-  async function offered(
-    read: (available: readonly AvailableModel[]) => Promise<ModelScopes>,
-  ): Promise<ModelState> {
-    const models = await availablePiModels();
-    const available = offeredPiModels(models);
-    return { providers: piProviders(models), available, ...(await read(available)) };
-  }
-
-  /** The providers of Pi's models, as Pi names them. */
-  function piProviders(models: readonly Model<Api>[]): ModelProvider[] {
-    return [...new Set(models.map((model) => model.provider))].map((id) => ({
-      id,
-      name: modelRuntime.getProvider(id)?.name ?? id,
-    }));
-  }
-
-  /** Pi's catalogue as the picker sees it: one thinking setting per reasoning model. */
-  function offeredPiModels(models: readonly Model<Api>[]): AvailableModel[] {
-    return models.map((model) => ({
-      provider: model.provider,
-      model: model.id,
-      name: model.name,
-      options: model.reasoning
-        ? [
-            {
-              id: THINKING_OPTION,
-              name: "Thinking",
-              choices: getSupportedThinkingLevels(model).map((level) => ({
-                id: level,
-                name: level,
-              })),
-              default: defaultThinkingLevel(model),
-            },
-          ]
-        : [],
-    }));
-  }
-
-  /** What runs when neither the agent nor the conversation chose a model: Pi's own setting. */
-  function runtimeDefault(): Selection {
-    const provider = settings.getDefaultProvider();
-    const model = settings.getDefaultModel();
-    if (provider === undefined || model === undefined) throw new Error("no Pi model is selected");
-    return { provider, model, options: {} };
-  }
-
-  function defaultThinkingLevel(model: Model<Api>): ModelThinkingLevel {
-    return clampThinkingLevel(
-      model,
-      settings.getModelThinkingLevel(model.provider, model.id) ??
-        settings.getDefaultThinkingLevel() ??
-        "medium",
-    );
-  }
-
-  async function availablePiModels() {
-    const models = [...(await modelRuntime.getAvailable())];
-    models.sort(
-      (left, right) =>
-        left.provider.localeCompare(right.provider) ||
-        left.name.localeCompare(right.name) ||
-        left.id.localeCompare(right.id),
-    );
-    return models;
-  }
-
-  async function selectedPiModel() {
-    return piModel(await availablePiModels(), runtimeDefault());
-  }
-
-  function piModel(models: readonly Model<Api>[], selection: Selection): Model<Api> {
-    const model = models.find(
-      (candidate) => candidate.provider === selection.provider && candidate.id === selection.model,
-    );
-    if (model === undefined)
-      throw new Error(
-        `selected Pi model ${selection.provider}/${selection.model} is not available`,
-      );
-    return model;
-  }
-
-  /** The workspace of the turn's agent; a turn of another agent is refused before anything runs. */
-  function workspaceOf(request: TurnRequest): string {
-    const workspace = workspaces.get(request.agent_id);
-    if (workspace === undefined)
-      throw new ExplainedFailure(422, "This conversation's agent does not run on Pi here.");
-    return workspace;
-  }
-
-  /**
-   * The turn's activity is visible from before preparation, and removed
-   * however it ends; its final report is taken first, with the answer or
-   * the failure.
-   */
-  async function executePi(request: TurnRequest, signal: AbortSignal): Promise<TurnResponse> {
-    const workspace = workspaceOf(request);
-    const activity = trackActivity(workspace);
-    executing.set(request.correlation_id, { interfaceId: request.interface_id, activity });
-    try {
-      const response = await runPi(request, workspace, signal, activity);
-      return { ...response, activity: finalReport(activity.snapshot()) };
-    } catch (failure) {
-      throw withReport(failure, finalReport(activity.snapshot()));
-    } finally {
-      executing.delete(request.correlation_id);
-    }
-  }
-
-  async function runPi(
-    request: TurnRequest,
-    workspace: string,
-    signal: AbortSignal,
-    activity: ActivityTracker,
-  ): Promise<TurnResponse> {
-    const root = resolve(request.resource_root);
-    const manager = openConversation(workspace, sessionDirectory, request);
-    // The effective selection is applied to every turn, so a continued session
-    // follows the current choice rather than the model it began with. The
-    // choice is taken as the turn starts, before the catalogue is awaited, so
-    // a model update made meanwhile applies to the next turn, not this one.
-    // It is resolved against the same catalogue the picker reports, so the
-    // thinking level that runs is the one shown.
-    const [chosen, models] = await Promise.all([
-      selections.chosen(runtimeDefault(), request),
-      availablePiModels(),
-    ]);
-    const selection = resolved(offeredPiModels(models), chosen);
-    const model = piModel(models, selection);
-    const thinking = selection.options?.[THINKING_OPTION];
-    const runtime = modelRuntime;
-    const attachments = await prepareAttachments(
-      request.attachment_root,
-      request.attachments ?? [],
-      options.inlineImages ?? DEFAULT_INLINE_IMAGES,
-    );
-    // Files of earlier unanswered turns the conversation does not hold,
-    // such as those of a command that opened it before Pi saved anything,
-    // come first; then this turn's.
-    const notes = (request.unanswered ?? [])
-      .filter((earlier) => !noted(manager, earlier.correlation_id))
-      .map((earlier) => note(earlier.correlation_id, earlierNote(earlier.attachments)));
-    if (attachments.note !== undefined) notes.push(note(request.correlation_id, attachments.note));
-    const created = await createPiExecutionSession({
-      resourceRoot: root,
-      extensionContext: options.extensionContext?.(request),
-      attachmentContext: attachmentContext(request.attachment_root, notes.length > 0),
-      workspace,
-      manager,
-      modelRuntime: runtime,
-      model,
-      ...(isThinkingLevel(model, thinking) ? { thinkingLevel: thinking } : {}),
-      onWork: (fact) => {
-        activity.report(fact);
-      },
-    });
-    const { session, extensionsResult } = created;
-    const describeAgent = () => {
-      const agent = piAgent(session);
-      if (agent !== undefined) activity.agent(agent);
-    };
-    describeAgent();
-    try {
-      assertExtensionsLoaded(extensionsResult.errors);
-      let output = "";
-      // Whether an extension reported a failure while the prompt ran, such
-      // as a command's.
-      const seen = { failure: false };
-      const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
-        activity.observe(event);
-        // Context usage changes with each model turn and compaction.
-        if (
-          event.type === "turn_end" ||
-          event.type === "compaction_end" ||
-          event.type === "thinking_level_changed"
-        )
-          describeAgent();
-        if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta")
-          output += event.assistantMessageEvent.delta;
-      });
-      const unwatch = session.extensionRunner.onError(() => {
-        seen.failure = true;
-      });
-      try {
-        const answer = await promptWithNotes(
-          session,
-          request.input,
-          signal,
-          attachments.images,
-          notes,
-        );
-        // A command Pi ran to completion without a message, such as an
-        // extension's, is acknowledged; a failed one, and any message the
-        // model answered with nothing, still has no answer.
-        const silent = answer === undefined && !seen.failure;
-        // Notes Pi has not saved, such as those of a command that opened the
-        // conversation, are left for core to offer again with a later turn.
-        const unsaved = notes.length > 0 && !saved(session.sessionManager);
-        const earlierLeft =
-          unsaved && notes.some((pending) => pending.details.turn !== request.correlation_id);
-        const ownLeft = unsaved && attachments.note !== undefined;
-        return {
-          correlation_id: request.correlation_id,
-          output: silent ? (commandFinished(request) ?? output) : output,
-          ...(earlierLeft ? { unanswered_left: true } : {}),
-          ...(ownLeft ? { attachments_left: true } : {}),
-        };
-      } finally {
-        unwatch();
-        unsubscribe();
-      }
-    } finally {
-      describeAgent();
-      session.dispose();
-    }
-  }
-
-  /** An attachment note of the turn that brought the files, as a native custom message. */
-  function note(turn: string, content: string) {
-    return { customType: ATTACHMENT_NOTE, content, display: false, details: { turn } };
-  }
-
-  /**
-   * Prompt with the turn's images, its attachment notes travelling with the
-   * message after any compaction. A command or input an extension handles
-   * consumes the prompt without a message; the notes are then kept on their
-   * own. Pi saves them once the conversation has a message; until then, the
-   * turn leaves them, and core offers the files again with later turns.
-   * Returns the prompt's own answer, as `promptSession` does.
-   */
-  async function promptWithNotes(
-    session: AgentSession,
-    input: string,
-    signal: AbortSignal,
-    images: ImageContent[],
-    notes: readonly ReturnType<typeof note>[],
-  ): Promise<AssistantMessage | undefined> {
-    for (const pending of notes)
-      await session.sendCustomMessage(pending, { deliverAs: "nextTurn" });
-    try {
-      return await promptSession(session, input, signal, images);
-    } finally {
-      if (!signal.aborted)
-        for (const pending of notes)
-          if (!noted(session.sessionManager, pending.details.turn))
-            await session.sendCustomMessage(pending);
-    }
-  }
-
-  /** Whether Pi has written the conversation's file, which it does once there is a message. */
-  function saved(manager: SessionManager): boolean {
-    const file = manager.getSessionFile();
-    return file !== undefined && existsSync(file);
-  }
-
-  function noted(manager: SessionManager, turn: string): boolean {
-    return manager
-      .getBranch()
-      .some(
-        (entry) =>
-          entry.type === "custom_message" &&
-          entry.customType === ATTACHMENT_NOTE &&
-          typeof entry.details === "object" &&
-          entry.details !== null &&
-          "turn" in entry.details &&
-          entry.details.turn === turn,
-      );
-  }
-
-  /**
-   * What the session says about its agent now: the model it runs, its
-   * thinking level when the model reasons, and its own estimate of how much
-   * of the context window the conversation fills. Display never fails a
-   * turn, so a session that cannot say gives nothing.
-   */
-  function piAgent(session: AgentSession): AgentInfo | undefined {
-    try {
-      const model = session.model;
-      const usage = session.getContextUsage();
-      // Pi has no estimate right after a compaction, before the next response.
-      const context =
-        usage?.tokens == null ? undefined : { used: usage.tokens, window: usage.contextWindow };
-      return {
-        ...(model === undefined ? {} : { model: toolName(model.id) }),
-        ...(model?.reasoning === true ? { effort: session.thinkingLevel } : {}),
-        ...(context === undefined ? {} : { context }),
-      };
-    } catch {
-      return undefined;
-    }
-  }
-
-  function isThinkingLevel(
-    model: Model<Api>,
-    value: string | undefined,
-  ): value is ModelThinkingLevel {
-    return (
-      value !== undefined &&
-      getSupportedThinkingLevels(model).some((level: string) => level === value)
-    );
-  }
-
-  function assertExtensionsLoaded(errors: readonly { readonly error: string }[]): void {
-    if (errors.length > 0)
-      throw new Error(
-        `Pi extension loading failed: ${errors.map((entry) => entry.error).join("; ")}`,
-      );
-  }
 }

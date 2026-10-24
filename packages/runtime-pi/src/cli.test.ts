@@ -6,22 +6,107 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stringify } from "smol-toml";
-import { expect, it } from "vitest";
+import { afterEach, expect, it } from "vitest";
+import { TurnActivitySchema, TurnOutcomeSchema } from "@carillon/protocol";
+import { startFakeCore, type FakeCore } from "@carillon/runtime/testing";
+import { Parse } from "typebox/value";
 
-async function cli(args: readonly string[]) {
+const token = "pi-cli-test-token";
+const hash = createHash("sha256").update(token).digest("hex");
+const cleanups: (() => Promise<unknown>)[] = [];
+afterEach(async () => {
+  for (const cleanup of cleanups.splice(0).toReversed()) await cleanup();
+});
+
+function start(args: readonly string[]) {
   const child = spawn(process.execPath, [join(import.meta.dirname, "cli.ts"), ...args], {
-    signal: AbortSignal.timeout(10_000),
     stdio: ["ignore", "pipe", "pipe"],
+  });
+  cleanups.push(async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+      await once(child, "close");
+    }
   });
   let stdout = "";
   let stderr = "";
-  child.stdout.on("data", (chunk: Buffer) => {
-    stdout += chunk.toString();
-    if (stdout.includes("runtime-pi ready at")) child.kill("SIGTERM");
-  });
+  child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
   child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
-  await once(child, "close");
-  return { status: child.exitCode, stdout, stderr };
+  const ready = new Promise<void>((resolve, reject) => {
+    child.stdout.on("data", () => {
+      if (stdout.includes("runtime-pi ready at")) resolve();
+    });
+    child.once("close", () => reject(new Error(`runtime exited: ${stderr}`)));
+  });
+  ready.catch(() => undefined);
+  return { child, ready, output: () => ({ stdout, stderr }) };
+}
+
+async function run(args: readonly string[]) {
+  const started = start(args);
+  started.ready.then(
+    () => started.child.kill("SIGTERM"),
+    () => undefined,
+  );
+  await once(started.child, "close");
+  return { status: started.child.exitCode, ...started.output() };
+}
+
+async function freePort(): Promise<number> {
+  const listener = createServer();
+  listener.listen(0, "127.0.0.1");
+  await once(listener, "listening");
+  const address = listener.address();
+  if (address === null || typeof address === "string") throw new Error("no TCP address");
+  await new Promise<void>((done) => listener.close(() => done()));
+  return address.port;
+}
+
+/** An installation of one durable Pi runtime whose agents' resources are these directories. */
+async function installation(resources: Record<string, string>, core = "127.0.0.1:1") {
+  const home = await mkdtemp(join(tmpdir(), "carillon-pi-cli-"));
+  cleanups.push(() => rm(home, { recursive: true, force: true }));
+  const port = await freePort();
+  const config = join(home, "carillon.toml");
+  const credential = join(home, "runtime.token");
+  await writeFile(credential, token);
+  await writeFile(
+    config,
+    stringify({
+      data_dir: "state",
+      core: { listen: core, operator_token_hash: hash },
+      providers: [
+        {
+          id: "runtime-pi",
+          role: "runtime",
+          version: "0.0.0",
+          url: `http://127.0.0.1:${String(port)}`,
+          token_hash: hash,
+          enabled: true,
+          durable: true,
+        },
+      ],
+      agents: Object.entries(resources).map(([id, directory]) => ({
+        id,
+        name: id,
+        runtime: "runtime-pi",
+        workspace: home,
+        resources: directory,
+      })),
+    }),
+  );
+  const args = [
+    "--config",
+    config,
+    "--provider",
+    "runtime-pi",
+    "--state-dir",
+    join(home, "pi"),
+    "--token-file",
+    credential,
+    "--deterministic",
+  ];
+  return { home, args, url: `http://127.0.0.1:${String(port)}` };
 }
 
 it.each([
@@ -30,76 +115,111 @@ it.each([
   { mode: "startup", root: "missing" },
   { mode: "startup", root: "file" },
 ])("refuses a $root resource root during $mode for every Pi agent", async ({ mode, root }) => {
-  const home = await mkdtemp(join(tmpdir(), "carillon-pi-cli-"));
-  try {
-    await mkdir(join(home, "resources"));
-    if (root === "file") await writeFile(join(home, "broken-resources"), "not a directory");
-    const token = "pi-cli-test-token";
-    const hash = createHash("sha256").update(token).digest("hex");
-    const listener = createServer();
-    listener.listen(0, "127.0.0.1");
-    await once(listener, "listening");
-    const address = listener.address();
-    if (address === null || typeof address === "string") throw new Error("no TCP address");
-    await new Promise<void>((done) => listener.close(() => done()));
-    const config = join(home, "carillon.toml");
-    const credential = join(home, "runtime.token");
-    await writeFile(credential, token);
-    await writeFile(
-      config,
-      stringify({
-        data_dir: "state",
-        core: { listen: "127.0.0.1:1", operator_token_hash: hash },
-        providers: [
-          {
-            id: "runtime-pi",
-            role: "runtime",
-            version: "0.0.0",
-            url: `http://127.0.0.1:${String(address.port)}`,
-            token_hash: hash,
-            enabled: true,
-          },
-        ],
-        agents: [
-          {
-            id: "ready",
-            name: "Ready",
-            runtime: "runtime-pi",
-            workspace: home,
-            resources: "resources",
-          },
-          {
-            id: "broken",
-            name: "Broken",
-            runtime: "runtime-pi",
-            workspace: home,
-            resources: "broken-resources",
-          },
-        ],
-      }),
-    );
-    const args = [
-      "--config",
-      config,
-      "--provider",
-      "runtime-pi",
-      "--state-dir",
-      join(home, "pi"),
-      "--token-file",
-      credential,
-      "--deterministic",
-      ...(mode === "check" ? ["--check"] : []),
-    ];
-    const result = await cli(args);
-    expect(result.status, result.stderr).toBe(1);
-    expect(result.stderr).toContain("agent broken: resources must be an existing directory");
-    if (mode === "check") return;
-    if (root === "file") await rm(join(home, "broken-resources"));
-    await mkdir(join(home, "broken-resources"));
-    const recovered = await cli(args);
-    expect(recovered.status, recovered.stderr).toBe(0);
-    expect(recovered.stdout).toContain("runtime-pi ready at");
-  } finally {
-    await rm(home, { recursive: true, force: true });
+  const { home, args } = await installation({ ready: "resources", broken: "broken-resources" });
+  await mkdir(join(home, "resources"));
+  if (root === "file") await writeFile(join(home, "broken-resources"), "not a directory");
+  const result = await run([...args, ...(mode === "check" ? ["--check"] : [])]);
+  expect(result.status, result.stderr).toBe(1);
+  expect(result.stderr).toContain("agent broken: resources must be an existing directory");
+  if (mode === "check") return;
+  if (root === "file") await rm(join(home, "broken-resources"));
+  await mkdir(join(home, "broken-resources"));
+  const recovered = await run(args);
+  expect(recovered.status, recovered.stderr).toBe(0);
+  expect(recovered.stdout).toContain("runtime-pi ready at");
+});
+
+async function inbox(url: string, home: string, input: string) {
+  const response = await fetch(`${url}/v1/inbox`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      correlation_id: "turn-1",
+      interface_id: "discord-private",
+      agent_id: "default",
+      audience_id: "conversation",
+      input,
+      resource_root: join(home, "resources"),
+      attachment_root: join(home, "attachments"),
+    }),
+  });
+  expect(response.status).toBe(202);
+}
+
+/** Waits until the held turn's model request runs. */
+async function answering(url: string) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const activity = await fetch(`${url}/v1/turns/turn-1/activity?interface_id=discord-private`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    if (
+      activity.status === 200 &&
+      Parse(TurnActivitySchema, await activity.json()).phase === "model"
+    )
+      return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
   }
+  throw new Error("the turn never reached its model request");
+}
+
+async function outcomes(core: FakeCore) {
+  const path = "/v1/runtime/turns/turn-1/outcome";
+  for (
+    let attempt = 0;
+    attempt < 400 && !core.received.some((call) => call.path === path);
+    attempt += 1
+  )
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  return core.received.filter((call) => call.path === path);
+}
+
+it("gives up a message whose answer keeps killing the runtime, and fails its turn", async () => {
+  const core: FakeCore = await startFakeCore();
+  cleanups.push(() => core.close());
+  const { home, args, url } = await installation(
+    { default: "resources" },
+    core.url.replace("http://", ""),
+  );
+  await mkdir(join(home, "resources"));
+  for (let run = 0; run < 5; run += 1) {
+    const started = start(args);
+    await started.ready;
+    if (run === 0) await inbox(url, home, `hold ${join(home, "never")}`);
+    await answering(url);
+    started.child.kill("SIGKILL");
+    await once(started.child, "close");
+  }
+  await start(args).ready;
+  const [outcome, ...more] = await outcomes(core);
+  expect(more).toEqual([]);
+  expect(outcome?.body).toMatchObject({
+    outcome: "failed",
+    explanation: "This message stopped the agent's runtime several times, so it was given up.",
+  });
+}, 30_000);
+
+it("finishes a turn cut off by SIGKILL once it runs again, and settles it once", async () => {
+  const core: FakeCore = await startFakeCore();
+  cleanups.push(() => core.close());
+  const { home, args, url } = await installation(
+    { default: "resources" },
+    core.url.replace("http://", ""),
+  );
+  await mkdir(join(home, "resources"));
+  const marker = join(home, "release");
+  const first = start(args);
+  await first.ready;
+  await inbox(url, home, `hold ${marker}`);
+  await answering(url);
+  first.child.kill("SIGKILL");
+  await once(first.child, "close");
+  await start(args).ready;
+  await writeFile(marker, "");
+  const [outcome, ...more] = await outcomes(core);
+  expect(more).toEqual([]);
+  const settled = Parse(TurnOutcomeSchema, outcome?.body);
+  expect(settled.outcome === "answered" && settled.output).toMatch(
+    /^Local provider response 1: hold /u,
+  );
 });
