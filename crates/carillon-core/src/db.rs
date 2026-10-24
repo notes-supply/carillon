@@ -1212,7 +1212,7 @@ mod tests {
             .context("second turn missing")?;
         // A restart returns the running observation to its queue; the
         // executable turn that was running is interrupted, as ever.
-        assert_eq!(database.recover_running_turns(&[])?, 1);
+        assert_eq!(database.recover_running_turns(&[], "")?, 1);
         let resumed = database
             .claim("runtime", Lane::Observations, &CancellationToken::new())?
             .context("observation not resumed")?;
@@ -1789,8 +1789,8 @@ mod tests {
         database
             .claim("runtime", Lane::Messages, &CancellationToken::new())?
             .context("missing turn")?;
-        assert_eq!(database.recover_running_turns(&[])?, 1);
-        assert_eq!(database.recover_running_turns(&[])?, 0);
+        assert_eq!(database.recover_running_turns(&[], "")?, 1);
+        assert_eq!(database.recover_running_turns(&[], "")?, 0);
         assert!(
             database
                 .claim("runtime", Lane::Messages, &CancellationToken::new())?

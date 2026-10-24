@@ -67,9 +67,11 @@ export interface AnswerTurns {
 
 /**
  * Keeps each turn core hands over and settles it later through core's
- * client. `submit` resolves once the turn is kept, and the same correlation
- * ID again is the same turn. `control` acts on a turn the runtime holds for
- * that interface, as a person asked.
+ * client. `submit` resolves once the turn is kept. Core hands a turn over
+ * again after a restart, so the same correlation ID again is the same turn
+ * and resolves again for any turn the runtime accepted before, including
+ * one it finished whose outcome has not reached core yet. `control` acts on
+ * a turn the runtime holds for that interface, as a person asked.
  */
 export interface InboxTurns {
   readonly mode: "inbox";

@@ -93,10 +93,16 @@ New conversations use the agent's current runtime.
 A turn whose outcome can't be proved, or that its runtime reports as failed,
 becomes interrupted. Core never replays it; the next message continues the
 native session. An observation that got no answer is asked again instead,
-since it only reads. Startup interrupts running messages, except those a
-durable runtime holds, and requeues running observations. It then interrupts
-queued turns whose agent moved to another runtime or was removed, without
-needing their former runtime's workers. Observations also warn that work
+since it only reads. Startup interrupts running messages and requeues running
+observations. A durable runtime's running messages core handed over are
+queued again instead, to be handed over in order: a turn started on the
+synchronous path before its runtime became durable would otherwise stay
+running, and the runtime is handed every turn it holds again. It takes a
+turn it accepted before as the same one. Turns it opened stay
+running, and its observations are interrupted, since it answers none.
+Startup then interrupts queued turns whose agent moved to another runtime or
+was removed, without needing their former runtime's workers. Observations
+also warn that work
 already started there will not be reported here and that actions already
 taken may have had effects. Delivery is a separate outbox, so a lost
 interface never reruns the model, and a delivery claimed by a crashed

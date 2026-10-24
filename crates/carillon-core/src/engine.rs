@@ -230,6 +230,7 @@ impl Core {
             &durable
                 .map(|runtime| runtime.id.as_str())
                 .collect::<Vec<_>>(),
+            &interrupted(None),
         )?;
         for (agent_id, runtime_id) in self.database.queued_owners()? {
             if self

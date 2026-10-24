@@ -1,17 +1,18 @@
 //! A durable runtime over HTTP, against real storage: core hands it every
 //! turn in order and waits for no answer, a turn it did not take is handed
-//! over again, and the turns it holds outlast core's restarts and drains.
+//! over again, also after core restarts, and drains wait for none of them.
 
 use std::{collections::VecDeque, fs, path::Path, sync::Mutex};
 
 use anyhow::Context as _;
 use axum::body::Bytes;
-use carillon_protocol::turns::Silence;
+use carillon_protocol::turns::{Silence, TurnOpening};
 use tempfile::tempdir;
 
 use super::{
-    Fixture, configured, installation,
+    Fixture, accept, completed, configured, installation,
     live::{lock, ok, operator, submit},
+    run_next_turn,
 };
 use crate::application::http::*;
 
@@ -315,7 +316,8 @@ async fn a_refused_turn_is_interrupted_with_the_runtimes_explanation() -> Result
 }
 
 #[tokio::test]
-async fn held_turns_outlast_a_restart_and_a_late_outcome_is_delivered_once() -> Result<()> {
+async fn a_restart_hands_held_turns_over_again_and_a_late_outcome_is_delivered_once() -> Result<()>
+{
     let directory = tempdir()?;
     let runtime = DurableRuntime::start().await?;
     let (mut fixture, state) = durable(directory.path(), &runtime)?;
@@ -323,16 +325,30 @@ async fn held_turns_outlast_a_restart_and_a_late_outcome_is_delivered_once() -> 
     assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
     // Handed over just before core stopped, before it recorded the 202.
     let unrecorded = ok(submit(&state, "two", "elsewhere").await)?;
+    let opening = TurnOpening {
+        interface_id: "test-interface".to_owned(),
+        agent_id: "test-agent".to_owned(),
+        audience_id: "conversation".to_owned(),
+        key: "nightly".to_owned(),
+        label: None,
+    };
+    let opened = state
+        .core
+        .open_turn("test-runtime", &opening)
+        .map_err(|error| anyhow!("{error:?}"))?;
     let restarted = configured(&fixture);
     assert_eq!(restarted.core.recover_interrupted()?, 0);
-    assert_eq!(state_of(&restarted, &held.turn_id)?, TurnState::Running);
-    assert_eq!(
-        state_of(&restarted, &unrecorded.turn_id)?,
-        TurnState::Queued
-    );
+    // Its 202 may have been lost, so it is handed over again, in order.
+    assert_eq!(state_of(&restarted, &held.turn_id)?, TurnState::Queued);
+    assert_eq!(state_of(&restarted, &opened.turn_id)?, TurnState::Running);
+    for _ in 0..2 {
+        assert_eq!(dispatch(&restarted).await?, WorkerStep::Advanced);
+    }
+    assert_eq!(runtime.handed(), ["one", "one", "two"]);
+    assert_eq!(runtime.request(1)?.correlation_id, held.turn_id);
     assert!(delivered(&restarted)?.is_empty());
     let answer = json!({"outcome": "answered", "output": "Done after the restart."});
-    for turn in [&held.turn_id, &unrecorded.turn_id] {
+    for turn in [&held.turn_id, &unrecorded.turn_id, &opened.turn_id] {
         for _ in 0..2 {
             assert_eq!(
                 settle(&restarted, RUNTIME, turn, &answer).await?,
@@ -345,7 +361,11 @@ async fn held_turns_outlast_a_restart_and_a_late_outcome_is_delivered_once() -> 
             .iter()
             .map(|delivery| delivery.turn_id.as_str())
             .collect::<Vec<_>>(),
-        [held.turn_id.as_str(), unrecorded.turn_id.as_str()]
+        [
+            held.turn_id.as_str(),
+            unrecorded.turn_id.as_str(),
+            opened.turn_id.as_str()
+        ]
     );
     assert_eq!(dispatch(&restarted).await?, WorkerStep::Idle);
     // A runtime no longer durable at a restart holds nothing core knows of.
@@ -360,6 +380,61 @@ async fn held_turns_outlast_a_restart_and_a_late_outcome_is_delivered_once() -> 
             .content
             .starts_with("Carillon restarted during that turn.")
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_runtime_made_durable_takes_its_running_message_and_answers_no_observation() -> Result<()>
+{
+    let directory = tempdir()?;
+    let runtime = DurableRuntime::start().await?;
+    let mut fixture = installation(directory.path())?;
+    for audience in ["first", "second"] {
+        accept(&fixture, audience, audience).await?;
+        run_next_turn(&fixture, "test-runtime", async |_, _, request| {
+            Ok(RuntimeTurnResponse {
+                follow_up: Some(json!({"after": 1})),
+                ..completed(request)
+            })
+        })
+        .await?;
+    }
+    let observation = fixture
+        .core
+        .database
+        .claim(
+            "test-runtime",
+            Lane::Observations,
+            &CancellationToken::new(),
+        )?
+        .context("missing running observation")?;
+    let running = accept(&fixture, "running", "third").await?;
+    fixture
+        .core
+        .database
+        .claim("test-runtime", Lane::Messages, &CancellationToken::new())?
+        .context("missing running message")?;
+    delivered(&configured(&fixture))?;
+    let provider = &mut fixture.config.value.providers[1];
+    provider.url.clone_from(&runtime.url);
+    provider.durable = true;
+    let state = configured(&fixture);
+    assert_eq!(state.core.recover_interrupted()?, 2);
+    assert_eq!(
+        state_of(&state, &observation.turn_id)?,
+        TurnState::Interrupted
+    );
+    let notices = delivered(&state)?;
+    assert_eq!(notices.len(), 2);
+    assert!(
+        notices
+            .iter()
+            .all(|notice| notice.content.starts_with("That turn was interrupted. ")),
+        "{notices:?}"
+    );
+    assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
+    assert_eq!(runtime.handed(), ["running"]);
+    assert_eq!(state_of(&state, &running.turn_id)?, TurnState::Running);
     Ok(())
 }
 

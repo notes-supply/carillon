@@ -415,7 +415,7 @@ async fn credential_drift_leaves_work_queued_until_repaired() -> Result<()> {
         assert!(turn.delivery_state.is_none());
     }
     state.core.database = Database::open(&state.config.value.data_dir.join("carillon.sqlite3"))?;
-    assert_eq!(state.core.database.recover_running_turns(&[])?, 0);
+    assert_eq!(state.core.database.recover_running_turns(&[], "")?, 0);
     fs::write(&credential, "test-only\n")?;
     let mut calls = 0;
     assert_eq!(
@@ -1306,7 +1306,7 @@ async fn failed_outcome_write_waits_for_restart_without_blocking_other_conversat
     );
 
     state.core.database = Database::open(&path)?;
-    assert_eq!(state.core.database.recover_running_turns(&[])?, 1);
+    assert_eq!(state.core.database.recover_running_turns(&[], "")?, 1);
     run_next_turn(&state, "test-runtime", async |_, _, request| {
         assert_eq!(request.correlation_id, successor.turn_id);
         Ok(completed(request))
@@ -1342,7 +1342,7 @@ async fn cancelled_execution_is_interrupted_after_reopening_while_queued_work_re
             .is_cancelled()
     );
     state.core.database = Database::open(&state.config.value.data_dir.join("carillon.sqlite3"))?;
-    assert_eq!(state.core.database.recover_running_turns(&[])?, 1);
+    assert_eq!(state.core.database.recover_running_turns(&[], "")?, 1);
     assert_eq!(
         state
             .core

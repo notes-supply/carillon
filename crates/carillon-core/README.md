@@ -64,9 +64,13 @@ outcome again is recorded, another is refused. Steered and stopped turns
 deliver nothing to send, only their silence. It may also open a running
 turn in one of its own conversations, idempotent by its key, and core
 relays an interface's control of a running turn to it without keeping
-anything of the control. Its running turns survive core's restarts, and no
-worker waits on them. Another runtime's turns never hold back a
-conversation's messages.
+anything of the control. At a restart, the turns core handed it go back to
+the queue to be handed over again, so a turn started on the synchronous path
+before the runtime became durable is not left running and the runtime is
+handed every turn it holds again; the turns it opened stay running; its
+observations are interrupted, since it answers none. No worker waits on its
+running turns. Another runtime's turns never hold back a conversation's
+messages.
 
 A runtime operation's failure decides what happens next.
 `TurnFailure::Retry` means the runtime provably never received the turn, so
