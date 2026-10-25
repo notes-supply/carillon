@@ -143,7 +143,7 @@ answers there; downloads attachments after admission; creates and
 adopts threads; and owns typing, reactions, mention-free delivery and slash
 command registration. It also owns one card per job, drawn from core's
 record of the job and the runtime's activity snapshot. Feedback is
-best-effort and never decides delivery. While a message's turn waits in a
+best-effort and never decides delivery. While a message's turn is in a
 durable runtime that offers controls, it offers them as reactions (steer,
 interrupt, stop) and relays an allowlisted person's control to core
 (`POST /v1/events/{event_id}/control`), which relays it to the runtime and
@@ -191,8 +191,8 @@ hands it at `POST /v1/inbox`, answering 202 once kept, and settles it later
 through core's `POST /v1/runtime/turns/{id}/outcome`. It opens turns of its
 own through `POST /v1/runtime/turns`, reads back the turns core records
 running on it through `GET /v1/runtime/turns`, and takes a person's controls at
-`POST /v1/turns/{id}/control`. While a turn waits behind another, its
-activity snapshot says `queued` and lists the controls it offers.
+`POST /v1/turns/{id}/control`. A turn's activity snapshot lists the
+controls it offers now, and says `queued` while it waits behind another.
 
 Under the synchronous contract, which no bundled runtime speaks, the runtime
 runs a claimed turn while core waits and returns nonblank output. An empty

@@ -51,7 +51,7 @@ and controls with provider and choice display names.
   and recorded in `activity-cards.json` so a restart carries on with the same
   card. Every Discord call is bounded, including rate-limit waits. It types
   while a job's turn runs, not while it waits in its runtime, and offers the
-  controls the runtime's snapshot lists while it waits. Offering the first
+  controls the runtime's snapshot lists, in any phase. Offering the first
   control on a message this process did not admit removes the others an
   earlier process may have left; a failed change is tried again at the next
   read, and new control emoji replace the previous ones on messages showing

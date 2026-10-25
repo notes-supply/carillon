@@ -310,10 +310,12 @@ users, in a routed channel or a thread under a thread route.
 ### Reactions
 
 The bot reacts to each message it answers: while it works, then with how it
-ended. While a message waits behind the agent's running turn, a runtime that
-holds its turns may offer controls as reactions: an allowlisted person's
-reaction hands the message to the running turn now (steer), ends the running
-turn and runs it next (interrupt), or doesn't run it (stop). The emoji are
+ended. A runtime that holds a message's turn may offer controls as reactions,
+which the bot shows while the runtime lists them. While a message waits
+behind the agent's running turn, an allowlisted person's reaction hands it to
+the running turn now (steer), ends the running turn and runs it next
+(interrupt), or doesn't run it (stop). On T3, a running message offers stop
+too, which stops its run. The emoji are
 settings with these defaults, Unicode or a custom `name:id`, and apply live,
 replacing the controls messages show. The controls must differ from each
 other and from the rest.
