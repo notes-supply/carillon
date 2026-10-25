@@ -474,16 +474,10 @@ assistant's `settings.json` to turn them off:
 { "extensions": { "remove": ["discord"] } }
 ```
 
-On T3 the assistant uses `carillon discord call` as the Discord skill
-explains. Setup doesn't install the skill, because the tools can administer
-the server; install it into the assistant's resources, which Carillon's T3
-profiles share, so T3 Code channels never see it:
-
-```sh
-carillon discord tools install
-```
-
-Run it again after an update to refresh it.
+Your other harnesses (Claude Code, Codex) can use the same operations
+through `carillon discord call`, as the skill a release ships in
+`app/lib/carillon-discord-SKILL.md` explains. Nothing installs it, because
+the tools can administer the server.
 
 ## When things fail
 

@@ -13,24 +13,12 @@ the Discord skill's guidance, and loads the Discord tools into that
 conversation. That's context management, not a security boundary: the agent
 already has your Unix authority.
 
-## The skill for other harnesses
-
-```sh
-carillon discord tools install
-```
-
-This copies the release's skill into the resources of every agent that has
-them, replacing only `skills/discord/SKILL.md`. Carillon's T3 profiles link
-to those resources, so the assistant on T3 has the skill at its next session;
-T3 Code channels and your own sessions never do. Run it again after an
-update, and remove the file to turn it off. The regular installer doesn't
-install it.
-
 ## Other local agents
 
-With the provider running, other harnesses (the assistant on T3, Claude
-Code, Codex) use the same operations through the CLI, as the skill tells
-them:
+With the provider running, your other harnesses (Claude Code, Codex) use
+the same operations through the CLI, as the skill tells them; a release
+ships it as `app/lib/carillon-discord-SKILL.md`, for you to give those
+harnesses if you want them to administer the server:
 
 ```sh
 carillon discord call --help

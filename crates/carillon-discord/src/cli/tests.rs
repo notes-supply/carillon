@@ -3,7 +3,7 @@ use std::{fs, path::Path};
 use anyhow::{Context as _, Result};
 use carillon_installation::config::{LoadedConfig, Provider, ProviderRole};
 
-use super::{Cli, Command, call, install_tools, instance, uploads};
+use super::{Cli, Command, call, instance, uploads};
 use crate::operations::{Messages, Operation};
 use axum::{
     Router,
@@ -505,35 +505,6 @@ async fn message_files_are_loaded_locally_and_sent_as_bounded_bytes() -> Result<
         json!([
             {"filename": "evidence.txt", "data": "aGVsbG8K"}
         ])
-    );
-    Ok(())
-}
-
-#[test]
-fn tools_install_gives_every_agent_the_skill_and_leaves_its_other_resources() -> Result<()> {
-    let directory = tempfile::tempdir()?;
-    let root = directory.path();
-    let config =
-        crate::config::tests::installation(&root.join("installation"), "discord-private", 46_400)?;
-    let lib = root.join("lib");
-    fs::create_dir_all(&lib)?;
-    let resources = config.value.resource_roots()[0];
-    let extensions = resources.join("extensions");
-    fs::create_dir_all(&extensions)?;
-    fs::write(extensions.join("custom.js"), "the owner's own")?;
-    let missing = install_tools(&config, &lib)
-        .err()
-        .context("installed without a skill in the release")?;
-    assert!(format!("{missing:#}").contains("release has no Discord skill"));
-    fs::write(lib.join("carillon-discord-SKILL.md"), "Discord skill\n")?;
-    install_tools(&config, &lib)?;
-    assert_eq!(
-        fs::read_to_string(resources.join("skills/discord/SKILL.md"))?,
-        "Discord skill\n"
-    );
-    assert_eq!(
-        fs::read_to_string(extensions.join("custom.js"))?,
-        "the owner's own"
     );
     Ok(())
 }
