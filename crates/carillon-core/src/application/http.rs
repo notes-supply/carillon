@@ -212,7 +212,10 @@ fn router(state: AppState) -> Router {
         .route("/v1/events", post(accept_event))
         .route("/v1/events/{event_id}", get(event_status))
         .route("/v1/events/{event_id}/control", post(controls::control))
-        .route("/v1/runtime/turns", post(runtime::open))
+        .route(
+            "/v1/runtime/turns",
+            get(runtime::running).post(runtime::open),
+        )
         .route("/v1/runtime/turns/{id}/outcome", post(runtime::outcome))
         .route("/v1/jobs", get(jobs))
         .route("/v1/deliveries", get(claim_delivery))

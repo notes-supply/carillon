@@ -5,7 +5,7 @@ use carillon_protocol::{
         CommandCatalog, RuntimeModelQuery, RuntimeModelUpdate, RuntimeTurnRequest, TurnActivity,
     },
     models::ModelState,
-    turns::{RuntimeTurnControl, TurnOpening, TurnOutcome},
+    turns::{RunningTurn, RuntimeTurnControl, TurnOpening, TurnOutcome},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -189,6 +189,8 @@ struct HeldFixtures {
     invalid_openings: Vec<Value>,
     controls: Vec<Value>,
     invalid_controls: Vec<Value>,
+    running: Vec<Value>,
+    invalid_running: Vec<Value>,
 }
 
 #[test]
@@ -213,6 +215,12 @@ fn shared_held_turn_wire_fixtures() -> Result<()> {
     }
     for value in &fixtures.invalid_controls {
         refused::<RuntimeTurnControl>(value)?;
+    }
+    for value in &fixtures.running {
+        round_trip::<RunningTurn>(value)?;
+    }
+    for value in &fixtures.invalid_running {
+        refused::<RunningTurn>(value)?;
     }
     Ok(())
 }

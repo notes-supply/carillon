@@ -68,6 +68,30 @@ impl Database {
         Ok(Some(turn))
     }
 
+    /// The turns core records running on `runtime_id`, oldest first, each
+    /// with its event ID, read in one snapshot.
+    pub(crate) fn running_turns(&self, runtime_id: &str) -> Result<Vec<(QueuedTurn, String)>> {
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let running = transaction
+            .prepare(
+                "SELECT id, interface_id, agent_id, audience_id, runtime_id, target_id,
+                    feedback_target_id, input, resource_snapshot_id, native_json, follow_up_json,
+                    event_id
+                 FROM turns WHERE runtime_id = ?1 AND state = 'running'
+                 ORDER BY acceptance_sequence",
+            )?
+            .query_map([runtime_id], |row| Ok((queued_turn(row)?, row.get(11)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        running
+            .into_iter()
+            .map(|(mut turn, event_id)| {
+                turn.attachments = captured_files(&transaction, Some(&turn.turn_id))?;
+                Ok((turn, event_id))
+            })
+            .collect()
+    }
+
     /// Records that the durable runtime holds `turn`: it runs there, and its
     /// files are in the runtime's conversation. A turn the runtime settled
     /// before this was recorded keeps its outcome.

@@ -358,6 +358,19 @@ export const TurnReceiptSchema = Type.Object({
 });
 export type TurnReceipt = Static<typeof TurnReceiptSchema>;
 
+/**
+ * A turn core records running on the runtime that asks: the request core
+ * handed it, and the key of a turn the runtime opened.
+ */
+export const RunningTurnSchema = Type.Object(
+  {
+    request: RuntimeTurnRequestSchema,
+    key: Type.Optional(Type.String({ minLength: 1 })),
+  },
+  { additionalProperties: false },
+);
+export type RunningTurn = Static<typeof RunningTurnSchema>;
+
 /** Core's relay of a person's control of a turn the runtime holds. */
 export const RuntimeTurnControlSchema = Type.Object(
   { interface_id: ProviderIdentitySchema, action: ControlActionSchema },

@@ -1,9 +1,10 @@
 //! What a durable runtime tells core of the turns it holds, the turns it
-//! opens, and the controls core relays to it, each authenticated by the
-//! caller's own credential.
+//! opens, what it reads back of those core records running, and the
+//! controls core relays to it, each authenticated by the caller's own
+//! credential.
 
 use axum::body::Bytes;
-use carillon_protocol::turns::Silence;
+use carillon_protocol::turns::{RunningTurn, Silence};
 use tempfile::tempdir;
 
 use super::{
@@ -289,6 +290,94 @@ async fn a_runtime_opens_one_turn_per_key_in_a_conversation_of_its_own() -> Resu
         ),
         ("test-destination", "")
     );
+    Ok(())
+}
+
+async fn running(
+    state: &AppState,
+    (runtime, token): (&str, &str),
+) -> Result<Result<Vec<RunningTurn>, StatusCode>> {
+    let mut headers = HeaderMap::new();
+    headers.insert(PROVIDER_HEADER, runtime.parse()?);
+    headers.insert(
+        http::header::AUTHORIZATION,
+        format!("Bearer {token}").parse()?,
+    );
+    Ok(runtime::running(State(state.clone()), headers)
+        .await
+        .map(|Json(turns)| turns)
+        .map_err(|refusal| refusal.status))
+}
+
+#[tokio::test]
+async fn a_runtime_reads_back_the_turns_core_records_running_on_it() -> Result<()> {
+    let directory = tempdir()?;
+    let runtime = DurableRuntime::start().await?;
+    let (mut fixture, _) = durable(directory.path(), &runtime)?;
+    add_runtime(&mut fixture, "other-runtime", "other-only", true)?;
+    add_runtime(&mut fixture, "plain-runtime", "plain-only", false)?;
+    let state = configured(&fixture);
+    let held = ok(submit(&state, "one", "conversation").await)?;
+    let answered = ok(submit(&state, "two", "conversation").await)?;
+    for _ in 0..2 {
+        assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
+    }
+    ok(submit(&state, "three", "conversation").await)?;
+    let answer = json!({"outcome": "answered", "output": "Done."});
+    assert_eq!(
+        settle(&state, RUNTIME, &answered.turn_id, &answer).await?,
+        StatusCode::NO_CONTENT
+    );
+    let opened = open_turn(&state, RUNTIME, &opening("conversation", "nightly"))
+        .await?
+        .map_err(|status| anyhow!("refused with {status}"))?;
+    for caller in [
+        ("test-interface", "test-only"),
+        ("test-runtime", "wrong"),
+        ("missing-runtime", "test-only"),
+        ("plain-runtime", "plain-only"),
+    ] {
+        assert_eq!(
+            running(&state, caller).await?.err(),
+            Some(StatusCode::FORBIDDEN),
+            "{caller:?}"
+        );
+    }
+    let other = running(&state, ("other-runtime", "other-only")).await?;
+    assert!(other.is_ok_and(|turns| turns.is_empty()));
+    // Neither the queued turn nor the answered one: only those it holds.
+    let turns = running(&state, RUNTIME)
+        .await?
+        .map_err(|status| anyhow!("refused with {status}"))?;
+    let listed = turns
+        .iter()
+        .map(|turn| {
+            (
+                turn.request.correlation_id.as_str(),
+                turn.request.input.as_str(),
+                turn.key.as_deref(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        listed,
+        [
+            (held.turn_id.as_str(), "one", None),
+            (
+                opened.turn_id.as_str(),
+                "The nightly summary.",
+                Some("nightly")
+            ),
+        ]
+    );
+    assert_eq!(
+        serde_json::to_value(&turns[0].request)?,
+        serde_json::to_value(runtime.request(0)?)?
+    );
+    // Disabled, it still reads what it holds.
+    fixture.config.value.providers[1].enabled = false;
+    let disabled = running(&configured(&fixture), RUNTIME).await?;
+    assert_eq!(disabled.map(|turns| turns.len()), Ok(2));
     Ok(())
 }
 

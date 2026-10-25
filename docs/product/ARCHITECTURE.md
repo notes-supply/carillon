@@ -189,7 +189,8 @@ the conversation's native session. It speaks one of two turn contracts.
 A durable runtime, marked `durable` in the registry, keeps each turn core
 hands it at `POST /v1/inbox`, answering 202 once kept, and settles it later
 through core's `POST /v1/runtime/turns/{id}/outcome`. It opens turns of its
-own through `POST /v1/runtime/turns` and takes a person's controls at
+own through `POST /v1/runtime/turns`, reads back the turns core records
+running on it through `GET /v1/runtime/turns`, and takes a person's controls at
 `POST /v1/turns/{id}/control`. While a turn waits behind another, its
 activity snapshot says `queued` and lists the controls it offers.
 

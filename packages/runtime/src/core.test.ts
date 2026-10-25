@@ -1,7 +1,7 @@
 import { createServer } from "node:net";
 import { once } from "node:events";
 import { afterEach, expect, it } from "vitest";
-import { createCoreClient } from "./core.ts";
+import { CoreRefusal, createCoreClient, UnreadableListing } from "./core.ts";
 import { startFakeCore, type FakeCore } from "./testing.ts";
 
 const cores: FakeCore[] = [];
@@ -78,4 +78,70 @@ it("opens one turn per key and reads core's receipt", async () => {
     status: 409,
     message: "core opened no turn: answered 409",
   });
+});
+
+it("lists the turns core records running, sets apart one it cannot read, and throws when core lists none", async () => {
+  const fake = await core();
+  const { running, open, settle } = client(fake.url);
+  expect(await running()).toEqual({ turns: [], unreadable: [] });
+  const request = {
+    correlation_id: "turn-1",
+    interface_id: "discord-private",
+    agent_id: "default",
+    audience_id: "conversation",
+    input: "hello",
+    resource_root: "/resources",
+    attachment_root: "/attachments",
+  };
+  fake.hold(request);
+  fake.hold({ ...request, correlation_id: "turn-2", attachment_root: "" });
+  const opened = await open({
+    interface_id: "discord-private",
+    agent_id: "default",
+    audience_id: "conversation",
+    key: "nightly",
+  });
+  const listed = await running();
+  expect(listed.turns.map((turn) => [turn.request.correlation_id, turn.key])).toEqual([
+    ["turn-1", undefined],
+    [opened.turn_id, "nightly"],
+  ]);
+  expect(listed.unreadable.map(({ turnId }) => turnId)).toEqual(["turn-2"]);
+  await settle("turn-1", { outcome: "stopped" });
+  await settle("turn-2", { outcome: "failed" });
+  expect((await running()).turns.map((turn) => turn.request.correlation_id)).toEqual([
+    opened.turn_id,
+  ]);
+  expect(fake.received.at(-1)).toMatchObject({
+    path: "/v1/runtime/turns",
+    provider: "runtime-durable",
+    authorization: "Bearer durable-only",
+    body: undefined,
+  });
+  fake.answer(403);
+  await expect(running()).rejects.toMatchObject({
+    status: 403,
+    message: "core did not list the turns it records running: answered 403",
+  });
+});
+
+it("throws a failure worth asking again when core's list breaks off, and an unreadable one when it is no list", async () => {
+  const fake = await core();
+  fake.answer(200);
+  await expect(client(fake.url).running()).rejects.toBeInstanceOf(UnreadableListing);
+  const breaking = createServer((socket) => {
+    socket.end(
+      'HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n[{"request"',
+    );
+  }).listen(0, "127.0.0.1");
+  await once(breaking, "listening");
+  const address = breaking.address();
+  if (address === null || typeof address === "string") throw new Error("expected a TCP port");
+  const failure: unknown = await client(`http://127.0.0.1:${String(address.port)}`)
+    .running()
+    .catch((caught: unknown) => caught);
+  breaking.close();
+  expect(failure).toBeInstanceOf(Error);
+  expect(failure).not.toBeInstanceOf(CoreRefusal);
+  expect(failure).not.toBeInstanceOf(UnreadableListing);
 });

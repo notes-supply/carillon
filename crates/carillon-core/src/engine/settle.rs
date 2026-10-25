@@ -4,11 +4,11 @@
 use anyhow::Result;
 use carillon_protocol::{
     model::{EventReceipt, TurnState},
-    turns::{Silence, TurnOpening, TurnOutcome},
+    turns::{RunningTurn, Silence, TurnOpening, TurnOutcome},
 };
 
 use super::{Core, CoreError, RuntimeProvider, interrupted, kept_report};
-use crate::db::{Opened, Settled, Settlement};
+use crate::db::{Opened, RUNTIME_EVENT_PREFIX, Settled, Settlement};
 
 impl Core {
     /// Settles a turn `runtime_id` holds as it says the turn ended, with the
@@ -86,6 +86,24 @@ impl Core {
                 "the conversation runs on {owner}, not {runtime_id}"
             ))),
         }
+    }
+
+    /// The turns core records running on `runtime_id`, oldest first: each
+    /// with the request core hands the runtime, and the key of a turn it
+    /// opened.
+    /// # Errors
+    /// Returns storage errors.
+    pub(crate) fn running_turns(&self, runtime_id: &str) -> Result<Vec<RunningTurn>> {
+        let opened = format!("{RUNTIME_EVENT_PREFIX}{runtime_id}:");
+        Ok(self
+            .database
+            .running_turns(runtime_id)?
+            .into_iter()
+            .map(|(turn, event_id)| RunningTurn {
+                key: event_id.strip_prefix(&opened).map(str::to_owned),
+                request: self.runtime_request(&turn, Vec::new()),
+            })
+            .collect())
     }
 
     /// The durable runtime holding the running turn of an interface's

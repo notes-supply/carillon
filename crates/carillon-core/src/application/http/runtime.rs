@@ -1,6 +1,7 @@
 //! What durable runtimes call core for, with their own credential: settling
-//! the turns they hold and opening their own. And the dispatcher that hands
-//! each of them its queued turns.
+//! the turns they hold, opening their own and reading back those core
+//! records running. And the dispatcher that hands each of them its queued
+//! turns.
 
 use axum::{
     Json,
@@ -11,7 +12,7 @@ use axum::{
 use carillon_installation::config::{LoadedConfig, Provider, ProviderRole};
 use carillon_protocol::{
     model::EventReceipt,
-    turns::{TurnOpening, TurnOutcome},
+    turns::{RunningTurn, TurnOpening, TurnOutcome},
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -97,6 +98,17 @@ pub(super) async fn open(
             .blocking(move |core| core.open_turn(&runtime, &opening))
             .await?,
     ))
+}
+
+/// The turns core records running on the calling runtime, enabled or not,
+/// for it to take up again once its process restarts: each with the request
+/// core handed it, and the key of a turn it opened.
+pub(super) async fn running(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<RunningTurn>>, ApiError> {
+    let runtime = runtime_provider(&headers, &state.config())?.id.clone();
+    Ok(Json(state.core.running_turns(&runtime)?))
 }
 
 /// How long a dispatcher waits after its first failure, doubling with each

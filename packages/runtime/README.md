@@ -22,7 +22,9 @@ depend on it; it imports neither. Import modules by path
   of an explanation; other failures are logged, redacted.
 - [`core.ts`](src/core.ts): an inbox runtime's client of core, with its own
   credential: `settle` a turn it holds, in one attempt the caller repeats
-  until core says what it made of the outcome, and `open` one of its own. [`testing.ts`](src/testing.ts) is a
+  until core says what it made of the outcome, `open` one of its own, and
+  list the turns core records `running` on it, for a process that forgot
+  them, setting apart an entry it cannot read. [`testing.ts`](src/testing.ts) is a
   small fake core for runtime tests.
 - [`failure.ts`](src/failure.ts): `ExplainedFailure`, `RuntimeClosed` and the
   best-effort rules for what of an explanation may be shown.
