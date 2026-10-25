@@ -71,32 +71,6 @@ project. Work already running in another project continues there.
 An explicit `--runtime` adds that runtime to an existing installation.
 Pi sign-in is skipped when no agent runs on Pi.
 
-Each T3 profile keeps its own real `skills/` directory. Carillon links each
-`skills/NAME` to the assistant's `resources/skills/NAME`. The instructions
-file links to `resources/AGENTS.md`. Serve startup reads each saved profile's
-homePath from T3, then adds new links, removes obsolete links, and updates
-links after resources move before accepting turns. A saved profile missing
-from T3 or without a homePath stops startup. Only directories containing
-`SKILL.md` are shared. Harness files and directories stay in the profile.
-A conflicting name or a symlink in the source `AGENTS.md` or `skills/` tree stops
-startup. This includes linked skill directories, manifests, and nested resources,
-which core's admission snapshots also refuse. Each T3 runtime permits at most
-one agent with resources.
-
-Profiles belong to the user and are shared across installations. Setup creates
-or validates each T3 instance and creates its home for sign-in, leaving links
-untouched. `carillon runtime-t3 check` reads settings and the token without
-reaching T3 or changing links. Setting up or checking another installation
-therefore leaves the serving installation's resources linked. Starting an
-installation reconciles the links to its resources. Only one installation's
-services run at a time.
-
-`carillon runtime-t3 discover --agent ID --url URL` reads the token on
-standard input and returns that agent's model offer. The saved `profiles`
-list decides which instances the assistant may use. Plain T3 Code excludes
-saved profiles and the reserved `carillon_claude` and `carillon_codex` IDs,
-even when they are absent from that list.
-
 The installer creates `~/.carillon` (or `CARILLON_HOME`), registers the user
 services (`carillon.target` with core, Discord and both runtimes; a
 runtime you didn't choose ends at once) and links `~/.local/bin/carillon`.
@@ -588,6 +562,11 @@ downgrade: restore a backup made before the update instead.
 Provider versions in `carillon.toml` are expectations you change yourself
 when you mean to run another provider release; `status` shows any mismatch.
 
+Earlier releases ran Carillon's assistant on T3 through T3 instances of its
+own, `carillon_claude` and `carillon_codex`. Nothing uses them now, and T3
+offers them to plain T3 Code agents like any other instance, so remove them
+in T3's settings.
+
 Maintenance commands take a lock per installation (`.maintenance.lock`) and
 one on the owner's user units, and refuse while another holds them.
 
@@ -600,9 +579,3 @@ one on the owner's user units, and refuse while another holds them.
 It removes the user services, the `~/.local/bin/carillon` link and the
 application. Configuration, credentials, sessions and other data stay in the
 installation directory; delete it yourself if you no longer need it.
-
-T3 profile homes under `${XDG_DATA_HOME:-~/.local/share}/carillon/profiles`
-also stay, with their sign-ins, sessions, and settings. T3 keeps the
-`carillon_claude` and `carillon_codex` instances and their keys in its secret
-store. Remove those separately in T3 settings and remove the profile homes
-when no longer needed.

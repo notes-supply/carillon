@@ -1,9 +1,5 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { ModelSelections } from "@carillon/runtime/selections";
 import { expect, it } from "vitest";
-import { agentModels, catalog, ledgerUpdate, modelState, type Catalog } from "./models.ts";
+import { catalog, modelState } from "./models.ts";
 
 it("names each usable instance as T3 displays it, or by its ID when T3 gives no name", () => {
   const usable = { enabled: true, installed: true, status: "ready" };
@@ -20,7 +16,7 @@ it("names each usable instance as T3 displays it, or by its ID when T3 gives no 
     ],
   });
   const settings = { provider: "codex", model: "gpt-6-astra", options: {} };
-  const models = agentModels(offered, { selection: settings, overridden: false }, settings);
+  const models = { offered, agent: { selection: settings, overridden: false } };
   expect(modelState(models, undefined).providers).toEqual([
     { id: "carillon_claude", name: "Claude · Carillon" },
     { id: "codex", name: "codex" },
@@ -80,46 +76,4 @@ it("names every choice of a setting as T3 labels it, and a boolean's as off or o
       default: "off",
     },
   ]);
-});
-
-it("refuses a ledger change committed after reading a default set aside by a role change", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "carillon-t3-ledger-"));
-  try {
-    const path = join(directory, "models.json");
-    const first = await ModelSelections.open(path);
-    const other = await ModelSelections.open(path);
-    const previous = { provider: "carillon_claude", model: "haiku", options: {} };
-    const concurrent = { provider: "carillon_claude", model: "sonnet", options: {} };
-    const settings = { provider: "codex", model: "gpt", options: {} };
-    const available = [previous, concurrent, settings].map((selection) => ({
-      ...selection,
-      name: selection.model,
-      options: [],
-    }));
-    const offered: Catalog = {
-      providers: [{ id: "codex", name: "Codex" }],
-      available: available.filter(({ provider }) => provider === "codex"),
-      booleans: new Set(),
-      runsOn: (provider) => provider === "codex",
-    };
-    const query = { interface_id: "discord", agent_id: "code" };
-    await first.update(available, settings, { ...query, scope: "agent", selection: previous });
-    const { agent: chosen } = await first.state(available, settings, query);
-    const models = agentModels(offered, chosen, settings);
-    expect(models.agent).toEqual({ selection: settings, overridden: false });
-    const update = ledgerUpdate(models, {
-      ...query,
-      scope: "agent",
-      selection: settings,
-      expected: settings,
-    });
-    await other.update(available, settings, { ...query, scope: "agent", selection: concurrent });
-    await expect(first.update(offered.available, settings, update)).rejects.toMatchObject({
-      status: 409,
-      message: "The model settings changed.",
-    });
-    expect((await first.state(available, settings, query)).agent.selection).toEqual(concurrent);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
 });

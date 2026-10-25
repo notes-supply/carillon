@@ -84,10 +84,7 @@ it.each(["default", "code"])(
         type: "thread.create",
         threadId: next.id,
         projectId: NEXT_PROJECT,
-        title:
-          agentId === "default"
-            ? `Carillon ${conversation.interface_id} ${conversation.audience_id}`
-            : "New thread",
+        title: "New thread",
       }),
     ]);
     expect(fake.threads.size).toBe(2);
@@ -114,7 +111,7 @@ it.each(["default", "code"])(
     expect(next.messages.filter((message) => message.role === "user")).toHaveLength(2);
     const sent = fake.commands.filter((command) => command.type === "message.dispatch");
     expect(sent.slice(1).map((command) => command.threadId)).toEqual([next.id, next.id]);
-    expect(sent[1]?.["titleSeed"]).toBe(agentId === "code" ? "Use the new project." : undefined);
+    expect(sent[1]?.["titleSeed"]).toBe("Use the new project.");
 
     await restart({ projectId: PROJECT });
     const resumed = runtime.turns.execute(

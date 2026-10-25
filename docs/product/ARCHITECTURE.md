@@ -248,27 +248,17 @@ observations of the resolved thread.
 Native work whose stop T3 couldn't confirm fences that thread in the runtime's
 memory, and the runtime refuses a drained restart while any fence stands.
 
-Its agents are of two kinds. Carillon's assistant runs on Carillon's own T3
-instances, its profiles: each has a home of its own whose instructions and
-skills link to the assistant's resources, so the harness loads them natively
-and no other T3 thread sees them. T3's instance `config.homePath` owns the home
-path. Profiles are shared across installations of the same user. Serve startup
-reconciles the saved profiles' links before accepting turns. It refuses symlinks
-in the source `AGENTS.md` and `skills/` tree, including skill directories,
-manifests, and nested resources, as admission snapshots do. Setup and preflight
-checks leave profile links untouched. The assistant's messages carry where the
-person wrote them. Every other agent is plain T3 Code, on every other instance, given the
-person's text as written, its threads titled by T3. Each message names the
-selection its run takes: the thread's while it is on one of the agent's
-instances, else the agent default. See the
-[T3 guide](../../packages/runtime-t3/README.md).
+Its agents are plain T3 Code, given the person's text as written, their
+threads titled by T3; an agent with resources is refused. Each message
+names the selection its run takes: the thread's, else the agent default.
+See the [T3 guide](../../packages/runtime-t3/README.md).
 
 ## Configuration
 
 `carillon.toml` declares providers by stable ID and role, with each one's
 address, credential hash, expected version and whether it's enabled, and the
 agents: each one's ID, name, runtime, workspace and, for Carillon's
-assistant, resources. Each provider owns `providers/ID.toml`, where a
+assistant on Pi, resources. Each provider owns `providers/ID.toml`, where a
 runtime keeps its own settings for its agents. Both files reject unknown
 fields.
 
@@ -309,8 +299,7 @@ A runtime decides which captured copy a turn uses. The Pi runtime uses the
 latest one it admitted for the agent: an edit applies to the agent's next
 model request, including those for messages already waiting, and its
 `settings.json` selects the agent's extensions and busy mode. T3 takes no
-resources with a turn: the assistant's profiles link to them instead, and
-read them as their sessions open. Model sign-in and engine settings are not
+resources, and refuses an agent that has them. Model sign-in and engine settings are not
 resources: Pi keeps them in `CARILLON_HOME/pi` and checks its default model
 is usable before it serves, so incomplete setup leaves work queued. A runtime
 works in its agent's workspace (your home by default for Pi) with your

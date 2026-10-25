@@ -1,7 +1,6 @@
 /**
  * The runtime under test against a fake T3, fresh for each test of a file
- * that imports this: agent `default` is the assistant, on the profile
- * `claudeAgent`, and `code` is plain T3 Code.
+ * that imports this: agents `default`, on Claude, and `code`, on Codex.
  */
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -48,8 +47,8 @@ interface Overrides {
   readonly projectId?: string;
   readonly reconnectDelayMs?: number;
   readonly connect?: Connect;
-  /** The default agent's role and settings model, the assistant's on the profile by default. */
-  readonly role?: Pick<T3Agent, "assistant" | "selection">;
+  /** The default agent's settings model. */
+  readonly selection?: T3Agent["selection"];
 }
 
 export function build(overrides: Overrides = {}) {
@@ -61,7 +60,7 @@ export function build(overrides: Overrides = {}) {
         {
           projectId: overrides.projectId ?? PROJECT,
           workspace: resources,
-          ...(overrides.role ?? { assistant: true, selection }),
+          selection: overrides.selection ?? selection,
         },
       ],
       [
@@ -69,12 +68,10 @@ export function build(overrides: Overrides = {}) {
         {
           projectId: overrides.projectId ?? PROJECT,
           workspace: resources,
-          assistant: false,
           selection: { instanceId: "codex", model: "gpt-6-astra", options: [] },
         },
       ],
     ]),
-    profiles: new Set(["claudeAgent"]),
     selections,
     ...(overrides.connect === undefined ? {} : { connect: overrides.connect }),
     reconnect: { attempts: 5, delayMs: overrides.reconnectDelayMs ?? 50 },

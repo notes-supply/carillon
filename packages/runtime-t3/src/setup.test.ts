@@ -24,17 +24,17 @@ it("discovers T3's projects and usable models", async () => {
   expect(fake.refreshes).toEqual([]);
 });
 
-it("has T3 check instances signed in since it last looked before listing models", async () => {
-  // T3 keeps what it last found of an instance's sign-in, so a profile
-  // signed in after T3 made it is checked again on request, and only it.
-  const fake = await fakeT3();
-  await discover({ url: fake.url, token: fake.token }, { refresh: ["carillon_codex"] });
-  expect(fake.refreshes).toEqual([{ instanceId: "carillon_codex" }]);
-});
-
 it("writes the runtime's files only for a project rooted at the agent's workspace and a model T3 offers", async () => {
   const fake = await fakeT3();
   const { root, workspace, config } = await installation();
+  // T3 runs plain T3 Code, which takes no resources.
+  await writeFile(
+    config,
+    (await readFile(config, "utf8")).replace(
+      'name = "Notes app"',
+      'name = "Notes app"\nresources = "agent"',
+    ),
+  );
   const runtime = await loaded(config);
   const endpoint = { url: fake.url, token: fake.token };
   fake.projects = [
@@ -52,9 +52,7 @@ it("writes the runtime's files only for a project rooted at the agent's workspac
     [{ ...sonnet, projectId: "elsewhere" }, /rooted/u],
     [{ ...sonnet, instanceId: "cursor", model: "auto" }, /no usable model/u],
     [{ ...sonnet, agentId: "elsewhere" }, /not an agent of runtime-t3/u],
-    // The assistant, the agent with resources, runs on Carillon's profiles
-    // alone, and there are none yet.
-    [{ ...sonnet, agentId: "assistant" }, /among Carillon's profiles/u],
+    [{ ...sonnet, agentId: "notes" }, /notes has resources in carillon\.toml/u],
   ] as const) {
     await expect(configure(runtime, endpoint, choice)).rejects.toThrow(refusal);
     expect(await readdir(join(root, "credentials"))).toEqual([]);
@@ -76,7 +74,7 @@ it("writes the runtime's files only for a project rooted at the agent's workspac
   expect(await readFile(runtime.providerFile, "utf8")).not.toContain(fake.token);
 });
 
-it("keeps the title on a rerun, and the model's options while the model stays the same", async () => {
+it("keeps the other agents' settings on a rerun, and the model's options while the model stays the same", async () => {
   const { workspace, config } = await installation();
   const runtime = await loaded(config);
   const sonnet = {
@@ -85,14 +83,12 @@ it("keeps the title on a rerun, and the model's options while the model stays th
     instanceId: "claudeAgent",
     model: "claude-sonnet-5",
   };
-  // Settings the operator tuned as documented, with the assistant's.
+  // Settings the operator tuned as documented, with another agent's.
   await writeFile(
     runtime.providerFile,
     [
       'url = "http://127.0.0.1:1"',
       'token_file = "credentials/t3.token"',
-      'title = "Notes"',
-      'profiles = ["carillon_claude"]',
       "[agents.code]",
       'project_id = "agent"',
       "[agents.code.model]",
@@ -101,11 +97,11 @@ it("keeps the title on a rerun, and the model's options while the model stays th
       "[agents.code.model.options]",
       'effort = "high"',
       "thinking = true",
-      "[agents.assistant]",
+      "[agents.notes]",
       'project_id = "other"',
-      "[agents.assistant.model]",
-      'instance_id = "carillon_claude"',
-      'model = "claude-sonnet-5"',
+      "[agents.notes.model]",
+      'instance_id = "codex"',
+      'model = "gpt-6-astra"',
     ].join("\n"),
   );
 
@@ -114,7 +110,7 @@ it("keeps the title on a rerun, and the model's options while the model stays th
   moved.projects = [{ id: "agent", title: "Agent", workspaceRoot: workspace }];
   await configure(runtime, { url: moved.url, token: moved.token }, sonnet);
   let settings = await loadSettings(runtime.providerFile, runtime.root);
-  expect(settings).toMatchObject({ url: moved.url, title: "Notes" });
+  expect(settings.url).toBe(moved.url);
   expect(settings.agents.get("code")?.selection).toEqual({
     instanceId: "claudeAgent",
     model: "claude-sonnet-5",
@@ -123,11 +119,11 @@ it("keeps the title on a rerun, and the model's options while the model stays th
       { id: "thinking", value: true },
     ],
   });
-  expect(settings.agents.get("assistant")?.projectId).toBe("other");
+  expect(settings.agents.get("notes")?.projectId).toBe("other");
   expect((await readFile(settings.tokenFile, "utf8")).trim()).toBe("rotated-token");
 
-  // Another model starts from its own defaults; the title stays, and so does
-  // the token's file, the token being the same.
+  // Another model starts from its own defaults; the token's file stays, the
+  // token being the same.
   const tokenFile = settings.tokenFile;
   await configure(
     runtime,
@@ -136,7 +132,6 @@ it("keeps the title on a rerun, and the model's options while the model stays th
   );
   settings = await loadSettings(runtime.providerFile, runtime.root);
   expect(settings.tokenFile).toBe(tokenFile);
-  expect(settings.title).toBe("Notes");
   expect(settings.agents.get("code")?.selection).toEqual({
     instanceId: "claudeAgent",
     model: "claude-haiku-4-5",
@@ -151,10 +146,7 @@ it("drops an agent carillon.toml no longer gives the runtime, so the runtime sti
   const endpoint = { url: fake.url, token: fake.token };
   const sonnet = { projectId: "agent", instanceId: "claudeAgent", model: "claude-sonnet-5" };
   // Plain T3 Code alone, for two projects, until a setup rerun keeps one.
-  const kept = (await readFile(config, "utf8")).replace(
-    /\[\[agents\]\]\nid = "assistant"[^[]*/u,
-    "",
-  );
+  const kept = (await readFile(config, "utf8")).replace(/\[\[agents\]\]\nid = "notes"[^[]*/u, "");
   await writeFile(
     config,
     [
@@ -307,17 +299,10 @@ it("checks the saved settings and T3 token as startup reads them, reaching no T3
     'model = "m"',
   ];
   const settings = (token: string, ...agents: string[][]) =>
-    [
-      'url = "http://127.0.0.1:1"',
-      `token_file = "credentials/${token}"`,
-      'profiles = ["carillon_claude"]',
-      ...agents.flat(),
-    ].join("\n");
-  const usable = settings(
-    "t3.token",
-    agent("assistant", "carillon_claude"),
-    agent("code", "claudeAgent"),
-  );
+    ['url = "http://127.0.0.1:1"', `token_file = "credentials/${token}"`, ...agents.flat()].join(
+      "\n",
+    );
+  const usable = settings("t3.token", agent("notes", "codex"), agent("code", "claudeAgent"));
   await writeFile(tokenFile, "saved-token\n");
   await writeFile(providerFile, usable);
   const passed = await cli(["check", "--config", config], "");
@@ -338,7 +323,7 @@ it("checks the saved settings and T3 token as startup reads them, reaching no T3
     const refused = await cli(["check", "--config", config], "");
     expect(refused.status).toBe(1);
     expect(refused.stderr).toBe(
-      `error: ${workspace}: Carillon's workspace must be an existing directory\n`,
+      `error: ${workspace}: Notes app's workspace must be an existing directory\n`,
     );
   }
   await rm(workspace);
@@ -359,24 +344,15 @@ it("checks the saved settings and T3 token as startup reads them, reaching no T3
   }
   await writeFile(config, saved);
 
-  // The assistant, the agent with resources, runs on the profiles alone,
-  // and plain T3 Code never does.
-  for (const [swapped, reason] of [
-    [
-      settings("t3.token", agent("assistant", "claudeAgent"), agent("code", "codex")),
-      /\/agents\/assistant\/model must be on one of \/profiles/u,
-    ],
-    [
-      settings("t3.token", agent("assistant", "carillon_claude"), agent("code", "carillon_claude")),
-      /\/agents\/code\/model must not be on one of \/profiles/u,
-    ],
-  ] as const) {
-    await writeFile(providerFile, swapped);
-    const refused = await cli(["check", "--config", config], "");
-    expect(refused.status).toBe(1);
-    expect(refused.stderr).toMatch(reason);
-  }
-  await writeFile(providerFile, usable);
+  // T3 runs plain T3 Code, which takes no resources.
+  await writeFile(
+    config,
+    saved.replace('name = "Notes app"', 'name = "Notes app"\nresources = "agent"'),
+  );
+  const refused = await cli(["check", "--config", config], "");
+  expect(refused.status).toBe(1);
+  expect(refused.stderr).toMatch(/notes has resources in carillon\.toml/u);
+  await writeFile(config, saved);
 
   // A runtime that does not start, disabled or not registered as in a Pi
   // installation, passes with no settings at all.
@@ -400,11 +376,7 @@ it("checks the saved settings and T3 token as startup reads them, reaching no T3
       () =>
         writeFile(
           providerFile,
-          settings(
-            "missing.token",
-            agent("assistant", "carillon_claude"),
-            agent("code", "claudeAgent"),
-          ),
+          settings("missing.token", agent("notes", "codex"), agent("code", "claudeAgent")),
         ),
       /missing\.token/u,
     ],
@@ -424,15 +396,8 @@ it("checks the saved settings and T3 token as startup reads them, reaching no T3
 
 it("takes the token on standard input, says the settings are saved for a start, and reports a refusal in one line", async () => {
   const fake = await fakeT3();
-  const discovered = await cli(
-    ["discover", "--url", fake.url, "--refresh", "carillon_claude,carillon_codex"],
-    `${fake.token}\n`,
-  );
+  const discovered = await cli(["discover", "--url", fake.url], `${fake.token}\n`);
   expect(discovered.status, discovered.stderr).toBe(0);
-  expect(fake.refreshes).toEqual([
-    { instanceId: "carillon_claude" },
-    { instanceId: "carillon_codex" },
-  ]);
   const offer: unknown = JSON.parse(discovered.stdout);
   expect(offer).toMatchObject({ projects: [{ id: "project-1" }] });
 
@@ -487,136 +452,22 @@ it("takes the token on standard input, says the settings are saved for a start, 
   expect(configured.stderr).toMatch(/runtime-t3 is not in carillon\.toml/u);
 });
 
-it("discovers each agent's models from every persisted profile through the CLI", async () => {
+it("discovers the models offered to an agent through the CLI", async () => {
   const fake = await fakeT3();
-  const { root, config } = await installation();
-  fake.providers = [
-    ...fake.providers,
-    ...["carillon_claude", "carillon_codex"].map((instanceId) => ({
-      instanceId,
-      driver: "codex",
-      enabled: true,
-      installed: true,
-      status: "ready",
-      models: [{ slug: "profile-model", name: instanceId, capabilities: null }],
-    })),
-  ];
-  await writeFile(
-    join(root, "providers", "runtime-t3.toml"),
-    `url = "${fake.url}"\ntoken_file = "credentials/t3.token"\nprofiles = ["carillon_claude", "carillon_codex"]\n`,
-  );
-  const offered = async (id: string) => {
-    const found = await cli(
-      ["discover", "--config", config, "--url", fake.url, "--agent", id],
-      `${fake.token}\n`,
-    );
-    expect(found.status, found.stderr).toBe(0);
-    const offer: unknown = JSON.parse(found.stdout);
-    return offer;
-  };
-  expect(await offered("assistant")).toMatchObject({
-    models: [
-      { provider: "carillon_claude", model: "profile-model" },
-      { provider: "carillon_codex", model: "profile-model" },
-    ],
-  });
-  expect(await offered("code")).toMatchObject({
+  const { config } = await installation();
+  const offered = (id: string) =>
+    cli(["discover", "--config", config, "--url", fake.url, "--agent", id], `${fake.token}\n`);
+  const found = await offered("code");
+  expect(found.status, found.stderr).toBe(0);
+  const offer: unknown = JSON.parse(found.stdout);
+  expect(offer).toMatchObject({
     models: [
       { provider: "claudeAgent", model: "claude-sonnet-5" },
       { provider: "claudeAgent", model: "claude-haiku-4-5" },
       { provider: "codex", model: "gpt-6-astra" },
     ],
   });
-  const unknown = await cli(
-    ["discover", "--config", config, "--url", fake.url, "--agent", "unknown"],
-    `${fake.token}\n`,
-  );
+  const unknown = await offered("unknown");
   expect(unknown.status).toBe(1);
   expect(unknown.stderr).toContain("unknown is not an agent of runtime-t3");
 });
-
-async function unsavedProfile(harness: string) {
-  const fake = await fakeT3();
-  const { root, workspace, config } = await installation();
-  const runtime = await loaded(config);
-  const endpoint = { url: fake.url, token: fake.token };
-  const instanceId = `carillon_${harness}`;
-  // The assistant runs on the other harness's saved profile.
-  const saved = `carillon_${harness === "claude" ? "codex" : "claude"}`;
-  fake.projects = [{ id: "agent", title: "Agent", workspaceRoot: workspace }];
-  fake.providers = [
-    ...fake.providers,
-    ...[instanceId, saved].map((id) => ({
-      instanceId: id,
-      driver: id === "carillon_claude" ? "claudeAgent" : "codex",
-      enabled: true,
-      installed: true,
-      status: "ready",
-      models: [{ slug: "profile-model", name: "Profile model", capabilities: null }],
-    })),
-  ];
-  const settings = [
-    `url = "${fake.url}"`,
-    'token_file = "credentials/t3.token"',
-    `profiles = ["${saved}"]`,
-    "[agents.assistant]",
-    'project_id = "agent"',
-    "[agents.assistant.model]",
-    `instance_id = "${saved}"`,
-    'model = "profile-model"',
-  ].join("\n");
-  await writeFile(runtime.providerFile, settings);
-  await writeFile(join(root, "credentials", "t3.token"), fake.token);
-  return { runtime, endpoint, config, settings, instanceId };
-}
-
-it.each(["claude", "codex"])(
-  "discover hides unsaved carillon_%s from plain T3 Code",
-  async (harness) => {
-    const { endpoint, config } = await unsavedProfile(harness);
-    const found = await cli(
-      ["discover", "--config", config, "--url", endpoint.url, "--agent", "code"],
-      `${endpoint.token}\n`,
-    );
-    expect(found.status, found.stderr).toBe(0);
-    const offer: unknown = JSON.parse(found.stdout);
-    // T3's ordinary instances, and neither Carillon profile.
-    expect(offer).toMatchObject({
-      models: [
-        { provider: "claudeAgent", model: "claude-sonnet-5" },
-        { provider: "claudeAgent", model: "claude-haiku-4-5" },
-        { provider: "codex", model: "gpt-6-astra" },
-      ],
-    });
-  },
-);
-
-it.each(["claude", "codex"])(
-  "configure refuses unsaved carillon_%s for plain T3 Code",
-  async (harness) => {
-    const { runtime, endpoint, settings, instanceId } = await unsavedProfile(harness);
-    await expect(
-      configure(runtime, endpoint, {
-        agentId: "code",
-        projectId: "agent",
-        instanceId,
-        model: "profile-model",
-      }),
-    ).rejects.toThrow(/no usable model/u);
-    expect(await readFile(runtime.providerFile, "utf8")).toBe(settings);
-  },
-);
-
-it.each(["claude", "codex"])(
-  "check refuses unsaved carillon_%s for plain T3 Code",
-  async (harness) => {
-    const { runtime, config, settings, instanceId } = await unsavedProfile(harness);
-    await writeFile(
-      runtime.providerFile,
-      `${settings}\n[agents.code]\nproject_id = "agent"\n[agents.code.model]\ninstance_id = "${instanceId}"\nmodel = "profile-model"\n`,
-    );
-    const checked = await cli(["check", "--config", config], "");
-    expect(checked.status).toBe(1);
-    expect(checked.stderr).toContain("/agents/code/model");
-  },
-);

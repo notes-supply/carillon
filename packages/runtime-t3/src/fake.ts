@@ -115,8 +115,6 @@ export interface FakeT3 {
   protocolVersion: number;
   /** The provider instances `server.getConfig` and `server.refreshProviders` list, as T3 describes them. */
   providers: unknown[];
-  /** The provider instances T3's settings hold, by ID, as `server.getSettings` lists them. */
-  readonly instances: Map<string, unknown>;
   /** The projects T3's authenticated shell snapshot lists. */
   projects: { id: string; title: string; workspaceRoot: string }[];
   /** Processes the command, then drops the socket before answering. */
@@ -378,7 +376,6 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
     uploadRedirect: undefined,
     protocolVersion: ORCHESTRATION_PROTOCOL,
     providers: [...FAKE_PROVIDERS],
-    instances: new Map(),
     projects: [{ id: "project-1", title: "Project", workspaceRoot: "/" }],
     dropAnswer: () => false,
     dropRequest: () => false,
@@ -829,31 +826,6 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
         refreshes.push(payload);
         exit(socket, id, { _tag: "Success", value: { providers: fake.providers } });
         return;
-      case "server.getSettings":
-        exit(socket, id, {
-          _tag: "Success",
-          value: { providerInstances: Object.fromEntries(fake.instances) },
-        });
-        return;
-      case "server.updateSettings": {
-        // As T3: a created instance must be new; it applies at once.
-        const mutation = isRecord(payload) ? payload["providerInstanceMutation"] : undefined;
-        if (
-          !isRecord(mutation) ||
-          mutation["operation"] !== "create" ||
-          typeof mutation["instanceId"] !== "string" ||
-          fake.instances.has(mutation["instanceId"])
-        ) {
-          rejectRequest(socket, id, "ServerSettingsError", "create-provider-instance");
-          return;
-        }
-        fake.instances.set(mutation["instanceId"], mutation["instance"]);
-        exit(socket, id, {
-          _tag: "Success",
-          value: { providerInstances: Object.fromEntries(fake.instances) },
-        });
-        return;
-      }
       default:
         rejectRequest(socket, id, "RpcNotFound", String(frame["tag"]));
     }

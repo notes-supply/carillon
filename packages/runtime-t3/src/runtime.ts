@@ -55,17 +55,14 @@ import {
 import { commandCatalog } from "./commands.ts";
 import { uploadImages, type PreparedImages } from "./images.ts";
 import {
-  agentModels,
   catalog,
   fromNative,
-  ledgerUpdate,
   modelState,
   routed,
   sameSelection,
   toNative,
   type AgentModels,
 } from "./models.ts";
-import { offers } from "./settings.ts";
 import {
   conversationId,
   ensureThread,
@@ -91,15 +88,11 @@ const FollowUpSchema = Type.Object({
   after: Type.Integer({ minimum: 0 }),
 });
 
+/** An agent that is plain T3 Code, given the person's text as written. */
 export interface T3Agent {
   /** The T3 project whose workspace root is the agent's workspace. */
   readonly projectId: string;
   readonly workspace: string;
-  /**
-   * Carillon's assistant, the agent with resources, on the profile
-   * instances; any other agent is plain T3 Code, on every other instance.
-   */
-  readonly assistant: boolean;
   /** The agent default from the settings, until `/model` chooses another. */
   readonly selection: NativeSelection;
 }
@@ -108,12 +101,8 @@ export interface T3RuntimeOptions {
   readonly endpoint: T3Endpoint;
   /** The agents the runtime serves, by ID. */
   readonly agents: ReadonlyMap<string, T3Agent>;
-  /** Carillon's own T3 instances: the assistant's, and no other agent's. */
-  readonly profiles: ReadonlySet<string>;
   /** The agent defaults `/model` chose. */
   readonly selections: ModelSelections;
-  /** Prefix of the titles of the assistant's threads. */
-  readonly title?: string;
   /** How the runtime reaches T3; tests substitute a faulty transport. */
   readonly connect?: Connect;
   /** Reconnections attempted after a lost connection before the turn is given up. */
@@ -125,7 +114,7 @@ export interface T3RuntimeOptions {
 }
 
 const DEFAULT_RECONNECT = { attempts: 20, delayMs: 3_000 };
-/** A plain T3 Code thread's title until T3 titles it from its first message. */
+/** A thread's title until T3 titles it from its first message, as it titles its own. */
 const NEW_THREAD = "New thread";
 const DEFAULT_SETTLE_MS = 30_000;
 
@@ -221,25 +210,18 @@ export function createT3Runtime(options: T3RuntimeOptions): AnswerRuntime {
     return agent;
   }
 
-  /**
-   * The agent's models, read from T3 and the ledger: its catalogue, of the
-   * instances it runs on, the profiles for the assistant and the others for
-   * plain T3 Code, and its default.
-   */
+  /** The agent's models, read from T3 and the ledger: T3's catalogue and the agent default. */
   async function readModels(
     connection: T3Connection,
     query: Pick<ModelQuery, "interface_id" | "agent_id">,
     agent: T3Agent,
   ): Promise<AgentModels> {
-    const offered = catalog(await connection.call(RPC.getConfig, {}), (instanceId) =>
-      offers(options.profiles, agent.assistant, instanceId),
-    );
-    const settings = fromNative(agent.selection);
-    const { agent: chosen } = await options.selections.state(offered.available, settings, {
+    const offered = catalog(await connection.call(RPC.getConfig, {}));
+    const state = await options.selections.state(offered.available, fromNative(agent.selection), {
       interface_id: query.interface_id,
       agent_id: query.agent_id,
     });
-    return agentModels(offered, chosen, settings);
+    return { offered, agent: state.agent };
   }
 
   /** The model state of the query's agent and, with an audience, of its conversation's thread. */
@@ -283,17 +265,16 @@ export function createT3Runtime(options: T3RuntimeOptions): AnswerRuntime {
       return connected(async (connection) => {
         const thread = await queryThread(connection, update);
         const models = await readModels(connection, update, agent);
-        const settings = fromNative(agent.selection);
-        const { agent: chosen } = await options.selections.update(
+        const state = await options.selections.update(
           models.offered.available,
-          settings,
-          ledgerUpdate(models, update),
+          fromNative(agent.selection),
+          update,
         );
         log(
           `agent ${update.agent_id}: default model ${update.selection === null ? "reset" : "set"}`,
         );
         return modelState(
-          agentModels(models.offered, chosen, settings),
+          { offered: models.offered, agent: state.agent },
           update.audience_id === undefined ? undefined : { thread: thread?.thread.modelSelection },
         );
       });
@@ -580,17 +561,7 @@ export function createT3Runtime(options: T3RuntimeOptions): AnswerRuntime {
     return resolveThread(
       connection,
       request,
-      {
-        projectId: agent.projectId,
-        // The assistant's threads say whose they are; T3 titles plain T3
-        // Code's from their first message, as it titles its own.
-        title: agent.assistant
-          ? `${options.title ?? "Carillon"} ${request.interface_id} ${request.audience_id}`.slice(
-              0,
-              120,
-            )
-          : NEW_THREAD,
-      },
+      { projectId: agent.projectId, title: NEW_THREAD },
       {
         timeoutMs,
         ...(signal === undefined ? {} : { signal }),
@@ -729,7 +700,7 @@ export function createT3Runtime(options: T3RuntimeOptions): AnswerRuntime {
             signal,
             timeoutMs,
           );
-          text ??= compose(request, prepared.unavailable, agent.assistant);
+          text ??= compose(request, prepared.unavailable);
           progress.ownFilesSent = prepared.unavailable.length === 0;
           // Nothing of this turn has reached T3 yet, so a caller that
           // aborted meanwhile is honoured before anything is sent. Work
@@ -740,7 +711,7 @@ export function createT3Runtime(options: T3RuntimeOptions): AnswerRuntime {
           // The run takes the thread's selection while the agent offers it,
           // as the snapshot showed it, else the agent default.
           const selection = routed(models, watch.selection());
-          const seed = agent.assistant ? undefined : titleSeed(request.input);
+          const seed = titleSeed(request.input);
           await dispatch(
             connection,
             binding,

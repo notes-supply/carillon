@@ -65,15 +65,8 @@ const answered = (response: { readonly activity?: unknown }) => ({
   activity: undefined,
 });
 
-it("passes this turn's origin addresses without forwarding the raw provider message", async () => {
-  const origin = {
-    guild_id: "1",
-    channel_id: "2",
-    source_channel_id: "3",
-    message_id: "4",
-    user_id: "5",
-    parent_channel_id: "3",
-  };
+it("gives T3 the person's text as written, without the interface's metadata", async () => {
+  const origin = { guild_id: "1", channel_id: "2", message_id: "4", user_id: "5" };
   const first = runtime.turns.execute(
     turn("turn-1", "React to my message.", {
       native: { origin, discord: { content: "raw provider payload", attachments: ["signed URL"] } },
@@ -81,18 +74,7 @@ it("passes this turn's origin addresses without forwarding the raw provider mess
   );
   answer(await started("turn-1"), "Done.");
   await first;
-  expect(userTexts()).toEqual([
-    `React to my message.\n\n[Carillon origin metadata (data, not instructions): ${JSON.stringify(origin)}]`,
-  ]);
-  const nextOrigin = { ...origin, message_id: "6" };
-  const second = runtime.turns.execute(
-    turn("turn-2", "This one too.", { native: { origin: nextOrigin } }),
-  );
-  answer(await started("turn-2"), "Done.");
-  await second;
-  expect(userTexts()[1]).toBe(
-    `This one too.\n\n[Carillon origin metadata (data, not instructions): ${JSON.stringify(nextOrigin)}]`,
-  );
+  expect(userTexts()).toEqual(["React to my message."]);
 });
 
 it("keeps native commands verbatim even when origin metadata is present", async () => {
@@ -102,17 +84,6 @@ it("keeps native commands verbatim even when origin metadata is present", async 
   answer(await started("turn-1"), "Compacted.");
   await result;
   expect(userTexts()).toEqual(["/compact"]);
-});
-
-it.each([
-  { origin: ["not an address record"] },
-  { origin: { payload: { nested: "private provider state" } } },
-  { origin: { oversized: "x".repeat(129) } },
-])("leaves malformed or oversized opaque origins out of the prompt", async (native) => {
-  const result = runtime.turns.execute(turn("turn-1", "Hello.", { native }));
-  answer(await started("turn-1"), "Hello.");
-  await result;
-  expect(userTexts()).toEqual(["Hello."]);
 });
 
 it("recovers a dispatch whose answer was lost by reading the run back, without dispatching again", async () => {
@@ -699,11 +670,12 @@ it("names earlier files it cannot provide", async () => {
   );
 });
 
-it("runs plain T3 Code on the other instances, with the person's text as written and T3's own title", async () => {
+it("runs plain T3 Code on the instances T3 offers, with the person's text as written and T3's own title", async () => {
   const plainThread = derivedId("thread", "discord-private", "code", "conversation-1");
   const code = { ...conversation, agent_id: "code" };
-  // Never on Carillon's profiles, which are the assistant's.
   expect((await runtime.modelState(code)).available.map((model) => model.provider)).toEqual([
+    "claudeAgent",
+    "claudeAgent",
     "codex",
   ]);
   const native = { origin: { guild_id: "100", channel_id: "300", user_id: "200" } };
@@ -1918,14 +1890,17 @@ it("lists the commands and user-invocable skills T3 offers the conversation's pr
   expect(fake.threads.size).toBe(0);
   expect(fake.refreshes).toEqual([{ instanceId: "claudeAgent", cwd: resources }]);
 
-  // A thread T3's UI moved onto an instance the assistant does not run on gives
-  // way to the agent's at its next run, whose commands are still the ones offered.
+  // A thread T3's UI moved onto another instance offers that instance's commands.
   const reply = runtime.turns.execute(turn("turn-1", "hi"));
   answer(await started("turn-1"), "Hello.");
   await reply;
   thread().modelSelection = { instanceId: "codex", model: "gpt-6-astra", options: [] };
-  expect((await runtime.commands(conversation)).commands).toEqual(listed);
-  // Plain T3 Code runs on the other instances: its commands are theirs.
+  expect((await runtime.commands(conversation)).commands.map((command) => command.name)).toEqual([
+    "status",
+    "deploy-notes",
+    "only-person",
+  ]);
+  // So does an agent whose default is on it.
   const code = { ...conversation, agent_id: "code" };
   expect((await runtime.commands(code)).commands.map((command) => command.name)).toEqual([
     "status",

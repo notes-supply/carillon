@@ -58,7 +58,7 @@ it("takes T3's address only as an HTTP origin, before anything connects or logs 
   }
 });
 
-it("reads the profiles and each agent's settings, refusing a repeated or unknown profile or an agent ID outside the grammar", async () => {
+it("reads each agent's settings, refusing an agent ID outside the grammar or a setting it does not know", async () => {
   const root = await mkdtemp(join(tmpdir(), "carillon-t3-settings-"));
   directories.push(root);
   const path = join(root, "runtime-t3.toml");
@@ -74,20 +74,14 @@ it("reads the profiles and each agent's settings, refusing a repeated or unknown
       path,
       ['url = "http://127.0.0.1:3773"', 'token_file = "credentials/t3.token"', ...lines].join("\n"),
     );
-  await file(
-    'profiles = ["carillon_claude", "carillon_codex"]',
-    ...agent("assistant", "carillon_codex"),
-    ...agent("code", "claudeAgent"),
-  );
+  await file(...agent("notes", "codex"), ...agent("code", "claudeAgent"));
   const loaded = await loadSettings(path, root);
-  expect(loaded.profiles).toEqual(new Set(["carillon_claude", "carillon_codex"]));
-  expect(loaded.agents.get("assistant")).toEqual({
+  expect(loaded.agents.get("notes")).toEqual({
     projectId: "project",
-    selection: { instanceId: "carillon_codex", model: "m", options: [] },
+    selection: { instanceId: "codex", model: "m", options: [] },
   });
   for (const [lines, refusal] of [
-    [['profiles = ["carillon_claude", "carillon_claude"]'], /\/profiles/u],
-    [['profiles = ["carillon_claude", "carillon_claud"]'], /\/profiles/u],
+    [['profiles = ["carillon_claude"]'], /must not have additional properties/u],
     [agent('"not/an/agent"', "claudeAgent"), /\/agents/u],
   ] as const) {
     await file(...lines);
