@@ -29,7 +29,7 @@ const calls = (from = 0) =>
 
 /** How the runtime answers a person's stop of `turnId`. */
 const stopStatus = (turnId: string) =>
-  runtime.turns.control?.(turnId, "discord-private", "stop").then(
+  runtime.turns.control(turnId, "discord-private", "stop").then(
     () => 204,
     (failure: unknown) => (failure instanceof ExplainedFailure ? failure.status : undefined),
   );
@@ -90,13 +90,13 @@ it("stops a message waiting behind its conversation's turn at once, leaving that
     controls: ["stop"],
   });
   for (const action of ["steer", "interrupt"] as const)
-    await expect(
-      runtime.turns.control?.("turn-2", "discord-private", action),
-    ).rejects.toMatchObject({ status: 409 });
-  await expect(runtime.turns.control?.("turn-2", "other-interface", "stop")).rejects.toMatchObject({
+    await expect(runtime.turns.control("turn-2", "discord-private", action)).rejects.toMatchObject({
+      status: 409,
+    });
+  await expect(runtime.turns.control("turn-2", "other-interface", "stop")).rejects.toMatchObject({
     status: 404,
   });
-  await runtime.turns.control?.("turn-2", "discord-private", "stop");
+  await runtime.turns.control("turn-2", "discord-private", "stop");
   expect(await core.outcome("turn-2")).toEqual({ outcome: "stopped" });
   await expect(waiting).rejects.toThrow("the turn was stopped");
   // Nothing of it reached T3, and the turn before it runs on.
@@ -105,7 +105,7 @@ it("stops a message waiting behind its conversation's turn at once, leaving that
   answer(long, "Long done.");
   expect((await first).output).toBe("Long done.");
   expect(dispatches()).toHaveLength(1);
-  await expect(runtime.turns.control?.("turn-2", "discord-private", "stop")).rejects.toMatchObject({
+  await expect(runtime.turns.control("turn-2", "discord-private", "stop")).rejects.toMatchObject({
     status: 404,
   });
 });
@@ -113,7 +113,7 @@ it("stops a message waiting behind its conversation's turn at once, leaving that
 it("stops a running message by interrupting its own run, once T3 confirms it", async () => {
   const reply = execute(turn("turn-1", "work"));
   const run = await started("turn-1");
-  await runtime.turns.control?.("turn-1", "discord-private", "stop");
+  await runtime.turns.control("turn-1", "discord-private", "stop");
   expect(await core.outcome("turn-1")).toEqual({ outcome: "stopped" });
   await expect(reply).rejects.toThrow("the turn was stopped");
   expect(fake.interrupts).toEqual([run.id]);
@@ -125,7 +125,7 @@ it("settles a stop T3 confirms while the runtime closes, and is not ready to res
   const reply = execute(turn("turn-1", "work"));
   void reply.catch(() => undefined);
   const run = await started("turn-1");
-  await runtime.turns.control?.("turn-1", "discord-private", "stop");
+  await runtime.turns.control("turn-1", "discord-private", "stop");
   const closed = runtime.close();
   // The stop asked before closing is still carried out, and waits for T3.
   await fake.waitFor(() => fake.interrupts.length === 1);
@@ -133,7 +133,7 @@ it("settles a stop T3 confirms while the runtime closes, and is not ready to res
     state: "unready",
     reason: "a person's stop waits for T3 to confirm it",
   });
-  await expect(runtime.turns.control?.("turn-1", "discord-private", "stop")).rejects.toThrow(
+  await expect(runtime.turns.control("turn-1", "discord-private", "stop")).rejects.toThrow(
     "T3 runtime is closed",
   );
   fake.stop(threadId, run.id, "interrupted");
@@ -145,7 +145,7 @@ it("settles a stop T3 confirms while the runtime closes, and is not ready to res
 it("keeps a stop core could not record, and settles it first at the next start, never running it", async () => {
   const { first, long, waiting } = await oneWaiting();
   core.answer(503, 503, 503);
-  await runtime.turns.control?.("turn-2", "discord-private", "stop");
+  await runtime.turns.control("turn-2", "discord-private", "stop");
   await fake.waitFor(() => settles("turn-2").length > 0);
   const before = core.received.length;
   await restart();
@@ -163,7 +163,7 @@ it("keeps a stop core could not record, and settles it first at the next start, 
 
 it("runs nothing for a late hand-over of a turn it settled", async () => {
   const { first, long, waiting } = await oneWaiting();
-  await runtime.turns.control?.("turn-2", "discord-private", "stop");
+  await runtime.turns.control("turn-2", "discord-private", "stop");
   await expect(waiting).rejects.toThrow("the turn was stopped");
   await expect.poll(() => stopStatus("turn-2")).toBe(404);
   // A hand-over core sent before the stop arrives now.

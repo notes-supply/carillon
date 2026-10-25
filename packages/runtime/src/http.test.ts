@@ -1,7 +1,6 @@
-import type { TurnActivity } from "@carillon/protocol";
 import { once } from "node:events";
 import { afterEach, expect, it, vi } from "vitest";
-import { ExplainedFailure, RuntimeClosed, withReport } from "./failure.ts";
+import { ExplainedFailure, RuntimeClosed } from "./failure.ts";
 import { createRuntimeServer } from "./http.ts";
 import type { RuntimeOperations } from "./operations.ts";
 
@@ -11,27 +10,19 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-/** A runtime whose turns fail with the input as the provider's explanation, and whose model changes are refused quoting the requested option. */
+/** A runtime that refuses each turn with the input as the provider's explanation, and whose model changes are refused quoting the requested option. */
 async function serve() {
   const runtime: RuntimeOperations = {
     turns: {
-      mode: "answer",
-      execute: (request) =>
+      submit: (request) =>
         Promise.reject(
           request.input === "internal"
             ? new Error(`extension state at /private/state rejected ${key}`)
             : request.input === "closing"
               ? new RuntimeClosed("runtime is closed")
-              : request.input === "reported internal"
-                ? reported(new Error(`state at /private/state rejected ${key}`))
-                : request.input === "reported value"
-                  ? reportedValue(`the session's state rejected ${key}`)
-                  : request.input === "reported closing"
-                    ? reported(new RuntimeClosed("runtime is closed"))
-                    : request.input.startsWith("reported ")
-                      ? reported(new ExplainedFailure(502, request.input.slice(9)))
-                      : new ExplainedFailure(502, request.input),
+              : new ExplainedFailure(502, request.input),
         ),
+      control: () => Promise.reject(new Error("unused")),
     },
     activity: (correlationId, interfaceId) =>
       correlationId === "turn/1" && interfaceId === "discord-private"
@@ -57,7 +48,6 @@ async function serve() {
     runtime,
     token: "test-only",
     providerId: "runtime-pi",
-    durable: false,
     provider: "deterministic-local-substitute",
     version: "9.9.9-test",
     features: [],
@@ -80,26 +70,6 @@ async function serve() {
     await new Promise((done) => server.close(done));
   };
   return { call, close };
-}
-
-const REPORT: TurnActivity = {
-  phase: "tools",
-  running: [],
-  recent: [{ tool: "bash", detail: "make", ok: false, duration_ms: 1200 }],
-  tool_calls: 1,
-};
-
-/** `failure`, after a turn left its report with it. */
-function reported(failure: Error): Error {
-  withReport(failure, REPORT);
-  return failure;
-}
-
-/** What a runtime throws when a turn that left its report ended with `value`, which is no error. */
-function reportedValue(value: string): Error {
-  const failure = withReport(value, REPORT);
-  if (!(failure instanceof Error)) throw new TypeError("the report was not kept with an error");
-  return failure;
 }
 
 const turn = (input: string) => ({
@@ -132,15 +102,15 @@ it("sends callers only the displayable part of explanations and logs redacted di
     expect(
       await call(
         "POST",
-        "/v1/turns",
+        "/v1/inbox",
         turn('403: {"error":{"message":"The usage limit has been reached","type":"usage_limit"}}'),
       ),
     ).toEqual({ status: 502, body: { error: "403: The usage limit has been reached" } });
     for (const text of withheld)
-      expect(await call("POST", "/v1/turns", turn(text))).toEqual({ status: 502, body: {} });
-    expect(await call("POST", "/v1/turns", turn("internal"))).toEqual({ status: 500, body: {} });
+      expect(await call("POST", "/v1/inbox", turn(text))).toEqual({ status: 502, body: {} });
+    expect(await call("POST", "/v1/inbox", turn("internal"))).toEqual({ status: 500, body: {} });
     // A runtime that closes under a request gives no answer, which is not a failure.
-    expect(await call("POST", "/v1/turns", turn("closing"))).toEqual({ status: 503, body: {} });
+    expect(await call("POST", "/v1/inbox", turn("closing"))).toEqual({ status: 503, body: {} });
     expect(
       await call(
         "GET",
@@ -170,12 +140,12 @@ it("sends callers only the displayable part of explanations and logs redacted di
   const logged = log.mock.calls.map((args) => args.join(" "));
   // Failures are logged; refusals of a caller's request are answers.
   expect(logged).toHaveLength(7);
-  expect(logged[0]).toMatch(/^POST \/v1\/turns failed: Error: 403: \{"error":/u);
-  expect(logged[1]).toMatch(/^POST \/v1\/turns failed: Error: .*password=\[redacted\]/u);
-  expect(logged[2]).toMatch(/^POST \/v1\/turns failed: Error: .*https:\/\/example\.invalid\n/u);
-  expect(logged[3]).toMatch(/^POST \/v1\/turns failed: Error: .*example\.invalid\/\?\[redacted\]/u);
+  expect(logged[0]).toMatch(/^POST \/v1\/inbox failed: Error: 403: \{"error":/u);
+  expect(logged[1]).toMatch(/^POST \/v1\/inbox failed: Error: .*password=\[redacted\]/u);
+  expect(logged[2]).toMatch(/^POST \/v1\/inbox failed: Error: .*https:\/\/example\.invalid\n/u);
+  expect(logged[3]).toMatch(/^POST \/v1\/inbox failed: Error: .*example\.invalid\/\?\[redacted\]/u);
   expect(logged[5]).toMatch(
-    /^POST \/v1\/turns failed: Error: extension state at \/private\/state rejected \[redacted\]\n\s+at /u,
+    /^POST \/v1\/inbox failed: Error: extension state at \/private\/state rejected \[redacted\]\n\s+at /u,
   );
   expect(logged[6]).toMatch(/^GET \/v1\/model failed: Error: model catalogue file is corrupt\n/u);
   for (const secret of [key, "short-secret"]) expect(logged.join("\n")).not.toContain(secret);
@@ -226,45 +196,6 @@ it("describes an executing turn only to its own interface, after authentication"
     expect(
       (await call("GET", "/v1/turns/%E0%A4%A/activity?interface_id=discord-private")).status,
     ).toBe(400);
-  } finally {
-    await close();
-  }
-});
-
-it("sends a failed turn's report whether or not its explanation can be shown", async () => {
-  const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
-  const { call, close } = await serve();
-  try {
-    expect(await call("POST", "/v1/turns", turn("reported The build failed."))).toEqual({
-      status: 502,
-      body: { error: "The build failed.", activity: REPORT },
-    });
-    // Unsafe text is withheld; the report is not.
-    expect(
-      await call("POST", "/v1/turns", turn("reported Authentication failed: password=x")),
-    ).toEqual({ status: 502, body: { activity: REPORT } });
-    // An internal failure keeps its status and its diagnostics in the log.
-    expect(await call("POST", "/v1/turns", turn("reported internal"))).toEqual({
-      status: 500,
-      body: { activity: REPORT },
-    });
-    // So does a value that is no error, which has no explanation to show;
-    // its diagnostic is the value's, redacted.
-    expect(await call("POST", "/v1/turns", turn("reported value"))).toEqual({
-      status: 500,
-      body: { activity: REPORT },
-    });
-    expect(log.mock.calls.map((args) => args.join(" "))).toContainEqual(
-      expect.stringMatching(
-        /^POST \/v1\/turns failed: Error: the session's state rejected \[redacted\]\n\s+at /u,
-      ),
-    );
-    // A closing runtime still gives no answer, report or not.
-    expect(await call("POST", "/v1/turns", turn("reported closing"))).toEqual({
-      status: 503,
-      body: {},
-    });
-    expect(JSON.stringify(log.mock.calls)).not.toContain(key);
   } finally {
     await close();
   }

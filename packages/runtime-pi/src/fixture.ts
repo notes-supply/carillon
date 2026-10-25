@@ -21,7 +21,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import type { ImageProcessor } from "@earendil-works/pi-durable/tools";
 import { TurnOutcomeSchema, type TurnOutcome } from "@carillon/protocol";
 import { createCoreClient } from "@carillon/runtime/core";
-import type { InboxTurns, RuntimeOperations, TurnRequest } from "@carillon/runtime/operations";
+import type { RuntimeOperations, TurnRequest } from "@carillon/runtime/operations";
 import { startFakeCore, type FakeCore } from "@carillon/runtime/testing";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -39,7 +39,7 @@ const images: ImageProcessor = {
 };
 
 export interface Fixture {
-  readonly runtime: RuntimeOperations<InboxTurns>;
+  readonly runtime: RuntimeOperations;
   readonly core: FakeCore;
   readonly model: ReturnType<typeof fauxProvider>;
   /** The catalogue's models, which a test may change. */

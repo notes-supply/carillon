@@ -3,7 +3,7 @@ import { once } from "node:events";
 import { afterEach, expect, it, vi } from "vitest";
 import { ExplainedFailure } from "./failure.ts";
 import { createRuntimeServer } from "./http.ts";
-import type { InboxTurns, RuntimeOperations, TurnHandling, TurnRequest } from "./operations.ts";
+import type { InboxTurns, RuntimeOperations, TurnRequest } from "./operations.ts";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -18,12 +18,11 @@ const others: Omit<RuntimeOperations, "turns"> = {
   close: () => Promise.resolve(),
 };
 
-async function serve(turns: TurnHandling, durable = turns.mode === "inbox") {
+async function serve(turns: InboxTurns) {
   const server = createRuntimeServer({
     runtime: { turns, ...others },
     token: "test-only",
     providerId: "runtime-durable",
-    durable,
     provider: "test",
     version: "9.9.9-test",
     features: [],
@@ -61,40 +60,11 @@ const turn = (input: string): TurnRequest => ({
   attachment_root: "/unused",
 });
 
-it("serves each turn contract only in its own mode", async () => {
-  const answering = await serve({
-    mode: "answer",
-    execute: (request) =>
-      Promise.resolve({ correlation_id: request.correlation_id, output: "Hi." }),
-  });
-  try {
-    expect(await answering.call("/v1/turns", turn("hello"))).toEqual({
-      status: 200,
-      body: { correlation_id: "turn-1", output: "Hi." },
-    });
-    expect((await answering.call("/v1/inbox", turn("hello"))).status).toBe(404);
-    const control = { interface_id: "discord-private", action: "stop" };
-    expect((await answering.call("/v1/turns/turn-1/control", control)).status).toBe(404);
-  } finally {
-    await answering.close();
-  }
-  const holding = await serve({ mode: "inbox", submit: () => Promise.resolve() });
-  try {
-    expect((await holding.call("/v1/turns", turn("hello"))).status).toBe(404);
-    // Without controls of its own, the runtime takes none.
-    const control = { interface_id: "discord-private", action: "stop" };
-    expect((await holding.call("/v1/turns/turn-1/control", control)).status).toBe(404);
-  } finally {
-    await holding.close();
-  }
-});
-
 it("answers 202 once a turn is kept, and passes a refusal through", async () => {
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   const kept: string[] = [];
   let release: (() => void) | undefined;
   const inbox: InboxTurns = {
-    mode: "inbox",
     submit: async (request) => {
       if (request.input === "refused")
         throw new ExplainedFailure(422, "That agent is not set up here.");
@@ -104,6 +74,7 @@ it("answers 202 once a turn is kept, and passes a refusal through", async () => 
       });
       kept.push(request.correlation_id);
     },
+    control: () => Promise.reject(new Error("unused")),
   };
   const { call, close } = await serve(inbox);
   try {
@@ -138,7 +109,6 @@ it("answers 202 once a turn is kept, and passes a refusal through", async () => 
 it("relays a person's control of a held turn to the runtime", async () => {
   const controlled: [string, string, ControlAction][] = [];
   const { call, close } = await serve({
-    mode: "inbox",
     submit: () => Promise.resolve(),
     control: (turnId, interfaceId, action) => {
       if (action === "interrupt")
@@ -167,14 +137,4 @@ it("relays a person's control of a held turn to the runtime", async () => {
   } finally {
     await close();
   }
-});
-
-it("refuses to serve a turn contract its registry entry does not declare", async () => {
-  await expect(serve({ mode: "inbox", submit: () => Promise.resolve() }, false)).rejects.toThrow(
-    "a runtime that holds its turns needs durable = true in its carillon.toml entry",
-  );
-  const execute = () => Promise.reject(new Error("unused"));
-  await expect(serve({ mode: "answer", execute }, true)).rejects.toThrow(
-    "a runtime that answers while core waits must not be durable in carillon.toml",
-  );
 });

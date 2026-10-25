@@ -132,7 +132,7 @@ export async function execute(request: TurnRequest, signal?: AbortSignal, on = r
   // A turn that ended first has nothing to stop.
   const stop = () => {
     void on.turns
-      .control?.(request.correlation_id, request.interface_id, "stop")
+      .control(request.correlation_id, request.interface_id, "stop")
       .catch(() => undefined);
   };
   if (signal?.aborted === true) stop();

@@ -31,7 +31,6 @@ import { resolved, validated } from "@carillon/runtime/models";
 import type { CoreClient } from "@carillon/runtime/core";
 import {
   commandFinished,
-  type InboxTurns,
   type RuntimeOperations,
   type TurnRequest,
 } from "@carillon/runtime/operations";
@@ -134,7 +133,7 @@ interface Progress {
   unsent?: readonly string[];
 }
 
-export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations<InboxTurns> {
+export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
   const connect = options.connect ?? connectT3;
   const reconnect = options.reconnect ?? DEFAULT_RECONNECT;
   const settleMs = options.settleMs ?? DEFAULT_SETTLE_MS;
@@ -376,7 +375,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations<In
   });
 
   return {
-    turns: { mode: "inbox", submit: held.submit, control: held.control },
+    turns: { submit: held.submit, control: held.control },
     activity: held.activity,
     modelState(query: ModelQuery): Promise<ModelState> {
       return track(() =>

@@ -177,13 +177,13 @@ it("steers a waiting message into the running answer", async () => {
   const { agent, pause, turn } = await busy("queue", [fauxAssistantMessage("Joined answer.")]);
   await agent.runtime.turns.submit(turn("turn-2", "second"));
   await eventually(() => agent.runtime.activity("turn-2", "discord-private"));
-  await agent.runtime.turns.control?.("turn-2", "discord-private", "steer");
+  await agent.runtime.turns.control("turn-2", "discord-private", "steer");
   pause.release();
   expect(await agent.outcome("turn-2")).toMatchObject({ output: "Joined answer." });
   expect(await agent.outcome("turn-1")).toEqual({ outcome: "steered" });
   // Only a waiting message can be steered.
   await expect(
-    agent.runtime.turns.control?.("turn-1", "discord-private", "steer"),
+    agent.runtime.turns.control("turn-1", "discord-private", "steer"),
   ).rejects.toMatchObject({ status: 409 });
 });
 
@@ -197,7 +197,7 @@ it("interrupts the running answer for a waiting message", async () => {
   ]);
   await agent.runtime.turns.submit(turn("turn-2", "second"));
   await eventually(() => agent.runtime.activity("turn-2", "discord-private"));
-  await agent.runtime.turns.control?.("turn-2", "discord-private", "interrupt");
+  await agent.runtime.turns.control("turn-2", "discord-private", "interrupt");
   expect(await agent.outcome("turn-1")).toEqual({ outcome: "stopped" });
   expect(await agent.outcome("turn-2")).toMatchObject({ output: "After the interruption." });
   expect(texts(seen)).toEqual([
@@ -213,20 +213,20 @@ it("stops a waiting message, and then the running one with what waits behind it"
   await agent.runtime.turns.submit(turn("turn-3", "third"));
   await eventually(() => agent.runtime.activity("turn-3", "discord-private"));
   // A message is controlled only from the interface it came from.
-  await expect(agent.runtime.turns.control?.("turn-3", "elsewhere", "stop")).rejects.toMatchObject({
+  await expect(agent.runtime.turns.control("turn-3", "elsewhere", "stop")).rejects.toMatchObject({
     status: 404,
   });
-  await agent.runtime.turns.control?.("turn-2", "discord-private", "stop");
+  await agent.runtime.turns.control("turn-2", "discord-private", "stop");
   expect(await agent.outcome("turn-2")).toEqual({ outcome: "stopped" });
-  await agent.runtime.turns.control?.("turn-1", "discord-private", "stop");
+  await agent.runtime.turns.control("turn-1", "discord-private", "stop");
   expect(await agent.outcome("turn-1")).toEqual({ outcome: "stopped" });
   expect(await agent.outcome("turn-3")).toMatchObject({ output: "Third answer." });
   await expect(
-    agent.runtime.turns.control?.("turn-1", "discord-private", "stop"),
+    agent.runtime.turns.control("turn-1", "discord-private", "stop"),
   ).rejects.toMatchObject({ status: 409 });
 
   await expect(
-    agent.runtime.turns.control?.("unknown", "discord-private", "stop"),
+    agent.runtime.turns.control("unknown", "discord-private", "stop"),
   ).rejects.toMatchObject({ status: 404 });
 });
 
@@ -279,7 +279,7 @@ it("stops no later message when the stopped one is answered before its run ends"
   let stopping: Promise<unknown> | undefined;
   boundary.next(() => {
     stopping = agent.runtime.turns
-      .control?.("turn-1", "discord-private", "stop")
+      .control("turn-1", "discord-private", "stop")
       .catch((failure: unknown) => failure);
   });
   await agent.runtime.turns.submit(turn("turn-2", "second"));
@@ -303,7 +303,7 @@ it.each([
     let interrupting: Promise<unknown> | undefined;
     boundary.next(() => {
       interrupting = agent.runtime.turns
-        .control?.("turn-2", "discord-private", "interrupt")
+        .control("turn-2", "discord-private", "interrupt")
         .catch((failure: unknown) => failure);
     });
     await agent.runtime.turns.submit(turn("turn-2", "second"));
@@ -331,7 +331,7 @@ it("sends one note when the person interrupts for a message already interrupting
   await agent.runtime.turns.submit(turn("turn-2", "second"));
   // The stubborn tool holds the abort the handoff started while the person interrupts.
   const interrupting = agent.runtime.turns
-    .control?.("turn-2", "discord-private", "interrupt")
+    .control("turn-2", "discord-private", "interrupt")
     .catch((failure: unknown) => failure);
   pause.release();
   expect(await interrupting).toMatchObject({ status: 409 });

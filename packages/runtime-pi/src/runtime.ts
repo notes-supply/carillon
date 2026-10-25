@@ -8,7 +8,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import type { ImageProcessor } from "@earendil-works/pi-durable/tools";
 import type { CoreClient } from "@carillon/runtime/core";
 import { ExplainedFailure } from "@carillon/runtime/failure";
-import type { InboxTurns, RuntimeOperations } from "@carillon/runtime/operations";
+import type { RuntimeOperations } from "@carillon/runtime/operations";
 import { ModelSelections } from "@carillon/runtime/selections";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -39,9 +39,7 @@ export interface PiRuntimeOptions {
 }
 
 /** Refuses to start, before any storage opens, unless the runtime default model can run. */
-export async function createPiRuntime(
-  options: PiRuntimeOptions,
-): Promise<RuntimeOperations<InboxTurns>> {
+export async function createPiRuntime(options: PiRuntimeOptions): Promise<RuntimeOperations> {
   await mkdir(join(options.componentDirectory, "agents"), { recursive: true, mode: 0o700 });
   const selections = await ModelSelections.open(
     join(options.componentDirectory, "model-selection.json"),
@@ -86,7 +84,6 @@ export async function createPiRuntime(
 
   return {
     turns: {
-      mode: "inbox",
       submit: async (request) => agentOf(request.agent_id).submit(request),
       async control(turnId, interfaceId, action) {
         for (const agent of agents.values())

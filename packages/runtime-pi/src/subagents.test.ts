@@ -114,7 +114,7 @@ it("leaves a background subagent working when the answer that started it is stop
   const agent = await fixture({ defaults: ["subagents"], answers });
   await agent.runtime.turns.submit(agent.turn("turn-1", "Delegate."));
   await asked;
-  await agent.runtime.turns.control?.("turn-1", "discord-private", "stop");
+  await agent.runtime.turns.control("turn-1", "discord-private", "stop");
   expect(await agent.outcome("turn-1")).toEqual({ outcome: "stopped" });
   child.resolve();
   expect(await agent.outcome("opened-1")).toMatchObject({
@@ -215,7 +215,7 @@ it("aborts a waited-for subagent when the answer waiting for it is stopped", asy
   });
   await agent.runtime.turns.submit(agent.turn("turn-1", "Delegate and wait."));
   await asked.promise;
-  await agent.runtime.turns.control?.("turn-1", "discord-private", "stop");
+  await agent.runtime.turns.control("turn-1", "discord-private", "stop");
   expect(await agent.outcome("turn-1")).toEqual({ outcome: "stopped" });
   await aborted.promise;
 });

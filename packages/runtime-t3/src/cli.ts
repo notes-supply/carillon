@@ -38,10 +38,6 @@ async function serve(values: readonly string[]): Promise<void> {
     process.stdout.write(`runtime provider ${providerId} serves no agent; not serving\n`);
     return;
   }
-  if (!installation.durable)
-    throw new Error(
-      `runtime provider ${providerId} holds its turns and needs durable = true in carillon.toml`,
-    );
   const listenAddress = providerAddress(installation.runtime.url);
   const token = await loadRuntimeCredential(
     requiredArgument(args, "token-file"),
@@ -69,7 +65,6 @@ async function serve(values: readonly string[]): Promise<void> {
     runtime,
     token,
     providerId: installation.runtime.id,
-    durable: installation.durable,
     provider: "t3",
     version: packageInfo.version,
     features: ["native-continuations"],
