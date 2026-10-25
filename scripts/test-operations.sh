@@ -233,12 +233,12 @@ until carillon registry >"$TEST_ROOT/resumed.log" &&
   [ "$attempt" -lt 120 ] || fail 'the workers did not resume when the pause lapsed'
   sleep 0.25
 done
-grep -F 'runtime-pi: enabled, holding and ordering its own turns; 1 message and 0 observation worker(s)' \
+grep -F 'runtime-pi: enabled; its dispatcher hands it its turns' \
   "$TEST_ROOT/resumed.log" >/dev/null
 carillon status | grep -F '"status": "unavailable"' >/dev/null
 # The forced restart waits, as any restart does, until every provider answers.
 carillon restart --force >"$TEST_ROOT/forced.log"
-grep -F 'Forcing the stop, which interrupts what has not settled' "$TEST_ROOT/forced.log" >/dev/null
+grep -F 'Forcing the stop before this settles' "$TEST_ROOT/forced.log" >/dev/null
 grep -F 'runtime-pi: ready' "$TEST_ROOT/forced.log" >/dev/null
 rm -f "$TRACE"
 carillon logs core | grep -F 'Carillon core ready' >/dev/null

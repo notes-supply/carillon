@@ -1,4 +1,4 @@
-//! Handing queued messages to the durable runtimes that hold them.
+//! Handing queued messages to the runtimes that hold them.
 
 use anyhow::{Context as _, Result};
 use carillon_protocol::model::RuntimeTurnRequest;
@@ -11,7 +11,7 @@ use crate::{
     db::{QueuedTurn, Settlement},
 };
 
-/// Why a durable runtime does not hold a turn core handed it.
+/// Why a runtime does not hold a turn core handed it.
 #[derive(Debug, thiserror::Error)]
 pub enum InboxFailure {
     /// It may not have arrived, or the runtime asked for it later: it stays
@@ -33,7 +33,7 @@ pub enum InboxFailure {
     },
 }
 
-/// Why a durable runtime's dispatcher hands nothing over for now: its queued
+/// Why a runtime's dispatcher hands nothing over for now: its queued
 /// turns wait, in order, until it tries again.
 #[derive(Debug, thiserror::Error)]
 pub enum Stalled {
@@ -46,7 +46,7 @@ pub enum Stalled {
 }
 
 impl Core {
-    /// Hands a durable runtime its oldest queued message through `submit`,
+    /// Hands a runtime its oldest queued message through `submit`,
     /// once its files are still the ones accepted. The turn stays queued
     /// until the runtime takes it, and then runs there until the runtime
     /// settles it; nothing here waits for its work. Once `stopping` is
@@ -82,7 +82,7 @@ impl Core {
             self.refuse(&turn, error, Some(explanation)).await?;
             return Ok(WorkerStep::Advanced);
         }
-        match submit(self.runtime_request(&turn, Vec::new())).await {
+        match submit(self.runtime_request(&turn)).await {
             Ok(()) => {
                 let held = turn.clone();
                 self.blocking(move |core| core.database.dispatched(&held))

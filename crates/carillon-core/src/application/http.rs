@@ -1,5 +1,5 @@
-//! The core service: admission, the turn lifecycle worker, and the delivery
-//! outbox, served over the loopback provider API.
+//! The core service: admission, the dispatchers that hand turns to their
+//! runtimes, and the delivery outbox, served over the loopback provider API.
 
 mod controls;
 mod maintenance;
@@ -26,8 +26,8 @@ use carillon_installation::{
 use carillon_protocol::model::{
     Delivery, DeliveryAck, DeliveryReconciliation, EventReceipt, EventStatus, ExternalEvent,
     Health, INSTANCE_HEADER, JobPage, ModelQuery, ModelUpdate, PROVIDER_HEADER, RuntimeModelQuery,
-    RuntimeModelUpdate, RuntimeTurnRequest, RuntimeTurnResponse, SelectedProvider, StatusReport,
-    TurnActivity, TurnInspection, TurnState, TurnSummary,
+    RuntimeModelUpdate, SelectedProvider, StatusReport, TurnActivity, TurnInspection, TurnState,
+    TurnSummary,
 };
 use reqwest::{Client, RequestBuilder, Url};
 use serde::Deserialize;
@@ -36,12 +36,11 @@ use tokio::{net::TcpListener, sync::watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::{
-    AgentOptions, Core, CoreError, CoreOptions, Lane, RuntimeClient, TurnFailure, WorkerStep,
-};
+use crate::{AgentOptions, Core, CoreError, CoreOptions};
 pub(super) use maintenance::{Drain, Lease};
 pub(super) use registry::{Applied, FileState, RegistryStatus, ServingRuntime};
 use registry::{Refusal, Registry, runtime_facts};
+pub(super) use workers::Dispatcher;
 use workers::{Census, Pause};
 
 #[derive(Clone)]
@@ -171,14 +170,10 @@ pub(super) async fn serve(path: PathBuf, config: LoadedConfig) -> Result<()> {
         workers: Arc::new(watch::Sender::new(Census::default())),
         pause: Arc::new(watch::Sender::new(None)),
     };
-    // A runtime configured for concurrent conversations gets that many
-    // message workers. Each claim is one transaction that skips
-    // conversations with an earlier message queued or running, so workers
-    // never share a conversation and each conversation keeps its order.
-    // Observations wait on native work that may take hours; a fixed few run
-    // per runtime beside its messages, never in their place. Their
-    // supervisor follows the serving registry; none claims a turn once
-    // `stopping` is cancelled, as shutdown begins.
+    // Each enabled runtime's one dispatcher hands it its queued turns in
+    // order, and the runtime settles them later. Their supervisor follows
+    // the serving registry; none hands a turn over once `stopping` is
+    // cancelled, as shutdown begins.
     let stopping = CancellationToken::new();
     let supervisor = tokio::spawn(workers::supervise(
         state.clone(),
@@ -192,14 +187,13 @@ pub(super) async fn serve(path: PathBuf, config: LoadedConfig) -> Result<()> {
         .with_graceful_shutdown(shutdown(state.core.clone(), stopping.clone()))
         .await;
     // The caller releases the service lock when this returns, however the
-    // server ended: no copy may still be publishing then, no worker may
-    // still hold a turn, which settles rather than being dropped, and no
-    // storage work may still be writing.
+    // server ended: no copy may still be publishing then, no dispatcher may
+    // still be handing a turn over, and no storage work may still be writing.
     stopping.cancel();
     state.core.stop_capturing();
     state.core.captures_settled().await;
     if let Err(error) = supervisor.await {
-        error!(%error, "runtime worker supervisor ended abnormally");
+        error!(%error, "runtime dispatcher supervisor ended abnormally");
     }
     state.core.storage_settled().await;
     served?;
@@ -522,107 +516,6 @@ async fn runtime_activity(
     })
 }
 
-/// Runs a runtime's turns of one lane until `stopping` is cancelled. An idle
-/// worker waits for core to signal new work instead of polling. A message
-/// already claimed runs to its outcome; none is claimed after the
-/// cancellation. An observation only reads, and may wait hours on native
-/// work: once `set_aside` is cancelled, for maintenance or shutdown, core
-/// stops waiting for its answer and asks again later. A durable runtime's
-/// one worker is its dispatcher instead.
-async fn runtime_worker(
-    state: AppState,
-    runtime_id: String,
-    lane: Lane,
-    stopping: CancellationToken,
-    set_aside: CancellationToken,
-) {
-    // Restart-only, so as it was when the worker started.
-    if state
-        .config()
-        .provider(&runtime_id, ProviderRole::Runtime)
-        .is_ok_and(|runtime| runtime.durable)
-    {
-        return runtime::dispatcher(state, runtime_id, stopping).await;
-    }
-    // A runtime that gave an observation no answer is asked again after a
-    // pause, not in a tight loop.
-    let backoff = match lane {
-        Lane::Messages => Duration::from_secs(1),
-        Lane::Observations => Duration::from_secs(5),
-    };
-    let mut work = state.core.work(lane);
-    while !stopping.is_cancelled() {
-        work.mark_unchanged();
-        match run_next(
-            &state,
-            &runtime_id,
-            lane,
-            &stopping,
-            async |runtime, token, request| {
-                let observation = request.follow_up.is_some();
-                let call = call_runtime(&state.client, runtime, token, request);
-                if !observation {
-                    return call.await;
-                }
-                set_aside
-                    .run_until_cancelled(call)
-                    .await
-                    .unwrap_or_else(|| {
-                        Err(TurnFailure::Unanswered(anyhow!(
-                            "observation set aside: core paused its workers or is stopping"
-                        )))
-                    })
-            },
-        )
-        .await
-        {
-            Ok(WorkerStep::Advanced) => {}
-            Ok(WorkerStep::Idle) => {
-                // The sender lives as long as `state`, which this task holds.
-                let _ = stopping.run_until_cancelled(work.changed()).await;
-            }
-            Ok(WorkerStep::Backoff) => {
-                stopping
-                    .run_until_cancelled(tokio::time::sleep(backoff))
-                    .await;
-            }
-            Err(failure) => {
-                warn!(runtime_id, ?lane, error = %failure, "runtime worker failed");
-                stopping
-                    .run_until_cancelled(tokio::time::sleep(backoff))
-                    .await;
-            }
-        }
-    }
-}
-
-/// One worker iteration without idle or availability waits. Only the runtime
-/// call is substitutable; claims and outcome writes use the real database.
-async fn run_next(
-    state: &AppState,
-    runtime_id: &str,
-    lane: Lane,
-    stopping: &CancellationToken,
-    submit: impl AsyncFnOnce(
-        &Provider,
-        &str,
-        RuntimeTurnRequest,
-    ) -> Result<RuntimeTurnResponse, TurnFailure>,
-) -> Result<WorkerStep> {
-    let config = state.config();
-    let runtime = config.provider(runtime_id, ProviderRole::Runtime)?;
-    if !runtime.enabled {
-        return Ok(WorkerStep::Backoff);
-    }
-    let token = runtime_token(&config, runtime)?;
-    state
-        .core
-        .run_next(runtime_id, lane, stopping, async |request| {
-            submit(runtime, &token, request).await
-        })
-        .await
-}
-
 /// The credential core presents to a runtime, checked against the registry
 /// so a stale token file fails here rather than as a mysterious rejection.
 fn runtime_token(config: &LoadedConfig, runtime: &Provider) -> Result<String> {
@@ -634,17 +527,6 @@ fn runtime_token(config: &LoadedConfig, runtime: &Provider) -> Result<String> {
         ));
     }
     Ok(token)
-}
-
-async fn call_runtime(
-    client: &Client,
-    runtime: &Provider,
-    token: &str,
-    request: RuntimeTurnRequest,
-) -> Result<RuntimeTurnResponse, TurnFailure> {
-    RuntimeClient::new(client.clone(), runtime.url.clone(), token.to_owned())
-        .execute(request)
-        .await
 }
 
 #[derive(Deserialize)]

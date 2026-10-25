@@ -112,16 +112,14 @@ fn acceptance_pins_conversations_and_rejects_owner_changes() -> Result<()> {
     Ok(())
 }
 
-/// A turn still running on the agent's former runtime does not hold back the
+/// A turn its former runtime still holds does not hold back the
 /// conversation's messages on its new one.
 #[test]
 fn a_conversations_messages_wait_only_for_its_own_runtimes_turns() -> Result<()> {
     let directory = tempdir()?;
     let database = Database::create(&directory.path().join("state.sqlite3"))?;
     accept(&database, "held", "conversation")?;
-    let held = database
-        .claim("runtime", Lane::Messages, &CancellationToken::new())?
-        .context("missing held turn")?;
+    let held = hold(&database, "runtime")?;
     let notice = Admission::Stranded {
         previous_runtime: "runtime",
         explanation: "Your next message starts a new conversation on replacement.",
@@ -143,13 +141,13 @@ fn a_conversations_messages_wait_only_for_its_own_runtimes_turns() -> Result<()>
         },
         None,
     )?;
-    let claimed = database
-        .claim("replacement", Lane::Messages, &CancellationToken::new())?
+    let handed = database
+        .next_dispatch("replacement")?
         .context("the other runtime's turn held the message back")?;
-    assert_eq!(claimed.turn.turn_id, next.turn_id);
+    assert_eq!(handed.turn_id, next.turn_id);
     assert_eq!(
         database
-            .inspect_turn(&held.turn.turn_id)?
+            .inspect_turn(&held.turn_id)?
             .context("missing held turn")?
             .state,
         TurnState::Running

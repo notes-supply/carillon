@@ -149,19 +149,20 @@ time; switch with the other installation's `app/bin/carillon-register-services`.
 
 ### Restart and update drain first
 
-`restart` and `update` pause core's runtime workers and stop the services only
-once nothing would be interrupted, waiting up to `--timeout` seconds:
+`restart` and `update` pause core's runtime dispatchers and stop the services
+only once nothing would be lost, waiting up to `--timeout` seconds:
 
-- turns that are running finish normally (none is cancelled or replayed);
-- their answers are delivered while Discord still runs;
+- no turn is being handed to its runtime;
+- answers are delivered while Discord still runs;
 - every runtime says a restart loses nothing it alone knows.
 
-New messages are accepted meanwhile and wait. If the drain doesn't finish in
+Turns a runtime holds are not waited for: it takes each up again once it
+starts, and none is replayed. New messages are accepted meanwhile and wait. If the drain doesn't finish in
 time, or core or a runtime doesn't answer, nothing is stopped and the command
 says what remained. After a drain that ran out of time, core's paused
-workers resume within 15 seconds, when the pause lapses. `--force` restarts anyway: a running message is recorded
-as interrupted and not replayed, and native work a runtime started may carry
-on. `carillon stop`, and restarting a single unit with `systemctl --user`, do
+dispatchers resume within 15 seconds, when the pause lapses. `--force`
+restarts anyway: a runtime that was not ready may lose what only it knew,
+and native work a runtime started may carry on. `carillon stop`, and restarting a single unit with `systemctl --user`, do
 not drain.
 
 The T3 runtime refuses a restart while it remembers a conversation whose
@@ -194,7 +195,7 @@ carillon registry apply               # serve the file's live changes now
 carillon provider runtime-t3 disable  # or enable; any runtime's ID
 ```
 
-A runtime's `enabled` and `parallel_turns` apply live. Disabling a runtime
+A runtime's `enabled` applies live. Disabling a runtime
 refuses new messages for its conversations and starts none of its queued
 turns; running turns finish and are delivered. Enabling or disabling changes
 what core does, not whether the runtime's program runs: `carillon start`
@@ -220,17 +221,11 @@ settings it was admitted with. Setup and `configure` save the file, then
 have a running provider serve it; if it refuses, they fail, unless only a
 restart applies the file and this release accepts the module it declares.
 
-### Parallel conversations
+### Conversations at once
 
-T3 can run several conversations at once: set `parallel_turns` (1 to 16) on
-the `runtime-t3` entry and run `carillon registry apply`. Each conversation
-still runs one turn at a time, in order.
-
-A runtime marked `durable = true`, as setup registers Pi, holds the turns it
-accepts and orders them itself, so it takes no `parallel_turns`: Pi answers
-in every conversation at once. Changing `durable` needs `carillon restart`,
-and a runtime refuses to start when its entry says otherwise than its
-program does.
+Each runtime holds the turns core hands it and orders them itself, answering
+in every conversation at once. T3 runs a conversation's messages in order;
+Pi handles a message that arrives while it answers as below.
 
 ### Messages while Pi answers
 
@@ -498,8 +493,8 @@ the tools can administer the server.
   crashing it is given up after five tries and fails. T3 takes up the turns
   it held again, reading each run back from T3, and settles a stop core
   hadn't recorded instead of running the message.
-- **Core can't save an outcome** (disk full, for example). The turn stays
-  marked running until core restarts, which records it as interrupted.
+- **Core can't save an outcome** (disk full, for example). The runtime asks
+  again until core records it, and the turn shows as running meanwhile.
 - **Delegated T3 work** reports later in its own message, even across
   restarts.
 

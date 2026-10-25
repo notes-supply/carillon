@@ -128,12 +128,12 @@ async fn an_altered_capture_interrupts_its_turn_without_running_it() -> Result<(
         .join(&inspection.attachments[0].path);
     fs::set_permissions(&file, fs::Permissions::from_mode(0o640))?;
     fs::write(&file, b"tampered")?;
-    let step = run_next_turn(&state, "test-runtime", async |_, _, _| {
-        Err(TurnFailure::Uncertain(anyhow!(
-            "the runtime must not be called"
-        )))
-    })
-    .await?;
+    let step = state
+        .core
+        .dispatch_next("test-runtime", &CancellationToken::new(), async |_| {
+            unreachable!("the runtime must not be called")
+        })
+        .await?;
     assert_eq!(step, WorkerStep::Advanced);
     let interrupted = state.core.inspect_turn(&receipt.turn_id)?.context("turn")?;
     assert_eq!(interrupted.state, TurnState::Interrupted);

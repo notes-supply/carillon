@@ -226,8 +226,6 @@ fn default_providers(
             url: format!("http://127.0.0.1:{}", checked_port(base_port, 1)?),
             token_hash: hash_token(discord_token),
             enabled: true,
-            parallel_turns: None,
-            durable: false,
         },
         runtime_provider(runtime, checked_port(base_port, 2)?, runtime_token)?,
     ])
@@ -241,8 +239,6 @@ fn runtime_provider(runtime: Runtime, port: u16, token: &str) -> Result<Provider
         url: format!("http://127.0.0.1:{port}"),
         token_hash: hash_token(token),
         enabled: true,
-        parallel_turns: None,
-        durable: true,
     })
 }
 
@@ -617,7 +613,6 @@ mod tests {
     };
 
     use super::{Runtime, assistant, backup, initialize, restore, set_provider};
-    use crate::Lane;
 
     fn initialize_test_installation(
         root: &Path,
@@ -1201,11 +1196,9 @@ mod tests {
                     None,
                 )?;
                 let expected_state = if uncertain {
-                    assert!(
-                        db.claim("runtime-pi", Lane::Messages, &CancellationToken::new())?
-                            .is_some()
-                    );
-                    assert_eq!(db.recover_running_turns(&[], "")?, 1);
+                    let held = db.next_dispatch("runtime-pi")?.context("nothing queued")?;
+                    db.dispatched(&held)?;
+                    assert_eq!(db.recover_running_turns(&[])?, 1);
                     TurnState::Interrupted
                 } else {
                     TurnState::Queued
@@ -1275,7 +1268,6 @@ mod tests {
                 version: "test".to_owned(),
                 url: "http://127.0.0.1:1".to_owned(),
                 enabled: true,
-                durable: false,
             }],
             attachments: AttachmentLimits {
                 free_space_mib: 0,
@@ -1291,7 +1283,7 @@ mod tests {
     )]
     async fn backups_carry_validated_attachments_and_leave_scratch_behind() -> Result<()> {
         use carillon_protocol::model::{
-            ExternalEvent, RuntimeTurnResponse, SelectedProvider, StagedAttachments, StagedFile,
+            ExternalEvent, SelectedProvider, StagedAttachments, StagedFile,
         };
 
         let directory = tempdir()?;
@@ -1344,22 +1336,13 @@ mod tests {
                 .await?;
             turns.push(receipt.turn_id);
         }
-        core.run_next(
-            "runtime-pi",
-            Lane::Messages,
-            &CancellationToken::new(),
-            async |request| {
-                Ok(RuntimeTurnResponse {
-                    output: "read it".to_owned(),
-                    follow_up: None,
-                    unanswered_left: false,
-                    activity: None,
-                    attachments_left: false,
-                    correlation_id: request.correlation_id,
-                })
-            },
-        )
-        .await?;
+        core.dispatch_next("runtime-pi", &CancellationToken::new(), async |_| Ok(()))
+            .await?;
+        let answer = carillon_protocol::turns::TurnOutcome::Answered {
+            output: "read it".to_owned(),
+            activity: None,
+        };
+        core.settle("runtime-pi", &turns[0], answer)?;
         // Scratch the archive must not carry: interface staging still in
         // place, an abandoned copy and a published capture never committed.
         let store = config.value.data_dir.join("attachments");
@@ -1397,29 +1380,16 @@ mod tests {
         let restored = LoadedConfig::load(&restore(&archive, &relocated)?)?;
         let restored_core = installed_core(&restored)?;
         restored_core
-            .run_next(
-                "runtime-pi",
-                Lane::Messages,
-                &CancellationToken::new(),
-                async |request| {
-                    assert_eq!(request.correlation_id, turns[1]);
-                    let root = Path::new(&request.attachment_root);
-                    assert!(root.starts_with(&relocated), "{}", root.display());
-                    assert_eq!(
-                        fs::read(root.join(&request.attachments[0].path))
-                            .map_err(|error| crate::TurnFailure::Uncertain(error.into()))?,
-                        b"queued file"
-                    );
-                    Ok(RuntimeTurnResponse {
-                        output: "read it".to_owned(),
-                        follow_up: None,
-                        unanswered_left: false,
-                        activity: None,
-                        attachments_left: false,
-                        correlation_id: request.correlation_id,
-                    })
-                },
-            )
+            .dispatch_next("runtime-pi", &CancellationToken::new(), async |request| {
+                assert_eq!(request.correlation_id, turns[1]);
+                let root = Path::new(&request.attachment_root);
+                assert!(root.starts_with(&relocated), "{}", root.display());
+                assert_eq!(
+                    fs::read(root.join(&request.attachments[0].path)).ok(),
+                    Some(b"queued file".to_vec())
+                );
+                Ok(())
+            })
             .await?;
 
         // Damaged archives are refused before publication.

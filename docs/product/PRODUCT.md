@@ -17,8 +17,8 @@ new interface or runtime doesn't mean rebuilding the rest.
 6. Choose models and their settings for a conversation, or an agent's
    default for new conversations, with `/model`, and run the runtime's own
    commands with `/command`.
-7. Change users, routes, runtime availability and concurrency while Carillon
-   runs; other settings apply on restart.
+7. Change users, routes and runtime availability while Carillon runs; other
+   settings apply on restart.
 8. Replace the Discord module (slash commands and cards) without restarting.
 9. Restart and update without interrupting running work, inspect recent
    turns, and back up and restore the installation.

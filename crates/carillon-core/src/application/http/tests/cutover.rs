@@ -16,15 +16,13 @@ async fn runtime_cutover_resumes_the_same_conversation_after_the_notice() -> Res
     state.config.value.providers.push(replacement);
     let first = accept(&state, "one", "conversation").await?;
     state.config.value.agents[0].runtime = "replacement".to_owned();
-    state.core.database = Database::open(&state.config.value.data_dir.join("carillon.sqlite3"))?;
+    state.core.database =
+        crate::db::Database::open(&state.config.value.data_dir.join("carillon.sqlite3"))?;
     assert_eq!(configured(&state).core.recover_interrupted()?, 1);
     let second = accept(&state, "two", "conversation").await?;
     let fresh = accept(&state, "fresh", "conversation").await?;
-    run_next_turn(&state, "replacement", async |_, _, request| {
-        assert_eq!(request.correlation_id, fresh.turn_id);
-        Ok(completed(request))
-    })
-    .await?;
+    let request = answer_next(&configured(&state).core, "replacement").await?;
+    assert_eq!(request.correlation_id, fresh.turn_id);
     for receipt in [&first, &second] {
         let inspected = state
             .core
@@ -53,75 +51,18 @@ async fn runtime_cutover_resumes_the_same_conversation_after_the_notice() -> Res
 }
 
 #[tokio::test]
-async fn runtime_cutover_observation_explains_unreported_work_and_possible_effects() -> Result<()> {
-    let directory = tempdir()?;
-    let mut state = installation(directory.path())?;
-    let parent = accept(&state, "start native work", "conversation").await?;
-    run_next_turn(&state, "test-runtime", async |_, _, request| {
-        Ok(RuntimeTurnResponse {
-            follow_up: Some(json!({"after": 1})),
-            ..completed(request)
-        })
-    })
-    .await?;
-    let reply = state
-        .core
-        .claim_turn_delivery("test-interface", "instance", &parent.turn_id)?
-        .context("missing initial reply")?;
-    state.core.database.acknowledge_delivery(
-        "test-interface",
-        reply.id,
-        "instance",
-        DeliveryOutcome::Delivered,
-        None,
-    )?;
-    state.config.value.agents[0].runtime = "replacement".to_owned();
-    state.config.value.providers[1].enabled = false;
-    assert_eq!(configured(&state).core.recover_interrupted()?, 1);
-    let notice = state
-        .core
-        .claim_delivery("test-interface", "instance")?
-        .context("missing observation refusal")?;
-    assert_eq!(
-        notice.content,
-        "This conversation ran on test-runtime, which no longer runs test-agent.\nWork already started there will not be reported here. Actions already taken may have had effects."
-    );
-    assert_eq!(state.core.database.turn_counts()?.interrupted, 1);
-    Ok(())
-}
-
-#[tokio::test]
-async fn startup_recovers_running_messages_once_and_settles_stranded_observations() -> Result<()> {
+async fn startup_settles_a_removed_runtimes_turns_once() -> Result<()> {
     let directory = tempdir()?;
     let mut state = installation(directory.path())?;
     let running = accept(&state, "running", "conversation").await?;
-    state
-        .core
-        .database
-        .claim("test-runtime", Lane::Messages, &CancellationToken::new())?
+    hand_next(&state.core, "test-runtime")
+        .await?
         .context("missing running message")?;
     let queued = accept(&state, "queued", "conversation").await?;
-    accept(&state, "work", "other-conversation").await?;
-    run_next_turn(&state, "test-runtime", async |_, _, request| {
-        Ok(RuntimeTurnResponse {
-            follow_up: Some(json!({"after": 1})),
-            ..completed(request)
-        })
-    })
-    .await?;
-    let observation = state
-        .core
-        .database
-        .claim(
-            "test-runtime",
-            Lane::Observations,
-            &CancellationToken::new(),
-        )?
-        .context("missing running observation")?;
     state.config.value.agents.clear();
     state.config.value.providers.remove(1);
     let core = configured(&state).core;
-    assert_eq!(core.recover_interrupted()?, 3);
+    assert_eq!(core.recover_interrupted()?, 2);
     for (turn_id, content) in [
         (
             running.turn_id,
@@ -131,10 +72,6 @@ async fn startup_recovers_running_messages_once_and_settles_stranded_observation
             queued.turn_id,
             "This conversation ran on test-runtime, which no longer runs test-agent.",
         ),
-        (
-            observation.turn.turn_id,
-            "This conversation ran on test-runtime, which no longer runs test-agent.\nWork already started there will not be reported here. Actions already taken may have had effects.",
-        ),
     ] {
         let notice = core
             .claim_turn_delivery("test-interface", "instance", &turn_id)?
@@ -143,7 +80,7 @@ async fn startup_recovers_running_messages_once_and_settles_stranded_observation
         assert_eq!(notice.content, content);
     }
     assert_eq!(core.recover_interrupted()?, 0);
-    assert_eq!(core.turn_counts()?.interrupted, 3);
+    assert_eq!(core.turn_counts()?.interrupted, 2);
     Ok(())
 }
 

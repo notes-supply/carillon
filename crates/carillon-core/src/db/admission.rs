@@ -92,9 +92,8 @@ impl Database {
         transaction.execute(
             "INSERT INTO turns(id, interface_id, event_id, agent_id, audience_id, user_id,
                  target_id, feedback_target_id, input, native_json, runtime_id,
-                 provider_snapshot_json, resource_snapshot_id, state, accepted_at,
-                 origin_turn_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'queued', ?14, ?1)",
+                 provider_snapshot_json, resource_snapshot_id, state, accepted_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'queued', ?14)",
             params![
                 turn_id,
                 interface_id,

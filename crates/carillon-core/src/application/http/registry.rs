@@ -1,9 +1,9 @@
 //! The registry core serves. The application owns the installation's
 //! configuration and credentials: it loads `carillon.toml` at start, and an
 //! apply replaces what serves with the file, whole, when the two differ only
-//! in what applies live: whether a runtime is enabled and how many of its
-//! conversations run at once. Core's engine receives only the runtime facts
-//! derived from it, and the runtime workers follow it.
+//! in what applies live: whether a runtime is enabled. Core's engine
+//! receives only the runtime facts derived from it, and the runtime workers
+//! follow it.
 
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
@@ -12,7 +12,7 @@ use carillon_installation::config::{Config, CoreConfig, LoadedConfig, Provider, 
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, watch};
 
-use super::workers::{Census, RuntimeWorkers};
+use super::workers::{Census, Dispatcher};
 use crate::{Core, RuntimeProvider};
 
 /// The runtime facts core's engine admits and runs work by.
@@ -27,7 +27,6 @@ pub(super) fn runtime_facts(config: &LoadedConfig) -> Vec<RuntimeProvider> {
             version: provider.version.clone(),
             url: provider.url.clone(),
             enabled: provider.enabled,
-            durable: provider.durable,
         })
         .collect()
 }
@@ -43,13 +42,9 @@ pub(crate) struct Difference {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub(crate) struct ServingRuntime {
     pub(crate) id: String,
-    /// Whether core admits work for it and runs its queued turns.
+    /// Whether core admits work for it and hands it its queued turns.
     pub(crate) enabled: bool,
-    /// How many of its conversations run at once while it is enabled.
-    pub(crate) parallel_turns: u32,
-    /// It holds its turns and orders them itself.
-    pub(crate) durable: bool,
-    pub(crate) workers: RuntimeWorkers,
+    pub(crate) dispatcher: Dispatcher,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -90,9 +85,7 @@ impl ServingRuntime {
             .map(|provider| Self {
                 id: provider.id.clone(),
                 enabled: provider.enabled,
-                parallel_turns: provider.parallel_turns(),
-                durable: provider.durable,
-                workers: census
+                dispatcher: census
                     .runtimes
                     .get(&provider.id)
                     .copied()
@@ -178,8 +171,6 @@ impl Difference {
             url,
             token_hash,
             enabled,
-            parallel_turns,
-            durable,
         } = file;
         let mut changed = |changed: bool, field: &str, live: bool| {
             if changed {
@@ -195,19 +186,11 @@ impl Difference {
         changed(*version != serving.version, "version", false);
         changed(*url != serving.url, "url", false);
         changed(*token_hash != serving.token_hash, "token_hash", false);
-        // Turns a durable runtime holds have no worker, and recovery keeps
-        // them only for a runtime durable when core starts.
-        changed(*durable != serving.durable, "durable", false);
         // An interface's flag decides whether its program serves at all, and
         // core refuses a disabled interface's calls: only a restart of both
         // changes it without stranding the deliveries it holds.
         let runtime = *role == ProviderRole::Runtime && serving.role == ProviderRole::Runtime;
         changed(*enabled != serving.enabled, "enabled", runtime);
-        changed(
-            *parallel_turns != serving.parallel_turns,
-            "parallel_turns",
-            runtime,
-        );
     }
 }
 

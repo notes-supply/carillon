@@ -1,9 +1,8 @@
 //! Work cards and typing while jobs run.
 //!
-//! A job is the work one message began: the message's turn and the
-//! observations core queues to report what it delegated. Core owns every
-//! fact of a job: its turns, their final reports and how each answer was
-//! sent. The monitor reads them every few seconds, every job at work page by
+//! A job is the work one turn does: a message's, or one its runtime opened.
+//! Core owns every fact of a job: its turn, its final report and how its
+//! answer was sent. The monitor reads them every few seconds, every job at work page by
 //! page and, by name, every job it still follows that is no longer at work,
 //! and at once when the delivery loop has had an answer's outcome recorded.
 //! The delivery loop names a job when it takes up one of its answers, before
@@ -40,7 +39,7 @@ use carillon_installation::filesystem::{PublishError, publish};
 use carillon_protocol::model::{JOB_READ_LIMIT, Job, TurnState};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, hash_map::Entry},
+    collections::{BTreeMap, HashSet},
     fs,
     path::PathBuf,
     sync::{Arc, Mutex, PoisonError},
@@ -404,27 +403,19 @@ struct Read {
 /// none of the pages listed.
 async fn read(core: CoreClient, named: Vec<String>) -> Result<Read, crate::InterfaceError> {
     let mut jobs = Vec::new();
-    let mut positions = HashMap::new();
     let mut after = None;
     loop {
         let page = core.jobs_at_work(after.as_deref()).await?;
-        // A continuation accepted between pages can list the same origin
-        // twice. Its latest read wins, with still only one card owner.
-        for job in page.jobs {
-            match positions.entry(job.origin.turn_id.clone()) {
-                Entry::Occupied(position) => jobs[*position.get()] = job,
-                Entry::Vacant(position) => {
-                    position.insert(jobs.len());
-                    jobs.push(job);
-                }
-            }
-        }
+        jobs.extend(page.jobs);
         match page.next {
             Some(next) => after = Some(next),
             None => break,
         }
     }
-    let listed = positions.into_keys().collect::<HashSet<_>>();
+    let listed = jobs
+        .iter()
+        .map(|job| job.origin.turn_id.clone())
+        .collect::<HashSet<_>>();
     let mut read = read_named(&core, &named, &listed).await?;
     read.jobs.extend(jobs);
     Ok(read)

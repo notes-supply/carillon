@@ -1,4 +1,4 @@
-//! What durable runtimes tell core of the turns they hold, and the turns an
+//! What runtimes tell core of the turns they hold, and the turns an
 //! interface may control there.
 
 use anyhow::Result;
@@ -15,12 +15,7 @@ impl Core {
     /// delivery that tells its conversation, once.
     /// # Errors
     /// Returns storage errors.
-    pub(crate) fn settle(
-        &self,
-        runtime_id: &str,
-        turn_id: &str,
-        outcome: TurnOutcome,
-    ) -> Result<Settled> {
+    pub fn settle(&self, runtime_id: &str, turn_id: &str, outcome: TurnOutcome) -> Result<Settled> {
         let settle = |settlement| self.database.settle_held(runtime_id, turn_id, settlement);
         match outcome {
             TurnOutcome::Answered { output, activity } => {
@@ -101,16 +96,15 @@ impl Core {
             .into_iter()
             .map(|(turn, event_id)| RunningTurn {
                 key: event_id.strip_prefix(&opened).map(str::to_owned),
-                request: self.runtime_request(&turn, Vec::new()),
+                request: self.runtime_request(&turn),
             })
             .collect())
     }
 
-    /// The durable runtime holding the running turn of an interface's
-    /// event, and the turn's ID: `None` when the interface submitted no such
-    /// event.
+    /// The runtime holding the running turn of an interface's event, and the
+    /// turn's ID: `None` when the interface submitted no such event.
     /// # Errors
-    /// Returns a turn that is not running on an enabled durable runtime as a
+    /// Returns a turn that is not running on an enabled runtime as a
     /// conflict, or storage errors.
     pub(crate) fn controlled(
         &self,
@@ -127,12 +121,6 @@ impl Core {
                 "that message's turn is not running".to_owned(),
             ));
         }
-        let runtime = self.enabled_runtime(&runtime_id)?;
-        if !runtime.durable {
-            return Err(CoreError::Conflict(format!(
-                "runtime provider {runtime_id} offers no controls"
-            )));
-        }
-        Ok(Some((runtime, turn_id)))
+        Ok(Some((self.enabled_runtime(&runtime_id)?, turn_id)))
     }
 }

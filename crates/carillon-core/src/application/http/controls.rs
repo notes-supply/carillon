@@ -1,4 +1,4 @@
-//! A person's control of a turn a durable runtime holds, relayed from the
+//! A person's control of a turn a runtime holds, relayed from the
 //! interface that submitted it. Core keeps nothing of it: the runtime
 //! decides, and says how the turn ended when it settles it.
 

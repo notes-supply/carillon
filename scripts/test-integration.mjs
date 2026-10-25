@@ -258,9 +258,9 @@ try {
 
   await stop("runtime");
   await stop("core");
-  // A queued observation is not a shutdown barrier: an outage worker can
-  // claim again before SIGTERM. Start this backup fixture with unavailable
-  // credentials so no iteration can claim the turn, rather than racing a retry.
+  // A queued turn is not a shutdown barrier: the dispatcher can hand it over
+  // again before SIGTERM. Start this backup fixture with unavailable
+  // credentials so no hand-over reaches the runtime, rather than racing a retry.
   const runtimeCredential = credential("runtime-pi");
   const runtimeToken = await readFile(runtimeCredential);
   await writeFile(runtimeCredential, "");
@@ -1245,7 +1245,6 @@ version = "${version}"
 url = "http://127.0.0.1:${String(servicePort("runtime-t3"))}"
 token_hash = "${createHash("sha256").update(token).digest("hex")}"
 enabled = true
-durable = true
 `,
     );
     await writeFile(credential("runtime-t3"), token, { mode: 0o600 });

@@ -1,6 +1,6 @@
 //! The registry applied while core serves: its classification, the apply
-//! operation, and the runtime workers following it, against a runtime whose
-//! turns wait for the case to release them.
+//! operation, and the dispatchers following it, against a runtime whose
+//! hand-overs wait for the case to release them.
 
 use std::{collections::HashMap, fs, path::Path, sync::Mutex};
 
@@ -8,18 +8,18 @@ use anyhow::Context as _;
 use tempfile::tempdir;
 use tokio::sync::oneshot;
 
-use super::{Fixture, completed, configured, installation};
+use super::{Fixture, configured, installation};
 use crate::application::http::{registry::Difference, *};
+use carillon_protocol::{model::RuntimeTurnRequest, turns::TurnOutcome};
 
-/// A runtime that keeps every turn until the case releases it, answering
-/// with or without a follow-up cursor, and records what it was given.
+/// A runtime whose inbox keeps each hand-over waiting until the case
+/// releases it, then takes the turn, and records what it was handed.
 #[derive(Clone)]
 pub(super) struct HeldRuntime {
     url: String,
-    held: Arc<Mutex<HashMap<String, oneshot::Sender<Option<Value>>>>>,
-    /// Every turn it was given, in order: its input and whether it was an
-    /// observation.
-    given: Arc<Mutex<Vec<(String, bool)>>>,
+    held: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
+    /// The input of every turn it was handed, in order.
+    given: Arc<Mutex<Vec<String>>>,
     /// What it answers when asked whether it can restart.
     pub(super) restart: Arc<Mutex<Value>>,
 }
@@ -49,17 +49,15 @@ impl HeldRuntime {
             async move { Json(answer) }
         };
         let router = Router::new().route("/v1/restart", get(answer)).route(
-            "/v1/turns",
+            "/v1/inbox",
             post(move |Json(request): Json<RuntimeTurnRequest>| {
                 let (held, given) = (held.clone(), given.clone());
                 async move {
-                    let (answer, answered) = oneshot::channel();
-                    lock(&given).push((request.input.clone(), request.follow_up.is_some()));
-                    lock(&held).insert(request.input.clone(), answer);
-                    let follow_up = answered.await.unwrap_or_default();
-                    let mut response = completed(request);
-                    response.follow_up = follow_up;
-                    Json(response)
+                    let (release, released) = oneshot::channel();
+                    lock(&given).push(request.input.clone());
+                    lock(&held).insert(request.input, release);
+                    let _ = released.await;
+                    (StatusCode::ACCEPTED, Json(json!({})))
                 }
             }),
         );
@@ -67,7 +65,7 @@ impl HeldRuntime {
         Ok(runtime)
     }
 
-    /// Waits until it holds `count` turns, and returns their inputs.
+    /// Waits until it holds `count` hand-overs, and returns their inputs.
     pub(super) async fn holding(&self, count: usize) -> Result<Vec<String>> {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -79,29 +77,32 @@ impl HeldRuntime {
             }
         })
         .await
-        .with_context(|| format!("the runtime never held {count} turns"))
+        .with_context(|| format!("the runtime never held {count} hand-overs"))
     }
 
-    /// Answers the turn given `input`, optionally saying its work goes on.
-    pub(super) fn release(&self, input: &str, follow_up: Option<Value>) -> Result<()> {
+    /// Takes the turn handed over with `input`.
+    pub(super) fn release(&self, input: &str) -> Result<()> {
         lock(&self.held)
             .remove(input)
-            .with_context(|| format!("the runtime holds no turn {input}"))?
-            .send(follow_up)
-            .map_err(|_| anyhow!("turn {input} was abandoned"))
+            .with_context(|| format!("the runtime holds no hand-over {input}"))?
+            .send(())
+            .map_err(|()| anyhow!("the hand-over of {input} was abandoned"))
     }
 
-    pub(super) fn given(&self) -> Vec<(String, bool)> {
+    pub(super) fn given(&self) -> Vec<String> {
         lock(&self.given).clone()
     }
 
+    /// Takes every turn handed over and answers every turn it holds until
+    /// core's counts are `wanted`.
     pub(super) async fn drain(&self, state: &AppState, wanted: (u64, u64, u64)) -> Result<()> {
         tokio::time::timeout(Duration::from_secs(10), async {
             while counts(state)? != wanted {
                 let held = lock(&self.held).keys().cloned().collect::<Vec<_>>();
                 for input in held {
-                    self.release(&input, None)?;
+                    self.release(&input)?;
                 }
+                answer_held(state)?;
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
             Ok::<_, anyhow::Error>(())
@@ -111,17 +112,27 @@ impl HeldRuntime {
     }
 }
 
+/// Answers every turn the test runtime holds, as it settles them through core.
+pub(super) fn answer_held(state: &AppState) -> Result<()> {
+    for running in state.core.running_turns("test-runtime")? {
+        let answer = TurnOutcome::Answered {
+            output: format!("reply to {}", running.request.input),
+            activity: None,
+        };
+        state
+            .core
+            .settle("test-runtime", &running.request.correlation_id, answer)?;
+    }
+    Ok(())
+}
+
 /// An installation whose runtime is `runtime`, its registry file written
 /// out as core would read it, and core serving it.
-pub(super) fn serving(
-    directory: &Path,
-    runtime: &HeldRuntime,
-    parallel: u32,
-) -> Result<(Fixture, AppState)> {
+pub(super) fn serving(directory: &Path, runtime: &HeldRuntime) -> Result<(Fixture, AppState)> {
     let mut fixture = installation(directory)?;
-    let provider = &mut fixture.config.value.providers[1];
-    provider.url.clone_from(&runtime.url);
-    provider.parallel_turns = Some(parallel);
+    fixture.config.value.providers[1]
+        .url
+        .clone_from(&runtime.url);
     write(&fixture.config)?;
     let state = configured(&fixture);
     Ok((fixture, state))
@@ -190,15 +201,12 @@ pub(super) async fn submit(
     .map(|Json(receipt)| receipt)
 }
 
-/// Waits until the supervisor reports `wanted` for the test runtime.
-pub(super) async fn workers_are(
-    state: &AppState,
-    wanted: impl Fn(&workers::RuntimeWorkers) -> bool,
-) -> Result<()> {
+/// Waits until the supervisor reports the test runtime's dispatcher `wanted`.
+pub(super) async fn workers_are(state: &AppState, wanted: Dispatcher) -> Result<()> {
     let mut census = state.workers.subscribe();
     tokio::time::timeout(
         Duration::from_secs(10),
-        census.wait_for(|census: &Census| census.runtimes.get("test-runtime").is_some_and(&wanted)),
+        census.wait_for(|census: &Census| census.runtimes.get("test-runtime") == Some(&wanted)),
     )
     .await
     .with_context(|| {
@@ -216,20 +224,16 @@ pub(super) fn counts(state: &AppState) -> Result<(u64, u64, u64)> {
 }
 
 #[test]
-fn only_runtime_availability_and_concurrency_apply_live() -> Result<()> {
+fn only_runtime_availability_applies_live() -> Result<()> {
     let directory = tempdir()?;
     let fixture = installation(directory.path())?;
     let serving = &fixture.config.value;
     let mut file = serving.clone();
     file.providers[1].enabled = false;
-    file.providers[1].parallel_turns = Some(3);
     assert_eq!(
         Difference::between(serving, &file),
         Difference {
-            live: vec![
-                "providers.test-runtime.enabled".to_owned(),
-                "providers.test-runtime.parallel_turns".to_owned(),
-            ],
+            live: vec!["providers.test-runtime.enabled".to_owned()],
             restart: Vec::new(),
         }
     );
@@ -258,7 +262,7 @@ fn only_runtime_availability_and_concurrency_apply_live() -> Result<()> {
             "providers.test-runtime.token_hash",
         ]
     );
-    assert_eq!(difference.live.len(), 2);
+    assert_eq!(difference.live.len(), 1);
     Ok(())
 }
 
@@ -266,7 +270,7 @@ fn only_runtime_availability_and_concurrency_apply_live() -> Result<()> {
 async fn an_apply_serves_live_changes_whole_or_nothing_for_the_operator_alone() -> Result<()> {
     let directory = tempdir()?;
     let runtime = HeldRuntime::start().await?;
-    let (mut fixture, state) = serving(directory.path(), &runtime, 1)?;
+    let (mut fixture, state) = serving(directory.path(), &runtime)?;
     // Only the operator applies.
     for headers in [HeaderMap::new(), {
         let mut wrong = HeaderMap::new();
@@ -340,15 +344,12 @@ async fn an_apply_serves_live_changes_whole_or_nothing_for_the_operator_alone() 
 async fn a_misspelt_setting_is_refused_rather_than_dropped() -> Result<()> {
     let directory = tempdir()?;
     let runtime = HeldRuntime::start().await?;
-    let (fixture, state) = serving(directory.path(), &runtime, 2)?;
+    let (fixture, state) = serving(directory.path(), &runtime)?;
     let serving = state.config();
     // The runtime entry names a setting the registry does not define.
     let path = fixture.config.root.join("carillon.toml");
     let file = fs::read_to_string(&path)?;
-    let misspelt = file.replace(
-        "parallel_turns = 2",
-        "parallel_turns = 2\nparallel_turn = 4",
-    );
+    let misspelt = file.replace("role = \"runtime\"", "role = \"runtime\"\nenabeld = false");
     assert_ne!(misspelt, file);
     fs::write(&path, misspelt)?;
     let refused = apply(&state)
@@ -357,7 +358,7 @@ async fn a_misspelt_setting_is_refused_rather_than_dropped() -> Result<()> {
         .context("applied a file with a misspelt setting")?;
     assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert!(
-        refused.message.contains("unknown field `parallel_turn`"),
+        refused.message.contains("unknown field `enabeld`"),
         "{}",
         refused.message
     );
@@ -366,70 +367,16 @@ async fn a_misspelt_setting_is_refused_rather_than_dropped() -> Result<()> {
     let FileState::Invalid { error } = status.file else {
         anyhow::bail!("a misspelt file read as a registry");
     };
-    assert!(error.contains("parallel_turn"), "{error}");
+    assert!(error.contains("enabeld"), "{error}");
     Ok(())
 }
 
 #[tokio::test]
-async fn fewer_parallel_turns_let_running_turns_finish_and_then_run_fewer_at_once() -> Result<()> {
+async fn a_disabled_runtime_settles_what_it_holds_and_is_handed_its_queue_once_enabled()
+-> Result<()> {
     let directory = tempdir()?;
     let runtime = HeldRuntime::start().await?;
-    let (mut fixture, state) = serving(directory.path(), &runtime, 4)?;
-    // Eight conversations, one of them with two messages.
-    for conversation in ["a", "b", "c", "d", "e", "f", "g", "h"] {
-        ok(submit(&state, &format!("{conversation}1"), conversation).await)?;
-    }
-    ok(submit(&state, "a2", "a").await)?;
-    let stopping = CancellationToken::new();
-    let supervisor = tokio::spawn(workers::supervise(
-        state.clone(),
-        state.workers.clone(),
-        stopping.clone(),
-    ));
-    let first = runtime.holding(4).await?;
-    workers_are(&state, |runtime| runtime.messages.claiming == 4).await?;
-    edit(&mut fixture, |provider| provider.parallel_turns = Some(2))?;
-    assert_eq!(
-        ok(apply(&state).await)?.changed,
-        ["providers.test-runtime.parallel_turns"]
-    );
-    // Every worker holds a turn: two are retired and settle theirs.
-    workers_are(&state, |runtime| {
-        runtime.messages.claiming == 2 && runtime.messages.settling == 2
-    })
-    .await?;
-    assert_eq!(counts(&state)?, (5, 4, 0));
-    for input in &first {
-        runtime.release(input, None)?;
-    }
-    // The retired workers end; two run at once from now on.
-    workers_are(&state, |runtime| {
-        runtime.messages.claiming == 2 && runtime.messages.settling == 0
-    })
-    .await?;
-    let second = runtime.holding(2).await?;
-    assert_eq!(counts(&state)?, (3, 2, 4));
-    for input in second {
-        runtime.release(&input, None)?;
-    }
-    runtime.drain(&state, (0, 0, 9)).await?;
-    // Each message ran once, a conversation's in order, and each answer
-    // waits for its interface.
-    let given = runtime.given();
-    assert_eq!(given.len(), 9);
-    let position = |input: &str| given.iter().position(|(given, _)| given == input);
-    assert!(position("a1") < position("a2"));
-    assert_eq!(state.core.delivery_counts()?.pending, 9);
-    stopping.cancel();
-    supervisor.await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_disabled_runtime_settles_its_turn_and_resumes_its_queue_once_enabled() -> Result<()> {
-    let directory = tempdir()?;
-    let runtime = HeldRuntime::start().await?;
-    let (mut fixture, state) = serving(directory.path(), &runtime, 1)?;
+    let (mut fixture, state) = serving(directory.path(), &runtime)?;
     ok(submit(&state, "first", "one").await)?;
     ok(submit(&state, "queued", "two").await)?;
     let stopping = CancellationToken::new();
@@ -439,65 +386,38 @@ async fn a_disabled_runtime_settles_its_turn_and_resumes_its_queue_once_enabled(
         stopping.clone(),
     ));
     runtime.holding(1).await?;
-    assert_eq!(runtime.given(), [("first".to_owned(), false)]);
-    // Disabled while its turn runs: the turn's worker settles it and claims
-    // no other; idle observation workers end.
+    assert_eq!(runtime.given(), ["first"]);
+    // Disabled while it hands a turn over: its dispatcher retires, and ends
+    // once that hand-over has.
     edit(&mut fixture, |provider| provider.enabled = false)?;
     ok(apply(&state).await)?;
-    workers_are(&state, |runtime| {
-        runtime.messages.claiming == 0
-            && runtime.messages.settling == 1
-            && runtime.observations.claiming + runtime.observations.settling == 0
-    })
-    .await?;
+    workers_are(&state, Dispatcher::Retiring).await?;
     let refused = submit(&state, "refused", "three")
         .await
         .err()
         .context("admitted while disabled")?;
     assert_eq!(refused.status, StatusCode::CONFLICT);
-    // Enabled again before that turn ends: no second worker claims beside
-    // the one still settling.
+    // Enabled again before that hand-over ends: no second dispatcher starts
+    // beside the one retiring.
     edit(&mut fixture, |provider| provider.enabled = true)?;
     ok(apply(&state).await)?;
-    workers_are(&state, |runtime| {
-        runtime.messages.claiming == 0
-            && runtime.messages.settling == 1
-            && runtime.observations.claiming == workers::OBSERVATION_WORKERS
-    })
-    .await?;
-    // Disabled again; the running turn ends saying its work goes on.
+    workers_are(&state, Dispatcher::Retiring).await?;
+    // Disabled again; the hand-over ends, and the runtime still settles the
+    // turn it took.
     edit(&mut fixture, |provider| provider.enabled = false)?;
     ok(apply(&state).await)?;
-    runtime.release("first", Some(json!({"cursor": 1})))?;
-    workers_are(&state, |runtime| {
-        *runtime == workers::RuntimeWorkers::default()
-    })
-    .await?;
-    // Its answer waits for the interface; the queued message and the
-    // observation of the delegated work wait for the runtime.
-    assert_eq!(counts(&state)?, (2, 0, 1));
+    runtime.release("first")?;
+    workers_are(&state, Dispatcher::Stopped).await?;
+    assert_eq!(counts(&state)?, (1, 1, 0));
+    answer_held(&state)?;
+    assert_eq!(counts(&state)?, (1, 0, 1));
     assert_eq!(state.core.delivery_counts()?.pending, 1);
+    // Enabled, its queued turn is handed over, once.
     edit(&mut fixture, |provider| provider.enabled = true)?;
     ok(apply(&state).await)?;
-    runtime.holding(2).await?;
-    runtime.drain(&state, (0, 0, 3)).await?;
-    // Each turn ran once: the message, the queued one and the observation.
-    let mut given = runtime.given();
-    given.sort();
-    assert_eq!(
-        given,
-        [
-            (String::new(), true),
-            ("first".to_owned(), false),
-            ("queued".to_owned(), false),
-        ]
-    );
-    workers_are(&state, |runtime| {
-        runtime.messages.claiming == 1
-            && runtime.observations.claiming == workers::OBSERVATION_WORKERS
-            && runtime.messages.settling + runtime.observations.settling == 0
-    })
-    .await?;
+    runtime.drain(&state, (0, 0, 2)).await?;
+    assert_eq!(runtime.given(), ["first", "queued"]);
+    workers_are(&state, Dispatcher::Dispatching).await?;
     stopping.cancel();
     supervisor.await?;
     Ok(())
@@ -507,18 +427,15 @@ async fn a_disabled_runtime_settles_its_turn_and_resumes_its_queue_once_enabled(
 async fn core_and_its_workers_follow_one_serving_registry() -> Result<()> {
     let directory = tempdir()?;
     let runtime = HeldRuntime::start().await?;
-    let (mut fixture, state) = serving(directory.path(), &runtime, 3)?;
+    let (mut fixture, state) = serving(directory.path(), &runtime)?;
     let stopping = CancellationToken::new();
     let supervisor = tokio::spawn(workers::supervise(
         state.clone(),
         state.workers.clone(),
         stopping.clone(),
     ));
-    for (enabled, parallel) in [(true, 3), (false, 3), (true, 1), (true, 2)] {
-        edit(&mut fixture, |provider| {
-            provider.enabled = enabled;
-            provider.parallel_turns = Some(parallel);
-        })?;
+    for enabled in [true, false, true] {
+        edit(&mut fixture, |provider| provider.enabled = enabled)?;
         ok(apply(&state).await)?;
         let config = state.config();
         let provider = config.provider("test-runtime", ProviderRole::Runtime)?;
@@ -535,8 +452,12 @@ async fn core_and_its_workers_follow_one_serving_registry() -> Result<()> {
             engine.err().map(|error| error.to_string()),
             (!enabled).then(|| "conversation runtime provider is disabled".to_owned())
         );
-        let wanted = if enabled { parallel as usize } else { 0 };
-        workers_are(&state, |runtime| runtime.messages.claiming == wanted).await?;
+        let wanted = if enabled {
+            Dispatcher::Dispatching
+        } else {
+            Dispatcher::Stopped
+        };
+        workers_are(&state, wanted).await?;
     }
     stopping.cancel();
     supervisor.await?;

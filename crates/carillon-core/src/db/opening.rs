@@ -87,10 +87,9 @@ impl Database {
         transaction.execute(
             "INSERT INTO turns(id, interface_id, event_id, agent_id, audience_id, user_id,
                  target_id, feedback_target_id, input, native_json, runtime_id,
-                 provider_snapshot_json, resource_snapshot_id, state, accepted_at,
-                 origin_turn_id)
+                 provider_snapshot_json, resource_snapshot_id, state, accepted_at)
              SELECT ?2, interface_id, ?3, agent_id, audience_id, '', target_id, '', ?4, '{}',
-                 runtime_id, provider_snapshot_json, resource_snapshot_id, 'running', ?5, ?2
+                 runtime_id, provider_snapshot_json, resource_snapshot_id, 'running', ?5
              FROM turns WHERE id = ?1",
             params![
                 latest,

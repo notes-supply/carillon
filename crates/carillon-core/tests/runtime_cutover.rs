@@ -1,8 +1,9 @@
 use anyhow::{Context as _, Result};
-use carillon_core::{AgentOptions, Core, CoreOptions, Lane, RuntimeProvider, WorkerStep};
+use carillon_core::{AgentOptions, Core, CoreOptions, RuntimeProvider, Settled, WorkerStep};
 use carillon_installation::config::AttachmentLimits;
-use carillon_protocol::model::{
-    ExternalEvent, RuntimeTurnRequest, RuntimeTurnResponse, SelectedProvider, TurnState,
+use carillon_protocol::{
+    model::{ExternalEvent, SelectedProvider, TurnState},
+    turns::TurnOutcome,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -20,7 +21,6 @@ fn options(root: &std::path::Path) -> CoreOptions {
                 version: "test".to_owned(),
                 url: "in-process".to_owned(),
                 enabled: true,
-                durable: false,
             })
             .into(),
         attachments: AttachmentLimits::default(),
@@ -41,15 +41,25 @@ fn event() -> ExternalEvent {
     }
 }
 
-fn answer(request: RuntimeTurnRequest) -> RuntimeTurnResponse {
-    RuntimeTurnResponse {
-        correlation_id: request.correlation_id,
+/// Hands `runtime` its next queued turn, which it then answers; the turn's ID.
+async fn answer_next(core: &Core, runtime: &str) -> Result<Option<String>> {
+    let mut handed = None;
+    let step = core
+        .dispatch_next(runtime, &CancellationToken::new(), async |request| {
+            handed = Some(request.correlation_id);
+            Ok(())
+        })
+        .await?;
+    let Some(turn) = handed else {
+        assert_eq!(step, WorkerStep::Idle);
+        return Ok(None);
+    };
+    let answer = TurnOutcome::Answered {
         output: "answer".to_owned(),
-        follow_up: None,
-        unanswered_left: false,
-        attachments_left: false,
         activity: None,
-    }
+    };
+    assert_eq!(core.settle(runtime, &turn, answer)?, Settled::Recorded);
+    Ok(Some(turn))
 }
 
 fn interface() -> SelectedProvider {
@@ -100,17 +110,8 @@ async fn queued_cutover(agent_runtime: Option<&str>, former_enabled: Option<bool
         version: "test".to_owned(),
         url: "in-process".to_owned(),
         enabled: true,
-        durable: false,
     }])?;
-    for lane in [Lane::Messages, Lane::Observations] {
-        assert_eq!(
-            core.run_next("old", lane, &CancellationToken::new(), async |_| {
-                unreachable!("settled stranded turn was retried")
-            })
-            .await?,
-            WorkerStep::Idle
-        );
-    }
+    assert_eq!(answer_next(&core, "old").await?, None);
     core.storage_settled().await;
     Ok(())
 }
@@ -242,16 +243,7 @@ async fn moved_agent_strands_once_then_runs_the_same_channel_on_its_current_runt
     let interface = interface();
     let event = event();
     core.accept(&interface, &event).await?;
-    let stopping = CancellationToken::new();
-    assert_eq!(
-        core.run_next("old", Lane::Messages, &stopping, async |request| {
-            let mut response = answer(request);
-            response.follow_up = Some(serde_json::json!({"cursor": 1}));
-            Ok(response)
-        })
-        .await?,
-        WorkerStep::Advanced
-    );
+    assert!(answer_next(&core, "old").await?.is_some());
     let queued = ExternalEvent {
         event_id: "queued".to_owned(),
         ..event.clone()
@@ -261,7 +253,7 @@ async fn moved_agent_strands_once_then_runs_the_same_channel_on_its_current_runt
     drop(core);
     "new".clone_into(&mut options.agents[0].runtime);
     let core = Core::open(options)?;
-    assert_eq!(core.recover_interrupted()?, 2);
+    assert_eq!(core.recover_interrupted()?, 1);
     let later = ExternalEvent {
         event_id: "later".to_owned(),
         ..event.clone()
@@ -269,19 +261,11 @@ async fn moved_agent_strands_once_then_runs_the_same_channel_on_its_current_runt
     core.accept(&interface, &later).await?;
     assert!(core.accept(&interface, &queued).await?.duplicate);
     for runtime in ["old", "new"] {
-        assert_eq!(
-            core.run_next(runtime, Lane::Messages, &stopping, async |_| {
-                unreachable!("the notice must not dispatch to either runtime")
-            })
-            .await?,
-            WorkerStep::Idle
-        );
+        assert_eq!(answer_next(&core, runtime).await?, None);
     }
     let explanation = "This conversation ran on old, which no longer runs agent.";
-    let observation = "This conversation ran on old, which no longer runs agent.\nWork already started there will not be reported here. Actions already taken may have had effects.";
     for (state, content) in [
         (TurnState::Completed, "answer"),
-        (TurnState::Interrupted, observation),
         (TurnState::Interrupted, explanation),
         (
             TurnState::Interrupted,
@@ -315,13 +299,8 @@ async fn moved_agent_strands_once_then_runs_the_same_channel_on_its_current_runt
             .await?;
         assert_eq!(receipt.state, TurnState::Queued);
         assert_eq!(
-            core.run_next("new", Lane::Messages, &stopping, async |request| {
-                assert_eq!(request.correlation_id, receipt.turn_id);
-                assert_eq!(request.audience_id, event.audience_id);
-                Ok(answer(request))
-            })
-            .await?,
-            WorkerStep::Advanced
+            answer_next(&core, "new").await?.as_deref(),
+            Some(receipt.turn_id.as_str())
         );
         assert_eq!(
             core.inspect_turn(&receipt.turn_id)?
@@ -365,16 +344,7 @@ async fn removed_agent_stays_stranded_in_the_same_channel() -> Result<()> {
         assert!(notice.content.contains("no longer runs agent"));
         assert!(!notice.content.contains("Your next message"));
         for runtime in ["old", "new"] {
-            assert_eq!(
-                core.run_next(
-                    runtime,
-                    Lane::Messages,
-                    &CancellationToken::new(),
-                    async |_| { unreachable!("removed agent received work") }
-                )
-                .await?,
-                WorkerStep::Idle
-            );
+            assert_eq!(answer_next(&core, runtime).await?, None);
         }
     }
     core.storage_settled().await;

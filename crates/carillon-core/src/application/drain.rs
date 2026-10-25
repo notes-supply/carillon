@@ -6,9 +6,9 @@
 //! that does not finish in time, or that core or a runtime cannot show,
 //! ends the pause and stops nothing.
 //!
-//! Forcing stops without waiting. It interrupts: a message a runtime is
-//! still running is recorded as interrupted and not replayed, and forcing
-//! does not show that native work a runtime started has stopped.
+//! Forcing stops without waiting. A hand-over it interrupts is made again
+//! after the restart, and forcing does not show that native work a runtime
+//! started has stopped.
 
 use std::time::Duration;
 
@@ -144,7 +144,7 @@ impl Hold {
         Ok(drain)
     }
 
-    /// Ends the pause so core's workers claim again, waiting at most
+    /// Ends the pause so core's workers hand turns over again, waiting at most
     /// `within`. With no time left it asks nothing, and the pause lapses
     /// within its lease, as a pause core does not hear end does.
     pub(super) async fn end(&self, within: Duration) {
@@ -238,7 +238,7 @@ fn unsettled(drain: &Drain) -> Vec<String> {
             }
         }
         Some(workers) => unsettled.push(format!(
-            "{workers} runtime worker(s) have not ended; a turn one holds settles first"
+            "{workers} runtime worker(s) have not ended; a hand-over one makes ends first"
         )),
         None => unsettled.push("core has not yet arranged its workers for the pause".to_owned()),
     }
@@ -288,9 +288,9 @@ pub(super) async fn drain(
         let unsettled = unsettled(&drain);
         if !unsettled.is_empty() {
             println!(
-                "Forcing the stop, which interrupts what has not settled: {}. A message a \
-                 runtime is still running is recorded as interrupted and not replayed; forcing \
-                 does not show that native work a runtime started has stopped.",
+                "Forcing the stop before this settles: {}. Each runtime takes up the turns it \
+                 holds again once it starts, and none is replayed; forcing does not show that \
+                 native work a runtime started has stopped.",
                 unsettled.join("; ")
             );
         }
@@ -342,12 +342,12 @@ pub(super) async fn stop(services: &Services<'_>, hold: Option<Hold>) -> Result<
     match kept {
         Held::Throughout => println!("Core stopped with its runtime workers paused."),
         Held::Lapsed => println!(
-            "Core's pause lapsed before core stopped: its workers may have claimed a turn the \
-             stop interrupted; `carillon recent` shows what ran."
+            "Core's pause lapsed before core stopped: its workers may have handed a runtime a \
+             turn as it stopped; `carillon recent` shows what ran."
         ),
         Held::Unconfirmed => println!(
-            "Core did not confirm its pause until it stopped, so its workers may have claimed a \
-             turn the stop interrupted; `carillon recent` shows what ran."
+            "Core did not confirm its pause until it stopped, so its workers may have handed a \
+             runtime a turn as it stopped; `carillon recent` shows what ran."
         ),
     }
     stopped
