@@ -139,23 +139,27 @@ fn shared_command_wire_fixtures() -> Result<()> {
 /// that is not valid is dropped without costing the turn its answer.
 #[test]
 fn an_invalid_final_report_never_invalidates_the_answer() -> Result<()> {
-    use carillon_protocol::model::RuntimeTurnResponse;
     let fixtures: ActivityFixtures = serde_json::from_str(include_str!(
         "../../../packages/protocol/fixtures/activity.json"
     ))?;
-    let answer = |activity: &Value| serde_json::json!({ "correlation_id": "turn", "output": "Done.", "activity": activity });
+    let answer = |activity: &Value| serde_json::json!({ "outcome": "answered", "output": "Done.", "activity": activity });
     for value in &fixtures.activities {
-        let response: RuntimeTurnResponse = serde_json::from_value(answer(value))?;
+        let TurnOutcome::Answered { activity, .. } = serde_json::from_value(answer(value))? else {
+            anyhow::bail!("an answer read as another outcome");
+        };
         assert_eq!(
-            serde_json::to_value(response.activity)?,
+            serde_json::to_value(activity)?,
             *value,
             "a valid report is kept as it was"
         );
     }
     for value in &fixtures.invalid_activities {
-        let response: RuntimeTurnResponse = serde_json::from_value(answer(value))?;
-        assert_eq!(response.output, "Done.");
-        assert!(response.activity.is_none());
+        let TurnOutcome::Answered { output, activity } = serde_json::from_value(answer(value))?
+        else {
+            anyhow::bail!("an answer read as another outcome");
+        };
+        assert_eq!(output, "Done.");
+        assert!(activity.is_none());
     }
     Ok(())
 }

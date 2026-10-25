@@ -1,4 +1,4 @@
-/** A durable runtime's calls to core, with its own registry credential. */
+/** A runtime's calls to core, with its own registry credential. */
 import { Type } from "typebox";
 import { Check, Parse } from "typebox/value";
 import {

@@ -265,14 +265,7 @@ export const TurnAttachmentSchema = Type.Object({
 });
 export type TurnAttachment = Static<typeof TurnAttachmentSchema>;
 
-/** An earlier turn's captured files, offered again to a later turn. */
-export const UnansweredTurnSchema = Type.Object({
-  correlation_id: Type.String({ minLength: 1 }),
-  attachments: Type.Array(TurnAttachmentSchema, { minItems: 1, maxItems: 100 }),
-});
-export type UnansweredTurn = Static<typeof UnansweredTurnSchema>;
-
-/** Core's request to run one claimed turn. */
+/** A turn core hands a runtime to hold and run. */
 export const RuntimeTurnRequestSchema = Type.Object({
   correlation_id: Type.String(),
   interface_id: ProviderIdentitySchema,
@@ -287,21 +280,11 @@ export const RuntimeTurnRequestSchema = Type.Object({
   attachment_root: Type.String({ minLength: 1 }),
   /** This turn's captured files, in message order. */
   attachments: Type.Optional(Type.Array(TurnAttachmentSchema, { maxItems: 100 })),
-  /**
-   * Files of earlier turns in this conversation that no answered turn has
-   * carried yet, oldest first, which the runtime's conversation may not hold.
-   */
-  unanswered: Type.Optional(Type.Array(UnansweredTurnSchema, { maxItems: 100 })),
-  /**
-   * Present on an observation: a turn core queued itself to carry the report
-   * of native work an earlier turn started, with that turn's runtime cursor.
-   */
-  follow_up: Type.Optional(Type.Unknown()),
 });
 export type RuntimeTurnRequest = Static<typeof RuntimeTurnRequestSchema>;
 
 /**
- * How a durable runtime says a turn it holds ended. `steered` and `stopped`
+ * How a runtime says a turn it holds ended. `steered` and `stopped`
  * send nothing to the conversation; a failure's `explanation` is shown as
  * given.
  */
@@ -328,7 +311,7 @@ export const TurnOutcomeSchema = Type.Union([
 export type TurnOutcome = Static<typeof TurnOutcomeSchema>;
 
 /**
- * A turn a durable runtime opens in an existing conversation of its own, for
+ * A turn a runtime opens in an existing conversation of its own, for
  * a schedule or a subagent's report. The same `key` opens one turn.
  */
 export const TurnOpeningSchema = Type.Object(

@@ -35,38 +35,10 @@
       "interface_id": "discord-private",
       "agent_id": "default",
       "audience_id": "discord-100-300",
-      "input": "What was in the file I sent with that command?",
+      "input": "And what about the second one?",
       "resource_root": "/home/owner/.carillon/state/resource-snapshots/419ebb9a13f728315bc30ff6cb2523105de7a2da7f0eed72753185fb511cb9c4",
       "native": null,
-      "attachment_root": "/home/owner/.carillon/state/attachments",
-      "unanswered": [
-        {
-          "correlation_id": "01a0fc1d-6b10-7c42-9a1e-3f5d0e2b7c11",
-          "attachments": [
-            {
-              "path": "01a0fc1d-6b4e-7d31-8f0a-2c9b1e7d4a50/0",
-              "name": "sent with a command.pdf",
-              "size": 1024,
-              "content_type": "application/pdf",
-              "sha256": "5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef"
-            }
-          ]
-        }
-      ]
-    },
-    {
-      "correlation_id": "01a0fc1e-0b7d-7a52-8c11-5e6f7a8b9c0d",
-      "interface_id": "discord-private",
-      "agent_id": "default",
-      "audience_id": "discord-100-300",
-      "input": "",
-      "resource_root": "/home/owner/.carillon/state/resource-snapshots/419ebb9a13f728315bc30ff6cb2523105de7a2da7f0eed72753185fb511cb9c4",
-      "native": {},
-      "attachment_root": "/home/owner/.carillon/state/attachments",
-      "follow_up": {
-        "message": "a-runtime-owned-message-id",
-        "after": 3
-      }
+      "attachment_root": "/home/owner/.carillon/state/attachments"
     }
   ],
   "invalid_requests": [
@@ -143,21 +115,6 @@
           "name": "p",
           "size": -1,
           "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        }
-      ]
-    },
-    {
-      "correlation_id": "unanswered without files",
-      "interface_id": "discord-private",
-      "agent_id": "default",
-      "audience_id": "a",
-      "input": "x",
-      "resource_root": "/r",
-      "attachment_root": "/a",
-      "unanswered": [
-        {
-          "correlation_id": "earlier",
-          "attachments": []
         }
       ]
     }

@@ -569,7 +569,6 @@ impl Core {
             audience_id: turn.audience_id.clone(),
             input: turn.input.clone(),
             native: turn.native.clone(),
-            follow_up: None,
             resource_root: resources::root(&self.snapshot_store(), &turn.resource_snapshot_id)
                 .display()
                 .to_string(),
@@ -581,7 +580,6 @@ impl Core {
                 .iter()
                 .map(attachments::CapturedFile::wire)
                 .collect(),
-            unanswered: Vec::new(),
         }
     }
 

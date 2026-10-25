@@ -4,21 +4,11 @@ import type { TurnRequest } from "@carillon/runtime/operations";
 /**
  * The message T3 is sent for the turn: a command invocation verbatim, so
  * T3 runs it as its own; else the person's text as written, followed by
- * Carillon's notes of the files T3 cannot take, of this message and of
- * earlier ones.
+ * Carillon's note of the files T3 cannot take.
  */
 export function compose(request: TurnRequest, unavailable: readonly string[]): string {
   if (turnIntent(request.native) === "command") return request.input;
-  const earlier = (request.unanswered ?? []).flatMap((turn) =>
-    turn.attachments.map((attachment) => attachment.name),
-  );
-  return joined(
-    request.input,
-    unavailableNote(unavailable),
-    earlier.length === 0
-      ? ""
-      : `[Carillon: ${String(earlier.length)} file(s) attached to earlier messages are not available to this runtime: ${earlier.join(", ")}]`,
-  );
+  return joined(request.input, unavailableNote(unavailable));
 }
 
 /**

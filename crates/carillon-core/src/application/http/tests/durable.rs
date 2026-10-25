@@ -201,7 +201,6 @@ async fn a_conversations_messages_all_reach_the_inbox_in_order_without_waiting_f
     assert_eq!(runtime.handed(), ["one", "two", "three"]);
     let request = runtime.request(0)?;
     assert_eq!(request.correlation_id, first.turn_id);
-    assert!(request.follow_up.is_none() && request.unanswered.is_empty());
     for turn in [&first.turn_id, &second.turn_id] {
         assert_eq!(state_of(&state, turn)?, TurnState::Running);
     }

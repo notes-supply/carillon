@@ -30,13 +30,6 @@ import {
 } from "./runtime/harness.ts";
 import { connectT3 } from "./t3.ts";
 
-const attachment = {
-  path: `${"0".repeat(8)}-0000-0000-0000-${"0".repeat(12)}/0`,
-  name: "a.png",
-  size: 1,
-  sha256: "0".repeat(64),
-};
-
 /** The turn's run once it has the status. */
 async function waitForStatus(correlation: string, status: Run["status"]): Promise<Run> {
   await fake.waitFor(() => runOf(correlation)?.status === status);
@@ -655,19 +648,6 @@ it("never follows T3's upload redirect to another origin", async () => {
     message: "T3 did not accept the attached image photo.png (HTTP 307).",
   });
   expect(dispatches()).toHaveLength(0);
-});
-
-it("names earlier files it cannot provide", async () => {
-  const result = execute(
-    turn("turn-2", "hello", {
-      unanswered: [{ correlation_id: "turn-1", attachments: [attachment] }],
-    }),
-  );
-  answer(await started("turn-2"), "hi");
-  await result;
-  expect(userTexts()[0]).toMatch(
-    /\n\n\[Carillon: 1 file\(s\) attached to earlier messages are not available to this runtime: a\.png\]$/u,
-  );
 });
 
 it("runs plain T3 Code on the instances T3 offers, with the person's text as written and T3's own title", async () => {
@@ -1781,23 +1761,13 @@ it("sends a command with the images it could upload, and prose names a file T3 c
   );
 });
 
-it("sends a command invocation verbatim, and names earlier files only with prose", async () => {
-  const earlier = [{ correlation_id: "turn-0", attachments: [attachment] }];
+it("sends a command invocation verbatim", async () => {
   const command = execute(
-    turn("turn-1", "/compact keep the decisions", {
-      native: { intent: "command" },
-      unanswered: earlier,
-    }),
+    turn("turn-1", "/compact keep the decisions", { native: { intent: "command" } }),
   );
   answer(await started("turn-1"), "Compacted.");
   expect((await command).output).toBe("Compacted.");
-  const prose = execute(turn("turn-2", "hello", { unanswered: earlier }));
-  answer(await started("turn-2"), "hi");
-  expect((await prose).output).toBe("hi");
-  expect(userTexts()).toEqual([
-    "/compact keep the decisions",
-    "hello\n\n[Carillon: 1 file(s) attached to earlier messages are not available to this runtime: a.png]",
-  ]);
+  expect(userTexts()).toEqual(["/compact keep the decisions"]);
 
   // A command T3 runs to completion without a reply of its own is acknowledged
   // by name; a failed one keeps T3's explanation.

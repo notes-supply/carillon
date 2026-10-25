@@ -1,4 +1,4 @@
-/** A small stand-in for core's runtime API, for durable runtimes' tests. */
+/** A small stand-in for core's runtime API, for runtimes' tests. */
 import { once } from "node:events";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { Check, Parse } from "typebox/value";
