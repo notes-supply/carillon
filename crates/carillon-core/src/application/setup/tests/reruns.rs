@@ -1,17 +1,16 @@
 use super::{
-    Assistant, Config, LoadedConfig, Options, Runtime, Shown, Unasked, fake_t3, initialize, model,
-    options, set_up_t3,
+    Config, LoadedConfig, Options, Runtime, Shown, fake_t3, initialized, model, options, set_up_t3,
 };
 use crate::application::{
     admin::set_agents,
-    setup::{agents, runtimes, sign_in_to_pi},
+    setup::{agents, runtimes},
 };
 
 #[test]
-fn a_t3_assistant_moves_to_pi_by_resources_and_keeps_its_paths() -> anyhow::Result<()> {
+fn setting_up_t3_keeps_the_assistants_id_and_paths_on_pi() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let home = directory.path().join("home");
-    let path = initialize(&home, directory.path(), 44_000, Runtime::T3)?;
+    let path = initialized(&home, directory.path(), Runtime::Pi)?;
     let mut config: Config = toml::from_str(&std::fs::read_to_string(&path)?)?;
     config.agents[0].id = "my-assistant".to_owned();
     config.agents[0].name = "My assistant".to_owned();
@@ -25,7 +24,7 @@ fn a_t3_assistant_moves_to_pi_by_resources_and_keeps_its_paths() -> anyhow::Resu
     set_up_t3(
         &home,
         &options(),
-        &Assistant::Pi,
+        true,
         &program,
         &mut Shown::answering(&["", "token", "0", "0"]),
     )?;
@@ -38,67 +37,31 @@ fn a_t3_assistant_moves_to_pi_by_resources_and_keeps_its_paths() -> anyhow::Resu
         assistant.resources.as_deref(),
         Some(std::path::Path::new("agents/default"))
     );
-    assert!(
-        stored
-            .provider("runtime-pi", super::ProviderRole::Runtime)?
-            .enabled
-    );
+    assert_eq!(stored.agent("t3-notes")?.runtime, "runtime-t3");
     assert_eq!(stored.agents.len(), 2);
     Ok(())
 }
 
 #[test]
-fn a_pi_assistant_moves_to_t3_by_resources_and_none_drops_it() -> anyhow::Result<()> {
+fn a_pi_assistant_is_created_when_a_code_only_installation_adds_pi() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let home = directory.path().join("home");
-    let path = initialize(&home, directory.path(), 44_000, Runtime::Pi)?;
-    let mut config: Config = toml::from_str(&std::fs::read_to_string(&path)?)?;
-    config.agents[0].id = "my-assistant".to_owned();
-    set_agents(&path, config.agents)?;
-    let project = super::super::Project {
-        id: "notes".to_owned(),
-        title: "Notes".to_owned(),
-        workspace: directory.path().to_path_buf(),
-    };
-    agents(
-        &home,
-        &options(),
-        Assistant::T3(&project),
-        Some(&[&project]),
+    let path = initialized(&home, directory.path(), Runtime::T3)?;
+    set_agents(
+        &path,
+        vec![carillon_installation::config::AgentConfig {
+            id: "t3-code".to_owned(),
+            name: "T3 Code".to_owned(),
+            runtime: Runtime::T3.id().to_owned(),
+            workspace: directory.path().to_path_buf(),
+            resources: None,
+        }],
     )?;
-    let loaded = LoadedConfig::load(&path)?;
-    assert_eq!(loaded.value.agent("my-assistant")?.runtime, "runtime-t3");
-    assert_eq!(
-        loaded.value.agent("my-assistant")?.workspace,
-        project.workspace
-    );
-    sign_in_to_pi(&home, true, &mut Unasked)?;
-    std::fs::write(
-        home.join("providers/runtime-t3.toml"),
-        "[agents.t3-notes]\nproject_id = 'notes'\n",
-    )?;
-    agents(&home, &options(), Assistant::None, Some(&[&project]))?;
-    let loaded = LoadedConfig::load(&path)?;
-    assert_eq!(loaded.value.agents.len(), 1);
-    assert_eq!(loaded.value.agents[0].id, "t3-notes");
-    assert_eq!(loaded.value.agents[0].resources, None);
-    Ok(())
-}
-
-#[test]
-fn a_pi_assistant_is_created_when_a_code_only_installation_chooses_pi() -> anyhow::Result<()> {
-    let directory = tempfile::tempdir()?;
-    let home = directory.path().join("home");
-    let path = initialize(&home, directory.path(), 44_000, Runtime::T3)?;
-    let mut config: Config = toml::from_str(&std::fs::read_to_string(&path)?)?;
-    config.agents[0].resources = None;
-    config.agents[0].id = "t3-code".to_owned();
-    set_agents(&path, config.agents)?;
     let options = Options {
         workspace: Some(directory.path().to_path_buf()),
         ..options()
     };
-    agents(&home, &options, Assistant::Pi, Some(&[]))?;
+    agents(&home, &options, true, Some(&[]))?;
     let stored: Config = toml::from_str(&std::fs::read_to_string(&path)?)?;
     assert_eq!(stored.agents.len(), 1);
     assert!(!home.join("agents/default/sessions").exists());
@@ -114,7 +77,7 @@ fn a_pi_assistant_is_created_when_a_code_only_installation_chooses_pi() -> anyho
 fn an_explicit_runtime_extends_a_pi_installation() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let home = directory.path().join("home");
-    initialize(&home, directory.path(), 44_000, Runtime::Pi)?;
+    initialized(&home, directory.path(), Runtime::Pi)?;
     let options = Options {
         runtimes: vec![Runtime::T3],
         ..options()
@@ -125,7 +88,7 @@ fn an_explicit_runtime_extends_a_pi_installation() -> anyhow::Result<()> {
         title: "Notes".to_owned(),
         workspace: directory.path().to_path_buf(),
     };
-    agents(&home, &options, Assistant::Pi, Some(&[&project]))?;
+    agents(&home, &options, true, Some(&[&project]))?;
     assert_eq!(
         super::registered_runtimes(&home)?,
         [Runtime::Pi, Runtime::T3]
@@ -133,102 +96,32 @@ fn an_explicit_runtime_extends_a_pi_installation() -> anyhow::Result<()> {
     let stored: Config = toml::from_str(&std::fs::read_to_string(home.join("carillon.toml"))?)?;
     assert_eq!(stored.agent("assistant")?.runtime, "runtime-pi");
     assert_eq!(stored.agent("t3-notes")?.runtime, "runtime-t3");
+    let loaded = LoadedConfig::load(&home.join("carillon.toml"))?;
+    assert_eq!(loaded.value.agents.len(), 2);
     Ok(())
 }
 
 #[test]
-fn t3_reruns_use_the_runtimes_agent_offer_including_older_profiles() -> anyhow::Result<()> {
+fn t3_setup_offers_each_agent_the_models_the_runtime_offers_it() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let home = directory.path().join("home");
-    initialize(&home, directory.path(), 44_000, Runtime::T3)?;
+    initialized(&home, directory.path(), Runtime::T3)?;
     let offer = serde_json::json!({
         "projects": [{"id": "notes", "title": "Notes", "workspace": directory.path()}],
-        "models": [model("carillon_codex", "gpt", "Profile GPT"), model("codex", "gpt", "GPT")],
+        "models": [model("other", "gpt", "Other GPT"), model("codex", "gpt", "GPT")],
         "agentModels": {"t3-notes": [model("codex", "gpt", "GPT")]},
     });
     let program = fake_t3(directory.path(), &offer)?;
     set_up_t3(
         &home,
         &options(),
-        &Assistant::None,
+        false,
         &program,
         &mut Shown::answering(&["", "token", "0", "0"]),
     )?;
     let calls = std::fs::read_to_string(directory.path().join("calls"))?;
     assert!(
         calls.contains("--agent t3-notes --project notes --model codex/gpt"),
-        "{calls}"
-    );
-    Ok(())
-}
-
-#[test]
-fn an_existing_key_based_profile_is_reconciled_without_asking_to_sign_in() -> anyhow::Result<()> {
-    let directory = tempfile::tempdir()?;
-    let home = directory.path().join("home");
-    initialize(&home, directory.path(), 44_000, Runtime::T3)?;
-    let settings = home.join("providers/runtime-t3.toml");
-    let saved = "profiles = [\"carillon_claude\"]\n";
-    std::fs::write(&settings, saved)?;
-    let program = fake_t3(
-        directory.path(),
-        &serde_json::json!({"projects": [], "models": [], "profiles": ["carillon_claude"]}),
-    )?;
-    let server = super::super::Server {
-        t3: &program,
-        url: "http://127.0.0.1:3773".to_owned(),
-        token: "saved-token".to_owned(),
-    };
-    let profile =
-        super::super::make_profile(&home, &server, super::super::Harness::Claude, &mut Unasked)?;
-    assert_eq!(profile.instance_id, "carillon_claude");
-    assert_eq!(profile.home, directory.path().join("profiles/claude"));
-    assert_eq!(std::fs::read_to_string(&settings)?, saved);
-    assert_eq!(
-        std::fs::read_to_string(directory.path().join("calls"))?,
-        format!(
-            "discover --url http://127.0.0.1:3773\n  stdin: saved-token\nprofile --config {} --url http://127.0.0.1:3773 --harness claude\n  stdin: saved-token\n",
-            home.join("carillon.toml").display()
-        )
-    );
-    std::fs::remove_file(settings)?;
-    let recovered =
-        super::super::make_profile(&home, &server, super::super::Harness::Claude, &mut Unasked)?;
-    assert_eq!(recovered.instance_id, "carillon_claude");
-    Ok(())
-}
-
-#[test]
-fn a_saved_profile_missing_from_t3_asks_how_to_sign_in_again() -> anyhow::Result<()> {
-    let directory = tempfile::tempdir()?;
-    let home = directory.path().join("home");
-    initialize(&home, directory.path(), 44_000, Runtime::T3)?;
-    std::fs::write(
-        home.join("providers/runtime-t3.toml"),
-        "profiles = [\"carillon_claude\"]\n",
-    )?;
-    let program = fake_t3(
-        directory.path(),
-        &serde_json::json!({"projects": [], "models": [], "profiles": []}),
-    )?;
-    let server = super::super::Server {
-        t3: &program,
-        url: "http://127.0.0.1:3773".to_owned(),
-        token: "saved-token".to_owned(),
-    };
-    let mut questions = Shown::answering(&["1", "replacement-key"]);
-    let profile = super::super::make_profile(
-        &home,
-        &server,
-        super::super::Harness::Claude,
-        &mut questions,
-    )?;
-    assert_eq!(profile.instance_id, "carillon_claude");
-    let calls = std::fs::read_to_string(directory.path().join("calls"))?;
-    assert!(
-        calls.contains(
-            "--harness claude --with-key\n  stdin: saved-token\n  stdin: replacement-key\n"
-        ),
         "{calls}"
     );
     Ok(())

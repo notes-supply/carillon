@@ -25,7 +25,7 @@ use tracing_subscriber::EnvFilter;
 use carillon_installation::maintenance::ServiceLock;
 
 use super::{
-    admin::{Runtime, backup, initialize as init, restore, set_provider},
+    admin::{Runtime, assistant, backup, initialize, restore, set_provider},
     drain::{Pace, drain, stop},
     http::{Applied, RegistryStatus, check, serve},
     operations::{
@@ -92,22 +92,19 @@ struct Drained {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Create a new installation.
+    /// Create a new installation, with Carillon's assistant on Pi.
     Init {
         #[arg(long)]
         workspace: PathBuf,
         #[arg(long, default_value_t = 43_800)]
         base_port: u16,
-        /// The runtime the agent runs on; only it is registered.
-        #[arg(long, value_enum, default_value_t = Runtime::Pi)]
-        runtime: Runtime,
     },
-    /// Set up an installation at the terminal: the runtimes and what runs
-    /// Carillon's assistant, then Discord. A rerun keeps what is already set
-    /// up when asked to.
+    /// Set up an installation at the terminal: the runtimes, Pi for
+    /// Carillon's assistant and T3 for T3 Code channels, then Discord. A
+    /// rerun keeps what is already set up when asked to.
     Setup {
-        /// The agent's folder with Pi (default: your home). With T3, the
-        /// chosen project's folder.
+        /// The assistant's folder with Pi (default: your home). On T3, an
+        /// agent works in its project's folder.
         #[arg(long)]
         workspace: Option<PathBuf>,
         #[arg(long, default_value_t = 43_800)]
@@ -241,9 +238,13 @@ pub(crate) async fn run() -> Result<()> {
         Command::Init {
             workspace,
             base_port,
-            runtime,
         } => {
-            let path = init(&home()?, &workspace, base_port, runtime)?;
+            let path = initialize(
+                &home()?,
+                base_port,
+                Runtime::Pi,
+                vec![assistant(&workspace)],
+            )?;
             println!("{}", path.display());
         }
         Command::Setup {

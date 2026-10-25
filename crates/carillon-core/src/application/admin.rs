@@ -73,17 +73,17 @@ impl Runtime {
     }
 }
 
-/// Creates an installation with the Discord provider and the chosen runtime
-/// registered and credentialed, and only those. Provider-owned settings
-/// (such as Discord admission or the T3 server) are written afterwards by
-/// each provider's own commands.
+/// Creates an installation with `agents`, and the Discord provider and
+/// `runtime` registered and credentialed, and only those. Provider-owned
+/// settings are written afterwards by each provider's own commands.
 pub(super) fn initialize(
     root: &Path,
-    workspace: &Path,
     base_port: u16,
     runtime: Runtime,
+    agents: Vec<AgentConfig>,
 ) -> Result<PathBuf> {
-    if !workspace.is_absolute() || !workspace.is_dir() {
+    let usable = |workspace: &Path| workspace.is_absolute() && workspace.is_dir();
+    if !agents.iter().all(|agent| usable(&agent.workspace)) {
         bail!("workspace must be an absolute path to an existing directory");
     }
     if root.exists() && fs::read_dir(root)?.next().is_some() {
@@ -102,7 +102,7 @@ pub(super) fn initialize(
             attachments: AttachmentLimits::default(),
         },
         providers: default_providers(base_port, &discord_token, runtime, &runtime_token)?,
-        agents: vec![assistant(runtime, workspace)],
+        agents,
     };
     config.validate()?;
     let target = absolute_destination(root)?;
@@ -150,16 +150,15 @@ pub(super) fn initialize(
     Ok(target.join("carillon.toml"))
 }
 
-/// The ID of the agent a new installation starts with: Carillon's own
-/// assistant, with the installation's resources.
+/// The ID of Carillon's own assistant, on Pi with the installation's resources.
 pub(super) const ASSISTANT: &str = "assistant";
 
 #[must_use]
-pub(super) fn assistant(runtime: Runtime, workspace: &Path) -> AgentConfig {
+pub(super) fn assistant(workspace: &Path) -> AgentConfig {
     AgentConfig {
         id: ASSISTANT.to_owned(),
         name: "Carillon".to_owned(),
-        runtime: runtime.id().to_owned(),
+        runtime: Runtime::Pi.id().to_owned(),
         workspace: workspace.to_path_buf(),
         resources: Some(PathBuf::from(RESOURCES)),
     }
@@ -618,7 +617,7 @@ mod tests {
         Config, LoadedConfig, ProviderRole, RELEASE_VERSION, hash_token,
     };
 
-    use super::{backup, initialize, restore, set_provider};
+    use super::{Runtime, assistant, backup, initialize, restore, set_provider};
     use crate::Lane;
 
     fn initialize_test_installation(
@@ -626,7 +625,7 @@ mod tests {
         workspace: &Path,
         base_port: u16,
     ) -> Result<PathBuf> {
-        initialize(root, workspace, base_port, super::Runtime::Pi)
+        initialize(root, base_port, Runtime::Pi, vec![assistant(workspace)])
     }
 
     /// A base port for backups that must find their services stopped, away
@@ -781,9 +780,9 @@ mod tests {
     fn a_t3_installation_registers_only_the_t3_runtime() -> Result<()> {
         let directory = tempdir()?;
         let root = directory.path().join("installation");
-        let config_path = initialize(&root, directory.path(), 44_000, super::Runtime::T3)?;
+        let config_path = initialize(&root, 44_000, Runtime::T3, Vec::new())?;
         let config = LoadedConfig::load(&config_path)?;
-        assert_eq!(config.value.agents[0].runtime, "runtime-t3");
+        assert!(config.value.agents.is_empty());
         let ids: Vec<&str> = config
             .value
             .providers

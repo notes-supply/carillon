@@ -4,7 +4,7 @@ umask 077
 
 usage() {
   echo "usage: install.sh [--runtime pi|t3] [--base-port PORT] [--workspace PATH]    (asks the rest at the terminal)" >&2
-  echo "       install.sh [--runtime pi|t3] --guild-id ID --bot-user-id ID --user-id ID [--user-id ID ...] --route CHANNEL_ID:mention|always:thread|channel:AGENT_ID [--route ...] [--base-port PORT] [--workspace PATH]" >&2
+  echo "       install.sh --guild-id ID --bot-user-id ID --user-id ID [--user-id ID ...] --route CHANNEL_ID:mention|always:thread|channel:AGENT_ID [--route ...] [--base-port PORT] [--workspace PATH]" >&2
   echo "       install.sh --update [--check]    (run by 'carillon update'; --check changes nothing)" >&2
   exit 2
 }
@@ -51,6 +51,8 @@ if [ "$MODE" = setup ]; then
     [ -n "$BOT_USER_ID" ] || usage
     [ -n "$USER_IDS" ] || usage
     [ -n "$ROUTES" ] || usage
+    # Without questions, Carillon's assistant runs on Pi; T3 is set up guided.
+    [ -z "$RUNTIME" ] || usage
     WORKSPACE=${WORKSPACE:-${HOME:-}}
   fi
 fi
@@ -199,7 +201,7 @@ fi
 # arguments.
 if [ "$MODE" = setup ] && [ "$GUIDED" -eq 0 ] && [ ! -f "$CARILLON_HOME/carillon.toml" ]; then
   "$SOURCE/bin/carillon" --home "$CARILLON_HOME" init --workspace "$WORKSPACE" \
-    --base-port "$BASE_PORT" --runtime "${RUNTIME:-pi}"
+    --base-port "$BASE_PORT"
 fi
 # Serialize maintenance with `carillon update`, which holds this lock itself
 # while it runs `install.sh --update`, and with uninstallation.
@@ -328,16 +330,11 @@ To start it at boot without logging in, an administrator can run: loginctl enabl
 EOF
   exit 0
 fi
-if grep -Fqx 'runtime = "runtime-t3"' "$CARILLON_HOME/carillon.toml"; then
-  RUNTIME_STEP="Set up T3 with: $CARILLON setup, which makes Carillon's own T3 profile and signs it in"
-else
-  RUNTIME_STEP="Sign in to a model provider with: $APP/bin/carillon-pi --no-session --no-tools --no-approve
-   In Pi, run /login, then /model and press Ctrl+S on the agent's model to save it."
-fi
 cat <<EOF
 Carillon installed for $OWNER at $CARILLON_HOME and enabled for this user's service manager.
 1. Put the Discord bot token in $CARILLON_HOME/credentials/discord-bot.token (mode 0600).
-2. $RUNTIME_STEP
+2. Sign in to a model provider with: $APP/bin/carillon-pi --no-session --no-tools --no-approve
+   In Pi, run /login, then /model and press Ctrl+S on the agent's model to save it.
 3. Start deliberately with: $CARILLON start
 4. Inspect with: $CARILLON status   and   $CARILLON logs
 Update later with: $CARILLON update /path/to/carillon-VERSION-linux-ARCH.tar.gz

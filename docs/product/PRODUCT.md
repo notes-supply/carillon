@@ -12,8 +12,8 @@ new interface or runtime doesn't mean rebuilding the rest.
 3. Talk to the agent in channels or threads, with files and images.
 4. Let the agent use its runtime's native tools, extensions and skills with
    the owner's authority, and watch a running turn on a Discord card.
-5. Route each channel to an agent: Carillon's assistant, on Pi or on T3
-   with Carillon's own profiles, or plain T3 Code in a project.
+5. Route each channel to an agent: Carillon's assistant, on Pi, or plain T3
+   Code in a project.
 6. Choose models and their settings for a conversation, or an agent's
    default for new conversations, with `/model`, and run the runtime's own
    commands with `/command`.

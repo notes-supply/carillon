@@ -468,9 +468,9 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let config_path = crate::application::admin::initialize(
             &directory.path().join("installation"),
-            directory.path(),
             44_000,
             crate::application::admin::Runtime::Pi,
+            vec![crate::application::admin::assistant(directory.path())],
         )?;
         let config = super::LoadedConfig::load(&config_path)?;
         for partial_body in [false, true] {
@@ -520,9 +520,9 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let config_path = crate::application::admin::initialize(
             &directory.path().join("installation"),
-            directory.path(),
             44_100,
             crate::application::admin::Runtime::Pi,
+            vec![crate::application::admin::assistant(directory.path())],
         )?;
         let mut config = super::LoadedConfig::load(&config_path)?;
         let listener = tokio::net::TcpListener::bind("127.0.0.2:0").await?;

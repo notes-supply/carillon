@@ -1,4 +1,4 @@
-1624 crates/carillon-core/src/application/admin.rs
+1623 crates/carillon-core/src/application/admin.rs
 2558 crates/carillon-core/src/application/http/tests.rs
 1314 crates/carillon-core/src/application/http/tests/attachments.rs
 1980 crates/carillon-core/src/db.rs

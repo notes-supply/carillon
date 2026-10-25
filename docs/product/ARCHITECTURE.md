@@ -273,20 +273,19 @@ runtime keeps its own settings for its agents. Both files reject unknown
 fields.
 
 Setup registers the Discord provider and the runtimes chosen, Pi, T3 or
-both, and asks what runs Carillon's assistant: Pi, or T3 with Claude or Codex
-signed in for Carillon alone. Each provider's own program sets up its part:
-Pi signs in through its own interface; the T3 runtime makes the assistant's
-profiles, an agent for each T3 project T3 Code channels work in, and their
-settings; and the Discord provider learns the bot from its token and offers
-servers, channels and people by name, asking who answers in each channel.
-Setup reruns retain a plain T3 agent's ID by its saved T3 project ID. New
-projects receive IDs that avoid both existing agents and saved project bindings,
-so keeping a Discord route cannot silently move it to a different project.
-Adding Pi explicitly to plain T3 Code channels plans its assistant while keeping
-T3's settings and honours `--workspace`. If the assistant currently runs on T3,
-setup asks where it should run and sets T3 up again so its saved agents match.
-Moving the assistant can leave a registered runtime with no agents. Core reports
-that runtime as idle, and its service exits successfully without serving.
+both. Pi runs Carillon's assistant whenever it is chosen. Each provider's
+own program sets up its part: Pi signs in through its own interface; the T3
+runtime makes an agent for each T3 project T3 Code channels work in, and
+their settings; and the Discord provider learns the bot from its token and
+offers servers, channels and people by name, asking who answers in each
+channel. Setup reruns retain a plain T3 agent's ID by its saved T3 project
+ID. New projects receive IDs that avoid both existing agents and saved
+project bindings, so keeping a Discord route cannot silently move it to a
+different project. Adding Pi explicitly to plain T3 Code channels plans its
+assistant while keeping T3's settings and honours `--workspace`. A
+registered runtime may have no agents, such as T3 beside Pi with no project
+chosen. Core reports that runtime as idle, and its service exits
+successfully without serving.
 The user target wants every bundled runtime's unit; one the registry doesn't
 list ends at once, as a disabled one does.
 
