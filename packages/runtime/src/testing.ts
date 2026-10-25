@@ -1,11 +1,18 @@
 /** A small stand-in for core's runtime API, for durable runtimes' tests. */
 import { once } from "node:events";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { Check } from "typebox/value";
-import { TurnOpeningSchema, type RunningTurn, type RuntimeTurnRequest } from "@carillon/protocol";
+import { Check, Parse } from "typebox/value";
+import {
+  TurnOpeningSchema,
+  TurnOutcomeSchema,
+  type RunningTurn,
+  type RuntimeTurnRequest,
+  type TurnOutcome,
+} from "@carillon/protocol";
 
 /** A call core received. */
 export interface Received {
+  readonly method: string;
   readonly path: string;
   readonly provider: string | undefined;
   readonly authorization: string | undefined;
@@ -20,6 +27,8 @@ export interface FakeCore {
   answer(...statuses: number[]): void;
   /** Records a turn core handed the runtime, which core lists running until it is settled. */
   hold(request: RuntimeTurnRequest): void;
+  /** Resolves with the outcome the runtime first settles `turnId` with. */
+  outcome(turnId: string): Promise<TurnOutcome>;
   /**
    * Holds the answers to calls of `path`, which core has acted on, until
    * released: as if the caller stopped before it heard them.
@@ -39,6 +48,12 @@ export async function startFakeCore(port = 0): Promise<FakeCore> {
   const settled = new Map<string, unknown>();
   const opened = new Map<string, string>();
   const running = new Map<string, RunningTurn>();
+  const outcomes = new Map<string, PromiseWithResolvers<TurnOutcome>>();
+  const outcomeOf = (turnId: string) => {
+    const known = outcomes.get(turnId) ?? Promise.withResolvers<TurnOutcome>();
+    outcomes.set(turnId, known);
+    return known;
+  };
   const stalls = new Map<string, { reached: () => void; released: Promise<void> }>();
   const server = createServer((request, response) => {
     void respond(request, response);
@@ -59,6 +74,7 @@ export async function startFakeCore(port = 0): Promise<FakeCore> {
     const provider = request.headers["x-carillon-provider"];
     const body: unknown = text.length === 0 ? undefined : JSON.parse(text);
     received.push({
+      method: request.method ?? "",
       path,
       provider: typeof provider === "string" ? provider : undefined,
       authorization: request.headers.authorization,
@@ -71,7 +87,10 @@ export async function startFakeCore(port = 0): Promise<FakeCore> {
       const kind = kindOf(body);
       const earlier = settled.get(outcome);
       if (earlier === undefined) settled.set(outcome, kind);
-      running.delete(decodeURIComponent(outcome));
+      const turnId = decodeURIComponent(outcome);
+      running.delete(turnId);
+      if (earlier === undefined && Check(TurnOutcomeSchema, body))
+        outcomeOf(turnId).resolve(Parse(TurnOutcomeSchema, body));
       return [earlier === undefined || earlier === kind ? 204 : 409];
     }
     if (path === "/v1/runtime/turns" && request.method === "GET")
@@ -114,6 +133,7 @@ export async function startFakeCore(port = 0): Promise<FakeCore> {
     hold(request) {
       running.set(request.correlation_id, { request });
     },
+    outcome: (turnId) => outcomeOf(turnId).promise,
     stall(path) {
       const reached = Promise.withResolvers<void>();
       const released = Promise.withResolvers<void>();

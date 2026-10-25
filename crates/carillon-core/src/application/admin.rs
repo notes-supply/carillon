@@ -242,8 +242,7 @@ fn runtime_provider(runtime: Runtime, port: u16, token: &str) -> Result<Provider
         token_hash: hash_token(token),
         enabled: true,
         parallel_turns: None,
-        // Pi holds the turns core hands it; T3 answers while core waits.
-        durable: runtime == Runtime::Pi,
+        durable: true,
     })
 }
 

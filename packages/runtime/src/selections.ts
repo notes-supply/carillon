@@ -3,7 +3,7 @@
 // own setting; the agent default and conversation overrides are Carillon's,
 // kept beside the runtime's private state and resolved when a turn starts.
 
-import { open, readFile, realpath, rename, writeFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import lockfile from "proper-lockfile";
 import { isDeepStrictEqual } from "node:util";
@@ -20,6 +20,7 @@ import {
 import { Parse } from "typebox/value";
 import { ExplainedFailure } from "./failure.ts";
 import { resolved, validated } from "./models.ts";
+import { publish, Unsynced } from "./publish.ts";
 import { Serial } from "./serial.ts";
 
 const LedgerSchema = Type.Object({
@@ -201,18 +202,13 @@ export class ModelSelections {
   }
 
   private async write(next: Ledger): Promise<void> {
-    const temporary = `${this.#path}.${String(process.pid)}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600, flush: true });
-    await rename(temporary, this.#path);
-    // The rename committed the visible state even if syncing its directory
-    // fails. Keep memory aligned with disk, but do not confirm durability.
+    await publish(this.#path, `${JSON.stringify(next, null, 2)}\n`).catch((failure: unknown) => {
+      // The rename committed the visible state even if syncing its directory
+      // fails. Keep memory aligned with disk, but do not confirm durability.
+      if (failure instanceof Unsynced) this.#ledger = next;
+      throw failure;
+    });
     this.#ledger = next;
-    const directory = await open(dirname(this.#path), "r");
-    try {
-      await directory.sync();
-    } finally {
-      await directory.close();
-    }
   }
 
   private agentSelection(agentId: string): Selection | null {

@@ -12,19 +12,43 @@ export function compose(request: TurnRequest, unavailable: readonly string[]): s
   const earlier = (request.unanswered ?? []).flatMap((turn) =>
     turn.attachments.map((attachment) => attachment.name),
   );
-  const notes = [
-    ...(unavailable.length === 0
-      ? []
-      : [
-          `[Carillon: ${String(unavailable.length)} file(s) attached to this message are not available to this runtime: ${unavailable.join(", ")}]`,
-        ]),
-    ...(earlier.length === 0
-      ? []
-      : [
-          `[Carillon: ${String(earlier.length)} file(s) attached to earlier messages are not available to this runtime: ${earlier.join(", ")}]`,
-        ]),
-  ];
-  return [request.input, ...notes].filter((part) => part.length > 0).join("\n\n");
+  return joined(
+    request.input,
+    unavailableNote(unavailable),
+    earlier.length === 0
+      ? ""
+      : `[Carillon: ${String(earlier.length)} file(s) attached to earlier messages are not available to this runtime: ${earlier.join(", ")}]`,
+  );
+}
+
+/**
+ * The turn's answer, which for a command also notes the files T3 did not
+ * take, since its message went as written. `unsent` is unknown for a
+ * command an earlier process sent.
+ */
+export function answerText(
+  request: TurnRequest,
+  output: string,
+  unsent: readonly string[] | undefined,
+): string {
+  const files = (request.attachments ?? []).map((attachment) => attachment.name);
+  if (turnIntent(request.native) !== "command" || files.length === 0) return output;
+  return joined(
+    output,
+    unsent === undefined
+      ? `[Carillon: T3 may not have received the ${String(files.length)} file(s) attached to this message: ${files.join(", ")}]`
+      : unavailableNote(unsent),
+  );
+}
+
+function unavailableNote(unavailable: readonly string[]): string {
+  return unavailable.length === 0
+    ? ""
+    : `[Carillon: ${String(unavailable.length)} file(s) attached to this message are not available to this runtime: ${unavailable.join(", ")}]`;
+}
+
+function joined(...parts: readonly string[]): string {
+  return parts.filter((part) => part.length > 0).join("\n\n");
 }
 
 /** The person's words a plain T3 Code thread's first message is titled from, as T3's composer seeds it. */

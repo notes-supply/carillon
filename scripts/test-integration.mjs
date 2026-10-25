@@ -1217,9 +1217,7 @@ async function testActivityVisibility() {
   }
 }
 
-/**
- * T3 tool calls and failures reach core's jobs and Discord's work cards.
- */
+/** T3 tool calls and failures reach core's jobs and Discord's work cards. */
 async function testT3ActivityThroughDelivery() {
   const { startFakeT3 } = await import(
     new URL("../packages/runtime-t3/src/fake.ts", import.meta.url).href
@@ -1247,6 +1245,7 @@ version = "${version}"
 url = "http://127.0.0.1:${String(servicePort("runtime-t3"))}"
 token_hash = "${createHash("sha256").update(token).digest("hex")}"
 enabled = true
+durable = true
 `,
     );
     await writeFile(credential("runtime-t3"), token, { mode: 0o600 });

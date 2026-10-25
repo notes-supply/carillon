@@ -40,8 +40,9 @@ leaves its conversations stranded. Messages there receive a receipt and an
 explanation even if the former runtime is disabled or removed.
 An otherwise current conversation whose runtime is unavailable
 refuses new work. Changing an agent's T3 project also ends conversations that
-already have T3 threads. Their messages, queued turns, follow-up observations,
-model requests, and commands receive an explanation asking for a new conversation.
+already have T3 threads. Their messages, queued turns, reports of delegated
+work, model requests, and commands receive an explanation asking for a new
+conversation.
 Work already running in the previous project continues there. Nothing translates
 native state between engines or T3 projects.
 
@@ -57,14 +58,16 @@ native state between engines or T3 projects.
   once to its runtime, and stores the answer and its delivery together. Pi
   holds the turns it accepts and finishes them across its own restarts; a
   tool call a crash cut off is reported to the model as interrupted, never
-  repeated. On T3, a turn whose outcome can't be proved is marked
-  interrupted and never replayed. Either way the conversation is told, and
-  the next message carries on with the same native conversation. Delivery
-  retries without rerunning the model.
+  repeated. T3 holds its turns too: restarted, it follows each again in
+  T3's records rather than running it twice, and a turn whose outcome T3
+  can't show fails and is never replayed. Either way the conversation is
+  told, and the next message carries on with the same native conversation.
+  Delivery retries without rerunning the model.
 - **Busy conversations.** A message that arrives while Pi answers in its
   conversation steers that answer by default, or waits for it or interrupts
   it, as the agent's settings choose. People can steer a waiting message in,
-  interrupt for it, or stop it, with reactions.
+  interrupt for it, or stop it, with reactions. On T3, a conversation's
+  messages wait their turn, and people can stop one, waiting or running.
 - **Visibility.** While a turn runs, a card shows its current tool calls,
   recent ones and delegated work, never tool output or private reasoning.
   It stays as a summary when the work ends.

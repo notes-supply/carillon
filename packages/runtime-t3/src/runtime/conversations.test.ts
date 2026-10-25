@@ -1,12 +1,12 @@
 import { expect, it } from "vitest";
-import { answer, dispatches, fake, runtime, started, thread, turn } from "./harness.ts";
+import { answer, dispatches, execute, fake, started, thread, turn } from "./harness.ts";
 
 it("keeps a conversation's turns in one T3 thread and sends the person's text as written", async () => {
-  const first = runtime.turns.execute(turn("turn-1", "Remember carillon."));
+  const first = execute(turn("turn-1", "Remember carillon."));
   answer(await started("turn-1"), "Noted.");
-  expect(await first).toMatchObject({ correlation_id: "turn-1", output: "Noted." });
+  expect(await first).toMatchObject({ output: "Noted." });
 
-  const second = runtime.turns.execute(turn("turn-2", "Which word?"));
+  const second = execute(turn("turn-2", "Which word?"));
   answer(await started("turn-2"), "Carillon.");
   expect((await second).output).toBe("Carillon.");
 

@@ -62,9 +62,9 @@ setup` asks only Discord's. A rerun that changes the T3 settings or the bot
 token takes effect in a running Carillon at `carillon restart`. Changing an
 agent's T3 project makes the first message in each existing conversation open an
 empty thread in the current project and receive an explanation. That message
-never runs; the next message runs in the new thread. Model requests, commands,
-and follow-up observations are refused without creating anything until that
-thread exists, then use it. Returning to the original project resumes its
+never runs; the next message runs in the new thread. Model requests and
+commands are refused without creating anything until that thread exists, then
+use it. Returning to the original project resumes its
 original thread. A conversation without a T3 thread yet starts in the current
 project. Work already running in another project continues there.
 
@@ -165,8 +165,9 @@ on. `carillon stop`, and restarting a single unit with `systemctl --user`, do
 not drain.
 
 The T3 runtime refuses a restart while it remembers a conversation whose
-native work it couldn't confirm stopped; only that process knows, and
-restarting forgets it. Use `--force` once you've checked T3 yourself.
+native work it couldn't confirm stopped, or while a person's stop waits for
+T3 to confirm it; only that process knows, and restarting forgets it. Use
+`--force` once you've checked T3 yourself.
 
 A drain needs core and every runtime to answer, so a few changes need a
 different path:
@@ -492,8 +493,9 @@ the tools can administer the server.
 - **A runtime crashes.** Its service restarts it. Pi finishes the answers it
   held: a model call runs again, and a tool call it cut off is reported to
   the model as interrupted rather than repeated. A message that keeps
-  crashing it is given up after five tries and fails. T3 continues with the
-  next message.
+  crashing it is given up after five tries and fails. T3 takes up the turns
+  it held again, reading each run back from T3, and settles a stop core
+  hadn't recorded instead of running the message.
 - **Core can't save an outcome** (disk full, for example). The turn stays
   marked running until core restarts, which records it as interrupted.
 - **Delegated T3 work** reports later in its own message, even across

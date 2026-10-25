@@ -1,4 +1,4 @@
-1623 crates/carillon-core/src/application/admin.rs
+1622 crates/carillon-core/src/application/admin.rs
 2558 crates/carillon-core/src/application/http/tests.rs
 1314 crates/carillon-core/src/application/http/tests/attachments.rs
 1980 crates/carillon-core/src/db.rs
@@ -8,9 +8,9 @@
 1114 crates/carillon-discord/src/operations.rs
 1039 crates/carillon-discord/src/setup/tests.rs
 1124 packages/runtime-t3/src/fake.ts
-2069 packages/runtime-t3/src/runtime.test.ts
-1114 packages/runtime-t3/src/runtime.ts
+2039 packages/runtime-t3/src/runtime.test.ts
+1069 packages/runtime-t3/src/runtime.ts
 3366 packages/runtime-t3/src/watch.test.ts
 1913 packages/runtime-t3/src/watch.ts
 1026 scripts/test-filesystem.mjs
-2110 scripts/test-integration.mjs
+2109 scripts/test-integration.mjs

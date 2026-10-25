@@ -4,10 +4,11 @@
  * is given as a value, never as an argument, and written only to a private
  * credential file the runtime's settings name.
  */
-import { open, readFile, realpath, rename, rm } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { readFile, realpath } from "node:fs/promises";
+import { resolve } from "node:path";
 import type { AvailableModel } from "@carillon/protocol";
 import type { Agent, Installation } from "@carillon/runtime/installation";
+import { publish, Unsynced } from "@carillon/runtime/publish";
 import { stringify } from "smol-toml";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
@@ -237,41 +238,6 @@ async function publishSettings(
       ? failure
       : new Error(`${unchanged}: ${reason(failure)}`, { cause: failure });
   });
-}
-
-/** A publication in place whose directory did not sync, so a crash may still undo it. */
-class Unsynced extends Error {}
-
-/**
- * Replaces `path` with `text`, readable only by the owner, durably. A failure
- * before the rename leaves `path` as it was; {@link Unsynced} leaves the new
- * text in place.
- */
-async function publish(path: string, text: string): Promise<void> {
-  const temporary = `${path}.${crypto.randomUUID()}.tmp`;
-  const file = await open(temporary, "wx", 0o600);
-  try {
-    try {
-      await file.writeFile(text);
-      await file.sync();
-    } finally {
-      await file.close();
-    }
-    await rename(temporary, path);
-  } catch (failure) {
-    await rm(temporary, { force: true });
-    throw failure;
-  }
-  try {
-    const directory = await open(dirname(path), "r");
-    try {
-      await directory.sync();
-    } finally {
-      await directory.close();
-    }
-  } catch (failure) {
-    throw new Unsynced(`${path}: changed, but not confirmed durable: ${reason(failure)}`);
-  }
 }
 
 function reason(failure: unknown): string {

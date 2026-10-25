@@ -28,6 +28,7 @@ it("settles a turn once and says how core took each outcome", async () => {
   fake.answer(404);
   expect(await settle("turn-2", { outcome: "steered" })).toBe("unknown");
   expect(fake.received[0]).toEqual({
+    method: "POST",
     path: "/v1/runtime/turns/turn%2F1/outcome",
     provider: "runtime-durable",
     authorization: "Bearer durable-only",
@@ -113,6 +114,7 @@ it("lists the turns core records running, sets apart one it cannot read, and thr
     opened.turn_id,
   ]);
   expect(fake.received.at(-1)).toMatchObject({
+    method: "GET",
     path: "/v1/runtime/turns",
     provider: "runtime-durable",
     authorization: "Bearer durable-only",

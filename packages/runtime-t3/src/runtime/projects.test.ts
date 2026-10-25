@@ -1,11 +1,21 @@
 import { ExplainedFailure } from "@carillon/runtime/failure";
-import type { TurnResponse } from "@carillon/runtime/operations";
 import { Check } from "typebox/value";
 import { expect, it } from "vitest";
 import { derivedId, ThreadSnapshotSchema } from "../contracts.ts";
 import { connectT3 } from "../t3.ts";
 import { startFakeT3, type FakeT3 } from "../fake.ts";
-import { fake, PROJECT, resources, restart, runtime, turn as request } from "./harness.ts";
+import {
+  execute,
+  fake,
+  openings,
+  PROJECT,
+  resources,
+  restart,
+  runtime,
+  settled,
+  turn as request,
+  TurnFailed,
+} from "./harness.ts";
 
 const conversation = {
   interface_id: "discord-channel",
@@ -48,9 +58,7 @@ async function started(correlation: string, server: FakeT3 = fake) {
 }
 
 async function seed(agentId = "default") {
-  const response = runtime.turns.execute(
-    turn("first", "Remember this project.", { agent_id: agentId }),
-  );
+  const response = execute(turn("first", "Remember this project.", { agent_id: agentId }));
   const { thread, run } = await started("first");
   fake.assistant(thread.id, run.id, "Remembered.");
   fake.complete(thread.id, run.id);
@@ -63,14 +71,20 @@ async function refused(operation: Promise<unknown>) {
   await expect(operation).rejects.toMatchObject(refusal);
 }
 
+/** A turn the runtime settled failed, explaining the refusal. */
+async function turnRefused(turn: Promise<unknown>) {
+  await expect(turn).rejects.toBeInstanceOf(TurnFailed);
+  await expect(turn).rejects.toThrow(refusal.message);
+}
+
 it.each(["default", "code"])(
   "refuses one %s channel message on a project change, then continues there and resumes the original project",
   async (agentId) => {
     const old = await seed(agentId);
     await restart({ projectId: NEXT_PROJECT });
     const received = fake.received.length;
-    await refused(
-      runtime.turns.execute(
+    await turnRefused(
+      execute(
         turn("queued", "An already queued request.", { agent_id: agentId }),
         AbortSignal.timeout(500),
       ),
@@ -93,9 +107,7 @@ it.each(["default", "code"])(
 
     for (const correlation of ["second", "later"]) {
       await restart({ projectId: NEXT_PROJECT });
-      const response = runtime.turns.execute(
-        turn(correlation, "Use the new project.", { agent_id: agentId }),
-      );
+      const response = execute(turn(correlation, "Use the new project.", { agent_id: agentId }));
       const fresh = await started(correlation);
       expect(fresh.thread.id).toBe(next.id);
       await fake.waitFor(
@@ -114,9 +126,7 @@ it.each(["default", "code"])(
     expect(sent[1]?.["titleSeed"]).toBe("Use the new project.");
 
     await restart({ projectId: PROJECT });
-    const resumed = runtime.turns.execute(
-      turn("resumed", "Back to the original.", { agent_id: agentId }),
-    );
+    const resumed = execute(turn("resumed", "Back to the original.", { agent_id: agentId }));
     const original = await started("resumed");
     expect(original.thread.id).toBe(old.id);
     fake.assistant(old.id, original.run.id, "Resumed.");
@@ -131,7 +141,7 @@ it("keeps the native thread identity independent of the project", async () => {
   const other = await startFakeT3();
   try {
     await restart({ url: other.url, projectId: NEXT_PROJECT });
-    const response = runtime.turns.execute(turn("next", "Start again."));
+    const response = execute(turn("next", "Start again."));
     const next = await started("next", other);
     other.assistant(next.thread.id, next.run.id, "Started.");
     other.complete(next.thread.id, next.run.id);
@@ -180,7 +190,7 @@ it.each([
     expect(old.modelSelection.model).toBe("claude-sonnet-5");
     expect(await runtime.modelState(defaultQuery)).toEqual(before);
 
-    await refused(runtime.turns.execute(turn("cutover", "Start in the current project.")));
+    await turnRefused(execute(turn("cutover", "Start in the current project.")));
     const next = projectThread();
     next.modelSelection = { instanceId: "claudeAgent", model: "claude-haiku-4-5", options: [] };
     const commands = fake.received.length;
@@ -201,7 +211,7 @@ it.each([
     expect(state.agent.selection?.model).toBe(
       operation === "agent model" ? "claude-haiku-4-5" : "claude-sonnet-5",
     );
-    const response = runtime.turns.execute(turn("selected", "Use this model."));
+    const response = execute(turn("selected", "Use this model."));
     const selected = await started("selected");
     expect(selected.thread.id).toBe(next.id);
     expect(selected.thread.modelSelection.model).toBe(state.conversation?.selection?.model);
@@ -221,8 +231,8 @@ it.each(["default", "code"])(
     await seed(agentId);
     await restart({ projectId: NEXT_PROJECT });
     const received = fake.received.length;
-    await refused(
-      runtime.turns.execute(
+    await turnRefused(
+      execute(
         turn("command", "/compact", { agent_id: agentId, native: { intent: "command" } }),
         AbortSignal.timeout(500),
       ),
@@ -230,9 +240,9 @@ it.each(["default", "code"])(
     expect(fake.received).toHaveLength(received);
     expect(fake.threads.size).toBe(1);
 
-    await refused(runtime.turns.execute(turn("cutover", "Move projects.", { agent_id: agentId })));
+    await turnRefused(execute(turn("cutover", "Move projects.", { agent_id: agentId })));
     const next = projectThread(agentId);
-    const response = runtime.turns.execute(
+    const response = execute(
       turn("next-command", "/compact", { agent_id: agentId, native: { intent: "command" } }),
     );
     const command = await started("next-command");
@@ -248,63 +258,39 @@ it.each(["default", "code"])(
   },
 );
 
-it("refuses observations of delegated work from the previous project without stopping that work", async () => {
-  const response = runtime.turns.execute(turn("first", "Delegate the work."));
+it("refuses a report of delegated work from the previous project without stopping that work", async () => {
+  const response = execute(turn("first", "Delegate the work."));
   const { thread, run } = await started("first");
   const task = fake.delegate(thread.id, run.id, { title: "Old project work" });
   fake.assistant(thread.id, run.id, "Started.");
   fake.complete(thread.id, run.id);
-  const initial: TurnResponse = await response;
-  expect(initial.follow_up).toBeDefined();
+  await response;
+  // The report's turn is taken up again after the restart, in the agent's new project.
+  const received = fake.received.length;
   await restart({ projectId: NEXT_PROJECT });
   const wake = fake.finishDelegation(thread.id, task.id);
   fake.assistant(thread.id, wake.id, "Old work finished.");
   fake.complete(thread.id, wake.id);
-  const received = fake.received.length;
-  await refused(runtime.turns.execute(turn("observation", "", { follow_up: initial.follow_up })));
+  await turnRefused(settled("opened-1"));
   expect(fake.received).toHaveLength(received);
   expect(fake.interrupts).toEqual([]);
   expect(fake.detached).toEqual([]);
   expect(fake.threads.size).toBe(1);
-  expect(runtime.activity("observation", conversation.interface_id)).toBeUndefined();
+  expect(runtime.activity("opened-1", conversation.interface_id)).toBeUndefined();
 
-  await refused(runtime.turns.execute(turn("cutover", "Move projects.")));
+  await turnRefused(execute(turn("cutover", "Move projects.")));
   const next = projectThread();
-  const after = fake.received.length;
-  const observation = runtime.turns.execute(
-    turn("observation-after", "", { follow_up: initial.follow_up }),
-  );
-  await expect(observation).rejects.toMatchObject({ status: 502 });
-  await expect(observation).rejects.toThrow(
-    "T3 no longer lists the message whose delegated work this turn reports",
-  );
-  expect(fake.received).toHaveLength(after);
-  expect(next.messages).toEqual([]);
-  expect(fake.interrupts).toEqual([]);
-  expect(fake.detached).toEqual([]);
-
-  const currentResponse = runtime.turns.execute(turn("current", "Delegate in this project."));
+  const currentResponse = execute(turn("current", "Delegate in this project."));
   const current = await started("current");
   const currentTask = fake.delegate(next.id, current.run.id, { title: "Current project work" });
   fake.assistant(next.id, current.run.id, "Delegated.");
   fake.complete(next.id, current.run.id);
-  const currentTurn = await currentResponse;
-  expect(currentTurn.follow_up).toBeDefined();
+  await currentResponse;
   const currentWake = fake.finishDelegation(next.id, currentTask.id);
   fake.assistant(next.id, currentWake.id, "Current work finished.");
   fake.complete(next.id, currentWake.id);
-  const currentObserved = runtime.turns.execute(
-    turn("current-observation", "", { follow_up: currentTurn.follow_up }),
-  );
-  expect((await currentObserved).output).toBe("Current work finished.");
-  await restart({ projectId: PROJECT });
-  expect(
-    (
-      await runtime.turns.execute(
-        turn("original-observation", "", { follow_up: initial.follow_up }),
-      )
-    ).output,
-  ).toBe("Old work finished.");
+  expect((await settled("opened-2")).output).toBe("Current work finished.");
+  expect(openings()).toHaveLength(2);
 });
 
 it("checks the watched snapshot before dispatch or activity even when the ownership read passed", async () => {
@@ -332,7 +318,7 @@ it("checks the watched snapshot before dispatch or activity even when the owners
     },
   });
   const received = fake.received.length;
-  await refused(runtime.turns.execute(turn("watched", "Old work."), AbortSignal.timeout(500)));
+  await turnRefused(execute(turn("watched", "Old work."), AbortSignal.timeout(500)));
   expect(snapshots).toBe(3);
   expect(fake.received).toHaveLength(received);
   expect(fake.threads.size).toBe(1);

@@ -1,5 +1,6 @@
 import { once } from "node:events";
 import { mkdir, readFile, stat } from "node:fs/promises";
+import { createCoreClient } from "@carillon/runtime/core";
 import { providerAddress } from "@carillon/runtime/endpoint";
 import { createRuntimeServer } from "@carillon/runtime/http";
 import {
@@ -11,6 +12,7 @@ import {
   type Installation,
 } from "@carillon/runtime/installation";
 import { ModelSelections } from "@carillon/runtime/selections";
+import { readStops } from "./held.ts";
 import { createT3Runtime, type T3Agent } from "./runtime.ts";
 import packageInfo from "../package.json" with { type: "json" };
 import { join } from "node:path";
@@ -36,6 +38,10 @@ async function serve(values: readonly string[]): Promise<void> {
     process.stdout.write(`runtime provider ${providerId} serves no agent; not serving\n`);
     return;
   }
+  if (!installation.durable)
+    throw new Error(
+      `runtime provider ${providerId} holds its turns and needs durable = true in carillon.toml`,
+    );
   const listenAddress = providerAddress(installation.runtime.url);
   const token = await loadRuntimeCredential(
     requiredArgument(args, "token-file"),
@@ -52,6 +58,12 @@ async function serve(values: readonly string[]): Promise<void> {
     selections: await ModelSelections.open(
       join(installation.componentDirectory, "model-selection.json"),
     ),
+    stops: await readStops(join(installation.componentDirectory, "stops.json")),
+    core: createCoreClient({
+      url: installation.coreUrl,
+      providerId: installation.runtime.id,
+      token,
+    }),
   });
   const server = createRuntimeServer({
     runtime,

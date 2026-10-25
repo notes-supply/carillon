@@ -194,9 +194,9 @@ running on it through `GET /v1/runtime/turns`, and takes a person's controls at
 `POST /v1/turns/{id}/control`. While a turn waits behind another, its
 activity snapshot says `queued` and lists the controls it offers.
 
-The synchronous contract is T3's until it moves to the durable one: the
-runtime runs a claimed turn while core waits and returns nonblank output.
-An empty or unusable answer interrupts the turn.
+Under the synchronous contract, which no bundled runtime speaks, the runtime
+runs a claimed turn while core waits and returns nonblank output. An empty
+or unusable answer interrupts the turn.
 
 Either way, a failure may carry an explanation the runtime has judged safe
 to show; core and interfaces display it as given.
@@ -231,23 +231,31 @@ a background subagent's report come in turns Pi opens. Pi's sign-in,
 catalogue and default model live in `CARILLON_HOME/pi`, apart from `~/.pi`.
 See the [Pi guide](../../packages/runtime-pi/README.md).
 
-**T3** (`carillon-runtime-t3`) runs turns on a T3 Code server as another
-client of the threads T3's own UI shows. It stores nothing durable of a
-conversation: one thread per conversation in a project and one message per turn, named
-from Carillon's identifiers, let a lost connection read the work back
-instead of repeating it. The canonical thread ID derives from the interface, agent,
+**T3** (`carillon-runtime-t3`) is a durable runtime that runs turns on a T3
+Code server as another client of the threads T3's own UI shows. It stores
+nothing durable of a conversation: one thread per conversation in a project
+and one message per turn, named from Carillon's identifiers, let a lost
+connection, or a turn taken up again after a restart, read the work back
+instead of repeating it. Core keeps the turns it holds; restarted, it reads
+them back from core and follows each again. It runs a conversation's
+messages in order, and a person may stop one, waiting or running. A stop
+core has not recorded yet is kept in the runtime's component directory, so
+a restart settles it instead of running the message, and a hand-over of a
+turn it settled lately runs nothing. The canonical thread ID derives from the interface, agent,
 and audience. The runtime uses it when absent or in the agent's current project;
 otherwise it uses an ID that also includes the current project. T3's projection
 owns each thread's project. After a project change, the first message opens an
 empty project-scoped thread and receives an explanation; none of it runs. The next
-message runs in that thread. Model requests, commands, and follow-up observations
-are refused without creating anything until the project-scoped thread exists,
-then use it. Returning to the original project resumes the canonical thread.
-Conversations without a T3 thread yet start in the current project. Native work
-already running in another project is left alone. Delegated work reports through
-observations of the resolved thread.
-Native work whose stop T3 couldn't confirm fences that thread in the runtime's
-memory, and the runtime refuses a drained restart while any fence stands.
+message runs in that thread. Model requests and commands are refused without
+creating anything until the project-scoped thread exists, then use it.
+Returning to the original project resumes the canonical thread. Conversations
+without a T3 thread yet start in the current project. Native work already
+running in another project is left alone. Delegated work reports in a turn
+the runtime opens, keyed by T3's records, before the reply that started the
+work settles; that turn offers no controls, since the work is T3's. Native
+work whose stop T3 couldn't confirm is reported as such, not as stopped; it
+fences that thread in the runtime's memory, and the runtime refuses a
+drained restart while any fence stands or a person's stop waits for T3.
 
 Its agents are plain T3 Code, given the person's text as written, their
 threads titled by T3; an agent with resources is refused. Each message

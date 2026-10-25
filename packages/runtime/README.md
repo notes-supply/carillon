@@ -35,3 +35,5 @@ depend on it; it imports neither. Import modules by path
   [`serial.ts`](src/serial.ts): registry and credential loading, including
   the runtime's `durable` and, for a durable runtime only, core's loopback
   address; loopback address checks; and one-at-a-time execution.
+- [`publish.ts`](src/publish.ts): durable replacement of a file a runtime
+  owns, such as its model selections.

@@ -592,6 +592,11 @@ export function sessionDetach(threadId: string, providerSessionId: string, reaso
   } as const;
 }
 
+/** A command that stops a thread's run or its provider session. */
+export type StopCommand = ReturnType<
+  typeof queuedRunCancel | typeof runInterrupt | typeof sessionDetach
+>;
+
 /**
  * The thread subscription: a bounded snapshot (T3 windows messages and
  * items to recent turns; runs, requests, provider threads and sessions stay
