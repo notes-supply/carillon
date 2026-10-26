@@ -112,7 +112,9 @@ pause lapses on its own if its holder stops renewing it. Running turns hold
 no dispatcher, so the drain waits only for a hand-over in progress, and
 runtimes still settle their turns while the pause holds. Once no dispatcher
 remains, core asks every runtime whether a restart would lose something only its
-process knows (`GET /v1/restart`); no valid answer counts as not ready. The
+process knows (`GET /v1/restart`). A runtime that refuses the connection is
+not running and holds nothing; any other lack of a valid answer counts as not
+ready. The
 command then stops the target together with its member services, so it
 returns only when their processes have ended, and reports whether core
 confirmed the pause until then.

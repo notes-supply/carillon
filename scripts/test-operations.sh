@@ -215,14 +215,25 @@ expect_trace '--user show --property=ActiveState --value carillon.target' \
   '--user stop carillon.target carillon-core.service carillon-discord.service carillon-runtime-pi.service carillon-runtime-t3.service' \
   '--user start carillon.target'
 grep -F 'runtime workers paused for maintenance' "$INSTALLATION/logs/core.log" >/dev/null
+# A runtime that is not running holds nothing a restart loses, as one that
+# is disabled or serves no agent does not run: the restart goes ahead and
+# starts it again.
+kill "$(head -n 1 "$MANAGER/pids")"
+carillon restart >"$TEST_ROOT/restart-exited.log"
+grep -Fx 'Core stopped with its runtime workers paused.' "$TEST_ROOT/restart-exited.log" >/dev/null
+expect_trace '--user show --property=ActiveState --value carillon.target' \
+  '--user show --property=ConsistsOf --value carillon.target' \
+  '--user stop carillon.target carillon-core.service carillon-discord.service carillon-runtime-pi.service carillon-runtime-t3.service' \
+  '--user start carillon.target'
 # A runtime that cannot say whether a restart loses anything keeps the
 # services running and stops nothing. Refused when its time is up, the
 # command asks nothing more of core: the pause lapses within its lease and
 # the workers resume. Forced, the restart goes ahead and says what it
 # interrupts.
-kill "$(head -n 1 "$MANAGER/pids")"
-refuse undrained carillon restart --timeout 2
-grep -F 'core did not drain within 2 seconds' "$TEST_ROOT/undrained.log" >/dev/null
+frozen=$(head -n 1 "$MANAGER/pids")
+kill -STOP "$frozen"
+refuse undrained carillon restart --timeout 10
+grep -F 'core did not drain within 10 seconds' "$TEST_ROOT/undrained.log" >/dev/null
 grep -F 'runtime-pi is not ready to restart: it did not say whether it can restart' \
   "$TEST_ROOT/undrained.log" >/dev/null
 expect_trace '--user show --property=ActiveState --value carillon.target'
@@ -236,6 +247,7 @@ done
 grep -F 'runtime-pi: enabled; its dispatcher hands it its turns' \
   "$TEST_ROOT/resumed.log" >/dev/null
 carillon status | grep -F '"status": "unavailable"' >/dev/null
+kill -CONT "$frozen"
 # The forced restart waits, as any restart does, until every provider answers.
 carillon restart --force >"$TEST_ROOT/forced.log"
 grep -F 'Forcing the stop before this settles' "$TEST_ROOT/forced.log" >/dev/null

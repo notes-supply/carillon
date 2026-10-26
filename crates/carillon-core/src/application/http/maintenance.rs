@@ -201,7 +201,9 @@ async fn drain(state: &AppState, holder: Uuid) -> Result<Drain, ApiError> {
 }
 
 /// Asks every runtime of the registry at once, enabled or not: a disabled
-/// runtime's program may still run and hold what a restart loses.
+/// runtime's program may still run and hold what a restart loses. One that
+/// refuses the connection is not running, as one serving no agent is not,
+/// and holds nothing.
 async fn restart_readiness(client: &Client, config: &LoadedConfig) -> Vec<RuntimeRestart> {
     let mut asked = JoinSet::new();
     let runtimes = config
@@ -214,16 +216,18 @@ async fn restart_readiness(client: &Client, config: &LoadedConfig) -> Vec<Runtim
         let (client, url, id) = (client.clone(), runtime.url.clone(), runtime.id.clone());
         asked.spawn(async move {
             let answer = match token {
-                Ok(token) => RuntimeClient::new(client, url, token)
-                    .restart_readiness()
-                    .await
-                    .map_err(|error| format!("{error:#}")),
-                Err(error) => Err(format!("{error:#}")),
+                Ok(token) => {
+                    RuntimeClient::new(client, url, token)
+                        .restart_readiness()
+                        .await
+                }
+                Err(error) => Err(error),
             };
             let unready = match answer {
                 Ok(RestartReadiness::Ready {}) => None,
                 Ok(RestartReadiness::Unready { reason }) => Some(reason),
-                Err(error) => Some(format!("it did not say whether it can restart ({error})")),
+                Err(error) if not_running(&error) => None,
+                Err(error) => Some(format!("it did not say whether it can restart ({error:#})")),
             };
             (index, RuntimeRestart { id, unready })
         });
@@ -231,4 +235,12 @@ async fn restart_readiness(client: &Client, config: &LoadedConfig) -> Vec<Runtim
     let mut answers = asked.join_all().await;
     answers.sort_by_key(|(index, _)| *index);
     answers.into_iter().map(|(_, answer)| answer).collect()
+}
+
+fn not_running(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::ConnectionRefused)
+    })
 }

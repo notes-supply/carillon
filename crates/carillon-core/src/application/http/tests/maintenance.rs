@@ -283,6 +283,25 @@ async fn one_holder_at_a_time_renews_only_a_pause_still_in_force() -> Result<()>
     Ok(())
 }
 
+/// A runtime nothing listens for is not running, as one serving no agent is
+/// not, and holds nothing a restart loses.
+#[tokio::test]
+async fn a_runtime_that_is_not_running_is_ready_to_restart() -> Result<()> {
+    let directory = tempdir()?;
+    let mut fixture = super::installation(directory.path())?;
+    let vacant = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?;
+    fixture.config.value.providers[1].url = format!("http://{vacant}");
+    let state = super::configured(&fixture);
+    let (stopping, supervisor) = supervise(&state);
+    let holder = ok(begin(&state, Duration::from_secs(30)).await)?.holder;
+    let drain = until(&state, holder, |drain| drain.workers == Some(0)).await?;
+    assert_eq!(drain.runtimes, ready());
+    ok(end(&state, holder).await)?;
+    stopping.cancel();
+    supervisor.await?;
+    Ok(())
+}
+
 /// Core as one run of its service: its operator API at an address of its
 /// own, and its workers.
 struct Running {

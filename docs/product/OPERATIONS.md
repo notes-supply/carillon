@@ -154,11 +154,13 @@ only once nothing would be lost, waiting up to `--timeout` seconds:
 
 - no turn is being handed to its runtime;
 - answers are delivered while Discord still runs;
-- every runtime says a restart loses nothing it alone knows.
+- every running runtime says a restart loses nothing it alone knows. A
+  runtime that isn't running, such as one that is disabled or serves no
+  agent, holds nothing.
 
 Turns a runtime holds are not waited for: it takes each up again once it
 starts, and none is replayed. New messages are accepted meanwhile and wait. If the drain doesn't finish in
-time, or core or a runtime doesn't answer, nothing is stopped and the command
+time, or core or a running runtime doesn't answer, nothing is stopped and the command
 says what remained. After a drain that ran out of time, core's paused
 dispatchers resume within 15 seconds, when the pause lapses. `--force`
 restarts anyway: a runtime that was not ready may lose what only it knew,
@@ -170,15 +172,11 @@ native work it couldn't confirm stopped, or while a person's stop waits for
 T3 to confirm it; only that process knows, and restarting forgets it. Use
 `--force` once you've checked T3 yourself.
 
-A drain needs core and every runtime to answer, so a few changes need a
-different path:
-
-- **A runtime that isn't running**, for example one you just enabled:
-  `carillon start` starts it and stops nothing.
-- **A new `core.listen` or operator credential** in `carillon.toml`: the
-  command would ask core at the new address or with the new credential. Make
-  the change while Carillon is stopped (`carillon stop` once `carillon status`
-  shows no running turns, edit, `carillon start`), or use `restart --force`.
+A drain needs core to answer, so a new `core.listen` or operator credential
+in `carillon.toml` needs a different path: the command would ask core at the
+new address or with the new credential. Make the change while Carillon is
+stopped (`carillon stop` once `carillon status` shows no running turns, edit,
+`carillon start`), or use `restart --force`.
 
 ## Configuration
 
