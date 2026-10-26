@@ -234,8 +234,10 @@ async fn a_turn_the_runtime_did_not_take_stays_queued_and_is_handed_over_again()
         StatusCode::REQUEST_TIMEOUT,
         StatusCode::TOO_MANY_REQUESTS,
     ];
-    // An inbox that is not installed as core expects is no fault of the turn.
+    // An inbox that is not installed as core expects, or cannot read the
+    // request core built, is no fault of the turn.
     let misinstalled = [
+        StatusCode::BAD_REQUEST,
         StatusCode::UNAUTHORIZED,
         StatusCode::FORBIDDEN,
         StatusCode::NOT_FOUND,
@@ -263,10 +265,10 @@ async fn a_turn_the_runtime_did_not_take_stays_queued_and_is_handed_over_again()
         assert_eq!(state_of(&state, &first.turn_id)?, TurnState::Queued);
     }
     // Nothing behind it overtakes it.
-    assert_eq!(runtime.handed(), ["one"; 9]);
+    assert_eq!(runtime.handed(), ["one"; 10]);
     assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
     assert_eq!(state_of(&state, &first.turn_id)?, TurnState::Running);
-    assert_eq!(runtime.request(9)?.correlation_id, first.turn_id);
+    assert_eq!(runtime.request(10)?.correlation_id, first.turn_id);
     // A runtime core cannot reach has not taken the next one either.
     fixture.config.value.providers[1].url = "http://127.0.0.1:9".to_owned();
     let unreachable = configured(&fixture);

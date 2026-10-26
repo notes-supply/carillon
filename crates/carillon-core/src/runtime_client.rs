@@ -37,7 +37,7 @@ impl RuntimeClient {
     /// # Errors
     /// Returns `Later` for a turn that may not have arrived or that the
     /// runtime asked to have later (5xx, 408 or 429), `Misinstalled` for an
-    /// answer no turn explains (401, 403, 404, 405 or another 2xx), and
+    /// answer no turn explains (400, 401, 403, 404, 405 or another 2xx), and
     /// `Refused` for any other.
     pub async fn submit(&self, request: &RuntimeTurnRequest) -> Result<(), InboxFailure> {
         let response = self
@@ -68,7 +68,8 @@ impl RuntimeClient {
         if status.is_success()
             || matches!(
                 status,
-                StatusCode::UNAUTHORIZED
+                StatusCode::BAD_REQUEST
+                    | StatusCode::UNAUTHORIZED
                     | StatusCode::FORBIDDEN
                     | StatusCode::NOT_FOUND
                     | StatusCode::METHOD_NOT_ALLOWED

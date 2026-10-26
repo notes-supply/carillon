@@ -59,7 +59,7 @@ is running, which means the runtime holds it, and its files count as
 carried. A 5xx, 408, 429
 or no answer leaves it queued, to be handed over again in order; the runtime
 takes a turn it already holds as the same one. So does an answer that shows
-an installation fault rather than the turn's (401, 403, 404, 405 or another
+an installation fault rather than the turn's (400, 401, 403, 404, 405 or another
 2xx), which core logs as an error. The dispatcher backs off from 1 to 60
 seconds meanwhile. Any other answer interrupts the turn with the runtime's
 explanation. The runtime later settles the turn with
