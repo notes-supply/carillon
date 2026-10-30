@@ -35,38 +35,25 @@ it("settles a turn once and says how core took each outcome", async () => {
   });
 });
 
-it("waits out a core that cannot settle yet and throws on a permanent refusal", async () => {
+it("throws whatever else core answers, and when core does not answer at all", async () => {
   const fake = await core();
   const { settle } = client(fake.url);
-  fake.answer(503, 401, 403);
-  expect(await settle("turn-1", { outcome: "stopped" })).toBe("recorded");
-  fake.answer(408, 429);
-  expect(await settle("turn-4", { outcome: "steered" })).toBe("recorded");
-  expect(fake.received).toHaveLength(7);
-  fake.answer(400);
-  await expect(settle("turn-2", { outcome: "answered", output: " " })).rejects.toThrow(
-    "core refused the outcome of turn turn-2: answered 400",
-  );
-  fake.answer(413);
-  await expect(settle("turn-2", { outcome: "answered", output: "x" })).rejects.toThrow(
-    "core refused the outcome of turn turn-2: answered 413",
-  );
-  expect(fake.received).toHaveLength(9);
-  // A core that is not listening yet is asked again until it is.
+  for (const status of [503, 401, 400, 413]) {
+    fake.answer(status);
+    await expect(settle("turn-1", { outcome: "stopped" })).rejects.toMatchObject({
+      status,
+      message: `core did not record the outcome of turn turn-1: answered ${String(status)}`,
+    });
+  }
+  expect(fake.received).toHaveLength(4);
   const reserved = createServer().listen(0, "127.0.0.1");
   await once(reserved, "listening");
   const address = reserved.address();
   if (address === null || typeof address === "string") throw new Error("expected a TCP port");
   await new Promise((done) => reserved.close(done));
-  const later = client(`http://127.0.0.1:${String(address.port)}`).settle("turn-3", {
-    outcome: "failed",
-  });
-  await new Promise((done) => setTimeout(done, 300));
-  const restarted = await core(address.port);
-  expect(await later).toBe("recorded");
-  expect(restarted.received.map((received) => received.path)).toEqual([
-    "/v1/runtime/turns/turn-3/outcome",
-  ]);
+  await expect(
+    client(`http://127.0.0.1:${String(address.port)}`).settle("turn-2", { outcome: "failed" }),
+  ).rejects.toThrow("fetch failed");
 });
 
 it("opens one turn per key and reads core's receipt", async () => {

@@ -175,9 +175,10 @@ limits and suppresses mentions when it sends them.
 
 The Discord provider's operator API also runs typed operations
 (`POST /v1/operations`) with the bot's own credential, within its guild and
-Discord's permissions. The optional [`discord-pi`](../../packages/discord-pi/README.md)
-extension and skill expose them to Pi, and `carillon discord call` to other
-local agents. Uncertain writes are reported, not retried.
+Discord's permissions. The [`discord-pi`](../../packages/discord-pi/README.md)
+tools expose them to the Pi runtime's agents, and its skill and
+`carillon discord call` to other local agents. Uncertain writes are
+reported, not retried.
 
 ## Runtime providers
 
@@ -216,11 +217,15 @@ holds the HTTP adapter for both contracts, a durable runtime's client of
 core, the display boundary for explanations, tool descriptions and registry
 loading.
 
-**Pi** (`carillon-runtime-pi`) keeps a native Pi session per conversation,
-runs turns one at a time, and owns models, tools, extensions, skills and
-compaction. Its state and sign-in live in `CARILLON_HOME/pi`, apart from
-`~/.pi`. It refuses follow-up turns, since it never delegates.
-See the [Pi guide](../../packages/runtime-pi/README.md).
+**Pi** (`carillon-runtime-pi`) is a durable runtime on pi-durable, Pi's
+durable agent harness. Each agent's conversations live in one SQLite file in
+its component directory, where model calls, tool calls and waiting messages
+survive restarts. A message that arrives while the agent answers in its
+conversation steers that answer, waits for it or interrupts it, as the
+agent's settings choose, and people steer, interrupt or stop a waiting
+message. Steers placed into one answer settle with it: the newest carries
+it. Pi's sign-in, catalogue and default model live in `CARILLON_HOME/pi`,
+apart from `~/.pi`. See the [Pi guide](../../packages/runtime-pi/README.md).
 
 **T3** (`carillon-runtime-t3`) runs turns on a T3 Code server as another
 client of the threads T3's own UI shows. It stores nothing durable of a
@@ -291,18 +296,23 @@ with.
 
 ## Agent resources
 
-An agent's resource root is an ordinary Pi-compatible directory:
-`SYSTEM.md` (the system prompt), optional `AGENTS.md`, `settings.json`,
-`extensions/` and `skills/`. Core captures a content-addressed copy with each
-accepted turn, so later edits don't change work already queued. The copy is
-write-protected against accidents, not against the owner. The root must
-exist; its files are optional, and symlinks or special files are refused.
-Model sign-in and engine settings are not resources: Pi keeps them in
-`CARILLON_HOME/pi` and checks its default model is usable before it serves,
-so incomplete setup leaves work queued. An agent without resources captures
-none. T3 takes no resources with a turn: the assistant's profiles link to
-them instead, and read them as their sessions open. A runtime works in its
-agent's workspace (your home by default for Pi) with your authority.
+An agent's resource root is a directory of `SYSTEM.md` (the system prompt),
+optional `AGENTS.md`, `settings.json`, `extensions/` and `skills/`, which each
+runtime reads in its own way. Core captures a content-addressed copy with
+each accepted turn. The copy is write-protected against accidents, not
+against the owner. The root must exist; its files are optional, and symlinks
+or special files are refused. An agent without resources captures none.
+
+A runtime decides which captured copy a turn uses. The Pi runtime uses the
+latest one it admitted for the agent: an edit applies to the agent's next
+model request, including those for messages already waiting, and its
+`settings.json` selects the agent's extensions and busy mode. T3 takes no
+resources with a turn: the assistant's profiles link to them instead, and
+read them as their sessions open. Model sign-in and engine settings are not
+resources: Pi keeps them in `CARILLON_HOME/pi` and checks its default model
+is usable before it serves, so incomplete setup leaves work queued. A runtime
+works in its agent's workspace (your home by default for Pi) with your
+authority.
 
 ## Packaging
 

@@ -103,7 +103,7 @@ enum Command {
         #[arg(long)]
         provider: Option<String>,
     },
-    /// Install the Discord tools and skill into the agents' resources.
+    /// Install the Discord skill into the agents' resources.
     Tools {
         #[command(subcommand)]
         action: ToolsAction,
@@ -160,8 +160,8 @@ module serving then.")]
 
 #[derive(Debug, Subcommand)]
 enum ToolsAction {
-    /// Install the Pi tools and the skill into every agent's resources,
-    /// which Carillon's T3 profiles share.
+    /// Install the Discord skill into every agent's resources, which
+    /// Carillon's T3 profiles share.
     Install,
 }
 
@@ -409,48 +409,26 @@ fn release() -> Result<PathBuf> {
         .context("cannot locate this program's release")
 }
 
-/// Copy the release's tools and skill from `lib` into the agent resources,
-/// with core stopped: core captures resources as it accepts turns, so it
-/// must not see one file without the other.
+/// Copy the release's Discord skill from `lib` into the agent resources,
+/// which Carillon's T3 profiles share. The Pi runtime brings the Discord
+/// tools and their guidance itself.
 fn install_tools(config: &LoadedConfig, lib: &Path) -> Result<()> {
-    use carillon_installation::{
-        filesystem::{publish, sync_ancestors},
-        maintenance::ServiceLock,
-    };
-    let _maintenance = MaintenanceLock::acquire(&config.root)?;
-    // Core cannot start while this is held, nor serve while it is taken.
-    let Some(_core) = ServiceLock::try_acquire(&config.value.data_dir)? else {
-        bail!(
-            "Carillon core is running; stop it (`carillon stop`), install the Discord tools, then start it again (`carillon start`)"
-        );
-    };
-    // Read both before changing resources. The operator explicitly replaces these two files.
-    let extension = fs::read(lib.join("carillon-discord-pi.js"))
-        .context("release has no bundled Discord Pi tools; use a packaged installation")?;
-    let skill = fs::read(lib.join("carillon-discord-SKILL.md"))?;
+    use carillon_installation::filesystem::{publish, sync_ancestors};
+    let skill = fs::read(lib.join("carillon-discord-SKILL.md"))
+        .context("release has no Discord skill; use a packaged installation")?;
     let roots = config.value.resource_roots();
     if roots.is_empty() {
-        bail!("no agent has Carillon resources to install the Discord tools into");
+        bail!("no agent has Carillon resources to install the Discord skill into");
     }
     for root in &roots {
-        let extensions = root.join("extensions");
         let skills = root.join("skills/discord");
-        (|| -> Result<()> {
-            fs::create_dir_all(&extensions)?;
-            fs::create_dir_all(&skills)?;
-            sync_ancestors(&extensions)?;
-            sync_ancestors(&skills)?;
-            publish(&extensions.join("carillon-discord.js"), &extension, 0o600)?;
-            publish(&skills.join("SKILL.md"), &skill, 0o600)?;
-            Ok(())
-        })()
-        .context(
-            "the Discord tools may be partly installed: run `carillon discord tools install` again until it succeeds before starting Carillon core",
-        )?;
-        println!("Installed Discord tools and skill in {}.", root.display());
+        fs::create_dir_all(&skills)?;
+        sync_ancestors(&skills)?;
+        publish(&skills.join("SKILL.md"), &skill, 0o600)?;
+        println!("Installed the Discord skill in {}.", root.display());
     }
     println!(
-        "Start Carillon core (`carillon start`) to serve them: turns it accepts from then on capture them, and turns already accepted keep their resources. Carillon's T3 profiles share the skill at once."
+        "Turns core accepts from now on capture it, and Carillon's T3 profiles share it at once."
     );
     Ok(())
 }

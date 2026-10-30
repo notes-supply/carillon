@@ -1,30 +1,30 @@
 # Discord agent access
 
-An optional Pi extension and skill that let Carillon's assistant read and
-manage the Discord server through Carillon's Discord provider. It is separate from the
-Wasm module behind slash commands, and importing it starts nothing.
+Discord reading and administration for Carillon's agents, through Carillon's
+Discord provider. It is separate from the Wasm module behind slash commands.
 
-## Install
+## In the Pi runtime
 
-```sh
-carillon stop
-carillon discord tools install
-carillon start
-```
-
-This copies the release's extension and skill into the resources of every
-agent that has them (the assistant's), replacing only
-`extensions/carillon-discord.js` and `skills/discord/SKILL.md`. Carillon's
-T3 profiles link to those resources, so the assistant on T3 has the skill
-too, at its next session; T3 Code channels and your own sessions never do.
-Core must be stopped while it runs; if it fails, run it again before starting.
-Run it again after an update. Remove the two files to turn it off for new
-turns. The regular installer doesn't enable these tools.
-
-A fresh conversation sees one small tool, `enable_discord`; the skill tells
-the agent to call it when needed, which adds the Discord tools to that
+The Pi runtime brings these tools as its built-in `discord` extension, which
+its agents select by default when Carillon has a Discord provider; an agent's
+`settings.json` can remove it. A conversation sees one small tool,
+`enable_discord`: it identifies the guild, bot and current origin, returns
+the Discord skill's guidance, and loads the Discord tools into that
 conversation. That's context management, not a security boundary: the agent
 already has your Unix authority.
+
+## The skill for other harnesses
+
+```sh
+carillon discord tools install
+```
+
+This copies the release's skill into the resources of every agent that has
+them, replacing only `skills/discord/SKILL.md`. Carillon's T3 profiles link
+to those resources, so the assistant on T3 has the skill at its next session;
+T3 Code channels and your own sessions never do. Run it again after an
+update, and remove the file to turn it off. The regular installer doesn't
+install it.
 
 ## Other local agents
 
@@ -65,8 +65,7 @@ the agent's normal reply.
 
 ## Where things live
 
-- [`index.ts`](src/index.ts): the extension and its tools;
-  [`activation.ts`](src/activation.ts): per-conversation activation;
+- [`index.ts`](src/index.ts): the pi-durable extension and its tools;
   [`schemas.ts`](src/schemas.ts): the model-facing schemas.
 - [`client.ts`](src/client.ts): the provider client, which only talks to a
   loopback address from the registry.
@@ -74,6 +73,6 @@ the agent's normal reply.
   calls and guild checks.
 - [`skill`](skill/SKILL.md): the agent's instructions.
 
-The runtime gives the extension the current conversation's Discord origin and
-provider connection through a per-session `carillon:context` event, taken from
-the admitted message and the installation's registry, never from user text.
+The runtime gives the tools each conversation's Discord origin, from the
+latest message it admitted there, and its provider connection, from the
+installation's registry; never from the model's arguments.

@@ -3,13 +3,11 @@ import { testChannelCutover } from "./test-runtime-cutover.mjs";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { constants } from "node:fs";
 import {
   chmod,
   lstat,
   mkdir,
   mkdtemp,
-  open,
   readdir,
   readFile,
   readlink,
@@ -165,7 +163,20 @@ try {
     "operator diagnostics must require authentication",
   );
 
-  run("--home", installation, "enable-demo-resources");
+  const agentResources = join(installation, "agents/default");
+  await mkdir(join(agentResources, "skills/carillon-status"), { recursive: true });
+  await writeFile(
+    join(agentResources, "extensions/carillon-context.js"),
+    'export default { sections: [{ key: "context", render: () => "Carillon native extension active." }] };',
+  );
+  await writeFile(
+    join(agentResources, "skills/carillon-status/SKILL.md"),
+    "---\nname: carillon-status\ndescription: Report Carillon's status.\n---\nReport it plainly.\n",
+  );
+  await writeFile(
+    join(agentResources, "settings.json"),
+    JSON.stringify({ extensions: { add: ["extensions/carillon-context.js"] } }),
+  );
   const additions = await simulate("event-2", "use the additions");
   assert.match(additions.delivery.content, /Local provider response 2/u);
   assert.match(additions.delivery.content, /native extension active; skill active/u);
@@ -298,8 +309,8 @@ try {
     // startup if it disappears, before binding or touching native session state.
     await start("core");
     await rename(workspace, `${workspace}-saved`);
-    const sessions = join(installation, "state/components/runtime-pi/sessions");
-    await rename(sessions, `${sessions}-saved`);
+    const storage = join(installation, "state/components/runtime-pi/agents");
+    await rename(storage, `${storage}-saved`);
     try {
       for (const missing of [true, false]) {
         if (!missing) await writeFile(workspace, "not a directory");
@@ -307,7 +318,7 @@ try {
           "runtime",
           /agent assistant: workspace must be an existing directory/u,
         );
-        await assert.rejects(stat(sessions), { code: "ENOENT" });
+        await assert.rejects(stat(storage), { code: "ENOENT" });
         // Dispatch is paused, so startup refusals must leave accepted work queued.
         assert.equal(
           JSON.parse(run("--home", installation, "inspect", queued.turn_id)).state,
@@ -317,8 +328,8 @@ try {
     } finally {
       await rm(workspace, { force: true });
       await rename(`${workspace}-saved`, workspace);
-      await rm(sessions, { recursive: true, force: true });
-      await rename(`${sessions}-saved`, sessions);
+      await rm(storage, { recursive: true, force: true });
+      await rename(`${storage}-saved`, storage);
       await stop("core");
     }
     await testResourceStateSeparation(queued.turn_id);
@@ -803,51 +814,18 @@ async function testModuleOperations() {
 }
 
 /**
- * Starts a deterministic turn directly on the runtime and holds it at a
- * resource read: the extension file is a pipe that yields nothing until
- * `release` writes to it.
+ * Starts a deterministic turn in a conversation of its own and keeps it
+ * running: its scripted model answers once `release` creates the file the
+ * message names.
  */
-async function holdTurn(correlationId) {
-  const fixture = join(workspace, `resources-${correlationId}`);
-  await mkdir(join(fixture, "extensions"), { recursive: true });
-  const pipe = join(fixture, "extensions", "carillon-context.js");
-  execFileSync("mkfifo", [pipe]);
-  const response = fetch(`http://${runtimeHost}:${String(basePort + 2)}/v1/turns`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${await credentialValue("runtime-pi")}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      correlation_id: correlationId,
-      interface_id: "discord-private",
-      agent_id: "assistant",
-      audience_id: `discord-100-${correlationId}`,
-      input: "held",
-      resource_root: fixture,
-      attachment_root: fixture,
-    }),
-  });
-  response.catch(() => undefined);
-  // The pipe accepts a writer once the runtime has opened it to read.
-  let writer;
-  for (let attempt = 0; writer === undefined && attempt < 400; attempt += 1) {
-    try {
-      writer = await open(pipe, constants.O_WRONLY | constants.O_NONBLOCK);
-    } catch (failure) {
-      if (failure.code !== "ENXIO") throw failure;
-      await new Promise((resolveWait) => setTimeout(resolveWait, 25));
-    }
-  }
-  assert.ok(writer, "the held turn did not reach its resource read");
+async function holdTurn(eventId) {
+  const marker = join(workspace, eventId);
+  const { turn_id: turnId } = await submitCoreEvent(eventId, `hold ${marker}`, "307");
+  await waitForTurn(turnId, "running");
   return {
     async release() {
-      await writer.write("held");
-      await writer.close();
-      const settled = await response;
-      const body = await settled.text();
-      assert.equal(settled.status, 200, body);
-      return JSON.parse(body);
+      await writeFile(marker, "");
+      return await waitForTurn(turnId, "completed");
     },
   };
 }
@@ -888,8 +866,8 @@ async function testResourceStateSeparation(turnId) {
       await rename(nested, state);
     }
   }
-  // Non-selected siblings remain valid: the resource root need not be isolated
-  // from every kind of state (Pi itself keeps sessions beneath that root).
+  // Non-selected siblings remain valid: the resource root need not be
+  // isolated from every kind of state.
   const sibling = join(resources, "core-state");
   await rename(state, sibling);
   try {
@@ -908,9 +886,9 @@ async function testResourceStateSeparation(turnId) {
 
 async function testPiModelReadiness() {
   const privateState = join(installation, "pi");
-  const sessions = join(installation, "state/components/runtime-pi/sessions");
+  const storage = join(installation, "state/components/runtime-pi/agents");
   await rename(privateState, `${privateState}-saved`);
-  await rename(sessions, `${sessions}-saved`);
+  await rename(storage, `${storage}-saved`);
   await mkdir(privateState);
   // Pi's own offline switch keeps catalog refresh local, without substituting
   // ModelRuntime or borrowing the installing user's model credentials.
@@ -944,7 +922,7 @@ async function testPiModelReadiness() {
       assertStartupRefused("runtime", message, [], options);
       // Setup's readiness check is the same startup check.
       assertStartupRefused("runtime", message, ["--check"], options);
-      assert.deepEqual(await readdir(sessions), [], "setup failure must not create a native turn");
+      assert.deepEqual(await readdir(storage), [], "setup failure must not create a native turn");
     }
     // Core stays stopped throughout this runtime-only readiness check, so no
     // queued work can reach the intentionally non-listening model endpoint.
@@ -966,14 +944,13 @@ async function testPiModelReadiness() {
     const response = await fetch(`http://${runtimeHost}:${String(basePort + 2)}/health`);
     assert.equal(response.status, 200);
     assert.equal((await response.json()).provider, "pi");
-    assert.deepEqual(await readdir(sessions), []);
     await stop("runtime");
   } finally {
     await stop("runtime");
     await rm(privateState, { recursive: true, force: true });
-    await rm(sessions, { recursive: true, force: true });
+    await rm(storage, { recursive: true, force: true });
     await rename(`${privateState}-saved`, privateState);
-    await rename(`${sessions}-saved`, sessions);
+    await rename(`${storage}-saved`, storage);
   }
 }
 
@@ -984,7 +961,7 @@ async function testPiModelReadiness() {
  */
 async function testProviderFailure() {
   const privateState = join(installation, "pi");
-  const sessions = join(installation, "state/components/runtime-pi/sessions");
+  const storage = join(installation, "state/components/runtime-pi/agents");
   const key = `sk-proj-${"Ab1".repeat(20)}`;
   const failures = [
     {
@@ -1032,7 +1009,7 @@ async function testProviderFailure() {
   await once(provider, "listening");
   await stop("runtime");
   await rename(privateState, `${privateState}-saved`);
-  await rename(sessions, `${sessions}-saved`);
+  await rename(storage, `${storage}-saved`);
   await mkdir(privateState);
   const log = [];
   try {
@@ -1092,9 +1069,9 @@ async function testProviderFailure() {
     assert.equal(recovered.delivery.content, "Recovered after the provider failures.");
     assert.equal(requests, 4, "failed turns must not be retried or replayed");
     const diagnostics = log.join("");
-    assert.match(diagnostics, /POST \/v1\/turns failed: .*The usage limit has been reached/u);
-    assert.match(diagnostics, /POST \/v1\/turns failed: .*Gateway refused \[redacted\]/u);
-    assert.match(diagnostics, /POST \/v1\/turns failed: .*password=\[redacted\]/u);
+    assert.match(diagnostics, /turn \S+ failed: .*The usage limit has been reached/u);
+    assert.match(diagnostics, /turn \S+ failed: .*Gateway refused \[redacted\]/u);
+    assert.match(diagnostics, /turn \S+ failed: .*password=\[redacted\]/u);
     for (const text of [explained.delivery.content, ...withheld, diagnostics])
       for (const secret of [key, "short-secret"])
         assert.ok(!text.includes(secret), "credentials must not be displayed or logged");
@@ -1102,9 +1079,9 @@ async function testProviderFailure() {
     await stop("runtime");
     provider.close();
     await rm(privateState, { recursive: true, force: true });
-    await rm(sessions, { recursive: true, force: true });
+    await rm(storage, { recursive: true, force: true });
     await rename(`${privateState}-saved`, privateState);
-    await rename(`${sessions}-saved`, sessions);
+    await rename(`${storage}-saved`, storage);
   }
 }
 
@@ -1117,7 +1094,7 @@ async function testProviderFailure() {
  */
 async function testActivityVisibility() {
   const privateState = join(installation, "pi");
-  const sessions = join(installation, "state/components/runtime-pi/sessions");
+  const storage = join(installation, "state/components/runtime-pi/agents");
   const marker = "activity-release";
   const command = `until [ -e ${marker} ]; do sleep 0.1; done; echo released`;
   let requests = 0;
@@ -1157,7 +1134,7 @@ async function testActivityVisibility() {
   await once(provider, "listening");
   await stop("runtime");
   await rename(privateState, `${privateState}-saved`);
-  await rename(sessions, `${sessions}-saved`);
+  await rename(storage, `${storage}-saved`);
   await mkdir(privateState);
   try {
     await writeFile(
@@ -1235,9 +1212,9 @@ async function testActivityVisibility() {
     provider.close();
     await rm(join(workspace, marker), { force: true });
     await rm(privateState, { recursive: true, force: true });
-    await rm(sessions, { recursive: true, force: true });
+    await rm(storage, { recursive: true, force: true });
     await rename(`${privateState}-saved`, privateState);
-    await rename(`${sessions}-saved`, sessions);
+    await rename(`${storage}-saved`, storage);
   }
 }
 
@@ -1442,10 +1419,10 @@ async function testMissingResourceRoot(turnId) {
 
 async function testRuntimeStartupRefusals(turnId) {
   const original = await readFile(configPath(), "utf8");
-  const sessions = join(installation, "state/components/runtime-pi/sessions");
+  const storage = join(installation, "state/components/runtime-pi/agents");
   const privateState = join(installation, "pi");
   const alternateToken = join(workspace, "alternate-runtime.token");
-  await rename(sessions, `${sessions}-saved`);
+  await rename(storage, `${storage}-saved`);
   await rename(privateState, `${privateState}-saved`);
   await start("core");
   try {
@@ -1456,7 +1433,7 @@ async function testRuntimeStartupRefusals(turnId) {
         "--token-file",
         alternateToken,
       ]);
-      await assert.rejects(stat(sessions), { code: "ENOENT" });
+      await assert.rejects(stat(storage), { code: "ENOENT" });
       await assert.rejects(stat(privateState), { code: "ENOENT" });
       assert.equal(JSON.parse(run("--home", installation, "inspect", turnId)).state, "queued");
     }
@@ -1469,7 +1446,7 @@ async function testRuntimeStartupRefusals(turnId) {
     ]) {
       await writeFile(runtimeSettings, settings);
       assertStartupRefused("runtime", expected);
-      await assert.rejects(stat(sessions), { code: "ENOENT" });
+      await assert.rejects(stat(storage), { code: "ENOENT" });
     }
     await rm(runtimeSettings);
     // An interface endpoint off the loopback socket rule is refused before
@@ -1480,7 +1457,7 @@ async function testRuntimeStartupRefusals(turnId) {
     assert.notEqual(remote, original);
     await writeFile(configPath(), remote);
     assertStartupRefused("runtime", /provider URL must use an HTTP loopback socket address/u);
-    await assert.rejects(stat(sessions), { code: "ENOENT" });
+    await assert.rejects(stat(storage), { code: "ENOENT" });
     await writeFile(configPath(), original);
     run("--home", installation, "provider", "runtime-pi", "disable");
     // Disabled on purpose, the runtime exits successfully before reading its
@@ -1497,16 +1474,16 @@ async function testRuntimeStartupRefusals(turnId) {
       await rename(`${token}-saved`, token);
       await writeFile(configPath(), disabled);
     }
-    await assert.rejects(stat(sessions), { code: "ENOENT" });
+    await assert.rejects(stat(storage), { code: "ENOENT" });
     await assert.rejects(stat(privateState), { code: "ENOENT" });
     assert.equal(JSON.parse(run("--home", installation, "inspect", turnId)).state, "queued");
   } finally {
     await stop("core");
     await writeFile(configPath(), original);
     await rm(alternateToken, { force: true });
-    await rm(sessions, { recursive: true, force: true });
+    await rm(storage, { recursive: true, force: true });
     await rm(privateState, { recursive: true, force: true });
-    await rename(`${sessions}-saved`, sessions);
+    await rename(`${storage}-saved`, storage);
     await rename(`${privateState}-saved`, privateState);
   }
 }
@@ -1920,8 +1897,8 @@ async function testAttachments() {
   // The interface's staging is its own; accepted files no longer need it.
   await rm(incoming, { recursive: true });
   const inspection = await waitForTurn(receipt.turn_id, "completed", "pending");
-  assert.match(inspection.output, /attachment report\.pdf 26 bytes intact/u);
-  assert.match(inspection.output, /attachment notes\.txt 5 bytes intact/u);
+  assert.match(inspection.output, /attachment report\.pdf 26 bytes;/u);
+  assert.match(inspection.output, /attachment notes\.txt 5 bytes\./u);
   assert.equal(inspection.attachments.length, 2);
   assert.match(inspection.attachments[0].path, /^[0-9a-f-]{36}\/0$/u);
   // Asked about the event again, core names the same accepted turn, in the
@@ -1965,7 +1942,7 @@ async function postCoreEvent(eventId, content, attachments) {
   });
 }
 
-async function submitCoreEvent(eventId, content) {
+async function submitCoreEvent(eventId, content, channel = "300") {
   const response = await fetch(`http://127.0.0.1:${String(basePort)}/v1/events`, {
     method: "POST",
     headers: {
@@ -1977,9 +1954,9 @@ async function submitCoreEvent(eventId, content) {
       event_id: eventId,
       agent_id: "assistant",
       user_id: "200",
-      audience_id: "discord-100-300",
-      delivery_target_id: "300",
-      feedback_target_id: `300:${eventId}`,
+      audience_id: `discord-100-${channel}`,
+      delivery_target_id: channel,
+      feedback_target_id: `${channel}:${eventId}`,
       content,
     }),
   });

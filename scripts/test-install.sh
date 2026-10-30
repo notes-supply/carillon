@@ -32,7 +32,7 @@ for artifact in \
   bin/carillon-discord \
   lib/carillon_discord_module.wasm \
   lib/examples/card-colours.wasm \
-  lib/carillon-discord-pi.js \
+  lib/carillon-discord-SKILL.md \
   bin/carillon-runtime-pi \
   bin/carillon-runtime-t3 \
   bin/photon_rs_bg.wasm \
@@ -380,14 +380,11 @@ done
 APP=$CARILLON_HOME/app/bin
 CONFIG=$CARILLON_HOME/carillon.toml
 
-# The integration is opt-in and enters captured agent resources, not mutable app paths.
-[ ! -e "$CARILLON_HOME/agents/default/extensions/carillon-discord.js" ]
+# The skill is opt-in and enters captured agent resources, not mutable app paths.
+[ ! -e "$CARILLON_HOME/agents/default/skills/discord/SKILL.md" ]
 env CARILLON_HOME="$CARILLON_HOME" "$APP/carillon" discord tools install
-cmp "$CARILLON_HOME/app/lib/carillon-discord-pi.js" "$CARILLON_HOME/agents/default/extensions/carillon-discord.js"
+cmp "$CARILLON_HOME/app/lib/carillon-discord-SKILL.md" "$CARILLON_HOME/agents/default/skills/discord/SKILL.md"
 grep -Fq 'enable_discord' "$CARILLON_HOME/agents/default/skills/discord/SKILL.md"
-env CARILLON_HOME="$CARILLON_HOME" "$APP/carillon" discord tools install
-cmp "$CARILLON_HOME/app/lib/carillon-discord-pi.js" "$CARILLON_HOME/agents/default/extensions/carillon-discord.js"
-bun -e 'const extension = await import(process.argv[1]); if (typeof extension.default !== "function") throw new Error("missing extension export")' "$CARILLON_HOME/agents/default/extensions/carillon-discord.js"
 
 
 start_runtime() {
@@ -425,18 +422,9 @@ for offset in 0 1 2; do
   done
 done
 
-# While core serves, the tools install refuses before changing either file.
-TOOLS_HASH=$(cat "$CARILLON_HOME/agents/default/extensions/carillon-discord.js" \
-  "$CARILLON_HOME/agents/default/skills/discord/SKILL.md" | sha256sum)
-if env CARILLON_HOME="$CARILLON_HOME" "$APP/carillon" discord tools install >"$TEST_ROOT/tools.log" 2>&1; then
-  printf '%s\n' "the Discord tools must not install while core is serving" >&2
-  exit 1
-fi
-grep -F 'Carillon core is running' "$TEST_ROOT/tools.log" >/dev/null
-[ "$(cat "$CARILLON_HOME/agents/default/extensions/carillon-discord.js" \
-  "$CARILLON_HOME/agents/default/skills/discord/SKILL.md" | sha256sum)" = "$TOOLS_HASH" ]
-
-# The skill goes only into the agents' resources, never the shared workspace.
+# While core serves, the skill installs again; it goes only into the agents'
+# resources, never the shared workspace.
+env CARILLON_HOME="$CARILLON_HOME" "$APP/carillon" discord tools install >/dev/null
 [ ! -e "$WORKSPACE/.claude/skills/discord" ] && [ ! -e "$WORKSPACE/.agents/skills/discord" ]
 env CARILLON_HOME="$CARILLON_HOME" "$APP/carillon" discord call messages pin --help >/dev/null
 
