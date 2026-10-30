@@ -74,7 +74,8 @@ it("opens one turn per key and reads core's receipt", async () => {
   });
   expect(await open(opening)).toEqual({ ...first, duplicate: true });
   fake.answer(409);
-  await expect(open({ ...opening, key: "other" })).rejects.toThrow(
-    "core opened no turn: answered 409",
-  );
+  await expect(open({ ...opening, key: "other" })).rejects.toMatchObject({
+    status: 409,
+    message: "core opened no turn: answered 409",
+  });
 });

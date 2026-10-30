@@ -158,6 +158,11 @@ it.each([
     "selects memory, which is neither a built-in extension",
   ],
   [
+    "an MCP server mcp.json does not configure",
+    { "settings.json": JSON.stringify({ extensions: ["mcp:nowhere"] }) },
+    "selects mcp:nowhere, but the Pi runtime's mcp.json configures no server nowhere",
+  ],
+  [
     "a user extension that throws",
     {
       "extensions/broken.js": 'throw new Error("broken on purpose");',

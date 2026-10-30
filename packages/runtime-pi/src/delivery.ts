@@ -13,6 +13,8 @@ import {
   type EntryId,
   type SettledSubmissionRecord,
   type SubmissionId,
+  type TaskId,
+  type TaskRecord,
   type Tx,
 } from "@earendil-works/pi-durable";
 import type { TurnActivity, TurnOutcome } from "@carillon/protocol";
@@ -23,11 +25,22 @@ import { Type } from "typebox";
 import { Check } from "typebox/value";
 import { MESSAGE } from "./documents.ts";
 
+/**
+ * What a turn the runtime opened runs for: it is over once `task` is
+ * cancelled or the agent no longer selects `extension`.
+ */
+export interface Needs {
+  readonly task: TaskId;
+  readonly extension: string;
+}
+
 export interface DeliveryInput {
   readonly turn: string;
   readonly interface_id: string;
   readonly conversation: ConversationId;
   readonly submission: SubmissionId;
+  /** An opened turn is answered only while what it runs for is not over. */
+  readonly needs?: Needs;
 }
 
 const DeliveryInputSchema = Type.Object({
@@ -35,6 +48,7 @@ const DeliveryInputSchema = Type.Object({
   interface_id: Type.String(),
   conversation: Type.Integer(),
   submission: Type.Integer(),
+  needs: Type.Optional(Type.Object({ task: Type.Integer(), extension: Type.String() })),
 });
 
 /** A delivery task's input, as its stored record holds it. */
@@ -58,6 +72,8 @@ export interface DeliveryHost {
   wait(submission: SubmissionId, context: Context): Promise<SettledSubmissionRecord>;
   /** What the turn did, as far as this process watched it. */
   report(turn: string): TurnActivity | undefined;
+  /** Whether the agent selects the extension; undefined while that is unknown. */
+  selects(extension: string): boolean | undefined;
   settle(turn: string, outcome: TurnOutcome): Promise<Settled>;
   /** Core has the turn's outcome: the runtime holds the turn no longer. */
   released(turn: string): void;
@@ -75,6 +91,12 @@ const UNDELIVERABLE: TurnOutcome = {
 export const DELIVERY = "carillon.delivery";
 
 export function deliveryTask(host: DeliveryHost) {
+  /** Whether an opened turn's work is over; an unknown selection keeps it. */
+  async function ended(tx: Tx, needs: Needs | undefined): Promise<boolean> {
+    if (needs === undefined) return false;
+    return over(host.selects(needs.extension) ?? true, await tx.task(needs.task));
+  }
+
   return defineTask<DeliveryInput, DeliveryState, null>({
     name: DELIVERY,
     version: 1,
@@ -87,7 +109,12 @@ export function deliveryTask(host: DeliveryHost) {
             `turn ${task.input.turn} failed: ${redactCredentials(textOf(settled.detail))}`,
           );
         await runtime.commit(async (tx) => {
-          const outcome = await decide(tx, task.input, settled, host.report(task.input.turn));
+          const decided = await decide(tx, task.input, settled, host.report(task.input.turn));
+          // An answer can come before the opening stops a turn whose work ended.
+          const outcome: TurnOutcome =
+            decided.outcome === "answered" && (await ended(tx, task.input.needs))
+              ? { outcome: "stopped" }
+              : decided;
           return { status: "running", checkpoint: { phase: "post", outcome, attempt: 0 } };
         }, context);
       },
@@ -98,7 +125,7 @@ export function deliveryTask(host: DeliveryHost) {
           await host.settle(turn, outcome);
         } catch (failure) {
           if (!refusedForGood(failure)) {
-            const delay = Math.min(1_000 * 2 ** attempt, LONGEST_BACKOFF_MS);
+            const delay = backoff(attempt);
             console.error(
               `turn ${turn}: ${diagnostic(failure)}; posting again in ${String(delay / 1_000)} s`,
             );
@@ -209,12 +236,30 @@ async function carriedLater(
   return false;
 }
 
+/** Whether the work is over: its extension deselected, or its task cancelled or gone. */
+export function over(
+  selected: boolean,
+  task: TaskRecord<JsonValue, JsonValue, unknown> | undefined,
+): boolean {
+  return (
+    !selected ||
+    task === undefined ||
+    task.abortRequested ||
+    task.state.outcome?.status === "aborted"
+  );
+}
+
+/** How long to wait before asking core again once `attempt` earlier tries failed. */
+export function backoff(attempt: number): number {
+  return Math.min(1_000 * 2 ** attempt, LONGEST_BACKOFF_MS);
+}
+
 /**
  * Whether asking core again cannot change its answer: a client error other
  * than an unready credential, a timeout or a rate limit. An unreachable or
  * failing core may record the outcome later.
  */
-function refusedForGood(failure: unknown): boolean {
+export function refusedForGood(failure: unknown): boolean {
   return (
     failure instanceof CoreRefusal &&
     failure.status >= 400 &&

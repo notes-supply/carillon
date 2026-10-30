@@ -129,6 +129,18 @@ it.each([
   expect(recovered.stdout).toContain("runtime-pi ready at");
 });
 
+it("refuses to start with an mcp.json it cannot use", async () => {
+  const { home, args } = await installation({ default: "resources" });
+  await mkdir(join(home, "resources"));
+  await mkdir(join(home, "pi"));
+  await writeFile(join(home, "pi", "mcp.json"), JSON.stringify({ mcpServers: { notes: {} } }), {
+    mode: 0o600,
+  });
+  const result = await run(args);
+  expect(result.status, result.stderr).toBe(1);
+  expect(result.stderr).toContain(`${join(home, "pi", "mcp.json")}: server notes must be`);
+});
+
 async function inbox(url: string, home: string, input: string) {
   const response = await fetch(`${url}/v1/inbox`, {
     method: "POST",

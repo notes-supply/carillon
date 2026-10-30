@@ -281,6 +281,48 @@ running answer and answers the new message, with every waiting one, next.
 A waiting message offers reactions to steer it in, interrupt for it, or stop
 it.
 
+### What Pi can do besides answer
+
+The assistant's `settings.json` selects more of Pi's built-in extensions.
+None of these is selected by default:
+
+```json
+{ "extensions": { "add": ["schedules", "subagents", "mcp:files"] } }
+```
+
+- `schedules` lets the assistant run a prompt later in the same
+  conversation, once or on a cron expression, such as "every weekday at 9".
+  Each run's answer arrives as a message of its own, like any answer.
+  Schedules survive restarts; a run missed while Pi was down happens once
+  when it starts again, and runs held up while core was unreachable happen
+  once when it is back. Remove `schedules` to end each one when it is next
+  due.
+- `subagents` lets the assistant hand a task to a helper that starts with
+  its model and tools but none of the conversation's history. The helper
+  works in the background by default, and its result arrives later as a
+  message of its own; stopping the answer that started it doesn't stop the
+  helper.
+- `mcp:<server>` gives the assistant the tools of an MCP server, which it
+  finds with tool search. Configure servers in `CARILLON_HOME/pi/mcp.json`,
+  then `carillon restart`. It holds their credentials, so make it readable
+  only by you, `chmod 600`; Pi refuses to start with one other users may
+  read or write, as ssh refuses such a key:
+
+  ```json
+  {
+    "mcpServers": {
+      "files": { "command": "mcp-files", "args": ["--root", "/srv"] },
+      "notes": { "url": "https://mcp.example.com/mcp", "headers": { "authorization": "Bearer …" } }
+    }
+  }
+  ```
+
+  A server, named in lowercase words joined by `-`, runs a program
+  (`command`, with optional `args`, `env` and `cwd`) or is reached at an
+  `http:` or `https:` `url` (with optional `headers`). Pi refuses to start
+  with a file it cannot use, and `carillon logs runtime-pi` says why. A
+  server Pi loses offers no tools until it reconnects.
+
 ## Discord
 
 `/model` shows the models the runtime offers and lets an allowlisted user

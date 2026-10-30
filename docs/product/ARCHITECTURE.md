@@ -77,8 +77,8 @@ reply. The outcome and its delivery commit together, once; the same outcome
 again is recorded, another is refused. A turn still queued is settled too,
 since the runtime may hold a turn whose 202 core never recorded. A durable
 runtime may also open a running turn in a conversation whose agent runs on
-it, for a schedule or a subagent's report, idempotent by its key; such a turn
-has no person or message behind it. Interfaces may not use event IDs that
+it, for a schedule or a subagent's report, idempotent by its key, which no
+other conversation may reuse; such a turn has no person or message behind it. Interfaces may not use event IDs that
 begin `runtime:`.
 
 Agent assignments are fixed for core's lifetime. If an agent moves to
@@ -224,8 +224,11 @@ survive restarts. A message that arrives while the agent answers in its
 conversation steers that answer, waits for it or interrupts it, as the
 agent's settings choose, and people steer, interrupt or stop a waiting
 message. Steers placed into one answer settle with it: the newest carries
-it. Pi's sign-in, catalogue and default model live in `CARILLON_HOME/pi`,
-apart from `~/.pi`. See the [Pi guide](../../packages/runtime-pi/README.md).
+it. An agent's settings may select schedules, subagents and the MCP servers
+of `CARILLON_HOME/pi/mcp.json` as built-in extensions; a schedule's run and
+a background subagent's report come in turns Pi opens. Pi's sign-in,
+catalogue and default model live in `CARILLON_HOME/pi`, apart from `~/.pi`.
+See the [Pi guide](../../packages/runtime-pi/README.md).
 
 **T3** (`carillon-runtime-t3`) runs turns on a T3 Code server as another
 client of the threads T3's own UI shows. It stores nothing durable of a

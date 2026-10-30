@@ -47,6 +47,15 @@ export const Turns = defineDocFamily<{ task?: TaskId }, null>({
   checkpointWhen: () => true,
 });
 
+/** A nonce made once per store, so the turns it opens never take another store's keys. */
+export const Store = defineDoc<{ nonce?: string }>({
+  kind: "carillon.store",
+  version: 1,
+  scope: "session",
+  initial: () => ({}),
+  checkpointWhen: () => true,
+});
+
 /** The agent's latest resource snapshot admitted with a turn. */
 export const Resources = defineDoc<{ root?: string }>({
   kind: "carillon.resources",

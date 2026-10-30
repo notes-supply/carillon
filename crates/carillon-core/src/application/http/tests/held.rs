@@ -233,6 +233,16 @@ async fn a_runtime_opens_one_turn_per_key_in_a_conversation_of_its_own() -> Resu
         (again.turn_id.as_str(), again.duplicate),
         (opened.turn_id.as_str(), true)
     );
+    // Another conversation with the same key is refused, not given this turn.
+    let mut other_agent = opening("conversation", "nightly");
+    other_agent["agent_id"] = json!("other-agent");
+    for body in [opening("elsewhere", "nightly"), other_agent] {
+        assert_eq!(
+            open_turn(&state, RUNTIME, &body).await?.err(),
+            Some(StatusCode::CONFLICT),
+            "{body}"
+        );
+    }
     let inspected = state
         .core
         .inspect_turn(&opened.turn_id)?

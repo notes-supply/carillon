@@ -15,7 +15,7 @@ import {
  */
 export type Settled = "recorded" | "superseded" | "unknown";
 
-/** Core answered with a status that means none of those, such as 503 or 413. */
+/** Core answered with a status that means none of those, such as 503 or 413, or opened no turn. */
 export class CoreRefusal extends Error {
   readonly status: number;
 
@@ -32,8 +32,11 @@ export interface CoreClient {
    * caller decides when to ask again.
    */
   readonly settle: (turnId: string, outcome: TurnOutcome) => Promise<Settled>;
-  /** Opens a running turn in one of this runtime's conversations, or finds the one its key opened. */
-  readonly open: (opening: TurnOpening) => Promise<TurnReceipt>;
+  /**
+   * Opens a running turn in one of this runtime's conversations, or finds
+   * the one its key opened. `signal` ends the wait for core's answer.
+   */
+  readonly open: (opening: TurnOpening, signal?: AbortSignal) => Promise<TurnReceipt>;
 }
 
 interface CoreClientOptions {
@@ -46,7 +49,7 @@ interface CoreClientOptions {
 const CALL_TIMEOUT_MS = 10_000;
 
 export function createCoreClient(options: CoreClientOptions): CoreClient {
-  const call = (path: string, body: unknown) =>
+  const call = (path: string, body: unknown, signal?: AbortSignal) =>
     fetch(`${options.url}${path}`, {
       method: "POST",
       headers: {
@@ -55,7 +58,10 @@ export function createCoreClient(options: CoreClientOptions): CoreClient {
         "content-type": "application/json",
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+      signal: AbortSignal.any([
+        AbortSignal.timeout(CALL_TIMEOUT_MS),
+        ...(signal === undefined ? [] : [signal]),
+      ]),
     });
   return {
     settle: async (turnId, outcome) => {
@@ -71,9 +77,10 @@ export function createCoreClient(options: CoreClientOptions): CoreClient {
         `core did not record the outcome of turn ${turnId}: ${await refusal(response)}`,
       );
     },
-    open: async (opening) => {
-      const response = await call("/v1/runtime/turns", opening);
-      if (!response.ok) throw new Error(`core opened no turn: ${await refusal(response)}`);
+    open: async (opening, signal) => {
+      const response = await call("/v1/runtime/turns", opening, signal);
+      if (!response.ok)
+        throw new CoreRefusal(response.status, `core opened no turn: ${await refusal(response)}`);
       return Parse(TurnReceiptSchema, await response.json());
     },
   };

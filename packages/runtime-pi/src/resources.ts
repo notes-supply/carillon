@@ -254,12 +254,18 @@ function selection(setting: Settings["extensions"], extensions: Extensions): str
         ...(setting?.add ?? []).filter((name) => setting?.remove?.includes(name) !== true),
       ];
   const builtIn = extensions.builtIn.map((extension) => extension.name);
-  for (const name of names)
-    if (!builtIn.includes(name) && !isUserExtension(name))
+  for (const name of names) {
+    if (builtIn.includes(name) || isUserExtension(name)) continue;
+    if (name.startsWith("mcp:"))
       throw new ExplainedFailure(
         422,
-        `The agent's settings.json selects ${name}, which is neither a built-in extension (${builtIn.join(", ")}) nor extensions/<file>.js, .mjs or .ts.`,
+        `The agent's settings.json selects ${name}, but the Pi runtime's mcp.json configures no server ${name.slice(4)}.`,
       );
+    throw new ExplainedFailure(
+      422,
+      `The agent's settings.json selects ${name}, which is neither a built-in extension (${builtIn.join(", ")}) nor extensions/<file>.js, .mjs or .ts.`,
+    );
+  }
   return [...new Set(names)];
 }
 
