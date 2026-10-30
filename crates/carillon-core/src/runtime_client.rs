@@ -1,9 +1,14 @@
 //! Concrete authenticated runtime transport. It does not claim or commit turns.
-use crate::TurnFailure;
+use crate::{InboxFailure, TurnFailure};
 use anyhow::anyhow;
 use carillon_protocol::model::{RestartReadiness, RuntimeTurnRequest, RuntimeTurnResponse};
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde::Deserialize;
+use std::time::Duration;
+
+/// How long a durable runtime may take to keep a turn handed to it before
+/// it is handed over again.
+const INBOX_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A runtime's failure response. Its `error` is phrased for the person using
 /// the interface and safe to display; a runtime omits it when it has nothing
@@ -74,7 +79,7 @@ impl RuntimeClient {
                 .and_then(|activity| serde_json::from_value(activity).ok());
             return Err(match (explanation, activity) {
                 // A closing runtime gives no answer; work may still have run.
-                (None, _) if status == reqwest::StatusCode::SERVICE_UNAVAILABLE => {
+                (None, _) if status == StatusCode::SERVICE_UNAVAILABLE => {
                     TurnFailure::Unanswered(anyhow!("runtime provider closed before answering"))
                 }
                 (None, None) => TurnFailure::Uncertain(anyhow!(
@@ -99,6 +104,62 @@ impl RuntimeClient {
         Ok(response)
     }
 
+    /// Hands a durable runtime a turn to hold, which it settles later. It
+    /// takes a turn it already holds as the same one, so a turn not known to
+    /// be taken is handed over again.
+    /// # Errors
+    /// Returns `Later` for a turn that may not have arrived or that the
+    /// runtime asked to have later (5xx, 408 or 429), `Misinstalled` for an
+    /// answer no turn explains (401, 403, 404, 405 or another 2xx), and
+    /// `Refused` for any other.
+    pub async fn submit(&self, request: &RuntimeTurnRequest) -> Result<(), InboxFailure> {
+        let response = self
+            .client
+            .post(format!("{}/v1/inbox", self.url))
+            .bearer_auth(&self.token)
+            .timeout(INBOX_TIMEOUT)
+            .json(request)
+            .send()
+            .await
+            .map_err(|error| {
+                InboxFailure::Later(anyhow!(error).context("contact runtime provider"))
+            })?;
+        let status = response.status();
+        if status == StatusCode::ACCEPTED {
+            return Ok(());
+        }
+        if status.is_server_error()
+            || matches!(
+                status,
+                StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
+            )
+        {
+            return Err(InboxFailure::Later(anyhow!(
+                "runtime provider answered {status}"
+            )));
+        }
+        if status.is_success()
+            || matches!(
+                status,
+                StatusCode::UNAUTHORIZED
+                    | StatusCode::FORBIDDEN
+                    | StatusCode::NOT_FOUND
+                    | StatusCode::METHOD_NOT_ALLOWED
+            )
+        {
+            return Err(InboxFailure::Misinstalled(anyhow!(
+                "runtime provider answered {status} at /v1/inbox"
+            )));
+        }
+        let failure = response.json::<RuntimeFailure>().await.unwrap_or_default();
+        Err(InboxFailure::Refused {
+            status: status.as_u16(),
+            explanation: failure
+                .error
+                .filter(|explanation| !explanation.trim().is_empty()),
+        })
+    }
+
     /// Whether the runtime says restarting it now loses nothing it alone
     /// knows. It answers at once from its own state.
     /// # Errors
@@ -108,7 +169,7 @@ impl RuntimeClient {
             .client
             .get(format!("{}/v1/restart", self.url))
             .bearer_auth(&self.token)
-            .timeout(std::time::Duration::from_secs(5))
+            .timeout(Duration::from_secs(5))
             .send()
             .await?
             .error_for_status()?

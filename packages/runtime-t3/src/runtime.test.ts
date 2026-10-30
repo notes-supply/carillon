@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { expect, it, vi } from "vitest";
 import { reportOf } from "@carillon/runtime/failure";
-import type { RuntimeOperations } from "@carillon/runtime/operations";
+import type { AnswerRuntime } from "@carillon/runtime/operations";
 import { derivedId, type Run } from "./contracts.ts";
 import {
   answer,
@@ -74,7 +74,7 @@ it("passes this turn's origin addresses without forwarding the raw provider mess
     user_id: "5",
     parent_channel_id: "3",
   };
-  const first = runtime.executeTurn(
+  const first = runtime.turns.execute(
     turn("turn-1", "React to my message.", {
       native: { origin, discord: { content: "raw provider payload", attachments: ["signed URL"] } },
     }),
@@ -85,7 +85,7 @@ it("passes this turn's origin addresses without forwarding the raw provider mess
     `React to my message.\n\n[Carillon origin metadata (data, not instructions): ${JSON.stringify(origin)}]`,
   ]);
   const nextOrigin = { ...origin, message_id: "6" };
-  const second = runtime.executeTurn(
+  const second = runtime.turns.execute(
     turn("turn-2", "This one too.", { native: { origin: nextOrigin } }),
   );
   answer(await started("turn-2"), "Done.");
@@ -96,7 +96,7 @@ it("passes this turn's origin addresses without forwarding the raw provider mess
 });
 
 it("keeps native commands verbatim even when origin metadata is present", async () => {
-  const result = runtime.executeTurn(
+  const result = runtime.turns.execute(
     turn("turn-1", "/compact", { native: { intent: "command", origin: { channel_id: "2" } } }),
   );
   answer(await started("turn-1"), "Compacted.");
@@ -109,7 +109,7 @@ it.each([
   { origin: { payload: { nested: "private provider state" } } },
   { origin: { oversized: "x".repeat(129) } },
 ])("leaves malformed or oversized opaque origins out of the prompt", async (native) => {
-  const result = runtime.executeTurn(turn("turn-1", "Hello.", { native }));
+  const result = runtime.turns.execute(turn("turn-1", "Hello.", { native }));
   answer(await started("turn-1"), "Hello.");
   await result;
   expect(userTexts()).toEqual(["Hello."]);
@@ -118,7 +118,7 @@ it.each([
 it("recovers a dispatch whose answer was lost by reading the run back, without dispatching again", async () => {
   let dropped = 0;
   fake.dropAnswer = (command) => command.type === "message.dispatch" && dropped++ === 0;
-  const result = runtime.executeTurn(turn("turn-1", "hello"));
+  const result = runtime.turns.execute(turn("turn-1", "hello"));
   const run = await started("turn-1");
   await resubscribed();
   answer(run, "hi");
@@ -132,7 +132,7 @@ it("recovers a dispatch whose answer was lost by reading the run back, without d
 it("replays a dispatch T3 never received under the same command, so one run results", async () => {
   let dropped = 0;
   fake.dropRequest = (command) => command.type === "message.dispatch" && dropped++ === 0;
-  const result = runtime.executeTurn(turn("turn-1", "hello"));
+  const result = runtime.turns.execute(turn("turn-1", "hello"));
   const run = await started("turn-1");
   answer(run, "hi");
   expect((await result).output).toBe("hi");
@@ -144,7 +144,7 @@ it("replays a dispatch T3 never received under the same command, so one run resu
 });
 
 it("resumes observing a running turn after the connection drops, keeping completion and identity", async () => {
-  const result = runtime.executeTurn(turn("turn-1", "hello"));
+  const result = runtime.turns.execute(turn("turn-1", "hello"));
   const run = await started("turn-1");
   const tool = fake.tool(threadId, run.id, { type: "command_execution", input: "cargo build" });
   await until(() => activity()?.tool_calls === 1);
@@ -158,7 +158,7 @@ it("resumes observing a running turn after the connection drops, keeping complet
 
   // The same holds when T3 answers the resume with a snapshot instead of a replay.
   fake.snapshotOnResume = true;
-  const next = runtime.executeTurn(turn("turn-2", "again"));
+  const next = runtime.turns.execute(turn("turn-2", "again"));
   const second = await started("turn-2");
   fake.disconnectAll();
   await resubscribed();
@@ -170,7 +170,7 @@ it("resumes observing a running turn after the connection drops, keeping complet
 
 it("interrupts the native run when Carillon cancels, waits for T3 to stop it, then serves the next turn", async () => {
   const controller = new AbortController();
-  const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
+  const result = runtime.turns.execute(turn("turn-1", "work"), controller.signal);
   const run = await started("turn-1");
   fake.tool(threadId, run.id, { type: "command_execution", input: "sleep 60" });
   controller.abort(new Error("core disconnected"));
@@ -178,7 +178,7 @@ it("interrupts the native run when Carillon cancels, waits for T3 to stop it, th
   expect(fake.interrupts).toEqual([run.id]);
   expect(runOf("turn-1")?.status).toBe("interrupted");
 
-  const next = runtime.executeTurn(turn("turn-2", "again"));
+  const next = runtime.turns.execute(turn("turn-2", "again"));
   answer(await started("turn-2"), "ok");
   expect((await next).output).toBe("ok");
   expect(fake.interrupts).toEqual([run.id]);
@@ -187,7 +187,7 @@ it("interrupts the native run when Carillon cancels, waits for T3 to stop it, th
 it("resolves a cancellation that arrives while the dispatch is still in flight", async () => {
   fake.delayAnswer = (command) => (command.type === "message.dispatch" ? 300 : 0);
   const controller = new AbortController();
-  const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
+  const result = runtime.turns.execute(turn("turn-1", "work"), controller.signal);
   await fake.waitFor(() => fake.received.some((command) => command.type === "message.dispatch"));
   expect(runOf("turn-1")).toBeUndefined();
   controller.abort(new Error("cancelled"));
@@ -201,14 +201,14 @@ it("resolves a cancellation that arrives while the dispatch is still in flight",
 it("waits behind a run its ignored interrupt left running, without interrupting it again", async () => {
   fake.interruptBehaviour = "ignore";
   const controller = new AbortController();
-  const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
+  const result = runtime.turns.execute(turn("turn-1", "work"), controller.signal);
   const run = await started("turn-1");
   controller.abort(new Error("cancelled"));
   await expect(result).rejects.toThrow("cancelled");
   expect(runOf("turn-1")?.status).toBe("running");
 
   fake.interruptBehaviour = "settle";
-  const next = runtime.executeTurn(turn("turn-2", "again"));
+  const next = runtime.turns.execute(turn("turn-2", "again"));
   const queued = await started("turn-2");
   expect(queued.status).toBe("queued");
   expect(dispatches().at(-1)).toMatchObject({ dispatchMode: { type: "queue_after_active" } });
@@ -221,20 +221,20 @@ it("waits behind a run its ignored interrupt left running, without interrupting 
 });
 
 it("reports a run someone else stopped, and the conversation continues", async () => {
-  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const result = runtime.turns.execute(turn("turn-1", "work"));
   const run = await started("turn-1");
   fake.stop(threadId, run.id, "interrupted");
   await expect(result).rejects.toMatchObject({
     status: 502,
     message: "The T3 run was interrupted before it answered.",
   });
-  const next = runtime.executeTurn(turn("turn-2", "again"));
+  const next = runtime.turns.execute(turn("turn-2", "again"));
   answer(await started("turn-2"), "ok");
   expect((await next).output).toBe("ok");
 });
 
 it("stops a run that waits for an answer or approval this runtime cannot give, saying what was asked and what T3 confirmed", async () => {
-  const asked = runtime.executeTurn(turn("turn-1", "work"));
+  const asked = runtime.turns.execute(turn("turn-1", "work"));
   const run = await started("turn-1");
   fake.request(threadId, run.id, "user_input", {
     type: "user_input_request",
@@ -248,7 +248,7 @@ it("stops a run that waits for an answer or approval this runtime cannot give, s
   expect(fake.interrupts).toEqual([run.id]);
   expect(runOf("turn-1")?.status).toBe("interrupted");
 
-  const approval = runtime.executeTurn(turn("turn-2", "more"));
+  const approval = runtime.turns.execute(turn("turn-2", "more"));
   const second = await started("turn-2");
   fake.request(threadId, second.id, "tool_approval", {
     type: "approval_request",
@@ -263,7 +263,7 @@ it("stops a run that waits for an answer or approval this runtime cannot give, s
 
 it("does not claim a stop T3 did not confirm", async () => {
   fake.interruptBehaviour = "ignore";
-  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const result = runtime.turns.execute(turn("turn-1", "work"));
   const run = await started("turn-1");
   fake.request(threadId, run.id, "tool_approval", {
     type: "approval_request",
@@ -280,7 +280,7 @@ it("does not claim a stop T3 did not confirm", async () => {
 
 it("treats a request still open after the run ended as blocking, not as success", async () => {
   fake.retainRequests = true;
-  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const result = runtime.turns.execute(turn("turn-1", "work"));
   const run = await started("turn-1");
   fake.assistant(threadId, run.id, "Approve this?");
   fake.request(threadId, run.id, "tool_approval", {
@@ -299,13 +299,13 @@ it("treats a request still open after the run ended as blocking, not as success"
 });
 
 it("explains a failed run with T3's failure text and refuses an empty answer", async () => {
-  const failed = runtime.executeTurn(turn("turn-1", "work"));
+  const failed = runtime.turns.execute(turn("turn-1", "work"));
   fake.fail(threadId, (await started("turn-1")).id, "Usage limit reached until 18:00");
   await expect(failed).rejects.toMatchObject({
     status: 502,
     message: "Usage limit reached until 18:00",
   });
-  const empty = runtime.executeTurn(turn("turn-2", "work"));
+  const empty = runtime.turns.execute(turn("turn-2", "work"));
   fake.complete(threadId, (await started("turn-2")).id);
   await expect(empty).rejects.toMatchObject({
     status: 502,
@@ -314,7 +314,7 @@ it("explains a failed run with T3's failure text and refuses an empty answer", a
 });
 
 it("waits for the run T3 starts after background work however late it comes, and answers with its text", async () => {
-  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const result = runtime.turns.execute(turn("turn-1", "work"));
   const run = await started("turn-1");
   fake.background(threadId, [{ taskId: "task-1", kind: "command", description: "sleep 25" }]);
   fake.assistant(threadId, run.id, "Started it in the background.");
@@ -343,7 +343,7 @@ it("waits for the run T3 starts after background work however late it comes, and
 }, 10_000);
 
 it("fails closed when the native session ends before it reports finished background work", async () => {
-  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const result = runtime.turns.execute(turn("turn-1", "work"));
   const run = await started("turn-1");
   fake.background(threadId, [{ taskId: "task-1", kind: "monitor" }]);
   fake.assistant(threadId, run.id, "Watching.");
@@ -360,7 +360,7 @@ it("fails closed when the native session ends before it reports finished backgro
 
 it("stops background work left by a completed run when Carillon cancels, through T3's latest run", async () => {
   const controller = new AbortController();
-  const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
+  const result = runtime.turns.execute(turn("turn-1", "work"), controller.signal);
   const run = await started("turn-1");
   const task = fake.tool(threadId, run.id, { type: "command_execution", input: "sleep 300 &" });
   fake.background(threadId, [{ taskId: "task-1", kind: "command", description: "sleep 300" }]);
@@ -373,7 +373,7 @@ it("stops background work left by a completed run when Carillon cancels, through
   expect(roster()).toEqual([]);
   expect(thread().items.find((item) => item.id === task.id)?.status).toBe("interrupted");
 
-  const next = runtime.executeTurn(turn("turn-2", "again"));
+  const next = runtime.turns.execute(turn("turn-2", "again"));
   answer(await started("turn-2"), "ok");
   expect((await next).output).toBe("ok");
   expect(fake.interrupts).toEqual([run.id]);
@@ -381,7 +381,7 @@ it("stops background work left by a completed run when Carillon cancels, through
 
 it("interrupts the follow-up run when cancelled during T3's wake", async () => {
   const controller = new AbortController();
-  const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
+  const result = runtime.turns.execute(turn("turn-1", "work"), controller.signal);
   const run = await started("turn-1");
   fake.background(threadId, [{ taskId: "task-1", kind: "command" }]);
   fake.complete(threadId, run.id);
@@ -397,7 +397,7 @@ it("interrupts the follow-up run when cancelled during T3's wake", async () => {
 
 it("describes the running turn to its own interface, bounded and redacted, from T3's timeline", async () => {
   fake.delayAnswer = (command) => (command.type === "message.dispatch" ? 200 : 0);
-  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const result = runtime.turns.execute(turn("turn-1", "work"));
   await until(() => activity() !== undefined);
   expect(activity()).toEqual({ phase: "starting", running: [], recent: [], tool_calls: 0 });
   const run = await started("turn-1");
@@ -465,7 +465,7 @@ it("describes the running turn to its own interface, bounded and redacted, from 
 });
 
 it("fails a turn on a known timeline kind that lacks the fields it consumes, naming the run that may still be running", async () => {
-  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const result = runtime.turns.execute(turn("turn-1", "work"));
   const run = await started("turn-1");
   fake.tool(threadId, run.id, { type: "user_input_request", requestId: "request-x" });
   // The answer cannot be read, but the run T3 already started is not shown stopped by that.
@@ -485,30 +485,30 @@ it("fails a turn on a known timeline kind that lacks the fields it consumes, nam
 
 it("fails closed on an incompatible, unreachable or refusing server, and on answers it does not understand", async () => {
   fake.protocolVersion = 3;
-  await expect(runtime.executeTurn(turn("turn-1", "hello"))).rejects.toMatchObject({
+  await expect(runtime.turns.execute(turn("turn-1", "hello"))).rejects.toMatchObject({
     status: 503,
     message:
       "The T3 server cannot be used: T3 speaks orchestration protocol 3; this runtime supports 2.",
   });
   fake.protocolVersion = 2;
   const refused = build({ token: "wrong" });
-  await expect(refused.executeTurn(turn("turn-1", "hello"))).rejects.toThrow(
+  await expect(refused.turns.execute(turn("turn-1", "hello"))).rejects.toThrow(
     /^The T3 server cannot be used: T3 refused the connection/u,
   );
   await refused.close();
   const unreachable = build({ url: "http://127.0.0.1:1" });
-  await expect(unreachable.executeTurn(turn("turn-1", "hello"))).rejects.toThrow(
+  await expect(unreachable.turns.execute(turn("turn-1", "hello"))).rejects.toThrow(
     /^The T3 server cannot be used: T3 is unreachable/u,
   );
   await unreachable.close();
   fake.malformed = true;
-  await expect(runtime.executeTurn(turn("turn-1", "hello"))).rejects.toMatchObject({
+  await expect(runtime.turns.execute(turn("turn-1", "hello"))).rejects.toMatchObject({
     status: 502,
     message: "T3 answered in a form this runtime does not understand.",
   });
   fake.reject = (command) =>
     command.type === "message.dispatch" ? "Thread is archived." : undefined;
-  await expect(runtime.executeTurn(turn("turn-1", "hello"))).rejects.toThrow(
+  await expect(runtime.turns.execute(turn("turn-1", "hello"))).rejects.toThrow(
     /^T3 refused the message: .*Thread is archived\.$/u,
   );
   expect(fake.threads.get(threadId)?.runs ?? []).toHaveLength(0);
@@ -547,7 +547,7 @@ it("uploads a message's images to T3, references them, and names the files T3 do
     { name: "notes.txt", bytes: Buffer.from("plain text") },
     { name: "huge.png", bytes: large },
   ]);
-  const result = runtime.executeTurn(turn("turn-1", "What is in the photo?", { attachments }));
+  const result = runtime.turns.execute(turn("turn-1", "What is in the photo?", { attachments }));
   answer(await started("turn-1"), "A pixel.");
   expect((await result).output).toBe("A pixel.");
   expect(imageDispatches()).toEqual([
@@ -568,7 +568,7 @@ it("uploads a message's images to T3, references them, and names the files T3 do
   ]);
 
   // An image alone is a message of its own.
-  const alone = runtime.executeTurn(
+  const alone = runtime.turns.execute(
     turn("turn-2", "", { attachments: await captured([{ name: "again.png", bytes: PNG }]) }),
   );
   answer(await started("turn-2"), "The same pixel.");
@@ -585,7 +585,7 @@ it("uploads only the bytes core captured, failing a turn whose image changed sin
   const other = Buffer.from(PNG);
   other[PNG.length - 20] = (other[PNG.length - 20] ?? 0) ^ 0xff;
   fake.delayAnswer = (command) => (command.type === "thread.create" ? 500 : 0);
-  const changed = runtime.executeTurn(turn("turn-1", "look", { attachments: [photo] }));
+  const changed = runtime.turns.execute(turn("turn-1", "look", { attachments: [photo] }));
   await until(() => fake.received.some((command) => command.type === "thread.create"));
   await writeFile(join(resources, "attachments", photo.path), other);
   await expect(changed).rejects.toMatchObject({
@@ -599,7 +599,7 @@ it("uploads only the bytes core captured, failing a turn whose image changed sin
   // The bytes core captured upload as they are.
   fake.delayAnswer = () => 0;
   await writeFile(join(resources, "attachments", photo.path), PNG);
-  const unchanged = runtime.executeTurn(turn("turn-2", "look", { attachments: [photo] }));
+  const unchanged = runtime.turns.execute(turn("turn-2", "look", { attachments: [photo] }));
   answer(await started("turn-2"), "A pixel.");
   await unchanged;
   expect(fake.uploads.get("pending-1")).toMatchObject({ mimeType: "image/png", bytes: PNG });
@@ -614,7 +614,7 @@ it("reuses its uploads when a dispatch is retried, and dispatches nothing when a
     dropped = true;
     return true;
   };
-  const retried = runtime.executeTurn(turn("turn-1", "look", { attachments }));
+  const retried = runtime.turns.execute(turn("turn-1", "look", { attachments }));
   answer(await started("turn-1"), "Seen.");
   await retried;
   expect(fake.uploads.size).toBe(1);
@@ -629,24 +629,24 @@ it("reuses its uploads when a dispatch is retried, and dispatches nothing when a
 
   // T3 refuses the bytes: the turn fails before any message is sent.
   fake.uploadStatus = 500;
-  await expect(runtime.executeTurn(turn("turn-2", "again", { attachments }))).rejects.toMatchObject(
-    {
-      status: 502,
-      message: "T3 did not accept the attached image photo.png (HTTP 500).",
-    },
-  );
+  await expect(
+    runtime.turns.execute(turn("turn-2", "again", { attachments })),
+  ).rejects.toMatchObject({
+    status: 502,
+    message: "T3 did not accept the attached image photo.png (HTTP 500).",
+  });
   // An upload address on another origin is never posted to.
   fake.uploadStatus = 204;
   fake.uploadUrl = () => "http://198.51.100.7/api/attachments/upload/x.signed";
-  await expect(runtime.executeTurn(turn("turn-3", "again", { attachments }))).rejects.toMatchObject(
-    {
-      status: 502,
-    },
-  );
+  await expect(
+    runtime.turns.execute(turn("turn-3", "again", { attachments })),
+  ).rejects.toMatchObject({
+    status: 502,
+  });
   expect(dispatches()).toHaveLength(1);
   // Nothing reached T3 for those turns, so the conversation is not fenced.
   fake.uploadUrl = (id) => `/api/attachments/upload/${id}.signed`;
-  const next = runtime.executeTurn(turn("turn-4", "text only"));
+  const next = runtime.turns.execute(turn("turn-4", "text only"));
   answer(await started("turn-4"), "Fine.");
   expect((await next).output).toBe("Fine.");
 });
@@ -671,8 +671,8 @@ it("never follows T3's upload redirect to another origin", async () => {
   const { port } = address;
   // T3's own upload route answers with a redirect there.
   fake.uploadRedirect = `http://127.0.0.1:${String(port)}/collect`;
-  const failure: unknown = await runtime
-    .executeTurn(turn("turn-1", "look", { attachments }))
+  const failure: unknown = await runtime.turns
+    .execute(turn("turn-1", "look", { attachments }))
     .then(
       () => undefined,
       (error: unknown) => error,
@@ -687,7 +687,7 @@ it("never follows T3's upload redirect to another origin", async () => {
 });
 
 it("names earlier files it cannot provide", async () => {
-  const result = runtime.executeTurn(
+  const result = runtime.turns.execute(
     turn("turn-2", "hello", {
       unanswered: [{ correlation_id: "turn-1", attachments: [attachment] }],
     }),
@@ -707,7 +707,7 @@ it("runs plain T3 Code on the other instances, with the person's text as written
     "codex",
   ]);
   const native = { origin: { guild_id: "100", channel_id: "300", user_id: "200" } };
-  const reply = runtime.executeTurn({
+  const reply = runtime.turns.execute({
     ...turn("turn-1", "Fix the  flaky\ntest", { native }),
     agent_id: "code",
   });
@@ -729,12 +729,12 @@ it("runs plain T3 Code on the other instances, with the person's text as written
   expect((await reply).output).toBe("Fixed.");
   // A conversation of an agent the runtime does not serve is refused before T3.
   await expect(
-    runtime.executeTurn({ ...turn("turn-2", "hi"), agent_id: "elsewhere" }),
+    runtime.turns.execute({ ...turn("turn-2", "hi"), agent_id: "elsewhere" }),
   ).rejects.toMatchObject({ status: 422 });
 });
 
 it("stops the native run when the runtime closes mid-turn", async () => {
-  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const result = runtime.turns.execute(turn("turn-1", "work"));
   const run = await started("turn-1");
   await runtime.close();
   await expect(result).rejects.toThrow("T3 runtime is closed");
@@ -763,7 +763,7 @@ function refusalLogged(fragment: string): string {
 
 it("logs T3's refusal of an interrupt without the credentials its detail carries", async () => {
   fake.reject = (command) => (command.type === "run.interrupt" ? LEAKY : undefined);
-  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const result = runtime.turns.execute(turn("turn-1", "work"));
   await started("turn-1");
   await runtime.close();
   await expect(result).rejects.toThrow("T3 runtime is closed");
@@ -773,14 +773,14 @@ it("logs T3's refusal of an interrupt without the credentials its detail carries
 });
 
 it("logs T3's refusal to withdraw a queued run without the credentials its detail carries", async () => {
-  const first = runtime.executeTurn(turn("turn-1", "hello"));
+  const first = runtime.turns.execute(turn("turn-1", "hello"));
   answer(await started("turn-1"), "hi");
   await first;
   const person = fake.wake(threadId, "a message typed in the T3 UI");
   fake.request(threadId, person.id, "tool_approval");
   fake.reject = (command) => (command.type === "queued-run.cancel" ? LEAKY : undefined);
   const controller = new AbortController();
-  const queued = runtime.executeTurn(turn("turn-2", "from Discord"), controller.signal);
+  const queued = runtime.turns.execute(turn("turn-2", "from Discord"), controller.signal);
   expect((await started("turn-2")).status).toBe("queued");
   await until(() => runtime.activity("turn-2", "discord-private")?.phase === "queued");
   controller.abort(new Error("core disconnected"));
@@ -792,7 +792,7 @@ it("logs T3's refusal to withdraw a queued run without the credentials its detai
 
 it("requests a session detach when cancelled after the roster cleared, before the wake, and reports the stop as unconfirmed", async () => {
   const controller = new AbortController();
-  const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
+  const result = runtime.turns.execute(turn("turn-1", "work"), controller.signal);
   const run = await started("turn-1");
   fake.background(threadId, [{ taskId: "task-1", kind: "command", description: "sleep 25" }]);
   fake.assistant(threadId, run.id, "Started it in the background.");
@@ -816,7 +816,7 @@ it("requests a session detach when cancelled after the roster cleared, before th
 
   // The detached process delivers its wake anyway; the next turn waits behind it in T3's queue.
   const wake = fake.wake(threadId, "Background command completed");
-  const next = runtime.executeTurn(turn("turn-2", "again"));
+  const next = runtime.turns.execute(turn("turn-2", "again"));
   expect((await started("turn-2")).status).toBe("queued");
   fake.complete(threadId, wake.id);
   answer(await waitForStatus("turn-2", "running"), "ok");
@@ -832,7 +832,7 @@ it("requests a session detach when cancelled after the roster cleared, before th
 it("does not report an owed wake as stopped when T3 does not confirm the session detach", async () => {
   fake.interruptBehaviour = "ignore";
   const controller = new AbortController();
-  const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
+  const result = runtime.turns.execute(turn("turn-1", "work"), controller.signal);
   const run = await started("turn-1");
   fake.background(threadId, [{ taskId: "task-1", kind: "command" }]);
   fake.complete(threadId, run.id);
@@ -849,7 +849,7 @@ it("does not report an owed wake as stopped when T3 does not confirm the session
 
 it("fails closed when a snapshot resume cannot show whether background work was reported, without claiming a stop", async () => {
   fake.snapshotOnResume = true;
-  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const result = runtime.turns.execute(turn("turn-1", "work"));
   const run = await started("turn-1");
   fake.background(threadId, [{ taskId: "task-1", kind: "command", description: "sleep 25" }]);
   await until(() => activity()?.phase === "tools");
@@ -869,7 +869,7 @@ it("fails closed when a snapshot resume cannot show whether background work was 
 });
 
 it("resumes by replay through the roster transitions and still waits for the wake", async () => {
-  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const result = runtime.turns.execute(turn("turn-1", "work"));
   const run = await started("turn-1");
   fake.background(threadId, [{ taskId: "task-1", kind: "command" }]);
   await until(() => activity()?.phase === "tools");
@@ -888,7 +888,7 @@ it("resumes by replay through the roster transitions and still waits for the wak
 });
 
 it("completes normally when background work finished inside the running turn", async () => {
-  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const result = runtime.turns.execute(turn("turn-1", "work"));
   const run = await started("turn-1");
   fake.background(threadId, [{ taskId: "task-1", kind: "command" }]);
   await until(() => activity()?.phase === "tools");
@@ -903,7 +903,7 @@ it("keeps a request's ownership and wording through a bounded snapshot that omit
   fake.interruptBehaviour = "ignore";
   fake.omitRequestItems = true;
   fake.snapshotOnResume = true;
-  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const result = runtime.turns.execute(turn("turn-1", "work"));
   const run = await started("turn-1");
   fake.request(threadId, run.id, "user_input", {
     type: "user_input_request",
@@ -922,7 +922,7 @@ it("keeps a request's ownership and wording through a bounded snapshot that omit
 });
 
 it("never answers with, waits for or stops a run a person started in T3 while its own wake is owed", async () => {
-  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const result = runtime.turns.execute(turn("turn-1", "work"));
   const run = await started("turn-1");
   fake.background(threadId, [{ taskId: "task-1", kind: "command" }]);
   fake.assistant(threadId, run.id, "Started own background work.");
@@ -945,7 +945,7 @@ it("never answers with, waits for or stops a run a person started in T3 while it
 
 it("neither interrupts nor detaches the session of a person's run when cancelled while its wake is owed", async () => {
   const controller = new AbortController();
-  const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
+  const result = runtime.turns.execute(turn("turn-1", "work"), controller.signal);
   void result.catch(() => undefined);
   const run = await started("turn-1");
   fake.background(threadId, [{ taskId: "task-1", kind: "command" }]);
@@ -964,7 +964,7 @@ it("neither interrupts nor detaches the session of a person's run when cancelled
 
 it("detaches no session while a person's completed run still lists its own background work", async () => {
   const controller = new AbortController();
-  const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
+  const result = runtime.turns.execute(turn("turn-1", "work"), controller.signal);
   void result.catch(() => undefined);
   const run = await started("turn-1");
   fake.background(threadId, [{ taskId: "task-1", kind: "command" }]);
@@ -993,7 +993,7 @@ it("detaches no session while a person's completed run still lists its own backg
  * process, on its own provider thread, finishes a task and wakes.
  */
 async function olderProviderWake(signal?: AbortSignal) {
-  const result = runtime.executeTurn(turn("turn-1", "work"), signal);
+  const result = runtime.turns.execute(turn("turn-1", "work"), signal);
   void result.catch(() => undefined);
   const run = await started("turn-1");
   const older = (tasks: { taskId: string; kind: string }[]) => ({
@@ -1040,7 +1040,7 @@ it("neither interrupts another provider's wake nor detaches a session under it w
 });
 
 it("does not adopt a later run the turn does not owe, and the next turn waits behind it", async () => {
-  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const result = runtime.turns.execute(turn("turn-1", "work"));
   const run = await started("turn-1");
   // A predecessor's late wake lands on the thread while this turn runs: it queues behind it.
   const stale = fake.wake(threadId, 'Background command "old sleep" completed (exit code 0)');
@@ -1052,7 +1052,7 @@ it("does not adopt a later run the turn does not owe, and the next turn waits be
   fake.assistant(threadId, stale.id, "Old result.");
   expect((await result).output).toBe("Only mine.");
 
-  const next = runtime.executeTurn(turn("turn-2", "again"));
+  const next = runtime.turns.execute(turn("turn-2", "again"));
   expect((await started("turn-2")).status).toBe("queued");
   fake.complete(threadId, stale.id);
   answer(await waitForStatus("turn-2", "running"), "ok");
@@ -1062,7 +1062,7 @@ it("does not adopt a later run the turn does not owe, and the next turn waits be
 
 it("ignores a stale pending request until the new run's own item names its request", async () => {
   fake.retainRequests = true;
-  const first = runtime.executeTurn(turn("turn-1", "first"));
+  const first = runtime.turns.execute(turn("turn-1", "first"));
   const run = await started("turn-1");
   answer(run, "done");
   expect((await first).output).toBe("done");
@@ -1070,7 +1070,7 @@ it("ignores a stale pending request until the new run's own item names its reque
   fake.request(threadId, run.id, "tool_approval");
   fake.retainRequests = false;
 
-  const second = runtime.executeTurn(turn("turn-2", "second"));
+  const second = runtime.turns.execute(turn("turn-2", "second"));
   const next = await started("turn-2");
   // The new run waits on its own request before its item has arrived: unknown, not blocked.
   const own = fake.request(threadId, next.id, "user_input");
@@ -1095,7 +1095,7 @@ it.each([false, true])(
   "cancels promptly while the first snapshot never arrives, existing thread %s",
   async (existing) => {
     if (existing) {
-      const initial = runtime.executeTurn(turn("initial", "Hello."));
+      const initial = runtime.turns.execute(turn("initial", "Hello."));
       answer(await started2("initial"), "Hi.");
       await initial;
     }
@@ -1103,7 +1103,7 @@ it.each([false, true])(
     const subscribed = fake.subscriptions.length;
     fake.holdSnapshot = true;
     const controller = new AbortController();
-    const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
+    const result = runtime.turns.execute(turn("turn-1", "work"), controller.signal);
     await until(() => fake.subscriptions.length === subscribed + 1);
     const started = Date.now();
     controller.abort(new Error("core disconnected"));
@@ -1111,7 +1111,7 @@ it.each([false, true])(
     expect(Date.now() - started).toBeLessThan(1_000);
     expect(dispatches()).toHaveLength(dispatched);
     fake.holdSnapshot = false;
-    const next = runtime.executeTurn(turn("turn-2", "again"));
+    const next = runtime.turns.execute(turn("turn-2", "again"));
     answer(await started2("turn-2"), "ok");
     expect((await next).output).toBe("ok");
   },
@@ -1122,7 +1122,7 @@ it("cancels promptly during a reconnect delay before anything was dispatched", a
   let dropped = 0;
   fake.dropAnswer = (command) => command.type === "thread.create" && dropped++ === 0;
   const controller = new AbortController();
-  const result = slow.executeTurn(turn("turn-1", "work"), controller.signal);
+  const result = slow.turns.execute(turn("turn-1", "work"), controller.signal);
   await until(() => dropped === 1);
   await pause(100);
   const started = Date.now();
@@ -1138,7 +1138,7 @@ it("keeps recovering a possibly dispatched turn when cancelled during a reconnec
   let dropped = 0;
   fake.dropAnswer = (command) => command.type === "message.dispatch" && dropped++ === 0;
   const controller = new AbortController();
-  const result = slow.executeTurn(turn("turn-1", "work"), controller.signal);
+  const result = slow.turns.execute(turn("turn-1", "work"), controller.signal);
   const run = await started2("turn-1");
   await pause(100);
   controller.abort(new Error("core disconnected"));
@@ -1153,14 +1153,14 @@ it.each([false, true])(
   "closes promptly while the first snapshot never arrives, existing thread %s",
   async (existing) => {
     if (existing) {
-      const initial = runtime.executeTurn(turn("initial", "Hello."));
+      const initial = runtime.turns.execute(turn("initial", "Hello."));
       answer(await started2("initial"), "Hi.");
       await initial;
     }
     const dispatched = dispatches().length;
     const subscribed = fake.subscriptions.length;
     fake.holdSnapshot = true;
-    const result = runtime.executeTurn(turn("turn-1", "work"));
+    const result = runtime.turns.execute(turn("turn-1", "work"));
     await until(() => fake.subscriptions.length === subscribed + 1);
     const started = Date.now();
     await runtime.close();
@@ -1177,7 +1177,7 @@ it("fails closed on any follow-up after an unconfirmed stop on the conversation,
   // Turn 1 is cancelled while waiting and T3 never confirms the stop.
   fake.interruptBehaviour = "ignore";
   const controller = new AbortController();
-  const first = runtime.executeTurn(turn("turn-1", "first"), controller.signal);
+  const first = runtime.turns.execute(turn("turn-1", "first"), controller.signal);
   const run1 = await started("turn-1");
   expect(runtime.restartReadiness()).toEqual({
     state: "unready",
@@ -1196,7 +1196,7 @@ it("fails closed on any follow-up after an unconfirmed stop on the conversation,
   fake.stop(threadId, run1.id, "interrupted");
 
   // Turn 2 owes a wake; the follow-up cannot be told from turn 1's late wake.
-  const second = runtime.executeTurn(turn("turn-2", "second"));
+  const second = runtime.turns.execute(turn("turn-2", "second"));
   const run2 = await started("turn-2");
   fake.background(threadId, [{ taskId: "task-1", kind: "command" }]);
   fake.assistant(threadId, run2.id, "Started.");
@@ -1211,10 +1211,10 @@ it("fails closed on any follow-up after an unconfirmed stop on the conversation,
 
   // The fence is not lifted by inference: a plain turn still completes on its own text,
   // a turn that depends on a follow-up still ends unresolved.
-  const third = runtime.executeTurn(turn("turn-3", "third"));
+  const third = runtime.turns.execute(turn("turn-3", "third"));
   answer(await started("turn-3"), "Plain answer.");
   expect((await third).output).toBe("Plain answer.");
-  const fourth = runtime.executeTurn(turn("turn-4", "fourth"));
+  const fourth = runtime.turns.execute(turn("turn-4", "fourth"));
   const run4 = await started("turn-4");
   fake.background(threadId, [{ taskId: "task-2", kind: "command" }]);
   fake.assistant(threadId, run4.id, "Started again.");
@@ -1235,9 +1235,9 @@ it("fails closed on any follow-up after an unconfirmed stop on the conversation,
  */
 async function backgroundTurn(
   correlation: string,
-  instance: RuntimeOperations = runtime,
+  instance: AnswerRuntime = runtime,
 ): Promise<{ readonly result: Promise<{ output: string }> }> {
-  const result = instance.executeTurn(turn(correlation, "work"));
+  const result = instance.turns.execute(turn(correlation, "work"));
   // The assertion attaches after the fake has been driven; keep an early rejection handled meanwhile.
   void result.catch(() => undefined);
   const run = await started(correlation);
@@ -1256,7 +1256,7 @@ async function backgroundTurn(
 
 it("fences the conversation when the receipt of an accepted detach is lost", async () => {
   const controller = new AbortController();
-  const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
+  const result = runtime.turns.execute(turn("turn-1", "work"), controller.signal);
   const run = await started("turn-1");
   fake.background(threadId, [{ taskId: "task-1", kind: "command" }]);
   fake.complete(threadId, run.id);
@@ -1274,7 +1274,7 @@ it("fences the conversation when the receipt of an accepted detach is lost", asy
 });
 
 it("fences the conversation when reconnection is exhausted after a dispatch", async () => {
-  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const result = runtime.turns.execute(turn("turn-1", "work"));
   await started("turn-1");
   fake.protocolVersion = 3;
   fake.disconnectAll();
@@ -1289,7 +1289,7 @@ it("fences the conversation when reconnection is exhausted after a dispatch", as
 
 it("fences the conversation when a native failure does not prove a stop, but not after a confirmed stop or a completed turn", async () => {
   // A detached session while work is owed: a failure, not a stop.
-  const detachedResult = runtime.executeTurn(turn("turn-1", "work"));
+  const detachedResult = runtime.turns.execute(turn("turn-1", "work"));
   const run = await started("turn-1");
   fake.background(threadId, [{ taskId: "task-1", kind: "command" }]);
   fake.complete(threadId, run.id);
@@ -1307,7 +1307,7 @@ it("fences the conversation when a native failure does not prove a stop, but not
   // A fresh runtime: a confirmed interrupt and a completed turn leave the thread trusted.
   await restart();
   const controller = new AbortController();
-  const cancelled = runtime.executeTurn(turn("turn-3", "work"), controller.signal);
+  const cancelled = runtime.turns.execute(turn("turn-3", "work"), controller.signal);
   const run3 = await started("turn-3");
   controller.abort(new Error("core disconnected"));
   await expect(cancelled).rejects.toThrow("core disconnected");
@@ -1318,10 +1318,10 @@ it("fences the conversation when a native failure does not prove a stop, but not
 
 it("fences the conversation when a turn read back from an existing run exits without a confirmed stop", async () => {
   // Another runtime instance retries the same correlation while its run is active: it dispatches nothing.
-  const first = runtime.executeTurn(turn("turn-1", "work"));
+  const first = runtime.turns.execute(turn("turn-1", "work"));
   await started("turn-1");
   const retry = build();
-  const again = retry.executeTurn(turn("turn-1", "work"));
+  const again = retry.turns.execute(turn("turn-1", "work"));
   // Both turns will fail; observe each rejection as it happens.
   const firstFails = first.catch((failure: unknown) => failure);
   const againFails = again.catch((failure: unknown) => failure);
@@ -1346,7 +1346,7 @@ it("treats a cancel with a possibly accepted dispatch and no observed run as unc
   // The dispatch never reaches T3's handler and the socket drops; the caller then cancels.
   fake.dropRequest = (command) => command.type === "message.dispatch";
   const controller = new AbortController();
-  const result = slow.executeTurn(turn("turn-1", "work"), controller.signal);
+  const result = slow.turns.execute(turn("turn-1", "work"), controller.signal);
   await until(() => fake.received.some((command) => command.type === "message.dispatch"));
   await pause(100);
   controller.abort(new Error("core disconnected"));
@@ -1361,7 +1361,7 @@ it("treats a cancel with a possibly accepted dispatch and no observed run as unc
 it("cancels or closes promptly while T3's discovery or upgrade stalls before any dispatch", async () => {
   fake.holdDiscovery = true;
   const controller = new AbortController();
-  const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
+  const result = runtime.turns.execute(turn("turn-1", "work"), controller.signal);
   await until(() => fake.heldRequests.size === 1);
   let begun = Date.now();
   controller.abort(new Error("core disconnected"));
@@ -1371,7 +1371,7 @@ it("cancels or closes promptly while T3's discovery or upgrade stalls before any
   fake.disconnectAll();
 
   fake.holdUpgrade = true;
-  const closing = runtime.executeTurn(turn("turn-2", "work"));
+  const closing = runtime.turns.execute(turn("turn-2", "work"));
   await until(() => fake.heldRequests.size === 1);
   begun = Date.now();
   await runtime.close();
@@ -1387,7 +1387,7 @@ it("keeps reconnecting through a stalled discovery after the dispatch, and stops
   let dropped = 0;
   fake.dropAnswer = (command) => command.type === "message.dispatch" && dropped++ === 0;
   const controller = new AbortController();
-  const result = runtime.executeTurn(turn("turn-1", "work"), controller.signal);
+  const result = runtime.turns.execute(turn("turn-1", "work"), controller.signal);
   const run = await started("turn-1");
   // The reconnection's discovery stalls; the caller cancels meanwhile.
   fake.holdDiscovery = true;
@@ -1406,7 +1406,7 @@ it("keeps reconnecting through a stalled discovery after the dispatch, and stops
 });
 
 it("stops background work a failed run left behind before releasing the queue, and says what T3 confirmed", async () => {
-  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const result = runtime.turns.execute(turn("turn-1", "work"));
   const run = await started("turn-1");
   const task = fake.tool(threadId, run.id, { type: "command_execution", input: "sleep 300 &" });
   fake.background(threadId, [{ taskId: "task-1", kind: "command", description: "sleep 300" }]);
@@ -1424,7 +1424,7 @@ it("stops background work a failed run left behind before releasing the queue, a
   expect(fake.interrupts).toEqual([run.id]);
 
   // A run someone else stopped with work still listed goes the same way.
-  const stopped = runtime.executeTurn(turn("turn-3", "work"));
+  const stopped = runtime.turns.execute(turn("turn-3", "work"));
   const run3 = await started("turn-3");
   fake.background(threadId, [{ taskId: "task-3", kind: "command" }]);
   await until(() => runtime.activity("turn-3", "discord-private")?.phase === "tools");
@@ -1438,7 +1438,7 @@ it("stops background work a failed run left behind before releasing the queue, a
 
 it("fences the conversation when the background work of a failed run is not confirmed stopped", async () => {
   fake.interruptBehaviour = "ignore";
-  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const result = runtime.turns.execute(turn("turn-1", "work"));
   const run = await started("turn-1");
   fake.background(threadId, [{ taskId: "task-1", kind: "command" }]);
   await until(() => activity()?.phase === "tools");
@@ -1457,7 +1457,7 @@ it("fences the conversation when the background work of a failed run is not conf
 
 it("keeps the possibly-running warning when T3 cannot be reached again after the dispatch", async () => {
   // Discovery changes protocol after the run started: every reconnection is refused.
-  const incompatible = runtime.executeTurn(turn("turn-1", "work"));
+  const incompatible = runtime.turns.execute(turn("turn-1", "work"));
   const run = await started("turn-1");
   fake.protocolVersion = 3;
   fake.disconnectAll();
@@ -1468,13 +1468,13 @@ it("keeps the possibly-running warning when T3 cannot be reached again after the
   fake.protocolVersion = 2;
   // A fresh turn that never reached T3 still reports plain unavailability.
   fake.protocolVersion = 3;
-  await expect(runtime.executeTurn(turn("turn-2", "work"))).rejects.toThrow(
+  await expect(runtime.turns.execute(turn("turn-2", "work"))).rejects.toThrow(
     /^The T3 server cannot be used: T3 speaks orchestration protocol 3/u,
   );
   fake.protocolVersion = 2;
 
   // The server goes away entirely after a run was accepted.
-  const unreachable = runtime.executeTurn(turn("turn-3", "work"));
+  const unreachable = runtime.turns.execute(turn("turn-3", "work"));
   const run3 = await started("turn-3");
   await fake.close();
   await expect(unreachable).rejects.toThrow(
@@ -1488,7 +1488,7 @@ it("keeps the possibly-running warning when T3 cannot be reached again after the
 it("clears the doubt on a refusal T3 holds a rejected receipt for, and keeps it on a defect", async () => {
   fake.reject = (command) =>
     command.type === "message.dispatch" ? "Thread is archived." : undefined;
-  await expect(runtime.executeTurn(turn("turn-1", "hello"))).rejects.toThrow(
+  await expect(runtime.turns.execute(turn("turn-1", "hello"))).rejects.toThrow(
     /^T3 refused the message: .*Thread is archived\.$/u,
   );
   // The receipt was read back by replaying the same command once.
@@ -1502,7 +1502,7 @@ it("clears the doubt on a refusal T3 holds a rejected receipt for, and keeps it 
   // nothing about what was committed: the turn exits as possibly running
   // and the doubt stays.
   fake.defect = (command) => command.type === "message.dispatch";
-  await expect(runtime.executeTurn(turn("turn-3", "hello"))).rejects.toThrow(
+  await expect(runtime.turns.execute(turn("turn-3", "hello"))).rejects.toThrow(
     /^Lost contact with T3 while the turn ran \(T3 failed the request\); native run .* may still be running\.$/u,
   );
   fake.defect = () => false;
@@ -1515,7 +1515,7 @@ it("reads the run back when T3 fails a dispatch it had already committed", async
   let failed = 0;
   fake.failAfterDispatch = (command) =>
     command.type === "message.dispatch" && failed++ === 0 ? "publication failed" : undefined;
-  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const result = runtime.turns.execute(turn("turn-1", "work"));
   const run = await started("turn-1");
   answer(run, "Committed after all.");
   expect((await result).output).toBe("Committed after all.");
@@ -1525,7 +1525,7 @@ it("reads the run back when T3 fails a dispatch it had already committed", async
 });
 
 it("refuses a resumed snapshot that omits the run it observed, keeping the run possibly running", async () => {
-  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const result = runtime.turns.execute(turn("turn-1", "work"));
   const run = await started("turn-1");
   fake.snapshotOnResume = true;
   fake.omitRun = (candidate) => candidate.id === run.id;
@@ -1545,7 +1545,7 @@ it("refuses a resumed snapshot that omits the run it observed, keeping the run p
 });
 
 it("keeps the answer text it observed when a bounded snapshot resumes without it", async () => {
-  const result = runtime.executeTurn(turn("turn-1", "work"));
+  const result = runtime.turns.execute(turn("turn-1", "work"));
   const run = await started("turn-1");
   fake.assistant(threadId, run.id, "Part one.");
   await until(() => activity()?.headline === "Part one.");
@@ -1559,7 +1559,7 @@ it("keeps the answer text it observed when a bounded snapshot resumes without it
 });
 
 it("queues behind a person's run in the native UI and cancels only its own queued run", async () => {
-  const first = runtime.executeTurn(turn("turn-1", "hello"));
+  const first = runtime.turns.execute(turn("turn-1", "hello"));
   answer(await started("turn-1"), "hi");
   await first;
   // The person starts a run in T3's own UI; it waits on their approval.
@@ -1567,7 +1567,7 @@ it("queues behind a person's run in the native UI and cancels only its own queue
   fake.request(threadId, person.id, "tool_approval");
 
   const controller = new AbortController();
-  const queued = runtime.executeTurn(turn("turn-2", "from Discord"), controller.signal);
+  const queued = runtime.turns.execute(turn("turn-2", "from Discord"), controller.signal);
   const own = await started("turn-2");
   expect(own.status).toBe("queued");
   expect(dispatches().at(-1)).toMatchObject({ dispatchMode: { type: "queue_after_active" } });
@@ -1587,7 +1587,7 @@ it("queues behind a person's run in the native UI and cancels only its own queue
 });
 
 it("answers when the parent run completes and delivers the delegated report in a follow-up turn", async () => {
-  const first = runtime.executeTurn(turn("turn-1", "delegate it"));
+  const first = runtime.turns.execute(turn("turn-1", "delegate it"));
   const parent = await started("turn-1");
   const child = fake.delegate(threadId, parent.id, {
     title: "pong child",
@@ -1611,7 +1611,7 @@ it("answers when the parent run completes and delivers the delegated report in a
   ]);
 
   // Core queues the follow-up turn with the cursor; it dispatches nothing and waits.
-  const followUp = runtime.executeTurn(turn("turn-1-report", "", { follow_up: reply.follow_up }));
+  const followUp = runtime.turns.execute(turn("turn-1-report", "", { follow_up: reply.follow_up }));
   await until(() => runtime.activity("turn-1-report", "discord-private")?.work?.items.length === 2);
   expect(runtime.activity("turn-1-report", "discord-private")?.phase).toBe("waiting");
   expect(runtime.activity("turn-1-report", "discord-private")?.work?.items).toEqual([
@@ -1634,13 +1634,13 @@ it("answers when the parent run completes and delivers the delegated report in a
 });
 
 it("stops nothing when a follow-up turn is cancelled: the continuation is T3's", async () => {
-  const first = runtime.executeTurn(turn("turn-1", "delegate it"));
+  const first = runtime.turns.execute(turn("turn-1", "delegate it"));
   const parent = await started("turn-1");
   const child = fake.delegate(threadId, parent.id, { title: "slow child" });
   answer(parent, "Working on it.");
   const reply = await first;
   const controller = new AbortController();
-  const followUp = runtime.executeTurn(
+  const followUp = runtime.turns.execute(
     turn("turn-1-report", "", { follow_up: reply.follow_up }),
     controller.signal,
   );
@@ -1660,15 +1660,15 @@ it("stops nothing when a follow-up turn is cancelled: the continuation is T3's",
 });
 
 it("runs the conversation's next message while a follow-up turn still observes delegated work", async () => {
-  const first = runtime.executeTurn(turn("turn-1", "delegate it"));
+  const first = runtime.turns.execute(turn("turn-1", "delegate it"));
   const parent = await started("turn-1");
   const child = fake.delegate(threadId, parent.id, { title: "slow child" });
   answer(parent, "DELEGATED");
   const reply = await first;
-  const followUp = runtime.executeTurn(turn("turn-1-report", "", { follow_up: reply.follow_up }));
+  const followUp = runtime.turns.execute(turn("turn-1-report", "", { follow_up: reply.follow_up }));
   await until(() => runtime.activity("turn-1-report", "discord-private")?.work?.items.length === 2);
   // The next message reaches T3 and is answered while the child still works.
-  const next = runtime.executeTurn(turn("turn-2", "anything else?"));
+  const next = runtime.turns.execute(turn("turn-2", "anything else?"));
   answer(await started("turn-2"), "Yes.");
   expect((await next).output).toBe("Yes.");
   expect(thread().subagents.find((task) => task.id === child.id)?.status).toBe("running");
@@ -1686,14 +1686,14 @@ it("runs the conversation's next message while a follow-up turn still observes d
 });
 
 it("says where a child's result went when T3 delivers it into the next message's run", async () => {
-  const first = runtime.executeTurn(turn("turn-1", "delegate it"));
+  const first = runtime.turns.execute(turn("turn-1", "delegate it"));
   const parent = await started("turn-1");
   const child = fake.delegate(threadId, parent.id, { title: "child" });
   answer(parent, "DELEGATED");
   const reply = await first;
-  const followUp = runtime.executeTurn(turn("turn-1-report", "", { follow_up: reply.follow_up }));
+  const followUp = runtime.turns.execute(turn("turn-1-report", "", { follow_up: reply.follow_up }));
   await until(() => runtime.activity("turn-1-report", "discord-private")?.work?.items.length === 2);
-  const next = runtime.executeTurn(turn("turn-2", "anything else?"));
+  const next = runtime.turns.execute(turn("turn-2", "anything else?"));
   const own = await started("turn-2");
   // The child finishes while that message runs: T3 delivers the result into it.
   expect(fake.finishDelegation(threadId, child.id).id).toBe(own.id);
@@ -1707,7 +1707,7 @@ it("says where a child's result went when T3 delivers it into the next message's
 });
 
 it("resumes a follow-up after its observation was lost, reporting what T3 delivered meanwhile once", async () => {
-  const first = runtime.executeTurn(turn("turn-1", "delegate twice"));
+  const first = runtime.turns.execute(turn("turn-1", "delegate twice"));
   const parent = await started("turn-1");
   const quick = fake.delegate(threadId, parent.id, { title: "quick child" });
   const slow = fake.delegate(threadId, parent.id, { title: "slow child" });
@@ -1716,7 +1716,7 @@ it("resumes a follow-up after its observation was lost, reporting what T3 delive
   const cursor = { follow_up: reply.follow_up };
   // Core loses the observation (a restart); nothing observes while T3 works.
   const controller = new AbortController();
-  const lost = runtime.executeTurn(turn("turn-1-report", "", cursor), controller.signal);
+  const lost = runtime.turns.execute(turn("turn-1-report", "", cursor), controller.signal);
   await until(() => runtime.activity("turn-1-report", "discord-private")?.work !== undefined);
   controller.abort(new Error("core restarted"));
   await expect(lost).rejects.toThrow("core restarted");
@@ -1726,14 +1726,14 @@ it("resumes a follow-up after its observation was lost, reporting what T3 delive
   const reported = fake.finishDelegation(threadId, quick.id);
   fake.assistant(threadId, reported.id, "Quick result.");
   fake.complete(threadId, reported.id);
-  const next = runtime.executeTurn(turn("turn-2", "more"));
+  const next = runtime.turns.execute(turn("turn-2", "more"));
   const own = await started("turn-2");
   expect(fake.finishDelegation(threadId, slow.id).id).toBe(own.id);
   answer(own, "More, and the slow child is done.");
   expect((await next).output).toBe("More, and the slow child is done.");
   // Core asks again: the observation is rebuilt from T3's records alone. It
   // reports the continuation once, and does not repeat the next message's reply.
-  const resumed = await runtime.executeTurn(turn("turn-1-report", "", cursor));
+  const resumed = await runtime.turns.execute(turn("turn-1-report", "", cursor));
   expect(resumed.output).toBe(
     "Quick result.\n\n[T3 gave the result of the delegated work to the agent during a later message's run in this conversation, not in a report of its own; T3 shows it.]",
   );
@@ -1744,7 +1744,7 @@ it("resumes a follow-up after its observation was lost, reporting what T3 delive
 });
 
 it("says so when a resumed follow-up's report is older than the window it reads", async () => {
-  const first = runtime.executeTurn(turn("turn-1", "delegate it"));
+  const first = runtime.turns.execute(turn("turn-1", "delegate it"));
   const parent = await started("turn-1");
   const child = fake.delegate(threadId, parent.id, { title: "child" });
   answer(parent, "DELEGATED");
@@ -1753,13 +1753,13 @@ it("says so when a resumed follow-up's report is older than the window it reads"
   fake.assistant(threadId, continuation.id, "Old report.");
   fake.complete(threadId, continuation.id);
   for (const correlation of ["turn-2", "turn-3"]) {
-    const later = runtime.executeTurn(turn(correlation, "later"));
+    const later = runtime.turns.execute(turn(correlation, "later"));
     answer(await started(correlation), "ok");
     await later;
   }
   fake.messageWindow = 2;
   await expect(
-    runtime.executeTurn(turn("turn-1-report", "", { follow_up: reply.follow_up })),
+    runtime.turns.execute(turn("turn-1-report", "", { follow_up: reply.follow_up })),
   ).rejects.toMatchObject({
     status: 502,
     message:
@@ -1768,7 +1768,7 @@ it("says so when a resumed follow-up's report is older than the window it reads"
 });
 
 it("reads a snapshot over T3's byte budget as whole, so a report there is neither older nor partial", async () => {
-  const first = runtime.executeTurn(turn("turn-1", "delegate it"));
+  const first = runtime.turns.execute(turn("turn-1", "delegate it"));
   const parent = await started("turn-1");
   const child = fake.delegate(threadId, parent.id, { title: "child" });
   answer(parent, "DELEGATED");
@@ -1779,12 +1779,12 @@ it("reads a snapshot over T3's byte budget as whole, so a report there is neithe
   // T3 keeps complete turns over its byte budget and says so; it omits nothing.
   fake.payloadBudgetExceeded = true;
   expect(
-    (await runtime.executeTurn(turn("turn-1-report", "", { follow_up: reply.follow_up }))).output,
+    (await runtime.turns.execute(turn("turn-1-report", "", { follow_up: reply.follow_up }))).output,
   ).toBe("Whole report.");
 });
 
 it("does not call a missing report older than the window when only T3's byte budget was exceeded", async () => {
-  const first = runtime.executeTurn(turn("turn-1", "delegate it"));
+  const first = runtime.turns.execute(turn("turn-1", "delegate it"));
   const parent = await started("turn-1");
   const child = fake.delegate(threadId, parent.id, { title: "child" });
   answer(parent, "DELEGATED");
@@ -1794,7 +1794,7 @@ it("does not call a missing report older than the window when only T3's byte bud
   fake.complete(threadId, fake.finishDelegation(threadId, child.id).id);
   fake.payloadBudgetExceeded = true;
   await expect(
-    runtime.executeTurn(turn("turn-1-report", "", { follow_up: reply.follow_up })),
+    runtime.turns.execute(turn("turn-1-report", "", { follow_up: reply.follow_up })),
   ).rejects.toMatchObject({ status: 502, message: "T3 finished the run without an answer." });
 });
 
@@ -1806,7 +1806,7 @@ it("leaves a command's own files it cannot send for a later turn, still sending 
   if (notes === undefined || photo === undefined) throw new Error("no capture");
   // A command with a file T3 cannot receive runs as written, with the image
   // it could upload, and says it left its own files.
-  const mixed = runtime.executeTurn(
+  const mixed = runtime.turns.execute(
     turn("turn-1", "/compact", { native: { intent: "command" }, attachments: [notes, photo] }),
   );
   answer(await started("turn-1"), "Compacted.");
@@ -1818,20 +1818,20 @@ it("leaves a command's own files it cannot send for a later turn, still sending 
   expect(userTexts()[0]).toBe("/compact");
   expect(imageDispatches()[0]).toMatchObject([{ name: "photo.png" }]);
   // Every own file sent as an image leaves nothing.
-  const images = runtime.executeTurn(
+  const images = runtime.turns.execute(
     turn("turn-2", "/compact", { native: { intent: "command" }, attachments: [photo] }),
   );
   answer(await started("turn-2"), "Again.");
   expect(answered(await images)).toEqual({ correlation_id: "turn-2", output: "Again." });
   // Prose names its own unavailable file, so it leaves none.
-  const prose = runtime.executeTurn(turn("turn-3", "read it", { attachments: [notes] }));
+  const prose = runtime.turns.execute(turn("turn-3", "read it", { attachments: [notes] }));
   answer(await started("turn-3"), "Read.");
   expect(answered(await prose)).toEqual({ correlation_id: "turn-3", output: "Read." });
 });
 
 it("sends a command invocation verbatim, leaving the earlier files' notes for a later turn", async () => {
   const earlier = [{ correlation_id: "turn-0", attachments: [attachment] }];
-  const command = runtime.executeTurn(
+  const command = runtime.turns.execute(
     turn("turn-1", "/compact keep the decisions", {
       native: { intent: "command" },
       unanswered: earlier,
@@ -1844,7 +1844,7 @@ it("sends a command invocation verbatim, leaving the earlier files' notes for a 
     output: "Compacted.",
     unanswered_left: true,
   });
-  const prose = runtime.executeTurn(turn("turn-2", "hello", { unanswered: earlier }));
+  const prose = runtime.turns.execute(turn("turn-2", "hello", { unanswered: earlier }));
   answer(await started("turn-2"), "hi");
   expect(answered(await prose)).toEqual({ correlation_id: "turn-2", output: "hi" });
   expect(userTexts()).toEqual([
@@ -1854,14 +1854,14 @@ it("sends a command invocation verbatim, leaving the earlier files' notes for a 
 
   // A command T3 runs to completion without a reply of its own is acknowledged
   // by name; a failed one keeps T3's explanation.
-  const silent = runtime.executeTurn(turn("turn-3", "/compact", { native: { intent: "command" } }));
+  const done = runtime.turns.execute(turn("turn-3", "/compact", { native: { intent: "command" } }));
   fake.complete(threadId, (await started("turn-3")).id);
   // Offered no earlier files, it leaves none.
-  expect(answered(await silent)).toEqual({
+  expect(answered(await done)).toEqual({
     correlation_id: "turn-3",
     output: "`/compact` finished.",
   });
-  const failed = runtime.executeTurn(
+  const failed = runtime.turns.execute(
     turn("turn-4", "/review main", { native: { intent: "command" } }),
   );
   fake.fail(threadId, (await started("turn-4")).id, "Unknown skill: review");
@@ -1920,7 +1920,7 @@ it("lists the commands and user-invocable skills T3 offers the conversation's pr
 
   // A thread T3's UI moved onto an instance the assistant does not run on gives
   // way to the agent's at its next run, whose commands are still the ones offered.
-  const reply = runtime.executeTurn(turn("turn-1", "hi"));
+  const reply = runtime.turns.execute(turn("turn-1", "hi"));
   answer(await started("turn-1"), "Hello.");
   await reply;
   thread().modelSelection = { instanceId: "codex", model: "gpt-6-astra", options: [] };
@@ -1941,12 +1941,12 @@ it("runs different conversations at once and each conversation's turns in order"
     fake.threads
       .get(otherThread)
       ?.runs.find((run) => run.userMessageId === derivedId("message", correlation));
-  const first = runtime.executeTurn(turn("turn-1", "long work"));
+  const first = runtime.turns.execute(turn("turn-1", "long work"));
   const long = await started("turn-1");
   // The same conversation's next turn waits for the first, in Carillon's order.
-  const second = runtime.executeTurn(turn("turn-2", "next"));
+  const second = runtime.turns.execute(turn("turn-2", "next"));
   // Another conversation proceeds meanwhile.
-  const unrelated = runtime.executeTurn(turn("turn-3", "elsewhere", other));
+  const unrelated = runtime.turns.execute(turn("turn-3", "elsewhere", other));
   await fake.waitFor(() => otherRun("turn-3") !== undefined);
   const elsewhere = otherRun("turn-3");
   if (elsewhere === undefined) throw new Error("other conversation did not start");
@@ -1965,9 +1965,9 @@ it("runs different conversations at once and each conversation's turns in order"
 it("cancels one conversation's turn without touching another's", async () => {
   const otherThread = derivedId("thread", "discord-private", "default", "conversation-2");
   const controller = new AbortController();
-  const cancelled = runtime.executeTurn(turn("turn-1", "stop me"), controller.signal);
+  const cancelled = runtime.turns.execute(turn("turn-1", "stop me"), controller.signal);
   const mine = await started("turn-1");
-  const kept = runtime.executeTurn(turn("turn-2", "keep me", { audience_id: "conversation-2" }));
+  const kept = runtime.turns.execute(turn("turn-2", "keep me", { audience_id: "conversation-2" }));
   await fake.waitFor(() => (fake.threads.get(otherThread)?.runs.length ?? 0) === 1);
   controller.abort(new Error("core disconnected"));
   await expect(cancelled).rejects.toThrow("core disconnected");
@@ -1981,7 +1981,7 @@ it("cancels one conversation's turn without touching another's", async () => {
 });
 
 it("refuses a snapshot of another thread, whether read once or followed through a turn", async () => {
-  const reply = runtime.executeTurn(turn("turn-1", "hi"));
+  const reply = runtime.turns.execute(turn("turn-1", "hi"));
   answer(await started("turn-1"), "Hello.");
   await reply;
   fake.snapshotThread = () => "another-thread";
@@ -1990,7 +1990,7 @@ it("refuses a snapshot of another thread, whether read once or followed through 
   await expect(runtime.commands(conversation)).rejects.toMatchObject({ status: 502 });
   // A turn does not fold another thread's state as its own, nor send its
   // message on the strength of it.
-  await expect(runtime.executeTurn(turn("turn-2", "again"))).rejects.toMatchObject({
+  await expect(runtime.turns.execute(turn("turn-2", "again"))).rejects.toMatchObject({
     status: 502,
     message: "T3 answered in a form this runtime does not understand.",
   });
@@ -1998,7 +1998,7 @@ it("refuses a snapshot of another thread, whether read once or followed through 
 });
 
 it("keeps a failed turn's report with its failure, taken before the turn's entry goes", async () => {
-  const result = runtime.executeTurn(turn("turn-1", "build it"));
+  const result = runtime.turns.execute(turn("turn-1", "build it"));
   const run = await started("turn-1");
   const make = fake.tool(threadId, run.id, { type: "command_execution", input: "make release" });
   fake.finishTool(threadId, make, "failed");
@@ -2040,7 +2040,7 @@ it("keeps a failed turn's report with a failure that is no error, as an error ca
       }),
   });
   try {
-    const failure = await failing.executeTurn(turn("turn-1", "build it")).then(
+    const failure = await failing.turns.execute(turn("turn-1", "build it")).then(
       () => undefined,
       (error: unknown) => error,
     );
@@ -2083,7 +2083,7 @@ it("leaves no snapshot deadline behind when a thread read cannot subscribe", asy
 });
 
 it("still bounds a thread read whose snapshot never arrives", async () => {
-  const reply = runtime.executeTurn(turn("turn-1", "hi"));
+  const reply = runtime.turns.execute(turn("turn-1", "hi"));
   answer(await started("turn-1"), "Hello.");
   await reply;
   fake.holdSnapshot = true;

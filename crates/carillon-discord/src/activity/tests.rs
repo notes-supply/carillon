@@ -370,9 +370,8 @@ impl Substitute {
         let (delivering, heard) = mpsc::unbounded_channel();
         let monitor = activity_monitor(
             self.client.clone(),
-            http,
             self.module.clone(),
-            settings,
+            Reactions::new(http, settings),
             CardRecords::open(records.to_path_buf()),
             heard,
             CancellationToken::new(),
@@ -392,20 +391,19 @@ impl Substitute {
         let core = self.client.clone();
         let (delivering, heard) = mpsc::unbounded_channel();
         let stopping = CancellationToken::new();
-        let settings = crate::config::Settings::new(config);
+        let reactions = Reactions::new(http.clone(), crate::config::Settings::new(config));
         let delivered = delivery_loop(
             core.clone(),
-            Reactions::new(http.clone(), settings.clone()),
-            http.clone(),
+            reactions.clone(),
+            http,
             delivering,
             stopping.clone(),
         );
         let records = CardRecords::open(records.to_path_buf());
         let monitor = activity_monitor(
             core,
-            http,
             self.module.clone(),
-            settings,
+            reactions,
             records,
             heard,
             stopping.clone(),
@@ -616,6 +614,7 @@ fn job(origin: &str, channel: &str, accepted_at: i64, turns: Vec<JobTurn>) -> Jo
             accepted_at,
         },
         target_id: channel.to_owned(),
+        feedback_target_id: None,
         turns,
         earlier: false,
     }
@@ -688,6 +687,7 @@ fn tools(
         notes: Vec::new(),
         agent: None,
         partial: false,
+        controls: Vec::new(),
     }
 }
 
@@ -726,6 +726,7 @@ fn answer(id: i64, turn_id: &str, origin: &str, turn_state: TurnState) -> Delive
         target_id: "300".to_owned(),
         feedback_target_id: "300:400".to_owned(),
         content: "answer".to_owned(),
+        silence: None,
         origin: Origin {
             turn_id: origin.to_owned(),
             accepted_at: now() - 60,
@@ -1914,60 +1915,6 @@ async fn followed_jobs_are_read_by_name_a_bounded_number_at_a_time() -> anyhow::
 }
 
 #[tokio::test]
-async fn disabled_cards_still_type_name_no_jobs_and_leave_records_alone() -> anyhow::Result<()> {
-    let directory = tempfile::tempdir()?;
-    let records = directory.path().join("activity-cards.json");
-    std::fs::write(
-        &records,
-        serde_json::to_vec(&json!({
-            "running": {"channel_id": "300", "message_id": "555"},
-            "unnamed": {"channel_id": "302"},
-        }))?,
-    )?;
-    let before = std::fs::read(&records)?;
-    let discord = Substitute::start(succeed()).await?;
-    let accepted = now() - 60;
-    let make = tools(None, &[("bash", "make")], &[]);
-    discord.record(vec![running("running", "300", accepted, Some(make))]);
-    // Cards are turned off and the provider restarted; typing is its own setting.
-    let mut configured = config(true);
-    configured.activity = false;
-    let mut provider = discord.provider(discord.http(false), configured, &records);
-    discord
-        .wait_for(&Method::POST, "/channels/300/typing", 1)
-        .await?;
-    // An unreachable core changes nothing.
-    discord.unavailable();
-    tokio::time::sleep(Duration::from_millis(3_500)).await;
-    let done = tools(None, &[], &[("bash", "make", true)]);
-    discord.record(vec![ended(
-        "running",
-        "300",
-        accepted,
-        TurnState::Completed,
-        Some(done),
-        None,
-    )]);
-    discord.deliver(answer(1, "running", "running", TurnState::Completed));
-    discord
-        .wait_for(&Method::POST, "/channels/300/messages", 1)
-        .await?;
-    tokio::time::sleep(Duration::from_millis(3_500)).await;
-    provider.stop().await?;
-    // The answer goes out plainly; no card is made, edited or removed,
-    // no job is read by name, and the records stay as they were.
-    let messages = discord.matching(&Method::POST, "/channels/300/messages");
-    assert_eq!(messages.len(), 1, "{:#?}", discord.seen());
-    assert_eq!(messages[0].body["content"], "answer");
-    assert!(!messages[0].is_card());
-    assert!(discord.matching(&Method::PATCH, "/channels").is_empty());
-    assert!(discord.matching(&Method::DELETE, "/channels").is_empty());
-    assert!(discord.named().is_empty());
-    assert_eq!(std::fs::read(&records)?, before);
-    Ok(())
-}
-
-#[tokio::test]
 async fn new_jobs_type_and_cards_draw_as_the_settings_serving_then_say() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let records = directory.path().join("activity-cards.json");
@@ -2543,3 +2490,6 @@ async fn a_module_that_draws_no_card_costs_no_answer_and_leaves_cards_for_the_ne
     assert_eq!(recorded(&records)?, earlier);
     Ok(())
 }
+
+mod controls;
+mod typing;

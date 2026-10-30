@@ -20,9 +20,11 @@ share:
 - conversations and the runtime of each one's latest turn;
 - turns (queued, running, completed, interrupted) and the observations core
   queues when a runtime says delegated work will report later;
+- the outcomes durable runtimes report for the turns they hold, and the
+  turns they open themselves;
 - delivery intents and their outcomes;
-- relaying model and command reads from an interface to the conversation's
-  runtime; and
+- relaying model and command reads, and turn controls, from an interface to
+  the conversation's runtime; and
 - inspection, backup and restore.
 
 SQLite is the only durable store, and network or model work never runs inside
@@ -36,7 +38,11 @@ the workers. See the [core guide](../../crates/carillon-core/README.md).
 Each enabled runtime gets message workers (one, or the registry's
 `parallel_turns`) and four observation workers. A message claim takes the
 oldest queued message of a conversation with nothing earlier queued or
-running, so a conversation keeps its order and two workers never share one.
+running on the same runtime, so a conversation keeps its order and two
+workers never share one. A durable runtime instead gets one dispatcher and no
+observation workers: it hands the runtime every queued message in acceptance
+order, without waiting for a conversation's earlier turns, since the runtime
+orders its own.
 Observations only read native records and run beside messages, never in
 their place. Workers wait for core to signal new work rather than polling.
 
@@ -55,6 +61,26 @@ retired worker settles its turn before it ends.
 5. Core stores the output and a delivery intent in one transaction.
 6. The interface claims the delivery, sends it and records the outcome.
 
+A durable runtime's turn takes another path from step 3. The dispatcher
+POSTs it to the runtime's `/v1/inbox`. On 202 the turn is running, which
+means the runtime holds it, and its files count as carried. A 5xx, 408, 429
+or no answer leaves it queued, to be handed over again in order; the runtime
+takes a turn it already holds as the same one. So does an answer that shows
+an installation fault rather than the turn's (401, 403, 404, 405 or another
+2xx), which core logs as an error. The dispatcher backs off from 1 to 60
+seconds meanwhile. Any other answer interrupts the turn with the runtime's
+explanation. The runtime later settles the turn with
+its own credential: answered, failed with an explanation it judged safe to
+show, steered into the turn running before it, or stopped. Steered and
+stopped deliver a silence the interface shows on the message instead of a
+reply. The outcome and its delivery commit together, once; the same outcome
+again is recorded, another is refused. A turn still queued is settled too,
+since the runtime may hold a turn whose 202 core never recorded. A durable
+runtime may also open a running turn in a conversation whose agent runs on
+it, for a schedule or a subagent's report, idempotent by its key; such a turn
+has no person or message behind it. Interfaces may not use event IDs that
+begin `runtime:`.
+
 Agent assignments are fixed for core's lifetime. If an agent moves to
 another runtime or is removed at restart, further messages in its old
 conversations are accepted directly as interrupted turns. The receipt,
@@ -70,13 +96,21 @@ New conversations use the agent's current runtime.
 A turn whose outcome can't be proved, or that its runtime reports as failed,
 becomes interrupted. Core never replays it; the next message continues the
 native session. An observation that got no answer is asked again instead,
-since it only reads. Startup interrupts running messages and requeues
-running observations. It then interrupts queued turns whose agent moved to
-another runtime or was removed, without needing their former runtime's
-workers. Observations also warn that work already started there will not
-be reported here and that actions already taken may have had effects.
-Delivery is a separate outbox, so a lost interface never reruns
-the model, and a delivery claimed by a crashed interface becomes uncertain.
+since it only reads. Startup interrupts running messages and requeues running
+observations. A durable runtime's running messages core handed over are
+queued again instead, to be handed over in order: a turn started on the
+synchronous path before its runtime became durable would otherwise stay
+running, and the runtime is handed every turn it holds again. It takes a
+turn it accepted before as the same one. Turns it opened stay
+running, and its observations are interrupted, since it answers none.
+Startup then interrupts queued turns whose agent moved to another runtime or
+was removed, without needing their former runtime's workers. Observations
+also warn that work
+already started there will not be reported here and that actions already
+taken may have had effects. Delivery is a separate outbox, so a lost
+interface never reruns the model, and a delivery claimed by a crashed
+interface becomes uncertain. A silence sends no message, so it is delivered
+again instead.
 
 ### Maintenance drain
 
@@ -86,7 +120,10 @@ the model, and a delivery claimed by a crashed interface becomes uncertain.
 messages settle normally and observations are set aside to be asked again.
 The barrier is the workers' actual end, not a row count. A report counts
 workers only from an arrangement made under that very pause, and the pause
-lapses on its own if its holder stops renewing it. Once no worker remains,
+lapses on its own if its holder stops renewing it. A durable runtime's
+running turns hold no worker, so the drain waits only for its dispatcher's
+hand-over, and the runtime still settles its turns while the pause holds.
+Once no worker remains,
 core asks every runtime whether a restart would lose something only its
 process knows (`GET /v1/restart`); no valid answer counts as not ready. The
 command then stops the target together with its member services, so it
@@ -106,7 +143,12 @@ answers there; downloads attachments after admission; creates and
 adopts threads; and owns typing, reactions, mention-free delivery and slash
 command registration. It also owns one card per job, drawn from core's
 record of the job and the runtime's activity snapshot. Feedback is
-best-effort and never decides delivery. A graceful stop records the gateway
+best-effort and never decides delivery. While a message's turn waits in a
+durable runtime that offers controls, it offers them as reactions (steer,
+interrupt, stop) and relays an allowlisted person's control to core
+(`POST /v1/events/{event_id}/control`), which relays it to the runtime and
+keeps nothing of it. A steered or stopped turn sends nothing; its message shows
+a reaction instead. A graceful stop records the gateway
 session so the next start can resume it and have Discord replay what it
 missed. See the [Discord guide](../../crates/carillon-discord/README.md).
 
@@ -139,12 +181,23 @@ local agents. Uncertain writes are reported, not retried.
 
 ## Runtime providers
 
-A runtime receives a claimed turn (agent, interface, audience, input,
-captured resources, files by relative path and opaque interface metadata),
-owns the conversation's native session, and returns nonblank output. An
-empty or unusable answer interrupts the turn. A failure may carry an
-`error` the runtime has judged safe to show; core and interfaces display it
-as given.
+A runtime receives a turn (agent, interface, audience, input, captured
+resources, files by relative path and opaque interface metadata) and owns
+the conversation's native session. It speaks one of two turn contracts.
+
+A durable runtime, marked `durable` in the registry, keeps each turn core
+hands it at `POST /v1/inbox`, answering 202 once kept, and settles it later
+through core's `POST /v1/runtime/turns/{id}/outcome`. It opens turns of its
+own through `POST /v1/runtime/turns` and takes a person's controls at
+`POST /v1/turns/{id}/control`. While a turn waits behind another, its
+activity snapshot says `queued` and lists the controls it offers.
+
+The synchronous contract is T3's until it moves to the durable one: the
+runtime runs a claimed turn while core waits and returns nonblank output.
+An empty or unusable answer interrupts the turn.
+
+Either way, a failure may carry an explanation the runtime has judged safe
+to show; core and interfaces display it as given.
 
 Runtimes also answer:
 
@@ -159,8 +212,9 @@ Runtimes also answer:
 - `GET /v1/restart`: whether restarting now loses anything.
 
 The shared [`@carillon/runtime`](../../packages/runtime/README.md) package
-holds the HTTP adapter, the display boundary for explanations, tool
-descriptions and registry loading.
+holds the HTTP adapter for both contracts, a durable runtime's client of
+core, the display boundary for explanations, tool descriptions and registry
+loading.
 
 **Pi** (`carillon-runtime-pi`) keeps a native Pi session per conversation,
 runs turns one at a time, and owns models, tools, extensions, skills and
@@ -265,8 +319,12 @@ not a signature.
 ## Trust and authority
 
 Remote admission is the security boundary: interfaces admit only configured
-people and places before any runtime work. After admission, every service has
-the installing user's ordinary authority, including files, groups and sudo.
-Carillon adds no permission system of its own; runtime extensions can add
-approval or confinement. The Wasm sandbox bounds the Discord module's memory
-and time; it doesn't limit the owner.
+people and places before any runtime work. After admission, every service
+has the installing user's ordinary authority, including files, groups and
+sudo. Carillon adds no permission system of its own; runtime extensions can
+add approval or confinement. Runtimes call core with their own registry
+credential, the one core presents to them: only a durable runtime may. It
+settles its own turns, even once disabled, since it accepted them, and while
+enabled opens turns in its own conversations. The
+Wasm sandbox bounds the Discord module's memory and time; it doesn't limit
+the owner.

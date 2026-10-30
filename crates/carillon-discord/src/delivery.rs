@@ -5,9 +5,12 @@ use crate::{
     config::{DiscordConfig, DiscordEmoji, Settings},
 };
 use anyhow::{Context, Result, bail};
-use carillon_protocol::model::{Delivery, DeliveryOutcome, ExternalEvent, TurnState};
+use carillon_protocol::{
+    model::{Delivery, DeliveryOutcome, ExternalEvent, TurnState},
+    turns::{ControlAction, Silence},
+};
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::{BTreeSet, HashMap, hash_map::Entry},
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
@@ -50,6 +53,17 @@ pub(crate) enum Feedback {
     Delivered,
     Failed,
     Uncertain,
+    Steered,
+    Stopped,
+}
+
+impl From<Silence> for Feedback {
+    fn from(silence: Silence) -> Self {
+        match silence {
+            Silence::Steered => Self::Steered,
+            Silence::Stopped => Self::Stopped,
+        }
+    }
 }
 
 /// A message's reactions, in order: its processing reaction, then the
@@ -70,12 +84,17 @@ pub(crate) enum Feedback {
 /// most [`OUTCOMES`] outcome reactions, and the lanes' overload refusals.
 /// After the stop nothing is sent, not even an outcome a caller awaits.
 ///
+/// They also own the control reactions a message offers while its turn
+/// waits in its runtime, as [`Controls`], and withdraw them before the
+/// message's outcome shows. A message without a feedback target, such as a
+/// turn its runtime opened, gets no reaction at all.
+///
 /// A message's reactions follow the settings it was admitted with, so its
 /// outcome replaces the processing reaction that was added, whichever emoji
 /// serves by then. Asking for the outcome ends the message's hold on those
-/// settings, whether or not the outcome is shown; a message admitted again
-/// after that, or one an earlier process admitted, follows the settings
-/// serving then.
+/// settings and on its record of controls, whether or not the outcome is
+/// shown; a message admitted again after that, or one an earlier process
+/// admitted, follows the settings serving then.
 #[derive(Clone)]
 pub(crate) struct Reactions(Arc<Owned>);
 
@@ -90,6 +109,10 @@ struct Owned {
     unanswered: Mutex<HashMap<String, watch::Receiver<()>>>,
     /// Slots for the outcome reactions shown beside work.
     outcomes: Arc<Semaphore>,
+    /// The control emoji each message may show, by feedback target, from
+    /// its admission or first offer of controls until its outcome is asked
+    /// for.
+    controls: Mutex<HashMap<String, MayShow>>,
     tasks: TaskTracker,
     stopped: CancellationToken,
 }
@@ -102,6 +125,7 @@ impl Reactions {
             admitted: Mutex::new(HashMap::new()),
             unanswered: Mutex::new(HashMap::new()),
             outcomes: Arc::new(Semaphore::new(OUTCOMES)),
+            controls: Mutex::new(HashMap::new()),
             tasks: TaskTracker::new(),
             stopped: CancellationToken::new(),
         }))
@@ -146,6 +170,8 @@ impl Reactions {
     /// whose emoji its request added.
     /// The returned receiver closes when the request has ended.
     fn processing(&self, target: &str, config: &Arc<DiscordConfig>) -> Option<watch::Receiver<()>> {
+        // Admitted here, the message shows no control this process did not add.
+        lock(&self.0.controls).entry(target.to_owned()).or_default();
         let admitted = lock(&self.0.admitted)
             .entry(target.to_owned())
             .or_insert_with(|| config.clone())
@@ -178,10 +204,14 @@ impl Reactions {
         Some(ended)
     }
 
-    /// The settings serving, which the provider's tests admit messages with.
-    #[cfg(test)]
+    /// The settings serving, which feedback follows.
     pub(crate) fn settings(&self) -> &Settings {
         &self.0.settings
+    }
+
+    /// The Discord client feedback is sent with.
+    pub(crate) fn http(&self) -> &Arc<DiscordHttp> {
+        &self.0.http
     }
 
     /// Runs `feedback` as a task these reactions own, until it ends or they
@@ -200,17 +230,24 @@ impl Reactions {
         }
     }
 
-    /// The settings the message's outcome follows: those of its admission
-    /// when this process admitted it, otherwise `known`, the settings the
-    /// caller took it with, otherwise those serving now.
-    fn settled(&self, target: &str, known: Option<&Arc<DiscordConfig>>) -> Arc<DiscordConfig> {
+    /// Takes what the message's outcome follows: the settings of its
+    /// admission when this process admitted it, otherwise `known`, the
+    /// settings the caller took it with, otherwise those serving now; and
+    /// its record of controls.
+    fn settled(&self, target: &str, known: Option<&Arc<DiscordConfig>>) -> Settled {
         let Owned {
-            settings, admitted, ..
+            settings,
+            admitted,
+            controls,
+            ..
         } = &*self.0;
         let admitted = lock(admitted).remove(target);
-        admitted
-            .or_else(|| known.cloned())
-            .unwrap_or_else(|| settings.current())
+        Settled {
+            config: admitted
+                .or_else(|| known.cloned())
+                .unwrap_or_else(|| settings.current()),
+            controls: lock(controls).remove(target),
+        }
     }
 
     /// Replaces the message's processing reaction with its outcome, as the
@@ -223,8 +260,8 @@ impl Reactions {
         target: &'a str,
         feedback: Feedback,
     ) -> impl Future<Output = ()> + 'a {
-        let config = self.settled(target, None);
-        self.show(target, feedback, config)
+        let settled = self.settled(target, None);
+        self.show(target, feedback, settled)
     }
 
     /// As [`Reactions::outcome`], for a message the caller took with
@@ -236,22 +273,34 @@ impl Reactions {
         feedback: Feedback,
         settings: &Arc<DiscordConfig>,
     ) -> impl Future<Output = ()> + 'a {
-        let config = self.settled(target, Some(settings));
-        self.show(target, feedback, config)
+        let settled = self.settled(target, Some(settings));
+        self.show(target, feedback, settled)
     }
 
-    async fn show(&self, target: &str, feedback: Feedback, config: Arc<DiscordConfig>) {
+    async fn show(&self, target: &str, feedback: Feedback, settled: Settled) {
         let Owned { http, stopped, .. } = &*self.0;
-        if !config.reactions {
+        let Settled { config, controls } = settled;
+        if target.is_empty() {
             return;
         }
         let emoji = match feedback {
             Feedback::Delivered => &config.delivered_emoji,
             Feedback::Failed => &config.failed_emoji,
             Feedback::Uncertain => &config.uncertain_emoji,
+            Feedback::Steered => &config.steered_emoji,
+            Feedback::Stopped => &config.stopped_emoji,
         };
         let shown = stopped.run_until_cancelled(async {
             self.after_processing(target).await;
+            let controls = Controls {
+                reactions: self.clone(),
+                target: target.to_owned(),
+                may_show: controls.unwrap_or_else(|| unknown(&self.0.settings.current())),
+            };
+            controls.reconcile(&BTreeSet::new()).await;
+            if !config.reactions {
+                return;
+            }
             if let Err(failure) =
                 delete_feedback_reaction(http, target, &config.processing_emoji).await
             {
@@ -271,16 +320,32 @@ impl Reactions {
     /// not shown, and that is logged. Either way, as for
     /// [`Reactions::outcome`], the message's settings are taken now.
     pub(crate) fn show_outcome(&self, target: String, feedback: Feedback) {
-        let config = self.settled(&target, None);
+        let settled = self.settled(&target, None);
         let Ok(slot) = self.0.outcomes.clone().try_acquire_owned() else {
             warn!(%target, "Discord outcome reaction not shown: too many are under way");
             return;
         };
         let this = self.clone();
         self.spawn(async move {
-            this.show(&target, feedback, config).await;
+            this.show(&target, feedback, settled).await;
             drop(slot);
         });
+    }
+
+    /// The message's control reactions, to offer controls on it. A message
+    /// this process neither admitted nor offered controls may show every
+    /// control `config` offers, which an earlier process may have left. The
+    /// record lasts until the message's outcome is asked for.
+    pub(crate) fn controls(&self, target: &str, config: &DiscordConfig) -> Controls {
+        let may_show = lock(&self.0.controls)
+            .entry(target.to_owned())
+            .or_insert_with(|| unknown(config))
+            .clone();
+        Controls {
+            reactions: self.clone(),
+            target: target.to_owned(),
+            may_show,
+        }
     }
 
     /// Ends the feedback under way when the provider stops: its tasks get
@@ -304,6 +369,83 @@ impl Reactions {
             tasks.wait().await;
         }
         unfinished
+    }
+}
+
+/// The control emoji a message may show: each this process asked Discord to
+/// add and has not seen it remove. The monitor and the message's outcome
+/// both change them, one pass at a time.
+type MayShow = Arc<tokio::sync::Mutex<BTreeSet<String>>>;
+
+/// What a message's outcome follows, taken when it is asked for.
+struct Settled {
+    config: Arc<DiscordConfig>,
+    /// The control emoji the message may show, unless this process neither
+    /// admitted it nor offered it controls.
+    controls: Option<MayShow>,
+}
+
+/// A message whose history is unknown may show every control `config`
+/// offers.
+fn unknown(config: &DiscordConfig) -> MayShow {
+    Arc::new(tokio::sync::Mutex::new(control_emoji(
+        config,
+        &ControlAction::ALL,
+    )))
+}
+
+/// The control emoji `config` offers for `actions`: none with reactions off.
+pub(crate) fn control_emoji(config: &DiscordConfig, actions: &[ControlAction]) -> BTreeSet<String> {
+    actions
+        .iter()
+        .filter(|_| config.reactions)
+        .map(|action| config.control_emoji(*action).to_owned())
+        .collect()
+}
+
+/// A message's control reactions, held while something changes them.
+pub(crate) struct Controls {
+    reactions: Reactions,
+    target: String,
+    may_show: MayShow,
+}
+
+impl Controls {
+    /// Makes the message show the control emoji `wanted`: removes each other
+    /// it may show and adds each wanted, after any pass under way. A removal
+    /// Discord did not confirm is tried again by the next pass. Returns
+    /// whether Discord took every change.
+    pub(crate) async fn reconcile(&self, wanted: &BTreeSet<String>) -> bool {
+        let Owned { http, stopped, .. } = &*self.reactions.0;
+        let target = &self.target;
+        if target.is_empty() {
+            return true;
+        }
+        let pass = async {
+            let mut may_show = self.may_show.lock().await;
+            let mut took = true;
+            let unwanted = may_show.difference(wanted).cloned().collect::<Vec<_>>();
+            for emoji in unwanted {
+                match delete_feedback_reaction(http, target, &emoji).await {
+                    Ok(()) => {
+                        may_show.remove(&emoji);
+                    }
+                    Err(failure) => {
+                        warn!(error = %failure, %target, "Discord control reaction removal failed");
+                        took = false;
+                    }
+                }
+            }
+            for emoji in wanted {
+                may_show.insert(emoji.clone());
+                if let Err(failure) = create_feedback_reaction(http, target, emoji).await {
+                    warn!(error = %failure, %target, "Discord control reaction failed");
+                    took = false;
+                }
+            }
+            took
+        };
+        stopped.run_until_cancelled(pass).await.unwrap_or(false)
     }
 }
 
@@ -490,6 +632,11 @@ async fn attempt_delivery(
     http: &DiscordHttp,
     delivery: &Delivery,
 ) -> (DeliveryOutcome, Option<String>, Feedback) {
+    // A turn steered into another or stopped sends nothing: its message
+    // shows how it ended.
+    if let Some(silence) = delivery.silence {
+        return (DeliveryOutcome::Delivered, None, silence.into());
+    }
     let channel = match delivery.target_id.parse::<Id<ChannelMarker>>() {
         Ok(channel) => channel,
         Err(failure) => {

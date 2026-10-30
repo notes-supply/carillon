@@ -2,7 +2,10 @@
 
 use std::str::FromStr;
 
-use crate::models::Selection;
+use crate::{
+    models::Selection,
+    turns::{CONTROL_LIMIT, ControlAction, Silence},
+};
 use anyhow::bail;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -26,6 +29,18 @@ pub enum TurnState {
     Running,
     Completed,
     Interrupted,
+}
+
+impl TurnState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Interrupted => "interrupted",
+        }
+    }
 }
 
 impl FromStr for TurnState {
@@ -279,7 +294,7 @@ pub enum RestartReadiness {
 pub const ACTIVITY_REPORT_LIMIT: usize = 16 * 1024;
 
 /// Display data that is not valid is absent, never an error of what carries it.
-fn valid_or_none<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+pub(crate) fn valid_or_none<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: serde::de::DeserializeOwned,
@@ -305,6 +320,9 @@ pub struct Delivery {
     pub content: String,
     /// Where the turn's work began: the job [`Job`] reads describe.
     pub origin: Origin,
+    /// The turn ended with nothing to send; `content` is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub silence: Option<Silence>,
 }
 
 /// Where a turn's work began: the message turn itself, or, for an
@@ -356,6 +374,14 @@ pub struct Job {
     pub origin: Origin,
     /// Where the job's answers go.
     pub target_id: String,
+    /// The message that began the job, which feedback is shown on; absent
+    /// for a job its runtime opened.
+    #[serde(
+        default,
+        deserialize_with = "crate::models::optional_nonempty_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub feedback_target_id: Option<String>,
     /// The job's latest turns, oldest first, at most [`JOB_TURN_LIMIT`]: the
     /// last is the newest, and one queued or running is the job at work.
     /// Every turn before the last was continued by an observation, which
@@ -474,6 +500,37 @@ pub struct TurnActivity {
     /// observed, but not all of it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub partial: bool,
+    /// What a person may do with the turn while it waits, each once, so at
+    /// most [`CONTROL_LIMIT`]. A runtime's list is read leniently.
+    #[serde(
+        default,
+        deserialize_with = "distinct_controls",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub controls: Vec<ControlAction>,
+}
+
+/// The controls a runtime lists that this build knows, each kept once where
+/// it first appears: a repeated or unknown one costs the snapshot nothing.
+fn distinct_controls<'de, D>(deserializer: D) -> Result<Vec<ControlAction>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Listed {
+        Known(ControlAction),
+        Unknown(serde::de::IgnoredAny),
+    }
+    let mut controls = Vec::with_capacity(CONTROL_LIMIT);
+    for listed in Vec::<Listed>::deserialize(deserializer)? {
+        if let Listed::Known(action) = listed
+            && !controls.contains(&action)
+        {
+            controls.push(action);
+        }
+    }
+    Ok(controls)
 }
 
 /// The most reasoning notes one snapshot carries.

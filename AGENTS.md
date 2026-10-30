@@ -8,7 +8,7 @@ Give each fact one authoritative owner. Prefer direct behavior and state over mi
 
 Use mature runtime, platform, and library facilities where they fit; do not reproduce them merely for uniformity. Build abstractions from concrete needs. Prefer ordinary data, direct control flow, deletion, and replaceable boundaries over generalized frameworks, compatibility layers, and new moving parts.
 
-Carillon is the installing user's general-purpose agent. Preserve that user's native operating-system authority and Pi's native tool and extension semantics; do not add a parallel permission system. Keep authenticated remote ingress fail-closed before runtime work.
+Carillon is the installing user's general-purpose agent. Preserve that user's native operating-system authority; do not add a parallel permission system. Keep authenticated remote ingress fail-closed before runtime work.
 
 Provider-authored emotes and adornments should be configurable defaults in that provider's configuration. Keep this scope narrow: prose, punctuation and safety deadlines do not each need a user setting.
 

@@ -13,20 +13,21 @@ async function registry(
   interfaceUrl: string,
   interfaceEnabled = true,
   runtimeEnabled = true,
+  { listen = "127.0.0.1:3100", durable = "" } = {},
 ): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "carillon-installation-"));
   directories.push(root);
   const hash = "0".repeat(64);
-  const provider = (id: string, role: string, url: string, enabled: boolean) =>
-    `[[providers]]\nid = "${id}"\nrole = "${role}"\nversion = "0.0.0"\nurl = "${url}"\ntoken_hash = "${hash}"\nenabled = ${String(enabled)}\n`;
+  const provider = (id: string, role: string, url: string, enabled: boolean, extra = "") =>
+    `[[providers]]\nid = "${id}"\nrole = "${role}"\nversion = "0.0.0"\nurl = "${url}"\ntoken_hash = "${hash}"\nenabled = ${String(enabled)}\n${extra}`;
   await writeFile(
     join(root, "carillon.toml"),
     [
-      `data_dir = "data"\n[core]\noperator_token_hash = "${hash}"\n`,
+      `data_dir = "data"\n[core]\nlisten = "${listen}"\noperator_token_hash = "${hash}"\n`,
       `[[agents]]\nid = "assistant"\nname = "Carillon"\nruntime = "runtime-t3"\nworkspace = "workspace"\nresources = "agent"\n`,
       `[[agents]]\nid = "elsewhere"\nname = "Elsewhere"\nruntime = "runtime-pi"\nworkspace = "/elsewhere"\n`,
       `[[agents]]\nid = "code"\nname = "T3 Code"\nruntime = "runtime-t3"\nworkspace = "/code"\n`,
-      provider("runtime-t3", "runtime", "http://127.0.0.1:3101", runtimeEnabled),
+      provider("runtime-t3", "runtime", "http://127.0.0.1:3101", runtimeEnabled, durable),
       provider("discord", "interface", interfaceUrl, interfaceEnabled),
     ].join("\n"),
   );
@@ -78,4 +79,44 @@ it("lists the agents whose conversations start on the runtime, paths resolved", 
     { id: "code", name: "T3 Code", workspace: "/code" },
   ]);
   expect(loaded.componentDirectory).toBe(join(root, "data", "components", "runtime-t3"));
+});
+
+it("reaches core on loopback only when the runtime holds its turns", async () => {
+  const durable = "durable = true\n";
+  const loaded = await loadInstallation(
+    await registry("http://127.0.0.1:3102", true, true, { durable }),
+    "runtime-t3",
+  );
+  if (typeof loaded === "string") throw new Error(`an enabled runtime was reported ${loaded}`);
+  expect(loaded).toMatchObject({ durable: true, coreUrl: "http://127.0.0.1:3100" });
+  // A core listening on every address is reached on loopback.
+  for (const [listen, url] of [
+    ["0.0.0.0:3100", "http://127.0.0.1:3100"],
+    ["[::]:3100", "http://[::1]:3100"],
+    ["[::1]:3100", "http://[::1]:3100"],
+  ]) {
+    const wildcard = await loadInstallation(
+      await registry("http://127.0.0.1:3102", true, true, { listen, durable }),
+      "runtime-t3",
+    );
+    if (typeof wildcard === "string")
+      throw new Error(`an enabled runtime was reported ${wildcard}`);
+    expect(wildcard).toMatchObject({ coreUrl: url });
+  }
+  const remote = await registry("http://127.0.0.1:3102", true, true, {
+    listen: "192.0.2.1:3100",
+    durable,
+  });
+  await expect(loadInstallation(remote, "runtime-t3")).rejects.toThrow(
+    /provider URL must use an HTTP loopback socket address/u,
+  );
+  // A runtime that only answers core never needs its address.
+  const answering = await loadInstallation(
+    await registry("http://127.0.0.1:3102", true, true, { listen: "192.0.2.1:3100" }),
+    "runtime-t3",
+  );
+  if (typeof answering === "string")
+    throw new Error(`an enabled runtime was reported ${answering}`);
+  expect(answering.durable).toBe(false);
+  expect("coreUrl" in answering).toBe(false);
 });

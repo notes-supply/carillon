@@ -6,8 +6,8 @@ use carillon_installation::config::{
 };
 
 use super::{
-    ActivityMarkers, DiscordActivation, DiscordConfig, DiscordConversation, DiscordEmoji,
-    DiscordRoute, validate_activity_marker, validate_activity_markers,
+    ActivityMarkers, Difference, DiscordActivation, DiscordConfig, DiscordConversation,
+    DiscordEmoji, DiscordRoute, validate_activity_marker, validate_activity_markers,
 };
 
 fn refusal<T, E: Display>(result: Result<T, E>) -> Option<String> {
@@ -50,6 +50,7 @@ pub(crate) fn installation(
             token_hash: hash_token(id),
             enabled: true,
             parallel_turns: None,
+            durable: false,
         });
     }
     fs::write(root.join("credentials").join("operator.token"), "operator")?;
@@ -525,6 +526,82 @@ fn emoji_accepts_unicode_and_canonical_custom_syntax() -> anyhow::Result<()> {
             refusal(DiscordEmoji::parse(emoji)).as_deref(),
             Some(refused),
             "{emoji}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn turn_emoji_default_to_distinct_reactions_and_apply_live() -> anyhow::Result<()> {
+    let serving: DiscordConfig = toml::from_str(
+        r#"
+guild_id = "100"
+allowed_user_ids = ["200"]
+"#,
+    )?;
+    assert_eq!(
+        [
+            &serving.steered_emoji,
+            &serving.stopped_emoji,
+            &serving.steer_emoji,
+            &serving.interrupt_emoji,
+            &serving.stop_emoji,
+        ],
+        ["↪️", "⏹️", "⏩", "⏭️", "🛑"]
+    );
+    let mut file = serving.clone();
+    "🔀".clone_into(&mut file.steered_emoji);
+    "✋".clone_into(&mut file.stopped_emoji);
+    "▶️".clone_into(&mut file.steer_emoji);
+    "🔁".clone_into(&mut file.interrupt_emoji);
+    "🚫".clone_into(&mut file.stop_emoji);
+    assert_eq!(
+        Difference::between(&serving, &file),
+        Difference {
+            live: [
+                "steered_emoji",
+                "stopped_emoji",
+                "steer_emoji",
+                "interrupt_emoji",
+                "stop_emoji"
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            restart: Vec::new(),
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn control_emoji_differ_from_each_other_and_from_the_feedback_emoji() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let config = installation(directory.path(), "discord", 47_100)?;
+    let valid = DiscordConfig::load(&config, "discord")?;
+    let clash = "steer_emoji, interrupt_emoji and stop_emoji must differ from each other and from the feedback emoji";
+    let unknown = "Discord emoji must be Unicode emoji or canonical custom name:id";
+    for (change, refused) in [
+        (("steer", "⏹️"), clash),
+        (("steer", "⏹"), clash),
+        (("interrupt", "⏩"), clash),
+        (("stop", "✅"), clash),
+        (("stop", "👀"), clash),
+        (("stop", "stop"), unknown),
+        (("steered", "🛑"), clash),
+    ] {
+        let mut tuned = valid.clone();
+        let (field, emoji) = change;
+        let setting = match field {
+            "steer" => &mut tuned.steer_emoji,
+            "interrupt" => &mut tuned.interrupt_emoji,
+            "stop" => &mut tuned.stop_emoji,
+            _ => &mut tuned.steered_emoji,
+        };
+        emoji.clone_into(setting);
+        assert_eq!(
+            refusal(tuned.validate(&config, "discord")).as_deref(),
+            Some(refused),
+            "{field} {emoji}"
         );
     }
     Ok(())

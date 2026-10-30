@@ -534,13 +534,13 @@ fn print_paused(paused: bool) {
 fn print_runtime(runtime: &super::http::ServingRuntime) {
     let workers = runtime.workers;
     let settling = workers.messages.settling + workers.observations.settling;
-    let state = if runtime.enabled {
-        format!(
+    let state = match (runtime.enabled, runtime.durable) {
+        (false, _) => "disabled".to_owned(),
+        (true, true) => "enabled, holding and ordering its own turns".to_owned(),
+        (true, false) => format!(
             "enabled, {} conversation(s) at once",
             runtime.parallel_turns
-        )
-    } else {
-        "disabled".to_owned()
+        ),
     };
     println!(
         "  {}: {state}; {} message and {} observation worker(s){}",

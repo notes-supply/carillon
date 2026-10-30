@@ -22,7 +22,16 @@ export interface Agent {
   readonly resources?: string;
 }
 
-export interface Installation {
+/**
+ * A durable runtime holds the turns it accepts and settles them through
+ * core, which it reaches at `coreUrl`, on loopback. Any other runtime only
+ * answers core, and needs no address of it.
+ */
+export type Durability =
+  | { readonly durable: false }
+  | { readonly durable: true; readonly coreUrl: string };
+
+export type Installation = Durability & {
   readonly root: string;
   /** The runtime's private state directory, `<data_dir>/components/<id>`. */
   readonly componentDirectory: string;
@@ -33,7 +42,7 @@ export interface Installation {
   readonly operatorTokenHash: string;
   /** The runtime's own settings file, `providers/<id>.toml`; it may not exist. */
   readonly providerFile: string;
-}
+};
 
 const ProviderIdentitySchema = Type.String({
   minLength: 1,
@@ -47,10 +56,14 @@ const ProviderSchema = Type.Object({
   url: Type.String({ minLength: 1 }),
   token_hash: Type.String({ pattern: "^[a-f0-9]{64}$" }),
   enabled: Type.Boolean(),
+  durable: Type.Optional(Type.Boolean()),
 });
 const FileConfigSchema = Type.Object({
   data_dir: Type.String(),
-  core: Type.Object({ operator_token_hash: Type.String({ pattern: "^[a-f0-9]{64}$" }) }),
+  core: Type.Object({
+    listen: Type.String({ minLength: 1 }),
+    operator_token_hash: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+  }),
   agents: Type.Optional(
     Type.Array(
       Type.Object({
@@ -94,7 +107,12 @@ export async function loadInstallation(
   );
   // Extensions receive these endpoints with the operator credential.
   for (const provider of interfaces) providerAddress(provider.url);
+  const durability: Durability =
+    runtime.durable === true
+      ? { durable: true, coreUrl: coreUrl(parsed.core.listen) }
+      : { durable: false };
   return {
+    ...durability,
     root,
     componentDirectory: join(resolve(root, parsed.data_dir), "components", providerId),
     agents: (parsed.agents ?? [])
@@ -110,6 +128,16 @@ export async function loadInstallation(
     operatorTokenHash: parsed.core.operator_token_hash,
     providerFile: join(root, "providers", `${providerId}.toml`),
   };
+}
+
+/**
+ * Core's address as a local client reaches it: a wildcard listener on the
+ * loopback address of its family, and any other on loopback only.
+ */
+function coreUrl(listen: string): string {
+  const url = `http://${listen.replace(/^0\.0\.0\.0:/u, "127.0.0.1:").replace(/^\[::\]:/u, "[::1]:")}`;
+  providerAddress(url);
+  return url;
 }
 
 /** Why a runtime serves nothing, as its log says it. */

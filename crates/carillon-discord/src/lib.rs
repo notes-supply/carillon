@@ -5,6 +5,7 @@ mod attachments;
 mod cli;
 mod client;
 pub mod config;
+mod controls;
 pub mod conversations;
 mod delivery;
 mod error;

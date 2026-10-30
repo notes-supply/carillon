@@ -42,6 +42,7 @@ export async function installation(): Promise<{ root: string; workspace: string;
     [
       'data_dir = "state"',
       "[core]",
+      'listen = "127.0.0.1:1"',
       `operator_token_hash = "${HASH}"`,
       "[[agents]]",
       'id = "assistant"',

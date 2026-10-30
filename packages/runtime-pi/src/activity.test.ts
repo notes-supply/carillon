@@ -129,7 +129,7 @@ it("reports a real turn's phases, slow and parallel tools, failures and bursts u
   });
   const activity = () => runtime.activity("turn-1", "discord-private");
   try {
-    const turn = runtime.executeTurn(request(root, "turn-1"));
+    const turn = runtime.turns.execute(request(root, "turn-1"));
     await expect.poll(() => activity()?.phase).toBe("model");
     // The session says which model runs; this one does not reason.
     expect(activity()).toMatchObject({
@@ -220,7 +220,7 @@ it("records a failed tool and the call that recovers from it", async () => {
     return scripted(hold.promise, "Done.", []);
   });
   try {
-    const turn = runtime.executeTurn(request(root, "turn-1"));
+    const turn = runtime.turns.execute(request(root, "turn-1"));
     await expect.poll(() => calls).toBe(3);
     expect(runtime.activity("turn-1", "discord-private")).toMatchObject({
       phase: "model",
@@ -251,7 +251,7 @@ it("removes a turn's activity when preparation fails before its session exists",
   const loading = Promise.withResolvers<readonly Model<typeof model.api>[]>();
   catalogue.mockReturnValue(loading.promise);
   try {
-    const turn = runtime.executeTurn(request(root, "turn-1"));
+    const turn = runtime.turns.execute(request(root, "turn-1"));
     const failed = turn.then(
       () => undefined,
       (error: unknown) => error,
@@ -336,7 +336,7 @@ export default function (pi) {
   });
   const activity = () => runtime.activity("turn-1", "discord-private");
   try {
-    const turn = runtime.executeTurn(request(root, "turn-1"));
+    const turn = runtime.turns.execute(request(root, "turn-1"));
     // Observed below once the children are released; kept handled meanwhile.
     void turn.catch(() => undefined);
     await expect
@@ -481,7 +481,7 @@ it("keeps thinking as notes beside the answer, and a failed turn's report with i
     return next();
   });
   try {
-    const answered = await runtime.executeTurn(request(root, "turn-1"));
+    const answered = await runtime.turns.execute(request(root, "turn-1"));
     // Thinking is kept as notes, one per block on one line, and never
     // becomes the answer.
     expect(answered.output).toBe("Reading the notes.The notes say notes.");
@@ -490,7 +490,7 @@ it("keeps thinking as notes beside the answer, and a failed turn's report with i
       "Nothing else is needed.",
     ]);
 
-    const failed = await runtime.executeTurn(request(root, "turn-2")).then(
+    const failed = await runtime.turns.execute(request(root, "turn-2")).then(
       () => undefined,
       (failure: unknown) => failure,
     );
@@ -534,7 +534,7 @@ it("keeps a turn's report with a failure that is no error, as an error caused by
     return next();
   });
   try {
-    const failed = await runtime.executeTurn(request(root, "turn-1"), controller.signal).then(
+    const failed = await runtime.turns.execute(request(root, "turn-1"), controller.signal).then(
       () => undefined,
       (failure: unknown) => failure,
     );

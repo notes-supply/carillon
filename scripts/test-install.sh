@@ -73,6 +73,7 @@ T3_HASH=$(printf synthetic | sha256sum | cut -d' ' -f1)
 printf '%s\n' \
   'data_dir = "state"' \
   '[core]' \
+  'listen = "127.0.0.1:1"' \
   "operator_token_hash = \"$T3_HASH\"" \
   '[[agents]]' \
   'id = "assistant"' \

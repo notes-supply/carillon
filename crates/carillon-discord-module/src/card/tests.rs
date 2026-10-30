@@ -40,6 +40,7 @@ fn tools() -> TurnActivity {
         notes: Vec::new(),
         agent: None,
         partial: false,
+        controls: Vec::new(),
     }
 }
 
@@ -98,6 +99,7 @@ fn job(turns: Vec<JobTurn>) -> Job {
             accepted_at: 1_790_000_000,
         },
         target_id: "300".to_owned(),
+        feedback_target_id: None,
         turns,
         earlier: false,
     }
@@ -959,6 +961,7 @@ fn only_a_settled_job_loses_its_card() {
         notes: Vec::new(),
         agent: None,
         partial: false,
+        controls: Vec::new(),
     };
     let mut finishing = turn("turn", TurnState::Completed, Some(plain.clone()));
     finishing.delivery = Some(DeliveryState::Delivering);

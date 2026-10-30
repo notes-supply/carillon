@@ -1,6 +1,7 @@
 //! The runtime workers core runs, kept to what the serving registry says:
 //! each enabled runtime gets its `parallel_turns` message workers and a
-//! fixed few observation workers, and a disabled runtime none. One
+//! fixed few observation workers, a durable one a single dispatcher, and a
+//! disabled runtime none. One
 //! supervisor owns them. When the registry changes it starts the workers a
 //! lane lacks and retires those it no longer wants: a retired worker claims
 //! nothing more, and the turn it holds settles as at shutdown. A lane gets
@@ -87,10 +88,11 @@ fn wanted(config: &LoadedConfig) -> BTreeMap<(String, Lane), usize> {
         .iter()
         .filter(|provider| provider.role == ProviderRole::Runtime)
     {
-        let (messages, observations) = if runtime.enabled {
-            (runtime.parallel_turns() as usize, OBSERVATION_WORKERS)
-        } else {
-            (0, 0)
+        // A durable runtime's one dispatcher hands it every turn in order.
+        let (messages, observations) = match (runtime.enabled, runtime.durable) {
+            (false, _) => (0, 0),
+            (true, true) => (1, 0),
+            (true, false) => (runtime.parallel_turns() as usize, OBSERVATION_WORKERS),
         };
         wanted.insert((runtime.id.clone(), Lane::Messages), messages);
         wanted.insert((runtime.id.clone(), Lane::Observations), observations);

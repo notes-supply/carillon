@@ -261,6 +261,11 @@ the `runtime-t3` entry and run `carillon registry apply`. Each conversation
 still runs one turn at a time, in order. Pi runs one turn at a time, so leave
 it unset there.
 
+A runtime marked `durable = true` holds the turns it accepts and orders them
+itself, so it takes no `parallel_turns`. Changing `durable` needs
+`carillon restart`, and a runtime refuses to start when its entry says
+otherwise than its program does.
+
 ## Discord
 
 `/model` shows the models the runtime offers and lets an allowlisted user
@@ -278,6 +283,31 @@ decisions`. Plain `/command` lists them.
 
 Both commands are admitted like messages: only in the guild, from allowlisted
 users, in a routed channel or a thread under a thread route.
+
+### Reactions
+
+The bot reacts to each message it answers: while it works, then with how it
+ended. While a message waits behind the agent's running turn, a runtime that
+holds its turns may offer controls as reactions: an allowlisted person's
+reaction hands the message to the running turn now (steer), ends the running
+turn and runs it next (interrupt), or doesn't run it (stop). The emoji are
+settings with these defaults, Unicode or a custom `name:id`, and apply live,
+replacing the controls messages show. The controls must differ from each
+other and from the rest.
+
+```toml
+# providers/discord-private.toml
+reactions = true
+processing_emoji = "👀"
+delivered_emoji = "✅"
+failed_emoji = "❌"
+uncertain_emoji = "⚠️"
+steered_emoji = "↪️"     # handed to the turn before it, which answers both
+stopped_emoji = "⏹️"
+steer_emoji = "⏩"
+interrupt_emoji = "⏭️"
+stop_emoji = "🛑"
+```
 
 ### Files
 
