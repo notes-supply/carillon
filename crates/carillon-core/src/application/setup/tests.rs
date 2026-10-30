@@ -1,13 +1,23 @@
-use std::{os::unix::fs::PermissionsExt as _, path::Path};
+use std::{
+    os::unix::fs::PermissionsExt as _,
+    path::{Path, PathBuf},
+};
 
-use anyhow::Context as _;
 use carillon_installation::config::{Config, LoadedConfig, ProviderRole};
 
-use super::{
-    Assistant, Harnesses, Options, Runtime, initialize, keep_t3, registered_runtimes, run,
-    set_up_t3, setup,
-};
-use crate::application::admin::{ASSISTANT, backup, register_runtime, set_provider};
+use super::{Options, Runtime, initialize, keep_t3, registered_runtimes, run, set_up_t3, setup};
+use crate::application::admin::{ASSISTANT, assistant, backup, register_runtime, set_provider};
+
+/// A new installation on `runtime`: on Pi with Carillon's assistant working
+/// in `workspace`, on T3 with no agent yet.
+fn initialized(home: &Path, workspace: &Path, runtime: Runtime) -> anyhow::Result<PathBuf> {
+    let agents = if runtime == Runtime::Pi {
+        vec![assistant(workspace)]
+    } else {
+        Vec::new()
+    };
+    initialize(home, 44_000, runtime, agents)
+}
 
 #[test]
 fn a_secret_goes_on_standard_input_and_a_failure_is_its_one_line() -> anyhow::Result<()> {
@@ -73,7 +83,7 @@ fn a_disabled_runtime_stops_setup_before_it_opens_anything() -> anyhow::Result<(
     let directory = tempfile::tempdir()?;
     for runtime in [Runtime::Pi, Runtime::T3] {
         let home = directory.path().join(runtime.id());
-        let config = initialize(&home, directory.path(), 44_000, runtime)?;
+        let config = initialized(&home, directory.path(), runtime)?;
         set_provider(&config, runtime.id(), false)?;
         let options = Options {
             workspace: None,
@@ -180,7 +190,7 @@ impl carillon_installation::prompt::Questions for Shown {
 fn saved_t3_settings_are_offered_only_when_the_runtime_reads_them() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let home = directory.path().join("home");
-    initialize(&home, directory.path(), 44_000, Runtime::T3)?;
+    initialized(&home, directory.path(), Runtime::T3)?;
     std::fs::create_dir_all(home.join("providers"))?;
     std::fs::write(home.join("providers/runtime-t3.toml"), "saved")?;
     let program = directory.path().join("carillon-runtime-t3");
@@ -213,7 +223,7 @@ fn a_rerun_keeps_the_runtimes_the_installation_registers() -> anyhow::Result<()>
     let directory = tempfile::tempdir()?;
     for runtime in [Runtime::Pi, Runtime::T3] {
         let home = directory.path().join(runtime.id());
-        let config = initialize(&home, directory.path(), 44_000, runtime)?;
+        let config = initialized(&home, directory.path(), runtime)?;
         assert_eq!(registered_runtimes(&home)?, [runtime]);
         register_runtime(&config, Runtime::T3)?;
         register_runtime(&config, Runtime::Pi)?;
@@ -223,15 +233,10 @@ fn a_rerun_keeps_the_runtimes_the_installation_registers() -> anyhow::Result<()>
 }
 
 /// A fake `carillon-runtime-t3` that records its arguments and standard
-/// input, discovers `offer`, and makes profiles in `profiles/`.
-fn fake_t3(directory: &Path, offer: &serde_json::Value) -> anyhow::Result<std::path::PathBuf> {
-    let mut offer = offer.clone();
-    if offer.get("profiles").is_none() {
-        offer["profiles"] = serde_json::json!([]);
-    }
+/// input and discovers `offer`, or for an agent its `agentModels` entry.
+fn fake_t3(directory: &Path, offer: &serde_json::Value) -> anyhow::Result<PathBuf> {
     let program = directory.join("carillon-runtime-t3");
     let calls = directory.join("calls");
-    let profiles = directory.join("profiles");
     if let Some(offers) = offer
         .get("agentModels")
         .and_then(serde_json::Value::as_object)
@@ -240,7 +245,7 @@ fn fake_t3(directory: &Path, offer: &serde_json::Value) -> anyhow::Result<std::p
             std::fs::write(
                 directory.join(format!("offer-{id}.json")),
                 serde_json::to_vec(
-                    &serde_json::json!({"projects": offer["projects"], "models": models, "profiles": offer["profiles"]}),
+                    &serde_json::json!({"projects": offer["projects"], "models": models}),
                 )?,
             )?;
         }
@@ -250,11 +255,9 @@ fn fake_t3(directory: &Path, offer: &serde_json::Value) -> anyhow::Result<std::p
         format!(
             "#!/bin/sh\n{{ echo \"$*\"; cat | sed 's/^/  stdin: /'; }} >>'{calls}'\ncase \"$1\" in\n  \
              discover) agent=; while [ \"$#\" -gt 0 ]; do if [ \"$1\" = --agent ]; then shift; agent=$1; fi; shift; done; if [ -n \"$agent\" ] && [ -f '{directory}/offer-'\"$agent\"'.json' ]; then cat '{directory}/offer-'\"$agent\"'.json'; else printf '%s' '{offer}'; fi ;;\n  \
-             profile) printf '{{\"instanceId\":\"carillon_claude\",\"home\":\"{profiles}/claude\"}}' ;;\n  \
              configure) echo \"configured $3 $4\" ;;\n  check) exit 0 ;;\n  *) exit 2 ;;\nesac\n",
             directory = directory.display(),
             calls = calls.display(),
-            profiles = profiles.display(),
         ),
     )?;
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))?;
@@ -265,43 +268,32 @@ fn model(provider: &str, slug: &str, name: &str) -> serde_json::Value {
     serde_json::json!({"provider": provider, "model": slug, "name": name, "options": []})
 }
 
-/// A new installation on T3 alone: Carillon's assistant on its own Claude,
-/// signed in with a key that goes to T3 alone, and a T3 Code agent for a
-/// project, each with a default model among its own instances.
+/// With Pi and T3, T3 asks only for its address, its token and the projects
+/// T3 Code channels work in: Carillon's assistant runs on Pi, and each
+/// project's agent gets a default model among those T3 offers it.
 #[test]
-fn t3_gets_the_assistant_with_its_profile_and_a_t3_code_agent_per_project() -> anyhow::Result<()> {
+fn t3_code_gets_an_agent_per_project_beside_the_assistant_on_pi() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let home = directory.path().join("home");
-    let assistant = directory.path().join("carillon-workspace");
+    let workspace = directory.path().join("carillon-workspace");
     let notes = directory.path().join("notes");
-    std::fs::create_dir_all(&assistant)?;
+    std::fs::create_dir_all(&workspace)?;
     std::fs::create_dir_all(&notes)?;
     let offer = serde_json::json!({
         "projects": [
-            {"id": "p-assistant", "title": "Carillon", "workspace": assistant},
+            {"id": "p-other", "title": "Other", "workspace": workspace},
             {"id": "p-notes", "title": "Notes App", "workspace": notes},
         ],
-        "models": [
-            model("claudeAgent", "sonnet", "Sonnet"),
-            model("carillon_claude", "sonnet", "Sonnet"),
-            model("codex", "gpt", "GPT"),
-        ],
-        "agentModels": {
-            "assistant": [model("carillon_claude", "sonnet", "Sonnet")],
-            "t3-notes-app": [model("claudeAgent", "sonnet", "Sonnet"), model("codex", "gpt", "GPT")],
-        },
+        "models": [model("claudeAgent", "sonnet", "Sonnet"), model("codex", "gpt", "GPT")],
     });
     let program = fake_t3(directory.path(), &offer)?;
-    // The default address, a token, the assistant's project, Notes for T3
-    // Code, a key for Claude, then the assistant's and Notes' first models.
-    let mut questions = Shown::answering(&["", "token", "0", "1", "1", "sk-test", "0", "1"]);
-    set_up_t3(
-        &home,
-        &options(),
-        &Assistant::T3(Harnesses::chosen(&[0]).context("Claude was chosen")?),
-        &program,
-        &mut questions,
-    )?;
+    // The default address, a token, Notes for T3 Code, then its second model.
+    let mut questions = Shown::answering(&["", "token", "1", "1"]);
+    let options = Options {
+        workspace: Some(workspace.clone()),
+        ..options()
+    };
+    set_up_t3(&home, &options, true, &program, &mut questions)?;
     let config = LoadedConfig::load(&home.join("carillon.toml"))?;
     let agents: Vec<(&str, &str, &Path, bool)> = config
         .value
@@ -319,7 +311,7 @@ fn t3_gets_the_assistant_with_its_profile_and_a_t3_code_agent_per_project() -> a
     assert_eq!(
         agents,
         [
-            (ASSISTANT, "runtime-t3", assistant.as_path(), true),
+            (ASSISTANT, "runtime-pi", workspace.as_path(), true),
             ("t3-notes-app", "runtime-t3", notes.as_path(), false),
         ]
     );
@@ -330,31 +322,27 @@ fn t3_gets_the_assistant_with_its_profile_and_a_t3_code_agent_per_project() -> a
     );
     backup(&config, &directory.path().join("backup.tar.gz"))?;
     let calls = std::fs::read_to_string(directory.path().join("calls"))?;
-    let config_arg = home.join("carillon.toml");
-    let config_arg = config_arg.display();
-    for expected in [
-        format!(
-            "profile --config {config_arg} --url http://127.0.0.1:3773 --harness claude \
-             --with-key\n  stdin: token\n  stdin: sk-test\n"
-        ),
-        format!(
-            "configure --config {config_arg} --url http://127.0.0.1:3773 --agent assistant \
-             --project p-assistant --model carillon_claude/sonnet\n"
-        ),
-        // Plain T3 Code is offered only the instances that are not the profile.
-        format!(
-            "configure --config {config_arg} --url http://127.0.0.1:3773 --agent t3-notes-app \
-             --project p-notes --model codex/gpt\n"
-        ),
-    ] {
-        assert!(calls.contains(&expected), "{expected}\nnot in\n{calls}");
-    }
-    // The key is the harness's, given to its program on standard input alone.
-    assert!(
-        !questions
-            .shown
-            .iter()
-            .any(|shown| shown.contains("sk-test"))
+    let expected = format!(
+        "configure --config {} --url http://127.0.0.1:3773 --agent t3-notes-app \
+         --project p-notes --model codex/gpt\n",
+        home.join("carillon.toml").display()
+    );
+    assert!(calls.contains(&expected), "{expected}\nnot in\n{calls}");
+    assert!(!calls.contains("--agent assistant"), "{calls}");
+    assert_eq!(
+        questions.shown,
+        [
+            "T3 Code's address:",
+            "T3 token (`t3 auth session issue --label Carillon --token-only` prints one):",
+            &format!("Other ({})", workspace.display()),
+            &format!("Notes App ({})", notes.display()),
+            "Which T3 projects should T3 Code channels work in? Each is an agent Discord can \
+             route channels to.",
+            "Sonnet (claudeAgent)",
+            "GPT (codex)",
+            "Which model should T3 Code · Notes App start new conversations with?",
+            &format!("configured {} --url", home.join("carillon.toml").display()),
+        ]
     );
     Ok(())
 }
@@ -374,13 +362,7 @@ fn models_sharing_a_name_are_told_apart_and_the_one_chosen_is_configured() -> an
     let program = fake_t3(directory.path(), &offer)?;
     // The default address, a token, the only project for T3 Code, the second Sonnet.
     let mut questions = Shown::answering(&["", "token", "0", "1"]);
-    set_up_t3(
-        &home,
-        &options(),
-        &Assistant::None,
-        &program,
-        &mut questions,
-    )?;
+    set_up_t3(&home, &options(), false, &program, &mut questions)?;
     let options = [
         "Sonnet (claudeAgent/sonnet-a)",
         "Sonnet (claudeAgent/sonnet-b)",
@@ -394,7 +376,7 @@ fn models_sharing_a_name_are_told_apart_and_the_one_chosen_is_configured() -> an
     );
     let calls = std::fs::read_to_string(directory.path().join("calls"))?;
     assert!(calls.contains("--model claudeAgent/sonnet-b"), "{calls}");
-    // With no assistant, the installation's only agent is T3 Code's.
+    // Without Pi, the installation's only agent is T3 Code's.
     let config = LoadedConfig::load(&home.join("carillon.toml"))?;
     let ids: Vec<&str> = config
         .value
@@ -418,7 +400,7 @@ fn t3_with_nothing_to_run_is_refused_or_left_out() -> anyhow::Result<()> {
     let refused = set_up_t3(
         &home,
         &options(),
-        &Assistant::None,
+        false,
         &program,
         &mut Shown::answering(&["", "token", ""]),
     );
@@ -429,7 +411,7 @@ fn t3_with_nothing_to_run_is_refused_or_left_out() -> anyhow::Result<()> {
     assert!(refusal.contains("nothing runs on T3"), "{refusal}");
     assert!(!home.exists());
     let mut questions = Shown::answering(&["", "token", ""]);
-    set_up_t3(&home, &options(), &Assistant::Pi, &program, &mut questions)?;
+    set_up_t3(&home, &options(), true, &program, &mut questions)?;
     assert!(
         questions
             .shown
@@ -457,13 +439,7 @@ fn t3_code_agents_are_named_from_their_projects_without_clashing() -> anyhow::Re
     // The default address, a token, every project for T3 Code, then each
     // agent's only model.
     let mut questions = Shown::answering(&["", "token", "0,1,2", "0", "0", "0"]);
-    set_up_t3(
-        &home,
-        &options(),
-        &Assistant::None,
-        &program,
-        &mut questions,
-    )?;
+    set_up_t3(&home, &options(), false, &program, &mut questions)?;
     let config = LoadedConfig::load(&home.join("carillon.toml"))?;
     let agents: Vec<(&str, &str)> = config
         .value
@@ -508,13 +484,7 @@ fn equally_named_agents_get_distinct_model_prompts_and_their_chosen_models() -> 
     });
     let program = fake_t3(directory.path(), &offer)?;
     let mut questions = Shown::answering(&["", "token", "0,1,2", "0", "1", "0"]);
-    set_up_t3(
-        &home,
-        &options(),
-        &Assistant::None,
-        &program,
-        &mut questions,
-    )?;
+    set_up_t3(&home, &options(), false, &program, &mut questions)?;
     for label in [
         "T3 Code · Notes (t3-notes)",
         "T3 Code · Notes (t3-notes-2)",

@@ -46,66 +46,11 @@ fn configuration_rejects_malformed_provider_endpoints_before_startup() -> Result
         }
         state.config.value.providers[index].url = original;
     }
-    // Concurrent conversations are a bounded runtime setting.
-    for index in 0..state.config.value.providers.len() {
-        let runtime = state.config.value.providers[index].role == ProviderRole::Runtime;
-        for (parallel, valid) in [(0, false), (1, runtime), (16, runtime), (17, false)] {
-            state.config.value.providers[index].parallel_turns = Some(parallel);
-            fs::write(&path, toml::to_string(&state.config.value)?)?;
-            let id = &state.config.value.providers[index].id;
-            assert_eq!(
-                LoadedConfig::load(&path)
-                    .err()
-                    .map(|error| error.to_string()),
-                (!valid).then(|| format!(
-                    "provider {id} parallel_turns must be between 1 and 16, on a runtime"
-                )),
-                "parallel_turns {parallel}"
-            );
-        }
-        state.config.value.providers[index].parallel_turns = None;
-    }
     state.config.value.core.listen.set_port(0);
     fs::write(&path, toml::to_string(&state.config.value)?)?;
     crate::assert_refused(
         LoadedConfig::load(&path),
         "core listen port must be nonzero",
     )?;
-    Ok(())
-}
-
-/// A durable runtime holds and orders its own turns: only a runtime is one,
-/// never with `parallel_turns`, and only a restart makes one durable or not.
-#[test]
-fn only_a_runtime_without_parallel_turns_is_durable_and_only_at_a_restart() -> Result<()> {
-    let directory = tempdir()?;
-    let mut state = installation(directory.path())?;
-    let path = directory.path().join("carillon.toml");
-    let serving = state.config.value.clone();
-    fs::write(&path, toml::to_string(&serving)?)?;
-    assert!(!fs::read_to_string(&path)?.contains("durable"));
-    for (index, parallel_turns, valid) in [(1, None, true), (1, Some(1), false), (0, None, false)] {
-        let mut file = serving.clone();
-        file.providers[index].durable = true;
-        file.providers[index].parallel_turns = parallel_turns;
-        fs::write(&path, toml::to_string(&file)?)?;
-        let id = &file.providers[index].id;
-        assert_eq!(
-            LoadedConfig::load(&path).err().map(|error| error.to_string()),
-            (!valid).then(|| format!(
-                "provider {id} durable is for a runtime, which then orders its own turns without parallel_turns"
-            )),
-            "{id} durable with parallel_turns {parallel_turns:?}"
-        );
-    }
-    state.config.value.providers[1].durable = true;
-    let difference = registry::Difference::between(&serving, &state.config.value);
-    assert_eq!(
-        (difference.live, difference.restart),
-        (
-            Vec::new(),
-            vec!["providers.test-runtime.durable".to_owned()]
-        )
-    );
     Ok(())
 }

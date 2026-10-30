@@ -25,7 +25,7 @@ use tracing_subscriber::EnvFilter;
 use carillon_installation::maintenance::ServiceLock;
 
 use super::{
-    admin::{Runtime, backup, initialize as init, restore, set_provider},
+    admin::{Runtime, assistant, backup, initialize, restore, set_provider},
     drain::{Pace, drain, stop},
     http::{Applied, RegistryStatus, check, serve},
     operations::{
@@ -83,31 +83,28 @@ impl Wait {
 /// Whether running services stop only once core has drained.
 #[derive(Debug, clap::Args)]
 struct Drained {
-    /// Stop without waiting for core to drain. A message a runtime is still
-    /// running is recorded as interrupted and not replayed, and native work
-    /// a runtime started may go on.
+    /// Stop without waiting for core to drain. Running messages are handed
+    /// to their runtimes again once core starts, and resumed; a runtime that
+    /// was not ready may lose what only it knew.
     #[arg(long)]
     force: bool,
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Create a new installation.
+    /// Create a new installation, with Carillon's assistant on Pi.
     Init {
         #[arg(long)]
         workspace: PathBuf,
         #[arg(long, default_value_t = 43_800)]
         base_port: u16,
-        /// The runtime the agent runs on; only it is registered.
-        #[arg(long, value_enum, default_value_t = Runtime::Pi)]
-        runtime: Runtime,
     },
-    /// Set up an installation at the terminal: the runtimes and what runs
-    /// Carillon's assistant, then Discord. A rerun keeps what is already set
-    /// up when asked to.
+    /// Set up an installation at the terminal: the runtimes, Pi for
+    /// Carillon's assistant and T3 for T3 Code channels, then Discord. A
+    /// rerun keeps what is already set up when asked to.
     Setup {
-        /// The agent's folder with Pi (default: your home). With T3, the
-        /// chosen project's folder.
+        /// The assistant's folder with Pi (default: your home). On T3, an
+        /// agent works in its project's folder.
         #[arg(long)]
         workspace: Option<PathBuf>,
         #[arg(long, default_value_t = 43_800)]
@@ -170,10 +167,9 @@ enum Command {
     /// Show the registry core serves, with its runtimes' workers, and how
     /// `carillon.toml` differs from it; or have core serve the file.
     #[command(after_help = "\
-Core serves a changed runtime `enabled` or `parallel_turns` without a
-restart: a disabled runtime admits no new work and starts no queued turn,
-while turns it is running settle and their answers are delivered; fewer
-parallel turns let running turns finish first. Applying neither starts nor
+Core serves a changed runtime `enabled` without a restart: a disabled
+runtime admits no new work and is handed no queued turn, while the turns it
+holds settle and their answers are delivered. Applying neither starts nor
 stops a runtime's program. A file that also changes anything else, such as
 addresses, credentials, the agent or the set of providers, is refused whole
 and applies when Carillon restarts.")]
@@ -241,9 +237,13 @@ pub(crate) async fn run() -> Result<()> {
         Command::Init {
             workspace,
             base_port,
-            runtime,
         } => {
-            let path = init(&home()?, &workspace, base_port, runtime)?;
+            let path = initialize(
+                &home()?,
+                base_port,
+                Runtime::Pi,
+                vec![assistant(&workspace)],
+            )?;
             println!("{}", path.display());
         }
         Command::Setup {
@@ -526,27 +526,18 @@ fn print_paused(paused: bool) {
 }
 
 fn print_runtime(runtime: &super::http::ServingRuntime) {
-    let workers = runtime.workers;
-    let settling = workers.messages.settling + workers.observations.settling;
-    let state = match (runtime.enabled, runtime.durable) {
-        (false, _) => "disabled".to_owned(),
-        (true, true) => "enabled, holding and ordering its own turns".to_owned(),
-        (true, false) => format!(
-            "enabled, {} conversation(s) at once",
-            runtime.parallel_turns
-        ),
+    use super::http::Dispatcher;
+    let state = if runtime.enabled {
+        "enabled"
+    } else {
+        "disabled"
     };
-    println!(
-        "  {}: {state}; {} message and {} observation worker(s){}",
-        runtime.id,
-        workers.messages.claiming,
-        workers.observations.claiming,
-        if settling > 0 {
-            format!(", {settling} more settling the turn they hold")
-        } else {
-            String::new()
-        }
-    );
+    let dispatcher = match runtime.dispatcher {
+        Dispatcher::Stopped => "no dispatcher",
+        Dispatcher::Dispatching => "its dispatcher hands it its turns",
+        Dispatcher::Retiring => "its dispatcher is ending its hand-over",
+    };
+    println!("  {}: {state}; {dispatcher}", runtime.id);
 }
 
 fn print_registry(status: &RegistryStatus) {

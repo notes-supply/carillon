@@ -1,12 +1,13 @@
 //! A complete durable conversation with no HTTP, Discord or model account.
 use anyhow::{Context as _, Result, ensure};
-use carillon_core::{
-    AgentOptions, Core, CoreOptions, Lane, RuntimeProvider, TurnFailure, WorkerStep,
-};
+use carillon_core::{AgentOptions, Core, CoreOptions, RuntimeProvider, Settled, WorkerStep};
 use carillon_installation::config::AttachmentLimits;
-use carillon_protocol::model::{
-    DeliveryAck, DeliveryOutcome, ExternalEvent, RuntimeTurnRequest, RuntimeTurnResponse,
-    SelectedProvider, TurnState,
+use carillon_protocol::{
+    model::{
+        DeliveryAck, DeliveryOutcome, ExternalEvent, RuntimeTurnRequest, SelectedProvider,
+        TurnState,
+    },
+    turns::TurnOutcome,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -32,7 +33,6 @@ async fn conversation() -> Result<()> {
             version: "example".to_owned(),
             url: "in-process".to_owned(),
             enabled: true,
-            durable: false,
         }],
         attachments: AttachmentLimits::default(),
     })?;
@@ -70,14 +70,22 @@ async fn conversation() -> Result<()> {
     std::fs::write(resources.join("SYSTEM.md"), "Changed after acceptance")?;
     // This example never stops; a service cancels the token as it shuts down.
     let stopping = CancellationToken::new();
+    let mut handed = None;
     let step = core
-        .run_next("echo", Lane::Messages, &stopping, async |request| {
+        .dispatch_next("echo", &stopping, async |request| {
             // Opaque interface data is captured on acceptance, not supplied by a duplicate.
             assert_eq!(request.native, event.native);
-            echo(&request)
+            handed = Some(request);
+            Ok(())
         })
         .await?;
-    ensure!(step == WorkerStep::Advanced, "no turn executed");
+    ensure!(step == WorkerStep::Advanced, "no turn handed over");
+    // The runtime holds the turn, and settles it once it has answered.
+    let request = handed.context("no turn handed over")?;
+    ensure!(
+        core.settle("echo", &request.correlation_id, echo(&request)?)? == Settled::Recorded,
+        "the answer was not recorded"
+    );
     let delivery = core
         .claim_delivery("example", "instance-1")?
         .context("missing delivery")?;
@@ -114,16 +122,11 @@ async fn conversation() -> Result<()> {
 
 /// This deterministic test runtime is deliberately not Pi: it answers with
 /// the input and the instructions of the turn's resource snapshot, which is real.
-fn echo(request: &RuntimeTurnRequest) -> Result<RuntimeTurnResponse, TurnFailure> {
+fn echo(request: &RuntimeTurnRequest) -> Result<TurnOutcome> {
     let captured =
-        std::fs::read_to_string(std::path::Path::new(&request.resource_root).join("SYSTEM.md"))
-            .map_err(|error| TurnFailure::Uncertain(error.into()))?;
-    Ok(RuntimeTurnResponse {
-        correlation_id: request.correlation_id.clone(),
+        std::fs::read_to_string(std::path::Path::new(&request.resource_root).join("SYSTEM.md"))?;
+    Ok(TurnOutcome::Answered {
         output: format!("{} — {captured}", request.input),
-        follow_up: None,
-        unanswered_left: false,
-        attachments_left: false,
         activity: None,
     })
 }

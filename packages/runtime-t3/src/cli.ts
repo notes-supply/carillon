@@ -1,5 +1,6 @@
 import { once } from "node:events";
 import { mkdir, readFile, stat } from "node:fs/promises";
+import { createCoreClient } from "@carillon/runtime/core";
 import { providerAddress } from "@carillon/runtime/endpoint";
 import { createRuntimeServer } from "@carillon/runtime/http";
 import {
@@ -11,13 +12,13 @@ import {
   type Installation,
 } from "@carillon/runtime/installation";
 import { ModelSelections } from "@carillon/runtime/selections";
+import { readStops } from "./held.ts";
 import { createT3Runtime, type T3Agent } from "./runtime.ts";
 import packageInfo from "../package.json" with { type: "json" };
 import { join } from "node:path";
 import { text } from "node:stream/consumers";
-import { configure, discover, profile } from "./setup.ts";
-import { assistantResources, HARNESSES, isHarness, reconcileProfiles } from "./profiles.ts";
-import { loadSettings, offers, origin, type T3Settings } from "./settings.ts";
+import { configure, discover, plain } from "./setup.ts";
+import { loadSettings, origin, type T3Settings } from "./settings.ts";
 import { connectT3, T3Failure, type T3Endpoint } from "./t3.ts";
 
 async function serve(values: readonly string[]): Promise<void> {
@@ -45,27 +46,25 @@ async function serve(values: readonly string[]): Promise<void> {
   const { settings, endpoint, agents } = await saved(installation);
   // Fail closed before listening: the server must speak the verified
   // protocol and accept the credential, or this runtime does not start.
-  const connection = await connectT3(endpoint);
-  try {
-    await reconcileProfiles(installation, settings.profiles, connection);
-  } finally {
-    connection.close();
-  }
+  (await connectT3(endpoint)).close();
   await mkdir(installation.componentDirectory, { recursive: true, mode: 0o700 });
   const runtime = createT3Runtime({
     endpoint,
     agents,
-    profiles: settings.profiles,
     selections: await ModelSelections.open(
       join(installation.componentDirectory, "model-selection.json"),
     ),
-    title: settings.title,
+    stops: await readStops(join(installation.componentDirectory, "stops.json")),
+    core: createCoreClient({
+      url: installation.coreUrl,
+      providerId: installation.runtime.id,
+      token,
+    }),
   });
   const server = createRuntimeServer({
     runtime,
     token,
     providerId: installation.runtime.id,
-    durable: installation.durable,
     provider: "t3",
     version: packageInfo.version,
     features: ["native-continuations"],
@@ -97,10 +96,9 @@ async function serve(values: readonly string[]): Promise<void> {
 /**
  * The saved settings, the T3 endpoint they name and the agents as the
  * runtime runs them, as startup reads them before reaching T3. Every agent
- * of this runtime in `carillon.toml` works in an existing directory and has
- * settings here, which name no other agent. The agent with resources is
- * Carillon's assistant, whose model is on one of the profiles; any other
- * agent's is not.
+ * of this runtime in `carillon.toml` is plain T3 Code, without resources,
+ * works in an existing directory and has settings here, which name no other
+ * agent.
  */
 async function saved(installation: Installation): Promise<{
   settings: T3Settings;
@@ -108,9 +106,8 @@ async function saved(installation: Installation): Promise<{
   agents: ReadonlyMap<string, T3Agent>;
 }> {
   const settings = await loadSettings(installation.providerFile, installation.root);
-  assistantResources(installation);
   const agents = new Map<string, T3Agent>();
-  for (const agent of installation.agents) {
+  for (const agent of installation.agents.map(plain)) {
     const workspace = await stat(agent.workspace).then(
       (entry) => entry.isDirectory(),
       () => false,
@@ -124,12 +121,7 @@ async function saved(installation: Installation): Promise<{
       throw new Error(
         `${installation.providerFile}: ${agent.id} has no T3 settings; set its project and model with \`carillon runtime-t3 configure --agent ${agent.id}\``,
       );
-    const assistant = agent.resources !== undefined;
-    if (!offers(settings.profiles, assistant, configured.selection.instanceId))
-      throw new Error(
-        `${installation.providerFile}: /agents/${agent.id}/model must ${assistant ? "be" : "not be"} on one of /profiles, which are the assistant's`,
-      );
-    agents.set(agent.id, { ...configured, workspace: agent.workspace, assistant });
+    agents.set(agent.id, { ...configured, workspace: agent.workspace });
   }
   for (const id of settings.agents.keys())
     if (!agents.has(id))
@@ -141,18 +133,13 @@ async function saved(installation: Installation): Promise<{
   return { settings, endpoint: { url: settings.url, token }, agents };
 }
 
-/** The T3 token, given on standard input rather than as an argument. */
+/** The T3 token, given on standard input rather than as an argument: never a terminal's. */
 async function token(): Promise<string> {
-  const value = (await input()).trim();
-  if (value.length === 0) throw new Error("the T3 token on standard input is empty");
-  return value;
-}
-
-/** Standard input, which carries secrets: never a terminal's. */
-async function input(): Promise<string> {
   if (process.stdin.isTTY)
     throw new Error("give the T3 token on standard input, for example `< t3.token`");
-  return text(process.stdin);
+  const value = (await text(process.stdin)).trim();
+  if (value.length === 0) throw new Error("the T3 token on standard input is empty");
+  return value;
 }
 
 function originArgument(args: ReadonlyMap<string, string>): string {
@@ -165,18 +152,12 @@ function originArgument(args: ReadonlyMap<string, string>): string {
 }
 
 /**
- * `discover --url URL [--refresh INSTANCE,…] [--agent ID --config PATH]`:
- * the server's projects and models, as JSON, once T3 has checked the
- * `--refresh` instances again. `--agent` limits models to that agent's offer
- * in the installation `--config` names, or `CARILLON_HOME`'s.
+ * `discover --url URL [--agent ID --config PATH]`: the server's projects and
+ * models, as JSON. `--agent` offers them to that agent of the installation
+ * `--config` names, or `CARILLON_HOME`'s.
  */
 async function discoverCommand(values: readonly string[]): Promise<void> {
   const args = parseArguments(values);
-  const refresh =
-    args
-      .get("refresh")
-      ?.split(",")
-      .filter((id) => id.length > 0) ?? [];
   const agentId = args.get("agent");
   const scope =
     agentId === undefined
@@ -184,7 +165,7 @@ async function discoverCommand(values: readonly string[]): Promise<void> {
       : { installation: (await serving(args)).installation, agentId };
   const offer = await discover(
     { url: originArgument(args), token: await token() },
-    { refresh, ...(scope === undefined ? {} : { scope }) },
+    scope === undefined ? {} : { scope },
   );
   process.stdout.write(`${JSON.stringify(offer)}\n`);
 }
@@ -218,39 +199,6 @@ async function configureCommand(values: readonly string[]): Promise<void> {
   );
 }
 
-/**
- * `profile --url URL --harness claude|codex [--with-key [--endpoint URL]]`:
- * Carillon's profile for the harness in T3, printed as JSON. Resource links
- * are reconciled at serve startup. With `--with-key`, a second line of standard
- * input is the harness's API key, for its own service or the compatible
- * `--endpoint`.
- */
-async function profileCommand(values: readonly string[]): Promise<void> {
-  const args = parseArguments(values, ["with-key"]);
-  const url = originArgument(args);
-  const harness = requiredArgument(args, "harness");
-  if (!isHarness(harness))
-    throw new Error(`--harness must be one of ${Object.keys(HARNESSES).join(", ")}`);
-  const { installation } = await serving(args);
-  const [secret = "", key] = (await input()).split("\n").map((line) => line.trim());
-  if (secret.length === 0) throw new Error("the T3 token on standard input is empty");
-  if (args.has("with-key") && (key === undefined || key.length === 0))
-    throw new Error("--with-key needs the API key on the second line of standard input");
-  const endpoint = args.get("endpoint");
-  if (endpoint !== undefined && !args.has("with-key"))
-    throw new Error("--endpoint is for a key: give --with-key too");
-  const made = await profile(
-    installation,
-    { url, token: secret },
-    {
-      harness,
-      ...(args.has("with-key") && key !== undefined ? { key } : {}),
-      ...(endpoint === undefined ? {} : { endpoint }),
-    },
-  );
-  process.stdout.write(`${JSON.stringify(made)}\n`);
-}
-
 /** The runtime `--provider` names, as the installation registers it and serving. */
 async function serving(
   args: ReadonlyMap<string, string>,
@@ -258,7 +206,7 @@ async function serving(
   const { providerId, installation } = await registered(args);
   if (installation === "unregistered")
     throw new Error(
-      `${providerId} is not in carillon.toml; create the installation with \`carillon init --runtime t3\``,
+      `${providerId} is not in carillon.toml; set it up with \`carillon setup --runtime t3\``,
     );
   if (installation === "disabled")
     throw new Error(`${providerId} is disabled in carillon.toml; enable it first`);
@@ -268,8 +216,8 @@ async function serving(
 /**
  * `check`: whether the saved settings and T3 token read as startup reads
  * them, for the installation `--config` names, or `CARILLON_HOME`'s. It
- * reaches no T3 server and leaves profile links untouched. A runtime that would not serve,
- * disabled or not registered, starts from nothing, so it passes.
+ * reaches no T3 server. A runtime that would not serve, disabled or not
+ * registered, starts from nothing, so it passes.
  */
 async function checkCommand(values: readonly string[]): Promise<void> {
   const { providerId, installation } = await registered(parseArguments(values));
@@ -309,7 +257,6 @@ function explained(failure: unknown): string {
 const commands = {
   discover: discoverCommand,
   configure: configureCommand,
-  profile: profileCommand,
   check: checkCommand,
 };
 const [command, ...rest] = process.argv.slice(2);

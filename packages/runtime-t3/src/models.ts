@@ -1,21 +1,12 @@
 /**
  * A T3 conversation's model, as T3 holds it. The thread's own selection is
- * the conversation's while it is on an instance the agent runs on: every run
- * of the thread uses it, and a change made here or in T3's own UI is the
- * thread's next selection, the last change winning. One on another
- * instance, as T3's UI may move a thread to, gives way to the agent default
- * at the next run. The catalogue is T3's, for the provider instances the
- * agent runs on. The agent default is the one `/model` chose for it, while
- * the agent runs on its instance, else the one its settings name.
+ * the conversation's: every run of the thread uses it, and a change made
+ * here or in T3's own UI is the thread's next selection, the last change
+ * winning. The catalogue is T3's. The agent default, what a new thread
+ * starts with, is the one `/model` chose for it, else the one its settings
+ * name.
  */
-import type {
-  AvailableModel,
-  ModelState,
-  ModelUpdate,
-  ScopeState,
-  Selection,
-} from "@carillon/protocol";
-import { ExplainedFailure } from "@carillon/runtime/failure";
+import type { AvailableModel, ModelState, ScopeState, Selection } from "@carillon/protocol";
 import { resolved } from "@carillon/runtime/models";
 import { Check } from "typebox/value";
 import {
@@ -38,15 +29,10 @@ export interface Catalog {
   readonly available: readonly AvailableModel[];
   /** Boolean settings by model, keyed by `optionKey`. */
   readonly booleans: ReadonlySet<string>;
-  /** Which provider instances the agent runs on: the catalogue lists theirs. */
-  readonly runsOn: (instanceId: string) => boolean;
 }
 
-/**
- * The models of the provider instances T3 reports enabled, installed and
- * usable, among those the agent `runsOn`.
- */
-export function catalog(config: unknown, runsOn: Catalog["runsOn"] = () => true): Catalog {
+/** The models of the provider instances T3 reports enabled, installed and usable. */
+export function catalog(config: unknown): Catalog {
   if (!Check(ServerConfigSchema, config))
     throw new T3Failure(
       "malformed",
@@ -56,8 +42,7 @@ export function catalog(config: unknown, runsOn: Catalog["runsOn"] = () => true)
   const available: AvailableModel[] = [];
   const booleans = new Set<string>();
   for (const provider of config.providers) {
-    if (!Check(ProviderSchema, provider) || !usable(provider) || !runsOn(provider.instanceId))
-      continue;
+    if (!Check(ProviderSchema, provider) || !usable(provider)) continue;
     providers.push({ id: provider.instanceId, name: provider.displayName ?? provider.instanceId });
     for (const model of provider.models) {
       const options = (model.capabilities?.optionDescriptors ?? []).filter(
@@ -95,7 +80,7 @@ export function catalog(config: unknown, runsOn: Catalog["runsOn"] = () => true)
       });
     }
   }
-  return { providers, available, booleans, runsOn };
+  return { providers, available, booleans };
 }
 
 function usable(provider: Provider): boolean {
@@ -141,66 +126,23 @@ export function toNative(catalog: Catalog, selection: Selection): NativeSelectio
 
 /** An agent's models, as one read of T3's catalogue and the ledger found them. */
 export interface AgentModels {
-  /** T3's catalogue of the instances the agent runs on. */
   readonly offered: Catalog;
   /** The agent default, resolved against the catalogue, and whether `/model` chose it. */
-  readonly agent: { readonly selection: Selection; readonly overridden: boolean };
-  /** The agent default as the ledger holds it, set aside while the agent may not run on it. */
-  readonly chosen: ScopeState & { readonly selection: Selection };
+  readonly agent: ScopeState & { readonly selection: Selection };
 }
 
 /**
- * An agent's models: its catalogue, and its default. That is the one
- * `/model` chose, as the ledger resolved it (`chosen`), while it is on an
- * instance the agent runs on, else the settings' default: a profile's model
- * chosen while the agent was the assistant does not outlive its resources.
- * A chosen model of such an instance the catalogue no longer lists stays
- * the default, and its run fails rather than another model being substituted.
- */
-export function agentModels(
-  offered: Catalog,
-  chosen: AgentModels["chosen"],
-  settings: Selection,
-): AgentModels {
-  return {
-    offered,
-    agent: offered.runsOn(chosen.selection.provider)
-      ? { selection: chosen.selection, overridden: chosen.overridden }
-      : { selection: resolved(offered.available, settings), overridden: false },
-    chosen,
-  };
-}
-
-/**
- * A change of the agent default as the ledger is to make it. Its `expected`
- * is the default the person saw, the one the agent runs with, but the ledger
- * compares the one it holds, which differs while that is set aside. So the
- * person's view is checked here, and the ledger is handed the default it
- * held when it was read, refusing the change if another came first.
- */
-export function ledgerUpdate(models: AgentModels, update: ModelUpdate): ModelUpdate {
-  const { expected } = update;
-  if (expected === undefined) return update;
-  if (!sameSelection(models.agent.selection, { ...expected, options: expected.options ?? {} }))
-    throw new ExplainedFailure(409, "The model settings changed.");
-  return { ...update, expected: models.chosen.selection };
-}
-
-/**
- * The selection a conversation's next run takes: its thread's, while it is
- * on an instance the agent runs on, else the agent default. A model of such
- * an instance the catalogue no longer lists stays the thread's, and its run
- * fails rather than another model being substituted.
+ * The selection a conversation's next run takes: its thread's, else the
+ * agent default. A model the catalogue no longer lists stays the thread's,
+ * and its run fails rather than another model being substituted.
  */
 export function routed(models: AgentModels, thread?: NativeSelection): NativeSelection {
-  if (thread !== undefined && models.offered.runsOn(thread.instanceId)) return thread;
-  return toNative(models.offered, models.agent.selection);
+  return thread ?? toNative(models.offered, models.agent.selection);
 }
 
 /**
  * The model state of an agent and, with a conversation, of its thread. A
- * conversation whose thread does not exist yet, or is on an instance the
- * agent does not run on, runs with the agent default.
+ * conversation whose thread does not exist yet runs with the agent default.
  */
 export function modelState(
   { offered, agent }: AgentModels,
@@ -210,7 +152,7 @@ export function modelState(
   const available = [...offered.available];
   if (conversation === undefined) return { providers, available, agent };
   const thread = conversation.thread;
-  if (thread === undefined || !offered.runsOn(thread.instanceId))
+  if (thread === undefined)
     return {
       providers,
       available,

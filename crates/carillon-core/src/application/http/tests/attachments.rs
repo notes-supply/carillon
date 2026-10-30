@@ -5,7 +5,7 @@ use std::{collections::BTreeSet, os::unix::fs::PermissionsExt as _};
 use anyhow::bail;
 
 use carillon_installation::config::AttachmentLimits;
-use carillon_protocol::model::{StagedAttachments, StagedFile, TurnAttachment, UnansweredTurn};
+use carillon_protocol::model::{StagedAttachments, StagedFile};
 
 use super::*;
 
@@ -146,24 +146,17 @@ async fn files_are_captured_before_acceptance_and_dispatched_by_relative_path() 
     // accepted files no longer depend on it.
     fs::remove_dir_all(staging(&state))?;
     let root = state.config.value.data_dir.join("attachments");
-    let dispatched = Arc::new(std::sync::Mutex::new(Vec::<TurnAttachment>::new()));
-    let seen = dispatched.clone();
-    run_next_turn(&state, "test-runtime", async |_, _, request| {
-        assert_eq!(Path::new(&request.attachment_root), root);
-        assert!(request.input.is_empty());
-        for attachment in &request.attachments {
-            assert!(!attachment.path.starts_with('/'));
-            let bytes = fs::read(root.join(&attachment.path))
-                .map_err(|error| TurnFailure::Uncertain(error.into()))?;
-            assert_eq!(bytes.len() as u64, attachment.size);
-        }
-        seen.lock()
-            .map_err(|_| TurnFailure::Uncertain(anyhow!("poisoned")))?
-            .clone_from(&request.attachments);
-        Ok(completed(request))
-    })
-    .await?;
-    let dispatched = dispatched.lock().map_err(|_| anyhow!("poisoned"))?.clone();
+    let request = answer_next(&state.core, "test-runtime").await?;
+    assert_eq!(Path::new(&request.attachment_root), root);
+    assert!(request.input.is_empty());
+    for attachment in &request.attachments {
+        assert!(!attachment.path.starts_with('/'));
+        assert_eq!(
+            fs::read(root.join(&attachment.path))?.len() as u64,
+            attachment.size
+        );
+    }
+    let dispatched = request.attachments;
     assert_eq!(dispatched, inspection.attachments);
     assert_eq!(fs::read(root.join(&dispatched[0].path))?, b"%PDF-1.7 bytes");
     assert_eq!(
@@ -175,12 +168,9 @@ async fn files_are_captured_before_acceptance_and_dispatched_by_relative_path() 
     );
     // Later turns of the conversation carry the root without files.
     accept(&state, "text later", "files").await?;
-    run_next_turn(&state, "test-runtime", async |_, _, request| {
-        assert_eq!(Path::new(&request.attachment_root), root);
-        assert!(request.attachments.is_empty());
-        Ok(completed(request))
-    })
-    .await?;
+    let request = answer_next(&state.core, "test-runtime").await?;
+    assert_eq!(Path::new(&request.attachment_root), root);
+    assert!(request.attachments.is_empty());
     Ok(())
 }
 
@@ -664,309 +654,8 @@ async fn startup_reconciliation_keeps_accepted_files_and_removes_crash_leftovers
     let reconciled = state.core.reconcile_attachments()?;
     assert_eq!((reconciled.partial, reconciled.unreferenced), (1, 1));
     assert_eq!(captures(&state)?, accepted);
-    let ran = Arc::new(AtomicUsize::new(0));
-    let count = ran.clone();
-    run_next_turn(&state, "test-runtime", async |_, _, request| {
-        count.fetch_add(1, Ordering::SeqCst);
-        assert_eq!(request.correlation_id, receipt.turn_id);
-        Ok(completed(request))
-    })
-    .await?;
-    assert_eq!(ran.load(Ordering::SeqCst), 1);
-    Ok(())
-}
-
-/// Run the next turn, answering with `output`, and return the earlier files
-/// it was offered. An empty answer ends the turn unanswered, as a command
-/// that consumed its message does.
-async fn offered(state: &Fixture, output: &str) -> Result<Vec<UnansweredTurn>> {
-    offered_answering(state, serde_json::json!({ "output": output })).await
-}
-
-/// Run the next turn, answering with the fields of `answer` as a runtime's
-/// response reads on the wire, and return the earlier files it was offered.
-async fn offered_answering(state: &Fixture, mut answer: Value) -> Result<Vec<UnansweredTurn>> {
-    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let record = seen.clone();
-    run_next_turn(state, "test-runtime", async move |_, _, request| {
-        record
-            .lock()
-            .map_err(|_| TurnFailure::Uncertain(anyhow!("poisoned")))?
-            .clone_from(&request.unanswered);
-        answer["correlation_id"] = request.correlation_id.into();
-        serde_json::from_value(answer).map_err(|error| TurnFailure::Uncertain(error.into()))
-    })
-    .await?;
-    let offered = seen.lock().map_err(|_| anyhow!("poisoned"))?.clone();
-    Ok(offered)
-}
-
-#[tokio::test]
-async fn files_of_unanswered_turns_are_offered_again_until_a_turn_is_answered() -> Result<()> {
-    let directory = tempdir()?;
-    let state = installation(directory.path())?;
-    let staged = stage(
-        &state,
-        "command",
-        &[("a.txt", b"first"), ("b.txt", b"second")],
-    )?;
-    let command = submit(&state, event("command", "/note", staged))
-        .await
-        .map_err(|error| anyhow!(error.message))?;
-    assert!(offered(&state, "").await?.is_empty());
-    // Another conversation's unanswered files stay with it.
-    let mut elsewhere = event(
-        "elsewhere",
-        "/note",
-        stage(&state, "elsewhere", &[("c.txt", b"other")])?,
-    );
-    "other".clone_into(&mut elsewhere.audience_id);
-    submit(&state, elsewhere)
-        .await
-        .map_err(|error| anyhow!(error.message))?;
-    assert!(offered(&state, "").await?.is_empty());
-    accept(&state, "describe", "files").await?;
-    let again = offered(&state, "the files say first and second").await?;
-    let accepted = state
-        .core
-        .inspect_turn(&command.turn_id)?
-        .context("turn")?
-        .attachments;
-    assert_eq!(
-        again,
-        vec![UnansweredTurn {
-            correlation_id: command.turn_id,
-            attachments: accepted,
-        }]
-    );
-    // Once a turn of the conversation is answered, they are not offered again.
-    accept(&state, "later", "files").await?;
-    assert!(offered(&state, "another answer").await?.is_empty());
-    Ok(())
-}
-
-#[tokio::test]
-async fn files_an_answered_command_left_are_offered_again_until_a_turn_carries_them() -> Result<()>
-{
-    let directory = tempdir()?;
-    let state = installation(directory.path())?;
-    // A message with a file is interrupted before it is answered.
-    let staged = stage(&state, "photo", &[("photo.png", b"pixels")])?;
-    let photo = submit(&state, event("photo", "look", staged))
-        .await
-        .map_err(|error| anyhow!(error.message))?;
-    assert!(offered(&state, "").await?.is_empty());
-    let left = vec![UnansweredTurn {
-        correlation_id: photo.turn_id.clone(),
-        attachments: state
-            .core
-            .inspect_turn(&photo.turn_id)?
-            .context("turn")?
-            .attachments,
-    }];
-    // A command is answered after it ran as written, as T3's runtime runs
-    // one, without the file it was offered.
-    accept(&state, "compact", "files").await?;
-    let command = serde_json::json!({
-        "output": "`/compact` finished.",
-        "unanswered_left": true,
-    });
-    assert_eq!(offered_answering(&state, command).await?, left);
-    // The next message is offered the file again, and its answer carries it.
-    accept(&state, "prose", "files").await?;
-    assert_eq!(offered(&state, "the photo is pixels").await?, left);
-    accept(&state, "later", "files").await?;
-    assert!(offered(&state, "another answer").await?.is_empty());
-    Ok(())
-}
-
-/// What `receipt`'s turn holds, as core offers it to a later turn.
-fn held(state: &Fixture, receipt: &EventReceipt) -> Result<UnansweredTurn> {
-    Ok(UnansweredTurn {
-        correlation_id: receipt.turn_id.clone(),
-        attachments: state
-            .core
-            .inspect_turn(&receipt.turn_id)?
-            .context("turn")?
-            .attachments,
-    })
-}
-
-#[tokio::test]
-async fn files_a_command_left_of_its_own_are_offered_to_later_prose() -> Result<()> {
-    let directory = tempdir()?;
-    let state = installation(directory.path())?;
-    // A command with its own file runs as written, without that file.
-    let staged = stage(&state, "command", &[("notes.txt", b"plain notes")])?;
-    let command = submit(&state, event("command", "/compact", staged))
-        .await
-        .map_err(|error| anyhow!(error.message))?;
-    let answered = serde_json::json!({
-        "output": "`/compact` finished.",
-        "attachments_left": true,
-    });
-    assert!(offered_answering(&state, answered).await?.is_empty());
-    // The next message is offered the command's file, and its answer carries it.
-    accept(&state, "prose", "files").await?;
-    assert_eq!(
-        offered(&state, "the notes are plain").await?,
-        vec![held(&state, &command)?]
-    );
-    accept(&state, "later", "files").await?;
-    assert!(offered(&state, "another answer").await?.is_empty());
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_command_that_left_earlier_and_own_files_leaves_both_for_later_prose() -> Result<()> {
-    let directory = tempdir()?;
-    let state = installation(directory.path())?;
-    // A message with a file is interrupted before it is answered.
-    let staged = stage(&state, "photo", &[("photo.png", b"pixels")])?;
-    let photo = submit(&state, event("photo", "look", staged))
-        .await
-        .map_err(|error| anyhow!(error.message))?;
-    assert!(offered(&state, "").await?.is_empty());
-    // A command with a file of its own leaves that file and the earlier one.
-    let staged = stage(&state, "command", &[("notes.txt", b"plain notes")])?;
-    let command = submit(&state, event("command", "/compact", staged))
-        .await
-        .map_err(|error| anyhow!(error.message))?;
-    let answered = serde_json::json!({
-        "output": "`/compact` finished.",
-        "unanswered_left": true,
-        "attachments_left": true,
-    });
-    assert_eq!(
-        offered_answering(&state, answered).await?,
-        vec![held(&state, &photo)?]
-    );
-    // The next message is offered both, oldest first.
-    accept(&state, "prose", "files").await?;
-    assert_eq!(
-        offered(&state, "both are read").await?,
-        vec![held(&state, &photo)?, held(&state, &command)?]
-    );
-    accept(&state, "later", "files").await?;
-    assert!(offered(&state, "another answer").await?.is_empty());
-    Ok(())
-}
-
-#[tokio::test]
-async fn every_file_of_initial_commands_is_offered_until_an_answered_turn_carries_it() -> Result<()>
-{
-    let directory = tempdir()?;
-    let mut state = installation(directory.path())?;
-    with_limits(
-        &mut state,
-        AttachmentLimits {
-            max_files: 2,
-            free_space_mib: 0,
-            ..AttachmentLimits::default()
-        },
-    )?;
-    // Three commands open the conversation with two files each: more than
-    // one event's worth, and none of them answered.
-    let mut commands = Vec::new();
-    for name in ["first", "second", "third"] {
-        let staged = stage(&state, name, &[("a", name.as_bytes()), ("b", b"b")])?;
-        let receipt = submit(&state, event(name, "/note", staged))
-            .await
-            .map_err(|error| anyhow!(error.message))?;
-        offered(&state, "").await?;
-        let files = state
-            .core
-            .inspect_turn(&receipt.turn_id)?
-            .context("turn")?
-            .attachments;
-        commands.push(UnansweredTurn {
-            correlation_id: receipt.turn_id,
-            attachments: files,
-        });
-    }
-    let [first, second, third] = commands.as_slice() else {
-        bail!("expected three commands");
-    };
-    let altered = state
-        .config
-        .value
-        .data_dir
-        .join("attachments")
-        .join(&second.attachments[1].path);
-    fs::set_permissions(&altered, fs::Permissions::from_mode(0o640))?;
-    fs::write(&altered, b"c")?;
-    let ask = async |id: &str, answer: &str| {
-        accept(&state, id, "files").await?;
-        offered(&state, answer).await
-    };
-    // Each answered turn carries the oldest files still waiting, one
-    // event's worth at a time; an unanswered one carries nothing for good.
-    assert_eq!(ask("ask-1", "an answer").await?, vec![first.clone()]);
-    let intact = UnansweredTurn {
-        correlation_id: second.correlation_id.clone(),
-        attachments: vec![second.attachments[0].clone()],
-    };
-    assert_eq!(ask("ask-2", "").await?, vec![intact.clone()]);
-    // A file no longer the one accepted is left out, and not offered again
-    // once a turn has been answered without it.
-    assert_eq!(ask("ask-3", "an answer").await?, vec![intact]);
-    assert_eq!(ask("ask-4", "an answer").await?, vec![third.clone()]);
-    assert!(ask("ask-5", "an answer").await?.is_empty());
-    // A turn's own files are carried by the turn itself once it is answered.
-    let staged = stage(&state, "own", &[("own", b"own")])?;
-    submit(&state, event("own", "look", staged))
-        .await
-        .map_err(|error| anyhow!(error.message))?;
-    assert!(offered(&state, "seen").await?.is_empty());
-    assert!(ask("ask-6", "an answer").await?.is_empty());
-    Ok(())
-}
-
-#[tokio::test]
-async fn earlier_files_that_cannot_be_read_now_are_offered_whole_once_they_can() -> Result<()> {
-    let directory = tempdir()?;
-    let state = installation(directory.path())?;
-    // Two commands open the conversation: one with a file, one with a pair.
-    let mut commands = Vec::new();
-    for (name, files) in [
-        ("alone", vec![("a", b"a".as_slice())]),
-        ("pair", vec![("b", b"b".as_slice()), ("c", b"c".as_slice())]),
-    ] {
-        let receipt = submit(&state, event(name, "/note", stage(&state, name, &files)?))
-            .await
-            .map_err(|error| anyhow!(error.message))?;
-        offered(&state, "").await?;
-        let attachments = state
-            .core
-            .inspect_turn(&receipt.turn_id)?
-            .context("turn")?
-            .attachments;
-        commands.push(UnansweredTurn {
-            correlation_id: receipt.turn_id,
-            attachments,
-        });
-    }
-    let root = state.config.value.data_dir.join("attachments");
-    let unreadable = [
-        root.join(&commands[0].attachments[0].path),
-        root.join(&commands[1].attachments[1].path),
-    ];
-    for file in &unreadable {
-        fs::set_permissions(file, fs::Permissions::from_mode(0o000))?;
-    }
-    // A turn with a file that cannot be read now is not offered, not even
-    // its readable sibling, and an answer does not retire it.
-    accept(&state, "ask-1", "files").await?;
-    let withheld = offered(&state, "an answer").await;
-    for file in &unreadable {
-        fs::set_permissions(file, fs::Permissions::from_mode(0o440))?;
-    }
-    assert!(withheld?.is_empty());
-    // Once readable, each is offered whole, in order, and then carried.
-    accept(&state, "ask-2", "files").await?;
-    assert_eq!(offered(&state, "an answer").await?, commands);
-    accept(&state, "ask-3", "files").await?;
-    assert!(offered(&state, "an answer").await?.is_empty());
+    let request = answer_next(&state.core, "test-runtime").await?;
+    assert_eq!(request.correlation_id, receipt.turn_id);
     Ok(())
 }
 
@@ -1031,20 +720,14 @@ async fn a_conversations_later_messages_wait_for_its_capture_in_progress() -> Re
     submit(&state, event("more", "", more))
         .await
         .map_err(|error| anyhow!(error.message))?;
-    // The conversation's turns run in the order its messages were sent.
+    // The conversation's turns are handed over in the order its messages were sent.
     let mut order = Vec::new();
     for _ in 0..4 {
-        let ran = Arc::new(std::sync::Mutex::new(String::new()));
-        let record = ran.clone();
-        run_next_turn(&state, "test-runtime", async move |_, _, request| {
-            record
-                .lock()
-                .map_err(|_| TurnFailure::Uncertain(anyhow!("poisoned")))?
-                .clone_from(&request.correlation_id);
-            Ok(completed(request))
-        })
-        .await?;
-        order.push(ran.lock().map_err(|_| anyhow!("poisoned"))?.clone());
+        order.push(
+            answer_next(&state.core, "test-runtime")
+                .await?
+                .correlation_id,
+        );
     }
     let position = |turn: &str| order.iter().position(|ran| ran == turn);
     assert!(
@@ -1243,12 +926,12 @@ async fn an_unreadable_capture_is_not_reported_as_altered() -> Result<()> {
         .join("attachments")
         .join(&inspection.attachments[0].path);
     fs::set_permissions(&file, fs::Permissions::from_mode(0o000))?;
-    let step = run_next_turn(&state, "test-runtime", async |_, _, _| {
-        Err(TurnFailure::Uncertain(anyhow!(
-            "the runtime must not be called"
-        )))
-    })
-    .await;
+    let step = state
+        .core
+        .dispatch_next("test-runtime", &CancellationToken::new(), async |_| {
+            unreachable!("the runtime must not be called")
+        })
+        .await;
     fs::set_permissions(&file, fs::Permissions::from_mode(0o440))?;
     assert_eq!(step?, WorkerStep::Advanced);
     let notice = state

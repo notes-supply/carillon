@@ -219,61 +219,12 @@ pub struct RuntimeTurnRequest {
     #[serde(default)]
     pub native: Value,
     /// The directory holding every captured attachment of the installation,
-    /// resolved when the turn is claimed. Earlier turns' relative paths
-    /// resolve against it too, so it is sent with every turn.
+    /// resolved when the turn is handed over; the files' relative paths
+    /// resolve against it.
     pub attachment_root: String,
     /// This turn's captured files, in message order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<TurnAttachment>,
-    /// Files of earlier turns in this conversation that no answered turn has
-    /// carried yet, oldest first: the runtime's conversation may never have
-    /// recorded them, so the runtime makes sure it knows them.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub unanswered: Vec<UnansweredTurn>,
-    /// Present on an observation: a turn core queued itself to carry the
-    /// report of native work an earlier turn started, with the cursor that
-    /// turn's runtime answered with. An observation dispatches nothing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub follow_up: Option<Value>,
-}
-
-/// An earlier turn's captured files, offered again to a later turn.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct UnansweredTurn {
-    pub correlation_id: String,
-    pub attachments: Vec<TurnAttachment>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct RuntimeTurnResponse {
-    pub correlation_id: String,
-    pub output: String,
-    /// Native work linked to this turn will continue the conversation after
-    /// this answer. Core queues an observation for the same conversation
-    /// whose request carries this runtime-owned cursor as `follow_up`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub follow_up: Option<Value>,
-    /// The answer left the earlier turns' files the request offered as
-    /// `unanswered` out of the runtime's conversation, as a command passed
-    /// to its engine as written may: core offers them again with a later
-    /// turn rather than counting them carried.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub unanswered_left: bool,
-    /// The answer left this turn's own files out of the runtime's
-    /// conversation, as a command passed to its engine as written may when
-    /// it cannot carry them: core does not count them carried, and offers
-    /// them again with a later turn.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub attachments_left: bool,
-    /// The runtime's final report of what the turn did, taken before its
-    /// executing state was discarded. A report that is not a valid one is
-    /// dropped rather than failing the turn: it is for display.
-    #[serde(
-        default,
-        deserialize_with = "valid_or_none",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub activity: Option<TurnActivity>,
 }
 
 /// Whether restarting a runtime now would lose something only its process
@@ -325,14 +276,11 @@ pub struct Delivery {
     pub silence: Option<Silence>,
 }
 
-/// Where a turn's work began: the message turn itself, or, for an
-/// observation, the message turn whose delegated work it reports, through
-/// any chain of observations. Core records it when it queues the
-/// observation; nothing infers it from the conversation.
+/// Where a turn's work began, which names its job: the turn itself.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Origin {
     pub turn_id: String,
-    /// When core accepted that message, Unix seconds.
+    /// When core accepted that turn, Unix seconds.
     pub accepted_at: i64,
 }
 
@@ -349,7 +297,7 @@ pub struct DeliveryAck {
 
 /// The most jobs one read names, and the most jobs at work one page lists.
 pub const JOB_READ_LIMIT: usize = 32;
-/// The most turns a job read lists of one job, the latest.
+/// The most turns module contract 5 lets a job read list of one job.
 pub const JOB_TURN_LIMIT: usize = 8;
 
 /// Jobs an interface read: a page of its jobs at work, or the jobs it named.
@@ -365,10 +313,9 @@ pub struct JobPage {
     pub next: Option<String>,
 }
 
-/// One job of the requesting interface, as core recorded it: the turn of the
-/// message that began it and the observations core queued, one after
-/// another, to report what that work delegated. Different messages are
-/// different jobs, even in one conversation.
+/// One job of the requesting interface, as core recorded it: one turn, a
+/// message's or one its runtime opened. Different turns are different jobs,
+/// even in one conversation.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct Job {
     pub origin: Origin,
@@ -382,13 +329,11 @@ pub struct Job {
         skip_serializing_if = "Option::is_none"
     )]
     pub feedback_target_id: Option<String>,
-    /// The job's latest turns, oldest first, at most [`JOB_TURN_LIMIT`]: the
-    /// last is the newest, and one queued or running is the job at work.
-    /// Every turn before the last was continued by an observation, which
-    /// core queues only when the turn's runtime said native work it started
-    /// would report later.
+    /// The job's turns, oldest first, at most [`JOB_TURN_LIMIT`]; the last
+    /// queued or running is the job at work. Core lists the job's one turn;
+    /// module contract 5 keeps the list.
     pub turns: Vec<JobTurn>,
-    /// The job has turns before those listed, each continued in turn.
+    /// The job has turns before those listed; never, from core.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub earlier: bool,
 }

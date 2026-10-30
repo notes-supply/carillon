@@ -1,26 +1,21 @@
-//! What durable runtimes tell core of the turns they hold, and the turns an
+//! What runtimes tell core of the turns they hold, and the turns an
 //! interface may control there.
 
 use anyhow::Result;
 use carillon_protocol::{
     model::{EventReceipt, TurnState},
-    turns::{Silence, TurnOpening, TurnOutcome},
+    turns::{RunningTurn, Silence, TurnOpening, TurnOutcome},
 };
 
 use super::{Core, CoreError, RuntimeProvider, interrupted, kept_report};
-use crate::db::{Opened, Settled, Settlement};
+use crate::db::{Opened, RUNTIME_EVENT_PREFIX, Settled, Settlement};
 
 impl Core {
     /// Settles a turn `runtime_id` holds as it says the turn ended, with the
     /// delivery that tells its conversation, once.
     /// # Errors
     /// Returns storage errors.
-    pub(crate) fn settle(
-        &self,
-        runtime_id: &str,
-        turn_id: &str,
-        outcome: TurnOutcome,
-    ) -> Result<Settled> {
+    pub fn settle(&self, runtime_id: &str, turn_id: &str, outcome: TurnOutcome) -> Result<Settled> {
         let settle = |settlement| self.database.settle_held(runtime_id, turn_id, settlement);
         match outcome {
             TurnOutcome::Answered { output, activity } => {
@@ -88,11 +83,28 @@ impl Core {
         }
     }
 
-    /// The durable runtime holding the running turn of an interface's
-    /// event, and the turn's ID: `None` when the interface submitted no such
-    /// event.
+    /// The turns core records running on `runtime_id`, oldest first: each
+    /// with the request core hands the runtime, and the key of a turn it
+    /// opened.
     /// # Errors
-    /// Returns a turn that is not running on an enabled durable runtime as a
+    /// Returns storage errors.
+    pub(crate) fn running_turns(&self, runtime_id: &str) -> Result<Vec<RunningTurn>> {
+        let opened = format!("{RUNTIME_EVENT_PREFIX}{runtime_id}:");
+        Ok(self
+            .database
+            .running_turns(runtime_id)?
+            .into_iter()
+            .map(|(turn, event_id)| RunningTurn {
+                key: event_id.strip_prefix(&opened).map(str::to_owned),
+                request: self.runtime_request(&turn),
+            })
+            .collect())
+    }
+
+    /// The runtime holding the running turn of an interface's event, and the
+    /// turn's ID: `None` when the interface submitted no such event.
+    /// # Errors
+    /// Returns a turn that is not running on an enabled runtime as a
     /// conflict, or storage errors.
     pub(crate) fn controlled(
         &self,
@@ -109,12 +121,6 @@ impl Core {
                 "that message's turn is not running".to_owned(),
             ));
         }
-        let runtime = self.enabled_runtime(&runtime_id)?;
-        if !runtime.durable {
-            return Err(CoreError::Conflict(format!(
-                "runtime provider {runtime_id} offers no controls"
-            )));
-        }
-        Ok(Some((runtime, turn_id)))
+        Ok(Some((self.enabled_runtime(&runtime_id)?, turn_id)))
     }
 }

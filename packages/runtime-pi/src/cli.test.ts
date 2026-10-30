@@ -62,7 +62,7 @@ async function freePort(): Promise<number> {
   return address.port;
 }
 
-/** An installation of one durable Pi runtime whose agents' resources are these directories. */
+/** An installation of one Pi runtime whose agents' resources are these directories. */
 async function installation(resources: Record<string, string>, core = "127.0.0.1:1") {
   const home = await mkdtemp(join(tmpdir(), "carillon-pi-cli-"));
   cleanups.push(() => rm(home, { recursive: true, force: true }));
@@ -83,7 +83,6 @@ async function installation(resources: Record<string, string>, core = "127.0.0.1
           url: `http://127.0.0.1:${String(port)}`,
           token_hash: hash,
           enabled: true,
-          durable: true,
         },
       ],
       agents: Object.entries(resources).map(([id, directory]) => ({

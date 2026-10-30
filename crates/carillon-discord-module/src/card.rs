@@ -41,14 +41,15 @@ pub fn render(request: &CardRequest) -> Card {
 /// What a card says of its job as a whole.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Status {
-    /// The job's message waits behind earlier work, since `since`.
+    /// The job's message waits in core for its runtime to take it, since
+    /// `since`.
     Queued { since: i64 },
     /// The job's live turn runs, in its phase when the runtime says.
     Working(Option<ActivityPhase>),
     /// The job's last turn ended, and its answer or notice is not yet sent.
     Finishing,
-    /// A turn answered; the observation core queued to continue the work
-    /// has not started.
+    /// A turn answered, and a later turn of the job, queued to continue the
+    /// work, has not started.
     Continuing,
     /// The job's last turn ended at `finished_at`, and its answer or notice
     /// was sent as `delivery` says.
@@ -77,11 +78,11 @@ struct Shown<'a> {
 /// Whether a job earns a retained summary: a turn stopped before finishing,
 /// a report (or the last snapshot `seen` of a turn that gave none) shows
 /// work (calls, published reasoning, or delegated and transferred work), or
-/// its work was continued after an answer. Every turn but a job's last was
-/// continued by an observation, which core queues only when the runtime
-/// said native work the turn started would report later; so a job with
-/// earlier turns than a read lists delegated work too, whatever the reports
-/// left out showed. An answer alone needs no card.
+/// its work was continued after an answer. Module contract 5 lets a job
+/// have several turns, each but the last continued by the next because
+/// native work it started reported later; so a job with earlier turns than
+/// a read lists delegated work too, whatever the reports left out showed.
+/// Core lists one turn per job. An answer alone needs no card.
 fn earned(job: &Job, seen: Option<&Seen>) -> bool {
     job.earlier
         || job.turns.len() > 1
@@ -141,7 +142,7 @@ fn job_card(job: &Job, seen: Option<&Seen>, markers: &ActivityMarkers) -> Embed 
         .chain(history.map(|seen| &seen.activity))
         .collect();
     // What a turn without a report did is not known once a later turn shows
-    // its own, nor is an observation's, which no read may have shown.
+    // its own, nor is a continuing turn's, which no read may have shown.
     let last = job.turns.len().saturating_sub(1);
     let unreported = job.turns.iter().enumerate().any(|(index, turn)| {
         turn.ended()
@@ -213,7 +214,7 @@ fn status_line(shown: &Shown<'_>, markers: &ActivityMarkers) -> String {
     match shown.status {
         Status::Queued { since } => marked(
             &markers.queued,
-            &format!("Waiting for earlier work to finish · queued <t:{since}:R>"),
+            &format!("Waiting for the runtime · queued <t:{since}:R>"),
         ),
         Status::Working(phase) => {
             let label = match phase {

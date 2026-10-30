@@ -1,7 +1,7 @@
 //! The operator's pause of the runtime workers, against the real supervisor,
-//! storage and a runtime whose turns wait for the case: what settles, what
-//! waits, which arrangement a report may rely on, and how long the pause
-//! is known to hold while the services stop.
+//! storage and a runtime whose hand-overs wait for the case: what settles,
+//! what waits, which arrangement a report may rely on, and how long the
+//! pause is known to hold while the services stop.
 
 use std::{
     fs,
@@ -15,7 +15,10 @@ use uuid::Uuid;
 
 use super::{
     Fixture,
-    live::{HeldRuntime, apply, counts, edit, lock, ok, operator, serving, submit, workers_are},
+    live::{
+        HeldRuntime, answer_held, apply, counts, edit, lock, ok, operator, serving, submit,
+        workers_are,
+    },
 };
 use crate::application::{
     drain::{Held, Pace, drain},
@@ -95,80 +98,38 @@ fn deliver(state: &AppState) -> Result<usize> {
 }
 
 #[tokio::test]
-async fn a_pause_lets_a_held_turn_settle_and_be_delivered_while_queued_work_waits() -> Result<()> {
+async fn a_pause_lets_a_hand_over_end_and_turns_settle_while_queued_work_waits() -> Result<()> {
     let directory = tempdir()?;
     let runtime = HeldRuntime::start().await?;
-    let (_fixture, state) = serving(directory.path(), &runtime, 1)?;
+    let (_fixture, state) = serving(directory.path(), &runtime)?;
     ok(submit(&state, "busy", "one").await)?;
     ok(submit(&state, "next", "two").await)?;
     let (stopping, supervisor) = supervise(&state);
     runtime.holding(1).await?;
     let holder = ok(begin(&state, Duration::from_secs(30)).await)?.holder;
-    // The busy turn is neither cancelled nor replayed: its worker counts
-    // until it ends, and no runtime is asked about a restart meanwhile.
+    // The hand-over is neither cancelled nor made again: its dispatcher
+    // counts until it ends, and no runtime is asked about a restart meanwhile.
     let drain = until(&state, holder, |drain| drain.workers == Some(1)).await?;
     assert!(drain.runtimes.is_empty());
     // Events are accepted while paused, and wait.
     ok(submit(&state, "during", "three").await)?;
-    runtime.release("busy", None)?;
+    runtime.release("busy")?;
     let drain = until(&state, holder, |drain| drain.workers == Some(0)).await?;
-    assert_eq!(drain.undelivered, 1);
     assert_eq!(drain.runtimes, ready());
-    // Its answer is delivered while the interface still runs, once.
+    // The runtime settles the turn it holds while paused, and its answer is
+    // delivered while the interface still runs, once.
+    answer_held(&state)?;
+    assert_eq!(ok(renew(&state, holder).await)?.undelivered, 1);
     assert_eq!(deliver(&state)?, 1);
     let drain = ok(renew(&state, holder).await)?;
     assert_eq!((drain.workers, drain.undelivered), (Some(0), 0));
-    assert_eq!(runtime.given(), [("busy".to_owned(), false)]);
+    assert_eq!(runtime.given(), ["busy"]);
     assert_eq!(counts(&state)?, (2, 0, 1));
-    // Once the pause ends the queued work runs, each turn once.
+    // Once the pause ends the queued work is handed over, each turn once.
     assert_eq!(ok(end(&state, holder).await)?, StatusCode::NO_CONTENT);
     runtime.drain(&state, (0, 0, 3)).await?;
-    let mut given = runtime.given();
-    given.sort();
-    assert_eq!(
-        given,
-        ["busy", "during", "next"].map(|input| (input.to_owned(), false))
-    );
+    assert_eq!(runtime.given(), ["busy", "next", "during"]);
     assert_eq!(deliver(&state)?, 2);
-    stopping.cancel();
-    supervisor.await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn an_observation_is_set_aside_and_asked_again_without_replaying_its_message() -> Result<()> {
-    let directory = tempdir()?;
-    let runtime = HeldRuntime::start().await?;
-    let (_fixture, state) = serving(directory.path(), &runtime, 1)?;
-    ok(submit(&state, "first", "one").await)?;
-    let (stopping, supervisor) = supervise(&state);
-    runtime.holding(1).await?;
-    runtime.release("first", Some(json!({"cursor": 1})))?;
-    // The observation of the delegated work waits on the runtime.
-    runtime.holding(1).await?;
-    let holder = ok(begin(&state, Duration::from_secs(30)).await)?.holder;
-    // Core stops waiting for it and queues it again through its outcome,
-    // rather than holding maintenance for as long as the work takes.
-    until(&state, holder, |drain| drain.workers == Some(0)).await?;
-    assert_eq!(counts(&state)?, (1, 0, 1));
-    ok(end(&state, holder).await)?;
-    // Asked again once the pause ends; the message is not run again.
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while runtime.given().len() < 3 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await?;
-    runtime.release("", None)?;
-    runtime.drain(&state, (0, 0, 2)).await?;
-    assert_eq!(
-        runtime.given(),
-        [
-            ("first".to_owned(), false),
-            (String::new(), true),
-            (String::new(), true)
-        ]
-    );
     stopping.cancel();
     supervisor.await?;
     Ok(())
@@ -183,38 +144,31 @@ fn hold_writer(fixture: &Fixture) -> Result<rusqlite::Connection> {
 }
 
 #[tokio::test]
-async fn a_blocked_claim_holds_the_barrier_and_no_holder_reads_another_arrangement() -> Result<()> {
+async fn a_blocked_hand_over_holds_the_barrier_and_no_holder_reads_another_arrangement()
+-> Result<()> {
     let directory = tempdir()?;
     let runtime = HeldRuntime::start().await?;
-    let (mut fixture, state) = serving(directory.path(), &runtime, 1)?;
+    let (mut fixture, state) = serving(directory.path(), &runtime)?;
     ok(submit(&state, "a1", "a").await)?;
     ok(submit(&state, "b1", "b").await)?;
-    // Every worker's claim waits for the database writer.
-    let writer = hold_writer(&fixture)?;
     let (stopping, supervisor) = supervise(&state);
-    workers_are(&state, |runtime| {
-        runtime.messages.claiming == 1 && runtime.observations.claiming == 4
-    })
-    .await?;
+    // The runtime takes the turn, and recording that waits for the database writer.
+    runtime.holding(1).await?;
+    let writer = hold_writer(&fixture)?;
+    runtime.release("a1")?;
     let lease = Duration::from_millis(1500);
     let first = ok(begin(&state, lease).await)?.holder;
-    // Retired, they have not ended while their claims wait: the barrier
-    // holds however the rows stand.
-    workers_are(&state, |runtime| {
-        runtime.messages.claiming + runtime.observations.claiming == 0
-    })
-    .await?;
+    // Retired, it has not ended while its write waits: the barrier holds
+    // however the rows stand.
+    workers_are(&state, Dispatcher::Retiring).await?;
     for _ in 0..3 {
         let drain = ok(renew(&state, first).await)?;
-        assert!(
-            drain.workers.is_some_and(|workers| workers > 0),
-            "{drain:?}"
-        );
+        assert_eq!(drain.workers, Some(1), "{drain:?}");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     writer.execute_batch("ROLLBACK")?;
     until(&state, first, |drain| drain.workers == Some(0)).await?;
-    assert_eq!(counts(&state)?, (2, 0, 0));
+    assert_eq!(counts(&state)?, (1, 1, 0));
 
     // The first pause lapses and another holder begins before the
     // supervisor has seen it: the drained arrangement was the first's, and
@@ -228,36 +182,31 @@ async fn a_blocked_claim_holds_the_barrier_and_no_holder_reads_another_arrangeme
         .context("renewed an ended pause")?;
     assert_eq!(refused.status, StatusCode::CONFLICT);
 
-    // Ended, the workers return and wait on the writer again; a third
-    // holder is never told they ended while they have not.
-    let writer = hold_writer(&fixture)?;
+    // Ended, the dispatcher returns and hands the next turn over; a third
+    // holder is never told it ended while it has not.
     ok(end(&state, second.holder).await)?;
-    workers_are(&state, |runtime| {
-        runtime.messages.claiming == 1 && runtime.observations.claiming == 4
-    })
-    .await?;
+    runtime.holding(1).await?;
     let third = ok(begin(&state, Duration::from_secs(30)).await)?.holder;
     // A registry applied meanwhile is served, and starts no worker.
-    edit(&mut fixture, |provider| provider.parallel_turns = Some(2))?;
+    edit(&mut fixture, |provider| provider.enabled = false)?;
+    ok(apply(&state).await)?;
+    edit(&mut fixture, |provider| provider.enabled = true)?;
     let applied = ok(apply(&state).await)?;
     assert!(applied.paused);
-    assert_eq!(applied.runtimes[0].workers.messages.claiming, 0);
+    assert_ne!(applied.runtimes[0].dispatcher, Dispatcher::Dispatching);
     for _ in 0..3 {
         let drain = ok(renew(&state, third).await)?;
         assert_ne!(drain.workers, Some(0), "{drain:?}");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    writer.execute_batch("ROLLBACK")?;
+    runtime.release("b1")?;
     until(&state, third, |drain| drain.workers == Some(0)).await?;
-    assert_eq!(counts(&state)?, (2, 0, 0));
-    assert!(runtime.given().is_empty());
-    // Once it ends, the workers follow the applied registry.
+    assert_eq!(counts(&state)?, (0, 2, 0));
+    assert_eq!(runtime.given(), ["a1", "b1"]);
+    // Once it ends, the dispatcher follows the applied registry.
     ok(end(&state, third).await)?;
-    runtime.holding(2).await?;
+    workers_are(&state, Dispatcher::Dispatching).await?;
     stopping.cancel();
-    for input in ["a1", "b1"] {
-        runtime.release(input, None)?;
-    }
     supervisor.await?;
     Ok(())
 }
@@ -266,7 +215,7 @@ async fn a_blocked_claim_holds_the_barrier_and_no_holder_reads_another_arrangeme
 async fn one_holder_at_a_time_renews_only_a_pause_still_in_force() -> Result<()> {
     let directory = tempdir()?;
     let runtime = HeldRuntime::start().await?;
-    let (_fixture, state) = serving(directory.path(), &runtime, 1)?;
+    let (_fixture, state) = serving(directory.path(), &runtime)?;
     let (stopping, supervisor) = supervise(&state);
     // Only the operator pauses, for a bounded lease.
     let refused = maintenance::begin(
@@ -293,7 +242,7 @@ async fn one_holder_at_a_time_renews_only_a_pause_still_in_force() -> Result<()>
     assert_eq!(refused.status, StatusCode::CONFLICT);
     // Unrenewed, it lapses: the workers return, and it is not renewed.
     tokio::time::sleep(Duration::from_millis(400)).await;
-    workers_are(&state, |runtime| runtime.observations.claiming == 4).await?;
+    workers_are(&state, Dispatcher::Dispatching).await?;
     assert_eq!(state.workers.borrow().paused, None);
     let refused = renew(&state, first)
         .await
@@ -329,6 +278,25 @@ async fn one_holder_at_a_time_renews_only_a_pause_still_in_force() -> Result<()>
         .err()
         .context("renewed an ended pause")?;
     assert_eq!(refused.status, StatusCode::CONFLICT);
+    stopping.cancel();
+    supervisor.await?;
+    Ok(())
+}
+
+/// A runtime nothing listens for is not running, as one serving no agent is
+/// not, and holds nothing a restart loses.
+#[tokio::test]
+async fn a_runtime_that_is_not_running_is_ready_to_restart() -> Result<()> {
+    let directory = tempdir()?;
+    let mut fixture = super::installation(directory.path())?;
+    let vacant = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?;
+    fixture.config.value.providers[1].url = format!("http://{vacant}");
+    let state = super::configured(&fixture);
+    let (stopping, supervisor) = supervise(&state);
+    let holder = ok(begin(&state, Duration::from_secs(30)).await)?.holder;
+    let drain = until(&state, holder, |drain| drain.workers == Some(0)).await?;
+    assert_eq!(drain.runtimes, ready());
+    ok(end(&state, holder).await)?;
     stopping.cancel();
     supervisor.await?;
     Ok(())
@@ -393,7 +361,7 @@ const PACE: Pace = Pace {
 async fn the_cli_stops_nothing_on_a_drain_it_cannot_show_and_the_workers_return() -> Result<()> {
     let directory = tempdir()?;
     let runtime = HeldRuntime::start().await?;
-    let (fixture, state) = serving(directory.path(), &runtime, 1)?;
+    let (fixture, state) = serving(directory.path(), &runtime)?;
     ok(submit(&state, "busy", "one").await)?;
     let running = Running::start(&fixture, &state).await?;
     runtime.holding(1).await?;
@@ -414,7 +382,7 @@ async fn the_cli_stops_nothing_on_a_drain_it_cannot_show_and_the_workers_return(
         .map(|_| ())
         .map_err(anyhow::Error::from)
     };
-    // A turn still running: refused once the time is up.
+    // A hand-over still under way: refused once the time is up.
     let refused = refusal(drain(&running.config, timeout, false, PACE).await.err())?;
     assert!(
         refused.contains("did not drain within 1 seconds"),
@@ -425,9 +393,8 @@ async fn the_cli_stops_nothing_on_a_drain_it_cannot_show_and_the_workers_return(
         "{refused}"
     );
     lapsed().await?;
-    workers_are(&state, |runtime| runtime.observations.claiming == 4).await?;
+    workers_are(&state, Dispatcher::Dispatching).await?;
     // An answer its interface has not delivered.
-    runtime.release("busy", None)?;
     runtime.drain(&state, (0, 0, 1)).await?;
     let refused = refusal(drain(&running.config, timeout, false, PACE).await.err())?;
     assert!(
@@ -472,7 +439,7 @@ async fn the_cli_stops_nothing_on_a_drain_it_cannot_show_and_the_workers_return(
 async fn the_pause_holds_through_a_slow_stop_only_while_core_acknowledges_it() -> Result<()> {
     let directory = tempdir()?;
     let runtime = HeldRuntime::start().await?;
-    let (fixture, state) = serving(directory.path(), &runtime, 1)?;
+    let (fixture, state) = serving(directory.path(), &runtime)?;
     let slow = PACE.lease * 3;
 
     // Renewed throughout a stop three leases long: work accepted meanwhile
@@ -495,13 +462,11 @@ async fn the_pause_holds_through_a_slow_stop_only_while_core_acknowledges_it() -
     // The next run answers the message that waited, and delivers it.
     state.pause.send_replace(None);
     let running = Running::start(&fixture, &state).await?;
-    runtime.holding(1).await?;
-    runtime.release("first", None)?;
     runtime.drain(&state, (0, 0, 1)).await?;
     deliver(&state)?;
     // Core stops answering while it runs: renewals fail without a refusal,
-    // the pause lapses unseen and its workers claim what waits. That is no
-    // evidence the pause held.
+    // the pause lapses unseen and its workers hand over what waits. That is
+    // no evidence the pause held.
     let mut hold = drain(&running.config, Duration::from_secs(5), false, PACE)
         .await?
         .context("no pause")?;
@@ -510,16 +475,13 @@ async fn the_pause_holds_through_a_slow_stop_only_while_core_acknowledges_it() -
         .through(async {
             running.http.cancel();
             runtime.holding(1).await?;
-            runtime.release("second", None)?;
+            runtime.release("second")?;
             running.stop().await
         })
         .await;
     stopped?;
     assert_eq!(kept, Held::Unconfirmed);
-    assert_eq!(
-        runtime.given(),
-        ["first", "second"].map(|input| (input.to_owned(), false))
-    );
+    assert_eq!(runtime.given(), ["first", "second"]);
 
     // Core says the pause no longer holds.
     state.pause.send_replace(None);

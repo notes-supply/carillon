@@ -31,26 +31,18 @@ and runs its installer as you, the user who will own Carillon (not root).
 Without Discord options, the installer asks at the terminal:
 
 1. **The runtimes.** Pi, a T3 Code server already running on this machine,
-   or both (`--runtime pi` and `--runtime t3` answer it).
-2. **The assistant.** What runs Carillon's assistant, the agent with
-   Discord's context and Carillon's resources: Pi, or T3 with Claude, Codex
-   or both, each signed in for Carillon alone. With T3 there may be no
-   assistant at all, and only T3 Code channels.
-3. **T3** asks for its address and a token (`t3 auth session issue --label
-   Carillon --token-only` prints one), the project the assistant works in,
-   and the projects T3 Code channels work in: each becomes an agent that
-   is plain T3 Code through Discord. For each harness of the assistant it
-   makes Carillon's profile, a T3 instance whose home is
-   `${XDG_DATA_HOME:-~/.local/share}/carillon/profiles/HARNESS` by default.
-   T3's instance `config.homePath` owns the path for an existing profile.
-   Setup signs it in with the harness's own login in that home, an API key,
-   or a compatible endpoint
-   and its token. Then it asks each agent's default model.
-4. **Pi** opens when an agent runs on it: sign in with `/login`,
+   or both (`--runtime pi` and `--runtime t3` answer it). Pi runs Carillon's
+   assistant, the agent with Discord's context and Carillon's resources. T3
+   runs T3 Code channels.
+2. **T3** asks for its address and a token (`t3 auth session issue --label
+   Carillon --token-only` prints one), and the projects T3 Code channels
+   work in: each becomes an agent that is plain T3 Code through Discord.
+   Then it asks each agent's default model.
+3. **Pi** opens when an agent runs on it: sign in with `/login`,
    choose the agent's model with `/model` and press Ctrl+S on it, then
    leave with Ctrl+D. Setup checks that Pi is ready and offers to open it
    again until it is.
-5. **Discord.** The bot token, not shown as you type. Setup learns the bot
+4. **Discord.** The bot token, not shown as you type. Setup learns the bot
    from it, waits until Message Content Intent is on, prints the
    invitation link if the bot is in no server yet, and offers the bot's
    servers and text channels by name (with the ID where names repeat), who
@@ -59,7 +51,7 @@ Without Discord options, the installer asks at the terminal:
    checks that the bot may answer that way in each channel, and asks again
    until it may. Then who it answers: the bot application's owners, and
    anyone else by Discord user ID. Only those people can talk to the agent.
-6. Carillon starts.
+5. Carillon starts.
 
 Ctrl+C or Esc cancels; run the installer again to finish, and it offers to
 keep what's already set up (the Discord bot once Discord confirms its saved
@@ -70,40 +62,14 @@ setup` asks only Discord's. A rerun that changes the T3 settings or the bot
 token takes effect in a running Carillon at `carillon restart`. Changing an
 agent's T3 project makes the first message in each existing conversation open an
 empty thread in the current project and receive an explanation. That message
-never runs; the next message runs in the new thread. Model requests, commands,
-and follow-up observations are refused without creating anything until that
-thread exists, then use it. Returning to the original project resumes its
+never runs; the next message runs in the new thread. Model requests and
+commands are refused without creating anything until that thread exists, then
+use it. Returning to the original project resumes its
 original thread. A conversation without a T3 thread yet starts in the current
 project. Work already running in another project continues there.
 
 An explicit `--runtime` adds that runtime to an existing installation.
 Pi sign-in is skipped when no agent runs on Pi.
-
-Each T3 profile keeps its own real `skills/` directory. Carillon links each
-`skills/NAME` to the assistant's `resources/skills/NAME`. The instructions
-file links to `resources/AGENTS.md`. Serve startup reads each saved profile's
-homePath from T3, then adds new links, removes obsolete links, and updates
-links after resources move before accepting turns. A saved profile missing
-from T3 or without a homePath stops startup. Only directories containing
-`SKILL.md` are shared. Harness files and directories stay in the profile.
-A conflicting name or a symlink in the source `AGENTS.md` or `skills/` tree stops
-startup. This includes linked skill directories, manifests, and nested resources,
-which core's admission snapshots also refuse. Each T3 runtime permits at most
-one agent with resources.
-
-Profiles belong to the user and are shared across installations. Setup creates
-or validates each T3 instance and creates its home for sign-in, leaving links
-untouched. `carillon runtime-t3 check` reads settings and the token without
-reaching T3 or changing links. Setting up or checking another installation
-therefore leaves the serving installation's resources linked. Starting an
-installation reconciles the links to its resources. Only one installation's
-services run at a time.
-
-`carillon runtime-t3 discover --agent ID --url URL` reads the token on
-standard input and returns that agent's model offer. The saved `profiles`
-list decides which instances the assistant may use. Plain T3 Code excludes
-saved profiles and the reserved `carillon_claude` and `carillon_codex` IDs,
-even when they are absent from that list.
 
 The installer creates `~/.carillon` (or `CARILLON_HOME`), registers the user
 services (`carillon.target` with core, Discord and both runtimes; a
@@ -132,14 +98,13 @@ curl -fsSL https://raw.githubusercontent.com/notes-supply/carillon/main/install.
   `always` or `mention`; `SCOPE` is `thread` (each thread is a conversation)
   or `channel`; `AGENT` is the agent that answers there, `assistant` in a new
   installation.
-- `--runtime t3` runs the assistant on T3; set `--workspace` to the T3
-  project's folder.
+- Carillon's assistant runs on Pi; set T3 Code channels up afterwards with
+  `carillon setup --runtime t3`.
 - `--version VERSION`, first, installs that release instead of the newest.
 
 Then put the bot token in `~/.carillon/credentials/discord-bot.token` (mode
-0600), sign in to Pi with the printed `carillon-pi` command, or set T3 up
-with `carillon setup` (see the [T3 guide](../../packages/runtime-t3/README.md)),
-and run `carillon start`.
+0600), sign in to Pi with the printed `carillon-pi` command, and run
+`carillon start`.
 
 Rerunning the installer with options keeps the registry, credentials and
 state, but rewrites the Discord settings from them. Use `carillon update`
@@ -184,34 +149,34 @@ time; switch with the other installation's `app/bin/carillon-register-services`.
 
 ### Restart and update drain first
 
-`restart` and `update` pause core's runtime workers and stop the services only
-once nothing would be interrupted, waiting up to `--timeout` seconds:
+`restart` and `update` pause core's runtime dispatchers and stop the services
+only once nothing would be lost, waiting up to `--timeout` seconds:
 
-- turns that are running finish normally (none is cancelled or replayed);
-- their answers are delivered while Discord still runs;
-- every runtime says a restart loses nothing it alone knows.
+- no turn is being handed to its runtime;
+- answers are delivered while Discord still runs;
+- every running runtime says a restart loses nothing it alone knows. A
+  runtime that isn't running, such as one that is disabled or serves no
+  agent, holds nothing.
 
-New messages are accepted meanwhile and wait. If the drain doesn't finish in
-time, or core or a runtime doesn't answer, nothing is stopped and the command
+Turns a runtime holds are not waited for: it takes each up again once it
+starts, and none is replayed. New messages are accepted meanwhile and wait. If the drain doesn't finish in
+time, or core or a running runtime doesn't answer, nothing is stopped and the command
 says what remained. After a drain that ran out of time, core's paused
-workers resume within 15 seconds, when the pause lapses. `--force` restarts anyway: a running message is recorded
-as interrupted and not replayed, and native work a runtime started may carry
-on. `carillon stop`, and restarting a single unit with `systemctl --user`, do
+dispatchers resume within 15 seconds, when the pause lapses. `--force`
+restarts anyway: a runtime that was not ready may lose what only it knew,
+and native work a runtime started may carry on. `carillon stop`, and restarting a single unit with `systemctl --user`, do
 not drain.
 
 The T3 runtime refuses a restart while it remembers a conversation whose
-native work it couldn't confirm stopped; only that process knows, and
-restarting forgets it. Use `--force` once you've checked T3 yourself.
+native work it couldn't confirm stopped, or while a person's stop waits for
+T3 to confirm it; only that process knows, and restarting forgets it. Use
+`--force` once you've checked T3 yourself.
 
-A drain needs core and every runtime to answer, so a few changes need a
-different path:
-
-- **A runtime that isn't running**, for example one you just enabled:
-  `carillon start` starts it and stops nothing.
-- **A new `core.listen` or operator credential** in `carillon.toml`: the
-  command would ask core at the new address or with the new credential. Make
-  the change while Carillon is stopped (`carillon stop` once `carillon status`
-  shows no running turns, edit, `carillon start`), or use `restart --force`.
+A drain needs core to answer, so a new `core.listen` or operator credential
+in `carillon.toml` needs a different path: the command would ask core at the
+new address or with the new credential. Make the change while Carillon is
+stopped (`carillon stop` once `carillon status` shows no running turns, edit,
+`carillon start`), or use `restart --force`.
 
 ## Configuration
 
@@ -228,7 +193,7 @@ carillon registry apply               # serve the file's live changes now
 carillon provider runtime-t3 disable  # or enable; any runtime's ID
 ```
 
-A runtime's `enabled` and `parallel_turns` apply live. Disabling a runtime
+A runtime's `enabled` applies live. Disabling a runtime
 refuses new messages for its conversations and starts none of its queued
 turns; running turns finish and are delivered. Enabling or disabling changes
 what core does, not whether the runtime's program runs: `carillon start`
@@ -254,17 +219,11 @@ settings it was admitted with. Setup and `configure` save the file, then
 have a running provider serve it; if it refuses, they fail, unless only a
 restart applies the file and this release accepts the module it declares.
 
-### Parallel conversations
+### Conversations at once
 
-T3 can run several conversations at once: set `parallel_turns` (1 to 16) on
-the `runtime-t3` entry and run `carillon registry apply`. Each conversation
-still runs one turn at a time, in order.
-
-A runtime marked `durable = true`, as setup registers Pi, holds the turns it
-accepts and orders them itself, so it takes no `parallel_turns`: Pi answers
-in every conversation at once. Changing `durable` needs `carillon restart`,
-and a runtime refuses to start when its entry says otherwise than its
-program does.
+Each runtime holds the turns core hands it and orders them itself, answering
+in every conversation at once. T3 runs a conversation's messages in order;
+Pi handles a message that arrives while it answers as below.
 
 ### Messages while Pi answers
 
@@ -344,10 +303,12 @@ users, in a routed channel or a thread under a thread route.
 ### Reactions
 
 The bot reacts to each message it answers: while it works, then with how it
-ended. While a message waits behind the agent's running turn, a runtime that
-holds its turns may offer controls as reactions: an allowlisted person's
-reaction hands the message to the running turn now (steer), ends the running
-turn and runs it next (interrupt), or doesn't run it (stop). The emoji are
+ended. A runtime that holds a message's turn may offer controls as reactions,
+which the bot shows while the runtime lists them. While a message waits
+behind the agent's running turn, an allowlisted person's reaction hands it to
+the running turn now (steer), ends the running turn and runs it next
+(interrupt), or doesn't run it (stop). On T3, a running message offers stop
+too, which stops its run. The emoji are
 settings with these defaults, Unicode or a custom `name:id`, and apply live,
 replacing the controls messages show. The controls must differ from each
 other and from the rest.
@@ -509,16 +470,10 @@ assistant's `settings.json` to turn them off:
 { "extensions": { "remove": ["discord"] } }
 ```
 
-On T3 the assistant uses `carillon discord call` as the Discord skill
-explains. Setup doesn't install the skill, because the tools can administer
-the server; install it into the assistant's resources, which Carillon's T3
-profiles share, so T3 Code channels never see it:
-
-```sh
-carillon discord tools install
-```
-
-Run it again after an update to refresh it.
+Your other harnesses (Claude Code, Codex) can use the same operations
+through `carillon discord call`, as the skill a release ships in
+`app/lib/carillon-discord-SKILL.md` explains. Nothing installs it, because
+the tools can administer the server.
 
 ## When things fail
 
@@ -533,10 +488,11 @@ Run it again after an update to refresh it.
 - **A runtime crashes.** Its service restarts it. Pi finishes the answers it
   held: a model call runs again, and a tool call it cut off is reported to
   the model as interrupted rather than repeated. A message that keeps
-  crashing it is given up after five tries and fails. T3 continues with the
-  next message.
-- **Core can't save an outcome** (disk full, for example). The turn stays
-  marked running until core restarts, which records it as interrupted.
+  crashing it is given up after five tries and fails. T3 takes up the turns
+  it held again, reading each run back from T3, and settles a stop core
+  hadn't recorded instead of running the message.
+- **Core can't save an outcome** (disk full, for example). The runtime asks
+  again until core records it, and the turn shows as running meanwhile.
 - **Delegated T3 work** reports later in its own message, even across
   restarts.
 
@@ -597,6 +553,11 @@ downgrade: restore a backup made before the update instead.
 Provider versions in `carillon.toml` are expectations you change yourself
 when you mean to run another provider release; `status` shows any mismatch.
 
+Earlier releases ran Carillon's assistant on T3 through T3 instances of its
+own, `carillon_claude` and `carillon_codex`. Nothing uses them now, and T3
+offers them to plain T3 Code agents like any other instance, so remove them
+in T3's settings.
+
 Maintenance commands take a lock per installation (`.maintenance.lock`) and
 one on the owner's user units, and refuse while another holds them.
 
@@ -609,9 +570,3 @@ one on the owner's user units, and refuse while another holds them.
 It removes the user services, the `~/.local/bin/carillon` link and the
 application. Configuration, credentials, sessions and other data stay in the
 installation directory; delete it yourself if you no longer need it.
-
-T3 profile homes under `${XDG_DATA_HOME:-~/.local/share}/carillon/profiles`
-also stay, with their sign-ins, sessions, and settings. T3 keeps the
-`carillon_claude` and `carillon_codex` instances and their keys in its secret
-store. Remove those separately in T3 settings and remove the profile homes
-when no longer needed.

@@ -33,7 +33,7 @@ const reports = new WeakMap<object, TurnActivity>();
  * returns the failure to throw in its place. An object or function is that
  * failure itself, so how its class, status, explanation and diagnostics are
  * handled is unchanged; any other value cannot hold a report, and becomes an
- * ordinary internal `Error` whose `cause` it is. The HTTP adapter sends the
+ * ordinary internal `Error` whose `cause` it is. A runtime settles the
  * report apart from the explanation, so withholding unsafe text never
  * withholds it.
  */
@@ -53,8 +53,8 @@ function canHold(failure: unknown): failure is object {
 
 /**
  * The runtime is closing, so the request gets no answer: the HTTP adapter
- * answers 503 without an explanation, which core reads as no answer rather
- * than as a failed turn.
+ * answers 503 without an explanation, which core reads as a turn not taken,
+ * to hand over again later.
  */
 export class RuntimeClosed extends Error {}
 

@@ -9,9 +9,9 @@ mod resources;
 mod runtime_client;
 
 pub use attachments::Reconciled;
+pub use db::Settled;
 pub use engine::{
-    AgentOptions, Core, CoreError, CoreOptions, InboxFailure, Lane, Reported, RuntimeProvider,
-    Stalled, TurnFailure, WorkerStep,
+    AgentOptions, Core, CoreError, CoreOptions, InboxFailure, RuntimeProvider, Stalled, WorkerStep,
 };
 pub use runtime_client::RuntimeClient;
 

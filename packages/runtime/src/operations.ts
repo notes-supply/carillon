@@ -22,34 +22,6 @@ export function commandFinished(request: TurnRequest): string | undefined {
   return `\`${name.replaceAll("`", "")}\` finished.`;
 }
 
-export interface TurnResponse {
-  readonly correlation_id: string;
-  readonly output: string;
-  /**
-   * Native work linked to this turn will continue the conversation after
-   * this answer: core queues a follow-up turn for the same conversation
-   * (an observation) whose request carries this runtime-owned cursor as `follow_up`.
-   */
-  readonly follow_up?: unknown;
-  /**
-   * The answer left the earlier turns' files the request offered as
-   * `unanswered` out of the native conversation, as a command passed to the
-   * engine as written may: core offers them again with a later turn.
-   */
-  readonly unanswered_left?: boolean;
-  /**
-   * The turn's final report of what it did, taken before the runtime
-   * discards its executing state, bounded by the shared `finalReport`.
-   */
-  readonly activity?: TurnActivity;
-  /**
-   * The answer left this turn's own files out of the native conversation, as
-   * a command passed to the engine as written may when it cannot carry them:
-   * core offers them again with a later turn.
-   */
-  readonly attachments_left?: boolean;
-}
-
 /**
  * Whether restarting the runtime now would lose something only its process
  * knows. Core asks before maintenance stops the services, and counts no
@@ -58,12 +30,6 @@ export interface TurnResponse {
 export type RestartReadiness =
   | { readonly state: "ready" }
   | { readonly state: "unready"; readonly reason: string };
-
-/** Runs each turn to its answer while core waits: T3's contract until it holds its turns. */
-export interface AnswerTurns {
-  readonly mode: "answer";
-  execute(request: TurnRequest, signal?: AbortSignal): Promise<TurnResponse>;
-}
 
 /**
  * Keeps each turn core hands over and settles it later through core's
@@ -74,18 +40,12 @@ export interface AnswerTurns {
  * a turn the runtime holds for that interface, as a person asked.
  */
 export interface InboxTurns {
-  readonly mode: "inbox";
   submit(request: TurnRequest): Promise<void>;
-  control?(turnId: string, interfaceId: string, action: ControlAction): Promise<void>;
+  control(turnId: string, interfaceId: string, action: ControlAction): Promise<void>;
 }
 
-export type TurnHandling = AnswerTurns | InboxTurns;
-
-/** A runtime that answers each turn while core waits. */
-export type AnswerRuntime = RuntimeOperations<AnswerTurns>;
-
-export interface RuntimeOperations<Turns extends TurnHandling = TurnHandling> {
-  readonly turns: Turns;
+export interface RuntimeOperations {
+  readonly turns: InboxTurns;
   /** The latest activity of a turn this instance is executing for that interface. */
   activity(correlationId: string, interfaceId: string): TurnActivity | undefined;
   modelState(query: ModelQuery): Promise<ModelState>;

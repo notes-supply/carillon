@@ -1,3 +1,5 @@
+use anyhow::Context as _;
+
 use super::*;
 
 fn rerun_projects(selected: &'static str, expected: &[(&str, &str)]) -> anyhow::Result<()> {
@@ -19,7 +21,7 @@ fn rerun_projects(selected: &'static str, expected: &[(&str, &str)]) -> anyhow::
     set_up_t3(
         &home,
         &options(),
-        &Assistant::None,
+        false,
         &program,
         &mut Shown::answering(&["", "token", "0,1", "0", "0"]),
     )?;
@@ -30,7 +32,7 @@ fn rerun_projects(selected: &'static str, expected: &[(&str, &str)]) -> anyhow::
     set_up_t3(
         &home,
         &options(),
-        &Assistant::None,
+        false,
         &program,
         &mut Shown::answering(&["", "token", selected, "0", "0"]),
     )?;

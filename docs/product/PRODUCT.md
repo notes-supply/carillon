@@ -12,13 +12,13 @@ new interface or runtime doesn't mean rebuilding the rest.
 3. Talk to the agent in channels or threads, with files and images.
 4. Let the agent use its runtime's native tools, extensions and skills with
    the owner's authority, and watch a running turn on a Discord card.
-5. Route each channel to an agent: Carillon's assistant, on Pi or on T3
-   with Carillon's own profiles, or plain T3 Code in a project.
+5. Route each channel to an agent: Carillon's assistant, on Pi, or plain T3
+   Code in a project.
 6. Choose models and their settings for a conversation, or an agent's
    default for new conversations, with `/model`, and run the runtime's own
    commands with `/command`.
-7. Change users, routes, runtime availability and concurrency while Carillon
-   runs; other settings apply on restart.
+7. Change users, routes and runtime availability while Carillon runs; other
+   settings apply on restart.
 8. Replace the Discord module (slash commands and cards) without restarting.
 9. Restart and update without interrupting running work, inspect recent
    turns, and back up and restore the installation.
@@ -40,8 +40,9 @@ leaves its conversations stranded. Messages there receive a receipt and an
 explanation even if the former runtime is disabled or removed.
 An otherwise current conversation whose runtime is unavailable
 refuses new work. Changing an agent's T3 project also ends conversations that
-already have T3 threads. Their messages, queued turns, follow-up observations,
-model requests, and commands receive an explanation asking for a new conversation.
+already have T3 threads. Their messages, queued turns, reports of delegated
+work, model requests, and commands receive an explanation asking for a new
+conversation.
 Work already running in the previous project continues there. Nothing translates
 native state between engines or T3 projects.
 
@@ -57,14 +58,16 @@ native state between engines or T3 projects.
   once to its runtime, and stores the answer and its delivery together. Pi
   holds the turns it accepts and finishes them across its own restarts; a
   tool call a crash cut off is reported to the model as interrupted, never
-  repeated. On T3, a turn whose outcome can't be proved is marked
-  interrupted and never replayed. Either way the conversation is told, and
-  the next message carries on with the same native conversation. Delivery
-  retries without rerunning the model.
+  repeated. T3 holds its turns too: restarted, it follows each again in
+  T3's records rather than running it twice, and a turn whose outcome T3
+  can't show fails and is never replayed. Either way the conversation is
+  told, and the next message carries on with the same native conversation.
+  Delivery retries without rerunning the model.
 - **Busy conversations.** A message that arrives while Pi answers in its
   conversation steers that answer by default, or waits for it or interrupts
   it, as the agent's settings choose. People can steer a waiting message in,
-  interrupt for it, or stop it, with reactions.
+  interrupt for it, or stop it, with reactions. On T3, a conversation's
+  messages wait their turn, and people can stop one, waiting or running.
 - **Visibility.** While a turn runs, a card shows its current tool calls,
   recent ones and delegated work, never tool output or private reasoning.
   It stays as a summary when the work ends.

@@ -8,7 +8,7 @@ use super::{
     timestamp, write_transaction,
 };
 
-/// How a turn a durable runtime holds ended, as core records it.
+/// How a turn a runtime holds ended, as core records it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Settlement<'a> {
     /// Completed, its output delivered.
@@ -41,7 +41,7 @@ impl Settlement<'_> {
 
 /// What a settlement found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Settled {
+pub enum Settled {
     /// It is recorded: now, or earlier as the same kind.
     Recorded,
     /// The turn already ended another way.

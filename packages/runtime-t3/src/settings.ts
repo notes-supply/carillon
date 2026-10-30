@@ -5,9 +5,6 @@ import { Type, type Static } from "typebox";
 import { Check, Errors } from "typebox/value";
 import { parse as parseToml, TomlError } from "smol-toml";
 import type { NativeSelection } from "./contracts.ts";
-import { HARNESSES } from "./profiles.ts";
-
-const PROFILE_IDS = new Set(Object.keys(HARNESSES).map((harness) => `carillon_${harness}`));
 
 const SelectionSchema = Type.Object(
   {
@@ -40,14 +37,6 @@ const SettingsSchema = Type.Object(
     url: Type.String({ minLength: 1 }),
     /** A file holding a bearer token T3 issued, relative to the installation. */
     token_file: Type.String({ minLength: 1 }),
-    /** Prefix of the titles of the assistant's T3 threads. */
-    title: Type.Optional(Type.String({ minLength: 1, maxLength: 60 })),
-    /** Carillon's own T3 instances, whose homes hold its profile. */
-    profiles: Type.Optional(
-      Type.Array(Type.String({ pattern: `^(?:${[...PROFILE_IDS].join("|")})$` }), {
-        uniqueItems: true,
-      }),
-    ),
     /** Each agent of this runtime, by its ID in `carillon.toml`. */
     agents: Type.Optional(
       Type.Record(Type.String({ pattern: "^[A-Za-z0-9_-]{1,128}$" }), AgentSettingsSchema, {
@@ -71,8 +60,6 @@ interface AgentSettings {
 export interface T3Settings {
   readonly url: string;
   readonly tokenFile: string;
-  readonly title: string;
-  readonly profiles: ReadonlySet<string>;
   readonly agents: ReadonlyMap<string, AgentSettings>;
 }
 
@@ -82,8 +69,6 @@ export async function loadSettings(path: string, root: string): Promise<T3Settin
   return {
     url: settings.url,
     tokenFile: resolve(root, settings.token_file),
-    title: settings.title ?? "Carillon",
-    profiles: new Set(settings.profiles ?? []),
     agents: new Map(
       Object.entries(settings.agents ?? {}).map(([id, agent]) => [
         id,
@@ -99,21 +84,6 @@ function nativeSelection(selection: AgentSettingsFile["model"]): NativeSelection
     model: selection.model,
     options: Object.entries(selection.options ?? {}).map(([id, value]) => ({ id, value })),
   };
-}
-
-/**
- * Whether `instanceId` is one the agent runs on: Carillon's profiles for its
- * assistant. Plain T3 Code excludes saved profiles and reserved Carillon IDs,
- * including profiles whose setup did not finish saving their settings.
- */
-export function offers(
-  profiles: ReadonlySet<string>,
-  assistant: boolean,
-  instanceId: string,
-): boolean {
-  return assistant
-    ? profiles.has(instanceId)
-    : !profiles.has(instanceId) && !PROFILE_IDS.has(instanceId);
 }
 
 /** The settings file at `path`, checked strictly, or undefined when there is none. */

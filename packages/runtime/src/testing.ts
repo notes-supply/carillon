@@ -1,9 +1,18 @@
-/** A small stand-in for core's runtime API, for durable runtimes' tests. */
+/** A small stand-in for core's runtime API, for runtimes' tests. */
 import { once } from "node:events";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { Check, Parse } from "typebox/value";
+import {
+  TurnOpeningSchema,
+  TurnOutcomeSchema,
+  type RunningTurn,
+  type RuntimeTurnRequest,
+  type TurnOutcome,
+} from "@carillon/protocol";
 
 /** A call core received. */
 export interface Received {
+  readonly method: string;
   readonly path: string;
   readonly provider: string | undefined;
   readonly authorization: string | undefined;
@@ -16,6 +25,10 @@ export interface FakeCore {
   readonly received: readonly Received[];
   /** Answers the next calls with these statuses, in order, before answering as core does. */
   answer(...statuses: number[]): void;
+  /** Records a turn core handed the runtime, which core lists running until it is settled. */
+  hold(request: RuntimeTurnRequest): void;
+  /** Resolves with the outcome the runtime first settles `turnId` with. */
+  outcome(turnId: string): Promise<TurnOutcome>;
   /**
    * Holds the answers to calls of `path`, which core has acted on, until
    * released: as if the caller stopped before it heard them.
@@ -26,13 +39,21 @@ export interface FakeCore {
 
 /**
  * Settles each turn once, answering the same outcome again as recorded and
- * another as superseded, and opens one turn per runtime and key.
+ * another as superseded, opens one turn per runtime and key, and lists the
+ * turns held or opened that are not settled yet, oldest first.
  */
 export async function startFakeCore(port = 0): Promise<FakeCore> {
   const received: Received[] = [];
   const scripted: number[] = [];
   const settled = new Map<string, unknown>();
   const opened = new Map<string, string>();
+  const running = new Map<string, RunningTurn>();
+  const outcomes = new Map<string, PromiseWithResolvers<TurnOutcome>>();
+  const outcomeOf = (turnId: string) => {
+    const known = outcomes.get(turnId) ?? Promise.withResolvers<TurnOutcome>();
+    outcomes.set(turnId, known);
+    return known;
+  };
   const stalls = new Map<string, { reached: () => void; released: Promise<void> }>();
   const server = createServer((request, response) => {
     void respond(request, response);
@@ -53,6 +74,7 @@ export async function startFakeCore(port = 0): Promise<FakeCore> {
     const provider = request.headers["x-carillon-provider"];
     const body: unknown = text.length === 0 ? undefined : JSON.parse(text);
     received.push({
+      method: request.method ?? "",
       path,
       provider: typeof provider === "string" ? provider : undefined,
       authorization: request.headers.authorization,
@@ -65,13 +87,33 @@ export async function startFakeCore(port = 0): Promise<FakeCore> {
       const kind = kindOf(body);
       const earlier = settled.get(outcome);
       if (earlier === undefined) settled.set(outcome, kind);
+      const turnId = decodeURIComponent(outcome);
+      running.delete(turnId);
+      if (earlier === undefined && Check(TurnOutcomeSchema, body))
+        outcomeOf(turnId).resolve(Parse(TurnOutcomeSchema, body));
       return [earlier === undefined || earlier === kind ? 204 : 409];
     }
+    if (path === "/v1/runtime/turns" && request.method === "GET")
+      return [200, [...running.values()]];
     if (path === "/v1/runtime/turns") {
       const event = `runtime:${String(provider)}:${String(keyOf(body))}`;
       const known = opened.get(event);
       const turnId = known ?? `opened-${String(opened.size + 1)}`;
       opened.set(event, turnId);
+      if (known === undefined && Check(TurnOpeningSchema, body))
+        running.set(turnId, {
+          request: {
+            correlation_id: turnId,
+            interface_id: body.interface_id,
+            agent_id: body.agent_id,
+            audience_id: body.audience_id,
+            input: body.label ?? "",
+            native: {},
+            resource_root: "",
+            attachment_root: "/",
+          },
+          key: body.key,
+        });
       // A turn settled since it opened is no longer running.
       const state = settled.has(turnId) ? "completed" : "running";
       return [200, { event_id: event, turn_id: turnId, state, duplicate: known !== undefined }];
@@ -88,6 +130,10 @@ export async function startFakeCore(port = 0): Promise<FakeCore> {
     answer(...statuses) {
       scripted.push(...statuses);
     },
+    hold(request) {
+      running.set(request.correlation_id, { request });
+    },
+    outcome: (turnId) => outcomeOf(turnId).promise,
     stall(path) {
       const reached = Promise.withResolvers<void>();
       const released = Promise.withResolvers<void>();

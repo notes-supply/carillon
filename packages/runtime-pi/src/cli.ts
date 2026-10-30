@@ -104,10 +104,6 @@ export async function main(values: readonly string[], embedded?: Embedded): Prom
     process.stdout.write("Pi is signed in and has a default model.\n");
     return;
   }
-  if (!config.durable)
-    throw new Error(
-      `runtime provider ${providerId} holds its turns and needs durable = true in carillon.toml`,
-    );
   const listenAddress = providerAddress(config.runtime.url);
   const token = await loadRuntimeCredential(requiredArgument(args, "token-file"), config.runtime);
   const mcp = [...(await loadMcpConfig(join(stateDirectory, "mcp.json")))].map(([name, server]) =>
@@ -165,7 +161,6 @@ export async function main(values: readonly string[], embedded?: Embedded): Prom
     runtime,
     token,
     providerId: config.runtime.id,
-    durable: config.durable,
     provider: deterministic ? "deterministic-local-substitute" : "pi",
     version: packageInfo.version,
     features: ["native-extensions", "skills"],

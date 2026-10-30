@@ -271,7 +271,7 @@ fn status_rows_say_how_the_job_stands() {
         status(Status::Queued {
             since: 1_790_000_005
         }),
-        "⏳ Waiting for earlier work to finish · queued <t:1790000005:R>"
+        "⏳ Waiting for the runtime · queued <t:1790000005:R>"
     );
     for (phase, expected) in [
         (
@@ -876,11 +876,11 @@ fn a_cards_status_and_rows_come_from_the_jobs_recorded_turns() {
     };
     let mut parent = turn("turn", TurnState::Completed, Some(tools()));
     parent.delivery = Some(DeliveryState::Pending);
-    // A queued message waits behind earlier work; a queued observation
+    // A queued message waits for its runtime; a job's queued later turn
     // continues work an answer left running.
     assert!(
         status(&job(vec![turn("turn", TurnState::Queued, None)]), None)
-            .starts_with("⏳ Waiting for earlier work to finish")
+            .starts_with("⏳ Waiting for the runtime")
     );
     let continuing = job(vec![
         parent.clone(),

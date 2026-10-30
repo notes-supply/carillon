@@ -12,21 +12,13 @@ import {
   type ModelUpdate,
   type RuntimeTurnControl,
 } from "@carillon/protocol";
-import {
-  diagnostic,
-  displayableExplanation,
-  ExplainedFailure,
-  reportOf,
-  RuntimeClosed,
-} from "./failure.ts";
+import { diagnostic, displayableExplanation, ExplainedFailure, RuntimeClosed } from "./failure.ts";
 import type { RuntimeOperations, TurnRequest } from "./operations.ts";
 
 interface RuntimeServerOptions {
   readonly runtime: RuntimeOperations;
   readonly token: string;
   readonly providerId: string;
-  /** The registry entry's `durable`: an inbox runtime is served exactly when it is set. */
-  readonly durable: boolean;
   /** The engine behind this runtime, as `/health` names it. */
   readonly provider: string;
   /** The runtime's own build version, which core compares with the registry's expectation. */
@@ -38,12 +30,6 @@ interface RuntimeServerOptions {
 export function createRuntimeServer(options: RuntimeServerOptions) {
   if (options.token.length === 0) throw new Error("runtime credential must not be empty");
   const { turns } = options.runtime;
-  if ((turns.mode === "inbox") !== options.durable)
-    throw new Error(
-      turns.mode === "inbox"
-        ? "a runtime that holds its turns needs durable = true in its carillon.toml entry"
-        : "a runtime that answers while core waits must not be durable in carillon.toml",
-    );
   return createServer((request, response) => {
     void route(request, response).catch((failure: unknown) => {
       // Callers receive only the displayable part of an explanation; the
@@ -57,13 +43,11 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
       }
       if (!explained || failure.status >= 500) logFailure(request, failure);
       const explanation = explained ? displayableExplanation(failure.message) : undefined;
-      // A failed turn's report is bounded display data, not diagnostic
-      // text: it goes whether or not any explanation can be shown.
-      const activity = reportOf(failure);
-      writeJson(response, explained ? failure.status : 500, {
-        ...(explanation === undefined ? {} : { error: explanation }),
-        ...(activity === undefined ? {} : { activity }),
-      });
+      writeJson(
+        response,
+        explained ? failure.status : 500,
+        explanation === undefined ? {} : { error: explanation },
+      );
     });
   });
   async function route(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -100,27 +84,9 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
       return;
     }
 
-    if (request.method === "POST" && request.url === "/v1/turns" && turns.mode === "answer") {
-      const parsed = await turnRequest(request, response);
-      if (parsed === undefined) return;
-      const controller = new AbortController();
-      const disconnect = () => {
-        if (!response.writableFinished) controller.abort();
-      };
-      response.on("close", disconnect);
-      try {
-        if (response.destroyed) controller.abort();
-        const result = await turns.execute(parsed, controller.signal);
-        writeJson(response, 200, result);
-      } finally {
-        response.off("close", disconnect);
-      }
-      return;
-    }
-
     // Kept, the turn is settled later: answering after `submit` is what
     // lets core count it held.
-    if (request.method === "POST" && request.url === "/v1/inbox" && turns.mode === "inbox") {
+    if (request.method === "POST" && request.url === "/v1/inbox") {
       const parsed = await turnRequest(request, response);
       if (parsed === undefined) return;
       await turns.submit(parsed);
@@ -130,12 +96,7 @@ export function createRuntimeServer(options: RuntimeServerOptions) {
 
     const url = new URL(request.url ?? "/", "http://localhost");
     const controlPath = /^\/v1\/turns\/([^/]+)\/control$/u.exec(url.pathname);
-    if (
-      request.method === "POST" &&
-      controlPath?.[1] !== undefined &&
-      turns.mode === "inbox" &&
-      turns.control !== undefined
-    ) {
+    if (request.method === "POST" && controlPath?.[1] !== undefined) {
       let turnId: string;
       let control: RuntimeTurnControl;
       try {

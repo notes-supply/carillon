@@ -1,7 +1,7 @@
 [
   {
     "card": {
-      "description": "⏳ Waiting for earlier work to finish · queued <t:1790000000:R>",
+      "description": "⏳ Waiting for the runtime · queued <t:1790000000:R>",
       "type": "rich"
     },
     "name": "queued",

@@ -215,14 +215,25 @@ expect_trace '--user show --property=ActiveState --value carillon.target' \
   '--user stop carillon.target carillon-core.service carillon-discord.service carillon-runtime-pi.service carillon-runtime-t3.service' \
   '--user start carillon.target'
 grep -F 'runtime workers paused for maintenance' "$INSTALLATION/logs/core.log" >/dev/null
+# A runtime that is not running holds nothing a restart loses, as one that
+# is disabled or serves no agent does not run: the restart goes ahead and
+# starts it again.
+kill "$(head -n 1 "$MANAGER/pids")"
+carillon restart >"$TEST_ROOT/restart-exited.log"
+grep -Fx 'Core stopped with its runtime workers paused.' "$TEST_ROOT/restart-exited.log" >/dev/null
+expect_trace '--user show --property=ActiveState --value carillon.target' \
+  '--user show --property=ConsistsOf --value carillon.target' \
+  '--user stop carillon.target carillon-core.service carillon-discord.service carillon-runtime-pi.service carillon-runtime-t3.service' \
+  '--user start carillon.target'
 # A runtime that cannot say whether a restart loses anything keeps the
 # services running and stops nothing. Refused when its time is up, the
 # command asks nothing more of core: the pause lapses within its lease and
 # the workers resume. Forced, the restart goes ahead and says what it
 # interrupts.
-kill "$(head -n 1 "$MANAGER/pids")"
-refuse undrained carillon restart --timeout 2
-grep -F 'core did not drain within 2 seconds' "$TEST_ROOT/undrained.log" >/dev/null
+frozen=$(head -n 1 "$MANAGER/pids")
+kill -STOP "$frozen"
+refuse undrained carillon restart --timeout 10
+grep -F 'core did not drain within 10 seconds' "$TEST_ROOT/undrained.log" >/dev/null
 grep -F 'runtime-pi is not ready to restart: it did not say whether it can restart' \
   "$TEST_ROOT/undrained.log" >/dev/null
 expect_trace '--user show --property=ActiveState --value carillon.target'
@@ -233,12 +244,13 @@ until carillon registry >"$TEST_ROOT/resumed.log" &&
   [ "$attempt" -lt 120 ] || fail 'the workers did not resume when the pause lapsed'
   sleep 0.25
 done
-grep -F 'runtime-pi: enabled, holding and ordering its own turns; 1 message and 0 observation worker(s)' \
+grep -F 'runtime-pi: enabled; its dispatcher hands it its turns' \
   "$TEST_ROOT/resumed.log" >/dev/null
 carillon status | grep -F '"status": "unavailable"' >/dev/null
+kill -CONT "$frozen"
 # The forced restart waits, as any restart does, until every provider answers.
 carillon restart --force >"$TEST_ROOT/forced.log"
-grep -F 'Forcing the stop, which interrupts what has not settled' "$TEST_ROOT/forced.log" >/dev/null
+grep -F 'Forcing the stop before this settles' "$TEST_ROOT/forced.log" >/dev/null
 grep -F 'runtime-pi: ready' "$TEST_ROOT/forced.log" >/dev/null
 rm -f "$TRACE"
 carillon logs core | grep -F 'Carillon core ready' >/dev/null
@@ -387,13 +399,14 @@ printf 'update state preflight passed: incompatible core schema, provider settin
 # gone or emptied while the running runtime still holds its token, or
 # settings it rejects, are refused, as above.
 cp -p "$INSTALLATION/carillon.toml" "$TEST_ROOT/registry"
-sed -i 's/"runtime-pi"/"runtime-t3"/' "$INSTALLATION/carillon.toml"
+# The assistant becomes plain T3 Code, which takes no resources.
+sed -i -e 's/"runtime-pi"/"runtime-t3"/' -e '/^resources = /d' "$INSTALLATION/carillon.toml"
 T3_SETTINGS=$INSTALLATION/providers/runtime-t3.toml
 T3_TOKEN=$INSTALLATION/credentials/t3.token
 t3_settings() {
   printf '%s\n' 'url = "http://127.0.0.1:1"' 'token_file = "credentials/t3.token"' \
-    'profiles = ["carillon_claude"]' '[agents.assistant]' 'project_id = "agent"' \
-    '[agents.assistant.model]' 'instance_id = "carillon_claude"' 'model = "claude-sonnet-5"' \
+    '[agents.assistant]' 'project_id = "agent"' \
+    '[agents.assistant.model]' 'instance_id = "claudeAgent"' 'model = "claude-sonnet-5"' \
     >"$T3_SETTINGS"
   printf '%s\n' t3-token >"$T3_TOKEN"
   chmod 0600 "$T3_SETTINGS" "$T3_TOKEN"

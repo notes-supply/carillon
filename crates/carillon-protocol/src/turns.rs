@@ -1,14 +1,15 @@
-//! Turns a durable runtime holds: how it settles them and opens its own, and
-//! the controls an interface relays to it while one waits.
+//! Turns a runtime holds: how it settles them, opens its own and
+//! reads back those it holds, and the controls an interface relays to it
+//! while one waits.
 
 use std::str::FromStr;
 
 use anyhow::bail;
 use serde::{Deserialize, Serialize};
 
-use crate::model::{TurnActivity, valid_or_none};
+use crate::model::{RuntimeTurnRequest, TurnActivity, valid_or_none};
 
-/// How a durable runtime says a turn it holds ended. Core settles the turn
+/// How a runtime says a turn it holds ended. Core settles the turn
 /// and its delivery from it once; the same outcome again is answered as
 /// recorded.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -91,7 +92,7 @@ impl FromStr for Silence {
     }
 }
 
-/// A turn a durable runtime opens in an existing conversation of its own,
+/// A turn a runtime opens in an existing conversation of its own,
 /// for a schedule or a subagent's report. `key` makes it idempotent: the
 /// same key opens one turn, and another conversation using it is refused.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -112,6 +113,21 @@ pub struct TurnOpening {
         skip_serializing_if = "Option::is_none"
     )]
     pub label: Option<String>,
+}
+
+/// A turn core records running on the runtime that asks: the request core
+/// handed it, and the key of a turn the runtime opened. A runtime whose
+/// process forgot the turns it holds reads them back.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunningTurn {
+    pub request: RuntimeTurnRequest,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::optional_nonempty_string",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub key: Option<String>,
 }
 
 /// What a person may do with a message that waits behind a running turn.

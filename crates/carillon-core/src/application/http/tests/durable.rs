@@ -10,11 +10,11 @@ use carillon_protocol::turns::{Silence, TurnOpening};
 use tempfile::tempdir;
 
 use super::{
-    Fixture, accept, completed, configured, installation,
+    Fixture, configured, installation,
     live::{lock, ok, operator, submit},
-    run_next_turn,
 };
-use crate::{InboxFailure, Stalled, application::http::*};
+use crate::{InboxFailure, Stalled, WorkerStep, application::http::*};
+use carillon_protocol::model::RuntimeTurnRequest;
 
 /// A durable runtime that keeps every turn core hands it, answering each
 /// hand-over with the next scripted answer (202 once they run out), and
@@ -102,19 +102,13 @@ pub(super) fn durable(directory: &Path, runtime: &DurableRuntime) -> Result<(Fix
     let mut fixture = installation(directory)?;
     let provider = &mut fixture.config.value.providers[1];
     provider.url.clone_from(&runtime.url);
-    provider.durable = true;
     fixture.config.value.validate()?;
     let state = configured(&fixture);
     Ok((fixture, state))
 }
 
 /// Registers another runtime, `id`, with its own credential `token`.
-pub(super) fn add_runtime(
-    fixture: &mut Fixture,
-    id: &str,
-    token: &str,
-    durable: bool,
-) -> Result<()> {
+pub(super) fn add_runtime(fixture: &mut Fixture, id: &str, token: &str) -> Result<()> {
     let mut other = fixture.config.value.providers[1].clone();
     id.clone_into(&mut other.id);
     other.url = format!(
@@ -122,7 +116,6 @@ pub(super) fn add_runtime(
         40_000 + fixture.config.value.providers.len()
     );
     other.token_hash = carillon_installation::config::hash_token(token);
-    other.durable = durable;
     fixture.config.value.providers.push(other);
     fs::write(
         fixture.config.root.join(format!("credentials/{id}.token")),
@@ -208,7 +201,6 @@ async fn a_conversations_messages_all_reach_the_inbox_in_order_without_waiting_f
     assert_eq!(runtime.handed(), ["one", "two", "three"]);
     let request = runtime.request(0)?;
     assert_eq!(request.correlation_id, first.turn_id);
-    assert!(request.follow_up.is_none() && request.unanswered.is_empty());
     for turn in [&first.turn_id, &second.turn_id] {
         assert_eq!(state_of(&state, turn)?, TurnState::Running);
     }
@@ -242,8 +234,10 @@ async fn a_turn_the_runtime_did_not_take_stays_queued_and_is_handed_over_again()
         StatusCode::REQUEST_TIMEOUT,
         StatusCode::TOO_MANY_REQUESTS,
     ];
-    // An inbox that is not installed as core expects is no fault of the turn.
+    // An inbox that is not installed as core expects, or cannot read the
+    // request core built, is no fault of the turn.
     let misinstalled = [
+        StatusCode::BAD_REQUEST,
         StatusCode::UNAUTHORIZED,
         StatusCode::FORBIDDEN,
         StatusCode::NOT_FOUND,
@@ -271,10 +265,10 @@ async fn a_turn_the_runtime_did_not_take_stays_queued_and_is_handed_over_again()
         assert_eq!(state_of(&state, &first.turn_id)?, TurnState::Queued);
     }
     // Nothing behind it overtakes it.
-    assert_eq!(runtime.handed(), ["one"; 9]);
+    assert_eq!(runtime.handed(), ["one"; 10]);
     assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
     assert_eq!(state_of(&state, &first.turn_id)?, TurnState::Running);
-    assert_eq!(runtime.request(9)?.correlation_id, first.turn_id);
+    assert_eq!(runtime.request(10)?.correlation_id, first.turn_id);
     // A runtime core cannot reach has not taken the next one either.
     fixture.config.value.providers[1].url = "http://127.0.0.1:9".to_owned();
     let unreachable = configured(&fixture);
@@ -347,7 +341,7 @@ async fn a_restart_hands_held_turns_over_again_and_a_late_outcome_is_delivered_o
 {
     let directory = tempdir()?;
     let runtime = DurableRuntime::start().await?;
-    let (mut fixture, state) = durable(directory.path(), &runtime)?;
+    let (fixture, state) = durable(directory.path(), &runtime)?;
     let held = ok(submit(&state, "one", "conversation").await)?;
     assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
     // Handed over just before core stopped, before it recorded the 202.
@@ -395,73 +389,6 @@ async fn a_restart_hands_held_turns_over_again_and_a_late_outcome_is_delivered_o
         ]
     );
     assert_eq!(dispatch(&restarted).await?, WorkerStep::Idle);
-    // A runtime no longer durable at a restart holds nothing core knows of.
-    let running = ok(submit(&restarted, "three", "conversation").await)?;
-    assert_eq!(dispatch(&restarted).await?, WorkerStep::Advanced);
-    fixture.config.value.providers[1].durable = false;
-    let plain = configured(&fixture);
-    assert_eq!(plain.core.recover_interrupted()?, 1);
-    assert_eq!(state_of(&plain, &running.turn_id)?, TurnState::Interrupted);
-    assert!(
-        delivered(&plain)?[0]
-            .content
-            .starts_with("Carillon restarted during that turn.")
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_runtime_made_durable_takes_its_running_message_and_answers_no_observation() -> Result<()>
-{
-    let directory = tempdir()?;
-    let runtime = DurableRuntime::start().await?;
-    let mut fixture = installation(directory.path())?;
-    for audience in ["first", "second"] {
-        accept(&fixture, audience, audience).await?;
-        run_next_turn(&fixture, "test-runtime", async |_, _, request| {
-            Ok(RuntimeTurnResponse {
-                follow_up: Some(json!({"after": 1})),
-                ..completed(request)
-            })
-        })
-        .await?;
-    }
-    let observation = fixture
-        .core
-        .database
-        .claim(
-            "test-runtime",
-            Lane::Observations,
-            &CancellationToken::new(),
-        )?
-        .context("missing running observation")?;
-    let running = accept(&fixture, "running", "third").await?;
-    fixture
-        .core
-        .database
-        .claim("test-runtime", Lane::Messages, &CancellationToken::new())?
-        .context("missing running message")?;
-    delivered(&configured(&fixture))?;
-    let provider = &mut fixture.config.value.providers[1];
-    provider.url.clone_from(&runtime.url);
-    provider.durable = true;
-    let state = configured(&fixture);
-    assert_eq!(state.core.recover_interrupted()?, 2);
-    assert_eq!(
-        state_of(&state, &observation.turn.turn_id)?,
-        TurnState::Interrupted
-    );
-    let notices = delivered(&state)?;
-    assert_eq!(notices.len(), 2);
-    assert!(
-        notices
-            .iter()
-            .all(|notice| notice.content.starts_with("That turn was interrupted. ")),
-        "{notices:?}"
-    );
-    assert_eq!(dispatch(&state).await?, WorkerStep::Advanced);
-    assert_eq!(runtime.handed(), ["running"]);
-    assert_eq!(state_of(&state, &running.turn_id)?, TurnState::Running);
     Ok(())
 }
 

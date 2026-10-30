@@ -10,7 +10,6 @@ import {
   mkdtemp,
   readdir,
   readFile,
-  readlink,
   rename,
   rm,
   stat,
@@ -259,9 +258,9 @@ try {
 
   await stop("runtime");
   await stop("core");
-  // A queued observation is not a shutdown barrier: an outage worker can
-  // claim again before SIGTERM. Start this backup fixture with unavailable
-  // credentials so no iteration can claim the turn, rather than racing a retry.
+  // A queued turn is not a shutdown barrier: the dispatcher can hand it over
+  // again before SIGTERM. Start this backup fixture with unavailable
+  // credentials so no hand-over reaches the runtime, rather than racing a retry.
   const runtimeCredential = credential("runtime-pi");
   const runtimeToken = await readFile(runtimeCredential);
   await writeFile(runtimeCredential, "");
@@ -1218,29 +1217,22 @@ async function testActivityVisibility() {
   }
 }
 
-/**
- * T3 tool calls and failures reach core's jobs and Discord's work cards.
- */
+/** T3 tool calls and failures reach core's jobs and Discord's work cards. */
 async function testT3ActivityThroughDelivery() {
   const { startFakeT3 } = await import(
     new URL("../packages/runtime-t3/src/fake.ts", import.meta.url).href
   );
   const fake = await startFakeT3();
-  // The assistant runs on its Claude profile, whose home T3's settings name.
-  const profileHome = join(root, "profiles", "claude");
-  const claude = fake.providers.find((provider) => provider.instanceId === "claudeAgent");
-  fake.providers.push({ ...claude, instanceId: "carillon_claude" });
-  fake.instances.set("carillon_claude", {
-    driver: "claudeAgent",
-    config: { homePath: profileHome },
-  });
   const original = await readFile(configPath(), "utf8");
   let discordSettings;
   const settings = join(installation, "providers/runtime-t3.toml");
   const t3Token = join(installation, "credentials/t3.token");
   const token = crypto.randomUUID();
   const { version } = JSON.parse(await readFile("packages/runtime-t3/package.json", "utf8"));
-  const registered = original.replace('runtime = "runtime-pi"', 'runtime = "runtime-t3"');
+  // The assistant becomes plain T3 Code, which takes no resources.
+  const registered = original
+    .replace('runtime = "runtime-pi"', 'runtime = "runtime-t3"')
+    .replace(/^resources = .*\n/mu, "");
   assert.notEqual(registered, original);
   try {
     await writeFile(
@@ -1261,13 +1253,12 @@ enabled = true
       settings,
       `url = "${fake.url}"
 token_file = "credentials/t3.token"
-profiles = ["carillon_claude"]
 
 [agents.assistant]
 project_id = "project-1"
 
 [agents.assistant.model]
-instance_id = "carillon_claude"
+instance_id = "claudeAgent"
 model = "claude-sonnet-5"
 
 [agents.assistant.model.options]
@@ -1276,10 +1267,6 @@ effort = "low"
     );
     await restart("core");
     await start("runtime-t3");
-    assert.equal(
-      await readlink(join(profileHome, "CLAUDE.md")),
-      join(installation, "agents/default/AGENTS.md"),
-    );
     // The example module draws these cards: the bundled text, coloured.
     discordSettings = await readFile(providerConfigPath());
     run("--home", installation, "discord", "module", "enable", exampleModule);

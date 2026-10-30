@@ -35,7 +35,7 @@ const channelActions = new Set([
   "messages.react",
 ]);
 
-/** The Discord skill, which `carillon discord tools install` also gives agents' resources. */
+/** The Discord skill, which a release also ships for the owner's other harnesses. */
 export const DISCORD_SKILL = new URL("../skill/SKILL.md", import.meta.url);
 
 export interface DiscordOptions {

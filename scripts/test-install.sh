@@ -68,7 +68,7 @@ grep -F -- '--config is required' "$TEST_ROOT_T3_OUT" >/dev/null
 # Disabled in its registry, it exits successfully before reading its
 # credential, settings or state, or reaching T3, so its unit is not restarted.
 T3_DISABLED=$(mktemp -d)
-mkdir "$T3_DISABLED/agent" "$T3_DISABLED/workspace"
+mkdir "$T3_DISABLED/workspace"
 T3_HASH=$(printf synthetic | sha256sum | cut -d' ' -f1)
 printf '%s\n' \
   'data_dir = "state"' \
@@ -76,11 +76,10 @@ printf '%s\n' \
   'listen = "127.0.0.1:1"' \
   "operator_token_hash = \"$T3_HASH\"" \
   '[[agents]]' \
-  'id = "assistant"' \
-  'name = "Carillon"' \
+  'id = "code"' \
+  'name = "Code"' \
   'runtime = "runtime-t3"' \
   'workspace = "workspace"' \
-  'resources = "agent"' \
   '[[providers]]' \
   'id = "runtime-t3"' \
   'role = "runtime"' \
@@ -380,11 +379,9 @@ done
 APP=$CARILLON_HOME/app/bin
 CONFIG=$CARILLON_HOME/carillon.toml
 
-# The skill is opt-in and enters captured agent resources, not mutable app paths.
+# The skill ships for the owner's other harnesses; nothing installs it.
 [ ! -e "$CARILLON_HOME/agents/default/skills/discord/SKILL.md" ]
-env CARILLON_HOME="$CARILLON_HOME" "$APP/carillon" discord tools install
-cmp "$CARILLON_HOME/app/lib/carillon-discord-SKILL.md" "$CARILLON_HOME/agents/default/skills/discord/SKILL.md"
-grep -Fq 'enable_discord' "$CARILLON_HOME/agents/default/skills/discord/SKILL.md"
+grep -Fq 'enable_discord' "$CARILLON_HOME/app/lib/carillon-discord-SKILL.md"
 
 
 start_runtime() {
@@ -422,10 +419,6 @@ for offset in 0 1 2; do
   done
 done
 
-# While core serves, the skill installs again; it goes only into the agents'
-# resources, never the shared workspace.
-env CARILLON_HOME="$CARILLON_HOME" "$APP/carillon" discord tools install >/dev/null
-[ ! -e "$WORKSPACE/.claude/skills/discord" ] && [ ! -e "$WORKSPACE/.agents/skills/discord" ]
 env CARILLON_HOME="$CARILLON_HOME" "$APP/carillon" discord call messages pin --help >/dev/null
 
 grep -F -- '--provider runtime-pi' "$XDG_CONFIG_HOME/systemd/user/carillon-runtime-pi.service" >/dev/null

@@ -21,8 +21,7 @@ use axum::{
 };
 use carillon_protocol::model::{
     ActivityPhase, AgentInfo, Delivery, DeliveryAck, DeliveryOutcome, DeliveryState, FinishedTool,
-    Job, JobPage, JobTurn, Origin, RunningTool, TurnActivity, TurnState, WorkItem, WorkKind,
-    WorkState, WorkSummary,
+    Job, JobPage, JobTurn, Origin, RunningTool, TurnActivity, TurnState,
 };
 use serde_json::{Value, json};
 use std::{
@@ -691,26 +690,6 @@ fn tools(
     }
 }
 
-/// `activity` with one delegated child in `state`.
-fn delegating(mut activity: TurnActivity, state: WorkState) -> TurnActivity {
-    activity.work = Some(WorkSummary {
-        items: vec![WorkItem {
-            id: "child".to_owned(),
-            kind: WorkKind::Delegation,
-            label: "research".to_owned(),
-            state,
-            parent: None,
-            actor: None,
-            started_at: None,
-            estimated: false,
-            duration_ms: (state == WorkState::Succeeded).then_some(61_000),
-        }],
-        partial: false,
-        omitted: None,
-    });
-    activity
-}
-
 fn config(typing: bool) -> DiscordConfig {
     let mut config = discord_config(DiscordActivation::Always, DiscordConversation::Channel);
     config.typing = typing;
@@ -1008,99 +987,6 @@ async fn a_slow_plain_answers_temporary_card_is_removed_even_with_agent_metadata
 }
 
 #[tokio::test]
-async fn an_early_answer_and_a_later_report_keep_one_card_ending_on_the_works_last_state()
--> anyhow::Result<()> {
-    let directory = tempfile::tempdir()?;
-    let records = directory.path().join("activity-cards.json");
-    let discord = Substitute::start(succeed()).await?;
-    let accepted = now() - 60;
-    // The message answered early; the child it delegated still runs, and
-    // the observation core queued to report it waits.
-    let parent_report = delegating(
-        tools(None, &[], &[("bash", "make", true)]),
-        WorkState::Running,
-    );
-    let parent = |delivery| {
-        let mut parent = turn(
-            "parent",
-            TurnState::Completed,
-            accepted,
-            Some(parent_report.clone()),
-        );
-        parent.delivery = Some(delivery);
-        parent
-    };
-    let observation = |state, activity| turn("report", state, accepted + 5, activity);
-    discord.record(vec![job(
-        "parent",
-        "300",
-        accepted,
-        vec![
-            parent(DeliveryState::Pending),
-            observation(TurnState::Queued, None),
-        ],
-    )]);
-    let (delivering, monitor) = discord.monitor(discord.http(false), config(false), &records);
-    let created = discord
-        .wait_for(&Method::POST, "/channels/300/messages", 1)
-        .await?;
-    let text = created[0].content();
-    assert!(
-        text.starts_with("⏳ Answered · delegated work goes on"),
-        "{text}"
-    );
-    assert!(text.contains("✓ bash `make`"), "{text}");
-    assert!(text.contains("delegation `research` · running"), "{text}");
-    // The observation runs, showing the child's progress.
-    let waiting = delegating(
-        tools(Some("Waiting for research."), &[], &[]),
-        WorkState::Running,
-    );
-    discord.record(vec![job(
-        "parent",
-        "300",
-        accepted,
-        vec![
-            parent(DeliveryState::Delivered),
-            observation(TurnState::Running, Some(waiting)),
-        ],
-    )]);
-    let working = discord
-        .wait_for_text(&Method::PATCH, "/channels/300/messages/901", "Working")
-        .await?;
-    assert!(working.content().contains("> Waiting for research."));
-    // Its report ends the job with the child's final state.
-    let reported = delegating(tools(None, &[], &[]), WorkState::Succeeded);
-    let mut report = observation(TurnState::Completed, Some(reported));
-    report.delivery = Some(DeliveryState::Delivered);
-    discord.record(vec![job(
-        "parent",
-        "300",
-        accepted,
-        vec![parent(DeliveryState::Delivered), report],
-    )]);
-    delivering.send(Delivering::Recorded)?;
-    let summary = discord
-        .wait_for_text(&Method::PATCH, "/channels/300/messages/901", "Done")
-        .await?
-        .content();
-    assert!(summary.starts_with("✓ Done · answered"), "{summary}");
-    assert!(summary.contains("✓ bash `make`"), "{summary}");
-    // One row per piece of work, as its latest report says.
-    assert_eq!(summary.matches("research").count(), 1, "{summary}");
-    assert!(
-        summary.contains("delegation `research` · done · 1m 1s"),
-        "{summary}"
-    );
-    assert!(!summary.contains("may not be shown"), "{summary}");
-    recorded_soon(&records, &json!({})).await?;
-    assert_eq!(discord.matching(&Method::POST, "/channels").len(), 1);
-    assert!(discord.matching(&Method::DELETE, "/channels").is_empty());
-    monitor.abort();
-    Ok(())
-}
-
-#[tokio::test]
 async fn jobs_of_one_conversation_get_cards_of_their_own_across_pages_of_jobs_at_work()
 -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
@@ -1116,8 +1002,8 @@ async fn jobs_of_one_conversation_get_cards_of_their_own_across_pages_of_jobs_at
             vec![turn("second", state, accepted, None)],
         )
     };
-    // Two messages of one conversation, one waiting behind the other, and
-    // more jobs at work than a page of them lists.
+    // Two messages of one conversation, the second still queued in core,
+    // and more jobs at work than a page of them lists.
     discord.record(vec![
         running("first", "300", accepted, Some(make())),
         second(TurnState::Queued),
@@ -1131,7 +1017,7 @@ async fn jobs_of_one_conversation_get_cards_of_their_own_across_pages_of_jobs_at
             .iter()
             .position(|seen| {
                 seen.path == format!("/channels/{channel}/messages")
-                    && seen.content().contains("Waiting for earlier work") == waits
+                    && seen.content().contains("Waiting for the runtime") == waits
             })
             .map(|index| (901 + index).to_string())
             .with_context(|| format!("no card in {channel}"))
@@ -1531,48 +1417,6 @@ async fn a_card_left_unfinished_is_finished_by_the_next_start_without_another() 
         );
         monitor.abort();
     }
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_job_moving_between_pages_has_one_card_owner_with_its_latest_read() -> anyhow::Result<()>
-{
-    let directory = tempfile::tempdir()?;
-    let records = directory.path().join("activity-cards.json");
-    let discord = Substitute::start(succeed()).await?;
-    let accepted = now() - 60;
-    let job = |origin, channel, detail| {
-        running(
-            origin,
-            channel,
-            accepted,
-            Some(tools(None, &[("bash", detail)], &[])),
-        )
-    };
-    discord.record(vec![
-        job("a", "300", "first"),
-        job("b", "301", "b"),
-        job("c", "302", "c"),
-    ]);
-    let held = discord.hold_reads().await;
-    let (_delivering, monitor) = discord.monitor(discord.http(false), config(false), &records);
-    discord.read_taken(0).await?;
-    // Completing a turn queues its observation at a later acceptance sequence:
-    // the same origin can appear again after the first page's cursor.
-    let mut continued = job("a", "300", "observation");
-    continued.turns[0].turn_id = "a-observation".to_owned();
-    discord.record(vec![job("b", "301", "b"), job("c", "302", "c"), continued]);
-    drop(held);
-    for channel in ["300", "301", "302"] {
-        discord
-            .wait_for(&Method::POST, &format!("/channels/{channel}/messages"), 1)
-            .await?;
-    }
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let cards = discord.cards_in("300");
-    assert_eq!(cards.len(), 1, "{cards:#?}");
-    assert!(cards[0].content().contains("observation"));
-    monitor.abort();
     Ok(())
 }
 

@@ -1,19 +1,16 @@
 //! The runtime workers core runs, kept to what the serving registry says:
-//! each enabled runtime gets its `parallel_turns` message workers and a
-//! fixed few observation workers, a durable one a single dispatcher, and a
-//! disabled runtime none. One
-//! supervisor owns them. When the registry changes it starts the workers a
-//! lane lacks and retires those it no longer wants: a retired worker claims
-//! nothing more, and the turn it holds settles as at shutdown. A lane gets
-//! new workers only as retired ones end, so it never runs more turns at once
-//! than the registry has allowed it since.
+//! each enabled runtime gets one dispatcher, which hands it its queued
+//! turns in order, and a disabled runtime none. One supervisor owns them.
+//! When the registry changes it starts the dispatchers runtimes lack and
+//! retires those it no longer wants: a retired dispatcher hands over nothing
+//! more, and ends once the hand-over it is making has. A runtime gets a new
+//! dispatcher only once its retired one has ended, so it never has two.
 //!
-//! While an operator's [`Pause`] is in force it runs none: every worker
-//! retires, an observation in progress is set aside to be asked again, and
-//! nothing is started until the pause ends or lapses.
+//! While an operator's [`Pause`] is in force it runs none: every dispatcher
+//! retires, and nothing is started until the pause ends or lapses.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
     time::Duration,
 };
@@ -29,33 +26,27 @@ use tokio_util::sync::CancellationToken;
 use tracing::error;
 use uuid::Uuid;
 
-use super::{AppState, runtime_worker};
-use crate::Lane;
+use super::{AppState, runtime};
 
-/// How many observations of one runtime core follows at once. More wait in
-/// the queue; messages are unaffected.
-pub(super) const OBSERVATION_WORKERS: usize = 4;
-
+/// How a runtime's dispatcher stands.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-pub(crate) struct Workers {
-    pub(crate) claiming: usize,
-    /// Retired workers still settling the turn they hold.
-    pub(crate) settling: usize,
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Dispatcher {
+    #[default]
+    Stopped,
+    /// Handing the runtime its queued turns.
+    Dispatching,
+    /// Retired, ending once the hand-over it is making has.
+    Retiring,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-pub(crate) struct RuntimeWorkers {
-    pub(crate) messages: Workers,
-    pub(crate) observations: Workers,
-}
-
-/// Every runtime's workers, as the supervisor arranged them for `registry`.
+/// Every runtime's dispatcher, as the supervisor arranged them for `registry`.
 #[derive(Clone, Debug, Default)]
 pub(super) struct Census {
     pub(super) registry: Option<Arc<LoadedConfig>>,
     /// The holder of the pause in force when they were arranged.
     pub(super) paused: Option<Uuid>,
-    pub(super) runtimes: BTreeMap<String, RuntimeWorkers>,
+    pub(super) runtimes: BTreeMap<String, Dispatcher>,
 }
 
 /// An operator's hold on the runtime workers while maintenance drains core.
@@ -80,29 +71,18 @@ fn in_force(pause: &watch::Sender<Option<Pause>>) -> Option<Pause> {
     pause.borrow().filter(|pause| pause.live(Instant::now()))
 }
 
-fn wanted(config: &LoadedConfig) -> BTreeMap<(String, Lane), usize> {
-    let mut wanted = BTreeMap::new();
-    for runtime in config
+/// The registry's runtimes, and of them, the enabled ones, which want a dispatcher.
+fn runtimes(config: &LoadedConfig) -> impl Iterator<Item = (&str, bool)> {
+    config
         .value
         .providers
         .iter()
         .filter(|provider| provider.role == ProviderRole::Runtime)
-    {
-        // A durable runtime's one dispatcher hands it every turn in order.
-        let (messages, observations) = match (runtime.enabled, runtime.durable) {
-            (false, _) => (0, 0),
-            (true, true) => (1, 0),
-            (true, false) => (runtime.parallel_turns() as usize, OBSERVATION_WORKERS),
-        };
-        wanted.insert((runtime.id.clone(), Lane::Messages), messages);
-        wanted.insert((runtime.id.clone(), Lane::Observations), observations);
-    }
-    wanted
+        .map(|provider| (provider.id.as_str(), provider.enabled))
 }
 
 struct Worker {
     runtime: String,
-    lane: Lane,
     retire: CancellationToken,
 }
 
@@ -111,10 +91,10 @@ struct Supervisor {
     state: AppState,
     census: Arc<watch::Sender<Census>>,
     stopping: CancellationToken,
-    /// Parent of every claiming worker's token: cancelled by a pause, or
-    /// by shutdown through `stopping`, it retires them all and sets aside
-    /// the observations they run. Replaced when the pause ends.
-    set_aside: CancellationToken,
+    /// Parent of every dispatcher's token: cancelled by a pause, or by
+    /// shutdown through `stopping`, it retires them all. Replaced when the
+    /// pause ends.
+    serving: CancellationToken,
     /// The holder of the pause the workers are arranged under.
     paused: Option<Uuid>,
     tasks: JoinSet<()>,
@@ -122,80 +102,63 @@ struct Supervisor {
 }
 
 impl Supervisor {
-    /// Starts the workers each lane lacks and retires those it no longer
-    /// wants, counting retired workers still settling as the lane's own.
-    /// A pause in force wants none.
+    /// Starts the dispatchers runtimes lack and retires those it no longer
+    /// wants, a retiring one counting as its runtime's. A pause in force
+    /// wants none.
     fn arrange(&mut self, config: &Arc<LoadedConfig>) {
         self.paused = in_force(&self.state.pause).map(|pause| pause.holder);
-        let mut wanted = wanted(config);
-        if self.paused.is_some() {
-            self.set_aside.cancel();
-            for workers in wanted.values_mut() {
-                *workers = 0;
+        let wanted: BTreeSet<&str> = if self.paused.is_some() {
+            self.serving.cancel();
+            BTreeSet::new()
+        } else {
+            if self.serving.is_cancelled() {
+                self.serving = self.stopping.child_token();
             }
-        } else if self.set_aside.is_cancelled() {
-            self.set_aside = self.stopping.child_token();
-        }
-        let mut lanes = wanted.keys().cloned().collect::<Vec<_>>();
+            runtimes(config)
+                .filter_map(|(runtime, enabled)| enabled.then_some(runtime))
+                .collect()
+        };
         for worker in self.workers.values() {
-            let lane = (worker.runtime.clone(), worker.lane);
-            if !lanes.contains(&lane) {
-                lanes.push(lane);
+            if !wanted.contains(worker.runtime.as_str()) {
+                worker.retire.cancel();
             }
         }
-        for (runtime, lane) in lanes {
-            let target = wanted.get(&(runtime.clone(), lane)).copied().unwrap_or(0);
-            let (mut claiming, mut settling) = (Vec::new(), 0);
-            for worker in self.workers.values() {
-                if worker.runtime == runtime && worker.lane == lane {
-                    if worker.retire.is_cancelled() {
-                        settling += 1;
-                    } else {
-                        claiming.push(&worker.retire);
-                    }
-                }
+        for runtime in wanted {
+            if self
+                .workers
+                .values()
+                .any(|worker| worker.runtime == runtime)
+            {
+                continue;
             }
-            for retire in claiming.iter().skip(target) {
-                retire.cancel();
-            }
-            for _ in claiming.len() + settling..target {
-                let retire = self.set_aside.child_token();
-                let task = self.tasks.spawn(runtime_worker(
-                    self.state.clone(),
-                    runtime.clone(),
-                    lane,
-                    retire.clone(),
-                    self.set_aside.clone(),
-                ));
-                self.workers.insert(
-                    task.id(),
-                    Worker {
-                        runtime: runtime.clone(),
-                        lane,
-                        retire,
-                    },
-                );
-            }
+            let retire = self.serving.child_token();
+            let task = self.tasks.spawn(runtime::dispatcher(
+                self.state.clone(),
+                runtime.to_owned(),
+                retire.clone(),
+            ));
+            self.workers.insert(
+                task.id(),
+                Worker {
+                    runtime: runtime.to_owned(),
+                    retire,
+                },
+            );
         }
         self.publish(config);
     }
 
     fn publish(&self, config: &Arc<LoadedConfig>) {
-        let mut runtimes = wanted(config)
-            .into_keys()
-            .map(|(runtime, _)| (runtime, RuntimeWorkers::default()))
+        let mut runtimes = runtimes(config)
+            .map(|(runtime, _)| (runtime.to_owned(), Dispatcher::Stopped))
             .collect::<BTreeMap<_, _>>();
         for worker in self.workers.values() {
-            let runtime = runtimes.entry(worker.runtime.clone()).or_default();
-            let lane = match worker.lane {
-                Lane::Messages => &mut runtime.messages,
-                Lane::Observations => &mut runtime.observations,
-            };
-            if worker.retire.is_cancelled() {
-                lane.settling += 1;
+            let dispatcher = if worker.retire.is_cancelled() {
+                Dispatcher::Retiring
             } else {
-                lane.claiming += 1;
-            }
+                Dispatcher::Dispatching
+            };
+            runtimes.insert(worker.runtime.clone(), dispatcher);
         }
         self.census.send_replace(Census {
             registry: Some(config.clone()),
@@ -224,7 +187,7 @@ impl Supervisor {
         let id = match ended {
             Ok((id, ())) => id,
             Err(failure) => {
-                error!(error = %failure, "runtime worker ended abnormally");
+                error!(error = %failure, "runtime dispatcher ended abnormally");
                 failure.id()
             }
         };
@@ -232,9 +195,9 @@ impl Supervisor {
     }
 }
 
-/// Keeps the workers to the serving registry and the operator's pause until
-/// `stopping`, then waits for every worker to settle the turn it holds.
-/// `census` tells who asks how the workers stand.
+/// Keeps the dispatchers to the serving registry and the operator's pause
+/// until `stopping`, then waits for every one to end its hand-over.
+/// `census` tells who asks how they stand.
 pub(super) async fn supervise(
     state: AppState,
     census: Arc<watch::Sender<Census>>,
@@ -245,7 +208,7 @@ pub(super) async fn supervise(
     let mut supervisor = Supervisor {
         state,
         census,
-        set_aside: stopping.child_token(),
+        serving: stopping.child_token(),
         stopping: stopping.clone(),
         paused: None,
         tasks: JoinSet::new(),
@@ -284,8 +247,8 @@ pub(super) async fn supervise(
             }
         }
     }
-    // Each worker's token descends from `stopping`: none claims again, and
-    // each settles the turn it holds, or sets aside its observation.
+    // Each dispatcher's token descends from `stopping`: none hands over
+    // another turn, and each ends its hand-over.
     let config = registry.borrow().clone();
     while let Some(ended) = supervisor.tasks.join_next_with_id().await {
         supervisor.ended(ended);

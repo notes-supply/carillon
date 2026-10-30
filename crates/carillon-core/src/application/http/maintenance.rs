@@ -1,9 +1,9 @@
 //! The operator's pause of the runtime workers, so maintenance stops the
 //! services only once nothing core runs would be interrupted. One holder at
 //! a time pauses them for a lease it renews. While the pause is in force
-//! the supervisor runs no worker: claimed messages settle and their answers
-//! enter the outbox, observations are set aside to be asked again, and
-//! queued work waits. Accepting events and delivering answers go on.
+//! the supervisor runs no worker: a hand-over under way ends, and queued
+//! work waits. Accepting events, settling the turns runtimes hold and
+//! delivering answers go on.
 //!
 //! A drain reports facts for the holder to judge: how many workers have not
 //! yet ended, once the supervisor has arranged them for this very pause;
@@ -27,7 +27,7 @@ use tokio::{task::JoinSet, time::Instant};
 use tracing::info;
 use uuid::Uuid;
 
-use super::{ApiError, AppState, Pause, authorize, runtime_token};
+use super::{ApiError, AppState, Pause, authorize, runtime_token, workers::Dispatcher};
 use crate::RuntimeClient;
 
 /// The longest a holder may leave its pause unrenewed.
@@ -43,7 +43,7 @@ pub(crate) struct Lease {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct Drain {
     pub(crate) holder: Uuid,
-    /// Workers that may still claim or hold a turn, a retired one counting
+    /// Dispatchers that may still hand a turn over, a retired one counting
     /// until its task ends; unknown until the supervisor has arranged the
     /// workers under this pause.
     pub(crate) workers: Option<usize>,
@@ -168,9 +168,8 @@ async fn drain(state: &AppState, holder: Uuid) -> Result<Drain, ApiError> {
             census
                 .runtimes
                 .values()
-                .flat_map(|runtime| [runtime.messages, runtime.observations])
-                .map(|lane| lane.claiming + lane.settling)
-                .sum()
+                .filter(|dispatcher| **dispatcher != Dispatcher::Stopped)
+                .count()
         })
     };
     let interfaces = config
@@ -202,7 +201,9 @@ async fn drain(state: &AppState, holder: Uuid) -> Result<Drain, ApiError> {
 }
 
 /// Asks every runtime of the registry at once, enabled or not: a disabled
-/// runtime's program may still run and hold what a restart loses.
+/// runtime's program may still run and hold what a restart loses. One that
+/// refuses the connection is not running, as one serving no agent is not,
+/// and holds nothing.
 async fn restart_readiness(client: &Client, config: &LoadedConfig) -> Vec<RuntimeRestart> {
     let mut asked = JoinSet::new();
     let runtimes = config
@@ -215,16 +216,18 @@ async fn restart_readiness(client: &Client, config: &LoadedConfig) -> Vec<Runtim
         let (client, url, id) = (client.clone(), runtime.url.clone(), runtime.id.clone());
         asked.spawn(async move {
             let answer = match token {
-                Ok(token) => RuntimeClient::new(client, url, token)
-                    .restart_readiness()
-                    .await
-                    .map_err(|error| format!("{error:#}")),
-                Err(error) => Err(format!("{error:#}")),
+                Ok(token) => {
+                    RuntimeClient::new(client, url, token)
+                        .restart_readiness()
+                        .await
+                }
+                Err(error) => Err(error),
             };
             let unready = match answer {
                 Ok(RestartReadiness::Ready {}) => None,
                 Ok(RestartReadiness::Unready { reason }) => Some(reason),
-                Err(error) => Some(format!("it did not say whether it can restart ({error})")),
+                Err(error) if not_running(&error) => None,
+                Err(error) => Some(format!("it did not say whether it can restart ({error:#})")),
             };
             (index, RuntimeRestart { id, unready })
         });
@@ -232,4 +235,12 @@ async fn restart_readiness(client: &Client, config: &LoadedConfig) -> Vec<Runtim
     let mut answers = asked.join_all().await;
     answers.sort_by_key(|(index, _)| *index);
     answers.into_iter().map(|(_, answer)| answer).collect()
+}
+
+fn not_running(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::ConnectionRefused)
+    })
 }

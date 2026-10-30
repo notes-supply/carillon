@@ -103,7 +103,7 @@ fn following(discord: &Substitute, records: &Path, reactions: &Reactions) -> Pro
 }
 
 #[tokio::test]
-async fn a_waiting_turn_offers_its_runtimes_controls_until_it_runs() -> anyhow::Result<()> {
+async fn a_turn_offers_the_controls_its_runtime_lists_in_any_phase() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let records = directory.path().join("activity-cards.json");
     let discord = Substitute::start(succeed()).await?;
@@ -114,11 +114,20 @@ async fn a_waiting_turn_offers_its_runtimes_controls_until_it_runs() -> anyhow::
     discord
         .wait_for(&Method::PUT, "/channels/300/messages/400/reactions/", 2)
         .await?;
-    // Running, the turn offers nothing: every control goes.
-    let make = tools(None, &[("bash", "make")], &[]);
-    discord.record(vec![job_of_message(accepted, make)]);
+    // Running, the turn offers what its runtime lists there: a stop alone.
+    let make = || tools(None, &[("bash", "make")], &[]);
+    let stoppable = TurnActivity {
+        controls: vec![ControlAction::Stop],
+        ..make()
+    };
+    discord.record(vec![job_of_message(accepted, stoppable)]);
     discord
-        .wait_for(&Method::DELETE, "/channels/300/messages/400/reactions/", 3)
+        .wait_for(&Method::DELETE, &own(&Method::DELETE, "⏩").1, 1)
+        .await?;
+    // Listing none, it offers none.
+    discord.record(vec![job_of_message(accepted, make())]);
+    discord
+        .wait_for(&Method::DELETE, &own(&Method::DELETE, "🛑").1, 1)
         .await?;
     tokio::time::sleep(Duration::from_millis(3_500)).await;
     provider.stop().await?;
@@ -130,6 +139,7 @@ async fn a_waiting_turn_offers_its_runtimes_controls_until_it_runs() -> anyhow::
             own(&Method::PUT, "⏩"),
             own(&Method::PUT, "🛑"),
             own(&Method::DELETE, "⏩"),
+            own(&Method::PUT, "🛑"),
             own(&Method::DELETE, "🛑"),
         ]
     );

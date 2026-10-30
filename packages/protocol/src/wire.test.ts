@@ -10,6 +10,7 @@ import {
   ModelStateSchema,
   ModelQuerySchema,
   ModelUpdateSchema,
+  RunningTurnSchema,
   RuntimeTurnControlSchema,
   RuntimeTurnRequestSchema,
   TurnActivitySchema,
@@ -58,4 +59,6 @@ it("preserves the shared Rust/TypeScript held turn fixtures", () => {
   for (const value of held.controls) expect(Parse(RuntimeTurnControlSchema, value)).toEqual(value);
   for (const value of held.invalid_controls)
     expect(Check(RuntimeTurnControlSchema, value)).toBe(false);
+  for (const value of held.running) expect(Parse(RunningTurnSchema, value)).toEqual(value);
+  for (const value of held.invalid_running) expect(Check(RunningTurnSchema, value)).toBe(false);
 });

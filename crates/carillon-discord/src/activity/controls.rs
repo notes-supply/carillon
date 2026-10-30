@@ -1,6 +1,6 @@
-//! The control reactions on a job's message while its turn waits in the
+//! The control reactions on a job's message while its turn is in the
 //! runtime that holds it: offered while the runtime's snapshot offers them,
-//! withdrawn once it does not. [`Reactions`] records which control emoji a
+//! in any phase, and withdrawn once it does not. [`Reactions`] records which control emoji a
 //! message may show, and removes them before the message's outcome.
 
 use std::collections::BTreeSet;
@@ -22,13 +22,13 @@ pub(super) fn waits(turn: &JobTurn) -> bool {
         .is_some_and(|activity| activity.phase == ActivityPhase::Queued)
 }
 
-/// The controls the job's message offers now: its runtime's, while the
-/// job's newest turn runs there and waits.
+/// The controls the job's message offers now: those its runtime lists while
+/// the job's newest turn runs there, which the runtime decides.
 fn wanted(known: &Known) -> Vec<ControlAction> {
     known
         .job()
         .and_then(|job| job.at_work())
-        .filter(|turn| turn.state == TurnState::Running && waits(turn))
+        .filter(|turn| turn.state == TurnState::Running)
         .and_then(|turn| turn.activity.as_ref())
         .map(|activity| activity.controls.clone())
         .unwrap_or_default()

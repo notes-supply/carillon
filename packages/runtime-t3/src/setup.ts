@@ -1,33 +1,20 @@
 /**
  * Setting the runtime up on an existing T3 server: what the server offers,
- * the runtime's settings for an agent's project and model, and Carillon's
- * profiles: T3 instances of their own whose homes link to the assistant's
- * resources. The T3 token is given as a value, never as an argument, and
- * written only to a private credential file the runtime's settings name.
+ * and the runtime's settings for an agent's project and model. The T3 token
+ * is given as a value, never as an argument, and written only to a private
+ * credential file the runtime's settings name.
  */
-import { mkdir, open, readFile, realpath, rename, rm } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { readFile, realpath } from "node:fs/promises";
+import { resolve } from "node:path";
 import type { AvailableModel } from "@carillon/protocol";
 import type { Agent, Installation } from "@carillon/runtime/installation";
+import { publish, Unsynced } from "@carillon/runtime/publish";
 import { stringify } from "smol-toml";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
-import {
-  instanceCreate,
-  ORCHESTRATION_PROTOCOL,
-  RPC,
-  ServerSettingsSchema,
-  type InstanceDefinition,
-} from "./contracts.ts";
+import { ORCHESTRATION_PROTOCOL, RPC } from "./contracts.ts";
 import { catalog } from "./models.ts";
-import {
-  assistantResources,
-  HARNESSES,
-  profileHome,
-  instanceHome,
-  type Harness,
-} from "./profiles.ts";
-import { offers, parseSettings, readSettings, type SettingsFile } from "./settings.ts";
+import { parseSettings, readSettings, type SettingsFile } from "./settings.ts";
 import { connectT3, DEFAULT_TIMEOUT_MS, T3Failure, type Connect, type T3Endpoint } from "./t3.ts";
 
 /** A T3 project: an agent works in its workspace. */
@@ -37,11 +24,10 @@ export interface Project {
   readonly workspace: string;
 }
 
-/** A T3 server's projects, usable models and existing Carillon profiles. */
+/** A T3 server's projects and usable models. */
 export interface Offer {
   readonly projects: readonly Project[];
   readonly models: readonly AvailableModel[];
-  readonly profiles: readonly string[];
 }
 
 /** An agent's project and default model, the model as T3 names its provider instance and slug. */
@@ -63,43 +49,22 @@ const ShellSchema = Type.Object({
 });
 
 /**
- * The projects and models the server at `endpoint` offers, after T3 checks
- * the `refresh` instances again: T3 keeps what it last found of an
- * instance's sign-in, so one signed in since then has to be checked again.
- * With a scope, only models the named agent may use are offered.
+ * The projects and models the server at `endpoint` offers. With a scope, it
+ * is an agent of the installation's that the models are offered to.
  */
 export async function discover(
   endpoint: T3Endpoint,
   options: {
     readonly connect?: Connect;
-    readonly refresh?: readonly string[];
     readonly scope?: { readonly installation: Installation; readonly agentId: string };
   } = {},
 ): Promise<Offer> {
-  const { connect = connectT3, refresh = [], scope } = options;
-  const agent = scope === undefined ? undefined : agentOf(scope.installation, scope.agentId);
-  const profiles = new Set(
-    scope === undefined ? [] : ((await readExisting(scope.installation))?.profiles ?? []),
-  );
+  const { connect = connectT3, scope } = options;
+  if (scope !== undefined) plain(agentOf(scope.installation, scope.agentId));
   const connection = await connect(endpoint);
   try {
-    for (const instanceId of refresh) await connection.call(RPC.refreshProviders, { instanceId });
     const { available } = catalog(await connection.call(RPC.getConfig, {}));
-    const settings: unknown = await connection.call(RPC.getSettings, {});
-    if (!Check(ServerSettingsSchema, settings))
-      throw new T3Failure("malformed", "T3 described unreadable provider settings");
-    return {
-      profiles: Object.keys(settings.providerInstances ?? {}).filter((id) =>
-        Object.keys(HARNESSES).some((harness) => id === `carillon_${harness}`),
-      ),
-      projects: await projects(endpoint),
-      models:
-        agent === undefined
-          ? available
-          : available.filter(({ provider }) =>
-              offers(profiles, agent.resources !== undefined, provider),
-            ),
-    };
+    return { projects: await projects(endpoint), models: available };
   } finally {
     connection.close();
   }
@@ -151,14 +116,21 @@ function agentOf(installation: Installation, id: string): Agent {
   return agent;
 }
 
+/** `agent`, refused when `carillon.toml` gives it resources: T3 runs plain T3 Code, which takes none. */
+export function plain(agent: Agent): Agent {
+  if (agent.resources !== undefined)
+    throw new Error(
+      `${agent.id} has resources in carillon.toml, but T3 runs plain T3 Code, which takes none; remove them or run the agent on Pi`,
+    );
+  return agent;
+}
+
 /**
  * Writes the runtime's settings for `choice` on the server at `endpoint`,
  * naming the token's file. The server must offer the project, rooted at the
- * agent's workspace, and the model, among the instances of the agent's kind:
- * the profiles for the assistant, the agent with resources, the others for
- * plain T3 Code. The settings of the other agents this runtime serves and the
- * profiles are kept, as are the title and the agent's model options while its
- * model stays the same; settings that do not read as valid are refused before
+ * agent's workspace, and the model. The settings of the other agents this
+ * runtime serves are kept, as are the agent's model options while its model
+ * stays the same; settings that do not read as valid are refused before
  * anything is written.
  *
  * The new settings are checked as the runtime reads them first. A token
@@ -173,7 +145,7 @@ export async function configure(
   connect: Connect = connectT3,
 ): Promise<Project> {
   const existing = await readExisting(installation);
-  const agent = agentOf(installation, choice.agentId);
+  const agent = plain(agentOf(installation, choice.agentId));
   const offer = await discover(endpoint, { connect });
   const project = offer.projects.find(({ id }) => id === choice.projectId);
   if (project === undefined) throw new Error(`T3 has no project ${choice.projectId}`);
@@ -183,20 +155,12 @@ export async function configure(
       `T3 project ${project.title} works in ${project.workspace}, but ${agent.name} works in ` +
         `${agent.workspace}; choose a project rooted there`,
     );
-  const assistant = agent.resources !== undefined;
-  const profiles = new Set(existing?.profiles ?? []);
   if (
     !offer.models.some(
-      ({ provider, model }) =>
-        offers(profiles, assistant, provider) &&
-        provider === choice.instanceId &&
-        model === choice.model,
+      ({ provider, model }) => provider === choice.instanceId && model === choice.model,
     )
   )
-    throw new Error(
-      `T3 offers ${agent.name} no usable model ${choice.instanceId}/${choice.model}` +
-        (assistant ? ", among Carillon's profiles" : ""),
-    );
+    throw new Error(`T3 offers ${agent.name} no usable model ${choice.instanceId}/${choice.model}`);
   const before = existing?.agents?.[choice.agentId];
   return publishSettings(installation, endpoint, existing, {
     ...existing?.agents,
@@ -216,86 +180,6 @@ export async function configure(
   }).then(() => project);
 }
 
-/** A Carillon profile: a T3 instance of its own for one harness. */
-export interface ProfileChoice {
-  readonly harness: Harness;
-  /** An API key the harness signs in with instead of its own login. */
-  readonly key?: string;
-  /** A compatible endpoint the key belongs to, instead of the harness's own. */
-  readonly endpoint?: string;
-}
-
-/**
- * Makes Carillon's profile for a harness on the server at `endpoint`: the T3
- * instance `carillon_HARNESS`, whose home holds the harness's own state.
- * T3 owns an existing instance's homePath; new instances use the setup user's
- * XDG data directory. Creates the home for sign-in and saves the profile ID,
- * leaving resource links untouched until the runtime starts serving.
- * Returns the instance and home for the harness's native sign-in.
- */
-export async function profile(
-  installation: Installation,
-  endpoint: T3Endpoint,
-  choice: ProfileChoice,
-  connect: Connect = connectT3,
-): Promise<{ readonly instanceId: string; readonly home: string }> {
-  const existing = await readExisting(installation);
-  const harness = HARNESSES[choice.harness];
-  const resources = assistantResources(installation);
-  if (resources === undefined)
-    throw new Error(
-      `no agent of ${installation.runtime.id} in carillon.toml has resources for a profile to share`,
-    );
-  const instanceId = `carillon_${choice.harness}`;
-  let home: string;
-  const connection = await connect(endpoint);
-  try {
-    const settings: unknown = await connection.call(RPC.getSettings, {});
-    if (!Check(ServerSettingsSchema, settings))
-      throw new T3Failure(
-        "malformed",
-        "T3 described its settings in a form this runtime does not understand",
-      );
-    const instance = settings.providerInstances?.[instanceId];
-    home =
-      instance === undefined ? profileHome(choice.harness) : instanceHome(choice.harness, instance);
-    if (instance !== undefined && (choice.key !== undefined || choice.endpoint !== undefined))
-      throw new Error(
-        `T3 already has profile ${instanceId}; change its environment in T3 settings. The supplied key or endpoint was not applied`,
-      );
-    await mkdir(home, { recursive: true, mode: 0o700 });
-    if (instance === undefined)
-      await connection.call(
-        RPC.updateSettings,
-        instanceCreate(instanceId, {
-          driver: harness.driver,
-          displayName: harness.name,
-          homePath: home,
-          environment: environmentOf(harness, choice),
-        }),
-      );
-  } finally {
-    connection.close();
-  }
-  const profiles = [...new Set([...(existing?.profiles ?? []), instanceId])];
-  await publishSettings(installation, endpoint, existing, existing?.agents, profiles);
-  return { instanceId, home };
-}
-
-/** The profile's sign-in, as the harness's environment: none for its own login. */
-function environmentOf(
-  harness: (typeof HARNESSES)[Harness],
-  choice: ProfileChoice,
-): InstanceDefinition["environment"] {
-  if (choice.key === undefined) return [];
-  if (choice.endpoint === undefined)
-    return [{ name: harness.key, value: choice.key, sensitive: true }];
-  return [
-    { name: harness.endpoint, value: choice.endpoint, sensitive: false },
-    { name: harness.endpointKey, value: choice.key, sensitive: true },
-  ];
-}
-
 async function readExisting(installation: Installation): Promise<SettingsFile | undefined> {
   return readSettings(installation.providerFile).catch((failure: unknown) => {
     throw new Error(
@@ -306,8 +190,8 @@ async function readExisting(installation: Installation): Promise<SettingsFile | 
 }
 
 /**
- * Publishes the settings with `agents` and `profiles` for `endpoint`, the
- * rest as they were, naming the token's file as described at
+ * Publishes the settings with `agents` for `endpoint`, naming the token's
+ * file as described at
  * {@link configure}. Only the agents `carillon.toml` gives this runtime keep
  * their settings: the runtime refuses to start with any other's.
  */
@@ -316,7 +200,6 @@ async function publishSettings(
   endpoint: T3Endpoint,
   existing: SettingsFile | undefined,
   agents: SettingsFile["agents"],
-  profiles: SettingsFile["profiles"] = existing?.profiles,
 ): Promise<void> {
   // Another token gets a file of its own, so the file the settings in place
   // name is never rewritten. One that cannot be read is not the same token.
@@ -337,8 +220,6 @@ async function publishSettings(
   const settings = stringify({
     url: endpoint.url,
     token_file: tokenFile,
-    ...(existing?.title === undefined ? {} : { title: existing.title }),
-    ...(profiles === undefined || profiles.length === 0 ? {} : { profiles }),
     ...(served.length === 0 ? {} : { agents: Object.fromEntries(served) }),
   });
   try {
@@ -357,41 +238,6 @@ async function publishSettings(
       ? failure
       : new Error(`${unchanged}: ${reason(failure)}`, { cause: failure });
   });
-}
-
-/** A publication in place whose directory did not sync, so a crash may still undo it. */
-class Unsynced extends Error {}
-
-/**
- * Replaces `path` with `text`, readable only by the owner, durably. A failure
- * before the rename leaves `path` as it was; {@link Unsynced} leaves the new
- * text in place.
- */
-async function publish(path: string, text: string): Promise<void> {
-  const temporary = `${path}.${crypto.randomUUID()}.tmp`;
-  const file = await open(temporary, "wx", 0o600);
-  try {
-    try {
-      await file.writeFile(text);
-      await file.sync();
-    } finally {
-      await file.close();
-    }
-    await rename(temporary, path);
-  } catch (failure) {
-    await rm(temporary, { force: true });
-    throw failure;
-  }
-  try {
-    const directory = await open(dirname(path), "r");
-    try {
-      await directory.sync();
-    } finally {
-      await directory.close();
-    }
-  } catch (failure) {
-    throw new Unsynced(`${path}: changed, but not confirmed durable: ${reason(failure)}`);
-  }
 }
 
 function reason(failure: unknown): string {

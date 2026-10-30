@@ -73,17 +73,17 @@ impl Runtime {
     }
 }
 
-/// Creates an installation with the Discord provider and the chosen runtime
-/// registered and credentialed, and only those. Provider-owned settings
-/// (such as Discord admission or the T3 server) are written afterwards by
-/// each provider's own commands.
+/// Creates an installation with `agents`, and the Discord provider and
+/// `runtime` registered and credentialed, and only those. Provider-owned
+/// settings are written afterwards by each provider's own commands.
 pub(super) fn initialize(
     root: &Path,
-    workspace: &Path,
     base_port: u16,
     runtime: Runtime,
+    agents: Vec<AgentConfig>,
 ) -> Result<PathBuf> {
-    if !workspace.is_absolute() || !workspace.is_dir() {
+    let usable = |workspace: &Path| workspace.is_absolute() && workspace.is_dir();
+    if !agents.iter().all(|agent| usable(&agent.workspace)) {
         bail!("workspace must be an absolute path to an existing directory");
     }
     if root.exists() && fs::read_dir(root)?.next().is_some() {
@@ -102,7 +102,7 @@ pub(super) fn initialize(
             attachments: AttachmentLimits::default(),
         },
         providers: default_providers(base_port, &discord_token, runtime, &runtime_token)?,
-        agents: vec![assistant(runtime, workspace)],
+        agents,
     };
     config.validate()?;
     let target = absolute_destination(root)?;
@@ -150,16 +150,15 @@ pub(super) fn initialize(
     Ok(target.join("carillon.toml"))
 }
 
-/// The ID of the agent a new installation starts with: Carillon's own
-/// assistant, with the installation's resources.
+/// The ID of Carillon's own assistant, on Pi with the installation's resources.
 pub(super) const ASSISTANT: &str = "assistant";
 
 #[must_use]
-pub(super) fn assistant(runtime: Runtime, workspace: &Path) -> AgentConfig {
+pub(super) fn assistant(workspace: &Path) -> AgentConfig {
     AgentConfig {
         id: ASSISTANT.to_owned(),
         name: "Carillon".to_owned(),
-        runtime: runtime.id().to_owned(),
+        runtime: Runtime::Pi.id().to_owned(),
         workspace: workspace.to_path_buf(),
         resources: Some(PathBuf::from(RESOURCES)),
     }
@@ -227,8 +226,6 @@ fn default_providers(
             url: format!("http://127.0.0.1:{}", checked_port(base_port, 1)?),
             token_hash: hash_token(discord_token),
             enabled: true,
-            parallel_turns: None,
-            durable: false,
         },
         runtime_provider(runtime, checked_port(base_port, 2)?, runtime_token)?,
     ])
@@ -242,9 +239,6 @@ fn runtime_provider(runtime: Runtime, port: u16, token: &str) -> Result<Provider
         url: format!("http://127.0.0.1:{port}"),
         token_hash: hash_token(token),
         enabled: true,
-        parallel_turns: None,
-        // Pi holds the turns core hands it; T3 answers while core waits.
-        durable: runtime == Runtime::Pi,
     })
 }
 
@@ -618,15 +612,14 @@ mod tests {
         Config, LoadedConfig, ProviderRole, RELEASE_VERSION, hash_token,
     };
 
-    use super::{backup, initialize, restore, set_provider};
-    use crate::Lane;
+    use super::{Runtime, assistant, backup, initialize, restore, set_provider};
 
     fn initialize_test_installation(
         root: &Path,
         workspace: &Path,
         base_port: u16,
     ) -> Result<PathBuf> {
-        initialize(root, workspace, base_port, super::Runtime::Pi)
+        initialize(root, base_port, Runtime::Pi, vec![assistant(workspace)])
     }
 
     /// A base port for backups that must find their services stopped, away
@@ -781,9 +774,9 @@ mod tests {
     fn a_t3_installation_registers_only_the_t3_runtime() -> Result<()> {
         let directory = tempdir()?;
         let root = directory.path().join("installation");
-        let config_path = initialize(&root, directory.path(), 44_000, super::Runtime::T3)?;
+        let config_path = initialize(&root, 44_000, Runtime::T3, Vec::new())?;
         let config = LoadedConfig::load(&config_path)?;
-        assert_eq!(config.value.agents[0].runtime, "runtime-t3");
+        assert!(config.value.agents.is_empty());
         let ids: Vec<&str> = config
             .value
             .providers
@@ -1203,11 +1196,9 @@ mod tests {
                     None,
                 )?;
                 let expected_state = if uncertain {
-                    assert!(
-                        db.claim("runtime-pi", Lane::Messages, &CancellationToken::new())?
-                            .is_some()
-                    );
-                    assert_eq!(db.recover_running_turns(&[], "")?, 1);
+                    let held = db.next_dispatch("runtime-pi")?.context("nothing queued")?;
+                    db.dispatched(&held)?;
+                    assert_eq!(db.recover_running_turns(&[])?, 1);
                     TurnState::Interrupted
                 } else {
                     TurnState::Queued
@@ -1277,7 +1268,6 @@ mod tests {
                 version: "test".to_owned(),
                 url: "http://127.0.0.1:1".to_owned(),
                 enabled: true,
-                durable: false,
             }],
             attachments: AttachmentLimits {
                 free_space_mib: 0,
@@ -1293,7 +1283,7 @@ mod tests {
     )]
     async fn backups_carry_validated_attachments_and_leave_scratch_behind() -> Result<()> {
         use carillon_protocol::model::{
-            ExternalEvent, RuntimeTurnResponse, SelectedProvider, StagedAttachments, StagedFile,
+            ExternalEvent, SelectedProvider, StagedAttachments, StagedFile,
         };
 
         let directory = tempdir()?;
@@ -1346,22 +1336,13 @@ mod tests {
                 .await?;
             turns.push(receipt.turn_id);
         }
-        core.run_next(
-            "runtime-pi",
-            Lane::Messages,
-            &CancellationToken::new(),
-            async |request| {
-                Ok(RuntimeTurnResponse {
-                    output: "read it".to_owned(),
-                    follow_up: None,
-                    unanswered_left: false,
-                    activity: None,
-                    attachments_left: false,
-                    correlation_id: request.correlation_id,
-                })
-            },
-        )
-        .await?;
+        core.dispatch_next("runtime-pi", &CancellationToken::new(), async |_| Ok(()))
+            .await?;
+        let answer = carillon_protocol::turns::TurnOutcome::Answered {
+            output: "read it".to_owned(),
+            activity: None,
+        };
+        core.settle("runtime-pi", &turns[0], answer)?;
         // Scratch the archive must not carry: interface staging still in
         // place, an abandoned copy and a published capture never committed.
         let store = config.value.data_dir.join("attachments");
@@ -1399,29 +1380,16 @@ mod tests {
         let restored = LoadedConfig::load(&restore(&archive, &relocated)?)?;
         let restored_core = installed_core(&restored)?;
         restored_core
-            .run_next(
-                "runtime-pi",
-                Lane::Messages,
-                &CancellationToken::new(),
-                async |request| {
-                    assert_eq!(request.correlation_id, turns[1]);
-                    let root = Path::new(&request.attachment_root);
-                    assert!(root.starts_with(&relocated), "{}", root.display());
-                    assert_eq!(
-                        fs::read(root.join(&request.attachments[0].path))
-                            .map_err(|error| crate::TurnFailure::Uncertain(error.into()))?,
-                        b"queued file"
-                    );
-                    Ok(RuntimeTurnResponse {
-                        output: "read it".to_owned(),
-                        follow_up: None,
-                        unanswered_left: false,
-                        activity: None,
-                        attachments_left: false,
-                        correlation_id: request.correlation_id,
-                    })
-                },
-            )
+            .dispatch_next("runtime-pi", &CancellationToken::new(), async |request| {
+                assert_eq!(request.correlation_id, turns[1]);
+                let root = Path::new(&request.attachment_root);
+                assert!(root.starts_with(&relocated), "{}", root.display());
+                assert_eq!(
+                    fs::read(root.join(&request.attachments[0].path)).ok(),
+                    Some(b"queued file".to_vec())
+                );
+                Ok(())
+            })
             .await?;
 
         // Damaged archives are refused before publication.

@@ -103,11 +103,6 @@ enum Command {
         #[arg(long)]
         provider: Option<String>,
     },
-    /// Install the Discord skill into the agents' resources.
-    Tools {
-        #[command(subcommand)]
-        action: ToolsAction,
-    },
     /// Call the running provider's Discord API; prints JSON and never retries a write.
     Call {
         /// Registry ID of the Discord instance; inferred when only one is configured.
@@ -156,13 +151,6 @@ module serving then.")]
         #[command(subcommand)]
         action: Option<ModuleAction>,
     },
-}
-
-#[derive(Debug, Subcommand)]
-enum ToolsAction {
-    /// Install the Discord skill into every agent's resources, which
-    /// Carillon's T3 profiles share.
-    Install,
 }
 
 #[derive(Debug, Subcommand)]
@@ -257,9 +245,6 @@ pub(crate) async fn run() -> Result<()> {
             );
             check_declared(&loaded, &provider, &discord, &release()?).await?;
         }
-        Command::Tools {
-            action: ToolsAction::Install,
-        } => install_tools(&installation()?, &release_library()?)?,
         Command::Call {
             provider,
             operation,
@@ -394,10 +379,6 @@ fn uploads(files: &[PathBuf]) -> Result<Vec<Upload>> {
         .collect()
 }
 
-fn release_library() -> Result<PathBuf> {
-    Ok(release()?.join("lib"))
-}
-
 /// The release this program belongs to, the directory holding its `bin`:
 /// the installed application, or a release an update is checking.
 fn release() -> Result<PathBuf> {
@@ -407,30 +388,6 @@ fn release() -> Result<PathBuf> {
         .and_then(Path::parent)
         .map(Path::to_path_buf)
         .context("cannot locate this program's release")
-}
-
-/// Copy the release's Discord skill from `lib` into the agent resources,
-/// which Carillon's T3 profiles share. The Pi runtime brings the Discord
-/// tools and their guidance itself.
-fn install_tools(config: &LoadedConfig, lib: &Path) -> Result<()> {
-    use carillon_installation::filesystem::{publish, sync_ancestors};
-    let skill = fs::read(lib.join("carillon-discord-SKILL.md"))
-        .context("release has no Discord skill; use a packaged installation")?;
-    let roots = config.value.resource_roots();
-    if roots.is_empty() {
-        bail!("no agent has Carillon resources to install the Discord skill into");
-    }
-    for root in &roots {
-        let skills = root.join("skills/discord");
-        fs::create_dir_all(&skills)?;
-        sync_ancestors(&skills)?;
-        publish(&skills.join("SKILL.md"), &skill, 0o600)?;
-        println!("Installed the Discord skill in {}.", root.display());
-    }
-    println!(
-        "Turns core accepts from now on capture it, and Carillon's T3 profiles share it at once."
-    );
-    Ok(())
 }
 
 /// `carillon discord setup`, then has a running provider serve the settings

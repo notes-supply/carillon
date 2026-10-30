@@ -1,6 +1,6 @@
-//! What durable runtimes call core for, with their own credential: settling
-//! the turns they hold and opening their own. And the dispatcher that hands
-//! each of them its queued turns.
+//! What runtimes call core for, with their own credential: settling the
+//! turns they hold, opening their own and reading back those core records
+//! running. And the dispatcher that hands each of them its queued turns.
 
 use axum::{
     Json,
@@ -11,7 +11,7 @@ use axum::{
 use carillon_installation::config::{LoadedConfig, Provider, ProviderRole};
 use carillon_protocol::{
     model::EventReceipt,
-    turns::{TurnOpening, TurnOutcome},
+    turns::{RunningTurn, TurnOpening, TurnOutcome},
 };
 use serde::de::DeserializeOwned;
 use std::{
@@ -22,10 +22,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use super::{ApiError, AppState, authorize, provider_identity, runtime_token};
-use crate::{InboxFailure, Lane, RuntimeClient, Stalled, WorkerStep, db::Settled};
+use crate::{InboxFailure, RuntimeClient, Stalled, WorkerStep, db::Settled};
 
-/// The durable runtime a call names, authenticated by the same credential
-/// core presents to it. It may be disabled: it still settles the turns it
+/// The runtime a call names, authenticated by the same credential core
+/// presents to it. It may be disabled: it still settles the turns it
 /// accepted before.
 fn runtime_provider<'a>(
     headers: &HeaderMap,
@@ -35,11 +35,6 @@ fn runtime_provider<'a>(
     let provider = config
         .provider(id, ProviderRole::Runtime)
         .map_err(|_| ApiError::forbidden("unknown runtime provider"))?;
-    if !provider.durable {
-        return Err(ApiError::forbidden(
-            "only a durable runtime settles or opens turns",
-        ));
-    }
     authorize(headers, &provider.token_hash)?;
     Ok(provider)
 }
@@ -99,6 +94,17 @@ pub(super) async fn open(
     ))
 }
 
+/// The turns core records running on the calling runtime, enabled or not,
+/// for it to take up again once its process restarts: each with the request
+/// core handed it, and the key of a turn it opened.
+pub(super) async fn running(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<RunningTurn>>, ApiError> {
+    let runtime = runtime_provider(&headers, &state.config())?.id.clone();
+    Ok(Json(state.core.running_turns(&runtime)?))
+}
+
 /// How long a dispatcher waits after its first failure, doubling with each
 /// failure after it up to `LONGEST_RETRY`.
 const FIRST_RETRY: Duration = Duration::from_secs(1);
@@ -134,11 +140,11 @@ impl Failing {
     }
 }
 
-/// Hands a durable runtime its queued turns, one at a time and in order,
+/// Hands a runtime its queued turns, one at a time and in order,
 /// until `stopping` is cancelled. While it cannot, it backs off, logging
 /// each new kind of failure once and the recovery once.
 pub(super) async fn dispatcher(state: AppState, runtime_id: String, stopping: CancellationToken) {
-    let mut work = state.core.work(Lane::Messages);
+    let mut work = state.core.work();
     let mut failing = Failing::default();
     while !stopping.is_cancelled() {
         work.mark_unchanged();
@@ -175,7 +181,7 @@ pub(super) async fn dispatcher(state: AppState, runtime_id: String, stopping: Ca
     }
 }
 
-/// One step of a durable runtime's dispatcher: its oldest queued turn,
+/// One step of a runtime's dispatcher: its oldest queued turn,
 /// handed over.
 pub(super) async fn dispatch_next(
     state: &AppState,
