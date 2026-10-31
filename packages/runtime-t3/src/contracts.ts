@@ -357,6 +357,11 @@ export const ThreadSnapshotSchema = Type.Object({
 });
 
 export const DispatchResultSchema = Type.Object({ sequence: Type.Integer() });
+/**
+ * T3's receipt for a command: the sequence of the last event it committed,
+ * or of the thread's latest event when it committed none.
+ */
+export type DispatchResult = Static<typeof DispatchResultSchema>;
 
 /**
  * A setting a model offers, as T3 describes it: a select among choices, or a
@@ -564,6 +569,13 @@ export function queuedRunCancel(threadId: string, runId: string) {
   } as const;
 }
 
+/**
+ * Interrupts a run. T3 commits the request with its receipt and stops the
+ * work afterwards, through the provider. It ends background work a
+ * completed run left without closing the session, and drops the wake of
+ * the process it stopped, so what T3 publishes after the receipt's
+ * sequence is the stop's outcome.
+ */
 export function runInterrupt(threadId: string, runId: string, reason: string) {
   return {
     type: "run.interrupt",

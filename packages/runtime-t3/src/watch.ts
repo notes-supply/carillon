@@ -130,8 +130,15 @@ export interface TurnWatch {
   /** The thread's own model selection, as last seen: the one its next run uses unless a dispatch names another. */
   selection(): NativeSelection | undefined;
   outcome(): Outcome | undefined;
-  /** Nothing of the turn still executes: no active run, no background work, and no report its live process still owes. */
-  quiet(): boolean;
+  /**
+   * Nothing of the turn still executes: no active run, no background work, and
+   * no report its process owes. Work still listed executes, and a report owed
+   * or a gap not witnessed does too until T3 shows the process stopped: by
+   * ending its session, or by ending the listing after committing a stop at
+   * `stoppedAt`, as T3 drops the wake of a process it stops. Work ending on its
+   * own just after that commit looks the same, and may still report.
+   */
+  quiet(stoppedAt?: number): boolean;
   /** The provider session behind the turn's latest run, while T3 lists one. */
   providerSession(): string | undefined;
   /** Whether a request of the turn is still open. */
@@ -395,6 +402,9 @@ export function watchTurn(
    * say whether the result was delivered.
    */
   let backgroundSeenAt: number | undefined;
+  /** Whether the latest run listed work at the last fold, and the sequence of the event that last ended a listing. */
+  let listing = false;
+  let unlistedAt: number | undefined;
   /** A recovered native cohort has no per-child provenance for its provider wakes. */
   let nativeReportsUnknown = false;
   /** Native children observed settled while their parent could still consume them. */
@@ -861,7 +871,14 @@ export function watchTurn(
    * is a broken reference: its work is unknown, never an empty roster.
    */
   function roster(run: Run | undefined): readonly BackgroundTask[] {
-    return listedWork(run).filter((task) => !otherTasks.has(task.taskId));
+    if (run?.providerThreadId == null) return [];
+    const thread = providerThreads.get(run.providerThreadId);
+    if (thread === undefined)
+      throw new T3Failure(
+        "malformed",
+        `T3 named provider thread ${String(run.providerThreadId)} for run ${run.id} without sending its record`,
+      );
+    return (thread.pendingBackgroundTasks ?? []).filter((task) => !otherTasks.has(task.taskId));
   }
 
   /** Native Agent work can be published without a provider-thread roster. */
@@ -889,21 +906,6 @@ export function watchTurn(
         return true;
     }
     return false;
-  }
-
-  /** Everything the run's provider thread lists, the turn's or not. */
-  function listedWork(run: Run | undefined): readonly BackgroundTask[] {
-    if (run?.providerThreadId == null) return [];
-    return listed(providerThreads.get(run.providerThreadId), run);
-  }
-
-  function listed(thread: ProviderThread | undefined, run: Run): readonly BackgroundTask[] {
-    if (thread === undefined)
-      throw new T3Failure(
-        "malformed",
-        `T3 named provider thread ${String(run.providerThreadId)} for run ${run.id} without sending its record`,
-      );
-    return thread.pendingBackgroundTasks ?? [];
   }
 
   /**
@@ -1380,16 +1382,12 @@ export function watchTurn(
     return earlier.size > 0 || laterOthers().some(isActive);
   }
 
-  /**
-   * Nothing of the turn still executes: work still listed is, and a report
-   * owed or a gap not witnessed is too while T3 has not shown the turn's
-   * process stopped.
-   */
-  function quiet(): boolean {
+  function quiet(stoppedAt = Infinity): boolean {
     if (active() !== undefined || nativeUnknown()) return false;
     const pending = pendingWork();
     if (pending === undefined) return true;
-    return pending !== "listed" && last !== undefined && sessionStopped(last);
+    if (pending === "listed" || last === undefined) return false;
+    return sessionStopped(last) || (unlistedAt !== undefined && unlistedAt > stoppedAt);
   }
 
   return {
@@ -1634,6 +1632,8 @@ export function watchTurn(
       }
       if (last !== undefined) {
         const listed = workListed(last);
+        if (listing && !listed && item["kind"] === "event") unlistedAt = lastSequence;
+        listing = listed;
         if (listed) backgroundSeenAt = last.ordinal;
         else if (isActive(last) && backgroundSeenAt === last.ordinal) backgroundSeenAt = undefined;
         if (listed && last.status === "completed") wakeOwedAfter = last.ordinal;
