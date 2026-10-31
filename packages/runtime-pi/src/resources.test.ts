@@ -153,6 +153,11 @@ it.each([
     "settings this runtime does not know: defaultTools",
   ],
   [
+    "an extensions change it does not know",
+    { "settings.json": JSON.stringify({ extensions: { add: ["extensions/a.js"], extra: 1 } }) },
+    "settings this runtime does not know at /extensions: extra",
+  ],
+  [
     "an extension that does not exist",
     { "settings.json": JSON.stringify({ extensions: ["memory"] }) },
     "selects memory, which is neither a built-in extension",
