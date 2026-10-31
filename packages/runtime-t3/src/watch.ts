@@ -127,8 +127,6 @@ export interface TurnWatch {
    * still listed.
    */
   sessionShared(): boolean;
-  /** Whether the thread has any message yet. */
-  empty(): boolean;
   /** The thread's own model selection, as last seen: the one its next run uses unless a dispatch names another. */
   selection(): NativeSelection | undefined;
   outcome(): Outcome | undefined;
@@ -349,7 +347,6 @@ export function watchTurn(
    * records a provider handoff before it creates the run it hands over to.
    */
   const recentTransfers = new Map<string, ContextTransfer>();
-  let hasMessages = false;
   /** The turn's assistant messages by ID, kept across snapshots. */
   const assistant = new Map<string, Message>();
   let latestAssistant: Message | undefined;
@@ -436,7 +433,6 @@ export function watchTurn(
     earlier = new Map();
     continuationRuns = new Map();
     unclaimed.clear();
-    hasMessages = false;
     running = new Map();
     held = new Set();
     recent = [];
@@ -690,7 +686,6 @@ export function watchTurn(
   }
 
   function foldMessage(message: Message): void {
-    hasMessages = true;
     if (message.delegatedCompletion !== undefined)
       link(message.id, message.delegatedCompletion.parentRunId);
     if (message.role !== "assistant" || message.runId === null || !turnRuns.has(message.runId))
@@ -1018,11 +1013,6 @@ export function watchTurn(
     )
       return "gap";
     return undefined;
-  }
-
-  /** The turn's process owes a report in a run that has not appeared, and T3 has not shown it stopped. */
-  function wakeOwed(): boolean {
-    return last !== undefined && wakeOwedBy(last) && !sessionStopped(last);
   }
 
   function sessionOf(
@@ -1431,7 +1421,7 @@ export function watchTurn(
                 `T3 sent a thread snapshot that omits run ${id} this turn observed`,
               );
           const before = new Map([...turnRuns].map(([id, run]) => [id, run.status]));
-          const nativeWakeOwed = wakeOwed();
+          const nativeWakeOwed = last !== undefined && wakeOwedBy(last) && !sessionStopped(last);
           const ordinalBefore = last?.ordinal;
           reset();
           // A snapshot lists runs, announcements and children whole, so the
@@ -1661,7 +1651,6 @@ export function watchTurn(
     latestRun: () => last,
     busy,
     sessionShared: () => busy() || otherTasks.size > 0,
-    empty: () => !hasMessages,
     selection: () => threadSelection,
     quiet,
     providerSession() {
