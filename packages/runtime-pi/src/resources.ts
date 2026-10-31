@@ -238,7 +238,7 @@ async function readSettings(path: string): Promise<Settings> {
     throw new ExplainedFailure(
       422,
       first?.keyword === "additionalProperties"
-        ? `The agent's settings.json has settings this runtime does not know: ${first.params.additionalProperties.join(", ")}.`
+        ? `The agent's settings.json has settings this runtime does not know${first.instancePath.length === 0 ? "" : ` at ${first.instancePath}`}: ${first.params.additionalProperties.join(", ")}.`
         : `The agent's settings.json is invalid at ${first === undefined || first.instancePath.length === 0 ? "/" : first.instancePath}: ${first?.message ?? "unexpected value"}.`,
     );
   }
