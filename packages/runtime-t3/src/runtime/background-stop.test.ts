@@ -72,3 +72,50 @@ it.each([
     expect(runtime.restartReadiness()).toMatchObject({ state: "unready" });
   },
 );
+
+it.each([2, 33])(
+  "leaves an ignored stop unconfirmed while one of %s native children still runs",
+  async (count) => {
+    fake.interruptBehaviour = "ignore";
+    const controller = new AbortController();
+    const result = execute(turn("turn-1", "start native children"), controller.signal);
+    const parent = await started("turn-1");
+    const children = Array.from({ length: count }, (_, index) => ({
+      id: `native-${String(index)}`,
+      runId: parent.id,
+      parentNodeId: `node:run:${parent.id}:root`,
+      origin: "provider_native" as const,
+      driver: "claudeAgent",
+      status: "running" as const,
+      title: `Native child ${String(index)}`,
+      model: "claude-sonnet-5",
+      childThreadId: `child-${String(index)}`,
+      startedAt: "2026-10-31T00:00:00Z",
+      completionWake: "always" as const,
+    }));
+    const calls = children.map((child) => {
+      fake.subagent(threadId, child);
+      return fake.tool(threadId, parent.id, {
+        type: "subagent",
+        subagentId: child.id,
+        input: child.title,
+        status: "running",
+      });
+    });
+    fake.assistant(threadId, parent.id, "Children are running.");
+    fake.complete(threadId, parent.id);
+    // Past the fold's bound, the last child is known only as live work left out.
+    await fake.waitFor(
+      () => activity()?.work?.items.some((item) => item.id === "native-0") === true,
+    );
+    controller.abort(new Error("core disconnected"));
+    await fake.waitFor(() => fake.interrupts.includes(parent.id));
+    for (const [index, child] of children.slice(0, -1).entries()) {
+      fake.subagent(threadId, { ...child, status: "completed" });
+      const call = calls[index];
+      if (call !== undefined) fake.finishTool(threadId, call);
+    }
+    await expect(result).rejects.toThrow(UNCONFIRMED);
+    expect(runtime.restartReadiness()).toMatchObject({ state: "unready" });
+  },
+);
