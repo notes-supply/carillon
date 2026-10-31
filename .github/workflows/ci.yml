@@ -26,7 +26,7 @@ concurrency:
 env:
   # Each lane installs its own tools; a task needing another fails instead.
   MISE_AUTO_INSTALL: "false"
-  MISE_VERSION: "2026.10.3"
+  MISE_VERSION: "2026.10.18"
 
 jobs:
   plan:
@@ -91,12 +91,12 @@ jobs:
           persist-credentials: false
       # Test scratch goes to the runner's work disk, whatever /tmp is.
       - run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
-      - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
         with:
           version: ${{ env.MISE_VERSION }}
-          install_args: rust cargo:cargo-deny cargo:cargo-shear aqua:nextest-rs/nextest/cargo-nextest
+          install_args: rust github:EmbarkStudios/cargo-deny github:Boshen/cargo-shear aqua:nextest-rs/nextest/cargo-nextest
           cache_key_prefix: mise-rust
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: check
           # Dependency builds are kept even when a test fails: rust-cache
@@ -118,7 +118,7 @@ jobs:
         with:
           persist-credentials: false
       - run: echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
-      - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
         with:
           version: ${{ env.MISE_VERSION }}
           install_args: node pnpm
@@ -154,7 +154,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y --no-install-recommends strace
-      - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
         with:
           version: ${{ env.MISE_VERSION }}
           install_args: rust node bun pnpm github:EmbarkStudios/cargo-about conda:coreutils
@@ -168,7 +168,7 @@ jobs:
           mkdir "$probe/a" "$probe/b"
           mise exec -- mv --exchange --no-copy -T "$probe/a" "$probe/b"
           rm -r "$probe"
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: release
           # Dependency builds are kept even when a test fails: rust-cache
@@ -268,7 +268,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
         with:
           version: ${{ env.MISE_VERSION }}
           install_args: ast-grep shellcheck
@@ -285,7 +285,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550 # v5.2.2
         with:
           version: ${{ env.MISE_VERSION }}
           install_args: actionlint shellcheck zizmor
