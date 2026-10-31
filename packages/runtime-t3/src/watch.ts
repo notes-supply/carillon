@@ -134,9 +134,10 @@ export interface TurnWatch {
    * Nothing of the turn still executes: no active run, no background work, and
    * no report its process owes. Work still listed executes, and a report owed
    * or a gap not witnessed does too until T3 shows the process stopped: by
-   * ending its session, or by ending the listing of all of it after a stop it
-   * committed at `stoppedAt`: T3 drops the wake of a process it stops. Work
-   * ending on its own after the commit, before T3 acts, may still report.
+   * ending its session, or by ending the listing after a stop it committed at
+   * `stoppedAt`: T3 drops the wake of a process it stops. Work ending on its
+   * own after the commit may still report. Once the bound has left out live or
+   * owed work, no stop of the turn is confirmed.
    */
   quiet(stoppedAt?: number): boolean;
   /** The provider session behind the turn's latest run, while T3 lists one. */
@@ -345,6 +346,8 @@ export function watchTurn(
   let workOmitted = false;
   /** Live or owed child agents the bound left out: the report counts as owed until a snapshot settles it. */
   let owedUnknown = false;
+  /** The bound once left out live or owed work: never retained, it is not missed if a snapshot omits it. */
+  let lostSight = false;
   /** Runs first seen in a bounded snapshot that may have left their messages outside its window. */
   const windowed = new Set<string>();
   /** The latest snapshot left older history outside its window. */
@@ -606,7 +609,7 @@ export function watchTurn(
       const room = [...ownLinks.keys()].find((kept) => ran.has(kept));
       if (room === undefined) {
         workOmitted = true;
-        owedUnknown = true;
+        owedUnknown = lostSight = true;
         return;
       }
       ownLinks.delete(room);
@@ -810,7 +813,7 @@ export function watchTurn(
         nativeInsideParent.add(task.id);
     } else {
       workOmitted = true;
-      if (!settledTask(task)) owedUnknown = true;
+      if (!settledTask(task)) owedUnknown = lostSight = true;
     }
   }
 
@@ -1336,13 +1339,6 @@ export function watchTurn(
     return false;
   }
 
-  /** Later runs on the thread this turn does not own, as last seen. */
-  function laterOthers(): Run[] {
-    return [...unclaimed.values(), ...continuationRuns.values()].filter(
-      (run) => !turnRuns.has(run.id),
-    );
-  }
-
   /**
    * Dates the background work the turn's current run lists when the fold
    * first sees it, since T3 does not, and forgets what it no longer lists.
@@ -1379,15 +1375,17 @@ export function watchTurn(
   }
 
   function busy(): boolean {
-    return earlier.size > 0 || laterOthers().some(isActive);
+    const later = [...unclaimed.values(), ...continuationRuns.values()];
+    return earlier.size > 0 || later.some((run) => !turnRuns.has(run.id) && isActive(run));
   }
 
   function quiet(stoppedAt = Infinity): boolean {
     if (active() !== undefined || nativeUnknown()) return false;
+    if (lostSight && stoppedAt < Infinity) return false;
     const pending = pendingWork();
     if (pending === undefined) return true;
     if (pending === "listed" || last === undefined) return false;
-    return sessionStopped(last) || (!owedUnknown && (unlistedAt ?? -1) > stoppedAt);
+    return sessionStopped(last) || (unlistedAt ?? -1) > stoppedAt;
   }
 
   return {
