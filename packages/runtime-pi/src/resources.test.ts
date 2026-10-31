@@ -209,6 +209,11 @@ it.each([
     "/tools/0 must have required properties execute",
   ],
   [
+    "a user extension with a tool wrap that wraps nothing",
+    userExtension('{ wraps: [{ tool: "echo", section: 42 }] }'),
+    "/wraps/0 must have required properties wrap",
+  ],
+  [
     "a user extension with a wrap that targets nothing",
     userExtension("{ wraps: [{ wrap: (tool) => tool }] }"),
     "/wraps/0",
