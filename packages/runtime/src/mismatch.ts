@@ -5,9 +5,9 @@ import { Errors } from "typebox/value";
  * The reason to report why `value` does not match `schema`. An unknown key is
  * reported first, naming the keys: TypeBox lists it after the error it causes,
  * a misspelled required key or a union's earlier branch, and before that
- * lists each unknown key as a `false` schema. Otherwise the deepest error
- * names the value: a union lists the branch the value was not meant for, at
- * the union's own path, before the error inside the branch it was.
+ * lists each unknown key as a `false` schema. Otherwise the first error is
+ * reported, passing over a union branch whose type the value does not have
+ * while another branch found errors inside it: the value was meant for that one.
  */
 export function mismatch(schema: TSchema, value: unknown) {
   const errors = Errors(schema, value);
@@ -17,10 +17,10 @@ export function mismatch(schema: TSchema, value: unknown) {
       ...unknown,
       message: `${unknown.message}: ${unknown.params.additionalProperties.join(", ")}`,
     };
-  const depth = (path: string) => path.split("/").length;
-  let deepest = errors.find((each) => each.keyword !== "boolean") ?? errors[0];
-  for (const each of errors)
-    if (each.keyword !== "boolean" && depth(each.instancePath) > depth(deepest?.instancePath ?? ""))
-      deepest = each;
-  return deepest;
+  const reported = errors.filter((each) => each.keyword !== "boolean");
+  const beneath = (path: string) =>
+    reported.some((other) => other.instancePath.startsWith(`${path}/`));
+  return (
+    reported.find((each) => each.keyword !== "type" || !beneath(each.instancePath)) ?? errors[0]
+  );
 }
