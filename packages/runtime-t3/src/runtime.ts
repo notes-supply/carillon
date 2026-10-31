@@ -41,6 +41,7 @@ import { Check } from "typebox/value";
 import {
   derivedId,
   DispatchResultSchema,
+  type DispatchResult,
   messageDispatch,
   modelSelectionSet,
   queuedRunCancel,
@@ -888,13 +889,30 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
       );
       return { quiet: true, requestOpen };
     }
+    /**
+     * T3's receipt for a command that stops the run, or undefined when T3
+     * refuses it: a queued run's withdrawal once the run has left its queue,
+     * an interrupt of a run with nothing to stop, or a session's detach.
+     */
+    async function accepts(command: StopCommand): Promise<DispatchResult | undefined> {
+      try {
+        const answer = await connection.call(RPC.dispatchCommand, command);
+        if (Check(DispatchResultSchema, answer)) return answer;
+        throw new T3Failure("malformed", "T3 answered a stop in a form this runtime cannot read");
+      } catch (failure) {
+        if (!(failure instanceof T3Failure) || failure.kind !== "rejected") throw failure;
+        log(
+          `thread ${command.threadId}: ${command.type} not accepted (${redactCredentials(failure.detail ?? failure.message)})`,
+        );
+        return undefined;
+      }
+    }
     // A run still waiting in T3's queue is withdrawn; once it has started
     // (or T3 says it is no longer queued), it is interrupted.
     const { threadId } = binding;
-    const accepted =
-      (target.status === "queued" &&
-        (await accepts(connection, queuedRunCancel(threadId, target.id)))) ||
-      (await accepts(connection, runInterrupt(threadId, target.id, "Carillon cancelled the turn")));
+    const stopped =
+      (target.status === "queued" && (await accepts(queuedRunCancel(threadId, target.id)))) ||
+      (await accepts(runInterrupt(threadId, target.id, "Carillon cancelled the turn")));
     // With nothing running, T3 refuses the interrupt, yet the process may
     // still owe a report (or T3 cannot show whether it does). The only public
     // stop left is a provider-session detach. T3 accepts it, removes the
@@ -902,7 +920,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     // what that process may still deliver, so the acceptance is a request
     // receipt, never a confirmed stop.
     const session = watch.providerSession();
-    if (!accepted && watch.activeRun() === undefined && session !== undefined) {
+    if (!stopped && watch.activeRun() === undefined && session !== undefined) {
       // The session is shared by every run on the thread: while a run this
       // turn does not own is active, or background work another run started
       // is listed, detaching it would stop that work too.
@@ -912,15 +930,13 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
         );
         return { quiet: false, requestOpen: watch.requestOpen() };
       }
-      if (
-        await accepts(connection, sessionDetach(threadId, session, "Carillon cancelled the turn"))
-      )
+      if (await accepts(sessionDetach(threadId, session, "Carillon cancelled the turn")))
         log(
           `thread ${binding.threadId}: T3 accepted a detach of provider session ${session}; its public contract does not confirm that the process has closed, so the stop is unconfirmed and the next turn interrupts any run it finds active`,
         );
       return { quiet: false, requestOpen: watch.requestOpen() };
     }
-    const quiet = await settle(watch, stream, (turn) => turn.quiet(), settleMs);
+    const quiet = await settle(watch, stream, (turn) => turn.quiet(stopped?.sequence), settleMs);
     const calls = watch.activity().tool_calls;
     const stop = { quiet, requestOpen: watch.requestOpen() };
     if (quiet)
@@ -932,25 +948,6 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
         `run ${target.id}: T3 did not confirm the stop within ${String(settleMs)} ms (active run: ${watch.activeRun()?.status ?? "none"}); it may still be running, and the next turn interrupts any run it finds active`,
       );
     return stop;
-  }
-
-  /**
-   * Whether T3 accepted the command that stops a run: a queued run's
-   * withdrawal, which T3 refuses once the run has left its queue, an
-   * interrupt, which it refuses for a run with nothing to stop, or a
-   * provider session's detach.
-   */
-  async function accepts(connection: T3Connection, command: StopCommand): Promise<boolean> {
-    try {
-      await connection.call(RPC.dispatchCommand, command);
-      return true;
-    } catch (failure) {
-      if (!(failure instanceof T3Failure) || failure.kind !== "rejected") throw failure;
-      log(
-        `thread ${command.threadId}: ${command.type} not accepted (${redactCredentials(failure.detail ?? failure.message)})`,
-      );
-      return false;
-    }
   }
 
   /**

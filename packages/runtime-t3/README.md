@@ -128,12 +128,14 @@ report of it is refused.
   steer or interrupt. A waiting message never reaches T3. A running one's
   own run is withdrawn from T3's queue or interrupted, and the turn settles
   as stopped once T3 confirms it, even while the runtime closes; a drained
-  restart is refused until then. A stop core has not recorded is kept in
-  `stops.json`, so the next start settles it before anything else and never
-  runs the message. A drained restart is refused until `stops.json` or core
-  keeps the stop, and a `stops.json` the runtime cannot read refuses its
-  start. Work by other runs (yours in T3's UI, for example) is never
-  interrupted.
+  restart is refused until then. For background work a completed run left,
+  T3 confirms the stop by no longer listing the work after it accepts the
+  interrupt; it keeps the native session. A stop core has not recorded is
+  kept in `stops.json`, so the next start settles it before anything else
+  and never runs the message. A drained restart is refused until
+  `stops.json` or core keeps the stop, and a `stops.json` the runtime cannot
+  read refuses its start. Work by other runs (yours in T3's UI, for
+  example) is never interrupted.
 - **Uncertain stops.** When T3 can't confirm a turn's native work stopped,
   the turn says so, and the runtime remembers that thread in memory. Later
   turns there still run, but one that depends on a follow-up ends

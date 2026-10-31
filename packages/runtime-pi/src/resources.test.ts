@@ -153,6 +153,16 @@ it.each([
     "settings this runtime does not know: defaultTools",
   ],
   [
+    "an extensions change it does not know",
+    { "settings.json": JSON.stringify({ extensions: { add: ["extensions/a.js"], extra: 1 } }) },
+    "settings this runtime does not know at /extensions: extra",
+  ],
+  [
+    "an extensions change with a value of the wrong type",
+    { "settings.json": JSON.stringify({ extensions: { remove: [1] } }) },
+    "invalid at /extensions/remove/0: must be string",
+  ],
+  [
     "an extension that does not exist",
     { "settings.json": JSON.stringify({ extensions: ["memory"] }) },
     "selects memory, which is neither a built-in extension",
@@ -197,6 +207,11 @@ it.each([
     "a user extension with a tool that cannot run",
     userExtension('{ tools: [{ name: "x", description: "X.", parameters: {} }] }'),
     "/tools/0 must have required properties execute",
+  ],
+  [
+    "a user extension with a tool wrap that wraps nothing",
+    userExtension('{ wraps: [{ tool: "echo", section: 42 }] }'),
+    "/wraps/0 must have required properties wrap",
   ],
   [
     "a user extension with a wrap that targets nothing",

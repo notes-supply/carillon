@@ -88,3 +88,13 @@ it("reads each agent's settings, refusing an agent ID outside the grammar or a s
     await expect(loadSettings(path, root)).rejects.toThrow(refusal);
   }
 });
+
+it("names a misspelled setting rather than the setting it hides", async () => {
+  const root = await mkdtemp(join(tmpdir(), "carillon-t3-settings-"));
+  directories.push(root);
+  const path = join(root, "runtime-t3.toml");
+  await writeFile(path, ['uri = "http://127.0.0.1:3773"', 'token_file = "t3.token"'].join("\n"));
+  await expect(loadSettings(path, root)).rejects.toThrow(
+    `${path}: / must not have additional properties: uri`,
+  );
+});

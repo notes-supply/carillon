@@ -229,12 +229,10 @@ const ACTIVE: ReadonlySet<Run["status"]> = new Set([
   "running",
   "waiting",
 ]);
-const BACKGROUND_ITEMS: ReadonlySet<string> = new Set([
-  "command_execution",
-  "dynamic_tool",
-  "subagent",
-]);
-const RUNNING_ITEMS: ReadonlySet<string> = new Set(["pending", "running", "waiting"]);
+/** A call T3 counts as the thread's background work while it runs. */
+const working = (item: FakeItem) =>
+  ["command_execution", "dynamic_tool", "subagent"].includes(item.type) &&
+  ["pending", "running", "waiting"].includes(item.status);
 
 export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
   const threads = new Map<string, FakeThread>();
@@ -900,10 +898,10 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
         if (ACTIVE.has(run.status)) {
           interrupts.push(runId);
           if (fake.interruptBehaviour === "settle") updateRun(thread.id, runId, "interrupted");
-        } else if (run.id === latest?.id && roster.length > 0) {
-          // T3 settles a stopped thread's remaining background work through its latest run.
+        } else if (run.id === latest?.id && (roster.length > 0 || thread.items.some(working))) {
+          // As T3: the latest run settles the thread's background work, after the receipt commits.
           interrupts.push(runId);
-          if (fake.interruptBehaviour === "settle") settleBackground(thread);
+          if (fake.interruptBehaviour === "settle") setImmediate(() => settleBackground(thread));
         } else throw new Error(`Run ${runId} is not interruptible.`);
         receipts.set(command.commandId, thread.sequence);
         return thread.sequence;
@@ -939,7 +937,7 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
   function settleBackground(thread: FakeThread): void {
     const now = new Date().toISOString();
     thread.items.forEach((item, index) => {
-      if (!BACKGROUND_ITEMS.has(item.type) || !RUNNING_ITEMS.has(item.status)) return;
+      if (!working(item)) return;
       const interrupted = {
         ...item,
         status: "interrupted" as const,

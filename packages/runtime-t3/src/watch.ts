@@ -127,13 +127,19 @@ export interface TurnWatch {
    * still listed.
    */
   sessionShared(): boolean;
-  /** Whether the thread has any message yet. */
-  empty(): boolean;
   /** The thread's own model selection, as last seen: the one its next run uses unless a dispatch names another. */
   selection(): NativeSelection | undefined;
   outcome(): Outcome | undefined;
-  /** Nothing of the turn still executes: no active run, no background work, and no report its live process still owes. */
-  quiet(): boolean;
+  /**
+   * Nothing of the turn still executes: no active run, no background work, and
+   * no report its process owes. Work still listed executes, and a report owed
+   * or a gap not witnessed does too until T3 shows the process stopped: by
+   * ending its session, or by ending the listing after a stop it committed at
+   * `stoppedAt`: T3 drops the wake of a process it stops. Work ending on its
+   * own after the commit may still report. Once the bound has left out live or
+   * owed work, no stop of the turn is confirmed.
+   */
+  quiet(stoppedAt?: number): boolean;
   /** The provider session behind the turn's latest run, while T3 lists one. */
   providerSession(): string | undefined;
   /** Whether a request of the turn is still open. */
@@ -340,6 +346,8 @@ export function watchTurn(
   let workOmitted = false;
   /** Live or owed child agents the bound left out: the report counts as owed until a snapshot settles it. */
   let owedUnknown = false;
+  /** The bound once left out live or owed work: never retained, it is not missed if a snapshot omits it. */
+  let lostSight = false;
   /** Runs first seen in a bounded snapshot that may have left their messages outside its window. */
   const windowed = new Set<string>();
   /** The latest snapshot left older history outside its window. */
@@ -349,7 +357,6 @@ export function watchTurn(
    * records a provider handoff before it creates the run it hands over to.
    */
   const recentTransfers = new Map<string, ContextTransfer>();
-  let hasMessages = false;
   /** The turn's assistant messages by ID, kept across snapshots. */
   const assistant = new Map<string, Message>();
   let latestAssistant: Message | undefined;
@@ -398,6 +405,9 @@ export function watchTurn(
    * say whether the result was delivered.
    */
   let backgroundSeenAt: number | undefined;
+  /** Whether the latest run listed work at the last fold, and the sequence of the event that last ended a listing. */
+  let listing = false;
+  let unlistedAt: number | undefined;
   /** A recovered native cohort has no per-child provenance for its provider wakes. */
   let nativeReportsUnknown = false;
   /** Native children observed settled while their parent could still consume them. */
@@ -436,7 +446,6 @@ export function watchTurn(
     earlier = new Map();
     continuationRuns = new Map();
     unclaimed.clear();
-    hasMessages = false;
     running = new Map();
     held = new Set();
     recent = [];
@@ -600,7 +609,7 @@ export function watchTurn(
       const room = [...ownLinks.keys()].find((kept) => ran.has(kept));
       if (room === undefined) {
         workOmitted = true;
-        owedUnknown = true;
+        owedUnknown = lostSight = true;
         return;
       }
       ownLinks.delete(room);
@@ -690,7 +699,6 @@ export function watchTurn(
   }
 
   function foldMessage(message: Message): void {
-    hasMessages = true;
     if (message.delegatedCompletion !== undefined)
       link(message.id, message.delegatedCompletion.parentRunId);
     if (message.role !== "assistant" || message.runId === null || !turnRuns.has(message.runId))
@@ -805,7 +813,7 @@ export function watchTurn(
         nativeInsideParent.add(task.id);
     } else {
       workOmitted = true;
-      if (!settledTask(task)) owedUnknown = true;
+      if (!settledTask(task)) owedUnknown = lostSight = true;
     }
   }
 
@@ -866,7 +874,14 @@ export function watchTurn(
    * is a broken reference: its work is unknown, never an empty roster.
    */
   function roster(run: Run | undefined): readonly BackgroundTask[] {
-    return listedWork(run).filter((task) => !otherTasks.has(task.taskId));
+    if (run?.providerThreadId == null) return [];
+    const thread = providerThreads.get(run.providerThreadId);
+    if (thread === undefined)
+      throw new T3Failure(
+        "malformed",
+        `T3 named provider thread ${String(run.providerThreadId)} for run ${run.id} without sending its record`,
+      );
+    return (thread.pendingBackgroundTasks ?? []).filter((task) => !otherTasks.has(task.taskId));
   }
 
   /** Native Agent work can be published without a provider-thread roster. */
@@ -894,21 +909,6 @@ export function watchTurn(
         return true;
     }
     return false;
-  }
-
-  /** Everything the run's provider thread lists, the turn's or not. */
-  function listedWork(run: Run | undefined): readonly BackgroundTask[] {
-    if (run?.providerThreadId == null) return [];
-    return listed(providerThreads.get(run.providerThreadId), run);
-  }
-
-  function listed(thread: ProviderThread | undefined, run: Run): readonly BackgroundTask[] {
-    if (thread === undefined)
-      throw new T3Failure(
-        "malformed",
-        `T3 named provider thread ${String(run.providerThreadId)} for run ${run.id} without sending its record`,
-      );
-    return thread.pendingBackgroundTasks ?? [];
   }
 
   /**
@@ -1018,11 +1018,6 @@ export function watchTurn(
     )
       return "gap";
     return undefined;
-  }
-
-  /** The turn's process owes a report in a run that has not appeared, and T3 has not shown it stopped. */
-  function wakeOwed(): boolean {
-    return last !== undefined && wakeOwedBy(last) && !sessionStopped(last);
   }
 
   function sessionOf(
@@ -1344,13 +1339,6 @@ export function watchTurn(
     return false;
   }
 
-  /** Later runs on the thread this turn does not own, as last seen. */
-  function laterOthers(): Run[] {
-    return [...unclaimed.values(), ...continuationRuns.values()].filter(
-      (run) => !turnRuns.has(run.id),
-    );
-  }
-
   /**
    * Dates the background work the turn's current run lists when the fold
    * first sees it, since T3 does not, and forgets what it no longer lists.
@@ -1387,19 +1375,17 @@ export function watchTurn(
   }
 
   function busy(): boolean {
-    return earlier.size > 0 || laterOthers().some(isActive);
+    const later = [...unclaimed.values(), ...continuationRuns.values()];
+    return earlier.size > 0 || later.some((run) => !turnRuns.has(run.id) && isActive(run));
   }
 
-  /**
-   * Nothing of the turn still executes: work still listed is, and a report
-   * owed or a gap not witnessed is too while T3 has not shown the turn's
-   * process stopped.
-   */
-  function quiet(): boolean {
+  function quiet(stoppedAt = Infinity): boolean {
     if (active() !== undefined || nativeUnknown()) return false;
+    if (lostSight && stoppedAt < Infinity) return false;
     const pending = pendingWork();
     if (pending === undefined) return true;
-    return pending !== "listed" && last !== undefined && sessionStopped(last);
+    if (pending === "listed" || last === undefined) return false;
+    return sessionStopped(last) || (unlistedAt ?? -1) > stoppedAt;
   }
 
   return {
@@ -1431,7 +1417,7 @@ export function watchTurn(
                 `T3 sent a thread snapshot that omits run ${id} this turn observed`,
               );
           const before = new Map([...turnRuns].map(([id, run]) => [id, run.status]));
-          const nativeWakeOwed = wakeOwed();
+          const nativeWakeOwed = last !== undefined && wakeOwedBy(last) && !sessionStopped(last);
           const ordinalBefore = last?.ordinal;
           reset();
           // A snapshot lists runs, announcements and children whole, so the
@@ -1644,6 +1630,8 @@ export function watchTurn(
       }
       if (last !== undefined) {
         const listed = workListed(last);
+        if (listing && !listed && item["kind"] === "event") unlistedAt = lastSequence;
+        listing = listed;
         if (listed) backgroundSeenAt = last.ordinal;
         else if (isActive(last) && backgroundSeenAt === last.ordinal) backgroundSeenAt = undefined;
         if (listed && last.status === "completed") wakeOwedAfter = last.ordinal;
@@ -1661,7 +1649,6 @@ export function watchTurn(
     latestRun: () => last,
     busy,
     sessionShared: () => busy() || otherTasks.size > 0,
-    empty: () => !hasMessages,
     selection: () => threadSelection,
     quiet,
     providerSession() {
