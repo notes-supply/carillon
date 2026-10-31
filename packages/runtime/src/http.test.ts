@@ -1,14 +1,10 @@
 import { once } from "node:events";
-import { afterEach, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import { ExplainedFailure, RuntimeClosed } from "./failure.ts";
 import { createRuntimeServer } from "./http.ts";
 import type { RuntimeOperations } from "./operations.ts";
 
 const key = `sk-proj-${"Ab1".repeat(20)}`;
-
-afterEach(() => {
-  vi.restoreAllMocks();
-});
 
 /** A runtime that refuses each turn with the input as the provider's explanation, and whose model changes are refused quoting the requested option. */
 async function serve() {

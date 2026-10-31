@@ -9,7 +9,6 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 inquire = { version = "0.9.4", default-features = false, features = ["crossterm"] }
-fs2.workspace = true
 hex.workspace = true
 reqwest.workspace = true
 serde.workspace = true

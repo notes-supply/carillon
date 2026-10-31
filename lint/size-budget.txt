@@ -10,6 +10,6 @@
 2009 packages/runtime-t3/src/runtime.test.ts
 1068 packages/runtime-t3/src/runtime.ts
 3366 packages/runtime-t3/src/watch.test.ts
-1913 packages/runtime-t3/src/watch.ts
+1912 packages/runtime-t3/src/watch.ts
 1026 scripts/test-filesystem.mjs
 2108 scripts/test-integration.mjs

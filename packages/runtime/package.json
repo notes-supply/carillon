@@ -11,7 +11,7 @@
     "@carillon/protocol": "workspace:*",
     "image-size": "2.0.4",
     "proper-lockfile": "4.1.2",
-    "smol-toml": "1.6.0",
-    "typebox": "1.0.65"
+    "smol-toml": "catalog:",
+    "typebox": "catalog:"
   }
 }

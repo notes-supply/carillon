@@ -2,7 +2,8 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { Type, type Static } from "typebox";
-import { Check, Errors } from "typebox/value";
+import { mismatch } from "@carillon/runtime/mismatch";
+import { Check } from "typebox/value";
 import { parse as parseToml, TomlError } from "smol-toml";
 import type { NativeSelection } from "./contracts.ts";
 
@@ -114,7 +115,7 @@ export function parseSettings(path: string, text: string): SettingsFile {
     throw failure;
   }
   if (!Check(SettingsSchema, settings)) {
-    const [first] = Errors(SettingsSchema, settings);
+    const first = mismatch(SettingsSchema, settings);
     throw new Error(
       `${path}: ${first === undefined ? "invalid settings" : `${first.instancePath || "/"} ${first.message}`}`,
     );

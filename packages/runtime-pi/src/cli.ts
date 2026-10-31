@@ -10,7 +10,7 @@ import { once } from "node:events";
 import { readFile, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { Type } from "typebox";
-import { Check, Errors } from "typebox/value";
+import { Check } from "typebox/value";
 import { parse as parseToml } from "smol-toml";
 import {
   DEFAULT_INLINE_IMAGES,
@@ -24,6 +24,7 @@ import { checkDefault, openPiCatalogue } from "./models.ts";
 import { createPiRuntime } from "./runtime.ts";
 import { createCoreClient } from "@carillon/runtime/core";
 import { createRuntimeServer } from "@carillon/runtime/http";
+import { mismatch } from "@carillon/runtime/mismatch";
 import packageInfo from "../package.json" with { type: "json" };
 import { providerAddress } from "@carillon/runtime/endpoint";
 import {
@@ -205,7 +206,7 @@ async function loadInlineImages(path: string): Promise<InlineImagePolicy> {
   // silently dropped or converted.
   const settings: unknown = parseToml(text);
   if (!Check(ProviderFileSchema, settings)) {
-    const [first] = Errors(ProviderFileSchema, settings);
+    const first = mismatch(ProviderFileSchema, settings);
     throw new Error(
       `${path}: ${first === undefined ? "invalid settings" : `${first.instancePath || "/"} ${first.message}`}`,
     );

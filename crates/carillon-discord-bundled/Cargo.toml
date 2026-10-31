@@ -24,6 +24,7 @@ future_incompatible = { level = "deny", priority = -1 }
 [lints.clippy]
 all = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
+assert_is_empty = "allow"
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"

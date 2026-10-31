@@ -8,13 +8,12 @@
 //! state while it serves; what needs core stopped takes it too.
 
 use std::{
-    fs,
+    fs::{self, TryLockError},
     os::unix::fs::OpenOptionsExt as _,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context as _, Result};
-use fs2::FileExt as _;
 
 /// Exclusive, non-blocking lock serializing maintenance of one installation.
 /// The release scripts take the same lock unless a caller already holds it
@@ -186,10 +185,12 @@ fn try_lock(path: &Path) -> Result<Option<Locked>> {
         .mode(0o600)
         .open(path)
         .with_context(|| format!("open lock {}", path.display()))?;
-    match file.try_lock_exclusive() {
+    match file.try_lock() {
         Ok(()) => Ok(Some(Locked(file))),
-        Err(error) if error.kind() == fs2::lock_contended_error().kind() => Ok(None),
-        Err(error) => Err(error).with_context(|| format!("lock {}", path.display())),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(error)) => {
+            Err(error).with_context(|| format!("lock {}", path.display()))
+        }
     }
 }
 

@@ -1,13 +1,9 @@
 import type { ControlAction } from "@carillon/protocol";
 import { once } from "node:events";
-import { afterEach, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import { ExplainedFailure } from "./failure.ts";
 import { createRuntimeServer } from "./http.ts";
 import type { InboxTurns, RuntimeOperations, TurnRequest } from "./operations.ts";
-
-afterEach(() => {
-  vi.restoreAllMocks();
-});
 
 const others: Omit<RuntimeOperations, "turns"> = {
   activity: () => undefined,

@@ -2126,7 +2126,7 @@ async fn a_stopping_provider_finishes_the_card_its_last_answer_settles() -> anyh
     // Before the monitor returned, the answered job's card showed its
     // summary, and its record went with it.
     let finished = discord.matching(&Method::PATCH, "/channels/300/messages/");
-    let summary = finished.last().map(Seen::content).unwrap_or_default();
+    let summary = finished.last().map_or_default(Seen::content);
     assert!(summary.starts_with("✓ Done · answered"), "{summary}");
     assert!(summary.contains("✓ read `notes.md`"), "{summary}");
     assert!(discord.matching(&Method::POST, "/channels/302/").is_empty());

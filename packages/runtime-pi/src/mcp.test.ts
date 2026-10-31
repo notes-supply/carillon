@@ -23,7 +23,6 @@ import { createMcpServer, loadMcpConfig, type McpServer } from "./mcp.ts";
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).toReversed()) await cleanup();
-  vi.restoreAllMocks();
   vi.useRealTimers();
 });
 

@@ -47,10 +47,10 @@ pub fn choice(label: &str, value: &str, description: Option<&str>, default: bool
 /// configured symbols stay in text because Discord refuses them as emoji.
 pub fn branded(mut option: Value, marker: &str) -> Value {
     let emote = marker
-        .strip_prefix("<a:")
+        .strip_circumfix("<a:", '>')
         .map(|emote| (true, emote))
-        .or_else(|| marker.strip_prefix("<:").map(|emote| (false, emote)))
-        .and_then(|(animated, emote)| Some((animated, emote.strip_suffix('>')?.split_once(':')?)));
+        .or_else(|| Some((false, marker.strip_circumfix("<:", '>')?)))
+        .and_then(|(animated, emote)| Some((animated, emote.split_once(':')?)));
     if let Some((animated, (name, id))) = emote {
         option["emoji"] = json!({ "id": id, "name": name, "animated": animated });
     } else if emojis::get(marker).is_some() {

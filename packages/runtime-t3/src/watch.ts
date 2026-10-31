@@ -1175,7 +1175,6 @@ export function watchTurn(
   function parsed<S extends TSchema>(schema: S, payload: unknown, what: string): Static<S> {
     if (!Check(schema, payload))
       throw new T3Failure("malformed", `T3 sent a ${what} this runtime does not understand`);
-    // oxlint-disable-next-line typescript/no-unsafe-return -- Check validates Static<S>; tsgolint resolves this generic TypeBox predicate as any.
     return payload;
   }
 

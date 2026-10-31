@@ -1,6 +1,6 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
-  "ignoreBinaries": ["mkfifo", "strace", "unshare"],
+  "ignoreBinaries": ["strace", "unshare"],
   "workspaces": {
     ".": {
       "entry": ["scripts/*.mjs"]

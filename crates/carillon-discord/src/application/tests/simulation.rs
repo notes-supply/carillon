@@ -25,7 +25,7 @@ type SharedCore = Arc<std::sync::Mutex<SimulatedCore>>;
 impl SimulatedCore {
     /// Capture `event` from staging as it is now, and keep it.
     fn capture(&mut self, staging: &Path, event: carillon_protocol::model::ExternalEvent) {
-        let staged = event.attachments.as_ref().map_or_else(Vec::new, |batch| {
+        let staged = event.attachments.as_ref().map_or_default(|batch| {
             (0..batch.files.len())
                 .map(|ordinal| {
                     std::fs::read(staging.join(&batch.batch).join(ordinal.to_string()))
