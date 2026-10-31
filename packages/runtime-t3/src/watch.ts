@@ -134,9 +134,9 @@ export interface TurnWatch {
    * Nothing of the turn still executes: no active run, no background work, and
    * no report its process owes. Work still listed executes, and a report owed
    * or a gap not witnessed does too until T3 shows the process stopped: by
-   * ending its session, or by ending the listing after committing a stop at
-   * `stoppedAt`, as T3 drops the wake of a process it stops. Work ending on its
-   * own just after that commit looks the same, and may still report.
+   * ending its session, or by ending the listing of all of it after a stop it
+   * committed at `stoppedAt`: T3 drops the wake of a process it stops. Work
+   * ending on its own after the commit, before T3 acts, may still report.
    */
   quiet(stoppedAt?: number): boolean;
   /** The provider session behind the turn's latest run, while T3 lists one. */
@@ -1387,7 +1387,7 @@ export function watchTurn(
     const pending = pendingWork();
     if (pending === undefined) return true;
     if (pending === "listed" || last === undefined) return false;
-    return sessionStopped(last) || (unlistedAt !== undefined && unlistedAt > stoppedAt);
+    return sessionStopped(last) || (!owedUnknown && (unlistedAt ?? -1) > stoppedAt);
   }
 
   return {
