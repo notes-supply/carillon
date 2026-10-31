@@ -13,6 +13,7 @@ process.on("exit", () => {
 
 export default defineConfig({
   test: {
+    restoreMocks: true,
     env: {
       HOME: home,
       XDG_CONFIG_HOME: join(home, ".config"),

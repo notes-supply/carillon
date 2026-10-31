@@ -236,7 +236,7 @@ function sameConversation(
 
 async function readLedger(path: string): Promise<Ledger> {
   try {
-    return await Parse(LedgerSchema, JSON.parse(await readFile(path, "utf8")));
+    return Parse(LedgerSchema, JSON.parse(await readFile(path, "utf8")));
   } catch (failure: unknown) {
     if (failure instanceof Error && "code" in failure && failure.code === "ENOENT")
       return { agents: [], conversations: [] };

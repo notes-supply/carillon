@@ -30,8 +30,9 @@ import {
   type Tool,
 } from "@earendil-works/pi-mcp";
 import { bounded, redactCredentials } from "@carillon/runtime/failure";
+import { mismatch } from "@carillon/runtime/mismatch";
 import { Type, type Static } from "typebox";
-import { Check, Errors } from "typebox/value";
+import { Check } from "typebox/value";
 import packageInfo from "../package.json" with { type: "json" };
 import { backoff } from "./delivery.ts";
 
@@ -98,7 +99,7 @@ export async function loadMcpConfig(path: string): Promise<Map<string, McpServer
     throw new Error(`${path} is not valid JSON`);
   }
   if (!Check(FileSchema, file)) {
-    const [first] = Errors(FileSchema, file);
+    const first = mismatch(FileSchema, file);
     throw new Error(
       `${path} must be {"mcpServers": {...}}: ${first === undefined ? "invalid" : `${first.instancePath || "/"} ${first.message}`}`,
     );

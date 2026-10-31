@@ -18,11 +18,12 @@ import {
   type Extension,
 } from "@earendil-works/pi-durable";
 import { ExplainedFailure } from "@carillon/runtime/failure";
+import { mismatch } from "@carillon/runtime/mismatch";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Type, type Static } from "typebox";
-import { Check, Errors } from "typebox/value";
+import { Check } from "typebox/value";
 import { attachmentSection } from "./attachments.ts";
 import { ConversationInfo } from "./documents.ts";
 
@@ -233,13 +234,11 @@ async function readSettings(path: string): Promise<Settings> {
     throw new ExplainedFailure(422, "The agent's settings.json is not valid JSON.");
   }
   if (!Check(SettingsSchema, settings)) {
-    const [first] = Errors(SettingsSchema, settings);
-    const unknown: unknown =
-      first === undefined ? undefined : Reflect.get(first.params, "additionalProperties");
+    const first = mismatch(SettingsSchema, settings);
     throw new ExplainedFailure(
       422,
-      Array.isArray(unknown)
-        ? `The agent's settings.json has settings this runtime does not know: ${unknown.join(", ")}.`
+      first?.keyword === "additionalProperties"
+        ? `The agent's settings.json has settings this runtime does not know: ${first.params.additionalProperties.join(", ")}.`
         : `The agent's settings.json is invalid at ${first === undefined || first.instancePath.length === 0 ? "/" : first.instancePath}: ${first?.message ?? "unexpected value"}.`,
     );
   }
@@ -285,7 +284,7 @@ async function importExtension(root: string, name: string): Promise<Extension> {
       ? module.default
       : undefined;
   if (!isExtensionBody(extension)) {
-    const [first] = Errors(ExtensionBodySchema, extension);
+    const first = mismatch(ExtensionBodySchema, extension);
     throw new ExplainedFailure(
       422,
       `The agent's extension ${name} must export a pi-durable extension object as its default export${first === undefined || first.instancePath.length === 0 ? "" : `: ${first.instancePath} ${first.message}`}.`,

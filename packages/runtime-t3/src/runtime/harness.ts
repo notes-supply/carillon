@@ -47,7 +47,6 @@ afterEach(async () => {
   await fake.close();
   await core.close();
   await rm(resources, { recursive: true, force: true });
-  vi.restoreAllMocks();
 });
 
 interface Overrides {

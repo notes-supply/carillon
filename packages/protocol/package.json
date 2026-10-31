@@ -6,6 +6,6 @@
   "type": "module",
   "exports": "./src/index.ts",
   "dependencies": {
-    "typebox": "1.0.65"
+    "typebox": "catalog:"
   }
 }

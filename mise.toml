@@ -2,7 +2,7 @@
 rust = { version = "1.99.1", profile = "minimal", components = ["clippy", "rustfmt"], targets = ["wasm32-unknown-unknown"] }
 node = "26.12.1"
 bun = "1.4.4"
-pnpm = "12.0.0"
+pnpm = "12.15.0"
 "cargo:cargo-deny" = "0.20.2"
 "cargo:cargo-shear" = "1.13.4"
 "aqua:nextest-rs/nextest/cargo-nextest" = "0.9.148"
