@@ -51,7 +51,7 @@ struct Discord {
 /// Counts a read of what `pending` holds back, saying whether it is shown.
 fn shown(pending: &AtomicUsize) -> bool {
     pending
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
             left.checked_sub(1)
         })
         .is_err()

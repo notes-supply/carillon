@@ -477,7 +477,7 @@ fn validate_portable_paths(root: &Path) -> Result<()> {
     // allowing it into an archive that must work under a different root.
     let config: Config = toml::from_str(&fs::read_to_string(root.join("carillon.toml"))?)?;
     for (field, path) in installation_paths(&config) {
-        if path.as_os_str().is_empty()
+        if path.is_empty()
             || path.is_absolute()
             || path
                 .components()

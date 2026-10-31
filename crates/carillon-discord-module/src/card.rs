@@ -209,8 +209,7 @@ fn card(shown: &Shown<'_>, markers: &ActivityMarkers) -> Embed {
 }
 
 fn status_line(shown: &Shown<'_>, markers: &ActivityMarkers) -> String {
-    let started =
-        |at: Option<i64>| at.map_or_else(String::new, |at| format!(" · started <t:{at}:R>"));
+    let started = |at: Option<i64>| at.map_or_default(|at| format!(" · started <t:{at}:R>"));
     match shown.status {
         Status::Queued { since } => marked(
             &markers.queued,
@@ -249,7 +248,7 @@ fn status_line(shown: &Shown<'_>, markers: &ActivityMarkers) -> String {
                     .requested_at
                     .zip(finished_at)
                     .and_then(|(requested, finished)| u64::try_from(finished - requested).ok())
-                    .map_or_else(String::new, |seconds| {
+                    .map_or_default(|seconds| {
                         format!(" · answered {} after the request", compact(seconds * 1000))
                     });
                 marked(&markers.succeeded, &format!("Done{took}"))

@@ -19,7 +19,7 @@ carillon-protocol = { path = "../carillon-protocol" }
 carillon-installation = { path = "../carillon-installation" }
 carillon-wasm = { path = "../carillon-wasm" }
 clap.workspace = true
-emojis = "0.8.2"
+emojis = "0.9.1"
 hex.workspace = true
 reqwest.workspace = true
 serde.workspace = true

@@ -123,7 +123,7 @@ pub fn remove(path: &Path) -> Result<(), PublishError> {
 
 fn parent(path: &Path) -> &Path {
     path.parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
+        .filter(|parent| !parent.is_empty())
         .unwrap_or_else(|| Path::new("."))
 }
 

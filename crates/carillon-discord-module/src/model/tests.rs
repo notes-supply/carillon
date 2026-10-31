@@ -132,9 +132,9 @@ fn choices(ids: &[&str]) -> Vec<OptionChoice> {
             let mut name = id.chars();
             OptionChoice {
                 id: (*id).to_owned(),
-                name: name.next().map_or_else(String::new, |first| {
-                    first.to_uppercase().chain(name).collect()
-                }),
+                name: name
+                    .next()
+                    .map_or_default(|first| first.to_uppercase().chain(name).collect()),
             }
         })
         .collect()

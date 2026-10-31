@@ -182,9 +182,8 @@ fn validate_activity_marker(value: &str) -> Result<()> {
     }
     if value.contains(':') || value.starts_with('<') {
         let emoji = value
-            .strip_prefix("<a:")
-            .or_else(|| value.strip_prefix("<:"))
-            .and_then(|emoji| emoji.strip_suffix('>'))
+            .strip_circumfix("<a:", '>')
+            .or_else(|| value.strip_circumfix("<:", '>'))
             .map(DiscordEmoji::parse);
         if matches!(emoji, Some(Ok(DiscordEmoji::Custom { .. }))) {
             return Ok(());
@@ -503,7 +502,7 @@ impl DiscordConfig {
         if self
             .bot_token_file
             .as_ref()
-            .is_some_and(|path| path.as_os_str().is_empty())
+            .is_some_and(|path| path.is_empty())
         {
             bail!("bot_token_file must name the bot token's file");
         }
@@ -553,13 +552,7 @@ impl DiscordConfig {
             }
         }
         validate_activity_markers(&self.activity_markers)?;
-        if self.module.enabled
-            && self
-                .module
-                .path
-                .as_ref()
-                .is_none_or(|path| path.as_os_str().is_empty())
-        {
+        if self.module.enabled && self.module.path.as_ref().is_none_or(|path| path.is_empty()) {
             bail!("module.enabled needs module.path, the custom Discord module to serve");
         }
         self.attachments

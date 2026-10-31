@@ -560,7 +560,7 @@ fn run(program: &Path, args: &[&str], secret: &str) -> Result<String> {
         .wait_with_output()
         .with_context(|| format!("{} did not finish", program.display()))?;
     if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+        return Ok(String::from_utf8_lossy_owned(output.stdout));
     }
     let error = String::from_utf8_lossy(&output.stderr);
     let error = error.trim();

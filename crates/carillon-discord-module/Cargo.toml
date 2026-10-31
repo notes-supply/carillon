@@ -8,7 +8,7 @@ license.workspace = true
 
 [dependencies]
 carillon-protocol = { path = "../carillon-protocol" }
-emojis = "0.8.2"
+emojis = "0.9.1"
 serde.workspace = true
 serde_json.workspace = true
 
@@ -29,6 +29,7 @@ future_incompatible = { level = "deny", priority = -1 }
 [lints.clippy]
 all = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
+assert_is_empty = "allow"
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
