@@ -120,6 +120,9 @@ export const threadId = derivedId("thread", "discord-private", "default", "conve
 /** A turn the runtime settled as failed; its message is the explanation it showed, if any. */
 export class TurnFailed extends Error {}
 
+/** How a stop T3 did not confirm settles: never as stopped. */
+export const UNCONFIRMED = "Stopped, but T3 has not confirmed that the run stopped";
+
 /**
  * Hands `request` to `on` as core does and resolves with the answer it
  * settles the turn with, as {@link settled} does; `signal` stops the turn.

@@ -27,6 +27,7 @@ import {
   threadId,
   turn,
   TurnFailed,
+  UNCONFIRMED,
 } from "./runtime/harness.ts";
 import { connectT3 } from "./t3.ts";
 
@@ -52,9 +53,6 @@ function userTexts(): string[] {
 const activity = () => runtime.activity("turn-1", "discord-private");
 
 const until = (condition: () => boolean) => fake.waitFor(condition);
-
-/** How a stop T3 did not confirm settles: never as stopped. */
-const UNCONFIRMED = "Stopped, but T3 has not confirmed that the run stopped";
 
 /** What core received settling `turnId`. */
 const settles = (turnId: string) =>
@@ -324,27 +322,6 @@ it("fails closed when the native session ends before it reports finished backgro
     message:
       "T3's native session stopped before it reported the result of its finished background work.",
   });
-});
-
-it("stops background work left by a completed run when Carillon cancels, through T3's latest run", async () => {
-  const controller = new AbortController();
-  const result = execute(turn("turn-1", "work"), controller.signal);
-  const run = await started("turn-1");
-  const task = fake.tool(threadId, run.id, { type: "command_execution", input: "sleep 300 &" });
-  fake.background(threadId, [{ taskId: "task-1", kind: "command", description: "sleep 300" }]);
-  fake.assistant(threadId, run.id, "Running it in the background.");
-  fake.complete(threadId, run.id);
-  await until(() => activity()?.phase === "tools" && runOf("turn-1")?.status === "completed");
-  controller.abort(new Error("core disconnected"));
-  await expect(result).rejects.toThrow(UNCONFIRMED);
-  expect(fake.interrupts).toEqual([run.id]);
-  expect(roster()).toEqual([]);
-  expect(thread().items.find((item) => item.id === task.id)?.status).toBe("interrupted");
-
-  const next = execute(turn("turn-2", "again"));
-  answer(await started("turn-2"), "ok");
-  expect((await next).output).toBe("ok");
-  expect(fake.interrupts).toEqual([run.id]);
 });
 
 it("interrupts the follow-up run when cancelled during T3's wake", async () => {
