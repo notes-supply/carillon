@@ -158,6 +158,11 @@ it.each([
     "settings this runtime does not know at /extensions: extra",
   ],
   [
+    "an extensions change with a value of the wrong type",
+    { "settings.json": JSON.stringify({ extensions: { remove: [1] } }) },
+    "invalid at /extensions/remove/0: must be string",
+  ],
+  [
     "an extension that does not exist",
     { "settings.json": JSON.stringify({ extensions: ["memory"] }) },
     "selects memory, which is neither a built-in extension",
