@@ -119,11 +119,22 @@ export async function testSettings(services) {
     "assistant\nModel  Local echo",
   );
 
+  const drawn = await interact("305", null, "command", "settings");
+  const unreachable = "The runtime is not reachable right now.";
   await services.stop("runtime");
   try {
     const outage = await interact("305", null, "command", "settings");
-    assert.equal(outage.content, card("305", CHANNEL, "The runtime is not reachable right now."));
+    assert.equal(outage.content, card("305", CHANNEL, unreachable));
     assert.deepEqual(outage.components, []);
+    const control = customIds(drawn)[1];
+    const clicked = await interact("305", null, "component", control, [
+      value(drawn, control, "Local reasoner"),
+    ]);
+    assert.equal(clicked.content, outage.content, "an outage is not a change meanwhile");
+    assert.throws(
+      () => settings("305", "thinking=high"),
+      /thinking cannot be changed now\. The runtime is not reachable right now\./u,
+    );
   } finally {
     await services.start("runtime");
   }
