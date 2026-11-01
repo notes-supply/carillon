@@ -26,7 +26,7 @@ use carillon_discord_module::{
         Invocation,
     },
 };
-use carillon_protocol::model::{JOB_READ_LIMIT, ModelQuery};
+use carillon_protocol::model::JOB_READ_LIMIT;
 use serde_json::{Value, json};
 use twilight_model::channel::message::Embed;
 
@@ -278,22 +278,15 @@ async fn draw(
     }
 }
 
-/// Runs `/model` until `stop`. Core is not there, so the module answers
-/// with its native call's refusal.
+/// Runs `/settings` until `stop`. Core is not there, so the module draws the
+/// route's lines with the runtime unavailable.
 async fn interact(module: Arc<Module>, stop: Arc<AtomicBool>, seen: Arc<Counters>) {
     while !stop.load(Ordering::Relaxed) {
-        let calls = crate::client::test_client("http://127.0.0.1:1".to_owned()).map(|core| {
-            InteractionCalls::new(
-                core,
-                ModelQuery {
-                    agent_id: "default".to_owned(),
-                    audience_id: None,
-                },
-            )
-        });
+        let calls = crate::client::test_client("http://127.0.0.1:1".to_owned())
+            .map(|core| InteractionCalls::new(core, super::tests::route(), None));
         let interaction = Interaction {
             kind: InteractionKind::Command,
-            name: "model".to_owned(),
+            name: "settings".to_owned(),
             values: Vec::new(),
             options: Value::Null,
             conversation: false,

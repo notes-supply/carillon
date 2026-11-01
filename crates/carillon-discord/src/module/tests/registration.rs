@@ -53,12 +53,12 @@ async fn loading_checks_the_contract_and_definitions() -> anyhow::Result<()> {
         "{broken:#}"
     );
     assert_eq!(
-        super::super::check(&variant(&["model"], "unused")?).await?,
-        ["model"]
+        super::super::check(&variant(&["settings"], "unused")?).await?,
+        ["settings"]
     );
-    let commands = release_commands(directory.path(), &["model"], "unused").await?;
+    let commands = release_commands(directory.path(), &["settings"], "unused").await?;
     assert_eq!(commands.serving().source, Source::Bundled);
-    assert_eq!(commands.serving().commands, ["model"]);
+    assert_eq!(commands.serving().commands, ["settings"]);
     Ok(())
 }
 
@@ -66,7 +66,7 @@ async fn loading_checks_the_contract_and_definitions() -> anyhow::Result<()> {
 async fn applying_serves_only_usable_modules_and_rereads_the_declared_file() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let root = directory.path();
-    let commands = release_commands(root, &["model"], "release").await?;
+    let commands = release_commands(root, &["settings"], "release").await?;
     let path = root.join("custom.wasm");
     let declared = custom(root, "custom.wasm");
 
@@ -94,7 +94,7 @@ async fn applying_serves_only_usable_modules_and_rereads_the_declared_file() -> 
     }
     assert!(MaintenanceLock::try_acquire(root)?.is_some());
 
-    let first = variant(&["model"], "custom")?;
+    let first = variant(&["settings"], "custom")?;
     std::fs::write(&path, &first)?;
     let change = commands.apply(declared.clone(), None).await?;
     assert_eq!(change.previous.source, Source::Bundled);
@@ -106,7 +106,7 @@ async fn applying_serves_only_usable_modules_and_rereads_the_declared_file() -> 
     assert_eq!(again.previous, again.serving);
 
     // A rebuild at the same path is another module until it is applied.
-    std::fs::write(&path, variant(&["model", "other"], "rebuilt")?)?;
+    std::fs::write(&path, variant(&["settings", "other"], "rebuilt")?)?;
     assert_eq!(
         commands.declared(declared.clone()),
         Declared::Other {
@@ -115,7 +115,7 @@ async fn applying_serves_only_usable_modules_and_rereads_the_declared_file() -> 
     );
     assert_eq!(reply(&commands).await?, "custom");
     let change = commands.apply(declared.clone(), None).await?;
-    assert_eq!(change.serving.commands, ["model", "other"]);
+    assert_eq!(change.serving.commands, ["settings", "other"]);
     assert_ne!(change.serving.digest, change.previous.digest);
     assert_eq!(reply(&commands).await?, "rebuilt");
 
@@ -154,7 +154,7 @@ async fn applying_serves_only_usable_modules_and_rereads_the_declared_file() -> 
 async fn changes_refused_during_other_maintenance_change_nothing() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let root = directory.path();
-    let commands = release_commands(root, &["model"], "release").await?;
+    let commands = release_commands(root, &["settings"], "release").await?;
     let status = Arc::new(AtomicU16::new(200));
     let (address, server, requests) = counting_registration_server(status).await?;
     let target = app(&address.to_string(), 1, 100);
@@ -186,7 +186,7 @@ async fn changes_refused_during_other_maintenance_change_nothing() -> anyhow::Re
 async fn refused_registration_keeps_the_module_and_forgets_the_record() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let root = directory.path();
-    let commands = release_commands(root, &["model"], "release").await?;
+    let commands = release_commands(root, &["settings"], "release").await?;
     let status = Arc::new(AtomicU16::new(200));
     let (address, server, requests) = counting_registration_server(status.clone()).await?;
     let target = app(&address.to_string(), 1, 100);
@@ -198,7 +198,7 @@ async fn refused_registration_keeps_the_module_and_forgets_the_record() -> anyho
 
     std::fs::write(
         root.join("custom.wasm"),
-        variant(&["model", "other"], "custom")?,
+        variant(&["settings", "other"], "custom")?,
     )?;
     for code in [400, 500] {
         status.store(code, Ordering::SeqCst);
@@ -234,7 +234,7 @@ async fn refused_registration_keeps_the_module_and_forgets_the_record() -> anyho
 async fn a_record_that_cannot_be_cleared_stops_before_discord() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let root = directory.path();
-    let commands = release_commands(root, &["model"], "release").await?;
+    let commands = release_commands(root, &["settings"], "release").await?;
     let (address, server, requests) =
         counting_registration_server(Arc::new(AtomicU16::new(200))).await?;
     let target = app(&address.to_string(), 1, 100);
@@ -335,13 +335,8 @@ async fn an_interaction_under_way_finishes_with_the_module_it_began_with() -> an
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let core = format!("http://{}", listener.local_addr()?);
     let server = tokio::spawn(async move { axum::serve(listener, router).await });
-    let calls = super::super::InteractionCalls::new(
-        crate::client::test_client(core)?,
-        carillon_protocol::model::ModelQuery {
-            agent_id: "default".to_owned(),
-            audience_id: None,
-        },
-    );
+    let calls =
+        super::super::InteractionCalls::new(crate::client::test_client(core)?, route(), None);
     let under_way = tokio::spawn({
         let commands = commands.clone();
         async move { commands.invoke(calls, interaction()).await }
@@ -352,7 +347,7 @@ async fn an_interaction_under_way_finishes_with_the_module_it_began_with() -> an
         .context("the interaction never asked core")?;
     std::fs::write(
         root.join("custom.wasm"),
-        variant(&["model"], "replacement")?,
+        variant(&["settings"], "replacement")?,
     )?;
     commands.apply(custom(root, "custom.wasm"), None).await?;
     assert_eq!(reply(&commands).await?, "replacement");
@@ -365,7 +360,7 @@ async fn an_interaction_under_way_finishes_with_the_module_it_began_with() -> an
 #[tokio::test]
 async fn registration_is_recorded_for_its_target_once_confirmed() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
-    let commands = release_commands(directory.path(), &["model"], "unused").await?;
+    let commands = release_commands(directory.path(), &["settings"], "unused").await?;
     let record = files(directory.path()).record;
     let definitions = commands.current().definitions.clone();
     let (address, server, requests) =
@@ -425,8 +420,8 @@ async fn a_confirmed_module_activates_even_when_recording_fails() -> anyhow::Res
 async fn checking_applying_and_starting_share_one_size_limit() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let root = directory.path();
-    let commands = release_commands(root, &["model"], "release").await?;
-    let base = variant(&["model"], "padded")?;
+    let commands = release_commands(root, &["settings"], "release").await?;
+    let base = variant(&["settings"], "padded")?;
     let at_limit = padded(base.clone(), MODULE_LIMIT)?;
     let over = padded(base, MODULE_LIMIT + 1)?;
     let declared = custom(root, "custom.wasm");
@@ -455,7 +450,7 @@ async fn checking_applying_and_starting_share_one_size_limit() -> anyhow::Result
     );
     assert_eq!(reply(&commands).await?, "release");
 
-    assert_eq!(super::super::check(&at_limit).await?, ["model"]);
+    assert_eq!(super::super::check(&at_limit).await?, ["settings"]);
     std::fs::write(root.join("custom.wasm"), &at_limit)?;
     commands.apply(declared.clone(), None).await?;
     assert_eq!(reply(&commands).await?, "padded");
@@ -464,7 +459,7 @@ async fn checking_applying_and_starting_share_one_size_limit() -> anyhow::Result
             .await?
             .serving()
             .commands,
-        ["model"]
+        ["settings"]
     );
     Ok(())
 }
@@ -477,13 +472,13 @@ async fn checking_applying_and_starting_share_one_size_limit() -> anyhow::Result
 async fn a_new_state_directory_is_synced_again_by_a_repeat() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let root = directory.path();
-    let commands = release_commands(root, &["model"], "release").await?;
+    let commands = release_commands(root, &["settings"], "release").await?;
     assert!(!root.join("state").exists());
     let (address, server) = registration_server(Arc::new(AtomicU16::new(200))).await?;
     let target = app(&address.to_string(), 1, 100);
     std::fs::write(
         root.join("custom.wasm"),
-        variant(&["model", "other"], "custom")?,
+        variant(&["settings", "other"], "custom")?,
     )?;
     let declared = custom(root, "custom.wasm");
     let first = match commands.apply(declared.clone(), Some(&target)).await {
@@ -507,7 +502,7 @@ async fn a_new_state_directory_is_synced_again_by_a_repeat() -> anyhow::Result<(
 async fn clearing_the_record_reports_its_boundary_and_a_repeat_registers() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let root = directory.path();
-    let commands = release_commands(root, &["model"], "release").await?;
+    let commands = release_commands(root, &["settings"], "release").await?;
     // An existing state directory: the first sync of it clears the record.
     std::fs::create_dir(root.join("state"))?;
     let (address, server, requests) =
@@ -515,7 +510,7 @@ async fn clearing_the_record_reports_its_boundary_and_a_repeat_registers() -> an
     let target = app(&address.to_string(), 1, 100);
     std::fs::write(
         root.join("custom.wasm"),
-        variant(&["model", "other"], "custom")?,
+        variant(&["settings", "other"], "custom")?,
     )?;
     let declared = custom(root, "custom.wasm");
     let first = match commands.apply(declared.clone(), Some(&target)).await {
@@ -535,52 +530,31 @@ async fn clearing_the_record_reports_its_boundary_and_a_repeat_registers() -> an
     Ok(())
 }
 
+/// The release module asks Discord for `/settings` and `/command`; `/model`
+/// is gone.
 #[tokio::test]
-async fn model_calls_preserve_the_conditional_write() -> anyhow::Result<()> {
-    use axum::Json;
-    use carillon_discord_module::contract::{HostReply, HostRequest};
-    use carillon_protocol::model::{ModelQuery, ModelUpdate};
-    use carillon_protocol::{model::ModelScope as Scope, models::Selection};
-    let selection = Selection {
-        provider: "fixture".to_owned(),
-        model: "A".to_owned(),
-        options: std::collections::BTreeMap::new(),
-    };
-    let expected = selection.clone();
+async fn the_release_module_registers_settings_and_no_model() -> anyhow::Result<()> {
+    use tokio::sync::{Semaphore, mpsc};
+
+    let directory = tempfile::tempdir()?;
+    std::fs::write(
+        directory.path().join("release.wasm"),
+        release_module_bytes()?,
+    )?;
+    let commands = Module::load(files(directory.path()), Source::Bundled).await?;
+    let (sent, mut received) = mpsc::unbounded_channel();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let address = listener.local_addr()?;
-    let router = Router::new().route(
-        "/v1/model",
-        put(move |Json(update): Json<ModelUpdate>| {
-            let expected = expected.clone();
-            async move {
-                assert_eq!(update.expected, Some(expected));
-                (
-                    StatusCode::CONFLICT,
-                    Json(json!({"error": "changed while applying"})),
-                )
-            }
-        }),
-    );
+    let target = app(&listener.local_addr()?.to_string(), 1, 100);
+    let router = gated_registration(sent, Arc::new(Semaphore::new(1)));
     let server = tokio::spawn(async move { axum::serve(listener, router).await });
-    let calls = super::super::InteractionCalls::new(
-        crate::client::test_client(format!("http://{address}"))?,
-        ModelQuery {
-            agent_id: "default".to_owned(),
-            audience_id: None,
-        },
-    );
-    let reply = calls
-        .answer(
-            &serde_json::to_vec(&HostRequest::SetModel {
-                scope: Scope::Agent,
-                selection: Some(selection.clone()),
-                expected: Some(selection),
-            })?,
-            calls_until(),
-        )
-        .await;
-    assert_eq!(reply, HostReply::Error("changed while applying".to_owned()));
+    assert_eq!(commands.reconcile(&target).await?, Registration::Registered);
+    let registered = received.recv().await.context("nothing was registered")?;
+    let names: Vec<_> = registered
+        .iter()
+        .filter_map(|definition| definition["name"].as_str())
+        .collect();
+    assert_eq!(names, ["settings", "command"]);
+    assert!(!names.contains(&"model"));
     server.abort();
     Ok(())
 }

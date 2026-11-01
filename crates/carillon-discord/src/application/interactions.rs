@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use carillon_discord_module::contract::{InteractionKind, Reply};
-use carillon_protocol::model::ModelQuery;
 use serde_json::Value;
 use tracing::{error, info, warn};
 use twilight_model::{
@@ -69,13 +68,7 @@ pub(super) async fn run_interaction(
     admitted: AdmittedInteraction,
     settings: Arc<DiscordConfig>,
 ) -> Result<Reply> {
-    let mut calls = InteractionCalls::new(
-        state.core.clone(),
-        ModelQuery {
-            agent_id: admitted.agent_id,
-            audience_id: admitted.audience_id,
-        },
-    );
+    let mut calls = InteractionCalls::new(state.core.clone(), admitted.route, admitted.audience_id);
     // Without a Discord connection there is nowhere to anchor a submission.
     if let Some(connection) = &state.connection {
         calls = calls.with_submissions(Submissions {

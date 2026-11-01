@@ -1,5 +1,4 @@
 use super::*;
-use crate::config::DiscordRoute;
 use anyhow::anyhow;
 
 #[test]
@@ -146,6 +145,17 @@ fn interaction_admission_follows_routes_and_conversations() -> Result<()> {
     assert_eq!(event.feedback_target_id, "300:901");
     assert_eq!(event.native["intent"], "command");
     assert_eq!(event.native["origin"]["parent_channel_id"], Value::Null);
+    assert_eq!(event.channel_id, "300");
+    let in_thread_event = submitted_event(
+        "default",
+        "discord-100-400",
+        &in_thread.origin,
+        "902",
+        "/compact",
+        Intent::Command,
+    );
+    assert_eq!(in_thread_event.delivery_target_id, "400");
+    assert_eq!(in_thread_event.channel_id, "300");
 
     for refused in [
         interaction("301", None),
@@ -306,9 +316,11 @@ fn mention_thread_adoption_persists_activation_for_later_messages() -> Result<()
         &participation,
     ))?;
     assert!(!continuation.adopt_thread);
+    let resolved = resolved_message(continuation, "400".to_owned());
+    assert_eq!(resolved.conversation_id, "discord-100-400");
     assert_eq!(
-        resolved_message(continuation, "400".to_owned()).conversation_id,
-        "discord-100-400"
+        resolved.event.channel_id, "300",
+        "a thread's conversation belongs to its routed channel"
     );
     Ok(())
 }
@@ -413,7 +425,7 @@ pub(crate) fn interaction(channel_id: &str, parent_channel_id: Option<&str>) -> 
         channel_id: channel_id.to_owned(),
         parent_channel_id: parent_channel_id.map(str::to_owned),
         kind: InteractionKind::Command,
-        name: "model".to_owned(),
+        name: "settings".to_owned(),
         values: Vec::new(),
         options: Value::Null,
     }

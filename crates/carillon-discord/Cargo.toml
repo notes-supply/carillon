@@ -53,5 +53,5 @@ wat = "1.254.0"
 workspace = true
 
 [[example]]
-name = "model_picker"
+name = "settings"
 test = true

@@ -121,5 +121,5 @@ depends = ["package"]
 run = ["scripts/test-bootstrap.sh", "scripts/test-install.sh"]
 
 [tasks."example:discord"]
-description = "Run Discord admission and model presentation without a gateway"
-run = "cargo run -p carillon-discord --example model_picker"
+description = "Run Discord admission and the settings card without a gateway"
+run = "cargo run -p carillon-discord --example settings"

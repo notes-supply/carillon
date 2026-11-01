@@ -95,7 +95,7 @@ fn submission_server(
 #[tokio::test]
 async fn commands_are_listed_and_submissions_anchored_in_the_conversation() -> anyhow::Result<()> {
     use carillon_discord_module::contract::{HostReply, HostRequest, Intent};
-    use carillon_protocol::model::{CommandCatalog, ModelQuery, RuntimeCommand};
+    use carillon_protocol::model::{CommandCatalog, RuntimeCommand};
     let catalog = CommandCatalog {
         commands: vec![RuntimeCommand {
             name: "compact".to_owned(),
@@ -115,17 +115,15 @@ async fn commands_are_listed_and_submissions_anchored_in_the_conversation() -> a
     let address = listener.local_addr()?;
     let server = tokio::spawn(async move { axum::serve(listener, router).await });
     let core = crate::client::test_client(format!("http://{address}"))?;
-    let query = ModelQuery {
-        agent_id: "default".to_owned(),
-        audience_id: Some("discord-100-400".to_owned()),
-    };
+    let audience_id = Some("discord-100-400".to_owned());
     let submit = serde_json::to_vec(&HostRequest::Submit {
         text: "/compact keep `this`".to_owned(),
         intent: Intent::Command,
     })?;
 
     // Without a Discord connection there is nowhere to anchor it.
-    let unanchored = super::super::InteractionCalls::new(core.clone(), query.clone());
+    let unanchored =
+        super::super::InteractionCalls::new(core.clone(), route(), audience_id.clone());
     assert_eq!(
         unanchored
             .answer(&serde_json::to_vec(&HostRequest::Commands)?, calls_until())
@@ -151,8 +149,8 @@ async fn commands_are_listed_and_submissions_anchored_in_the_conversation() -> a
             .build(),
     );
     let settings = crate::config::Settings::new(config);
-    let calls = super::super::InteractionCalls::new(core.clone(), query).with_submissions(
-        super::super::Submissions {
+    let calls = super::super::InteractionCalls::new(core.clone(), route(), audience_id)
+        .with_submissions(super::super::Submissions {
             reactions: crate::delivery::Reactions::new(http.clone(), settings.clone()),
             lanes: serving_lanes(core, http.clone())?,
             http,
@@ -163,8 +161,7 @@ async fn commands_are_listed_and_submissions_anchored_in_the_conversation() -> a
                 route_channel_id: "300".to_owned(),
             },
             settings: settings.current(),
-        },
-    );
+        });
     assert_eq!(
         calls.answer(&submit, calls_until()).await,
         HostReply::Submitted

@@ -42,12 +42,12 @@ use crate::{
     },
 };
 
-/// A Discord module in `directory` that defines `/model` and answers
+/// A Discord module in `directory` that defines `/settings` and answers
 /// every interaction with `reply`.
 async fn stub_module(directory: &Path, reply: &str) -> anyhow::Result<Arc<Module>> {
     write_module(
         &directory.join("release.wasm"),
-        &describing(&[definition("model")]),
+        &describing(&[definition("settings")]),
         reply,
     )?;
     Ok(Arc::new(
@@ -118,7 +118,7 @@ fn served_installation(
     let module = root.join("module.wasm");
     write_module(
         &module,
-        &describing(&[definition("model")]),
+        &describing(&[definition("settings")]),
         &replying("unused", &[]),
     )?;
     let token_file = root.join("credentials").join("discord-private.token");
@@ -483,14 +483,14 @@ fn gateway_interactions_map_to_their_source() -> anyhow::Result<()> {
     command["channel"] = json!({"id": "400", "type": 11, "parent_id": "300"});
     command["data"] = json!({
         "id": "3",
-        "name": "model",
+        "name": "settings",
         "type": 1,
         "options": [{"name": "scope", "type": 3, "value": "agent"}]
     });
     let source =
         interaction_source(&serde_json::from_value(command)?).context("command was not mapped")?;
     assert_eq!(source.kind, InteractionKind::Command);
-    assert_eq!(source.name, "model");
+    assert_eq!(source.name, "settings");
     assert_eq!(source.guild_id.as_deref(), Some("100"));
     assert_eq!(source.user_id, "200");
     assert_eq!(source.channel_id, "400");
@@ -709,12 +709,12 @@ async fn a_declared_module_serves_only_through_an_operator_apply() -> anyhow::Re
     let (status, body) = module_status(&state, Some("operator")).await?;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["serving"]["source"], "bundled");
-    assert_eq!(names(&body["serving"]), ["model"]);
+    assert_eq!(names(&body["serving"]), ["settings"]);
     assert_eq!(body["declared"], json!({"outcome": "serving"}));
     assert_eq!(body["registered"], Value::Null);
 
     // The file declares a custom module; only an operator's apply serves it.
-    std::fs::write(&custom, variant(&["model", "other"], "custom")?)?;
+    std::fs::write(&custom, variant(&["settings", "other"], "custom")?)?;
     declare_custom(&state, directory.path(), |_| ())?;
     let (_, body) = settings(&state, Method::GET, "operator").await?;
     assert_eq!(
@@ -735,13 +735,13 @@ async fn a_declared_module_serves_only_through_an_operator_apply() -> anyhow::Re
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["changed"], json!(["module"]));
     assert_eq!(body["module"]["serving"]["source"], "custom");
-    assert_eq!(names(&body["module"]["serving"]), ["model", "other"]);
+    assert_eq!(names(&body["module"]["serving"]), ["settings", "other"]);
     assert_eq!(body["module"]["discord"], "not_connected");
     let (_, reply) = interact(&state, Some("token"), &interaction("300", None)).await?;
     assert_eq!(reply["content"], "custom");
 
     // A rebuild at the same path serves when applied.
-    std::fs::write(&custom, variant(&["model", "other"], "rebuilt")?)?;
+    std::fs::write(&custom, variant(&["settings", "other"], "rebuilt")?)?;
     let (_, body) = settings(&state, Method::GET, "operator").await?;
     assert_eq!(body["file"]["live"], json!(["module"]));
     let (status, body) = settings(&state, Method::POST, "operator").await?;
@@ -769,7 +769,7 @@ async fn a_declared_module_serves_only_through_an_operator_apply() -> anyhow::Re
     assert_eq!(reply["content"], "rebuilt");
 
     // Another maintenance operation refuses a module change, not status.
-    std::fs::write(&custom, variant(&["model"], "locked out")?)?;
+    std::fs::write(&custom, variant(&["settings"], "locked out")?)?;
     let held = carillon_installation::maintenance::MaintenanceLock::acquire(directory.path())?;
     let (status, body) = settings(&state, Method::POST, "operator").await?;
     assert_eq!(status, StatusCode::CONFLICT);
@@ -826,7 +826,7 @@ async fn applies_serve_a_module_only_once_discord_confirmed_it() -> anyhow::Resu
     std::fs::write(
         directory.path().join("custom.wasm"),
         module(
-            &describing(&[definition("model"), definition("other")]),
+            &describing(&[definition("settings"), definition("other")]),
             &replying("replacement", &[]),
         )?,
     )?;
@@ -848,7 +848,7 @@ async fn applies_serve_a_module_only_once_discord_confirmed_it() -> anyhow::Resu
         assert_eq!(status, returned, "{body}");
         let error = body["error"].as_str().unwrap_or_default();
         assert!(error.starts_with(expected), "{error}");
-        assert_eq!(names(&body["serving"]), ["model"]);
+        assert_eq!(names(&body["serving"]), ["settings"]);
         assert!(!state.settings.current().module.enabled);
         let (_, reply) = interact(&state, Some("token"), &interaction("300", None)).await?;
         assert_eq!(reply["content"], "stub reply");
@@ -887,7 +887,7 @@ async fn an_abandoned_apply_completes_while_holding_the_maintenance_lock() -> an
     connect(&mut state, target);
     std::fs::write(
         directory.path().join("custom.wasm"),
-        variant(&["model", "other"], "replacement")?,
+        variant(&["settings", "other"], "replacement")?,
     )?;
     declare_custom(&state, directory.path(), |_| ())?;
 
@@ -1197,9 +1197,8 @@ fn edit_settings(
     file.write(&state.installation, "discord")
 }
 
-mod simulation;
-
+mod channels;
 mod interaction_replies;
-
 mod interactions;
-use interactions::model_command;
+mod simulation;
+use interactions::settings_command;

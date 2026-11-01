@@ -264,25 +264,20 @@ async fn conversation(
     )?;
     let (send, receive) = tokio::sync::mpsc::channel(4);
     let dispatcher = tokio::spawn(crate::inbound::lanes::dispatch(ingress.clone(), receive));
-    let calls = super::super::InteractionCalls::new(
-        core,
-        carillon_protocol::model::ModelQuery {
-            agent_id: "default".to_owned(),
-            audience_id: Some("discord-100-300".to_owned()),
-        },
-    )
-    .with_submissions(super::super::Submissions {
-        http,
-        reactions: ingress.reactions.clone(),
-        lanes: crate::inbound::lanes::Lanes::new(send.clone()),
-        origin: crate::conversations::InteractionOrigin {
-            guild_id: "100".to_owned(),
-            user_id: "200".to_owned(),
-            channel_id: "300".to_owned(),
-            route_channel_id: "300".to_owned(),
-        },
-        settings: ingress.reactions.settings().current(),
-    });
+    let calls =
+        super::super::InteractionCalls::new(core, route(), Some("discord-100-300".to_owned()))
+            .with_submissions(super::super::Submissions {
+                http,
+                reactions: ingress.reactions.clone(),
+                lanes: crate::inbound::lanes::Lanes::new(send.clone()),
+                origin: crate::conversations::InteractionOrigin {
+                    guild_id: "100".to_owned(),
+                    user_id: "200".to_owned(),
+                    channel_id: "300".to_owned(),
+                    route_channel_id: "300".to_owned(),
+                },
+                settings: ingress.reactions.settings().current(),
+            });
     let preparing = Preparing {
         ingress,
         send,
@@ -953,5 +948,50 @@ async fn a_command_shows_the_reactions_of_the_settings_it_was_admitted_with() ->
             format!("PUT {}", admitted.delivered_emoji),
         ]
     );
+    Ok(())
+}
+
+/// `/settings` from a user outside the allowlist, or from a guild that is not
+/// configured, is refused before the module runs; the allowed user's reads.
+#[tokio::test]
+async fn a_refused_settings_command_makes_no_core_call() -> anyhow::Result<()> {
+    let asked = Arc::new(AtomicUsize::new(0));
+    let counted = asked.clone();
+    let router = Router::new().fallback(move || {
+        counted.fetch_add(1, Ordering::SeqCst);
+        async { StatusCode::SERVICE_UNAVAILABLE }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let core = crate::client::test_client(format!("http://{}", listener.local_addr()?))?;
+    let server = tokio::spawn(async move { axum::serve(listener, router).await });
+    let config = crate::conversations::tests::discord_config(
+        crate::config::DiscordActivation::Always,
+        crate::config::DiscordConversation::Thread,
+    );
+    let module = release_module().await?;
+    for (user, guild, reads) in [("999", "100", 0), ("200", "101", 0), ("200", "100", 1)] {
+        let source = crate::conversations::InteractionSource {
+            user_id: user.to_owned(),
+            guild_id: Some(guild.to_owned()),
+            ..crate::conversations::tests::interaction("300", None)
+        };
+        match crate::conversations::admit_interaction(&config, source) {
+            Ok(admitted) => {
+                let calls = super::super::InteractionCalls::new(
+                    core.clone(),
+                    admitted.route,
+                    admitted.audience_id,
+                );
+                module.invoke(calls, admitted.interaction).await?;
+            }
+            Err(refusal) => assert_eq!(refusal.status, StatusCode::FORBIDDEN),
+        }
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            reads,
+            "{user} in guild {guild}"
+        );
+    }
+    server.abort();
     Ok(())
 }

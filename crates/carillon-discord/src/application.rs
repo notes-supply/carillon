@@ -1,4 +1,5 @@
 //! Gateway and operator HTTP assembly. Policies live in the component modules.
+mod channels;
 mod interactions;
 
 #[cfg(test)]
@@ -362,7 +363,12 @@ fn discord_router(state: DiscordState, deterministic: bool) -> Router {
         .route("/health", get(discord_health))
         .route("/v1/operations", post(discord_operation))
         .route("/v1/module", get(module_status))
-        .route("/v1/settings", get(settings_status).post(apply_settings));
+        .route("/v1/settings", get(settings_status).post(apply_settings))
+        .route("/v1/channels", get(channels::list))
+        .route(
+            "/v1/channels/{channel_id}/settings",
+            get(channels::show).put(channels::change),
+        );
     if deterministic {
         router
             .route("/v1/simulate", post(simulate))
