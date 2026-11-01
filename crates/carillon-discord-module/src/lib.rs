@@ -4,15 +4,17 @@
 //! lifecycle and every Discord or core call; this module only decides what
 //! to show and what to ask for.
 
-use carillon_protocol::model::{CommandCatalog, ModelScope as Scope};
-use carillon_protocol::models::{ModelState, Selection};
+use carillon_protocol::{
+    model::CommandCatalog,
+    settings::{Change, Page},
+};
 mod card;
 mod components;
 pub mod contract;
 mod embed;
-mod model;
 mod prose;
 mod run;
+mod settings;
 
 #[cfg(target_arch = "wasm32")]
 #[doc(hidden)]
@@ -50,7 +52,7 @@ macro_rules! export {
     };
 }
 
-use contract::{HostReply, HostRequest, Intent, Invocation, Outcome};
+use contract::{HostReply, HostRequest, Intent, Invocation, Notice, Outcome};
 
 /// Native operations the provider performs on the module's behalf. Each call
 /// answers with what the provider confirmed, or the reason it could not, in
@@ -63,30 +65,23 @@ pub trait HostCalls {
     /// Returns the user-facing reason the operation was refused or failed.
     fn call(&mut self, request: HostRequest) -> Result<HostReply, String>;
 
+    /// The page of the routed channel the interaction happened in.
+    ///
     /// # Errors
     ///
     /// See [`HostCalls::call`].
-    fn model_state(&mut self) -> Result<ModelState, String> {
-        model_state(self.call(HostRequest::ModelState)?)
+    fn settings(&mut self) -> Result<(Page, Option<Notice>), String> {
+        page(self.call(HostRequest::Settings)?)
     }
 
-    /// Changes a scope's selection, only if it still resolves to `expected`
-    /// when one is given.
+    /// Applies a change to a line of that page, then reads the page again,
+    /// with what became of the change when it did not apply as asked.
     ///
     /// # Errors
     ///
     /// See [`HostCalls::call`].
-    fn set_model(
-        &mut self,
-        scope: Scope,
-        selection: Option<Selection>,
-        expected: Option<Selection>,
-    ) -> Result<ModelState, String> {
-        model_state(self.call(HostRequest::SetModel {
-            scope,
-            selection,
-            expected,
-        })?)
+    fn change_setting(&mut self, change: Change) -> Result<(Page, Option<Notice>), String> {
+        page(self.call(HostRequest::ChangeSetting(change))?)
     }
 
     /// # Errors
@@ -117,9 +112,9 @@ pub trait HostCalls {
 
 const UNEXPECTED: &str = "The provider gave an unexpected answer.";
 
-fn model_state(reply: HostReply) -> Result<ModelState, String> {
+fn page(reply: HostReply) -> Result<(Page, Option<Notice>), String> {
     match reply {
-        HostReply::ModelState(state) => Ok(state),
+        HostReply::Page { page, notice } => Ok((page, notice)),
         _ => Err(UNEXPECTED.to_owned()),
     }
 }
@@ -130,12 +125,12 @@ pub fn handle(host: &mut impl HostCalls, invocation: Invocation) -> Outcome {
     match invocation {
         Invocation::Describe => Outcome::Description(contract::Description {
             contract: contract::CONTRACT,
-            commands: vec![model::definition(), run::definition()],
+            commands: vec![settings::definition(), run::definition()],
         }),
         // A command's components carry its name before the first `:`.
         Invocation::Interaction(interaction) => match interaction.name.split(':').next() {
             Some(run::COMMAND) => run::interact(host, &interaction),
-            _ => model::interact(host, &interaction),
+            _ => settings::interact(host, &interaction),
         },
         Invocation::Card(request) => Outcome::Card(card::render(&request)),
     }

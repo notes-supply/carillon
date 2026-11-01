@@ -4,7 +4,7 @@
 //! time, and choosing one shows what it does before it runs. The runtime's
 //! answer arrives in the conversation like any other.
 //!
-//! As in `/model`, select values and custom IDs carry fingerprints of
+//! As in `/settings`, select values and custom IDs carry fingerprints of
 //! command names, resolved against the runtime's current list on every
 //! click, so a control left over from an earlier list is reported rather
 //! than misapplied. Discord's interactions cannot ask for arguments after a

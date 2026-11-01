@@ -204,7 +204,6 @@ fn card(shown: &Shown<'_>, markers: &ActivityMarkers) -> Embed {
         kind: "rich",
         description: cut(&description.join("\n"), DESCRIPTION_LENGTH),
         fields,
-        footer: None,
     }
 }
 
