@@ -217,7 +217,9 @@ fn render(page: &Page, notice: Option<&Notice>, view: &View, markers: &ActivityM
         })
         .into_iter()
         .collect();
-    if let RuntimePart::Unavailable { reason } = &page.runtime {
+    if let RuntimePart::Unavailable { reason } = &page.runtime
+        && !warnings.contains(&reason.as_str())
+    {
         warnings.push(reason);
     }
     Reply {

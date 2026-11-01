@@ -471,3 +471,56 @@ async fn a_change_that_outlasts_its_time_still_reads_the_page_again() -> anyhow:
     assert!(reply.content.contains("GPT-6.1 Mini"), "{}", reply.content);
     Ok(())
 }
+
+#[tokio::test]
+async fn a_runtime_that_goes_out_on_the_change_is_named_once() -> anyhow::Result<()> {
+    let runtime = Arc::new(Mutex::new(Runtime::new()?));
+    let down = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let router = Router::new()
+        .route(
+            "/v1/settings",
+            post(
+                move |State(runtime): State<Shared>, Json(request): Json<SettingsRequest>| {
+                    let down = down.clone();
+                    async move {
+                        use std::sync::atomic::Ordering;
+                        if let Ok(mut held) = runtime.lock() {
+                            held.requests.push(request.clone());
+                        }
+                        if request.change.is_some() {
+                            down.store(true, Ordering::SeqCst);
+                        }
+                        if down.load(Ordering::SeqCst) {
+                            return (
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                Json(json!({"error": "The runtime is not reachable right now."})),
+                            )
+                                .into_response();
+                        }
+                        let settings = runtime.lock().map(|held| held.settings.clone());
+                        match settings {
+                            Ok(settings) => Json(settings).into_response(),
+                            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                        }
+                    }
+                },
+            ),
+        )
+        .with_state(runtime.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let client = crate::client::test_client(format!("http://{}", listener.local_addr()?))?;
+    let server = tokio::spawn(async move { axum::serve(listener, router).await });
+    let drawn = invoke(&client, source("401", None), &ActivityMarkers::default()).await?;
+    let reply = click(&client, &drawn, "set", "GPT-6.1 Mini").await?;
+    server.abort();
+    assert_eq!(
+        reply
+            .content
+            .matches("The runtime is not reachable right now.")
+            .count(),
+        1,
+        "{}",
+        reply.content
+    );
+    Ok(())
+}
