@@ -231,21 +231,17 @@ it("serializes changes from separately opened ledgers on one file", async () => 
   await withLedger(async (first, path) => {
     const second = await SettingsLedger.open(path);
     const drawn = line(await first.settings(catalogue, home), "model");
-    const outcomes = await Promise.allSettled(
+    const statuses = await Promise.all(
       ["local/reasoner", "local/deliberate"].map((id, index) =>
-        (index === 0 ? first : second).change(catalogue, home, {
-          setting: "model",
-          value: { kind: "one", id },
-          expected: drawn.revision,
-        }),
+        refusal(
+          (index === 0 ? first : second).change(catalogue, home, {
+            setting: "model",
+            value: { kind: "one", id },
+            expected: drawn.revision,
+          }),
+        ),
       ),
     );
-    expect(outcomes.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
-    const lost = outcomes.flatMap((outcome) =>
-      outcome.status === "rejected" ? [outcome.reason] : [],
-    );
-    expect(lost).toHaveLength(1);
-    expect(lost[0]).toBeInstanceOf(ExplainedFailure);
-    expect((lost[0] as ExplainedFailure).status).toBe(409);
+    expect(new Set(statuses)).toEqual(new Set([undefined, 409]));
   });
 });
