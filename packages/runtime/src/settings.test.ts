@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
@@ -6,6 +6,12 @@ import type { Setting, Subject } from "@carillon/protocol";
 import { ExplainedFailure } from "./failure.ts";
 import { noModel, SettingsLedger, type Catalogue } from "./settings.ts";
 
+const speed = {
+  id: "speed",
+  name: "Speed",
+  choices: ["normal", "fast"].map((id) => ({ id, name: id })),
+  default: "normal",
+};
 const catalogue: Catalogue = {
   providers: [{ id: "local", name: "Local" }],
   models: [
@@ -21,6 +27,7 @@ const catalogue: Catalogue = {
           choices: ["low", "medium", "high"].map((id) => ({ id, name: id })),
           default: "medium",
         },
+        speed,
       ],
     },
     {
@@ -34,6 +41,7 @@ const catalogue: Catalogue = {
           choices: ["medium", "high"].map((id) => ({ id, name: id })),
           default: "high",
         },
+        speed,
       ],
     },
   ],
@@ -119,7 +127,7 @@ it("lets a channel inherit the agent value until it chooses its own", async () =
     expect(await ledger.selection(catalogue, channel)).toEqual({
       provider: "local",
       model: "reasoner",
-      options: { thinking: "high" },
+      options: { thinking: "high", speed: "normal" },
     });
   });
 });
@@ -258,6 +266,101 @@ it("resets an option to its model's default and keeps the channel's own model", 
     });
     expect(line(inherited, "model")).toMatchObject({
       value: { kind: "one", id: "local/reasoner" },
+      inherited: true,
+    });
+  });
+});
+
+it("keeps the agent's choices beneath a channel's own option and resets to them", async () => {
+  await withLedger(async (ledger, path) => {
+    // The shape an earlier setup wrote: the agent's options stored as chosen.
+    const agentUnit = {
+      provider: "local",
+      model: "reasoner",
+      options: { thinking: "high", speed: "fast" },
+    };
+    await writeFile(
+      path,
+      JSON.stringify({ agents: [{ agent_id: "assistant", model: agentUnit }], channels: [] }),
+    );
+    const written = await readFile(path, "utf8");
+    const inheriting = await ledger.settings(catalogue, home);
+    expect(line(inheriting, "model.thinking")).toMatchObject({
+      value: { kind: "one", id: "high" },
+      inherited: true,
+    });
+    await ledger.change(catalogue, home, {
+      setting: "model.thinking",
+      value: null,
+      expected: line(inheriting, "model.thinking").revision,
+    });
+    expect(await readFile(path, "utf8"), "an inheriting reset writes nothing").toBe(written);
+
+    const own = await choose(ledger, home, "model.speed", "normal");
+    expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
+      agents: [{ agent_id: "assistant", model: agentUnit }],
+      channels: [
+        {
+          interface_id: "discord-private",
+          channel_id: "300",
+          agent_id: "assistant",
+          model: { provider: "local", model: "reasoner", options: { speed: "normal" } },
+        },
+      ],
+    });
+    expect(line(own, "model.thinking")).toMatchObject({
+      value: { kind: "one", id: "high" },
+      inherited: true,
+    });
+    expect(line(own, "model.speed")).toMatchObject({
+      value: { kind: "one", id: "normal" },
+      inherited: false,
+    });
+
+    const drawn = line(own, "model.thinking");
+    await choose(ledger, agent, "model.thinking", "low");
+    expect(
+      await refusal(
+        ledger.change(catalogue, home, {
+          setting: "model.thinking",
+          value: { kind: "one", id: "medium" },
+          expected: drawn.revision,
+        }),
+      ),
+      "the agent's choice decides the channel's line",
+    ).toBe(409);
+    const reset = await ledger.change(catalogue, home, {
+      setting: "model.speed",
+      value: null,
+      expected: line(await ledger.settings(catalogue, home), "model.speed").revision,
+    });
+    expect(line(reset, "model.speed")).toMatchObject({
+      value: { kind: "one", id: "fast" },
+      inherited: true,
+    });
+    expect(line(reset, "model.thinking").value).toEqual({ kind: "one", id: "low" });
+    expect(line(reset, "model").inherited).toBe(false);
+  });
+});
+
+it("never applies the agent's choices to a channel on another model", async () => {
+  await withLedger(async (ledger) => {
+    await choose(ledger, agent, "model", "local/reasoner");
+    await choose(ledger, agent, "model.speed", "fast");
+    const other = await choose(ledger, home, "model", "local/deliberate");
+    expect(line(other, "model.speed")).toMatchObject({
+      value: { kind: "one", id: "normal" },
+      inherited: true,
+    });
+    const channel = { interface_id: "discord-private", channel_id: "300", agent_id: "assistant" };
+    expect(await ledger.selection(catalogue, channel)).toEqual({
+      provider: "local",
+      model: "deliberate",
+      options: { thinking: "high", speed: "normal" },
+    });
+    const same = await choose(ledger, home, "model", "local/reasoner");
+    expect(line(same, "model.speed")).toMatchObject({
+      value: { kind: "one", id: "fast" },
       inherited: true,
     });
   });

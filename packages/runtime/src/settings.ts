@@ -3,12 +3,14 @@
  * agent and each channel stores at most one model unit, the model with the
  * options chosen for it. A channel without one inherits its agent's, and the
  * agent's is the only agent default. The ledger stores what was chosen; what
- * runs is `resolved` against the runtime's current catalogue, with each
- * option not chosen at its model's default.
+ * runs is `resolved` against the runtime's current catalogue: an option the
+ * channel did not choose takes the agent's choice while the channel runs the
+ * agent's model, and the model's default otherwise.
  */
 import { createHash } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import lockfile from "proper-lockfile";
 import { Type, type Static } from "typebox";
 import { Parse } from "typebox/value";
@@ -56,6 +58,16 @@ export interface Channel {
 const MODEL = "model";
 const OPTION = "model.";
 
+/**
+ * The units that decide a subject's lines: its own, and its agent's while
+ * the agent's choices apply there, which is while a channel inherits or
+ * runs the agent's model.
+ */
+interface Units {
+  readonly own: Selection | null;
+  readonly agent: Selection | null;
+}
+
 const LedgerSchema = Type.Object({
   agents: Type.Array(Type.Object({ agent_id: Type.String(), model: SelectionSchema })),
   channels: Type.Array(
@@ -73,24 +85,29 @@ export function offeredModel(
   catalogue: Catalogue,
   selection: Pick<Selection, "provider" | "model">,
 ): CatalogueModel | undefined {
-  return catalogue.models.find(
-    (candidate) => candidate.provider === selection.provider && candidate.model === selection.model,
-  );
+  return catalogue.models.find((candidate) => sameModel(candidate, selection));
 }
 
 /**
- * The selection as it runs: every option the model supports, with the stored
- * value where it is still offered and the model's default elsewhere. A model
+ * The selection as it runs: every option the model supports, at the choice
+ * stored for it where that is still offered, else at the choice `beneath` it,
+ * such as its agent's on the same model, else at the model's default. A model
  * the catalogue no longer offers is returned as stored; a turn on it fails
  * rather than another model being substituted.
  */
-export function resolved(catalogue: Catalogue, selection: Selection): Selection {
+export function resolved(
+  catalogue: Catalogue,
+  selection: Selection,
+  beneath: Selection["options"] = {},
+): Selection {
   const model = offeredModel(catalogue, selection);
   if (model === undefined) return selection;
   const options: Record<string, string> = {};
   for (const option of model.options) {
-    const choice = selection.options[option.id];
-    options[option.id] = choice !== undefined && offers(option, choice) ? choice : option.default;
+    options[option.id] =
+      [selection.options[option.id], beneath[option.id]].find(
+        (choice) => choice !== undefined && offers(option, choice),
+      ) ?? option.default;
   }
   return { provider: model.provider, model: model.model, options };
 }
@@ -139,7 +156,8 @@ export class SettingsLedger {
   /**
    * Applies `change` while the line it names still has the revision it
    * expects, and returns the subject's lines after it. A stale change gets
-   * 409 and writes nothing.
+   * 409 and writes nothing, as does a change that leaves the subject's unit
+   * as it was.
    */
   async change(catalogue: Catalogue, subject: Subject, change: Change): Promise<Setting[]> {
     return this.#writes.run(async () => {
@@ -161,10 +179,13 @@ export class SettingsLedger {
         const line = this.lines(catalogue, subject).find(({ id }) => id === change.setting);
         if (line === undefined || line.revision !== change.expected)
           throw new ExplainedFailure(409, "This setting changed meanwhile.");
-        const next = this.stored(subject, changed(catalogue, this.effective(subject), change));
-        checkLease();
-        await this.write(next);
-        checkLease();
+        const units = this.units(subject);
+        const unit = changed(catalogue, units, change);
+        if (!isDeepStrictEqual(unit, units.own)) {
+          checkLease();
+          await this.write(this.stored(subject, unit));
+          checkLease();
+        }
         return this.lines(catalogue, subject);
       } finally {
         await release();
@@ -180,8 +201,9 @@ export class SettingsLedger {
   async selection(catalogue: Catalogue, channel: Channel): Promise<Selection | undefined> {
     return this.#writes.run(async () => {
       await this.refresh();
-      const unit = this.effective({ kind: "channel", ...channel }).unit;
-      return unit === null ? undefined : resolved(catalogue, unit);
+      const { own, agent } = this.units({ kind: "channel", ...channel });
+      const unit = own ?? agent;
+      return unit === null ? undefined : resolved(catalogue, unit, agent?.options);
     });
   }
 
@@ -197,22 +219,21 @@ export class SettingsLedger {
     return this.#ledger.channels.find((entry) => sameChannel(entry, channel))?.model ?? null;
   }
 
-  /** The unit that applies to the subject, and whether it is the agent's rather than the subject's own. */
-  private effective(subject: Subject): { unit: Selection | null; inherited: boolean } {
-    if (subject.kind === "agent")
-      return { unit: this.agentUnit(subject.agent_id), inherited: false };
+  private units(subject: Subject): Units {
+    if (subject.kind === "agent") return { own: this.agentUnit(subject.agent_id), agent: null };
     const own = this.channelUnit(subject);
-    return own === null
-      ? { unit: this.agentUnit(subject.agent_id), inherited: true }
-      : { unit: own, inherited: false };
+    const agent = this.agentUnit(subject.agent_id);
+    const applies = agent !== null && (own === null || sameModel(own, agent));
+    return { own, agent: applies ? agent : null };
   }
 
   private lines(catalogue: Catalogue, subject: Subject): Setting[] {
-    const { unit, inherited } = this.effective(subject);
-    const running = unit === null ? null : resolved(catalogue, unit);
+    const { own, agent } = this.units(subject);
+    const unit = own ?? agent;
+    const running = unit === null ? null : resolved(catalogue, unit, agent?.options);
     const entry = running === null ? undefined : offeredModel(catalogue, running);
     const revision = (setting: string) =>
-      digest([setting, subjectKey(subject), inherited, unit, entry ?? null]);
+      digest([setting, subjectKey(subject), own, agent, entry ?? null]);
     const groups = new Map(catalogue.providers.map(({ id, name }) => [id, name]));
     const model: Setting = {
       id: MODEL,
@@ -223,19 +244,19 @@ export class SettingsLedger {
         group: groups.get(candidate.provider) ?? candidate.provider,
       })),
       value: running === null ? null : one(modelChoiceId(running)),
-      inherited,
+      inherited: subject.kind === "channel" && own === null,
       revision: revision(MODEL),
     };
     const options = (entry?.options ?? []).map((option): Setting => {
       const id = `${OPTION}${option.id}`;
       const value = running?.options[option.id] ?? option.default;
-      const chosen = unit?.options[option.id];
+      const chosen = own?.options[option.id];
       return {
         id,
         name: option.name,
         choices: option.choices.map((choice) => ({ id: choice.id, name: choice.name })),
         value: one(value),
-        inherited: inherited || chosen === undefined || !offers(option, chosen),
+        inherited: chosen === undefined || !offers(option, chosen),
         revision: revision(id),
       };
     });
@@ -275,15 +296,11 @@ export class SettingsLedger {
 /**
  * The subject's own unit after `change`: none on a reset of the model; a new
  * model with no options chosen, so option values never outlive their model;
- * or the unit that applied with one option chosen, or no longer chosen on
- * its reset. A subject that inherits chooses no option, so resetting one
- * leaves it inheriting.
+ * or its unit with one option chosen, or no longer chosen on its reset. A
+ * channel that inherits gets its agent's model with that one option chosen,
+ * and keeps inheriting on an option's reset.
  */
-function changed(
-  catalogue: Catalogue,
-  current: { unit: Selection | null; inherited: boolean },
-  change: Change,
-): Selection | null {
+function changed(catalogue: Catalogue, { own, agent }: Units, change: Change): Selection | null {
   if (change.setting === MODEL) {
     if (change.value === null) return null;
     const id = single(change.value);
@@ -291,21 +308,22 @@ function changed(
     if (model === undefined) throw new ExplainedFailure(422, `${id} is not a model offered here.`);
     return { provider: model.provider, model: model.model, options: {} };
   }
-  const { unit } = current;
-  const option = (unit === null ? undefined : offeredModel(catalogue, unit))?.options.find(
+  const running = own ?? agent;
+  const option = (running === null ? undefined : offeredModel(catalogue, running))?.options.find(
     (candidate) => `${OPTION}${candidate.id}` === change.setting,
   );
-  if (unit === null || option === undefined)
+  if (running === null || option === undefined)
     throw new ExplainedFailure(409, "This setting changed meanwhile.");
   if (change.value === null) {
-    if (current.inherited) return null;
-    const options = Object.entries(unit.options).filter(([chosen]) => chosen !== option.id);
-    return { ...unit, options: Object.fromEntries(options) };
+    if (own === null) return null;
+    const options = Object.entries(own.options).filter(([chosen]) => chosen !== option.id);
+    return { ...own, options: Object.fromEntries(options) };
   }
   const id = single(change.value);
   if (!offers(option, id))
     throw new ExplainedFailure(422, `${id} is not a ${option.name} choice here.`);
-  return { ...unit, options: { ...unit.options, [option.id]: id } };
+  const base = own ?? { provider: running.provider, model: running.model, options: {} };
+  return { ...base, options: { ...base.options, [option.id]: id } };
 }
 
 function single(value: SettingValue): string {
@@ -342,6 +360,13 @@ function canonical(value: unknown): unknown {
       .toSorted(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
       .map(([key, entry]) => [key, canonical(entry)]),
   );
+}
+
+function sameModel(
+  left: Pick<Selection, "provider" | "model">,
+  right: Pick<Selection, "provider" | "model">,
+): boolean {
+  return left.provider === right.provider && left.model === right.model;
 }
 
 function sameChannel(entry: Channel, channel: Channel): boolean {

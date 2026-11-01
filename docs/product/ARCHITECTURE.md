@@ -259,14 +259,16 @@ what the owners return and defines no setting of its own.
 - The runtime that serves an agent owns its model and the model's options.
   It keeps them in `settings.json` in its component directory: at most one
   model unit per agent and one per channel: the model and the options
-  chosen for it, each other option at the model's default. A channel
-  without a unit inherits its agent's, which is the only agent default.
-  Choosing a model replaces the unit with that model alone, so an option
-  value never outlives its model.
+  chosen for it. A channel without a unit inherits its agent's, which is
+  the only agent default. An option the channel did not choose takes the
+  agent's choice while the channel runs the agent's model, else the
+  model's default. Choosing a model replaces the unit with that model
+  alone, so an option value never outlives its model.
 
 A revision digests everything that decides a setting's meaning at its
-subject: the subject's interface, channel and agent, the stored unit,
-whether it is inherited, and the catalogue entry of the model that applies.
+subject: the subject's interface, channel and agent, its own unit, its
+agent's unit while that applies there, and the catalogue entry of the
+model that applies.
 A change names the revision it was drawn from. The owner refuses it with a
 conflict and writes nothing when the revision is another now, so a card
 drawn before a re-route or a model switch cannot write.
