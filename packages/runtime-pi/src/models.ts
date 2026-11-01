@@ -14,7 +14,6 @@ import {
 } from "@earendil-works/pi-ai";
 import type { ModelRef } from "@earendil-works/pi-durable";
 import type { RuntimeSettings, SettingsRequest } from "@carillon/protocol";
-import { ExplainedFailure } from "@carillon/runtime/failure";
 import type { Catalogue, Channel, SettingsLedger } from "@carillon/runtime/settings";
 import { join } from "node:path";
 
@@ -124,10 +123,7 @@ export function modelSettings(pi: PiCatalogue, ledger: SettingsLedger) {
      */
     async forTurn(channel: Channel): Promise<ModelChoice> {
       const models = await available();
-      const selection = await ledger.selection(offered(models), channel).catch((failure) => {
-        if (failure instanceof ExplainedFailure) return undefined;
-        throw failure;
-      });
+      const selection = await ledger.selection(offered(models), channel);
       if (selection === undefined) return { model: null, thinkingLevel: null };
       const model = models.find(
         (item) => item.provider === selection.provider && item.id === selection.model,

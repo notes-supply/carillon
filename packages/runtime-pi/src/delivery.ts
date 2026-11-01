@@ -270,7 +270,7 @@ async function modelMissing(tx: Tx, input: DeliveryInput): Promise<string> {
   const { model } = await tx.doc(AgentDoc, input.conversation);
   if (model !== undefined)
     return `${model.provider}/${model.modelId} is not available. Choose another model with /settings.`;
-  return noModel((await tx.doc(ConversationInfo, input.conversation)).agent_id).message;
+  return noModel((await tx.doc(ConversationInfo, input.conversation)).agent_id);
 }
 
 function textOf(detail: JsonValue): string {
