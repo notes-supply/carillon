@@ -32,7 +32,7 @@ pub enum TurnOutcome {
     Failed {
         #[serde(
             default,
-            deserialize_with = "crate::models::optional_nonempty_string",
+            deserialize_with = "crate::fields::optional_nonempty_string",
             skip_serializing_if = "Option::is_none"
         )]
         explanation: Option<String>,
@@ -98,18 +98,18 @@ impl FromStr for Silence {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TurnOpening {
-    #[serde(deserialize_with = "crate::models::nonempty_string")]
+    #[serde(deserialize_with = "crate::fields::nonempty_string")]
     pub interface_id: String,
-    #[serde(deserialize_with = "crate::models::nonempty_string")]
+    #[serde(deserialize_with = "crate::fields::nonempty_string")]
     pub agent_id: String,
-    #[serde(deserialize_with = "crate::models::nonempty_string")]
+    #[serde(deserialize_with = "crate::fields::nonempty_string")]
     pub audience_id: String,
-    #[serde(deserialize_with = "crate::models::nonempty_string")]
+    #[serde(deserialize_with = "crate::fields::nonempty_string")]
     pub key: String,
     /// What the turn is for, recorded as its input.
     #[serde(
         default,
-        deserialize_with = "crate::models::optional_nonempty_string",
+        deserialize_with = "crate::fields::optional_nonempty_string",
         skip_serializing_if = "Option::is_none"
     )]
     pub label: Option<String>,
@@ -124,7 +124,7 @@ pub struct RunningTurn {
     pub request: RuntimeTurnRequest,
     #[serde(
         default,
-        deserialize_with = "crate::models::optional_nonempty_string",
+        deserialize_with = "crate::fields::optional_nonempty_string",
         skip_serializing_if = "Option::is_none"
     )]
     pub key: Option<String>,
@@ -161,7 +161,7 @@ pub struct TurnControl {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeTurnControl {
-    #[serde(deserialize_with = "crate::models::nonempty_string")]
+    #[serde(deserialize_with = "crate::fields::nonempty_string")]
     pub interface_id: String,
     pub action: ControlAction,
 }

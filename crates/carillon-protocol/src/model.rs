@@ -2,10 +2,7 @@
 
 use std::str::FromStr;
 
-use crate::{
-    models::Selection,
-    turns::{CONTROL_LIMIT, ControlAction, Silence},
-};
+use crate::turns::{CONTROL_LIMIT, ControlAction, Silence};
 use anyhow::bail;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -128,6 +125,10 @@ pub struct ExternalEvent {
     pub agent_id: String,
     pub user_id: String,
     pub audience_id: String,
+    /// The interface's channel the conversation belongs to. Core records it
+    /// with the conversation's first admitted message.
+    #[serde(deserialize_with = "crate::fields::nonempty_string")]
+    pub channel_id: String,
     pub delivery_target_id: String,
     pub feedback_target_id: String,
     /// The person's text; may be empty when the event carries attachments.
@@ -184,6 +185,16 @@ pub struct EventReceipt {
     pub duplicate: bool,
 }
 
+/// What core recorded of a turn a runtime opened, with the channel core
+/// recorded for its conversation.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct OpenedTurn {
+    #[serde(flatten)]
+    pub receipt: EventReceipt,
+    #[serde(deserialize_with = "crate::fields::nonempty_string")]
+    pub channel_id: String,
+}
+
 /// What core knows about an event an interface submitted.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -211,6 +222,9 @@ pub struct RuntimeTurnRequest {
     pub interface_id: String,
     pub agent_id: String,
     pub audience_id: String,
+    /// The channel core recorded for the conversation.
+    #[serde(deserialize_with = "crate::fields::nonempty_string")]
+    pub channel_id: String,
     pub input: String,
     /// The captured resource snapshot the turn was accepted with, as a
     /// directory the runtime reads in place.
@@ -307,7 +321,7 @@ pub struct JobPage {
     /// More jobs at work follow: the next page is read after this.
     #[serde(
         default,
-        deserialize_with = "crate::models::optional_nonempty_string",
+        deserialize_with = "crate::fields::optional_nonempty_string",
         skip_serializing_if = "Option::is_none"
     )]
     pub next: Option<String>,
@@ -325,7 +339,7 @@ pub struct Job {
     /// for a job its runtime opened.
     #[serde(
         default,
-        deserialize_with = "crate::models::optional_nonempty_string",
+        deserialize_with = "crate::fields::optional_nonempty_string",
         skip_serializing_if = "Option::is_none"
     )]
     pub feedback_target_id: Option<String>,
@@ -370,7 +384,7 @@ pub struct JobTurn {
     /// When the turn ended, Unix seconds.
     #[serde(
         default,
-        deserialize_with = "crate::models::optional_value",
+        deserialize_with = "crate::fields::optional_value",
         skip_serializing_if = "Option::is_none"
     )]
     pub finished_at: Option<i64>,
@@ -378,7 +392,7 @@ pub struct JobTurn {
     /// turn's latest snapshot, when its runtime gives one.
     #[serde(
         default,
-        deserialize_with = "crate::models::optional_value",
+        deserialize_with = "crate::fields::optional_value",
         skip_serializing_if = "Option::is_none"
     )]
     pub activity: Option<TurnActivity>,
@@ -386,7 +400,7 @@ pub struct JobTurn {
     /// from the turn's outcome.
     #[serde(
         default,
-        deserialize_with = "crate::models::optional_value",
+        deserialize_with = "crate::fields::optional_value",
         skip_serializing_if = "Option::is_none"
     )]
     pub delivery: Option<DeliveryState>,
@@ -408,7 +422,7 @@ pub struct TurnActivity {
     /// The model's own latest public commentary, when it wrote any.
     #[serde(
         default,
-        deserialize_with = "crate::models::optional_nonempty_string",
+        deserialize_with = "crate::fields::optional_nonempty_string",
         skip_serializing_if = "Option::is_none"
     )]
     pub headline: Option<String>,
@@ -420,7 +434,7 @@ pub struct TurnActivity {
     /// Delegated and transferred work, when the runtime observes any.
     #[serde(
         default,
-        deserialize_with = "crate::models::optional_value",
+        deserialize_with = "crate::fields::optional_value",
         skip_serializing_if = "Option::is_none"
     )]
     pub work: Option<WorkSummary>,
@@ -436,7 +450,7 @@ pub struct TurnActivity {
     /// What the native engine reports about the agent running the turn.
     #[serde(
         default,
-        deserialize_with = "crate::models::optional_value",
+        deserialize_with = "crate::fields::optional_value",
         skip_serializing_if = "Option::is_none"
     )]
     pub agent: Option<AgentInfo>,
@@ -511,14 +525,14 @@ pub struct AgentInfo {
     /// The model, as the engine names it.
     #[serde(
         default,
-        deserialize_with = "crate::models::optional_nonempty_string",
+        deserialize_with = "crate::fields::optional_nonempty_string",
         skip_serializing_if = "Option::is_none"
     )]
     pub model: Option<String>,
     /// The reasoning effort or thinking level, as the engine names it.
     #[serde(
         default,
-        deserialize_with = "crate::models::optional_nonempty_string",
+        deserialize_with = "crate::fields::optional_nonempty_string",
         skip_serializing_if = "Option::is_none"
     )]
     pub effort: Option<String>,
@@ -526,7 +540,7 @@ pub struct AgentInfo {
     /// the engine last estimated it.
     #[serde(
         default,
-        deserialize_with = "crate::models::optional_value",
+        deserialize_with = "crate::fields::optional_value",
         skip_serializing_if = "Option::is_none"
     )]
     pub context: Option<ContextUse>,
@@ -539,7 +553,7 @@ pub struct ContextUse {
     /// The window's size, when the engine says.
     #[serde(
         default,
-        deserialize_with = "crate::models::optional_value",
+        deserialize_with = "crate::fields::optional_value",
         skip_serializing_if = "Option::is_none"
     )]
     pub window: Option<u64>,
@@ -573,7 +587,7 @@ pub struct WorkSummary {
     pub partial: bool,
     #[serde(
         default,
-        deserialize_with = "crate::models::optional_value",
+        deserialize_with = "crate::fields::optional_value",
         skip_serializing_if = "Option::is_none"
     )]
     pub omitted: Option<std::num::NonZeroU32>,
@@ -585,29 +599,29 @@ pub struct WorkSummary {
 /// text, never prompts, results or arguments.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct WorkItem {
-    #[serde(deserialize_with = "crate::models::nonempty_string")]
+    #[serde(deserialize_with = "crate::fields::nonempty_string")]
     pub id: String,
     pub kind: WorkKind,
-    #[serde(deserialize_with = "crate::models::nonempty_string")]
+    #[serde(deserialize_with = "crate::fields::nonempty_string")]
     pub label: String,
     pub state: WorkState,
     /// Another listed item this work was observed under.
     #[serde(
         default,
-        deserialize_with = "crate::models::optional_nonempty_string",
+        deserialize_with = "crate::fields::optional_nonempty_string",
         skip_serializing_if = "Option::is_none"
     )]
     pub parent: Option<String>,
     #[serde(
         default,
-        deserialize_with = "crate::models::optional_nonempty_string",
+        deserialize_with = "crate::fields::optional_nonempty_string",
         skip_serializing_if = "Option::is_none"
     )]
     pub actor: Option<String>,
     /// Unix seconds.
     #[serde(
         default,
-        deserialize_with = "crate::models::optional_value",
+        deserialize_with = "crate::fields::optional_value",
         skip_serializing_if = "Option::is_none"
     )]
     pub started_at: Option<i64>,
@@ -618,7 +632,7 @@ pub struct WorkItem {
     /// How long finished work ran, when the engine reported its start and end.
     #[serde(
         default,
-        deserialize_with = "crate::models::optional_value",
+        deserialize_with = "crate::fields::optional_value",
         skip_serializing_if = "Option::is_none"
     )]
     pub duration_ms: Option<u64>,
@@ -665,11 +679,11 @@ where
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RunningTool {
-    #[serde(deserialize_with = "crate::models::nonempty_string")]
+    #[serde(deserialize_with = "crate::fields::nonempty_string")]
     pub tool: String,
     #[serde(
         default,
-        deserialize_with = "crate::models::optional_nonempty_string",
+        deserialize_with = "crate::fields::optional_nonempty_string",
         skip_serializing_if = "Option::is_none"
     )]
     pub detail: Option<String>,
@@ -683,11 +697,11 @@ pub struct RunningTool {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct FinishedTool {
-    #[serde(deserialize_with = "crate::models::nonempty_string")]
+    #[serde(deserialize_with = "crate::fields::nonempty_string")]
     pub tool: String,
     #[serde(
         default,
-        deserialize_with = "crate::models::optional_nonempty_string",
+        deserialize_with = "crate::fields::optional_nonempty_string",
         skip_serializing_if = "Option::is_none"
     )]
     pub detail: Option<String>,
@@ -695,7 +709,7 @@ pub struct FinishedTool {
     /// How long the call ran, when the engine reported its start and end.
     #[serde(
         default,
-        deserialize_with = "crate::models::optional_value",
+        deserialize_with = "crate::fields::optional_value",
         skip_serializing_if = "Option::is_none"
     )]
     pub duration_ms: Option<u64>,
@@ -750,60 +764,18 @@ pub struct StateCounts {
     pub uncertain: u64,
 }
 
-/// Scope of a model selection: the agent default or one conversation.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelScope {
-    Agent,
-    Conversation,
-}
-
-/// Interface-to-core request for the model state of an agent and, when the
-/// interaction happens inside a conversation, that conversation's audience.
+/// Interface-to-core request about an agent's conversation, such as the
+/// commands a person may run in it.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ModelQuery {
-    #[serde(deserialize_with = "crate::models::nonempty_string")]
+pub struct ConversationQuery {
+    #[serde(deserialize_with = "crate::fields::nonempty_string")]
     pub agent_id: String,
     #[serde(
         default,
-        deserialize_with = "crate::models::optional_nonempty_string",
+        deserialize_with = "crate::fields::optional_nonempty_string",
         skip_serializing_if = "Option::is_none"
     )]
     pub audience_id: Option<String>,
-}
-
-/// Interface-to-core request to change a model selection. `selection` is the
-/// shared model vocabulary; `None` returns the scope to its default.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct ModelUpdate {
-    #[serde(deserialize_with = "crate::models::nonempty_string")]
-    pub agent_id: String,
-    #[serde(
-        default,
-        deserialize_with = "crate::models::optional_nonempty_string",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub audience_id: Option<String>,
-    pub scope: ModelScope,
-    #[serde(deserialize_with = "crate::models::required_nullable")]
-    pub selection: Option<Selection>,
-    /// Runtime-owned precondition for read-modify-write controls.
-    #[serde(
-        default,
-        deserialize_with = "crate::models::optional_value",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub expected: Option<Selection>,
-}
-
-/// Core-to-runtime form of [`ModelQuery`]; core adds the interface identity
-/// that names the conversation together with agent and audience.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct RuntimeModelQuery {
-    #[serde(deserialize_with = "crate::models::nonempty_string")]
-    pub interface_id: String,
-    #[serde(flatten)]
-    pub query: ModelQuery,
 }
 
 /// One of the runtime's own commands (or user-invocable skills), as its
@@ -815,14 +787,14 @@ pub struct RuntimeCommand {
     pub name: String,
     #[serde(
         default,
-        deserialize_with = "crate::models::optional_nonempty_string",
+        deserialize_with = "crate::fields::optional_nonempty_string",
         skip_serializing_if = "Option::is_none"
     )]
     pub description: Option<String>,
     /// The arguments the engine expects, when it says.
     #[serde(
         default,
-        deserialize_with = "crate::models::optional_nonempty_string",
+        deserialize_with = "crate::fields::optional_nonempty_string",
         skip_serializing_if = "Option::is_none"
     )]
     pub hint: Option<String>,
@@ -836,7 +808,7 @@ fn command_name<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let name = crate::models::nonempty_string(deserializer)?;
+    let name = crate::fields::nonempty_string(deserializer)?;
     if name.encode_utf16().count() > COMMAND_NAME_LIMIT {
         return Err(serde::de::Error::custom(format!(
             "a command name has at most {COMMAND_NAME_LIMIT} characters"
@@ -849,13 +821,4 @@ where
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct CommandCatalog {
     pub commands: Vec<RuntimeCommand>,
-}
-
-/// Core-to-runtime form of [`ModelUpdate`].
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct RuntimeModelUpdate {
-    #[serde(deserialize_with = "crate::models::nonempty_string")]
-    pub interface_id: String,
-    #[serde(flatten)]
-    pub update: ModelUpdate,
 }

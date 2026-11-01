@@ -1,66 +1,16 @@
-/** Shared wire schemas. Runtime-specific option values remain runtime-owned. */
+/** Shared wire schemas. Runtime-specific settings and their values remain runtime-owned. */
 import { Type, type Static } from "typebox";
 
 /** Header naming the configured provider on provider-to-core requests. */
 export const PROVIDER_HEADER = "x-carillon-provider";
 
-export const SelectionSchema = Type.Object({
-  provider: Type.String({ minLength: 1 }),
-  model: Type.String({ minLength: 1 }),
-  options: Type.Optional(Type.Record(Type.String(), Type.String())),
-});
-export type Selection = Static<typeof SelectionSchema>;
-
-/** One value a setting accepts, as the runtime names it. Selections hold its `id`. */
-export const OptionChoiceSchema = Type.Object({ id: Type.String(), name: Type.String() });
-export type OptionChoice = Static<typeof OptionChoiceSchema>;
-/** A setting the model supports; the choice `default` applies when no scope chose a supported value. */
-export const ModelOptionSchema = Type.Object({
-  id: Type.String(),
-  name: Type.String(),
-  choices: Type.Array(OptionChoiceSchema),
-  default: Type.String(),
-});
-export type ModelOption = Static<typeof ModelOptionSchema>;
-/** A provider of the runtime's models, as the runtime names it; `id` is what models' `provider` names. */
-export const ModelProviderSchema = Type.Object({ id: Type.String(), name: Type.String() });
-export type ModelProvider = Static<typeof ModelProviderSchema>;
-export const AvailableModelSchema = Type.Object({
-  provider: Type.String(),
-  model: Type.String(),
-  name: Type.String(),
-  options: Type.Array(ModelOptionSchema),
-});
-export type AvailableModel = Static<typeof AvailableModelSchema>;
-export const ScopeStateSchema = Type.Object({
-  selection: Type.Union([SelectionSchema, Type.Null()]),
-  overridden: Type.Boolean(),
-  /** The runtime does not change this scope through the model API. */
-  read_only: Type.Optional(Type.Boolean()),
-});
-export type ScopeState = Static<typeof ScopeStateSchema>;
-export const ModelStateSchema = Type.Object({
-  providers: Type.Array(ModelProviderSchema),
-  available: Type.Array(AvailableModelSchema),
-  agent: ScopeStateSchema,
-  conversation: Type.Optional(ScopeStateSchema),
-});
-export type ModelState = Static<typeof ModelStateSchema>;
-
-export const ModelQuerySchema = Type.Object({
+/** An agent's conversation, as core relays requests about it, such as its commands. */
+export const ConversationQuerySchema = Type.Object({
   interface_id: Type.String({ minLength: 1 }),
   agent_id: Type.String({ minLength: 1 }),
   audience_id: Type.Optional(Type.String({ minLength: 1 })),
 });
-export type ModelQuery = Static<typeof ModelQuerySchema>;
-
-export const ModelUpdateSchema = Type.Object({
-  ...ModelQuerySchema.properties,
-  scope: Type.Union([Type.Literal("agent"), Type.Literal("conversation")]),
-  selection: Type.Union([SelectionSchema, Type.Null()]),
-  expected: Type.Optional(SelectionSchema),
-});
-export type ModelUpdate = Static<typeof ModelUpdateSchema>;
+export type ConversationQuery = Static<typeof ConversationQuerySchema>;
 
 /**
  * One of the runtime's own commands (or user-invocable skills), as its
@@ -271,6 +221,8 @@ export const RuntimeTurnRequestSchema = Type.Object({
   interface_id: ProviderIdentitySchema,
   agent_id: Type.String(),
   audience_id: Type.String(),
+  /** The channel core recorded for the conversation. */
+  channel_id: Type.String({ minLength: 1 }),
   input: Type.String(),
   /** The captured resource snapshot, read in place. */
   resource_root: Type.String(),
@@ -327,8 +279,8 @@ export const TurnOpeningSchema = Type.Object(
 );
 export type TurnOpening = Static<typeof TurnOpeningSchema>;
 
-/** What core recorded of a turn it accepted or a runtime opened. */
-export const TurnReceiptSchema = Type.Object({
+/** What core recorded of a turn a runtime opened, with the channel core recorded for its conversation. */
+export const OpenedTurnSchema = Type.Object({
   event_id: Type.String(),
   turn_id: Type.String({ minLength: 1 }),
   state: Type.Union([
@@ -338,8 +290,9 @@ export const TurnReceiptSchema = Type.Object({
     Type.Literal("interrupted"),
   ]),
   duplicate: Type.Boolean(),
+  channel_id: Type.String({ minLength: 1 }),
 });
-export type TurnReceipt = Static<typeof TurnReceiptSchema>;
+export type OpenedTurn = Static<typeof OpenedTurnSchema>;
 
 /**
  * A turn core records running on the runtime that asks: the request core
@@ -360,3 +313,86 @@ export const RuntimeTurnControlSchema = Type.Object(
   { additionalProperties: false },
 );
 export type RuntimeTurnControl = Static<typeof RuntimeTurnControlSchema>;
+
+/**
+ * What a page of settings is about. Every revision covers it, so a change
+ * drawn for one agent never applies after the channel moved to another.
+ */
+export const SubjectSchema = Type.Union([
+  Type.Object(
+    { kind: Type.Literal("agent"), agent_id: Type.String({ minLength: 1 }) },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    {
+      kind: Type.Literal("channel"),
+      interface_id: ProviderIdentitySchema,
+      channel_id: Type.String({ minLength: 1 }),
+      agent_id: Type.String({ minLength: 1 }),
+    },
+    { additionalProperties: false },
+  ),
+]);
+export type Subject = Static<typeof SubjectSchema>;
+
+/** A setting's value, as choice IDs. */
+export const SettingValueSchema = Type.Union([
+  Type.Object(
+    { kind: Type.Literal("one"), id: Type.String({ minLength: 1 }) },
+    { additionalProperties: false },
+  ),
+  Type.Object(
+    { kind: Type.Literal("many"), ids: Type.Array(Type.String()) },
+    { additionalProperties: false },
+  ),
+]);
+export type SettingValue = Static<typeof SettingValueSchema>;
+
+/**
+ * The owner's digest of everything that decides what a setting means at its
+ * subject. A change names the revision it was drawn from, and the owner
+ * refuses it once the revision is another.
+ */
+export const RevisionSchema = Type.String({ pattern: "^[0-9a-f]{64}$" });
+
+export const ChoiceSchema = Type.Object({
+  id: Type.String({ minLength: 1 }),
+  name: Type.String({ minLength: 1 }),
+  /** The heading a renderer lists the choice under, such as its provider. */
+  group: Type.Optional(Type.String()),
+});
+export type Choice = Static<typeof ChoiceSchema>;
+
+/** One line of a page. Without `choices` it is shown and not editable; `value` is null when nothing applies. */
+export const SettingSchema = Type.Object({
+  id: Type.String({ minLength: 1 }),
+  name: Type.String({ minLength: 1 }),
+  choices: Type.Array(ChoiceSchema),
+  value: Type.Union([SettingValueSchema, Type.Null()]),
+  /** The value comes from the agent, not from this subject. */
+  inherited: Type.Boolean(),
+  revision: RevisionSchema,
+});
+export type Setting = Static<typeof SettingSchema>;
+
+/** A change to one setting; a null `value` returns it to what it inherits. */
+export const ChangeSchema = Type.Object(
+  {
+    setting: Type.String({ minLength: 1 }),
+    value: Type.Union([SettingValueSchema, Type.Null()]),
+    expected: RevisionSchema,
+  },
+  { additionalProperties: false },
+);
+export type Change = Static<typeof ChangeSchema>;
+
+/** A read of a subject's runtime settings, with a change to apply first. */
+export const SettingsRequestSchema = Type.Object(
+  { subject: SubjectSchema, change: Type.Optional(ChangeSchema) },
+  { additionalProperties: false },
+);
+export type SettingsRequest = Static<typeof SettingsRequestSchema>;
+
+/** The settings a runtime owns for a subject, in the order it shows them. */
+export const RuntimeSettingsSchema = Type.Object({ settings: Type.Array(SettingSchema) });
+export type RuntimeSettings = Static<typeof RuntimeSettingsSchema>;

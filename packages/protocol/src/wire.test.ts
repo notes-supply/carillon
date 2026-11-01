@@ -3,29 +3,55 @@ import { Check, Parse } from "typebox/value";
 import activity from "../fixtures/activity.json" with { type: "json" };
 import commands from "../fixtures/commands.json" with { type: "json" };
 import held from "../fixtures/held.json" with { type: "json" };
-import fixtures from "../fixtures/models.json" with { type: "json" };
+import settings from "../fixtures/settings.json" with { type: "json" };
 import turns from "../fixtures/turns.json" with { type: "json" };
 import {
   CommandCatalogSchema,
-  ModelStateSchema,
-  ModelQuerySchema,
-  ModelUpdateSchema,
+  OpenedTurnSchema,
   RunningTurnSchema,
   RuntimeTurnControlSchema,
+  RuntimeSettingsSchema,
   RuntimeTurnRequestSchema,
+  SettingsRequestSchema,
+  SettingValueSchema,
+  SubjectSchema,
   TurnActivitySchema,
   TurnOpeningSchema,
   TurnOutcomeSchema,
 } from "./index.ts";
 
-it("preserves the shared Rust/TypeScript model wire fixtures", () => {
-  for (const value of fixtures.states) expect(Parse(ModelStateSchema, value)).toEqual(value);
-  for (const value of fixtures.queries) expect(Parse(ModelQuerySchema, value)).toEqual(value);
-  for (const value of fixtures.updates) expect(Parse(ModelUpdateSchema, value)).toEqual(value);
-  for (const value of fixtures.invalid_queries) expect(Check(ModelQuerySchema, value)).toBe(false);
-  for (const value of fixtures.invalid_states) expect(Check(ModelStateSchema, value)).toBe(false);
-  for (const value of fixtures.accepted_updates) expect(Check(ModelUpdateSchema, value)).toBe(true);
-  for (const value of fixtures.invalid_updates) expect(Check(ModelUpdateSchema, value)).toBe(false);
+it("preserves the shared Rust/TypeScript settings wire fixtures", () => {
+  for (const value of settings.subjects) expect(Parse(SubjectSchema, value)).toEqual(value);
+  for (const value of settings.invalid_subjects) expect(Check(SubjectSchema, value)).toBe(false);
+  for (const value of settings.values) expect(Parse(SettingValueSchema, value)).toEqual(value);
+  for (const value of settings.invalid_values) expect(Check(SettingValueSchema, value)).toBe(false);
+  for (const value of settings.requests) expect(Parse(SettingsRequestSchema, value)).toEqual(value);
+  for (const value of settings.invalid_requests)
+    expect(Check(SettingsRequestSchema, value)).toBe(false);
+  for (const value of settings.settings) expect(Parse(RuntimeSettingsSchema, value)).toEqual(value);
+  for (const value of settings.invalid_settings)
+    expect(Check(RuntimeSettingsSchema, value)).toBe(false);
+});
+
+it("refuses every subject with a property its kind does not have", () => {
+  for (const subject of settings.subjects)
+    expect(Check(SubjectSchema, { ...subject, audience_id: "discord-100-300" })).toBe(false);
+});
+
+it("refuses a turn request or an opened turn without its channel", () => {
+  const opened = {
+    event_id: "runtime:runtime-pi:schedule:1",
+    turn_id: "turn-1",
+    state: "running",
+    duplicate: false,
+    channel_id: "300",
+  };
+  expect(Check(OpenedTurnSchema, opened)).toBe(true);
+  const { channel_id: _opened, ...withoutChannel } = opened;
+  expect(Check(OpenedTurnSchema, withoutChannel)).toBe(false);
+  const [request] = turns.requests;
+  const { channel_id: _request, ...channelless } = request ?? {};
+  expect(Check(RuntimeTurnRequestSchema, channelless)).toBe(false);
 });
 
 it("preserves the shared Rust/TypeScript activity wire fixtures", () => {

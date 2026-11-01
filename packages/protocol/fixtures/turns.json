@@ -5,6 +5,7 @@
       "interface_id": "discord-private",
       "agent_id": "default",
       "audience_id": "discord-100-300",
+      "channel_id": "300",
       "input": "What do you make of these?",
       "resource_root": "/home/owner/.carillon/state/resource-snapshots/419ebb9a13f728315bc30ff6cb2523105de7a2da7f0eed72753185fb511cb9c4",
       "native": {
@@ -35,6 +36,7 @@
       "interface_id": "discord-private",
       "agent_id": "default",
       "audience_id": "discord-100-300",
+      "channel_id": "300",
       "input": "And what about the second one?",
       "resource_root": "/home/owner/.carillon/state/resource-snapshots/419ebb9a13f728315bc30ff6cb2523105de7a2da7f0eed72753185fb511cb9c4",
       "native": null,
@@ -47,6 +49,7 @@
       "interface_id": "discord-private",
       "agent_id": "default",
       "audience_id": "a",
+      "channel_id": "300",
       "input": "x",
       "resource_root": "/r"
     },
@@ -55,6 +58,7 @@
       "interface_id": "discord-private",
       "agent_id": "default",
       "audience_id": "a",
+      "channel_id": "300",
       "input": "x",
       "resource_root": "/r",
       "attachment_root": "/a",
@@ -72,6 +76,7 @@
       "interface_id": "discord-private",
       "agent_id": "default",
       "audience_id": "a",
+      "channel_id": "300",
       "input": "x",
       "resource_root": "/r",
       "attachment_root": "/a",
@@ -89,6 +94,7 @@
       "interface_id": "discord-private",
       "agent_id": "default",
       "audience_id": "a",
+      "channel_id": "300",
       "input": "x",
       "resource_root": "/r",
       "attachment_root": "/a",
@@ -106,6 +112,7 @@
       "interface_id": "discord-private",
       "agent_id": "default",
       "audience_id": "a",
+      "channel_id": "300",
       "input": "x",
       "resource_root": "/r",
       "attachment_root": "/a",
@@ -117,6 +124,27 @@
           "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         }
       ]
+    },
+    {
+      "correlation_id": "missing channel",
+      "interface_id": "discord-private",
+      "agent_id": "default",
+      "audience_id": "discord-100-300",
+      "input": "And what about the second one?",
+      "resource_root": "/home/owner/.carillon/state/resource-snapshots/419ebb9a13f728315bc30ff6cb2523105de7a2da7f0eed72753185fb511cb9c4",
+      "native": null,
+      "attachment_root": "/home/owner/.carillon/state/attachments"
+    },
+    {
+      "correlation_id": "empty channel",
+      "interface_id": "discord-private",
+      "agent_id": "default",
+      "audience_id": "discord-100-300",
+      "channel_id": "",
+      "input": "And what about the second one?",
+      "resource_root": "/home/owner/.carillon/state/resource-snapshots/419ebb9a13f728315bc30ff6cb2523105de7a2da7f0eed72753185fb511cb9c4",
+      "native": null,
+      "attachment_root": "/home/owner/.carillon/state/attachments"
     }
   ]
 }
