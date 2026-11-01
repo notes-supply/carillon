@@ -531,9 +531,21 @@ async fn the_first_refusal_stops_the_rest_and_an_unknown_change_is_never_sent() 
     };
     assert_eq!(
         failure(run(&config, None, &["300", "agent=assistant", "thinking=low"]).await),
-        "Agent is read-only."
+        "agent: Agent is read-only."
     );
     assert_eq!(calls(&stub).len(), 1, "a change after a refusal was sent");
+    assert_eq!(
+        failure(
+            run(
+                &config,
+                None,
+                &["300", "thinking=low", "agent=assistant", "model=echo"]
+            )
+            .await
+        ),
+        "agent: Agent is read-only.\nAlready applied: thinking."
+    );
+    assert_eq!(calls(&stub).len(), 2, "a change after a refusal was sent");
     for (change, refusal) in [
         ("thinking=extreme", "extreme is not a choice of Thinking."),
         ("temperature=2", "temperature is not a setting of #home."),

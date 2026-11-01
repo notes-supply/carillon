@@ -228,7 +228,7 @@ carillon settings --agent assistant model=openai-codex/gpt-6.1-sol
 A key names a line, such as `model` or `thinking`. A value is a choice's ID
 or name. A value that matches no choice lists the choices. Each change uses
 the page the one before it returned, and the command stops at the first
-change that is refused.
+change that is refused, naming its key and the keys already applied.
 
 The agent's value is its channels' only default. An agent without one fails
 every message with an explanation that names `carillon settings --agent`.

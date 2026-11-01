@@ -192,10 +192,11 @@ and applies when Carillon restarts.")]
     /// or with `--agent` an agent's own, which its channels inherit.
     #[command(after_help = "\
 Changes apply left to right, each to the page read just before it, and
-the first one refused stops the rest. `key=value` sets a line: the key is
-the line's ID, or its last part, so `thinking` names `model.thinking`, and
-the value is a choice's ID or name. `reset <key>` returns a line to what
-it inherits. An unknown key or value lists what the line accepts.
+the first one refused stops the rest, naming its key and those already
+applied. `key=value` sets a line: the key is the line's ID, or its last
+part, so `thinking` names `model.thinking`, and the value is a choice's
+ID or name. `reset <key>` returns a line to what it inherits. An unknown
+key or value lists what the line accepts.
 
   carillon settings
   carillon settings 300 thinking=high

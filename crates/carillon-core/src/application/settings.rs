@@ -29,6 +29,13 @@ enum Edit {
     Reset { key: String },
 }
 
+impl Edit {
+    fn key(&self) -> &str {
+        let (Self::Set { key, .. } | Self::Reset { key }) = self;
+        key
+    }
+}
+
 /// Where a page is read and changed.
 enum Owner {
     /// The page an interface provider serves for one of its channels.
@@ -74,8 +81,16 @@ pub(super) async fn settings(
     } else {
         return channels(config, &operator).await;
     };
-    for edit in &edits {
-        page = owner.page(&operator, Some(change(&page, edit)?)).await?;
+    for (applied, edit) in edits.iter().enumerate() {
+        let next = match change(&page, edit) {
+            // An owner's refusal need not say which line it refused.
+            Ok(change) => owner
+                .page(&operator, Some(change))
+                .await
+                .with_context(|| edit.key().to_owned()),
+            Err(failure) => Err(failure),
+        };
+        page = next.map_err(|failure| stopped(failure, &edits[..applied]))?;
     }
     Ok(render(&page))
 }
@@ -103,11 +118,20 @@ fn edits(words: &[String]) -> Result<Vec<Edit>> {
     Ok(edits)
 }
 
+/// `failure`, saying which changes were applied before the one that failed.
+fn stopped(failure: anyhow::Error, applied: &[Edit]) -> anyhow::Error {
+    if applied.is_empty() {
+        return failure;
+    }
+    let keys: Vec<&str> = applied.iter().map(Edit::key).collect();
+    anyhow!("{failure:#}\nAlready applied: {}.", keys.join(", "))
+}
+
 /// The change `edit` asks of `page`, refused before it is sent when its key
 /// names no line of the page, or none the runtime could show, or its value
 /// no choice of the line.
 fn change(page: &Page, edit: &Edit) -> Result<Change> {
-    let (Edit::Set { key, .. } | Edit::Reset { key }) = edit;
+    let key = edit.key();
     let setting = line(page, key).ok_or_else(|| match &page.runtime {
         RuntimePart::Unavailable { reason } => anyhow!("{key} cannot be changed now. {reason}"),
         RuntimePart::Settings(_) => anyhow!(
