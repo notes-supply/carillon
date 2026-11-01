@@ -292,6 +292,11 @@ fn control(reply: &Reply, control: &str) -> Result<String, String> {
         .ok_or_else(|| format!("no {control} control in {:#?}", reply.components))
 }
 
+fn offers(reply: &Reply, control: &str) -> bool {
+    let prefix = format!("{COMMAND}:{control}:");
+    custom_ids(reply).iter().any(|id| id.starts_with(&prefix))
+}
+
 fn options<'a>(reply: &'a Reply, custom_id: &str) -> Vec<&'a Value> {
     components(reply)
         .filter(|component| component["custom_id"] == custom_id)
@@ -373,10 +378,7 @@ fn the_page_reads_as_the_contract_draws_it() -> Result<(), String> {
         .map(|option| option["description"].clone())
         .collect();
     assert_eq!(groups, ["OpenAI Codex", "OpenAI Codex", "Local"]);
-    assert!(
-        control(&reply, "reset").is_err(),
-        "nothing is set on the channel"
-    );
+    assert!(!offers(&reply, "reset"), "nothing is set on the channel");
 
     host.changed_elsewhere("model.thinking", "high")?;
     let reply = run(&mut host, &command())?;
@@ -385,10 +387,10 @@ fn the_page_reads_as_the_contract_draws_it() -> Result<(), String> {
         "{}",
         reply.content
     );
-    assert!(control(&reply, "reset").is_err(), "Model is picked");
+    assert!(!offers(&reply, "reset"), "Model is picked");
     let reply = pick(&mut host, &reply, "Thinking")?;
     assert_eq!(selected(&reply, &control(&reply, "set")?), ["High"]);
-    assert!(control(&reply, "reset").is_ok());
+    assert!(offers(&reply, "reset"));
     assert!(host.changes().is_empty(), "drawing changes nothing");
     Ok(())
 }
@@ -405,7 +407,7 @@ fn an_agent_without_a_model_shows_an_empty_model_line() -> Result<(), String> {
     );
     let models = control(&reply, "set")?;
     assert!(selected(&reply, &models).is_empty());
-    assert!(control(&reply, "reset").is_err());
+    assert!(!offers(&reply, "reset"));
     Ok(())
 }
 
@@ -548,7 +550,7 @@ fn a_click_applies_at_once_with_the_revision_it_was_drawn_with() -> Result<(), S
         "{}",
         reply.content
     );
-    assert!(control(&reply, "reset").is_err());
+    assert!(!offers(&reply, "reset"));
     Ok(())
 }
 

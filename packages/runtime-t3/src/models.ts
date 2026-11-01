@@ -103,7 +103,7 @@ function optionKey(instanceId: string, model: string, option: string): string {
 }
 
 /** A selection as T3 names it: a boolean setting is true or false. */
-export function toNative(catalog: Catalog, selection: Selection): NativeSelection {
+function toNative(catalog: Catalog, selection: Selection): NativeSelection {
   return {
     instanceId: selection.provider,
     model: selection.model,
