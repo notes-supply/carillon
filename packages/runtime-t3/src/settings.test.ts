@@ -71,7 +71,6 @@ it("reads each agent's settings, refusing an agent ID outside the grammar or a s
   for (const [lines, refusal] of [
     [['profiles = ["carillon_claude"]'], /must not have additional properties/u],
     [agent('"not/an/agent"'), /\/agents/u],
-    // An earlier release's, naming the agent's model.
     [
       [...agent("notes"), "[agents.notes.model]", 'instance_id = "codex"', 'model = "m"'],
       /\/agents\/notes must not have additional properties: model$/u,

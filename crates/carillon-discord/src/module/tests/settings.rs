@@ -1,6 +1,3 @@
-//! `/settings` on the release module, run through the provider's Wasm host
-//! against a fake core.
-
 use std::sync::Mutex;
 
 use axum::{
@@ -16,9 +13,6 @@ use carillon_protocol::settings::{
 
 use super::*;
 
-/// The runtime behind core's `/v1/settings`: a model line and a thinking
-/// line, both inherited until changed. It records every request, and
-/// refuses changes with `refusal` while one is set.
 struct Runtime {
     settings: RuntimeSettings,
     requests: Vec<SettingsRequest>,
@@ -87,7 +81,6 @@ impl Runtime {
         })
     }
 
-    /// Sets a line on the channel, as a change from anywhere does.
     fn set(&mut self, setting: &str, value: Option<SettingValue>) -> anyhow::Result<()> {
         self.revisions += 1;
         let revision = revision(self.revisions)?;
@@ -145,7 +138,6 @@ async fn answer(State(runtime): State<Shared>, Json(request): Json<SettingsReque
     Json(runtime.settings.clone()).into_response()
 }
 
-/// Core serving `runtime` at its address.
 async fn core(
     runtime: &Shared,
 ) -> anyhow::Result<(
@@ -164,8 +156,6 @@ async fn core(
     ))
 }
 
-/// The release module's reply to `interaction`, admitted from `source` in
-/// a thread route 300, checked as the provider checks it for Discord.
 async fn invoke(
     core: &crate::client::CoreClient,
     source: crate::conversations::InteractionSource,
@@ -188,7 +178,6 @@ async fn invoke(
     Ok(reply)
 }
 
-/// `/settings`, or a click on `custom_id` choosing `values`, in `channel`.
 fn source(
     channel: &str,
     custom_id: Option<(&str, &[&str])>,
@@ -228,7 +217,6 @@ fn control(reply: &Reply, control: &str) -> anyhow::Result<String> {
         .with_context(|| format!("no {control} control"))
 }
 
-/// The value of the option labelled `label` in the control `custom_id`.
 fn option(reply: &Reply, custom_id: &str, label: &str) -> anyhow::Result<String> {
     controls(reply)
         .filter(|component| component["custom_id"] == custom_id)
@@ -240,8 +228,6 @@ fn option(reply: &Reply, custom_id: &str, label: &str) -> anyhow::Result<String>
         .with_context(|| format!("no option {label}"))
 }
 
-/// Clicks the option labelled `label` in the line picker, or the picked
-/// line's choices.
 async fn click(
     core: &crate::client::CoreClient,
     reply: &Reply,
@@ -398,8 +384,6 @@ async fn route_lines_draw_while_core_is_unreachable() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Discord may refuse a badge as an option's emoji; the provider then sends
-/// the card again without them.
 #[tokio::test]
 async fn model_badges_can_be_dropped_for_discord() -> anyhow::Result<()> {
     let runtime = Arc::new(Mutex::new(Runtime::new()?));

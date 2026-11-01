@@ -113,16 +113,10 @@ fn a_disabled_runtime_stops_setup_before_it_opens_anything() -> anyhow::Result<(
     Ok(())
 }
 
-/// Questions answered in order from `answers`; the first left without one
-/// ends the run. Confirmations take `confirmations`, then their default, a
-/// choice is a 0-based index, a multiple choice 0-based indexes joined by
-/// commas, and what was shown and asked is kept, a choice's options before
-/// its question.
 #[derive(Default)]
 struct Shown {
     transcript: Vec<String>,
     answers: std::collections::VecDeque<&'static str>,
-    /// Answers to confirmations, in order, before their defaults.
     confirmations: std::collections::VecDeque<bool>,
 }
 
@@ -236,10 +230,6 @@ fn a_rerun_keeps_the_runtimes_the_installation_registers() -> anyhow::Result<()>
     Ok(())
 }
 
-/// A fake `carillon-runtime-t3` that records its arguments and standard
-/// input and discovers `offer`, or for an agent its `agentModels` entry.
-/// Its `check` and `configure` refuse settings that name an agent's model,
-/// as an earlier release wrote them.
 fn fake_t3(directory: &Path, offer: &serde_json::Value) -> anyhow::Result<PathBuf> {
     let program = directory.join("carillon-runtime-t3");
     let calls = directory.join("calls");

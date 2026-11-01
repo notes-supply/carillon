@@ -16,8 +16,6 @@ use crate::{
     },
 };
 
-/// Answers like the provider: the page it holds, and a change applied to it
-/// unless `answer` says what the owner made of it instead.
 struct FakeHost {
     page: Page,
     answer: Option<Notice>,
@@ -45,7 +43,6 @@ impl FakeHost {
             .collect()
     }
 
-    /// Another writer's change: the line holds `id` now, set on the channel.
     fn changed_elsewhere(&mut self, setting: &str, id: &str) -> Result<(), String> {
         self.revisions += 1;
         let revision = revision(self.revisions)?;
@@ -129,8 +126,6 @@ fn line(
     })
 }
 
-/// The route lines the provider draws for channel 300: read-only, each
-/// offering only its value.
 fn route() -> Result<Vec<Setting>, String> {
     Ok(vec![
         line(
@@ -194,7 +189,6 @@ fn thinking() -> Vec<Choice> {
     ]
 }
 
-/// #home as an agent's channel draws it while it inherits the agent's model.
 fn home() -> Result<Page, String> {
     page(RuntimePart::Settings(RuntimeSettings {
         settings: vec![
@@ -237,7 +231,6 @@ fn click(custom_id: &str, values: &[&str]) -> Interaction {
     interaction(InteractionKind::Component, custom_id, values)
 }
 
-/// A reply, checked as the provider checks it before Discord sees it.
 fn expect_reply(outcome: Outcome) -> Result<Reply, String> {
     let Outcome::Reply(reply) = outcome else {
         return Err(format!("expected a reply, got {outcome:?}"));
@@ -283,7 +276,6 @@ fn custom_ids(reply: &Reply) -> Vec<String> {
         .collect()
 }
 
-/// The custom ID of the control whose ID begins `settings:<control>:`.
 fn control(reply: &Reply, control: &str) -> Result<String, String> {
     let prefix = format!("{COMMAND}:{control}:");
     custom_ids(reply)
@@ -313,7 +305,6 @@ fn labels(reply: &Reply, custom_id: &str) -> Vec<String> {
         .collect()
 }
 
-/// The value of the option labelled `label`.
 fn value(reply: &Reply, custom_id: &str, label: &str) -> Result<String, String> {
     options(reply, custom_id)
         .into_iter()
@@ -332,14 +323,12 @@ fn selected(reply: &Reply, custom_id: &str) -> Vec<String> {
         .collect()
 }
 
-/// Picks the line labelled `label` in the line picker.
 fn pick(host: &mut FakeHost, reply: &Reply, label: &str) -> Result<Reply, String> {
     let picker = control(reply, "pick")?;
     let line = value(reply, &picker, label)?;
     run(host, &click(&picker, &[&line]))
 }
 
-/// Chooses the option labelled `label` in the picked line's choices.
 fn choose(host: &mut FakeHost, reply: &Reply, label: &str) -> Result<Reply, String> {
     let picker = control(reply, "set")?;
     let choice = value(reply, &picker, label)?;
@@ -411,8 +400,6 @@ fn an_agent_without_a_model_shows_an_empty_model_line() -> Result<(), String> {
     Ok(())
 }
 
-/// A T3 model with 25 options: the line picker lists 26 editable lines and
-/// the model line 30 models, each in pages of at most 25.
 fn catalogue() -> Result<Page, String> {
     let models = (0..30)
         .map(|index| Choice {
@@ -442,8 +429,6 @@ fn catalogue() -> Result<Page, String> {
     page(RuntimePart::Settings(RuntimeSettings { settings }))
 }
 
-/// Every label `picker` reaches by turning its pages from `reply`, the
-/// turns left out.
 fn reachable(host: &mut FakeHost, mut reply: Reply, picker: &str) -> Result<Vec<String>, String> {
     let mut seen = Vec::new();
     for _ in 0..10 {

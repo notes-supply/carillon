@@ -6,7 +6,6 @@ import type { RuntimeOperations } from "./operations.ts";
 
 const key = `sk-proj-${"Ab1".repeat(20)}`;
 
-/** A runtime that refuses each turn with the input as the provider's explanation, and whose setting changes are refused quoting the requested value. */
 async function serve() {
   const runtime: RuntimeOperations = {
     turns: {

@@ -2,8 +2,6 @@ use super::*;
 
 use carillon_protocol::settings::{Page, SettingsRequest};
 
-/// Core answering each settings request with a Thinking line, or with
-/// `refusal` for a change, recording every request.
 async fn settings_core(
     refusal: Option<(StatusCode, &'static str)>,
 ) -> anyhow::Result<(

@@ -135,7 +135,6 @@ it("gives two agents that inherit the same default different revisions", async (
     );
     expect(mine.value).toEqual(theirs.value);
     expect(mine.revision).not.toBe(theirs.revision);
-    // A card drawn for one agent cannot write to the other after a re-route.
     expect(
       await refusal(
         ledger.change(

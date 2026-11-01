@@ -302,9 +302,6 @@ async fn counting_registration_server(
     ))
 }
 
-/// Thread route 300 of agent `default`, as [`discord_config`] routes it.
-///
-/// [`discord_config`]: crate::conversations::tests::discord_config
 pub(crate) fn route() -> crate::config::DiscordRoute {
     crate::config::DiscordRoute {
         channel_id: "300".to_owned(),

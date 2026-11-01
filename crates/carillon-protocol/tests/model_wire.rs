@@ -70,8 +70,6 @@ fn shared_settings_wire_fixtures() -> Result<()> {
     Ok(())
 }
 
-/// Every conversation belongs to a channel: an event, a turn request and an
-/// opened turn without one are refused.
 #[test]
 fn a_turn_without_its_channel_is_refused() -> Result<()> {
     let event = serde_json::json!({

@@ -3,9 +3,6 @@ use carillon_installation::config::AgentConfig;
 use super::*;
 use crate::application::setup::choose_pi_models;
 
-/// A fake `carillon-runtime-pi` that offers two models, keeps each agent's
-/// chosen one in a file of its own, and records every call with Pi's state
-/// folder.
 fn fake_pi(directory: &Path) -> anyhow::Result<PathBuf> {
     let program = directory.join("carillon-runtime-pi");
     std::fs::write(
@@ -49,9 +46,6 @@ fn agent(id: &str, name: &str, runtime: Runtime) -> AgentConfig {
     }
 }
 
-/// Setup asks the model of each Pi agent that uses none and has Pi keep it
-/// as the agent's own. A rerun asks nothing, and an agent on another
-/// runtime is never asked here.
 #[test]
 fn each_pi_agent_is_asked_its_model_until_it_has_one() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
@@ -62,7 +56,6 @@ fn each_pi_agent_is_asked_its_model_until_it_has_one() -> anyhow::Result<()> {
         agent("helper", "Helper", Runtime::Pi),
         agent("t3-notes", "T3 Code · Notes", Runtime::T3),
     ];
-    // Mini for the assistant, then Sol for the helper.
     let mut questions = Shown::answering(&["1", "0"]);
     choose_pi_models(&home, &pi, &agents, &mut questions)?;
     let offered = ["GPT-6.1 Sol (openai-codex)", "GPT-6.1 Mini (openai-codex)"];

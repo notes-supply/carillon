@@ -51,8 +51,6 @@ const MODELS: [(&str, &str); 2] = [
     ("openai-codex/gpt-6.1-mini", "GPT-6.1 Mini"),
 ];
 
-/// Channel `300`'s page as the Discord provider serves it, every runtime
-/// line inherited, each line's revision numbered after `generation`.
 fn home(generation: usize) -> Page {
     let mut page = Page {
         title: "#home".to_owned(),
@@ -299,8 +297,6 @@ fn an_unknown_key_or_value_lists_what_the_line_accepts() {
     );
 }
 
-/// An interface provider and core as `carillon settings` reaches them:
-/// channel `300` is routed, and agent `assistant` starts with no model.
 struct Stub {
     token: String,
     home: Page,
@@ -327,8 +323,6 @@ impl Stub {
             == Some(format!("Bearer {}", self.token).as_str())
     }
 
-    /// Applies a change as an owner does: a stale revision is refused, a
-    /// route line is read-only, and every revision moves on.
     fn change(&mut self, change: Change) -> Response {
         let Some(line) = lines_mut(&mut self.home).find(|line| line.id == change.setting) else {
             return refused(StatusCode::UNPROCESSABLE_ENTITY, "No such setting.");
@@ -430,8 +424,6 @@ fn stub_router(stub: Shared) -> Router {
         .with_state(stub)
 }
 
-/// An installation whose interface provider and core both answer at one
-/// stub, and the stub.
 async fn installation(
     directory: &std::path::Path,
 ) -> Result<(

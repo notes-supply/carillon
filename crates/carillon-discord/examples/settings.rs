@@ -1,5 +1,3 @@
-//! Native admission and the `/settings` card, without a gateway or model
-//! account.
 use anyhow::{Context, Result, bail};
 use carillon_discord::{
     config::{DiscordActivation, DiscordConfig, DiscordConversation, DiscordRoute},
@@ -16,8 +14,6 @@ use carillon_discord_module::{
 use carillon_protocol::settings::Page;
 use serde_json::{Value, json};
 
-/// The page the provider would compose for channel 300: its route lines and
-/// a runtime's, inheriting the agent's model. It changes nothing.
 struct PageFixture(Page);
 
 impl HostCalls for PageFixture {
@@ -76,7 +72,6 @@ fn page() -> Result<Page> {
 async fn example() -> Result<Reply> {
     let directory = tempfile::tempdir()?;
     let participation = Participation::load(directory.path().join("participation.json"))?;
-    // Brand emotes are the operator's, set in the provider's settings.
     let mut settings = serde_json::to_value(DiscordConfig::with_defaults(
         "100".to_owned(),
         "900".to_owned(),

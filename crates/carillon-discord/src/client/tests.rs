@@ -85,9 +85,6 @@ async fn core_requests_timeout_on_stalled_headers_and_bodies() -> anyhow::Result
     Ok(())
 }
 
-/// Core's refusals keep their status and words, so a stale change, a value
-/// not offered, a late runtime and an unreachable one stay apart. The fake
-/// core answers with the status a request's channel names.
 #[tokio::test]
 async fn settings_calls_keep_each_refusal_apart() -> anyhow::Result<()> {
     use axum::{response::IntoResponse as _, routing::post};

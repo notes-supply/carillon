@@ -357,10 +357,6 @@ for archive in link:'unsupported entry' relabelled:'not version 9.9.9' broken:'r
 done
 printf 'update refusals passed: links, traversal, relabelled, unrunnable and incomplete releases\n'
 
-# The release's own programs refuse installed state they cannot use, before
-# anything is stopped: a core schema this release does not know, the
-# previous release's, which records no conversation's channel, and Discord
-# settings its provider rejects.
 DATABASE=$INSTALLATION/state/carillon.sqlite3
 DISCORD_SETTINGS=$INSTALLATION/providers/discord-private.toml
 cp -p "$DISCORD_SETTINGS" "$TEST_ROOT/discord-settings"
@@ -372,8 +368,6 @@ for state in schema:'database schema is not the current Carillon format' \
     schema)
       node -e 'new (require("node:sqlite").DatabaseSync)(process.argv[1]).exec("CREATE TABLE later_release (id INTEGER)")' \
         "$DATABASE" ;;
-    # The table is kept aside, and the write-ahead log emptied into the
-    # database, so its digest shows whether the refused update wrote.
     previous)
       node -e '
         const database = new (require("node:sqlite").DatabaseSync)(process.argv[1]);
@@ -439,7 +433,6 @@ for state in empty:'the T3 token file is empty' missing:'credentials/t3.token' \
   case "${state%%:*}" in
     empty) : >"$T3_TOKEN" ;;
     missing) rm "$T3_TOKEN" ;;
-    # An earlier release's settings, which named the agent's model.
     settings)
       printf '%s\n' '[agents.assistant.model]' 'instance_id = "claudeAgent"' 'model = "claude-sonnet-5"' \
         >>"$T3_SETTINGS" ;;

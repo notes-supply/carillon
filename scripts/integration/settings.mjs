@@ -1,10 +1,3 @@
-/**
- * `/settings` and `carillon settings` against the running services: a
- * routed channel's page drawn alike at its root, in its threads and at the
- * terminal, changes that reach the next turn of every conversation in that
- * channel and no other, and refusals that never reach core. Every value it
- * changes is restored.
- */
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { readFile, rm, writeFile } from "node:fs/promises";
@@ -18,7 +11,6 @@ const INHERITED = [
   "Replies  threads",
   "Model    Local echo · default",
 ];
-/** 302's route lines, padded to the width a Thinking line sets. */
 const BESIDE_THINKING = ["Agent     assistant", "Listens   always", "Replies   threads"];
 const CHANNEL = ["Agent    assistant", "Listens  always", "Replies  channel"];
 
@@ -142,12 +134,6 @@ export async function testSettings(services) {
   await testRefusals(services);
 }
 
-/**
- * Interactions are admitted like messages: a refused one never reaches the
- * module, so core receives no settings call for it. The Discord provider
- * reaches core through a proxy that counts them, and an admitted
- * `/settings` shows that the count sees its calls.
- */
 async function testRefusals(services) {
   const { interact, requestInteraction, interaction } = services;
   const calls = [];
@@ -210,7 +196,6 @@ async function testRefusals(services) {
   }
 }
 
-/** A `/settings` reply's text: its notice, the channel, then the page's lines. */
 function card(channel, lines, notice) {
   const warning = notice === undefined ? "" : `⚠ ${notice}\n`;
   return `${warning}<#${channel}>\n\`\`\`\n${lines.join("\n")}\n\`\`\``;

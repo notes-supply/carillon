@@ -36,7 +36,6 @@ const haiku = { instanceId: "claudeAgent", model: "claude-haiku-4-5", options: [
 const modelSets = () =>
   fake.received.filter((command) => command.type === "thread.model-selection.set");
 
-/** Chooses `id` on the subject's `setting`, or resets it, as `carillon settings` does through core. */
 async function change(subject: Subject, setting: string, id: string | null) {
   const { settings } = await runtime.settings({ subject });
   const line = settings.find((candidate) => candidate.id === setting);
@@ -47,7 +46,6 @@ async function change(subject: Subject, setting: string, id: string | null) {
   });
 }
 
-/** Runs one turn to its answer and gives the selection T3 ran it on. */
 async function ran(correlation: string, extra: Record<string, unknown> = {}) {
   const reply = execute(turn(correlation, "Which model?", extra));
   const messageId = derivedId("message", correlation);
@@ -130,7 +128,6 @@ it("replays a dropped first dispatch with the same command ID on the selection i
   try {
     const reply = execute(turn("turn-1", "hi"), undefined, held);
     await fake.waitFor(() => dropped);
-    // The channel moves to another model before the turn reaches T3 again.
     await change(home, "model", "claudeAgent/claude-haiku-4-5");
     reconnect();
     answer(await started("turn-1"), "Hello.");
@@ -153,7 +150,6 @@ it("runs the channel's model on the next turn of every thread in it, existing th
   expect(await ran("turn-3", elsewhere)).toEqual(sonnet);
 
   await change(home, "model", "claudeAgent/claude-haiku-4-5");
-  // A model picked in T3's own UI lasts until Carillon's next turn on the thread.
   thread().modelSelection = { instanceId: "codex", model: "gpt-6-astra", options: [] };
   expect(await ran("turn-4")).toEqual(haiku);
   expect(thread().modelSelection).toEqual(haiku);

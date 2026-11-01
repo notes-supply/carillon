@@ -2,9 +2,6 @@ use super::*;
 
 type Calls = tokio::sync::mpsc::UnboundedReceiver<(&'static str, Value)>;
 
-/// A runtime that records every settings and command call. A change to
-/// `stale` is refused as a real runtime phrases it, and a change to `slow`
-/// is never answered.
 fn fake_runtime(
     id: &'static str,
     sent: tokio::sync::mpsc::UnboundedSender<(&'static str, Value)>,
@@ -47,8 +44,6 @@ fn fake_runtime(
         )
 }
 
-/// Two fake runtimes: `test-runtime` owns the `pinned` conversation and
-/// `replacement` runs the agent now.
 async fn relay_fixture(
     directory: &Path,
 ) -> Result<(Fixture, Calls, tokio::task::JoinSet<std::io::Result<()>>)> {
@@ -80,7 +75,6 @@ async fn relay_fixture(
     Ok((state, received, services))
 }
 
-/// Who calls: an interface with its own credential, or the operator.
 #[derive(Clone, Copy, Debug)]
 enum Caller {
     Interface(&'static str),
@@ -218,7 +212,6 @@ async fn an_interface_reads_and_changes_only_its_own_channels() -> Result<()> {
         let (status, _) = settings_call(&state, caller, &request).await?;
         assert_eq!(status, StatusCode::FORBIDDEN, "{caller:?} {request}");
     }
-    // A body is read only once its caller is known.
     for (caller, status) in [
         (Caller::Operator("wrong"), StatusCode::FORBIDDEN),
         (OPERATOR, StatusCode::BAD_REQUEST),

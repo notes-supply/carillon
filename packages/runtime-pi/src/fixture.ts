@@ -51,9 +51,7 @@ export interface Fixture {
   readonly models: MutableModels;
   readonly workspace: string;
   readonly componentDirectory: string;
-  /** A turn on the agent's conversation, in channel `300`, with these resources. */
   turn(id: string, input: string, overrides?: Partial<TurnRequest>): TurnRequest;
-  /** Sets the subject's setting to the choice, or resets it, as a person does on its page. */
   set(subject: Subject, setting: string, choice: string | null): Promise<Setting[]>;
   /** A resource snapshot holding these files. */
   snapshot(files: Record<string, string>): Promise<string>;
@@ -81,7 +79,6 @@ interface FixtureOptions {
   readonly durable?: boolean;
   /** The agents' IDs; `default` alone without them. */
   readonly agents?: readonly string[];
-  /** The model each agent starts with, of the scripted provider; `scripted` without it, none when null. */
   readonly agentModel?: string | null;
   readonly builtIns?: readonly Extension[];
   readonly defaults?: readonly string[];

@@ -128,10 +128,6 @@ fn t3_setup_offers_each_agent_the_models_the_runtime_offers_it() -> anyhow::Resu
     Ok(())
 }
 
-/// Saved T3 settings the T3 runtime no longer reads, such as an earlier
-/// release's, are replaced: setup removes them, keeps the T3 token, and
-/// sets T3 up again. Readable settings the operator declines to keep stay
-/// for T3's `configure` to rewrite.
 #[test]
 fn unreadable_t3_settings_are_replaced_and_declined_ones_rewritten() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;

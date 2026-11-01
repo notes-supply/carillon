@@ -530,8 +530,6 @@ async fn clearing_the_record_reports_its_boundary_and_a_repeat_registers() -> an
     Ok(())
 }
 
-/// The release module asks Discord for `/settings` and `/command`; `/model`
-/// is gone.
 #[tokio::test]
 async fn the_release_module_registers_settings_and_no_model() -> anyhow::Result<()> {
     use tokio::sync::{Semaphore, mpsc};

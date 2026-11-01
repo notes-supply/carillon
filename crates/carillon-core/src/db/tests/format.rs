@@ -33,8 +33,6 @@ fn a_database_missing_a_current_index_is_refused_without_repair() -> Result<()> 
     let database = Database::create(&path)?;
     accept(&database, "one", "conversation")?;
     drop(database);
-    // An index is part of the format: a database an earlier release wrote
-    // without it is refused, and nothing adds it.
     rusqlite::Connection::open(&path)?.execute_batch("DROP INDEX turns_queued")?;
     crate::assert_refused(Database::open(&path), "not the current Carillon format")?;
     let indexes: u32 = rusqlite::Connection::open(&path)?.query_row(
@@ -108,8 +106,6 @@ fn a_conversation_keeps_the_channel_of_its_first_message_on_every_turn() -> Resu
     Ok(())
 }
 
-/// The release before conversations had channels wrote no `conversations`
-/// table. Its database is refused as it is, and nothing upgrades it.
 #[test]
 fn the_previous_releases_database_is_refused_and_left_as_it_was() -> Result<()> {
     let directory = tempdir()?;

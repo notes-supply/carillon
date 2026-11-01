@@ -1806,8 +1806,6 @@ it("lists the commands and user-invocable skills T3 offers the conversation's pr
   expect(fake.threads.size).toBe(0);
   expect(fake.refreshes).toEqual([{ instanceId: "claudeAgent", cwd: resources }]);
 
-  // A thread T3's UI moved onto another instance still offers the commands of
-  // the channel's model, which Carillon's next turn there runs on.
   const reply = execute(turn("turn-1", "hi"));
   answer(await started("turn-1"), "Hello.");
   await reply;
@@ -1873,7 +1871,6 @@ it("refuses a snapshot of another thread, whether read once or followed through 
   answer(await started("turn-1"), "Hello.");
   await reply;
   fake.snapshotThread = () => "another-thread";
-  // Another conversation's commands are never shown as this one's.
   await expect(runtime.commands(conversation)).rejects.toMatchObject({ status: 502 });
   // A turn does not fold another thread's state as its own, nor send its
   // message on the strength of it.
@@ -1958,8 +1955,6 @@ it("leaves no snapshot deadline behind when a thread read cannot subscribe", asy
   );
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   try {
-    // The thread read fails with the subscription's own failure, and nothing
-    // of it is left to fire once the read's deadline has passed.
     await expect(refusing.commands(conversation)).rejects.toBe(failure);
     expect.soft(vi.getTimerCount()).toBe(0);
     expect.soft(() => vi.advanceTimersByTime(2_000)).not.toThrow();

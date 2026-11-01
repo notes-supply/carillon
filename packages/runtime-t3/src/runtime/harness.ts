@@ -1,8 +1,3 @@
-/**
- * The runtime under test against a fake T3 and a fake core, fresh for each
- * test of a file that imports this: agents `default`, on Claude Sonnet at
- * low effort, and `code`, on Codex, as their own models in the ledger.
- */
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -82,7 +77,6 @@ export function build(overrides: Overrides = {}) {
 export const stopsFile = () => join(resources, "stops.json");
 const ledgerFile = () => join(resources, "settings.json");
 
-/** Chooses `id` on the subject's `setting` in the ledger, as `carillon settings` does. */
 async function choose(subject: Subject, setting: string, id: string): Promise<void> {
   const models = catalog({ providers: FAKE_PROVIDERS });
   const line = (await ledger.settings(models, subject)).find((shown) => shown.id === setting);
@@ -94,7 +88,6 @@ async function choose(subject: Subject, setting: string, id: string): Promise<vo
   });
 }
 
-/** A runtime started again over the same T3, settings ledger and stops file, as after a restart. */
 export async function restart(overrides: Overrides = {}): Promise<void> {
   await runtime.close();
   ledger = await SettingsLedger.open(ledgerFile());

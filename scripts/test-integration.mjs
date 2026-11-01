@@ -46,11 +46,6 @@ let installation = root;
 let runtimeHost = "127.0.0.1";
 let runtimeConfigPath;
 const services = new Map();
-/**
- * The Discord routes the installation serves. Channel 305 is reserved for the
- * settings card so its turns do not disturb the response counters of the
- * other conversations.
- */
 const DISCORD_ROUTES = [
   "300:always:channel:assistant",
   "301:mention:thread:assistant",
@@ -494,7 +489,6 @@ function assertStartupRefused(name, expected, extraArgs = [], options = {}) {
   assert.match(result.stderr, expected);
 }
 
-/** The Pi runtime's own setup command, as `carillon setup` runs it. */
 function runtimeSetup(options, ...flags) {
   const [program, args] = serviceArguments("runtime", options);
   return execFileSync(program, [...args, ...flags], {
@@ -752,8 +746,6 @@ async function testPiModelReadiness() {
       value: "readiness-fixture/readiness-model",
     });
     await assert.rejects(stat(storage), { code: "ENOENT" }, "setup must not create native state");
-    // Core stays stopped throughout this runtime-only readiness check, so no
-    // queued work can reach the intentionally non-listening model endpoint.
     await start("runtime", options);
     const response = await fetch(`http://${runtimeHost}:${String(basePort + 2)}/health`);
     assert.equal(response.status, 200);

@@ -1,8 +1,5 @@
 use super::*;
 
-/// A Discord module that asks for the settings page through its one native
-/// call, then replies `answered` when the provider gave the page, or
-/// `failed` when it did not.
 fn calling_settings(answered: &str, failed: &str) -> anyhow::Result<Vec<u8>> {
     let description = describing(&[definition("settings")]);
     let describe_length =
@@ -62,7 +59,6 @@ fn calling_settings(answered: &str, failed: &str) -> anyhow::Result<Vec<u8>> {
     Ok(wat::parse_str(text)?)
 }
 
-/// A gateway `/settings` command from an allowed user in route channel 300.
 pub(super) fn settings_command() -> anyhow::Result<twilight_gateway::Event> {
     use twilight_model::gateway::payload::incoming::InteractionCreate;
 

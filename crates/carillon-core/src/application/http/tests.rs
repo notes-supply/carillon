@@ -567,8 +567,6 @@ fn check_opens_storage_like_the_service_without_writing() -> Result<()> {
     let directory = tempdir()?;
     let state = installation(directory.path())?;
     check(&state.config)?;
-    // The previous release's state, without conversations' channels, is
-    // refused, and left as it was.
     let database = state.config.value.data_dir.join("carillon.sqlite3");
     rusqlite::Connection::open(&database)?.execute_batch("DROP TABLE conversations")?;
     let before = fs::read(&database)?;

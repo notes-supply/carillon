@@ -27,8 +27,6 @@ fn route(agent: &str) -> DiscordRoute {
     }
 }
 
-/// Core at its address, answering every settings request after `delay`
-/// with nothing, and counting the requests that carry a change.
 async fn core(
     delay: Duration,
 ) -> anyhow::Result<(
@@ -147,8 +145,6 @@ async fn a_route_line_is_read_only_and_reaches_no_runtime() -> anyhow::Result<()
     Ok(())
 }
 
-/// A change still unanswered at the interaction's deadline is unconfirmed:
-/// sent once, never again, and the page shows what could be read.
 #[tokio::test]
 async fn a_change_unanswered_by_the_deadline_is_unconfirmed_and_not_retried() -> anyhow::Result<()>
 {

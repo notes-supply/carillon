@@ -13,11 +13,9 @@ import { cleanup, cli, fakeT3, installation, loaded } from "./setup-fixtures.ts"
 
 const offered: Catalogue = catalog({ providers: FAKE_PROVIDERS });
 
-/** The runtime's settings ledger, where it keeps each agent's model. */
 const ledgerOf = (runtime: Installation) =>
   SettingsLedger.open(join(runtime.componentDirectory, "settings.json"));
 
-/** The agent's model lines in the ledger, each by its choice. */
 async function agentModel(runtime: Installation, agentId: string) {
   const lines = await (
     await ledgerOf(runtime)
@@ -122,7 +120,6 @@ it("keeps the other agents' settings on a rerun, and the model's options while t
     ].join("\n"),
   );
 
-  // Another server with a new token: the other agent's settings stay.
   const moved = await fakeT3("rotated-token");
   moved.projects = [{ id: "agent", title: "Agent", workspaceRoot: workspace }];
   const endpoint = { url: moved.url, token: moved.token };
@@ -132,7 +129,6 @@ it("keeps the other agents' settings on a rerun, and the model's options while t
   expect(settings.agents.get("notes")?.projectId).toBe("other");
   expect((await readFile(settings.tokenFile, "utf8")).trim()).toBe("rotated-token");
 
-  // An option tuned with `carillon settings --agent` stays while the model does.
   const ledger = await ledgerOf(runtime);
   const subject = { kind: "agent", agent_id: "code" } as const;
   const effort = (await ledger.settings(offered, subject)).find(({ id }) => id === "model.effort");
@@ -204,7 +200,6 @@ it("refuses settings that do not read as valid before writing anything", async (
     'note = "secret-in-file"\ntitle =\n',
     // TOML, but not the runtime's settings.
     ['title = ""', ...valid].join("\n"),
-    // An earlier release's, naming the agent's model.
     [...valid, "[agents.code.model]", 'instance_id = "claudeAgent"', 'model = "m"'].join("\n"),
   ]) {
     await writeFile(runtime.providerFile, malformed);

@@ -951,8 +951,6 @@ async fn a_command_shows_the_reactions_of_the_settings_it_was_admitted_with() ->
     Ok(())
 }
 
-/// `/settings` from a user outside the allowlist, or from a guild that is not
-/// configured, is refused before the module runs; the allowed user's reads.
 #[tokio::test]
 async fn a_refused_settings_command_makes_no_core_call() -> anyhow::Result<()> {
     let asked = Arc::new(AtomicUsize::new(0));

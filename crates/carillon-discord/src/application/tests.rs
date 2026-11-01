@@ -42,8 +42,6 @@ use crate::{
     },
 };
 
-/// A Discord module in `directory` that defines `/settings` and answers
-/// every interaction with `reply`.
 async fn stub_module(directory: &Path, reply: &str) -> anyhow::Result<Arc<Module>> {
     write_module(
         &directory.join("release.wasm"),
