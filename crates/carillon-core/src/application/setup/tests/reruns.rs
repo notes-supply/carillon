@@ -1,6 +1,6 @@
 use super::{
-    Config, LoadedConfig, Options, Runtime, SavedT3, Shown, fake_t3, initialized, model, options,
-    saved_t3, set_up_t3,
+    Config, LoadedConfig, Options, Runtime, SavedT3, Shown, create_missing_database, fake_t3,
+    initialized, model, options, saved_t3, set_up_t3,
 };
 use crate::application::{
     admin::set_agents,
@@ -187,5 +187,24 @@ fn unreadable_t3_settings_keep_their_agents_ids_and_are_replaced() -> anyhow::Re
         assert_eq!(std::fs::read_to_string(&token)?, "token");
         std::fs::remove_file(&calls)?;
     }
+    Ok(())
+}
+
+#[test]
+fn a_carried_registry_without_state_gets_a_new_database() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let home = directory.path().join("home");
+    initialized(&home, directory.path(), Runtime::Pi)?;
+    let database = home.join("state/carillon.sqlite3");
+    std::fs::remove_file(&database)?;
+    create_missing_database(&home)?;
+    crate::db::Database::open(&database)?;
+    let created = std::fs::read(&database)?;
+    create_missing_database(&home)?;
+    assert_eq!(
+        std::fs::read(&database)?,
+        created,
+        "an existing database is left as it is"
+    );
     Ok(())
 }

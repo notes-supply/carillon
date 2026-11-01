@@ -599,7 +599,9 @@ refuses its database format and changes nothing. To move to it:
 3. Run the new release's `install.sh` and answer setup. It keeps the
    Discord settings and the Pi sign-in. It asks T3's address, token and
    projects again, because the old T3 settings name a model, and the model
-   now lives in the runtime's settings. It asks each agent's model.
+   now lives in the runtime's settings. It asks each agent's model and
+   creates a new database.
+4. Run `carillon start`.
 
 `state/` starts empty, so turn history, conversations, Pi's conversations
 and scheduled runs do not carry over. T3 per-thread model choices do not

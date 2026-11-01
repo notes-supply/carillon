@@ -25,6 +25,7 @@ use super::{
     admin::{self, Runtime, initialize, register_runtime, set_agents},
     cli::provider_binary,
 };
+use crate::db::Database;
 
 /// What `carillon setup` was told on its command line.
 pub(super) struct Options {
@@ -112,6 +113,7 @@ pub(super) fn setup(home: &Path, options: &Options, questions: &mut impl Questio
         for &runtime in &runtimes {
             register_runtime(&home.join("carillon.toml"), runtime)?;
         }
+        create_missing_database(home)?;
     }
     let config = LoadedConfig::load(&home.join("carillon.toml"))?;
     let agents = &config.value.agents;
@@ -277,6 +279,18 @@ fn choose_pi_models(
         )?];
         let args = ["--configure", "--agent", &agent.id, "--model", &model.id()];
         questions.say(output(pi_command(home, pi, &args), "")?.trim())?;
+    }
+    Ok(())
+}
+
+/// Creates the installation's database when it has none, as a new
+/// installation does. An installation set up with another's carried
+/// configuration starts with empty state; core itself never creates one.
+fn create_missing_database(home: &Path) -> Result<()> {
+    let config = LoadedConfig::load(&home.join("carillon.toml"))?;
+    let path = config.value.data_dir.join("carillon.sqlite3");
+    if !path.exists() {
+        Database::create(&path)?;
     }
     Ok(())
 }
