@@ -191,6 +191,7 @@ expect_trace '--user start carillon.target'
 mkdir "$TEST_ROOT/decoy"
 printf '%s\n' 'not a registry' >"$TEST_ROOT/decoy/carillon.toml"
 (cd "$TEST_ROOT/decoy" && carillon status) | grep -F '"status": "ready"' >/dev/null
+carillon settings --agent assistant model=local/echo | grep -Fx 'Model  Local echo' >/dev/null
 case "$(simulate installed-1)" in *'Local provider response 1'*) ;; *) fail 'first turn failed' ;; esac
 
 # Provider commands receive the resolved installation and infer the only Discord instance.

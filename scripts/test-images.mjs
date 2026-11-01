@@ -2,7 +2,7 @@
 // model by the embedded Photon, and every file is listed. Controlled local
 // inference.
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { realpathSync } from "node:fs";
@@ -97,10 +97,6 @@ try {
   for (const [ordinal, file] of files.entries())
     await writeFile(join(store, capture, String(ordinal)), file.bytes);
   await writeFile(
-    join(state, "settings.json"),
-    JSON.stringify({ defaultProvider: "fixture", defaultModel: "vision" }),
-  );
-  await writeFile(
     join(state, "models.json"),
     JSON.stringify({
       providers: {
@@ -150,10 +146,13 @@ try {
         ...program,
       ]
     : program;
-  runtime = spawn(command, args, {
-    cwd: root,
-    env: { ...process.env, PI_OFFLINE: "1", PI_CODING_AGENT_DIR: state },
-  });
+  const env = { ...process.env, PI_OFFLINE: "1", PI_CODING_AGENT_DIR: state };
+  execFileSync(
+    program[0],
+    [...program.slice(1), "--configure", "--agent", "default", "--model", "fixture/vision"],
+    { cwd: root, env },
+  );
+  runtime = spawn(command, args, { cwd: root, env });
   runtime.stdout.on("data", (part) => {
     logs += part;
   });
@@ -177,6 +176,7 @@ try {
       interface_id: "fixture",
       agent_id: "default",
       audience_id: "images",
+      channel_id: "images",
       input: "",
       resource_root: resources,
       attachment_root: store,

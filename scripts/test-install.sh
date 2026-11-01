@@ -420,6 +420,8 @@ for offset in 0 1 2; do
 done
 
 env CARILLON_HOME="$CARILLON_HOME" "$APP/carillon" discord call messages pin --help >/dev/null
+env CARILLON_HOME="$CARILLON_HOME" "$APP/carillon" settings --agent assistant model=local/echo |
+  grep -Fx 'Model  Local echo' >/dev/null
 
 grep -F -- '--provider runtime-pi' "$XDG_CONFIG_HOME/systemd/user/carillon-runtime-pi.service" >/dev/null
 grep -F -- '--provider runtime-t3' "$XDG_CONFIG_HOME/systemd/user/carillon-runtime-t3.service" >/dev/null
@@ -470,9 +472,9 @@ case "$FIRST" in *"Local provider response 1"*) ;; *) printf '%s\n' "$FIRST" >&2
 # The packaged Discord module answers slash commands through the packaged provider.
 PANEL=$(curl --fail --silent -X POST -H 'content-type: application/json' \
   -H "@$SIMULATION_HEADERS" \
-  --data '{"guild_id":"100","user_id":"200","channel_id":"300","kind":"command","name":"model"}' \
+  --data '{"guild_id":"100","user_id":"200","channel_id":"300","kind":"command","name":"settings"}' \
   "http://127.0.0.1:$DISCORD_PORT/v1/interactions")
-case "$PANEL" in *"model:model:conversation"*) ;; *) printf '%s\n' "$PANEL" >&2; exit 1 ;; esac
+case "$PANEL" in *'Model    Local echo · default'*) ;; *) printf '%s\n' "$PANEL" >&2; exit 1 ;; esac
 kill "$RUNTIME_PID"
 wait "$RUNTIME_PID" 2>/dev/null || true
 RUNTIME_PID=
