@@ -196,14 +196,14 @@ case "$(simulate installed-1)" in *'Local provider response 1'*) ;; *) fail 'fir
 # Provider commands receive the resolved installation and infer the only Discord instance.
 EXAMPLE=$INSTALLATION/app/lib/examples/card-colours.wasm
 SETTINGS=$INSTALLATION/providers/discord-private.toml
-carillon discord module | grep -Fx 'discord-private serves the bundled Discord module: /model, /command.' >/dev/null
+carillon discord module | grep -Fx 'discord-private serves the bundled Discord module: /settings, /command.' >/dev/null
 carillon discord module check "$EXAMPLE" | grep -F 'is a usable Discord module' >/dev/null
 # Another maintenance operation's lock leaves the declaration as it is.
 cp "$SETTINGS" "$TEST_ROOT/settings-before"
 refuse locked-enable flock "$INSTALLATION/.maintenance.lock" carillon discord module enable "$EXAMPLE"
 grep -F 'another Carillon maintenance operation is running' "$TEST_ROOT/locked-enable.log" >/dev/null
 cmp "$SETTINGS" "$TEST_ROOT/settings-before"
-carillon discord module | grep -Fx 'discord-private serves the bundled Discord module: /model, /command.' >/dev/null
+carillon discord module | grep -Fx 'discord-private serves the bundled Discord module: /settings, /command.' >/dev/null
 carillon discord configure --guild-id 100 --bot-user-id 201 --user-id 200 --user-id 250 \
   --route 300:always:channel:assistant >/dev/null
 grep -F '"250"' "$INSTALLATION/providers/discord-private.toml" >/dev/null
@@ -357,18 +357,31 @@ done
 printf 'update refusals passed: links, traversal, relabelled, unrunnable and incomplete releases\n'
 
 # The release's own programs refuse installed state they cannot use, before
-# anything is stopped: a core schema this release does not know, and Discord
+# anything is stopped: a core schema this release does not know, the
+# previous release's, which records no conversation's channel, and Discord
 # settings its provider rejects.
 DATABASE=$INSTALLATION/state/carillon.sqlite3
 DISCORD_SETTINGS=$INSTALLATION/providers/discord-private.toml
 cp -p "$DISCORD_SETTINGS" "$TEST_ROOT/discord-settings"
 for state in schema:'database schema is not the current Carillon format' \
+  previous:'database schema is not the current Carillon format' \
   discord:'cannot use the settings of discord-private' \
   module:'enable a custom Discord module this release cannot serve'; do
   case "${state%%:*}" in
     schema)
       node -e 'new (require("node:sqlite").DatabaseSync)(process.argv[1]).exec("CREATE TABLE later_release (id INTEGER)")' \
         "$DATABASE" ;;
+    # The table is kept aside, and the write-ahead log emptied into the
+    # database, so its digest shows whether the refused update wrote.
+    previous)
+      node -e '
+        const database = new (require("node:sqlite").DatabaseSync)(process.argv[1]);
+        const sql = database.prepare("SELECT sql FROM sqlite_schema WHERE name = ?").get("conversations").sql;
+        const rows = database.prepare("SELECT * FROM conversations").all();
+        require("node:fs").writeFileSync(process.argv[2], JSON.stringify({ sql, rows }));
+        database.exec("DROP TABLE conversations; PRAGMA wal_checkpoint(TRUNCATE)");
+        database.close();' "$DATABASE" "$TEST_ROOT/conversations.json"
+      sha256sum "$DATABASE" >"$TEST_ROOT/database.sha256" ;;
     discord) sed -i 's/^guild_id = .*/guild_id = "not-a-snowflake"/' "$DISCORD_SETTINGS" ;;
     # An enabled module the new release cannot serve, as after a contract change.
     module)
@@ -387,12 +400,22 @@ for state in schema:'database schema is not the current Carillon format' \
     schema)
       node -e 'new (require("node:sqlite").DatabaseSync)(process.argv[1]).exec("DROP TABLE later_release")' \
         "$DATABASE" ;;
+    previous)
+      sha256sum --check --status "$TEST_ROOT/database.sha256" || fail 'a refused update changed the database'
+      node -e '
+        const database = new (require("node:sqlite").DatabaseSync)(process.argv[1]);
+        const { sql, rows } = JSON.parse(require("node:fs").readFileSync(process.argv[2], "utf8"));
+        database.exec(sql);
+        const insert = database.prepare(
+          "INSERT INTO conversations (interface_id, agent_id, audience_id, channel_id) VALUES (?, ?, ?, ?)");
+        for (const row of rows) insert.run(row.interface_id, row.agent_id, row.audience_id, row.channel_id);
+        database.close();' "$DATABASE" "$TEST_ROOT/conversations.json" ;;
     discord) cp -p "$TEST_ROOT/discord-settings" "$DISCORD_SETTINGS" ;;
     module) cp -p "$TEST_ROOT/discord-settings" "$DISCORD_SETTINGS" && rm "$TEST_ROOT/broken.wasm" ;;
   esac
 done
 snapshot
-printf 'update state preflight passed: incompatible core schema, provider settings and Discord module refused\n'
+printf 'update state preflight passed: incompatible and previous core schemas, provider settings and Discord module refused\n'
 
 # When T3 is the registered runtime, the release's own T3 runtime reads the
 # settings and token it would start from before anything stops. A token file
@@ -405,19 +428,20 @@ T3_SETTINGS=$INSTALLATION/providers/runtime-t3.toml
 T3_TOKEN=$INSTALLATION/credentials/t3.token
 t3_settings() {
   printf '%s\n' 'url = "http://127.0.0.1:1"' 'token_file = "credentials/t3.token"' \
-    '[agents.assistant]' 'project_id = "agent"' \
-    '[agents.assistant.model]' 'instance_id = "claudeAgent"' 'model = "claude-sonnet-5"' \
-    >"$T3_SETTINGS"
+    '[agents.assistant]' 'project_id = "agent"' >"$T3_SETTINGS"
   printf '%s\n' t3-token >"$T3_TOKEN"
   chmod 0600 "$T3_SETTINGS" "$T3_TOKEN"
 }
 for state in empty:'the T3 token file is empty' missing:'credentials/t3.token' \
-  settings:'runtime-t3.toml: /agents/assistant/model'; do
+  settings:'runtime-t3.toml: /agents/assistant must not have additional properties: model'; do
   t3_settings
   case "${state%%:*}" in
     empty) : >"$T3_TOKEN" ;;
     missing) rm "$T3_TOKEN" ;;
-    settings) printf '%s\n' 'temperature = 2' >>"$T3_SETTINGS" ;;
+    # An earlier release's settings, which named the agent's model.
+    settings)
+      printf '%s\n' '[agents.assistant.model]' 'instance_id = "claudeAgent"' 'model = "claude-sonnet-5"' \
+        >>"$T3_SETTINGS" ;;
   esac
   snapshot
   refuse "incompatible-t3-${state%%:*}" carillon update "$TEST_ROOT/next.tar.gz"
@@ -455,7 +479,7 @@ rm -f "$TRACE"
 # custom module the settings enable is checked by the new release before
 # anything stops.
 carillon discord module enable "$EXAMPLE" >"$TEST_ROOT/module-enable.log"
-grep -Fx "It serves the custom Discord module $EXAMPLE: /model, /command." \
+grep -Fx "It serves the custom Discord module $EXAMPLE: /settings, /command." \
   "$TEST_ROOT/module-enable.log" >/dev/null
 snapshot
 carillon update "$TEST_ROOT/next.tar.gz" >"$TEST_ROOT/update.log"
@@ -475,8 +499,8 @@ assert_preserved
 [ "$(carillon recent)" = "$recent_before" ]
 case "$(simulate installed-2)" in *'Local provider response 2'*) ;; *) fail 'conversation did not continue' ;; esac
 [ "$(carillon review check)" = "review $INSTALLATION check" ]
-carillon discord module | grep -Fx "discord-private serves the custom Discord module $EXAMPLE: /model, /command." >/dev/null
-carillon discord module disable | grep -Fx 'It serves the bundled Discord module: /model, /command.' >/dev/null
+carillon discord module | grep -Fx "discord-private serves the custom Discord module $EXAMPLE: /settings, /command." >/dev/null
+carillon discord module disable | grep -Fx 'It serves the bundled Discord module: /settings, /command.' >/dev/null
 snapshot
 
 # A stopped installation stays stopped.
