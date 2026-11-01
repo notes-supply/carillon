@@ -17,13 +17,14 @@ share:
   files;
 - the agents conversations belong to, each with the runtime its new
   conversations start on;
-- conversations and the runtime of each one's latest turn;
+- conversations, each with the channel its first message came from and the
+  runtime of its latest turn;
 - turns (queued, running, completed, interrupted);
 - the outcomes runtimes report for the turns they hold, and the turns they
   open themselves;
 - delivery intents and their outcomes;
-- relaying model and command reads, and turn controls, from an interface to
-  the conversation's runtime; and
+- relaying settings to the runtime that serves the agent, and command reads
+  and turn controls to the conversation's runtime; and
 - inspection, backup and restore.
 
 SQLite is the only durable store, and network or model work never runs inside
@@ -84,8 +85,8 @@ agent, that settled turn records the current runtime as owner. The next message
 in the same conversation starts a fresh native conversation there. Removed
 agents have no new runtime, so further messages remain stranded. Neither
 admission nor delivery needs the former runtime enabled or configured.
-Model and command queries return the explanation as a conflict without
-changing ownership. Startup settlement also preserves the former owner.
+Command queries return the explanation as a conflict without changing
+ownership. Startup settlement also preserves the former owner.
 New conversations use the agent's current runtime.
 
 A turn whose outcome can't be proved, or that its runtime reports as failed,
@@ -171,7 +172,7 @@ reported, not retried.
 
 ## Runtime providers
 
-A runtime receives a turn (agent, interface, audience, input, captured
+A runtime receives a turn (agent, interface, audience, channel, input, captured
 resources, files by relative path and opaque interface metadata) and owns
 the conversation's native session. It keeps each turn core hands it at
 `POST /v1/inbox`, answering 202 once kept, and settles it later
@@ -188,9 +189,8 @@ Runtimes also answer:
 - `GET /v1/turns/{id}/activity` with a bounded snapshot of the running turn:
   phase, recent and running calls, published reasoning and delegated work.
   Tool output is never included.
-- `GET|PUT /v1/model` with the models they offer, provider display names,
-  named option choices, and the selection for the agent or a conversation.
-  Selections hold provider, model and choice IDs.
+- `POST /v1/settings` with their settings for an agent or a channel, after
+  applying a change when the request carries one.
 - `GET /v1/commands` with the engine's own commands. Invoking one sends its
   text verbatim.
 - `GET /v1/restart`: whether restarting now loses anything.
@@ -208,8 +208,9 @@ agent's settings choose, and people steer, interrupt or stop a waiting
 message. Steers placed into one answer settle with it: the newest carries
 it. An agent's settings may select schedules, subagents and the MCP servers
 of `CARILLON_HOME/pi/mcp.json` as built-in extensions; a schedule's run and
-a background subagent's report come in turns Pi opens. Pi's sign-in,
-catalogue and default model live in `CARILLON_HOME/pi`, apart from `~/.pi`.
+a background subagent's report come in turns Pi opens, in the channel core
+recorded for the conversation. Pi's sign-in and catalogue live in
+`CARILLON_HOME/pi`, apart from `~/.pi`.
 See the [Pi guide](../../packages/runtime-pi/README.md).
 
 **T3** (`carillon-runtime-t3`) is a runtime that runs turns on a T3
@@ -227,8 +228,8 @@ and audience. The runtime uses it when absent or in the agent's current project;
 otherwise it uses an ID that also includes the current project. T3's projection
 owns each thread's project. After a project change, the first message opens an
 empty project-scoped thread and receives an explanation; none of it runs. The next
-message runs in that thread. Model requests and commands are refused without
-creating anything until the project-scoped thread exists, then use it.
+message runs in that thread. Commands are refused without creating anything
+until the project-scoped thread exists, then use it.
 Returning to the original project resumes the canonical thread. Conversations
 without a T3 thread yet start in the current project. Native work already
 running in another project is left alone. Delegated work reports in a turn
@@ -239,9 +240,50 @@ fences that thread in the runtime's memory, and the runtime refuses a
 drained restart while any fence stands or a person's stop waits for T3.
 
 Its agents are plain T3 Code, given the person's text as written, their
-threads titled by T3; an agent with resources is refused. Each message
-names the selection its run takes: the thread's, else the agent default.
+threads titled by T3; an agent with resources is refused. A turn takes the
+model of its channel once, before its first dispatch, and every dispatch of
+that turn names it, a reconnect's included. A channel change therefore
+reaches each of the channel's threads at its next turn. A model picked in
+T3's own UI for a Carillon thread lasts until Carillon's next turn there.
 See the [T3 guide](../../packages/runtime-t3/README.md).
+
+## Settings
+
+Each setting has one owner, which declares it, offers its choices,
+validates a change, stores it and computes its revision. A renderer draws
+what the owners return and defines no setting of its own.
+
+- The interface owns a channel's route: its agent, whether the agent
+  answers every message or only mentions, and whether it replies in threads
+  or in the channel. The Discord provider keeps routes in its settings file.
+- The runtime that serves an agent owns its model and the model's options.
+  It keeps them in `settings.json` in its component directory: at most one
+  model unit per agent and one per channel: the model and the options
+  chosen for it. A channel without a unit inherits its agent's, which is
+  the only agent default. An option the channel did not choose takes the
+  agent's choice while the channel runs the agent's model, else the
+  model's default. Choosing a model replaces the unit with that model
+  alone, so an option value never outlives its model.
+
+A revision digests everything that decides a setting's meaning at its
+subject: the subject's interface, channel and agent, its own unit, its
+agent's unit while that applies there, and the catalogue entry of the
+model that applies.
+A change names the revision it was drawn from. The owner refuses it with a
+conflict and writes nothing when the revision is another now, so a card
+drawn before a re-route or a model switch cannot write.
+
+The Discord provider composes a channel's page from its own route lines and
+the runtime's lines, which it reads through core's `POST /v1/settings`.
+Core relays only for the interface that owns the channel, or for the
+operator, who may also name an agent. The provider serves the same pages to
+`carillon settings` on its operator API. A runtime that does not answer
+leaves the route lines on the page.
+
+A turn takes its channel's unit, else its agent's, when the runtime admits
+it. Core records each conversation's channel with its first admitted
+message and hands it to the runtime with every turn of the conversation,
+the turns a runtime opens included.
 
 ## Configuration
 
@@ -254,7 +296,8 @@ fields.
 
 Setup registers the Discord provider and the runtimes chosen, Pi, T3 or
 both. Pi runs Carillon's assistant whenever it is chosen. Each provider's
-own program sets up its part: Pi signs in through its own interface; the T3
+own program sets up its part: Pi signs in through its own interface, and
+setup then asks the model of each Pi agent that has none; the T3
 runtime makes an agent for each T3 project T3 Code channels work in, and
 their settings; and the Discord provider learns the bot from its token and
 offers servers, channels and people by name, asking who answers in each
@@ -290,8 +333,7 @@ latest one it admitted for the agent: an edit applies to the agent's next
 model request, including those for messages already waiting, and its
 `settings.json` selects the agent's extensions and busy mode. T3 takes no
 resources, and refuses an agent that has them. Model sign-in and engine settings are not
-resources: Pi keeps them in `CARILLON_HOME/pi` and checks its default model
-is usable before it serves, so incomplete setup leaves work queued. A runtime
+resources: Pi keeps them in `CARILLON_HOME/pi`. A runtime
 works in its agent's workspace (your home by default for Pi) with your
 authority.
 

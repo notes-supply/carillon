@@ -5,29 +5,12 @@ import { Type, type Static } from "typebox";
 import { mismatch } from "@carillon/runtime/mismatch";
 import { Check } from "typebox/value";
 import { parse as parseToml, TomlError } from "smol-toml";
-import type { NativeSelection } from "./contracts.ts";
 
-const SelectionSchema = Type.Object(
-  {
-    instance_id: Type.String({ minLength: 1 }),
-    model: Type.String({ minLength: 1 }),
-    /** Option values by ID: a select choice's ID, or a boolean. */
-    options: Type.Optional(
-      Type.Record(
-        Type.String({ minLength: 1 }),
-        Type.Union([Type.String({ minLength: 1 }), Type.Boolean()]),
-      ),
-    ),
-  },
-  { additionalProperties: false },
-);
-
+/** An agent's T3 settings. Its model is the settings ledger's, never this file's. */
 const AgentSettingsSchema = Type.Object(
   {
     /** The T3 project the agent works in, rooted at its workspace. */
     project_id: Type.String({ minLength: 1 }),
-    /** The selection a new conversation thread starts with, as T3 names it. */
-    model: SelectionSchema,
   },
   { additionalProperties: false },
 );
@@ -50,12 +33,9 @@ const SettingsSchema = Type.Object(
 
 /** The settings file as written, its URL an origin. */
 export type SettingsFile = Static<typeof SettingsSchema>;
-type AgentSettingsFile = Static<typeof AgentSettingsSchema>;
 
 interface AgentSettings {
   readonly projectId: string;
-  /** The agent default from the settings: what new threads start with until `/model` changes it. */
-  readonly selection: NativeSelection;
 }
 
 export interface T3Settings {
@@ -73,17 +53,9 @@ export async function loadSettings(path: string, root: string): Promise<T3Settin
     agents: new Map(
       Object.entries(settings.agents ?? {}).map(([id, agent]) => [
         id,
-        { projectId: agent.project_id, selection: nativeSelection(agent.model) },
+        { projectId: agent.project_id },
       ]),
     ),
-  };
-}
-
-function nativeSelection(selection: AgentSettingsFile["model"]): NativeSelection {
-  return {
-    instanceId: selection.instance_id,
-    model: selection.model,
-    options: Object.entries(selection.options ?? {}).map(([id, value]) => ({ id, value })),
   };
 }
 

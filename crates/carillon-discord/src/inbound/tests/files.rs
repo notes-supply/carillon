@@ -1229,15 +1229,8 @@ async fn a_submission_still_waiting_for_a_slot_at_the_deadline_is_never_made() -
         busy.push(ingress.downloads.active().await);
     }
     let event = ExternalEvent {
-        event_id: "99".to_owned(),
-        agent_id: "default".to_owned(),
-        user_id: "200".to_owned(),
-        audience_id: "discord-100-300".to_owned(),
-        delivery_target_id: "300".to_owned(),
-        feedback_target_id: "300:99".to_owned(),
         content: String::new(),
-        native: Value::Null,
-        attachments: None,
+        ..crate::delivery::tests::event("99")
     };
     let started = Instant::now();
     let Err(crate::inbound::NotAccepted::Refused(refusal)) =

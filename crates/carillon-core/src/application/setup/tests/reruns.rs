@@ -1,5 +1,6 @@
 use super::{
-    Config, LoadedConfig, Options, Runtime, Shown, fake_t3, initialized, model, options, set_up_t3,
+    Config, LoadedConfig, Options, Runtime, SavedT3, Shown, create_missing_database, fake_t3,
+    initialized, model, options, saved_t3, set_up_t3,
 };
 use crate::application::{
     admin::set_agents,
@@ -26,6 +27,7 @@ fn setting_up_t3_keeps_the_assistants_id_and_paths_on_pi() -> anyhow::Result<()>
         &options(),
         true,
         &program,
+        SavedT3::Replaced,
         &mut Shown::answering(&["", "token", "0", "0"]),
     )?;
     let stored: Config = toml::from_str(&std::fs::read_to_string(&path)?)?;
@@ -117,12 +119,92 @@ fn t3_setup_offers_each_agent_the_models_the_runtime_offers_it() -> anyhow::Resu
         &options(),
         false,
         &program,
+        SavedT3::Replaced,
         &mut Shown::answering(&["", "token", "0", "0"]),
     )?;
     let calls = std::fs::read_to_string(directory.path().join("calls"))?;
     assert!(
         calls.contains("--agent t3-notes --project notes --model codex/gpt"),
         "{calls}"
+    );
+    Ok(())
+}
+
+#[test]
+fn unreadable_t3_settings_keep_their_agents_ids_and_are_replaced() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let home = directory.path().join("home");
+    let path = initialized(&home, directory.path(), Runtime::T3)?;
+    set_agents(
+        &path,
+        vec![carillon_installation::config::AgentConfig {
+            id: "t3-notes".to_owned(),
+            name: "T3 Code · Notes".to_owned(),
+            runtime: Runtime::T3.id().to_owned(),
+            workspace: directory.path().to_path_buf(),
+            resources: None,
+        }],
+    )?;
+    let settings = home.join("providers/runtime-t3.toml");
+    let token = home.join("credentials/t3.token");
+    std::fs::write(&token, "token")?;
+    let offer = serde_json::json!({
+        "projects": [{"id": "notes", "title": "Notes", "workspace": directory.path()}],
+        "models": [model("codex", "gpt", "GPT")],
+    });
+    let program = fake_t3(directory.path(), &offer)?;
+    let calls = directory.path().join("calls");
+    let earlier =
+        "[agents.t3-notes]\nproject_id = 'notes'\n[agents.t3-notes.model]\nmodel = 'gpt'\n";
+    let readable = "[agents.t3-notes]\nproject_id = 'notes'\n";
+    for (contents, declined) in [(earlier, false), (readable, true)] {
+        std::fs::write(&settings, contents)?;
+        let mut questions = Shown::answering(&["", "token", "0", "0"]);
+        questions.confirmations.extend(declined.then_some(false));
+        let saved = saved_t3(&home, &program, &mut questions)?;
+        let expected = if declined {
+            SavedT3::Replaced
+        } else {
+            SavedT3::Unreadable
+        };
+        assert_eq!(saved, expected);
+        set_up_t3(&home, &options(), false, &program, saved, &mut questions)?;
+        assert_eq!(settings.exists(), declined);
+        let ran = std::fs::read_to_string(&calls)?;
+        assert!(
+            ran.contains("--agent t3-notes --project notes --model codex/gpt"),
+            "{ran}"
+        );
+        let stored: Config = toml::from_str(&std::fs::read_to_string(&path)?)?;
+        assert_eq!(
+            stored
+                .agents
+                .iter()
+                .map(|agent| agent.id.as_str())
+                .collect::<Vec<_>>(),
+            ["t3-notes"]
+        );
+        assert_eq!(std::fs::read_to_string(&token)?, "token");
+        std::fs::remove_file(&calls)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn a_carried_registry_without_state_gets_a_new_database() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let home = directory.path().join("home");
+    initialized(&home, directory.path(), Runtime::Pi)?;
+    let database = home.join("state/carillon.sqlite3");
+    std::fs::remove_file(&database)?;
+    create_missing_database(&home)?;
+    crate::db::Database::open(&database)?;
+    let created = std::fs::read(&database)?;
+    create_missing_database(&home)?;
+    assert_eq!(
+        std::fs::read(&database)?,
+        created,
+        "an existing database is left as it is"
     );
     Ok(())
 }

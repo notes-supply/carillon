@@ -1,5 +1,5 @@
 use super::{AgentOptions, Core, CoreError, RuntimeProvider};
-use carillon_protocol::model::ModelQuery;
+use carillon_protocol::model::ConversationQuery;
 
 pub(super) enum Owner<'a> {
     Current(&'a AgentOptions),
@@ -13,7 +13,7 @@ impl Core {
     pub(super) fn conversation_owner(
         &self,
         interface_id: &str,
-        query: &ModelQuery,
+        query: &ConversationQuery,
     ) -> Result<Owner<'_>, CoreError> {
         let agent = self.agent(&query.agent_id);
         if let Some(audience) = &query.audience_id
@@ -30,6 +30,24 @@ impl Core {
         Ok(Owner::Current(agent?))
     }
 
+    /// The channel a conversation query is about: the one core recorded for
+    /// the conversation, which its turns run in, else the one the interface
+    /// names for a conversation without a turn yet.
+    pub(crate) fn conversation_channel(
+        &self,
+        interface_id: &str,
+        query: &ConversationQuery,
+    ) -> Result<String, CoreError> {
+        let recorded = match &query.audience_id {
+            Some(audience) => {
+                self.database
+                    .recorded_channel(interface_id, &query.agent_id, audience)?
+            }
+            None => None,
+        };
+        Ok(recorded.unwrap_or_else(|| query.channel_id.clone()))
+    }
+
     /// Refuses an interactive request for a conversation whose agent moved or was removed.
     /// Messages instead commit their interruption notice during admission.
     /// # Errors
@@ -37,7 +55,7 @@ impl Core {
     pub(crate) fn query_runtime(
         &self,
         interface_id: &str,
-        query: &ModelQuery,
+        query: &ConversationQuery,
     ) -> Result<RuntimeProvider, CoreError> {
         match self.conversation_owner(interface_id, query)? {
             Owner::Current(agent) => self.enabled_runtime(&agent.runtime),
@@ -50,6 +68,20 @@ impl Core {
                 current.map(|agent| agent.runtime.as_str()),
             ))),
         }
+    }
+
+    /// The runtime that serves `agent_id` now, enabled or not, or `None`
+    /// for an agent core does not know.
+    /// # Errors
+    /// Returns a runtime that is not configured.
+    pub(crate) fn agent_runtime(
+        &self,
+        agent_id: &str,
+    ) -> Result<Option<RuntimeProvider>, CoreError> {
+        self.agent(agent_id)
+            .ok()
+            .map(|agent| self.runtime(&agent.runtime))
+            .transpose()
     }
 }
 

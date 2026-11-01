@@ -21,9 +21,6 @@ async function settings(url: string): Promise<{ path: string; root: string }> {
       'token_file = "credentials/t3.token"',
       "[agents.code]",
       'project_id = "project"',
-      "[agents.code.model]",
-      'instance_id = "claudeAgent"',
-      'model = "claude-fable-5-1"',
     ].join("\n"),
   );
   return { path, root };
@@ -62,27 +59,22 @@ it("reads each agent's settings, refusing an agent ID outside the grammar or a s
   const root = await mkdtemp(join(tmpdir(), "carillon-t3-settings-"));
   directories.push(root);
   const path = join(root, "runtime-t3.toml");
-  const agent = (id: string, instance: string) => [
-    `[agents.${id}]`,
-    'project_id = "project"',
-    `[agents.${id}.model]`,
-    `instance_id = "${instance}"`,
-    'model = "m"',
-  ];
+  const agent = (id: string) => [`[agents.${id}]`, 'project_id = "project"'];
   const file = (...lines: string[]) =>
     writeFile(
       path,
       ['url = "http://127.0.0.1:3773"', 'token_file = "credentials/t3.token"', ...lines].join("\n"),
     );
-  await file(...agent("notes", "codex"), ...agent("code", "claudeAgent"));
+  await file(...agent("notes"), ...agent("code"));
   const loaded = await loadSettings(path, root);
-  expect(loaded.agents.get("notes")).toEqual({
-    projectId: "project",
-    selection: { instanceId: "codex", model: "m", options: [] },
-  });
+  expect(loaded.agents.get("notes")).toEqual({ projectId: "project" });
   for (const [lines, refusal] of [
     [['profiles = ["carillon_claude"]'], /must not have additional properties/u],
-    [agent('"not/an/agent"', "claudeAgent"), /\/agents/u],
+    [agent('"not/an/agent"'), /\/agents/u],
+    [
+      [...agent("notes"), "[agents.notes.model]", 'instance_id = "codex"', 'model = "m"'],
+      /\/agents\/notes must not have additional properties: model$/u,
+    ],
   ] as const) {
     await file(...lines);
     await expect(loadSettings(path, root)).rejects.toThrow(refusal);

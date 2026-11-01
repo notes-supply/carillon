@@ -26,6 +26,7 @@ import { publish } from "@carillon/runtime/publish";
 import { Serial } from "@carillon/runtime/serial";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
+import { NoModel } from "./models.ts";
 import type { FollowUp } from "./watch.ts";
 
 /**
@@ -195,10 +196,15 @@ export function holdTurns(options: HeldOptions): HeldTurns {
       // the runtime closes; any other failure explains what T3 did instead.
       if (stop.aborted && failure === stop.reason) return { outcome: "stopped" };
       if (options.closing.aborted) return undefined;
-      if (!(failure instanceof ExplainedFailure))
+      if (!(failure instanceof ExplainedFailure) && !(failure instanceof NoModel))
         console.error(`runtime-t3: turn ${request.correlation_id}: ${diagnostic(failure)}`);
+      // The runtime wrote a missing model's text whole, so it is shown as written.
       const explanation =
-        failure instanceof ExplainedFailure ? displayableExplanation(failure.message) : undefined;
+        failure instanceof NoModel
+          ? failure.message
+          : failure instanceof ExplainedFailure
+            ? displayableExplanation(failure.message)
+            : undefined;
       const activity = reportOf(failure);
       return {
         outcome: "failed",
@@ -245,6 +251,7 @@ export function holdTurns(options: HeldOptions): HeldTurns {
           interface_id,
           agent_id,
           audience_id,
+          channel_id: receipt.channel_id,
           input: REPORT,
           native: {},
           resource_root: request.resource_root,

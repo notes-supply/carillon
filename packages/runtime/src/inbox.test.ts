@@ -7,8 +7,7 @@ import type { InboxTurns, RuntimeOperations, TurnRequest } from "./operations.ts
 
 const others: Omit<RuntimeOperations, "turns"> = {
   activity: () => undefined,
-  modelState: () => Promise.reject(new Error("unused")),
-  setModel: () => Promise.reject(new Error("unused")),
+  settings: () => Promise.reject(new Error("unused")),
   commands: () => Promise.resolve({ commands: [] }),
   restartReadiness: () => ({ state: "ready" }),
   close: () => Promise.resolve(),
@@ -50,6 +49,7 @@ const turn = (input: string): TurnRequest => ({
   correlation_id: "turn-1",
   interface_id: "discord-private",
   agent_id: "default",
+  channel_id: "300",
   audience_id: "conversation",
   input,
   resource_root: "/unused",

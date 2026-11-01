@@ -23,6 +23,7 @@ fn rerun_projects(selected: &'static str, expected: &[(&str, &str)]) -> anyhow::
         &options(),
         false,
         &program,
+        SavedT3::Replaced,
         &mut Shown::answering(&["", "token", "0,1", "0", "0"]),
     )?;
     std::fs::write(
@@ -34,6 +35,7 @@ fn rerun_projects(selected: &'static str, expected: &[(&str, &str)]) -> anyhow::
         &options(),
         false,
         &program,
+        SavedT3::Replaced,
         &mut Shown::answering(&["", "token", selected, "0", "0"]),
     )?;
     let config = LoadedConfig::load(&home.join("carillon.toml"))?;

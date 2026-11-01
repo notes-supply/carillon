@@ -19,13 +19,13 @@ use carillon_installation::{
     maintenance::MaintenanceLock,
     prompt::Questions,
 };
-use carillon_protocol::models::AvailableModel;
 use serde::Deserialize;
 
 use super::{
     admin::{self, Runtime, initialize, register_runtime, set_agents},
     cli::provider_binary,
 };
+use crate::db::Database;
 
 /// What `carillon setup` was told on its command line.
 pub(super) struct Options {
@@ -40,7 +40,30 @@ pub(super) struct Options {
 #[derive(Deserialize)]
 struct Offer {
     projects: Vec<Project>,
-    models: Vec<AvailableModel>,
+    models: Vec<OfferedModel>,
+}
+
+/// A model a runtime offers an agent, as its setup commands print it.
+#[derive(Deserialize)]
+struct OfferedModel {
+    provider: String,
+    model: String,
+    name: String,
+}
+
+impl OfferedModel {
+    /// The ID a runtime's settings name the model by.
+    fn id(&self) -> String {
+        format!("{}/{}", self.provider, self.model)
+    }
+}
+
+/// The models Pi offers an agent and the one the agent uses, as
+/// `carillon-runtime-pi --models` prints them.
+#[derive(Deserialize)]
+struct PiModels {
+    models: Vec<OfferedModel>,
+    value: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -68,13 +91,18 @@ pub(super) fn setup(home: &Path, options: &Options, questions: &mut impl Questio
     if options.workspace.is_some() && !pi {
         bail!("--workspace is for Pi; on T3, an agent works in its project's folder");
     }
-    let kept = t3 && existing && keep_t3(home, &provider_binary("runtime-t3")?, questions)?;
-    if t3 && !kept {
+    let saved = if t3 && existing {
+        saved_t3(home, &provider_binary("runtime-t3")?, questions)?
+    } else {
+        SavedT3::Replaced
+    };
+    if t3 && saved != SavedT3::Kept {
         set_up_t3(
             home,
             options,
             pi,
             &provider_binary("runtime-t3")?,
+            saved,
             questions,
         )?;
     } else if pi {
@@ -85,8 +113,15 @@ pub(super) fn setup(home: &Path, options: &Options, questions: &mut impl Questio
         for &runtime in &runtimes {
             register_runtime(&home.join("carillon.toml"), runtime)?;
         }
+        create_missing_database(home)?;
     }
-    sign_in_to_pi(home, existing, questions)?;
+    let config = LoadedConfig::load(&home.join("carillon.toml"))?;
+    let agents = &config.value.agents;
+    if agents.iter().any(|agent| agent.runtime == Runtime::Pi.id()) {
+        let pi = provider_binary("runtime-pi")?;
+        sign_in_to_pi(home, &pi, existing, questions)?;
+        choose_pi_models(home, &pi, agents, questions)?;
+    }
     let discord = Command::new(provider_binary("discord")?)
         .arg("setup")
         .env("CARILLON_HOME", home)
@@ -155,53 +190,53 @@ fn registered_runtimes(home: &Path) -> Result<Vec<Runtime>> {
     Ok(runtimes)
 }
 
-/// Opens Pi until it is signed in and has a default model, as the Pi
-/// runtime's own startup check says.
-fn sign_in_to_pi(home: &Path, existing: bool, questions: &mut impl Questions) -> Result<()> {
-    let config = LoadedConfig::load(&home.join("carillon.toml"))?;
-    if !config
-        .value
-        .agents
-        .iter()
-        .any(|agent| agent.runtime == Runtime::Pi.id())
-    {
-        return Ok(());
-    }
-    let pi = provider_binary("runtime-pi")?;
+/// Pi's runtime program `pi` as the installation at `home` runs it, with
+/// `args` after the installation's own.
+fn pi_command(home: &Path, pi: &Path, args: &[&str]) -> Command {
     let state = home.join("pi");
+    let mut command = Command::new(pi);
+    command
+        .arg("--config")
+        .arg(home.join("carillon.toml"))
+        .args(["--provider", "runtime-pi", "--state-dir"])
+        .arg(&state)
+        .args(args)
+        .env("CARILLON_HOME", home)
+        .env("PI_CODING_AGENT_DIR", &state);
+    command
+}
+
+/// Opens Pi until it is signed in and offers a model, as the Pi runtime's
+/// own check says.
+fn sign_in_to_pi(
+    home: &Path,
+    pi: &Path,
+    existing: bool,
+    questions: &mut impl Questions,
+) -> Result<()> {
     let check = || -> Result<Output> {
-        Command::new(&pi)
-            .arg("--config")
-            .arg(home.join("carillon.toml"))
-            .args(["--provider", "runtime-pi", "--state-dir"])
-            .arg(&state)
-            .arg("--check")
-            .env("CARILLON_HOME", home)
-            .env("PI_CODING_AGENT_DIR", &state)
+        pi_command(home, pi, &["--check"])
             .stdin(Stdio::null())
             .output()
             .context("check Pi")
     };
     if existing && check()?.status.success() {
-        questions.say("Pi is signed in and has a default model.")?;
+        questions.say("Pi is signed in.")?;
         return Ok(());
     }
     loop {
-        questions.say(
-            "Pi opens next. Sign in with /login, then choose the agent's model with /model and \
-             press Ctrl+S on it to save it. Leave Pi with Ctrl+D.",
-        )?;
+        questions.say("Pi opens next. Sign in with /login, then leave Pi with Ctrl+D.")?;
         questions.answer("Press Enter to open Pi.", Some(""))?;
         // Pi's own interface owns the terminal until it ends, however it ends.
-        Command::new(&pi)
+        Command::new(pi)
             .args(["pi", "--no-session", "--no-tools", "--no-approve"])
             .env("CARILLON_HOME", home)
-            .env("PI_CODING_AGENT_DIR", &state)
+            .env("PI_CODING_AGENT_DIR", home.join("pi"))
             .status()
             .context("open Pi")?;
         let checked = check()?;
         if checked.status.success() {
-            questions.say("Pi is signed in and has a default model.")?;
+            questions.say("Pi is signed in.")?;
             return Ok(());
         }
         questions.say(String::from_utf8_lossy(&checked.stderr).trim())?;
@@ -211,20 +246,87 @@ fn sign_in_to_pi(home: &Path, existing: bool, questions: &mut impl Questions) ->
     }
 }
 
-/// Whether to keep T3's saved settings, offered only when `t3` reads them
-/// and their token as its startup does.
-fn keep_t3(home: &Path, t3: &Path, questions: &mut impl Questions) -> Result<bool> {
+/// Asks the model of each Pi agent among `agents` that uses none, and has
+/// Pi's runtime `pi` keep the answer as the agent's own. An agent that uses
+/// one keeps it.
+fn choose_pi_models(
+    home: &Path,
+    pi: &Path,
+    agents: &[AgentConfig],
+    questions: &mut impl Questions,
+) -> Result<()> {
+    for agent in agents
+        .iter()
+        .filter(|agent| agent.runtime == Runtime::Pi.id())
+    {
+        let listed = output(
+            pi_command(home, pi, &["--models", "--agent", &agent.id]),
+            "",
+        )?;
+        let offer: PiModels = serde_json::from_str(&listed)
+            .context("carillon-runtime-pi listed its models unreadably")?;
+        if offer.value.is_some() {
+            continue;
+        }
+        let label = agent.label(agents);
+        if offer.models.is_empty() {
+            bail!("Pi offers {label} no model; sign in to a model provider, then run setup again");
+        }
+        let model = &offer.models[questions.choose(
+            &format!("Which model should {label} use?"),
+            &model_labels(&offer.models),
+            0,
+        )?];
+        let args = ["--configure", "--agent", &agent.id, "--model", &model.id()];
+        questions.say(output(pi_command(home, pi, &args), "")?.trim())?;
+    }
+    Ok(())
+}
+
+/// Creates the installation's database when it has none, as a new
+/// installation does. An installation set up with another's carried
+/// configuration starts with empty state; core itself never creates one.
+fn create_missing_database(home: &Path) -> Result<()> {
+    let config = LoadedConfig::load(&home.join("carillon.toml"))?;
+    let path = config.value.data_dir.join("carillon.sqlite3");
+    if !path.exists() {
+        Database::create(&path)?;
+    }
+    Ok(())
+}
+
+/// What becomes of T3's saved settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SavedT3 {
+    Kept,
+    /// There are none, or the operator replaces them.
+    Replaced,
+    /// The runtime cannot read them, as an earlier release's. Setup replaces
+    /// them once their projects have given the agents their IDs, since
+    /// `configure` rewrites only settings it reads.
+    Unreadable,
+}
+
+/// What to do with T3's saved settings: keeping them is offered only when
+/// `t3` reads them and their token as its startup does.
+fn saved_t3(home: &Path, t3: &Path, questions: &mut impl Questions) -> Result<SavedT3> {
     if !home.join("providers/runtime-t3.toml").exists() {
-        return Ok(false);
+        return Ok(SavedT3::Replaced);
     }
     let config = home.join("carillon.toml");
     match run(t3, &["check", "--config", &config.to_string_lossy()], "") {
-        Ok(_) => questions.confirm("Keep the T3 settings and agents?", true),
+        Ok(_) => Ok(
+            if questions.confirm("Keep the T3 settings and agents?", true)? {
+                SavedT3::Kept
+            } else {
+                SavedT3::Replaced
+            },
+        ),
         Err(failure) => {
             questions.say(&format!(
-                "The saved T3 settings cannot be kept: {failure:#}"
+                "The saved T3 settings cannot be kept, so setup replaces them: {failure:#}"
             ))?;
-            Ok(false)
+            Ok(SavedT3::Unreadable)
         }
     }
 }
@@ -277,6 +379,7 @@ fn set_up_t3(
     options: &Options,
     assistant: bool,
     t3: &Path,
+    saved: SavedT3,
     questions: &mut impl Questions,
 ) -> Result<()> {
     let (server, offer) = loop {
@@ -316,6 +419,13 @@ fn set_up_t3(
         bail!("nothing runs on T3: choose a T3 Code project");
     }
     let agents = agents(home, options, assistant, Some(&code))?;
+    if saved == SavedT3::Unreadable {
+        let settings = home.join("providers/runtime-t3.toml");
+        let _maintenance = MaintenanceLock::acquire_unless_held(home)
+            .context("the T3 settings were not changed")?;
+        std::fs::remove_file(&settings)
+            .with_context(|| format!("remove {}", settings.display()))?;
+    }
     if agents.is_empty() {
         questions.say("T3 Code has no agents to configure.")?;
         return Ok(());
@@ -341,11 +451,11 @@ fn configure_agents(
             bail!("T3 offers {label} no usable model; set one up in T3, then run setup again");
         }
         let model = &models[questions.choose(
-            &format!("Which model should {label} start new conversations with?"),
+            &format!("Which model should {label} use?"),
             &model_labels(models),
             0,
         )?];
-        let model = format!("{}/{}", model.provider, model.model);
+        let model = model.id();
         let args = [
             "--agent",
             &agent.id,
@@ -524,7 +634,7 @@ fn slug(title: &str) -> String {
 /// The model picker's labels: each model's name and T3 instance, and its
 /// slug, which is what is saved, when another model of that instance shares
 /// the name.
-fn model_labels(models: &[AvailableModel]) -> Vec<String> {
+fn model_labels(models: &[OfferedModel]) -> Vec<String> {
     models
         .iter()
         .map(|model| {
@@ -545,8 +655,16 @@ fn model_labels(models: &[AvailableModel]) -> Vec<String> {
 /// Runs `program` with `secret` on its standard input, never as an
 /// argument: what it printed, or the one line it gave as its error.
 fn run(program: &Path, args: &[&str], secret: &str) -> Result<String> {
-    let mut child = Command::new(program)
-        .args(args)
+    let mut command = Command::new(program);
+    command.args(args);
+    output(command, secret)
+}
+
+/// What `command` printed, given `secret` on its standard input, or the one
+/// line it gave as its error.
+fn output(mut command: Command, secret: &str) -> Result<String> {
+    let program = PathBuf::from(command.get_program());
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

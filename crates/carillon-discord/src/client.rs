@@ -3,11 +3,11 @@ use crate::InterfaceError;
 use anyhow::Result;
 use carillon_installation::loopback;
 use carillon_protocol::model::{
-    CommandCatalog, Delivery, DeliveryAck, DeliveryOutcome, DeliveryReconciliation, EventReceipt,
-    EventStatus, ExternalEvent, INSTANCE_HEADER, Job, JobPage, ModelQuery, ModelUpdate,
-    PROVIDER_HEADER,
+    CommandCatalog, ConversationQuery, Delivery, DeliveryAck, DeliveryOutcome,
+    DeliveryReconciliation, EventReceipt, EventStatus, ExternalEvent, INSTANCE_HEADER, Job,
+    JobPage, PROVIDER_HEADER,
 };
-use carillon_protocol::models::ModelState;
+use carillon_protocol::settings::{RuntimeSettings, SettingsRequest};
 use carillon_protocol::turns::{ControlAction, TurnControl};
 use reqwest::{Client, IntoUrl, Method, RequestBuilder, Url};
 use serde::de::DeserializeOwned;
@@ -35,6 +35,11 @@ impl CoreClient {
             provider_id,
             instance_id: Uuid::now_v7().to_string(),
         })
+    }
+
+    /// This provider's ID, which is the interface ID of its channels.
+    pub(crate) fn provider_id(&self) -> &str {
+        &self.provider_id
     }
 
     fn url(&self, path: &str) -> String {
@@ -167,7 +172,7 @@ impl CoreClient {
             .extend([event_id, "control"]);
         let request = self
             .request(Method::POST, url)
-            .timeout(MODEL_CALL_TIMEOUT)
+            .timeout(RUNTIME_CALL_TIMEOUT)
             .json(&TurnControl { action });
         core_send(request, "control a turn through core").await?;
         Ok(())
@@ -180,47 +185,39 @@ impl CoreClient {
         )
     }
 
-    pub(crate) async fn model_state(
+    /// The settings the runtime serving the request's subject owns there,
+    /// after applying its change. A refusal keeps the status core answered
+    /// with: 409 when the change was drawn from an earlier revision, 422 when
+    /// its value is not offered; 504 when the runtime did not answer in time
+    /// and 503 when it cannot be reached, whether core or the provider found
+    /// it so.
+    pub(crate) async fn settings(
         &self,
-        query: &ModelQuery,
-    ) -> Result<ModelState, InterfaceError> {
-        self.runtime_query("/v1/model", query).await
+        request: &SettingsRequest,
+    ) -> Result<RuntimeSettings, InterfaceError> {
+        let request = self
+            .request(Method::POST, self.url("/v1/settings"))
+            .timeout(RUNTIME_CALL_TIMEOUT)
+            .json(request);
+        runtime_json(request).await
     }
 
     /// The runtime's own commands a person may run in the conversation.
     pub(crate) async fn commands(
         &self,
-        query: &ModelQuery,
+        query: &ConversationQuery,
     ) -> Result<CommandCatalog, InterfaceError> {
-        self.runtime_query("/v1/commands", query).await
-    }
-
-    async fn runtime_query<T: DeserializeOwned>(
-        &self,
-        path: &str,
-        query: &ModelQuery,
-    ) -> Result<T, InterfaceError> {
-        let mut url = Url::parse(&self.url(path))
+        let mut url = Url::parse(&self.url("/v1/commands"))
             .map_err(|error| InterfaceError::protocol(error.to_string()))?;
         {
             let mut pairs = url.query_pairs_mut();
             pairs.append_pair("agent_id", &query.agent_id);
+            pairs.append_pair("channel_id", &query.channel_id);
             if let Some(audience_id) = &query.audience_id {
                 pairs.append_pair("audience_id", audience_id);
             }
         }
-        let request = self.request(Method::GET, url).timeout(MODEL_CALL_TIMEOUT);
-        runtime_json(request).await
-    }
-
-    pub(crate) async fn set_model(
-        &self,
-        update: &ModelUpdate,
-    ) -> Result<ModelState, InterfaceError> {
-        let request = self
-            .request(Method::PUT, self.url("/v1/model"))
-            .timeout(MODEL_CALL_TIMEOUT)
-            .json(update);
+        let request = self.request(Method::GET, url).timeout(RUNTIME_CALL_TIMEOUT);
         runtime_json(request).await
     }
 }
@@ -228,10 +225,10 @@ impl CoreClient {
 /// Core captures an event's files for at most five minutes before it answers.
 const CAPTURE_SUBMISSION_TIMEOUT: Duration = Duration::from_mins(6);
 
-/// Model and command calls answer a waiting user and run inside the command
+/// Settings and command calls answer a waiting person, inside the command
 /// module's deadline, so they give up well before it.
-const MODEL_CALL_TIMEOUT: Duration = Duration::from_secs(6);
-/// What the user is told when a model or command call ran out of time.
+pub(crate) const RUNTIME_CALL_TIMEOUT: Duration = Duration::from_secs(6);
+/// What a person is told when a settings or command call ran out of time.
 pub(crate) const RUNTIME_LATE: &str = "The runtime did not answer in time.";
 
 /// Core and the runtime phrase rejections for people; transport failures
@@ -246,7 +243,7 @@ async fn runtime_json<T: DeserializeOwned>(request: RequestBuilder) -> Result<T,
             });
         }
         Err(error) => {
-            warn!(%error, "model or command call failed to reach core");
+            warn!(%error, "settings or command call failed to reach core");
             return Err(InterfaceError {
                 status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
                 message: "The runtime is not reachable right now.".to_owned(),
@@ -264,7 +261,7 @@ async fn runtime_json<T: DeserializeOwned>(request: RequestBuilder) -> Result<T,
         .ok()
         .and_then(|value| value.get("error")?.as_str().map(str::to_owned))
         .filter(|detail| !detail.is_empty());
-    warn!(%status, detail, "model or command call was rejected");
+    warn!(%status, detail, "settings or command call was rejected");
     Err(InterfaceError {
         status,
         message: detail.unwrap_or_else(|| "The runtime refused the request.".to_owned()),

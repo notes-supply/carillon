@@ -72,6 +72,7 @@ it("opens one turn per key and reads core's receipt", async () => {
     turn_id: "opened-1",
     state: "running",
     duplicate: false,
+    channel_id: "300",
   });
   expect(await open(opening)).toEqual({ ...first, duplicate: true });
   fake.answer(409);
@@ -90,6 +91,7 @@ it("lists the turns core records running, sets apart one it cannot read, and thr
     interface_id: "discord-private",
     agent_id: "default",
     audience_id: "conversation",
+    channel_id: "300",
     input: "hello",
     resource_root: "/resources",
     attachment_root: "/attachments",

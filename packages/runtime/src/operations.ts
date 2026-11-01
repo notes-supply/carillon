@@ -2,10 +2,10 @@ import {
   turnIntent,
   type CommandCatalog,
   type ControlAction,
-  type ModelQuery,
-  type ModelUpdate,
-  type ModelState,
+  type ConversationQuery,
+  type RuntimeSettings,
   type RuntimeTurnRequest,
+  type SettingsRequest,
   type TurnActivity,
 } from "@carillon/protocol";
 
@@ -48,10 +48,14 @@ export interface RuntimeOperations {
   readonly turns: InboxTurns;
   /** The latest activity of a turn this instance is executing for that interface. */
   activity(correlationId: string, interfaceId: string): TurnActivity | undefined;
-  modelState(query: ModelQuery): Promise<ModelState>;
-  setModel(update: ModelUpdate): Promise<ModelState>;
+  /**
+   * The subject's settings, after applying the request's change when it has
+   * one. A change whose revision is no longer the setting's is refused with
+   * 409 and writes nothing.
+   */
+  settings(request: SettingsRequest): Promise<RuntimeSettings>;
   /** The engine's own commands a person may run in the agent's conversation, as the engine lists them now. */
-  commands(query: ModelQuery): Promise<CommandCatalog>;
+  commands(query: ConversationQuery): Promise<CommandCatalog>;
   restartReadiness(): RestartReadiness;
   close(): Promise<void>;
 }

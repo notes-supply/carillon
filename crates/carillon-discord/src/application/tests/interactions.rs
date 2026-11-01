@@ -1,17 +1,13 @@
 use super::*;
 
-/// A Discord module that asks core for the model state through its one
-/// native call, then replies `answered` when core gave the state, or
-/// `failed` when it did not.
-fn calling_model(answered: &str, failed: &str) -> anyhow::Result<Vec<u8>> {
-    let description = describing(&[definition("model")]);
+fn calling_settings(answered: &str, failed: &str) -> anyhow::Result<Vec<u8>> {
+    let description = describing(&[definition("settings")]);
     let describe_length =
         serde_json::to_vec(&carillon_discord_module::contract::Invocation::Describe)?.len();
-    let request =
-        serde_json::to_string(&carillon_discord_module::contract::HostRequest::ModelState)?;
+    let request = serde_json::to_string(&carillon_discord_module::contract::HostRequest::Settings)?;
     let answered = json!({"Reply": {
         "content": answered,
-        "embeds": [{"type": "rich", "description": "Model settings received"}],
+        "embeds": [{"type": "rich", "description": "Settings received"}],
         "components": [],
     }})
     .to_string();
@@ -44,8 +40,8 @@ fn calling_model(answered: &str, failed: &str) -> anyhow::Result<Vec<u8>> {
           (else
             (local.set $reply (call $call (i32.const 4096) (i32.const {})))
             (call $take (i32.const 32768) (local.get $reply))
-            ;; {{"ModelState": ...}} or {{"Error": ...}}
-            (if (result i32) (i32.eq (i32.load8_u (i32.const 32770)) (i32.const 77))
+            ;; {{"Page": ...}} or {{"Error": ...}}
+            (if (result i32) (i32.eq (i32.load8_u (i32.const 32770)) (i32.const 80))
               (then (global.set $output (i32.const 5120)) (i32.const {}))
               (else (global.set $output (i32.const 6144)) (i32.const {}))))))))
   (func (export "output") (result i32) (global.get $output)))"#,
@@ -63,8 +59,7 @@ fn calling_model(answered: &str, failed: &str) -> anyhow::Result<Vec<u8>> {
     Ok(wat::parse_str(text)?)
 }
 
-/// A gateway `/model` command from an allowed user in route channel 300.
-pub(super) fn model_command() -> anyhow::Result<twilight_gateway::Event> {
+pub(super) fn settings_command() -> anyhow::Result<twilight_gateway::Event> {
     use twilight_model::gateway::payload::incoming::InteractionCreate;
 
     let command = json!({
@@ -84,7 +79,7 @@ pub(super) fn model_command() -> anyhow::Result<twilight_gateway::Event> {
             "mute": false,
             "flags": 0
         },
-        "data": {"id": "3", "name": "model", "type": 1}
+        "data": {"id": "3", "name": "settings", "type": 1}
     });
     Ok(twilight_gateway::Event::InteractionCreate(Box::new(
         InteractionCreate(serde_json::from_value(command)?),
@@ -134,16 +129,13 @@ async fn an_acknowledged_interaction_is_answered_before_the_provider_returns() -
     // Core answers the module's native call only when the test releases it.
     let (asked, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
     let core = Router::new().route(
-        "/v1/model",
-        get({
+        "/v1/settings",
+        post({
             let (asked, release) = (asked.clone(), release.clone());
             move || async move {
                 asked.notify_one();
                 release.notified().await;
-                Json(json!({
-                    "providers": [], "available": [],
-                    "agent": {"selection": null, "overridden": false}
-                }))
+                Json(json!({"settings": []}))
             }
         }),
     );
@@ -157,11 +149,11 @@ async fn an_acknowledged_interaction_is_answered_before_the_provider_returns() -
     .await?;
     std::fs::write(
         directory.path().join("release.wasm"),
-        calling_model("model state received", "the native call failed")?,
+        calling_settings("settings received", "the native call failed")?,
     )?;
     state.module = Arc::new(Module::load(files(directory.path()), Source::Bundled).await?);
     connect(&mut state, app(&discord_address.to_string(), 2, 100));
-    let event = model_command()?;
+    let event = settings_command()?;
     let mut interactions = tokio::task::JoinSet::new();
     assert!(super::super::take_event(&state, event, None, &mut interactions).is_none());
     // No event follows: the gateway is gone. Discord has the acknowledgement,
@@ -181,10 +173,10 @@ async fn an_acknowledged_interaction_is_answered_before_the_provider_returns() -
         .map_err(|_| anyhow::anyhow!("poisoned"))?
         .clone();
     assert_eq!(replies.len(), 1, "{replies:?}");
-    assert_eq!(replies[0]["content"], "model state received");
+    assert_eq!(replies[0]["content"], "settings received");
     assert_eq!(
         replies[0]["embeds"],
-        json!([{"type": "rich", "description": "Model settings received"}])
+        json!([{"type": "rich", "description": "Settings received"}])
     );
     assert_eq!(replies[0]["allowed_mentions"], json!({"parse": []}));
     discord_server.abort();
@@ -238,12 +230,12 @@ async fn a_replayed_interaction_discord_does_not_acknowledge_again_runs_nothing(
     .await?;
     std::fs::write(
         directory.path().join("release.wasm"),
-        calling_model("model state received", "the native call failed")?,
+        calling_settings("settings received", "the native call failed")?,
     )?;
     state.module = Arc::new(Module::load(files(directory.path()), Source::Bundled).await?);
     connect(&mut state, app(&discord_address.to_string(), 2, 100));
     let mut interactions = tokio::task::JoinSet::new();
-    let taken = super::super::take_event(&state, model_command()?, None, &mut interactions);
+    let taken = super::super::take_event(&state, settings_command()?, None, &mut interactions);
     assert!(
         taken.is_none(),
         "an interaction is not a message awaiting settlement"

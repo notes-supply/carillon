@@ -302,20 +302,27 @@ async fn counting_registration_server(
     ))
 }
 
+pub(crate) fn route() -> crate::config::DiscordRoute {
+    crate::config::DiscordRoute {
+        channel_id: "300".to_owned(),
+        agent: "default".to_owned(),
+        activation: crate::config::DiscordActivation::Always,
+        conversation: crate::config::DiscordConversation::Thread,
+    }
+}
+
 fn calls() -> anyhow::Result<super::InteractionCalls> {
     Ok(super::InteractionCalls::new(
         crate::client::test_client("http://127.0.0.1:1".to_owned())?,
-        carillon_protocol::model::ModelQuery {
-            agent_id: "default".to_owned(),
-            audience_id: None,
-        },
+        route(),
+        None,
     ))
 }
 
 fn interaction() -> Interaction {
     Interaction {
         kind: InteractionKind::Command,
-        name: "model".to_owned(),
+        name: "settings".to_owned(),
         values: Vec::new(),
         options: Value::Null,
         conversation: false,
@@ -414,25 +421,20 @@ async fn submitting(
     let reactions =
         crate::delivery::Reactions::new(http.clone(), crate::config::Settings::new(config));
     let core = crate::client::test_client(format!("http://{address}"))?;
-    let calls = super::InteractionCalls::new(
-        core.clone(),
-        carillon_protocol::model::ModelQuery {
-            agent_id: "default".to_owned(),
-            audience_id: Some("discord-100-400".to_owned()),
-        },
-    )
-    .with_submissions(super::Submissions {
-        lanes: serving_lanes(core, http.clone())?,
-        http,
-        reactions: reactions.clone(),
-        origin: crate::conversations::InteractionOrigin {
-            guild_id: "100".to_owned(),
-            user_id: "200".to_owned(),
-            channel_id: "400".to_owned(),
-            route_channel_id: "300".to_owned(),
-        },
-        settings: reactions.settings().current(),
-    });
+    let calls =
+        super::InteractionCalls::new(core.clone(), route(), Some("discord-100-400".to_owned()))
+            .with_submissions(super::Submissions {
+                lanes: serving_lanes(core, http.clone())?,
+                http,
+                reactions: reactions.clone(),
+                origin: crate::conversations::InteractionOrigin {
+                    guild_id: "100".to_owned(),
+                    user_id: "200".to_owned(),
+                    channel_id: "400".to_owned(),
+                    route_channel_id: "300".to_owned(),
+                },
+                settings: reactions.settings().current(),
+            });
     Ok((calls, reactions, server))
 }
 
@@ -535,7 +537,7 @@ fn running_module() -> anyhow::Result<Vec<u8>> {
 /// card by running `on_card`: WAT that leaves the output's length, with
 /// each of `data` at its address. Whatever it does, it installs.
 pub(crate) fn other_cards(on_card: &str, data: &[(u32, &str)]) -> anyhow::Result<Vec<u8>> {
-    let describe = describing(&[definition("model")]);
+    let describe = describing(&[definition("settings")]);
     let describe_length =
         serde_json::to_vec(&carillon_discord_module::contract::Invocation::Describe)?.len();
     let card = showing("checked");
@@ -579,4 +581,5 @@ mod cards;
 
 mod admission;
 mod registration;
+mod settings;
 mod submissions;

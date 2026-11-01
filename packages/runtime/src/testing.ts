@@ -107,6 +107,7 @@ export async function startFakeCore(port = 0): Promise<FakeCore> {
             interface_id: body.interface_id,
             agent_id: body.agent_id,
             audience_id: body.audience_id,
+            channel_id: "300",
             input: body.label ?? "",
             native: {},
             resource_root: "",
@@ -116,7 +117,16 @@ export async function startFakeCore(port = 0): Promise<FakeCore> {
         });
       // A turn settled since it opened is no longer running.
       const state = settled.has(turnId) ? "completed" : "running";
-      return [200, { event_id: event, turn_id: turnId, state, duplicate: known !== undefined }];
+      return [
+        200,
+        {
+          event_id: event,
+          turn_id: turnId,
+          state,
+          duplicate: known !== undefined,
+          channel_id: "300",
+        },
+      ];
     }
     return [404, { error: "not found" }];
   }

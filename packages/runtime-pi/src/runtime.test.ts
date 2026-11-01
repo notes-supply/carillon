@@ -2,8 +2,10 @@ import {
   fauxAssistantMessage,
   fauxText,
   fauxToolCall,
+  type FauxResponseFactory,
   type FauxResponseStep,
 } from "@earendil-works/pi-ai";
+import type { Subject } from "@carillon/protocol";
 import { afterEach, expect, it } from "vitest";
 import { heldAnswer, pauseTool, startFixture, type Fixture } from "./fixture.ts";
 
@@ -79,12 +81,69 @@ it.each<[string, FauxResponseStep, object]>([
 
 it("fails a turn whose model is gone, saying how to choose another", async () => {
   const agent = await fixture();
-  agent.models.deleteProvider(agent.model.provider.id);
+  const provider = agent.model.provider.id;
+  agent.models.deleteProvider(provider);
   await agent.runtime.turns.submit(agent.turn("turn-1", "hello"));
   expect(await agent.outcome("turn-1")).toMatchObject({
     outcome: "failed",
-    explanation: "No model is available. Choose one with /model.",
+    explanation: `${provider}/scripted is not available. Choose another model with /settings.`,
   });
+});
+
+const ranOn: FauxResponseFactory = (_context, options, _state, model) =>
+  fauxAssistantMessage(`${model.id} thinking ${options?.reasoning ?? "off"}`);
+
+const channel = (channel_id: string): Subject => ({
+  kind: "channel",
+  interface_id: "discord-private",
+  channel_id,
+  agent_id: "default",
+});
+
+it("runs every conversation of a channel on the channel's model once it changes, and no other channel", async () => {
+  const agent = await fixture({ answers: Array.from({ length: 6 }, () => ranOn) });
+  const ask = (turn: string, audience_id: string, channel_id: string) =>
+    agent.ask(turn, "hello", { audience_id, channel_id });
+  expect(await ask("turn-1", "first", "300")).toBe("scripted thinking off");
+  expect(await ask("turn-2", "other", "301")).toBe("scripted thinking off");
+  const reasoner = `${agent.model.provider.id}/reasoner`;
+  await agent.set(channel("300"), "model", reasoner);
+  const lines = await agent.set(channel("300"), "model.thinking", "high");
+  expect(lines.map(({ id, value, inherited }) => ({ id, value, inherited }))).toEqual([
+    { id: "model", value: { kind: "one", id: reasoner }, inherited: false },
+    { id: "model.thinking", value: { kind: "one", id: "high" }, inherited: false },
+  ]);
+  expect(await ask("turn-3", "first", "300")).toBe("reasoner thinking high");
+  expect(await ask("turn-4", "second", "300")).toBe("reasoner thinking high");
+  expect(await ask("turn-5", "other", "301")).toBe("scripted thinking off");
+  const { settings } = await agent.runtime.settings({ subject: channel("301") });
+  expect(settings).toMatchObject([{ id: "model", inherited: true }]);
+});
+
+it("fails the turns of an agent with no model, naming the command that sets one", async () => {
+  const agent = await fixture({ agentModel: null, answers: [ranOn] });
+  const { settings } = await agent.runtime.settings({
+    subject: { kind: "agent", agent_id: "default" },
+  });
+  expect(settings).toMatchObject([{ id: "model", value: null }]);
+  await agent.runtime.turns.submit(agent.turn("turn-1", "hello"));
+  const failed = await agent.outcome("turn-1");
+  expect(failed.outcome === "failed" && failed.explanation).toContain(
+    "`carillon settings --agent default model=<provider>/<model>`",
+  );
+  await agent.set(
+    { kind: "agent", agent_id: "default" },
+    "model",
+    `${agent.model.provider.id}/scripted`,
+  );
+  expect(await agent.ask("turn-2", "hello")).toBe("scripted thinking off");
+});
+
+it("refuses the settings of an agent it does not serve", async () => {
+  const agent = await fixture();
+  await expect(
+    agent.runtime.settings({ subject: { kind: "agent", agent_id: "elsewhere" } }),
+  ).rejects.toMatchObject({ status: 422 });
 });
 
 it("settles messages steered into one run with its answer, carried by the newest", async () => {

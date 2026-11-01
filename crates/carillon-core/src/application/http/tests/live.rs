@@ -190,6 +190,7 @@ pub(super) async fn submit(
             agent_id: "test-agent".to_owned(),
             user_id: "test-user".to_owned(),
             audience_id: conversation.to_owned(),
+            channel_id: "test-channel".to_owned(),
             delivery_target_id: "test-destination".to_owned(),
             feedback_target_id: "test-feedback".to_owned(),
             content: input.to_owned(),
@@ -443,8 +444,9 @@ async fn core_and_its_workers_follow_one_serving_registry() -> Result<()> {
         // Core's engine has the derived facts, and nothing more.
         let engine = state.core.query_runtime(
             "test-interface",
-            &ModelQuery {
+            &ConversationQuery {
                 agent_id: "test-agent".to_owned(),
+                channel_id: "300".to_owned(),
                 audience_id: None,
             },
         );

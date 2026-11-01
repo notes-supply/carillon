@@ -1,10 +1,8 @@
 //! Both languages consume the same wire examples, including canonical round trips.
 use anyhow::{Context as _, Result};
 use carillon_protocol::{
-    model::{
-        CommandCatalog, RuntimeModelQuery, RuntimeModelUpdate, RuntimeTurnRequest, TurnActivity,
-    },
-    models::ModelState,
+    model::{CommandCatalog, ExternalEvent, OpenedTurn, RuntimeTurnRequest, TurnActivity},
+    settings::{Page, RuntimeSettings, SettingsRequest, Subject, Value as SettingValue},
     turns::{RunningTurn, RuntimeTurnControl, TurnOpening, TurnOutcome},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -25,41 +23,91 @@ fn refused<T: DeserializeOwned>(value: &Value) -> Result<()> {
 }
 
 #[derive(Deserialize)]
-struct Fixtures {
-    states: Vec<Value>,
-    queries: Vec<Value>,
-    updates: Vec<Value>,
-    invalid_updates: Vec<Value>,
-    invalid_queries: Vec<Value>,
-    invalid_states: Vec<Value>,
-    accepted_updates: Vec<Value>,
+struct SettingsFixtures {
+    subjects: Vec<Value>,
+    invalid_subjects: Vec<Value>,
+    values: Vec<Value>,
+    invalid_values: Vec<Value>,
+    requests: Vec<Value>,
+    invalid_requests: Vec<Value>,
+    settings: Vec<Value>,
+    invalid_settings: Vec<Value>,
+    pages: Vec<Value>,
 }
 
 #[test]
-fn shared_model_wire_fixtures() -> Result<()> {
-    let fixtures: Fixtures = serde_json::from_str(include_str!(
-        "../../../packages/protocol/fixtures/models.json"
+fn shared_settings_wire_fixtures() -> Result<()> {
+    let fixtures: SettingsFixtures = serde_json::from_str(include_str!(
+        "../../../packages/protocol/fixtures/settings.json"
     ))?;
-    for value in &fixtures.states {
-        round_trip::<ModelState>(value)?;
+    for value in &fixtures.subjects {
+        round_trip::<Subject>(value)?;
     }
-    for value in &fixtures.queries {
-        round_trip::<RuntimeModelQuery>(value)?;
+    for value in &fixtures.invalid_subjects {
+        refused::<Subject>(value)?;
     }
-    for value in &fixtures.updates {
-        round_trip::<RuntimeModelUpdate>(value)?;
+    for value in &fixtures.values {
+        round_trip::<SettingValue>(value)?;
     }
-    for value in &fixtures.invalid_updates {
-        refused::<RuntimeModelUpdate>(value)?;
+    for value in &fixtures.invalid_values {
+        refused::<SettingValue>(value)?;
     }
-    for value in &fixtures.invalid_queries {
-        refused::<RuntimeModelQuery>(value)?;
+    for value in &fixtures.requests {
+        round_trip::<SettingsRequest>(value)?;
     }
-    for value in &fixtures.invalid_states {
-        refused::<ModelState>(value)?;
+    for value in &fixtures.invalid_requests {
+        refused::<SettingsRequest>(value)?;
     }
-    for value in fixtures.accepted_updates {
-        serde_json::from_value::<RuntimeModelUpdate>(value)?;
+    for value in &fixtures.settings {
+        round_trip::<RuntimeSettings>(value)?;
+    }
+    for value in &fixtures.invalid_settings {
+        refused::<RuntimeSettings>(value)?;
+    }
+    for value in &fixtures.pages {
+        round_trip::<Page>(value)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn a_turn_without_its_channel_is_refused() -> Result<()> {
+    let event = serde_json::json!({
+        "event_id": "500",
+        "agent_id": "assistant",
+        "user_id": "200",
+        "audience_id": "discord-100-300",
+        "channel_id": "300",
+        "delivery_target_id": "300",
+        "feedback_target_id": "300:500",
+        "content": "hello",
+    });
+    serde_json::from_value::<ExternalEvent>(event.clone())?;
+    let opened = serde_json::json!({
+        "event_id": "runtime:runtime-pi:schedule:1",
+        "turn_id": "turn-1",
+        "state": "running",
+        "duplicate": false,
+        "channel_id": "300",
+    });
+    round_trip::<OpenedTurn>(&opened)?;
+    let fixtures: TurnFixtures = serde_json::from_str(include_str!(
+        "../../../packages/protocol/fixtures/turns.json"
+    ))?;
+    let request = fixtures.requests.first().context("a request fixture")?;
+    for (mut value, refuse) in [
+        (event, refused::<ExternalEvent> as fn(&Value) -> Result<()>),
+        (opened, refused::<OpenedTurn>),
+        (request.clone(), refused::<RuntimeTurnRequest>),
+    ] {
+        let object = value.as_object_mut().context("an object")?;
+        object.insert("channel_id".to_owned(), Value::String(String::new()));
+        refuse(&value)?;
+        value
+            .as_object_mut()
+            .context("an object")?
+            .remove("channel_id");
+        refuse(&value)?;
     }
     Ok(())
 }

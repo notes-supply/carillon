@@ -10,10 +10,9 @@ use axum::{
 };
 use carillon_installation::config::{LoadedConfig, Provider, ProviderRole};
 use carillon_protocol::{
-    model::EventReceipt,
+    model::OpenedTurn,
     turns::{RunningTurn, TurnOpening, TurnOutcome},
 };
-use serde::de::DeserializeOwned;
 use std::{
     mem::{self, Discriminant},
     time::Duration,
@@ -21,7 +20,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use super::{ApiError, AppState, authorize, provider_identity, runtime_token};
+use super::{ApiError, AppState, authorize, body, provider_identity, runtime_token};
 use crate::{InboxFailure, RuntimeClient, Stalled, WorkerStep, db::Settled};
 
 /// The runtime a call names, authenticated by the same credential core
@@ -37,13 +36,6 @@ fn runtime_provider<'a>(
         .map_err(|_| ApiError::forbidden("unknown runtime provider"))?;
     authorize(headers, &provider.token_hash)?;
     Ok(provider)
-}
-
-/// A body read after authentication, so a caller that is refused learns
-/// nothing of what core would accept.
-fn body<T: DeserializeOwned>(bytes: &Bytes, what: &str) -> Result<T, ApiError> {
-    serde_json::from_slice(bytes)
-        .map_err(|error| ApiError::new(StatusCode::BAD_REQUEST, format!("invalid {what}: {error}")))
 }
 
 /// Settles a turn the calling runtime holds, enabled or not: 204 once
@@ -72,13 +64,13 @@ pub(super) async fn outcome(
 }
 
 /// Opens a running turn in one of the calling runtime's conversations, for
-/// it to settle later, or returns the receipt of the one its key opened. A
-/// disabled runtime opens none.
+/// it to settle later, or returns the receipt of the one its key opened,
+/// with the conversation's channel. A disabled runtime opens none.
 pub(super) async fn open(
     State(state): State<AppState>,
     headers: HeaderMap,
     bytes: Bytes,
-) -> Result<Json<EventReceipt>, ApiError> {
+) -> Result<Json<OpenedTurn>, ApiError> {
     let config = state.config();
     let runtime = runtime_provider(&headers, &config)?;
     if !runtime.enabled {

@@ -164,6 +164,7 @@ async fn accept_for(
             agent_id: agent.to_owned(),
             user_id: "test-user".to_owned(),
             audience_id: audience.to_owned(),
+            channel_id: "test-channel".to_owned(),
             delivery_target_id: "test-destination".to_owned(),
             feedback_target_id: "test-feedback".to_owned(),
             content: id.to_owned(),
@@ -566,10 +567,8 @@ fn check_opens_storage_like_the_service_without_writing() -> Result<()> {
     let directory = tempdir()?;
     let state = installation(directory.path())?;
     check(&state.config)?;
-    // State from a release with another schema is refused, and left as it was.
     let database = state.config.value.data_dir.join("carillon.sqlite3");
-    rusqlite::Connection::open(&database)?
-        .execute_batch("CREATE TABLE later_release (id INTEGER)")?;
+    rusqlite::Connection::open(&database)?.execute_batch("DROP TABLE conversations")?;
     let before = fs::read(&database)?;
     crate::assert_refused(check(&state.config), "not the current Carillon format")?;
     assert_eq!(fs::read(&database)?, before);
@@ -682,6 +681,7 @@ async fn foreign_turn(state: &mut Fixture, directory: &Path) -> Result<EventRece
                 agent_id: "test-agent".to_owned(),
                 user_id: "someone".to_owned(),
                 audience_id: "elsewhere".to_owned(),
+                channel_id: "test-channel".to_owned(),
                 delivery_target_id: "foreign-destination".to_owned(),
                 feedback_target_id: "foreign-feedback".to_owned(),
                 content: "not yours".to_owned(),
@@ -929,11 +929,14 @@ async fn job_reads_answer_promptly_when_several_runtimes_cannot_describe_their_t
 
 mod attachments;
 mod configuration;
+mod cutover;
 mod durable;
+mod health;
 mod held;
 mod live;
 mod maintenance;
 mod reserved;
+mod settings;
 
 /// One async worker, as when every worker could be taken: another writer
 /// holds SQLite's write lock while an interface claims a delivery and a
@@ -1147,9 +1150,3 @@ async fn each_agent_runs_on_its_own_runtime_with_its_own_resources() -> Result<(
     )?;
     Ok(())
 }
-
-mod cutover;
-
-mod models;
-
-mod health;

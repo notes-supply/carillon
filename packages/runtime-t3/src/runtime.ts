@@ -3,21 +3,21 @@
  *
  * Carillon owns admission, turn identity and delivery; T3 owns execution,
  * its transcript, jobs and provider policy. This runtime stores nothing of a
- * conversation, only the agent defaults `/model` chose; core records which
- * turns it holds (see `held.ts`). A conversation's thread, a turn's message
- * and the commands that create them are named by identifiers derived from
- * Carillon's own, so a lost answer, or a turn taken up again after a
- * restart, is read back from T3, or the same command replayed under its
- * receipt, rather than executed again. A stopped turn interrupts its native
+ * conversation, only the models its agents and channels chose, in the
+ * settings ledger; core records which turns it holds (see `held.ts`). A
+ * conversation's thread, a turn's message and the commands that create them
+ * are named by identifiers derived from Carillon's own, so a lost answer,
+ * or a turn taken up again after a restart, is read back from T3, or the
+ * same command replayed under its receipt, rather than executed again. A stopped turn interrupts its native
  * run and waits for T3 to confirm the stop before the next turn may start;
  * what T3 did not confirm is reported as unconfirmed, never as stopped.
  */
 import {
   turnIntent,
   type CommandCatalog,
-  type ModelQuery,
-  type ModelState,
-  type ModelUpdate,
+  type ConversationQuery,
+  type RuntimeSettings,
+  type SettingsRequest,
 } from "@carillon/protocol";
 import { finalReport } from "@carillon/runtime/activity";
 import {
@@ -27,15 +27,14 @@ import {
   RuntimeClosed,
   withReport,
 } from "@carillon/runtime/failure";
-import { resolved, validated } from "@carillon/runtime/models";
 import type { CoreClient } from "@carillon/runtime/core";
 import {
   commandFinished,
   type RuntimeOperations,
   type TurnRequest,
 } from "@carillon/runtime/operations";
-import type { ModelSelections } from "@carillon/runtime/selections";
 import { Serial } from "@carillon/runtime/serial";
+import type { SettingsLedger } from "@carillon/runtime/settings";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Check } from "typebox/value";
 import {
@@ -43,7 +42,6 @@ import {
   DispatchResultSchema,
   type DispatchResult,
   messageDispatch,
-  modelSelectionSet,
   queuedRunCancel,
   refreshProviders,
   RPC,
@@ -58,15 +56,7 @@ import { commandCatalog } from "./commands.ts";
 import { holdTurns, type Answer, type StopsFile } from "./held.ts";
 import { stopReport, wakeReport, withStop, type Stop } from "./stop.ts";
 import { uploadImages, type PreparedImages } from "./images.ts";
-import {
-  catalog,
-  fromNative,
-  modelState,
-  routed,
-  sameSelection,
-  toNative,
-  type AgentModels,
-} from "./models.ts";
+import { offered, turnSelection } from "./models.ts";
 import {
   conversationId,
   ensureThread,
@@ -84,23 +74,21 @@ import {
   type T3Stream,
 } from "./t3.ts";
 import { answerText, compose, titleSeed } from "./turn-input.ts";
-import { threadWorking, watchTurn, type FollowUp, type Outcome, type TurnWatch } from "./watch.ts";
+import { watchTurn, type FollowUp, type Outcome, type TurnWatch } from "./watch.ts";
 
 /** An agent that is plain T3 Code, given the person's text as written. */
 export interface T3Agent {
   /** The T3 project whose workspace root is the agent's workspace. */
   readonly projectId: string;
   readonly workspace: string;
-  /** The agent default from the settings, until `/model` chooses another. */
-  readonly selection: NativeSelection;
 }
 
 export interface T3RuntimeOptions {
   readonly endpoint: T3Endpoint;
   /** The agents the runtime serves, by ID. */
   readonly agents: ReadonlyMap<string, T3Agent>;
-  /** The agent defaults `/model` chose. */
-  readonly selections: ModelSelections;
+  /** The models the agents and their channels chose: the only home of an agent's default. */
+  readonly ledger: SettingsLedger;
   /** Core, which the runtime settles the turns it holds through. */
   readonly core: Pick<CoreClient, "settle" | "open" | "running">;
   /** How long the first retry of a call core did not answer waits. */
@@ -213,134 +201,6 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     return agent;
   }
 
-  /** The agent's models, read from T3 and the ledger: T3's catalogue and the agent default. */
-  async function readModels(
-    connection: T3Connection,
-    query: Pick<ModelQuery, "interface_id" | "agent_id">,
-    agent: T3Agent,
-  ): Promise<AgentModels> {
-    const offered = catalog(await connection.call(RPC.getConfig, {}));
-    const state = await options.selections.state(offered.available, fromNative(agent.selection), {
-      interface_id: query.interface_id,
-      agent_id: query.agent_id,
-    });
-    return { offered, agent: state.agent };
-  }
-
-  /** The model state of the query's agent and, with an audience, of its conversation's thread. */
-  async function currentState(
-    connection: T3Connection,
-    models: AgentModels,
-    query: ModelQuery,
-  ): Promise<ModelState> {
-    const thread = await queryThread(connection, query);
-    return modelState(
-      models,
-      query.audience_id === undefined ? undefined : { thread: thread?.thread.modelSelection },
-    );
-  }
-
-  async function queryThread(connection: T3Connection, query: ModelQuery) {
-    const audience = query.audience_id;
-    return audience === undefined
-      ? undefined
-      : readThread(
-          connection,
-          await bindThread(connection, { ...query, audience_id: audience }),
-          timeoutMs,
-        );
-  }
-
-  /**
-   * Changes a model selection. The agent default is the ledger's, written
-   * at once; a turn keeps the selection it started with. A conversation's is
-   * its thread's: the change waits in the thread's queue, so a turn that
-   * arrives meanwhile runs with it, and is refused while the conversation
-   * has turns or T3 still works or owes results on the thread, since T3 may
-   * restart or replace the provider session to apply it. `expected` is
-   * compared with the thread's selection just before the change: T3 itself
-   * offers no compare-and-set, so a change made in T3's own UI in between is
-   * overwritten, the last change winning.
-   */
-  async function setModel(update: ModelUpdate): Promise<ModelState> {
-    const agent = agentOf(update.agent_id);
-    if (update.scope === "agent")
-      return connected(async (connection) => {
-        const thread = await queryThread(connection, update);
-        const models = await readModels(connection, update, agent);
-        const state = await options.selections.update(
-          models.offered.available,
-          fromNative(agent.selection),
-          update,
-        );
-        log(
-          `agent ${update.agent_id}: default model ${update.selection === null ? "reset" : "set"}`,
-        );
-        return modelState(
-          { offered: models.offered, agent: state.agent },
-          update.audience_id === undefined ? undefined : { thread: thread?.thread.modelSelection },
-        );
-      });
-    const audience = update.audience_id;
-    if (audience === undefined)
-      throw new ExplainedFailure(400, "There is no conversation here to set a model for.");
-    const conversation = { ...update, audience_id: audience };
-    const id = conversationId(conversation);
-    if (threads.has(id)) throw busy();
-    return inThread(id, () =>
-      connected(async (connection) => {
-        const binding = await bindThread(connection, conversation);
-        const models = await readModels(connection, update, agent);
-        const { available } = models.offered;
-        const target =
-          update.selection === null
-            ? routed(models)
-            : toNative(models.offered, resolved(available, validated(available, update.selection)));
-        await ensureThread(connection, binding, routed(models), timeoutMs);
-        const before = await readThread(connection, binding, timeoutMs);
-        if (before === undefined)
-          throw new T3Failure("malformed", "T3 did not list the conversation's thread it opened");
-        if (threadWorking(before)) throw busy();
-        const current = modelState(models, { thread: before.thread.modelSelection });
-        if (
-          update.expected !== undefined &&
-          current.conversation?.selection != null &&
-          !sameSelection(current.conversation.selection, {
-            ...update.expected,
-            options: update.expected.options ?? {},
-          })
-        )
-          throw new ExplainedFailure(409, "The model settings changed.");
-        try {
-          await connection.call(RPC.dispatchCommand, modelSelectionSet(binding.threadId, target));
-        } catch (failure) {
-          if (!(failure instanceof T3Failure) || failure.kind !== "rejected") throw failure;
-          throw new ExplainedFailure(
-            422,
-            `T3 refused the model change: ${failure.detail ?? failure.message}`,
-          );
-        }
-        log(`thread ${binding.threadId}: model set to ${target.instanceId}/${target.model}`);
-        // T3 may have committed the change: a thread it no longer lists
-        // says nothing about the selection, so none is reported.
-        const after = await readThread(connection, binding, timeoutMs);
-        if (after === undefined)
-          throw new T3Failure(
-            "malformed",
-            "T3 did not list the conversation's thread after changing its model",
-          );
-        return modelState(models, { thread: after.thread.modelSelection });
-      }),
-    );
-  }
-
-  function busy(): ExplainedFailure {
-    return new ExplainedFailure(
-      409,
-      "This conversation is still working; change the model once it has finished.",
-    );
-  }
-
   /**
    * Runs a turn on T3 until it answers. `stop` interrupts its native work;
    * closing the runtime only stops following it, for the next process to
@@ -378,26 +238,43 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
   return {
     turns: { submit: held.submit, control: held.control },
     activity: held.activity,
-    modelState(query: ModelQuery): Promise<ModelState> {
+    async settings({ subject, change }: SettingsRequest): Promise<RuntimeSettings> {
+      if (!options.agents.has(subject.agent_id))
+        throw new ExplainedFailure(422, `${subject.agent_id} is not an agent of this T3 runtime.`);
       return track(() =>
         connected(async (connection) => {
-          const agent = agentOf(query.agent_id);
-          return currentState(connection, await readModels(connection, query, agent), query);
+          const models = await offered(connection);
+          if (change === undefined)
+            return { settings: await options.ledger.settings(models, subject) };
+          const settings = await options.ledger.change(models, subject, change);
+          log(
+            `${subject.kind} settings of ${subject.agent_id}: ${change.setting} ${change.value === null ? "reset" : "changed"}`,
+          );
+          return { settings };
         }),
       );
     },
-    setModel(update: ModelUpdate): Promise<ModelState> {
-      return track(() => setModel(update));
-    },
-    commands(query: ModelQuery): Promise<CommandCatalog> {
+    commands(query: ConversationQuery): Promise<CommandCatalog> {
       return track(() =>
         connected(async (connection) => {
           // The instance the conversation's next run takes, in its agent's
-          // workspace: its thread's, or the agent default.
+          // workspace: its channel's model's, else its agent's.
           const agent = agentOf(query.agent_id);
-          const models = await readModels(connection, query, agent);
-          const thread = await queryThread(connection, query);
-          const { instanceId } = routed(models, thread?.thread.modelSelection);
+          const audience = query.audience_id;
+          if (audience !== undefined)
+            await readThread(
+              connection,
+              await bindThread(connection, { ...query, audience_id: audience }),
+              timeoutMs,
+            );
+          const { interface_id, channel_id, agent_id } = query;
+          const selection = await options.ledger.selection(await offered(connection), {
+            interface_id,
+            channel_id,
+            agent_id,
+          });
+          const instanceId = selection?.provider;
+          if (instanceId === undefined) return { commands: [] };
           return commandCatalog(
             await connection.call(
               RPC.refreshProviders,
@@ -443,7 +320,9 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
           connection,
           request,
           signal,
-          follow === undefined && turnIntent(request.native) !== "command",
+          follow === undefined && turnIntent(request.native) !== "command"
+            ? () => turnSelection(connection, options.ledger, request)
+            : undefined,
         ),
       signal,
     );
@@ -556,19 +435,16 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     connection: T3Connection,
     request: Pick<TurnRequest, "interface_id" | "agent_id" | "audience_id">,
     signal?: AbortSignal,
-    start = false,
+    start?: () => Promise<NativeSelection>,
   ): Promise<ThreadBinding> {
-    const agent = agentOf(request.agent_id);
     return resolveThread(
       connection,
       request,
-      { projectId: agent.projectId, title: NEW_THREAD },
+      { projectId: agentOf(request.agent_id).projectId, title: NEW_THREAD },
       {
         timeoutMs,
         ...(signal === undefined ? {} : { signal }),
-        ...(start
-          ? { start: async () => routed(await readModels(connection, request, agent)) }
-          : {}),
+        ...(start === undefined ? {} : { start }),
       },
     );
   }
@@ -590,6 +466,14 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     let text: string | undefined;
     /** Uploaded once per attempt: a re-dispatch after a lost answer references the same images. */
     let prepared: PreparedImages | undefined;
+    /**
+     * Resolved once, when the turn opens its thread or first sends its
+     * message: every reconnection sends the same command, on the same
+     * selection, whatever the ledger says meanwhile.
+     */
+    let selection: NativeSelection | undefined;
+    const selected = async (connection: T3Connection) =>
+      (selection ??= await turnSelection(connection, options.ledger, request));
     let attempt = 0;
     /**
      * Whether the turn's work may exist on T3: dispatched by this call, or
@@ -666,16 +550,11 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
     async function drive(
       connection: T3Connection,
     ): Promise<{ readonly outcome: Outcome; readonly stop?: Stop }> {
-      const agent = agentOf(request.agent_id);
-      // A message's run takes its agent's catalogue and default, read on
-      // each connection; a follow-up dispatches nothing.
-      const models =
-        follow === undefined ? await readModels(connection, request, agent) : undefined;
-      if (models !== undefined)
+      if (follow === undefined)
         await ensureThread(
           connection,
           binding,
-          routed(models),
+          () => selected(connection),
           timeoutMs,
           reached() ? shutdown.signal : signal,
         );
@@ -690,7 +569,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
           "the thread snapshot",
           reached() ? shutdown.signal : signal,
         );
-        if (models !== undefined && watch.run() === undefined && !signal.aborted) {
+        if (follow === undefined && watch.run() === undefined && !signal.aborted) {
           prepared ??= await uploadImages(
             connection,
             options.endpoint,
@@ -701,15 +580,13 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
           );
           text ??= compose(request, prepared.unavailable);
           progress.unsent = prepared.unavailable;
+          const native = await selected(connection);
           // Nothing of this turn has reached T3 yet, so a stop or a close
           // meanwhile is honoured before anything is sent. Work
           // already running on the thread, whoever started it, is never
           // interrupted: the message waits behind it in T3's own queue.
           signal.throwIfAborted();
           progress.dispatched = true;
-          // The run takes the thread's selection while the agent offers it,
-          // as the snapshot showed it, else the agent default.
-          const selection = routed(models, watch.selection());
           const seed = titleSeed(request.input);
           await dispatch(
             connection,
@@ -718,7 +595,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
             {
               text,
               images: prepared.images,
-              selection,
+              selection: native,
               ...(seed === undefined ? {} : { titleSeed: seed }),
             },
             watch.busy(),
@@ -807,7 +684,7 @@ export function createT3Runtime(options: T3RuntimeOptions): RuntimeOperations {
         "T3 answered the dispatch in a form this runtime does not understand",
       );
     log(
-      `turn ${request.correlation_id}: T3 accepted the message at sequence ${String(result.sequence)}`,
+      `turn ${request.correlation_id}: T3 accepted the message on ${content.selection.instanceId}/${content.selection.model} at sequence ${String(result.sequence)}`,
     );
   }
 

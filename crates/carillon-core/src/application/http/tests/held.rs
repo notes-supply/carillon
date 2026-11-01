@@ -3,8 +3,10 @@
 //! controls core relays to it, each authenticated by the caller's own
 //! credential.
 
-use axum::body::Bytes;
-use carillon_protocol::turns::{RunningTurn, Silence};
+use carillon_protocol::{
+    model::OpenedTurn,
+    turns::{RunningTurn, Silence},
+};
 use tempfile::tempdir;
 
 use super::{
@@ -187,7 +189,7 @@ async fn open_turn(
     state: &AppState,
     (runtime, token): (&str, &str),
     opening: &Value,
-) -> Result<Result<EventReceipt, StatusCode>> {
+) -> Result<Result<OpenedTurn, StatusCode>> {
     let mut headers = HeaderMap::new();
     headers.insert(PROVIDER_HEADER, runtime.parse()?);
     headers.insert(
@@ -197,7 +199,7 @@ async fn open_turn(
     let body = Bytes::from(serde_json::to_vec(opening)?);
     Ok(runtime::open(State(state.clone()), headers, body)
         .await
-        .map(|Json(receipt)| receipt)
+        .map(|Json(opened)| opened)
         .map_err(|refusal| refusal.status))
 }
 
@@ -220,17 +222,18 @@ async fn a_runtime_opens_one_turn_per_key_in_a_conversation_of_its_own() -> Resu
     let opened = open_turn(&state, RUNTIME, &opening("conversation", "nightly"))
         .await?
         .map_err(|status| anyhow!("refused with {status}"))?;
-    assert_eq!(opened.event_id, "runtime:test-runtime:nightly");
+    assert_eq!(opened.receipt.event_id, "runtime:test-runtime:nightly");
+    assert_eq!(opened.channel_id, "test-channel");
     assert_eq!(
-        (opened.state, opened.duplicate),
+        (opened.receipt.state, opened.receipt.duplicate),
         (TurnState::Running, false)
     );
     let again = open_turn(&state, RUNTIME, &opening("conversation", "nightly"))
         .await?
         .map_err(|status| anyhow!("refused with {status}"))?;
     assert_eq!(
-        (again.turn_id.as_str(), again.duplicate),
-        (opened.turn_id.as_str(), true)
+        (again.receipt.turn_id.as_str(), again.receipt.duplicate),
+        (opened.receipt.turn_id.as_str(), true)
     );
     // Another conversation with the same key is refused, not given this turn.
     let mut other_agent = opening("conversation", "nightly");
@@ -244,7 +247,7 @@ async fn a_runtime_opens_one_turn_per_key_in_a_conversation_of_its_own() -> Resu
     }
     let inspected = state
         .core
-        .inspect_turn(&opened.turn_id)?
+        .inspect_turn(&opened.receipt.turn_id)?
         .context("no turn")?;
     assert_eq!(
         (inspected.input.as_str(), inspected.user_id.as_str()),
@@ -271,13 +274,13 @@ async fn a_runtime_opens_one_turn_per_key_in_a_conversation_of_its_own() -> Resu
                 first.turn_id.as_str(),
                 Some("test-feedback".to_owned())
             ),
-            ("test-runtime", opened.turn_id.as_str(), None),
+            ("test-runtime", opened.receipt.turn_id.as_str(), None),
         ]
     );
     // Opened, it is settled as any turn the runtime holds.
     let answer = json!({"outcome": "answered", "output": "Nightly summary."});
     assert_eq!(
-        settle(&state, RUNTIME, &opened.turn_id, &answer).await?,
+        settle(&state, RUNTIME, &opened.receipt.turn_id, &answer).await?,
         StatusCode::NO_CONTENT
     );
     let delivery = delivered(&state)?;
@@ -351,6 +354,7 @@ async fn a_runtime_reads_back_the_turns_core_records_running_on_it() -> Result<(
             (
                 turn.request.correlation_id.as_str(),
                 turn.request.input.as_str(),
+                turn.request.channel_id.as_str(),
                 turn.key.as_deref(),
             )
         })
@@ -358,10 +362,11 @@ async fn a_runtime_reads_back_the_turns_core_records_running_on_it() -> Result<(
     assert_eq!(
         listed,
         [
-            (held.turn_id.as_str(), "one", None),
+            (held.turn_id.as_str(), "one", "test-channel", None),
             (
-                opened.turn_id.as_str(),
+                opened.receipt.turn_id.as_str(),
                 "The nightly summary.",
+                "test-channel",
                 Some("nightly")
             ),
         ]
@@ -420,8 +425,8 @@ async fn a_runtime_opens_no_turn_in_a_conversation_that_is_not_its_own() -> Resu
         .await?
         .map_err(|status| anyhow!("refused with {status}"))?;
     assert_eq!(
-        (again.turn_id.as_str(), again.duplicate),
-        (before.turn_id.as_str(), true)
+        (again.receipt.turn_id.as_str(), again.receipt.duplicate),
+        (before.receipt.turn_id.as_str(), true)
     );
     for caller in [RUNTIME, ("other-runtime", "other-only")] {
         assert_eq!(
