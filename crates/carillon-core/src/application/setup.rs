@@ -90,13 +90,18 @@ pub(super) fn setup(home: &Path, options: &Options, questions: &mut impl Questio
     if options.workspace.is_some() && !pi {
         bail!("--workspace is for Pi; on T3, an agent works in its project's folder");
     }
-    let kept = t3 && existing && keep_t3(home, &provider_binary("runtime-t3")?, questions)?;
-    if t3 && !kept {
+    let saved = if t3 && existing {
+        saved_t3(home, &provider_binary("runtime-t3")?, questions)?
+    } else {
+        SavedT3::Replaced
+    };
+    if t3 && saved != SavedT3::Kept {
         set_up_t3(
             home,
             options,
             pi,
             &provider_binary("runtime-t3")?,
+            saved,
             questions,
         )?;
     } else if pi {
@@ -276,27 +281,38 @@ fn choose_pi_models(
     Ok(())
 }
 
-/// Whether to keep T3's saved settings, offered only when `t3` reads them
-/// and their token as its startup does. Settings it cannot read are
-/// removed, since its `configure` rewrites only settings it reads, such as
-/// an earlier release's; the token stays.
-fn keep_t3(home: &Path, t3: &Path, questions: &mut impl Questions) -> Result<bool> {
-    let settings = home.join("providers/runtime-t3.toml");
-    if !settings.exists() {
-        return Ok(false);
+/// What becomes of T3's saved settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SavedT3 {
+    Kept,
+    /// There are none, or the operator replaces them.
+    Replaced,
+    /// The runtime cannot read them, as an earlier release's. Setup replaces
+    /// them once their projects have given the agents their IDs, since
+    /// `configure` rewrites only settings it reads.
+    Unreadable,
+}
+
+/// What to do with T3's saved settings: keeping them is offered only when
+/// `t3` reads them and their token as its startup does.
+fn saved_t3(home: &Path, t3: &Path, questions: &mut impl Questions) -> Result<SavedT3> {
+    if !home.join("providers/runtime-t3.toml").exists() {
+        return Ok(SavedT3::Replaced);
     }
     let config = home.join("carillon.toml");
     match run(t3, &["check", "--config", &config.to_string_lossy()], "") {
-        Ok(_) => questions.confirm("Keep the T3 settings and agents?", true),
+        Ok(_) => Ok(
+            if questions.confirm("Keep the T3 settings and agents?", true)? {
+                SavedT3::Kept
+            } else {
+                SavedT3::Replaced
+            },
+        ),
         Err(failure) => {
             questions.say(&format!(
                 "The saved T3 settings cannot be kept, so setup replaces them: {failure:#}"
             ))?;
-            let _maintenance = MaintenanceLock::acquire_unless_held(home)
-                .context("the T3 settings were not changed")?;
-            std::fs::remove_file(&settings)
-                .with_context(|| format!("remove {}", settings.display()))?;
-            Ok(false)
+            Ok(SavedT3::Unreadable)
         }
     }
 }
@@ -349,6 +365,7 @@ fn set_up_t3(
     options: &Options,
     assistant: bool,
     t3: &Path,
+    saved: SavedT3,
     questions: &mut impl Questions,
 ) -> Result<()> {
     let (server, offer) = loop {
@@ -388,6 +405,13 @@ fn set_up_t3(
         bail!("nothing runs on T3: choose a T3 Code project");
     }
     let agents = agents(home, options, assistant, Some(&code))?;
+    if saved == SavedT3::Unreadable {
+        let settings = home.join("providers/runtime-t3.toml");
+        let _maintenance = MaintenanceLock::acquire_unless_held(home)
+            .context("the T3 settings were not changed")?;
+        std::fs::remove_file(&settings)
+            .with_context(|| format!("remove {}", settings.display()))?;
+    }
     if agents.is_empty() {
         questions.say("T3 Code has no agents to configure.")?;
         return Ok(());
@@ -413,7 +437,7 @@ fn configure_agents(
             bail!("T3 offers {label} no usable model; set one up in T3, then run setup again");
         }
         let model = &models[questions.choose(
-            &format!("Which model should {label} start new conversations with?"),
+            &format!("Which model should {label} use?"),
             &model_labels(models),
             0,
         )?];

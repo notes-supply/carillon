@@ -5,7 +5,9 @@ use std::{
 
 use carillon_installation::config::{Config, LoadedConfig, ProviderRole};
 
-use super::{Options, Runtime, initialize, keep_t3, registered_runtimes, run, set_up_t3, setup};
+use super::{
+    Options, Runtime, SavedT3, initialize, registered_runtimes, run, saved_t3, set_up_t3, setup,
+};
 use crate::application::admin::{ASSISTANT, assistant, backup, register_runtime, set_provider};
 
 /// A new installation on `runtime`: on Pi with Carillon's assistant working
@@ -192,15 +194,19 @@ fn saved_t3_settings_are_offered_only_when_the_runtime_reads_them() -> anyhow::R
     std::fs::write(home.join("providers/runtime-t3.toml"), "saved")?;
     let program = directory.path().join("carillon-runtime-t3");
     let expected = format!("check --config {}", home.join("carillon.toml").display());
-    for (check, shown, kept) in [
-        ("exit 0", vec!["Keep the T3 settings and agents?"], true),
+    for (check, shown, saved) in [
+        (
+            "exit 0",
+            vec!["Keep the T3 settings and agents?"],
+            SavedT3::Kept,
+        ),
         (
             "echo 'error: credentials/t3.token: the T3 token file is empty' >&2; exit 1",
             vec![
                 "The saved T3 settings cannot be kept, so setup replaces them: \
                  credentials/t3.token: the T3 token file is empty",
             ],
-            false,
+            SavedT3::Unreadable,
         ),
     ] {
         std::fs::write(
@@ -209,9 +215,9 @@ fn saved_t3_settings_are_offered_only_when_the_runtime_reads_them() -> anyhow::R
         )?;
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))?;
         let mut questions = Shown::default();
-        assert_eq!(keep_t3(&home, &program, &mut questions)?, kept);
+        assert_eq!(saved_t3(&home, &program, &mut questions)?, saved);
         assert_eq!(questions.transcript, shown);
-        assert_eq!(home.join("providers/runtime-t3.toml").exists(), kept);
+        assert!(home.join("providers/runtime-t3.toml").exists());
     }
     Ok(())
 }
@@ -291,7 +297,14 @@ fn t3_code_gets_an_agent_per_project_beside_the_assistant_on_pi() -> anyhow::Res
         workspace: Some(workspace.clone()),
         ..options()
     };
-    set_up_t3(&home, &options, true, &program, &mut questions)?;
+    set_up_t3(
+        &home,
+        &options,
+        true,
+        &program,
+        SavedT3::Replaced,
+        &mut questions,
+    )?;
     let config = LoadedConfig::load(&home.join("carillon.toml"))?;
     let agents: Vec<(&str, &str, &Path, bool)> = config
         .value
@@ -338,7 +351,7 @@ fn t3_code_gets_an_agent_per_project_beside_the_assistant_on_pi() -> anyhow::Res
              route channels to.",
             "Sonnet (claudeAgent)",
             "GPT (codex)",
-            "Which model should T3 Code · Notes App start new conversations with?",
+            "Which model should T3 Code · Notes App use?",
             &format!("configured {} --url", home.join("carillon.toml").display()),
         ]
     );
@@ -360,12 +373,19 @@ fn models_sharing_a_name_are_told_apart_and_the_one_chosen_is_configured() -> an
     let program = fake_t3(directory.path(), &offer)?;
     // The default address, a token, the only project for T3 Code, the second Sonnet.
     let mut questions = Shown::answering(&["", "token", "0", "1"]);
-    set_up_t3(&home, &options(), false, &program, &mut questions)?;
+    set_up_t3(
+        &home,
+        &options(),
+        false,
+        &program,
+        SavedT3::Replaced,
+        &mut questions,
+    )?;
     let options = [
         "Sonnet (claudeAgent/sonnet-a)",
         "Sonnet (claudeAgent/sonnet-b)",
         "Sonnet (other)",
-        "Which model should T3 Code · Agent start new conversations with?",
+        "Which model should T3 Code · Agent use?",
     ];
     assert!(
         questions
@@ -403,6 +423,7 @@ fn t3_with_nothing_to_run_is_refused_or_left_out() -> anyhow::Result<()> {
         &options(),
         false,
         &program,
+        SavedT3::Replaced,
         &mut Shown::answering(&["", "token", ""]),
     );
     let refusal = refused
@@ -412,7 +433,14 @@ fn t3_with_nothing_to_run_is_refused_or_left_out() -> anyhow::Result<()> {
     assert!(refusal.contains("nothing runs on T3"), "{refusal}");
     assert!(!home.exists());
     let mut questions = Shown::answering(&["", "token", ""]);
-    set_up_t3(&home, &options(), true, &program, &mut questions)?;
+    set_up_t3(
+        &home,
+        &options(),
+        true,
+        &program,
+        SavedT3::Replaced,
+        &mut questions,
+    )?;
     assert!(
         questions
             .transcript
@@ -440,7 +468,14 @@ fn t3_code_agents_are_named_from_their_projects_without_clashing() -> anyhow::Re
     // The default address, a token, every project for T3 Code, then each
     // agent's only model.
     let mut questions = Shown::answering(&["", "token", "0,1,2", "0", "0", "0"]);
-    set_up_t3(&home, &options(), false, &program, &mut questions)?;
+    set_up_t3(
+        &home,
+        &options(),
+        false,
+        &program,
+        SavedT3::Replaced,
+        &mut questions,
+    )?;
     let config = LoadedConfig::load(&home.join("carillon.toml"))?;
     let agents: Vec<(&str, &str)> = config
         .value
@@ -485,16 +520,23 @@ fn equally_named_agents_get_distinct_model_prompts_and_their_chosen_models() -> 
     });
     let program = fake_t3(directory.path(), &offer)?;
     let mut questions = Shown::answering(&["", "token", "0,1,2", "0", "1", "0"]);
-    set_up_t3(&home, &options(), false, &program, &mut questions)?;
+    set_up_t3(
+        &home,
+        &options(),
+        false,
+        &program,
+        SavedT3::Replaced,
+        &mut questions,
+    )?;
     for label in [
         "T3 Code · Notes (t3-notes)",
         "T3 Code · Notes (t3-notes-2)",
         "T3 Code · Other",
     ] {
         assert!(
-            questions.transcript.contains(&format!(
-                "Which model should {label} start new conversations with?"
-            )),
+            questions
+                .transcript
+                .contains(&format!("Which model should {label} use?")),
             "{:?}",
             questions.transcript
         );

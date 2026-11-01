@@ -1,6 +1,6 @@
 use super::{
-    Config, LoadedConfig, Options, Runtime, Shown, fake_t3, initialized, keep_t3, model, options,
-    set_up_t3,
+    Config, LoadedConfig, Options, Runtime, SavedT3, Shown, fake_t3, initialized, model, options,
+    saved_t3, set_up_t3,
 };
 use crate::application::{
     admin::set_agents,
@@ -27,6 +27,7 @@ fn setting_up_t3_keeps_the_assistants_id_and_paths_on_pi() -> anyhow::Result<()>
         &options(),
         true,
         &program,
+        SavedT3::Replaced,
         &mut Shown::answering(&["", "token", "0", "0"]),
     )?;
     let stored: Config = toml::from_str(&std::fs::read_to_string(&path)?)?;
@@ -118,6 +119,7 @@ fn t3_setup_offers_each_agent_the_models_the_runtime_offers_it() -> anyhow::Resu
         &options(),
         false,
         &program,
+        SavedT3::Replaced,
         &mut Shown::answering(&["", "token", "0", "0"]),
     )?;
     let calls = std::fs::read_to_string(directory.path().join("calls"))?;
@@ -129,10 +131,20 @@ fn t3_setup_offers_each_agent_the_models_the_runtime_offers_it() -> anyhow::Resu
 }
 
 #[test]
-fn unreadable_t3_settings_are_replaced_and_declined_ones_rewritten() -> anyhow::Result<()> {
+fn unreadable_t3_settings_keep_their_agents_ids_and_are_replaced() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let home = directory.path().join("home");
-    initialized(&home, directory.path(), Runtime::T3)?;
+    let path = initialized(&home, directory.path(), Runtime::T3)?;
+    set_agents(
+        &path,
+        vec![carillon_installation::config::AgentConfig {
+            id: "t3-notes".to_owned(),
+            name: "T3 Code · Notes".to_owned(),
+            runtime: Runtime::T3.id().to_owned(),
+            workspace: directory.path().to_path_buf(),
+            resources: None,
+        }],
+    )?;
     let settings = home.join("providers/runtime-t3.toml");
     let token = home.join("credentials/t3.token");
     std::fs::write(&token, "token")?;
@@ -145,27 +157,32 @@ fn unreadable_t3_settings_are_replaced_and_declined_ones_rewritten() -> anyhow::
     let earlier =
         "[agents.t3-notes]\nproject_id = 'notes'\n[agents.t3-notes.model]\nmodel = 'gpt'\n";
     let readable = "[agents.t3-notes]\nproject_id = 'notes'\n";
-    for (saved, declined) in [(earlier, false), (readable, true)] {
-        std::fs::write(&settings, saved)?;
+    for (contents, declined) in [(earlier, false), (readable, true)] {
+        std::fs::write(&settings, contents)?;
         let mut questions = Shown::answering(&["", "token", "0", "0"]);
         questions.confirmations.extend(declined.then_some(false));
-        assert!(!keep_t3(&home, &program, &mut questions)?);
+        let saved = saved_t3(&home, &program, &mut questions)?;
+        let expected = if declined {
+            SavedT3::Replaced
+        } else {
+            SavedT3::Unreadable
+        };
+        assert_eq!(saved, expected);
+        set_up_t3(&home, &options(), false, &program, saved, &mut questions)?;
         assert_eq!(settings.exists(), declined);
-        if !declined {
-            assert_eq!(
-                questions.transcript,
-                [format!(
-                    "The saved T3 settings cannot be kept, so setup replaces them: check \
-                     refuses {}",
-                    settings.display()
-                )]
-            );
-        }
-        set_up_t3(&home, &options(), false, &program, &mut questions)?;
         let ran = std::fs::read_to_string(&calls)?;
         assert!(
             ran.contains("--agent t3-notes --project notes --model codex/gpt"),
             "{ran}"
+        );
+        let stored: Config = toml::from_str(&std::fs::read_to_string(&path)?)?;
+        assert_eq!(
+            stored
+                .agents
+                .iter()
+                .map(|agent| agent.id.as_str())
+                .collect::<Vec<_>>(),
+            ["t3-notes"]
         );
         assert_eq!(std::fs::read_to_string(&token)?, "token");
         std::fs::remove_file(&calls)?;
