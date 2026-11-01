@@ -400,6 +400,41 @@ fn an_agent_without_a_model_shows_an_empty_model_line() -> Result<(), String> {
     Ok(())
 }
 
+#[test]
+fn a_runtime_line_pinned_without_alternatives_offers_reset_and_route_lines_never_do()
+-> Result<(), String> {
+    for choices in [vec![named("local/echo", "Echo")], Vec::new()] {
+        let offered = choices.len();
+        let mut host = FakeHost::new(page(RuntimePart::Settings(RuntimeSettings {
+            settings: vec![line(
+                "model",
+                "Model",
+                choices,
+                Some("local/echo"),
+                false,
+                10,
+            )?],
+        }))?);
+        let reply = run(&mut host, &command())?;
+        assert_eq!(
+            labels(&reply, &control(&reply, "pick")?),
+            ["Model"],
+            "route lines are set on the channel too, and have nothing to return to"
+        );
+        assert_eq!(offers(&reply, "set"), offered > 0);
+        run(&mut host, &click(&control(&reply, "reset")?, &[]))?;
+        assert_eq!(
+            host.changes(),
+            [&Change {
+                setting: "model".to_owned(),
+                value: None,
+                expected: revision(10)?,
+            }]
+        );
+    }
+    Ok(())
+}
+
 fn catalogue() -> Result<Page, String> {
     let models = (0..30)
         .map(|index| Choice {

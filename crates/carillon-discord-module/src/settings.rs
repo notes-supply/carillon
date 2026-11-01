@@ -1,10 +1,10 @@
 //! `/settings`: the page of the routed channel the command runs in, also
-//! inside one of its threads, with a picker of its editable lines, a picker
-//! of the picked line's choices, and `Reset` while the channel sets the
-//! picked line itself. Every invocation and click draws from a fresh read and
-//! every change applies at once, so the module keeps nothing: the picked
-//! line, the revision it was drawn with and each picker's page travel in
-//! custom IDs.
+//! inside one of its threads, with a picker of the lines it can change, a
+//! picker of the picked line's choices, and `Reset` while the channel sets
+//! the picked line itself. Every invocation and click draws from a fresh
+//! read and every change applies at once, so the module keeps nothing: the
+//! picked line, the revision it was drawn with and each picker's page travel
+//! in custom IDs.
 //!
 //! Custom IDs and select values carry fingerprints of setting and choice IDs,
 //! never the IDs themselves, so they stay within Discord's limits whatever
@@ -92,7 +92,7 @@ enum Action {
 /// What the pickers show beyond the page.
 #[derive(Default)]
 struct View {
-    /// The picked line's fingerprint; otherwise the first editable line.
+    /// The picked line's fingerprint; otherwise the first line it can pick.
     line: Option<String>,
     /// The page each picker shows; otherwise the page holding its pick.
     lines_page: Option<usize>,
@@ -276,26 +276,35 @@ fn editable(setting: &Setting) -> bool {
         .any(|choice| !holds(setting, &choice.id))
 }
 
+/// A runtime line this channel sets itself, which `Reset` returns to what it
+/// inherits even when the line offers nothing else. The interface's lines
+/// have nothing to return to.
+fn resettable(page: &Page, setting: &Setting) -> bool {
+    setting.value.is_some()
+        && !setting.inherited
+        && page.interface.iter().all(|line| line.id != setting.id)
+}
+
 fn controls(page: &Page, view: &View, markers: &ActivityMarkers) -> Vec<Value> {
-    let editable: Vec<&Setting> = page
+    let pickable: Vec<&Setting> = page
         .settings()
-        .filter(|setting| editable(setting))
+        .filter(|setting| editable(setting) || resettable(page, setting))
         .collect();
     let index = view
         .line
         .as_deref()
         .and_then(|line| {
-            editable
+            pickable
                 .iter()
                 .position(|setting| fingerprint(&[&setting.id]) == line)
         })
         .unwrap_or_default();
-    let Some(picked) = editable.get(index) else {
+    let Some(picked) = pickable.get(index) else {
         return Vec::new();
     };
     let line = fingerprint(&[&picked.id]);
     let (lines_page, lines) = paged(
-        editable
+        pickable
             .iter()
             .map(|setting| {
                 choice(
@@ -307,7 +316,7 @@ fn controls(page: &Page, view: &View, markers: &ActivityMarkers) -> Vec<Value> {
             })
             .collect(),
         view.lines_page
-            .unwrap_or_else(|| page_holding(index, editable.len())),
+            .unwrap_or_else(|| page_holding(index, pickable.len())),
     );
     let held = picked
         .choices
@@ -339,19 +348,21 @@ fn controls(page: &Page, view: &View, markers: &ActivityMarkers) -> Vec<Value> {
         view.values_page
             .unwrap_or_else(|| held.map_or(0, |index| page_holding(index, picked.choices.len()))),
     );
-    let mut rows = vec![
-        select(
-            &format!("{COMMAND}:pick:{line}:{lines_page}"),
-            "Setting",
-            lines.into_iter(),
-        ),
-        select(
+    let mut rows = vec![select(
+        &format!("{COMMAND}:pick:{line}:{lines_page}"),
+        "Setting",
+        lines.into_iter(),
+    )];
+    // Discord refuses a select without options, which a line offering
+    // nothing but `Reset` would draw.
+    if !values.is_empty() {
+        rows.push(select(
             &format!("{COMMAND}:set:{line}:{}:{values_page}", picked.revision),
             &picked.name,
             values.into_iter(),
-        ),
-    ];
-    if picked.value.is_some() && !picked.inherited {
+        ));
+    }
+    if resettable(page, picked) {
         rows.push(json!({ "type": 1, "components": [button(
             &format!("{COMMAND}:reset:{line}:{}", picked.revision),
             "Reset",
