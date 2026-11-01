@@ -142,9 +142,11 @@ fn line<'a>(page: &'a Page, key: &str) -> Option<&'a Setting> {
 }
 
 /// The choice whose ID is `value`, or else the one whose name it is, in any
-/// case.
+/// case, or else the one whose ID ends in `/<value>`, so `gpt-6.1-sol`
+/// names `openai-codex/gpt-6.1-sol`.
 fn choice<'a>(setting: &'a Setting, value: &str) -> Result<&'a Choice> {
     let value_name = value.to_lowercase();
+    let suffix = format!("/{value}");
     setting
         .choices
         .iter()
@@ -155,6 +157,14 @@ fn choice<'a>(setting: &'a Setting, value: &str) -> Result<&'a Choice> {
                     .choices
                     .iter()
                     .filter(|choice| choice.name.to_lowercase() == value_name),
+            )
+        })
+        .or_else(|| {
+            only(
+                setting
+                    .choices
+                    .iter()
+                    .filter(|choice| choice.id.ends_with(&suffix)),
             )
         })
         .ok_or_else(|| {
@@ -328,7 +338,7 @@ fn summary(pages: &[Page]) -> String {
     let (id_width, title_width) = (width(subject_id), width(|page| page.title.as_str()));
     let mut text = String::new();
     for page in pages {
-        let values: Vec<String> = page.settings().filter_map(named).collect();
+        let values: Vec<String> = page.settings().filter_map(Setting::value_name).collect();
         let mut line = format!(
             "{:<id_width$}{:<title_width$}{}",
             subject_id(page),
@@ -352,47 +362,17 @@ fn subject_id(page: &Page) -> &str {
 }
 
 /// The page as the terminal shows it: why the runtime's lines are missing,
-/// if they are, the title, then each line's name, padded to the longest
-/// and two spaces, and what applies.
+/// if they are, the title, then its lines.
 fn render(page: &Page) -> String {
     let mut text = String::new();
     if let RuntimePart::Unavailable { reason } = &page.runtime {
         let _ = writeln!(text, "⚠ {reason}");
     }
     let _ = writeln!(text, "{}", page.title);
-    let width = page
-        .settings()
-        .map(|setting| setting.name.chars().count())
-        .max()
-        .unwrap_or_default()
-        + 2;
-    for setting in page.settings() {
-        let mut line = format!("{:<width$}", setting.name);
-        if let Some(value) = named(setting) {
-            line.push_str(&value);
-            if setting.inherited {
-                line.push_str(" · default");
-            }
-        }
-        let _ = writeln!(text, "{}", line.trim_end());
+    for line in page.lines() {
+        let _ = writeln!(text, "{line}");
     }
     text
-}
-
-/// What applies, as its choices name it, or `None` when nothing does.
-fn named(setting: &Setting) -> Option<String> {
-    let name = |id: &String| {
-        setting
-            .choices
-            .iter()
-            .find(|choice| &choice.id == id)
-            .map_or(id, |choice| &choice.name)
-            .clone()
-    };
-    match setting.value.as_ref()? {
-        Value::One { id } => Some(name(id)),
-        Value::Many { ids } => Some(ids.iter().map(name).collect::<Vec<_>>().join(", ")),
-    }
 }
 
 #[cfg(test)]

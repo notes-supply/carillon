@@ -235,7 +235,7 @@ fn a_key_names_a_line_and_a_value_one_of_its_choices() -> Result<()> {
     for edit in [set("thinking", "high"), set("model.thinking", "HIGH")] {
         assert_eq!(change(&page, &edit)?, thinking, "{edit:?}");
     }
-    for value in ["openai-codex/gpt-6.1-mini", "gpt-6.1 mini"] {
+    for value in ["openai-codex/gpt-6.1-mini", "gpt-6.1 mini", "gpt-6.1-mini"] {
         let changed = change(&page, &set("model", value))?;
         assert_eq!(
             (changed.setting.as_str(), changed.value, changed.expected),

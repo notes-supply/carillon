@@ -172,6 +172,25 @@ pub enum RuntimePart {
     Unavailable { reason: String },
 }
 
+impl Setting {
+    /// What applies, as the setting's choices name it, or `None` when
+    /// nothing does.
+    #[must_use]
+    pub fn value_name(&self) -> Option<String> {
+        let name = |id: &String| {
+            self.choices
+                .iter()
+                .find(|choice| &choice.id == id)
+                .map_or(id, |choice| &choice.name)
+                .clone()
+        };
+        match self.value.as_ref()? {
+            Value::One { id } => Some(name(id)),
+            Value::Many { ids } => Some(ids.iter().map(name).collect::<Vec<_>>().join(", ")),
+        }
+    }
+}
+
 impl Page {
     /// Every line, the interface's first.
     pub fn settings(&self) -> impl Iterator<Item = &Setting> {
@@ -180,5 +199,30 @@ impl Page {
             RuntimePart::Unavailable { .. } => &[],
         };
         self.interface.iter().chain(runtime)
+    }
+
+    /// The lines every renderer shows: each setting's name, padded to the
+    /// longest and two spaces, then what applies, marked ` · default` when it
+    /// is the agent's.
+    #[must_use]
+    pub fn lines(&self) -> Vec<String> {
+        let width = self
+            .settings()
+            .map(|setting| setting.name.chars().count())
+            .max()
+            .unwrap_or_default()
+            + 2;
+        self.settings()
+            .map(|setting| {
+                let mut line = format!("{:<width$}", setting.name);
+                if let Some(value) = setting.value_name() {
+                    line.push_str(&value);
+                    if setting.inherited {
+                        line.push_str(" · default");
+                    }
+                }
+                line.trim_end().to_owned()
+            })
+            .collect()
     }
 }

@@ -235,7 +235,7 @@ fn content(page: &Page, warnings: &[&str]) -> String {
     let _ = write!(text, "{}\n```\n", page.title);
     let mut length = text.chars().count();
     let room = CONTENT_LIMIT.saturating_sub("…\n```".chars().count());
-    for line in lines(page) {
+    for line in page.lines() {
         let line = line.replace('`', "ˋ");
         length += line.chars().count() + 1;
         if length > room {
@@ -246,44 +246,6 @@ fn content(page: &Page, warnings: &[&str]) -> String {
         text.push('\n');
     }
     text.push_str("```");
-    text
-}
-
-fn lines(page: &Page) -> Vec<String> {
-    let width = page
-        .settings()
-        .map(|setting| setting.name.chars().count())
-        .max()
-        .unwrap_or_default()
-        + 2;
-    page.settings()
-        .map(|setting| {
-            format!("{:<width$}{}", setting.name, shown(setting))
-                .trim_end()
-                .to_owned()
-        })
-        .collect()
-}
-
-fn shown(setting: &Setting) -> String {
-    let name = |id: &str| {
-        setting
-            .choices
-            .iter()
-            .find(|choice| choice.id == id)
-            .map_or(id, |choice| choice.name.as_str())
-            .to_owned()
-    };
-    let mut text = match &setting.value {
-        None => return String::new(),
-        Some(SettingValue::One { id }) => name(id),
-        Some(SettingValue::Many { ids }) => {
-            ids.iter().map(|id| name(id)).collect::<Vec<_>>().join(", ")
-        }
-    };
-    if setting.inherited {
-        text.push_str(" · default");
-    }
     text
 }
 
