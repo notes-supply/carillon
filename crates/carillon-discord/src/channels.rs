@@ -4,6 +4,8 @@
 //! subject itself from the route, whoever asks, so a caller can only ever
 //! reach the channels this provider routes.
 
+use std::time::Duration;
+
 use axum::http::StatusCode;
 use carillon_discord_module::contract::Notice;
 use carillon_protocol::settings::{
@@ -69,6 +71,10 @@ pub(crate) async fn change(
     Ok(composed(core, route, title, Ok(runtime)))
 }
 
+/// How long before the end of a card's calls a change gives up, so the page
+/// can still be read again after a change that got no answer.
+const REREAD: Duration = Duration::from_secs(2);
+
 /// What a card shows after a change: the page it left, or the page read again
 /// by `until` with what became of the change. A change the runtime did not
 /// confirm is never sent again.
@@ -79,7 +85,8 @@ pub(crate) async fn settled(
     change: Change,
     until: Instant,
 ) -> (Page, Option<Notice>) {
-    let failure = match self::change(core, route, title.clone(), change, until).await {
+    let written_by = until.checked_sub(REREAD).unwrap_or(until);
+    let failure = match self::change(core, route, title.clone(), change, written_by).await {
         Ok(page) => return (page, None),
         Err(failure) => failure,
     };

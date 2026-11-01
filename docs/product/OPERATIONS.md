@@ -198,9 +198,11 @@ Thinking  Medium · default
 `· default` marks a value the channel takes from its agent. Pick a line,
 then a value. The change applies at once and the page redraws. **Reset**
 returns the channel's model and its options to the agent's. A model change
-applies to the next turn of every conversation in the channel; a turn
-already admitted keeps its model. Choosing another model resets its options
-to that model's defaults.
+applies to the next message each conversation in the channel receives.
+Choosing another model resets its options to that model's defaults. On T3,
+a message keeps the model it started with. On Pi, a conversation runs one
+model at a time: the next message moves the whole conversation to the new
+model, an answer still in progress there included.
 
 If someone changed the line after the page was drawn, nothing changes and
 the page shows `⚠ Changed meanwhile`. If the runtime did not answer in time,

@@ -66,8 +66,10 @@ with `pi` as its first argument, the same executable is Pi's own command line
   model is not read. `POST /v1/settings` shows and changes the model of an
   agent and of each of its channels, kept in `<component>/settings.json`. A
   turn runs its channel's model, else its agent's, with thinking clamped to
-  the levels the model supports, resolved once as it is admitted, or as it
-  opens for a schedule's run or a subagent's report.
+  the levels the model supports, resolved as it is admitted, or as it opens
+  for a schedule's run or a subagent's report. pi-durable keeps one model
+  per conversation, so that resolution moves the whole conversation,
+  including turns still running or waiting there.
 - **Setup.** `--check` passes once Pi is signed in and offers a model.
   `--models --agent <id>` prints the models Pi offers and the agent's model
   as JSON, and `--configure --agent <id> --model <provider>/<model>` sets the

@@ -427,3 +427,47 @@ async fn model_badges_can_be_dropped_for_discord() -> anyhow::Result<()> {
     server.abort();
     Ok(())
 }
+
+#[tokio::test]
+async fn a_change_that_outlasts_its_time_still_reads_the_page_again() -> anyhow::Result<()> {
+    let runtime = Arc::new(Mutex::new(Runtime::new()?));
+    let router = Router::new()
+        .route(
+            "/v1/settings",
+            post(
+                |State(runtime): State<Shared>, Json(request): Json<SettingsRequest>| async move {
+                    let changing = request.change.is_some();
+                    let response = answer(State(runtime), Json(request)).await;
+                    let late = if changing { 10_000 } else { 500 };
+                    tokio::time::sleep(Duration::from_millis(late)).await;
+                    response
+                },
+            ),
+        )
+        .with_state(runtime.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let client = crate::client::test_client(format!("http://{}", listener.local_addr()?))?;
+    let server = tokio::spawn(async move { axum::serve(listener, router).await });
+    let drawn = invoke(&client, source("401", None), &ActivityMarkers::default()).await?;
+    let reply = click(&client, &drawn, "set", "GPT-6.1 Mini").await?;
+    let writes: Vec<bool> = runtime
+        .lock()
+        .map_err(|_| anyhow::anyhow!("poisoned"))?
+        .requests
+        .iter()
+        .map(|request| request.change.is_some())
+        .collect();
+    server.abort();
+    assert_eq!(
+        writes,
+        [false, false, true, false],
+        "the click reads, changes once, then reads again"
+    );
+    assert!(
+        reply.content.starts_with("⚠ Not confirmed\n"),
+        "{}",
+        reply.content
+    );
+    assert!(reply.content.contains("GPT-6.1 Mini"), "{}", reply.content);
+    Ok(())
+}
