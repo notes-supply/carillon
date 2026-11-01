@@ -67,7 +67,7 @@ fn each_pi_agent_is_asked_its_model_until_it_has_one() -> anyhow::Result<()> {
     choose_pi_models(&home, &pi, &agents, &mut questions)?;
     let offered = ["GPT-6.1 Sol (openai-codex)", "GPT-6.1 Mini (openai-codex)"];
     assert_eq!(
-        questions.shown,
+        questions.transcript,
         [
             offered[0],
             offered[1],

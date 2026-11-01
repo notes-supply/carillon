@@ -1,5 +1,6 @@
 use super::{
-    Config, LoadedConfig, Options, Runtime, Shown, fake_t3, initialized, model, options, set_up_t3,
+    Config, LoadedConfig, Options, Runtime, Shown, fake_t3, initialized, keep_t3, model, options,
+    set_up_t3,
 };
 use crate::application::{
     admin::set_agents,
@@ -124,5 +125,54 @@ fn t3_setup_offers_each_agent_the_models_the_runtime_offers_it() -> anyhow::Resu
         calls.contains("--agent t3-notes --project notes --model codex/gpt"),
         "{calls}"
     );
+    Ok(())
+}
+
+/// Saved T3 settings the T3 runtime no longer reads, such as an earlier
+/// release's, are replaced: setup removes them, keeps the T3 token, and
+/// sets T3 up again. Readable settings the operator declines to keep stay
+/// for T3's `configure` to rewrite.
+#[test]
+fn unreadable_t3_settings_are_replaced_and_declined_ones_rewritten() -> anyhow::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let home = directory.path().join("home");
+    initialized(&home, directory.path(), Runtime::T3)?;
+    let settings = home.join("providers/runtime-t3.toml");
+    let token = home.join("credentials/t3.token");
+    std::fs::write(&token, "token")?;
+    let offer = serde_json::json!({
+        "projects": [{"id": "notes", "title": "Notes", "workspace": directory.path()}],
+        "models": [model("codex", "gpt", "GPT")],
+    });
+    let program = fake_t3(directory.path(), &offer)?;
+    let calls = directory.path().join("calls");
+    let earlier =
+        "[agents.t3-notes]\nproject_id = 'notes'\n[agents.t3-notes.model]\nmodel = 'gpt'\n";
+    let readable = "[agents.t3-notes]\nproject_id = 'notes'\n";
+    for (saved, declined) in [(earlier, false), (readable, true)] {
+        std::fs::write(&settings, saved)?;
+        let mut questions = Shown::answering(&["", "token", "0", "0"]);
+        questions.confirmations.extend(declined.then_some(false));
+        assert!(!keep_t3(&home, &program, &mut questions)?);
+        assert_eq!(settings.exists(), declined);
+        if !declined {
+            assert_eq!(
+                questions.transcript,
+                [format!(
+                    "The saved T3 settings cannot be kept, so setup replaces them: check \
+                     refuses {}",
+                    settings.display()
+                )]
+            );
+        }
+        set_up_t3(&home, &options(), false, &program, &mut questions)?;
+        let ran = std::fs::read_to_string(&calls)?;
+        assert!(
+            ran.contains("--agent t3-notes --project notes --model codex/gpt"),
+            "{ran}"
+        );
+        assert_eq!(std::fs::read_to_string(&token)?, "token");
+        std::fs::remove_file(&calls)?;
+    }
     Ok(())
 }

@@ -114,25 +114,28 @@ fn a_disabled_runtime_stops_setup_before_it_opens_anything() -> anyhow::Result<(
 }
 
 /// Questions answered in order from `answers`; the first left without one
-/// ends the run. Confirmations take their default, a choice is a 0-based
-/// index, a multiple choice 0-based indexes joined by commas, and what was
-/// shown and asked is kept, a choice's options before its question.
+/// ends the run. Confirmations take `confirmations`, then their default, a
+/// choice is a 0-based index, a multiple choice 0-based indexes joined by
+/// commas, and what was shown and asked is kept, a choice's options before
+/// its question.
 #[derive(Default)]
 struct Shown {
-    shown: Vec<String>,
+    transcript: Vec<String>,
     answers: std::collections::VecDeque<&'static str>,
+    /// Answers to confirmations, in order, before their defaults.
+    confirmations: std::collections::VecDeque<bool>,
 }
 
 impl Shown {
     fn answering(answers: &[&'static str]) -> Self {
         Self {
-            shown: Vec::new(),
             answers: answers.iter().copied().collect(),
+            ..Self::default()
         }
     }
 
     fn next(&mut self, question: &str) -> anyhow::Result<&'static str> {
-        self.shown.push(question.to_owned());
+        self.transcript.push(question.to_owned());
         self.answers
             .pop_front()
             .ok_or_else(|| anyhow::anyhow!("stopped at {question}"))
@@ -141,7 +144,7 @@ impl Shown {
 
 impl carillon_installation::prompt::Questions for Shown {
     fn say(&mut self, text: &str) -> anyhow::Result<()> {
-        self.shown.push(text.to_owned());
+        self.transcript.push(text.to_owned());
         Ok(())
     }
 
@@ -159,12 +162,12 @@ impl carillon_installation::prompt::Questions for Shown {
     }
 
     fn confirm(&mut self, question: &str, default: bool) -> anyhow::Result<bool> {
-        self.shown.push(question.to_owned());
-        Ok(default)
+        self.transcript.push(question.to_owned());
+        Ok(self.confirmations.pop_front().unwrap_or(default))
     }
 
     fn choose(&mut self, question: &str, options: &[String], _: usize) -> anyhow::Result<usize> {
-        self.shown.extend(options.iter().cloned());
+        self.transcript.extend(options.iter().cloned());
         Ok(self.next(question)?.parse()?)
     }
 
@@ -174,7 +177,7 @@ impl carillon_installation::prompt::Questions for Shown {
         options: &[String],
         _: &[usize],
     ) -> anyhow::Result<Vec<usize>> {
-        self.shown.extend(options.iter().cloned());
+        self.transcript.extend(options.iter().cloned());
         self.next(question)?
             .split(',')
             .filter(|index| !index.is_empty())
@@ -200,8 +203,8 @@ fn saved_t3_settings_are_offered_only_when_the_runtime_reads_them() -> anyhow::R
         (
             "echo 'error: credentials/t3.token: the T3 token file is empty' >&2; exit 1",
             vec![
-                "The saved T3 settings cannot be kept: credentials/t3.token: the T3 token file \
-                 is empty",
+                "The saved T3 settings cannot be kept, so setup replaces them: \
+                 credentials/t3.token: the T3 token file is empty",
             ],
             false,
         ),
@@ -213,7 +216,8 @@ fn saved_t3_settings_are_offered_only_when_the_runtime_reads_them() -> anyhow::R
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))?;
         let mut questions = Shown::default();
         assert_eq!(keep_t3(&home, &program, &mut questions)?, kept);
-        assert_eq!(questions.shown, shown);
+        assert_eq!(questions.transcript, shown);
+        assert_eq!(home.join("providers/runtime-t3.toml").exists(), kept);
     }
     Ok(())
 }
@@ -234,6 +238,8 @@ fn a_rerun_keeps_the_runtimes_the_installation_registers() -> anyhow::Result<()>
 
 /// A fake `carillon-runtime-t3` that records its arguments and standard
 /// input and discovers `offer`, or for an agent its `agentModels` entry.
+/// Its `check` and `configure` refuse settings that name an agent's model,
+/// as an earlier release wrote them.
 fn fake_t3(directory: &Path, offer: &serde_json::Value) -> anyhow::Result<PathBuf> {
     let program = directory.join("carillon-runtime-t3");
     let calls = directory.join("calls");
@@ -255,7 +261,9 @@ fn fake_t3(directory: &Path, offer: &serde_json::Value) -> anyhow::Result<PathBu
         format!(
             "#!/bin/sh\n{{ echo \"$*\"; cat | sed 's/^/  stdin: /'; }} >>'{calls}'\ncase \"$1\" in\n  \
              discover) agent=; while [ \"$#\" -gt 0 ]; do if [ \"$1\" = --agent ]; then shift; agent=$1; fi; shift; done; if [ -n \"$agent\" ] && [ -f '{directory}/offer-'\"$agent\"'.json' ]; then cat '{directory}/offer-'\"$agent\"'.json'; else printf '%s' '{offer}'; fi ;;\n  \
-             configure) echo \"configured $3 $4\" ;;\n  check) exit 0 ;;\n  *) exit 2 ;;\nesac\n",
+             check|configure) settings=\"${{3%/carillon.toml}}/providers/runtime-t3.toml\"; \
+             if grep -qs '\\.model]' \"$settings\"; then echo \"error: $1 refuses $settings\" >&2; exit 1; fi; \
+             [ \"$1\" = check ] || echo \"configured $3 $4\" ;;\n  *) exit 2 ;;\nesac\n",
             directory = directory.display(),
             calls = calls.display(),
         ),
@@ -330,7 +338,7 @@ fn t3_code_gets_an_agent_per_project_beside_the_assistant_on_pi() -> anyhow::Res
     assert!(calls.contains(&expected), "{expected}\nnot in\n{calls}");
     assert!(!calls.contains("--agent assistant"), "{calls}");
     assert_eq!(
-        questions.shown,
+        questions.transcript,
         [
             "T3 Code's address:",
             "T3 token (`t3 auth session issue --label Carillon --token-only` prints one):",
@@ -370,9 +378,12 @@ fn models_sharing_a_name_are_told_apart_and_the_one_chosen_is_configured() -> an
         "Which model should T3 Code · Agent start new conversations with?",
     ];
     assert!(
-        questions.shown.windows(4).any(|shown| shown == options),
+        questions
+            .transcript
+            .windows(4)
+            .any(|shown| shown == options),
         "{:?}",
-        questions.shown
+        questions.transcript
     );
     let calls = std::fs::read_to_string(directory.path().join("calls"))?;
     assert!(calls.contains("--model claudeAgent/sonnet-b"), "{calls}");
@@ -414,7 +425,7 @@ fn t3_with_nothing_to_run_is_refused_or_left_out() -> anyhow::Result<()> {
     set_up_t3(&home, &options(), true, &program, &mut questions)?;
     assert!(
         questions
-            .shown
+            .transcript
             .contains(&"T3 Code has no agents to configure.".to_owned())
     );
     Ok(())
@@ -491,11 +502,11 @@ fn equally_named_agents_get_distinct_model_prompts_and_their_chosen_models() -> 
         "T3 Code · Other",
     ] {
         assert!(
-            questions.shown.contains(&format!(
+            questions.transcript.contains(&format!(
                 "Which model should {label} start new conversations with?"
             )),
             "{:?}",
-            questions.shown
+            questions.transcript
         );
     }
     let calls = std::fs::read_to_string(directory.path().join("calls"))?;

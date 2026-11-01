@@ -277,9 +277,12 @@ fn choose_pi_models(
 }
 
 /// Whether to keep T3's saved settings, offered only when `t3` reads them
-/// and their token as its startup does.
+/// and their token as its startup does. Settings it cannot read are
+/// removed, since its `configure` rewrites only settings it reads, such as
+/// an earlier release's; the token stays.
 fn keep_t3(home: &Path, t3: &Path, questions: &mut impl Questions) -> Result<bool> {
-    if !home.join("providers/runtime-t3.toml").exists() {
+    let settings = home.join("providers/runtime-t3.toml");
+    if !settings.exists() {
         return Ok(false);
     }
     let config = home.join("carillon.toml");
@@ -287,8 +290,12 @@ fn keep_t3(home: &Path, t3: &Path, questions: &mut impl Questions) -> Result<boo
         Ok(_) => questions.confirm("Keep the T3 settings and agents?", true),
         Err(failure) => {
             questions.say(&format!(
-                "The saved T3 settings cannot be kept: {failure:#}"
+                "The saved T3 settings cannot be kept, so setup replaces them: {failure:#}"
             ))?;
+            let _maintenance = MaintenanceLock::acquire_unless_held(home)
+                .context("the T3 settings were not changed")?;
+            std::fs::remove_file(&settings)
+                .with_context(|| format!("remove {}", settings.display()))?;
             Ok(false)
         }
     }

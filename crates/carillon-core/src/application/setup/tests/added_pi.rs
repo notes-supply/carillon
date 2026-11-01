@@ -93,7 +93,7 @@ fn setup_added_pi_child() -> anyhow::Result<()> {
     };
     let mut questions = Shown::default();
     setup(Path::new(&home), &options, &mut questions)?;
-    println!("{}", questions.shown.join("\n"));
+    println!("{}", questions.transcript.join("\n"));
     Ok(())
 }
 
