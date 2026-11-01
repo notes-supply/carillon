@@ -25,7 +25,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { DEFAULT_IMAGE_LIMITS, type ImageProcessor } from "@earendil-works/pi-durable/tools";
-import type { ControlAction, TurnActivity } from "@carillon/protocol";
+import type { ControlAction, OpenedTurn, TurnActivity } from "@carillon/protocol";
 import type { CoreClient } from "@carillon/runtime/core";
 import { diagnostic, ExplainedFailure, RuntimeClosed } from "@carillon/runtime/failure";
 import type { TurnRequest } from "@carillon/runtime/operations";
@@ -50,7 +50,7 @@ import {
   Turns,
 } from "./documents.ts";
 import type { McpServer } from "./mcp.ts";
-import type { Catalogue, ModelChoice, ModelChoices } from "./models.ts";
+import type { ModelChoice, ModelSettings, PiCatalogue } from "./models.ts";
 import { OPENING, openingTask, type Opening } from "./opening.ts";
 import {
   carillonExtension,
@@ -80,8 +80,8 @@ export interface AgentOptions {
   readonly id: string;
   readonly workspace: string;
   readonly storage: Storage;
-  readonly catalogue: Catalogue;
-  readonly choices: ModelChoices;
+  readonly catalogue: PiCatalogue;
+  readonly models: ModelSettings;
   readonly core: CoreClient;
   readonly images: ImageProcessor;
   readonly inlineImages: InlineImagePolicy;
@@ -302,7 +302,8 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
       latest?.root === resolve(request.resource_root)
         ? latest
         : await loadSnapshot(resolve(request.resource_root), workspace, extensions);
-    const choice = await options.choices.forTurn(request);
+    const { interface_id, channel_id, agent_id } = request;
+    const choice = await options.models.forTurn({ interface_id, channel_id, agent_id });
     const model =
       choice.model === null
         ? undefined
@@ -378,19 +379,23 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
 
   /**
    * Places the input of a turn the runtime opened in its conversation, as a
-   * follow-up on the model its Carillon conversation chose. The opening's key
-   * is its request ID, so it is placed once.
+   * follow-up on the model of the channel core recorded for it. The
+   * opening's key is its request ID, so it is placed once.
    */
   async function place(
     conversation: ConversationId,
-    turn: string,
+    turn: OpenedTurn,
     opened: Opening,
   ): Promise<SubmissionId> {
     const info = await harness.snapshot(ConversationInfo, conversation, context);
     if (info === undefined)
       throw new Error(`conversation ${String(conversation)} serves no Carillon conversation`);
-    const { interface_id, agent_id, audience_id } = info;
-    const choice = await options.choices.forTurn({ interface_id, agent_id, audience_id });
+    const { interface_id, agent_id } = info;
+    const choice = await options.models.forTurn({
+      interface_id,
+      channel_id: turn.channel_id,
+      agent_id,
+    });
     await harness.commit(async (tx) => {
       if (!runs(await tx.doc(AgentDoc, conversation), choice))
         await configure(tx, conversation, choice);
@@ -403,7 +408,7 @@ export async function openAgent(options: AgentOptions): Promise<DurableAgent> {
         content: opened.content,
         requestId: opened.key,
         whenBusy: "followUp",
-        entry: { kind: MESSAGE, data: { turn } },
+        entry: { kind: MESSAGE, data: { turn: turn.turn_id } },
       },
       context,
     );

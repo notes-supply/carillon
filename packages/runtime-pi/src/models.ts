@@ -1,6 +1,6 @@
 /**
  * What models the runtime offers and which one a conversation runs. The
- * catalogue is pi-ai's `Models`; Carillon's selections are kept in its own
+ * catalogue is pi-ai's `Models`; Carillon's settings are kept in its own
  * ledger and applied to each conversation as its turns are admitted.
  */
 import { ModelRuntime, SettingsManager } from "@earendil-works/pi-coding-agent";
@@ -13,16 +13,9 @@ import {
   type ModelThinkingLevel,
 } from "@earendil-works/pi-ai";
 import type { ModelRef } from "@earendil-works/pi-durable";
-import type {
-  AvailableModel,
-  ModelProvider,
-  ModelQuery,
-  ModelState,
-  ModelUpdate,
-  Selection,
-} from "@carillon/protocol";
-import { resolved } from "@carillon/runtime/models";
-import type { ModelSelections } from "@carillon/runtime/selections";
+import type { RuntimeSettings, SettingsRequest } from "@carillon/protocol";
+import { ExplainedFailure } from "@carillon/runtime/failure";
+import type { Catalogue, Channel, SettingsLedger } from "@carillon/runtime/settings";
 import { join } from "node:path";
 
 const THINKING_OPTION = "thinking";
@@ -36,23 +29,20 @@ const THINKING_NAMES: Record<ModelThinkingLevel, string> = {
   max: "Max",
 };
 
-/** A model catalogue with the defaults that apply where nobody chose. */
-export interface Catalogue {
+/** Pi's models, with the thinking level each reasoning model runs at when nobody chose one. */
+export interface PiCatalogue {
   readonly models: Models;
-  /** What runs when neither the agent nor the conversation chose a model, if anything. */
-  runtimeDefault(): Selection | undefined;
-  /** The thinking level a reasoning model runs at when no choice names one. */
   defaultThinking(model: Model<Api>): ModelThinkingLevel;
 }
 
-/** The model a conversation's next requests run, as pi-durable stores it. */
+/** The model a conversation's next requests run, as pi-durable stores it; none when nothing applies. */
 export interface ModelChoice {
   readonly model: ModelRef | null;
   readonly thinkingLevel: ModelThinkingLevel | null;
 }
 
-/** Pi's own catalogue and defaults, from the state directory it signs in to. */
-export async function openPiCatalogue(stateDirectory: string): Promise<Catalogue> {
+/** Pi's own catalogue and thinking defaults, from the state directory it signs in to. */
+export async function openPiCatalogue(stateDirectory: string): Promise<PiCatalogue> {
   const settings = SettingsManager.create(stateDirectory, stateDirectory);
   const models = await ModelRuntime.create({
     authPath: join(stateDirectory, "auth.json"),
@@ -63,13 +53,6 @@ export async function openPiCatalogue(stateDirectory: string): Promise<Catalogue
   });
   return {
     models,
-    runtimeDefault() {
-      const provider = settings.getDefaultProvider();
-      const model = settings.getDefaultModel();
-      return provider === undefined || model === undefined
-        ? undefined
-        : { provider, model, options: {} };
-    },
     defaultThinking: (model) =>
       clampThinkingLevel(
         model,
@@ -80,25 +63,10 @@ export async function openPiCatalogue(stateDirectory: string): Promise<Catalogue
   };
 }
 
-/** Refuses a catalogue whose runtime default model cannot run. */
-export async function checkDefault(catalogue: Catalogue): Promise<void> {
-  const selection = catalogue.runtimeDefault();
-  if (selection === undefined) throw new Error("no Pi model is selected");
-  const { provider, model } = selection;
-  if ((await catalogue.models.getAvailable(provider)).every((item) => item.id !== model))
-    throw new Error(`selected Pi model ${provider}/${model} is not available`);
-}
-
-/** The catalogue and Carillon's selections, as the picker and admission use them. */
-export function modelChoices(catalogue: Catalogue, selections: ModelSelections) {
-  function runtimeDefault(): Selection {
-    const selection = catalogue.runtimeDefault();
-    if (selection === undefined) throw new Error("no Pi model is selected");
-    return selection;
-  }
-
-  async function available() {
-    const models = [...(await catalogue.models.getAvailable())];
+/** The catalogue and Carillon's settings ledger, as settings pages and admission use them. */
+export function modelSettings(pi: PiCatalogue, ledger: SettingsLedger) {
+  async function available(): Promise<Model<Api>[]> {
+    const models = [...(await pi.models.getAvailable())];
     models.sort(
       (left, right) =>
         left.provider.localeCompare(right.provider) ||
@@ -108,65 +76,63 @@ export function modelChoices(catalogue: Catalogue, selections: ModelSelections) 
     return models;
   }
 
-  /** The catalogue as the picker sees it: one thinking setting per reasoning model. */
-  function offered(models: readonly Model<Api>[]): AvailableModel[] {
-    return models.map((model) => ({
-      provider: model.provider,
-      model: model.id,
-      name: model.name,
-      options: model.reasoning
-        ? [
-            {
-              id: THINKING_OPTION,
-              name: "Thinking",
-              choices: getSupportedThinkingLevels(model).map((level) => ({
-                id: level,
-                name: THINKING_NAMES[level],
-              })),
-              default: catalogue.defaultThinking(model),
-            },
-          ]
-        : [],
-    }));
-  }
-
-  function providers(models: readonly Model<Api>[]): ModelProvider[] {
-    return [...new Set(models.map((model) => model.provider))].map((id) => ({
-      id,
-      name: catalogue.models.getProvider(id)?.name ?? id,
-    }));
-  }
-
-  async function state(
-    read: (
-      available: readonly AvailableModel[],
-    ) => Promise<Omit<ModelState, "providers" | "available">>,
-  ): Promise<ModelState> {
-    const models = await available();
-    const choices = offered(models);
-    return { providers: providers(models), available: choices, ...(await read(choices)) };
+  function offered(models: readonly Model<Api>[]): Catalogue {
+    return {
+      providers: [...new Set(models.map((model) => model.provider))].map((id) => ({
+        id,
+        name: pi.models.getProvider(id)?.name ?? id,
+      })),
+      models: models.map((model) => ({
+        provider: model.provider,
+        model: model.id,
+        name: model.name,
+        options: model.reasoning
+          ? [
+              {
+                id: THINKING_OPTION,
+                name: "Thinking",
+                choices: getSupportedThinkingLevels(model).map((level) => ({
+                  id: level,
+                  name: THINKING_NAMES[level],
+                })),
+                default: pi.defaultThinking(model),
+              },
+            ]
+          : [],
+      })),
+    };
   }
 
   return {
-    state: (query: ModelQuery) =>
-      state((choices) => selections.state(choices, runtimeDefault(), query)),
-    update: (update: ModelUpdate) =>
-      state((choices) => selections.update(choices, runtimeDefault(), update)),
+    catalogue: async () => offered(await available()),
+
+    async settings({ subject, change }: SettingsRequest): Promise<RuntimeSettings> {
+      const catalogue = offered(await available());
+      return {
+        settings:
+          change === undefined
+            ? await ledger.settings(catalogue, subject)
+            : await ledger.change(catalogue, subject, change),
+      };
+    },
 
     /**
-     * What a turn of this conversation runs: the nearest scope's choice
-     * resolved against the catalogue the picker shows. A choice that cannot
-     * run is passed on as it is, so the turn fails with its explanation.
+     * What a turn in the channel runs: its channel's model, else its
+     * agent's, with thinking only at a level the model supports. A model
+     * that cannot run is passed on as it is, and none when neither has one,
+     * so the turn fails with its explanation.
      */
-    async forTurn(query: ModelQuery): Promise<ModelChoice> {
-      const chosen = await selections.chosen(catalogue.runtimeDefault(), query);
-      if (chosen === undefined) return { model: null, thinkingLevel: null };
+    async forTurn(channel: Channel): Promise<ModelChoice> {
       const models = await available();
-      const selection = resolved(offered(models), chosen);
+      const selection = await ledger.selection(offered(models), channel).catch((failure) => {
+        if (failure instanceof ExplainedFailure) return undefined;
+        throw failure;
+      });
+      if (selection === undefined) return { model: null, thinkingLevel: null };
       const model = models.find(
         (item) => item.provider === selection.provider && item.id === selection.model,
       );
-      const thinking = selection.options?.[THINKING_OPTION];
+      const thinking = selection.options[THINKING_OPTION];
       return {
         model: { provider: selection.provider, modelId: selection.model },
         thinkingLevel: model !== undefined && supports(model, thinking) ? thinking : null,
@@ -175,7 +141,7 @@ export function modelChoices(catalogue: Catalogue, selections: ModelSelections) 
   };
 }
 
-export type ModelChoices = ReturnType<typeof modelChoices>;
+export type ModelSettings = ReturnType<typeof modelSettings>;
 
 function supports(model: Model<Api>, level: string | undefined): level is ModelThinkingLevel {
   return getSupportedThinkingLevels(model).some((supported) => supported === level);
