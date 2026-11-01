@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { expect, it } from "vitest";
 import type { Setting, Subject } from "@carillon/protocol";
 import { ExplainedFailure } from "./failure.ts";
-import { SettingsLedger, type Catalogue } from "./settings.ts";
+import { noModel, SettingsLedger, type Catalogue } from "./settings.ts";
 
 const catalogue: Catalogue = {
   providers: [{ id: "local", name: "Local" }],
@@ -82,18 +82,14 @@ async function refusal(promise: Promise<unknown>): Promise<number | undefined> {
   }
 }
 
-it("shows no model and fails a turn naming the command until the agent has a value", async () => {
+it("shows no model and resolves none until the agent has a value", async () => {
   await withLedger(async (ledger) => {
     const lines = await ledger.settings(catalogue, home);
     expect(lines).toHaveLength(1);
     expect(line(lines, "model")).toMatchObject({ value: null, inherited: true });
-    await expect(
-      ledger.selection(catalogue, {
-        interface_id: "discord-private",
-        channel_id: "300",
-        agent_id: "assistant",
-      }),
-    ).rejects.toThrow("carillon settings --agent assistant model=");
+    const channel = { interface_id: "discord-private", channel_id: "300", agent_id: "assistant" };
+    expect(await ledger.selection(catalogue, channel)).toBeUndefined();
+    expect(noModel("assistant")).toContain("carillon settings --agent assistant model=");
   });
 });
 

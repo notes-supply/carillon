@@ -99,12 +99,12 @@ export function modelChoiceId(model: Pick<Selection, "provider" | "model">): str
   return `${model.provider}/${model.model}`;
 }
 
-/** Why a turn has no model to run, naming how to give its agent one. */
-export function noModel(agentId: string): ExplainedFailure {
-  return new ExplainedFailure(
-    409,
-    `No model is set for ${agentId}. Set one with \`carillon settings --agent ${agentId} model=<provider>/<model>\`.`,
-  );
+/**
+ * Why a turn has no model to run, naming how to give its agent one. The text
+ * is the runtime's own, so a runtime settles the turn with it as written.
+ */
+export function noModel(agentId: string): string {
+  return `No model is set for ${agentId}. Set one with \`carillon settings --agent ${agentId} model=<provider>/<model>\`.`;
 }
 
 /**
@@ -173,15 +173,14 @@ export class SettingsLedger {
 
   /**
    * What a turn in `channel` runs: the channel's unit, else its agent's,
-   * resolved against the catalogue. Read in order with changes, so a change
-   * made after the call never alters it.
+   * resolved against the catalogue, or `undefined` when neither has one. Read
+   * in order with changes, so a change made after the call never alters it.
    */
-  async selection(catalogue: Catalogue, channel: Channel): Promise<Selection> {
+  async selection(catalogue: Catalogue, channel: Channel): Promise<Selection | undefined> {
     return this.#writes.run(async () => {
       await this.refresh();
       const unit = this.effective({ kind: "channel", ...channel }).unit;
-      if (unit === null) throw noModel(channel.agent_id);
-      return resolved(catalogue, unit);
+      return unit === null ? undefined : resolved(catalogue, unit);
     });
   }
 
