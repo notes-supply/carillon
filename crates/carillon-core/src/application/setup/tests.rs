@@ -510,5 +510,6 @@ fn equally_named_agents_get_distinct_model_prompts_and_their_chosen_models() -> 
 }
 
 mod added_pi;
+mod pi_models;
 mod projects;
 mod reruns;

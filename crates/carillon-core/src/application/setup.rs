@@ -57,6 +57,14 @@ impl OfferedModel {
     }
 }
 
+/// The models Pi offers an agent and the one the agent uses, as
+/// `carillon-runtime-pi --models` prints them.
+#[derive(Deserialize)]
+struct PiModels {
+    models: Vec<OfferedModel>,
+    value: Option<String>,
+}
+
 #[derive(Clone, Deserialize)]
 struct Project {
     id: String,
@@ -100,7 +108,13 @@ pub(super) fn setup(home: &Path, options: &Options, questions: &mut impl Questio
             register_runtime(&home.join("carillon.toml"), runtime)?;
         }
     }
-    sign_in_to_pi(home, existing, questions)?;
+    let config = LoadedConfig::load(&home.join("carillon.toml"))?;
+    let agents = &config.value.agents;
+    if agents.iter().any(|agent| agent.runtime == Runtime::Pi.id()) {
+        let pi = provider_binary("runtime-pi")?;
+        sign_in_to_pi(home, &pi, existing, questions)?;
+        choose_pi_models(home, &pi, agents, questions)?;
+    }
     let discord = Command::new(provider_binary("discord")?)
         .arg("setup")
         .env("CARILLON_HOME", home)
@@ -169,53 +183,53 @@ fn registered_runtimes(home: &Path) -> Result<Vec<Runtime>> {
     Ok(runtimes)
 }
 
-/// Opens Pi until it is signed in and has a default model, as the Pi
-/// runtime's own startup check says.
-fn sign_in_to_pi(home: &Path, existing: bool, questions: &mut impl Questions) -> Result<()> {
-    let config = LoadedConfig::load(&home.join("carillon.toml"))?;
-    if !config
-        .value
-        .agents
-        .iter()
-        .any(|agent| agent.runtime == Runtime::Pi.id())
-    {
-        return Ok(());
-    }
-    let pi = provider_binary("runtime-pi")?;
+/// Pi's runtime program `pi` as the installation at `home` runs it, with
+/// `args` after the installation's own.
+fn pi_command(home: &Path, pi: &Path, args: &[&str]) -> Command {
     let state = home.join("pi");
+    let mut command = Command::new(pi);
+    command
+        .arg("--config")
+        .arg(home.join("carillon.toml"))
+        .args(["--provider", "runtime-pi", "--state-dir"])
+        .arg(&state)
+        .args(args)
+        .env("CARILLON_HOME", home)
+        .env("PI_CODING_AGENT_DIR", &state);
+    command
+}
+
+/// Opens Pi until it is signed in and offers a model, as the Pi runtime's
+/// own check says.
+fn sign_in_to_pi(
+    home: &Path,
+    pi: &Path,
+    existing: bool,
+    questions: &mut impl Questions,
+) -> Result<()> {
     let check = || -> Result<Output> {
-        Command::new(&pi)
-            .arg("--config")
-            .arg(home.join("carillon.toml"))
-            .args(["--provider", "runtime-pi", "--state-dir"])
-            .arg(&state)
-            .arg("--check")
-            .env("CARILLON_HOME", home)
-            .env("PI_CODING_AGENT_DIR", &state)
+        pi_command(home, pi, &["--check"])
             .stdin(Stdio::null())
             .output()
             .context("check Pi")
     };
     if existing && check()?.status.success() {
-        questions.say("Pi is signed in and has a default model.")?;
+        questions.say("Pi is signed in.")?;
         return Ok(());
     }
     loop {
-        questions.say(
-            "Pi opens next. Sign in with /login, then choose the agent's model with /model and \
-             press Ctrl+S on it to save it. Leave Pi with Ctrl+D.",
-        )?;
+        questions.say("Pi opens next. Sign in with /login, then leave Pi with Ctrl+D.")?;
         questions.answer("Press Enter to open Pi.", Some(""))?;
         // Pi's own interface owns the terminal until it ends, however it ends.
-        Command::new(&pi)
+        Command::new(pi)
             .args(["pi", "--no-session", "--no-tools", "--no-approve"])
             .env("CARILLON_HOME", home)
-            .env("PI_CODING_AGENT_DIR", &state)
+            .env("PI_CODING_AGENT_DIR", home.join("pi"))
             .status()
             .context("open Pi")?;
         let checked = check()?;
         if checked.status.success() {
-            questions.say("Pi is signed in and has a default model.")?;
+            questions.say("Pi is signed in.")?;
             return Ok(());
         }
         questions.say(String::from_utf8_lossy(&checked.stderr).trim())?;
@@ -223,6 +237,43 @@ fn sign_in_to_pi(home: &Path, existing: bool, questions: &mut impl Questions) ->
             bail!("Pi is not ready, so setup stopped here; run it again to finish");
         }
     }
+}
+
+/// Asks the model of each Pi agent among `agents` that uses none, and has
+/// Pi's runtime `pi` keep the answer as the agent's own. An agent that uses
+/// one keeps it.
+fn choose_pi_models(
+    home: &Path,
+    pi: &Path,
+    agents: &[AgentConfig],
+    questions: &mut impl Questions,
+) -> Result<()> {
+    for agent in agents
+        .iter()
+        .filter(|agent| agent.runtime == Runtime::Pi.id())
+    {
+        let listed = output(
+            pi_command(home, pi, &["--models", "--agent", &agent.id]),
+            "",
+        )?;
+        let offer: PiModels = serde_json::from_str(&listed)
+            .context("carillon-runtime-pi listed its models unreadably")?;
+        if offer.value.is_some() {
+            continue;
+        }
+        let label = agent.label(agents);
+        if offer.models.is_empty() {
+            bail!("Pi offers {label} no model; sign in to a model provider, then run setup again");
+        }
+        let model = &offer.models[questions.choose(
+            &format!("Which model should {label} use?"),
+            &model_labels(&offer.models),
+            0,
+        )?];
+        let args = ["--configure", "--agent", &agent.id, "--model", &model.id()];
+        questions.say(output(pi_command(home, pi, &args), "")?.trim())?;
+    }
+    Ok(())
 }
 
 /// Whether to keep T3's saved settings, offered only when `t3` reads them
@@ -559,8 +610,16 @@ fn model_labels(models: &[OfferedModel]) -> Vec<String> {
 /// Runs `program` with `secret` on its standard input, never as an
 /// argument: what it printed, or the one line it gave as its error.
 fn run(program: &Path, args: &[&str], secret: &str) -> Result<String> {
-    let mut child = Command::new(program)
-        .args(args)
+    let mut command = Command::new(program);
+    command.args(args);
+    output(command, secret)
+}
+
+/// What `command` printed, given `secret` on its standard input, or the one
+/// line it gave as its error.
+fn output(mut command: Command, secret: &str) -> Result<String> {
+    let program = PathBuf::from(command.get_program());
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
