@@ -1,34 +1,31 @@
 /**
  * The runtime under test against a fake T3 and a fake core, fresh for each
- * test of a file that imports this: agents `default`, on Claude, and
- * `code`, on Codex.
+ * test of a file that imports this: agents `default`, on Claude Sonnet at
+ * low effort, and `code`, on Codex, as their own models in the ledger.
  */
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { TurnActivity } from "@carillon/protocol";
+import type { Subject, TurnActivity } from "@carillon/protocol";
 import { createCoreClient } from "@carillon/runtime/core";
 import { withReport } from "@carillon/runtime/failure";
 import type { TurnRequest } from "@carillon/runtime/operations";
-import { ModelSelections } from "@carillon/runtime/selections";
+import { SettingsLedger } from "@carillon/runtime/settings";
 import { startFakeCore, type FakeCore } from "@carillon/runtime/testing";
 import { afterEach, beforeEach, vi } from "vitest";
 import { derivedId, type Run } from "../contracts.ts";
 import { startFakeT3, type FakeT3 } from "../fake.ts";
+import { FAKE_PROVIDERS } from "../fake/providers.ts";
 import { readStops, type StopsFile } from "../held.ts";
-import { createT3Runtime, type T3Agent } from "../runtime.ts";
+import { catalog } from "../models.ts";
+import { createT3Runtime } from "../runtime.ts";
 import type { Connect } from "../t3.ts";
 
 export const PROJECT = "project-1";
-export const selection = {
-  instanceId: "claudeAgent",
-  model: "claude-sonnet-5",
-  options: [{ id: "effort", value: "low" }],
-};
 export let fake: FakeT3;
 export let core: FakeCore;
 export let resources: string;
-let selections: ModelSelections;
+let ledger: SettingsLedger;
 export let runtime: ReturnType<typeof createT3Runtime>;
 
 beforeEach(async () => {
@@ -36,7 +33,10 @@ beforeEach(async () => {
   core = await startFakeCore();
   resources = await mkdtemp(join(tmpdir(), "carillon-t3-"));
   await writeFile(join(resources, "SYSTEM.md"), "You are the Carillon agent.\n");
-  selections = await ModelSelections.open(join(resources, "model-selection.json"));
+  ledger = await SettingsLedger.open(ledgerFile());
+  await choose({ kind: "agent", agent_id: "default" }, "model", "claudeAgent/claude-sonnet-5");
+  await choose({ kind: "agent", agent_id: "default" }, "model.effort", "low");
+  await choose({ kind: "agent", agent_id: "code" }, "model", "codex/gpt-6-astra");
   vi.spyOn(console, "log").mockImplementation(() => undefined);
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   runtime = await readBack(build);
@@ -55,8 +55,6 @@ interface Overrides {
   readonly projectId?: string;
   readonly reconnectDelayMs?: number;
   readonly connect?: Connect;
-  /** The default agent's settings model. */
-  readonly selection?: T3Agent["selection"];
   /** The stops file as the runtime reads it at start; by default, none kept yet. */
   readonly stops?: StopsFile;
 }
@@ -64,25 +62,13 @@ interface Overrides {
 export function build(overrides: Overrides = {}) {
   return createT3Runtime({
     endpoint: { url: overrides.url ?? fake.url, token: overrides.token ?? fake.token },
-    agents: new Map([
-      [
-        "default",
-        {
-          projectId: overrides.projectId ?? PROJECT,
-          workspace: resources,
-          selection: overrides.selection ?? selection,
-        },
-      ],
-      [
-        "code",
-        {
-          projectId: overrides.projectId ?? PROJECT,
-          workspace: resources,
-          selection: { instanceId: "codex", model: "gpt-6-astra", options: [] },
-        },
-      ],
-    ]),
-    selections,
+    agents: new Map(
+      ["default", "code"].map((id) => [
+        id,
+        { projectId: overrides.projectId ?? PROJECT, workspace: resources },
+      ]),
+    ),
+    ledger,
     stops: overrides.stops ?? { path: stopsFile(), kept: [] },
     core: createCoreClient({ url: core.url, providerId: "runtime-t3", token: "runtime-token" }),
     coreRetryMs: 20,
@@ -94,11 +80,24 @@ export function build(overrides: Overrides = {}) {
 }
 
 export const stopsFile = () => join(resources, "stops.json");
+const ledgerFile = () => join(resources, "settings.json");
 
-/** A runtime started again over the same T3, model ledger and stops file, as after a restart. */
+/** Chooses `id` on the subject's `setting` in the ledger, as `carillon settings` does. */
+async function choose(subject: Subject, setting: string, id: string): Promise<void> {
+  const models = catalog({ providers: FAKE_PROVIDERS });
+  const line = (await ledger.settings(models, subject)).find((shown) => shown.id === setting);
+  if (line === undefined) throw new Error(`no ${setting} line`);
+  await ledger.change(models, subject, {
+    setting,
+    value: { kind: "one", id },
+    expected: line.revision,
+  });
+}
+
+/** A runtime started again over the same T3, settings ledger and stops file, as after a restart. */
 export async function restart(overrides: Overrides = {}): Promise<void> {
   await runtime.close();
-  selections = await ModelSelections.open(join(resources, "model-selection.json"));
+  ledger = await SettingsLedger.open(ledgerFile());
   const stops = await readStops(stopsFile());
   runtime = await readBack(() => build({ stops, ...overrides }));
 }
@@ -176,6 +175,7 @@ export function turn(correlation: string, input: string, extra: Record<string, u
     interface_id: "discord-private",
     agent_id: "default",
     audience_id: "conversation-1",
+    channel_id: "300",
     input,
     resource_root: resources,
     attachment_root: join(resources, "attachments"),

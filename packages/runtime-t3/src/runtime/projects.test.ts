@@ -154,76 +154,28 @@ it("keeps the native thread identity independent of the project", async () => {
   }
 });
 
-it.each([
-  "model read",
-  "conversation model",
-  "conversation reset",
-  "agent model",
-  "agent reset",
-  "commands",
-])(
-  "refuses a bound %s request until a message creates the current project's thread, then uses it",
-  async (operation) => {
-    const old = await seed();
-    await restart({ projectId: NEXT_PROJECT });
-    const received = fake.received.length;
-    const defaultQuery = {
-      interface_id: conversation.interface_id,
-      agent_id: conversation.agent_id,
-    };
-    const before = await runtime.modelState(defaultQuery);
-    const selection = { provider: "claudeAgent", model: "claude-haiku-4-5" };
-    const perform = () =>
-      operation === "model read"
-        ? runtime.modelState(conversation)
-        : operation === "commands"
-          ? runtime.commands(conversation)
-          : runtime.setModel({
-              ...conversation,
-              scope: operation.startsWith("agent") ? "agent" : "conversation",
-              selection: operation.endsWith("reset") ? null : selection,
-            });
-    await refused(perform());
-    expect(fake.received).toHaveLength(received);
-    expect(fake.refreshes).toEqual([]);
-    expect(fake.threads.size).toBe(1);
-    expect(old.modelSelection.model).toBe("claude-sonnet-5");
-    expect(await runtime.modelState(defaultQuery)).toEqual(before);
+it("refuses a bound commands request until a message creates the current project's thread, then uses it", async () => {
+  const old = await seed();
+  await restart({ projectId: NEXT_PROJECT });
+  const received = fake.received.length;
+  await refused(runtime.commands(conversation));
+  expect(fake.received).toHaveLength(received);
+  expect(fake.refreshes).toEqual([]);
+  expect(fake.threads.size).toBe(1);
 
-    await turnRefused(execute(turn("cutover", "Start in the current project.")));
-    const next = projectThread();
-    next.modelSelection = { instanceId: "claudeAgent", model: "claude-haiku-4-5", options: [] };
-    const commands = fake.received.length;
-    await perform();
-    expect(fake.threads.size).toBe(2);
-    expect(next.messages).toEqual([]);
-    expect(old.modelSelection.model).toBe("claude-sonnet-5");
-    expect(fake.received.slice(commands).every((command) => command.threadId === next.id)).toBe(
-      true,
-    );
-    expect(fake.refreshes).toEqual(
-      operation === "commands" ? [{ instanceId: "claudeAgent", cwd: resources }] : [],
-    );
-    const state = await runtime.modelState(conversation);
-    expect(state.conversation?.selection?.model).toBe(
-      operation === "conversation reset" ? "claude-sonnet-5" : "claude-haiku-4-5",
-    );
-    expect(state.agent.selection?.model).toBe(
-      operation === "agent model" ? "claude-haiku-4-5" : "claude-sonnet-5",
-    );
-    const response = execute(turn("selected", "Use this model."));
-    const selected = await started("selected");
-    expect(selected.thread.id).toBe(next.id);
-    expect(selected.thread.modelSelection.model).toBe(state.conversation?.selection?.model);
-    fake.assistant(next.id, selected.run.id, "Selected.");
-    fake.complete(next.id, selected.run.id);
-    await response;
-    await restart({ projectId: PROJECT });
-    expect((await runtime.modelState(conversation)).conversation?.selection?.model).toBe(
-      "claude-sonnet-5",
-    );
-  },
-);
+  await turnRefused(execute(turn("cutover", "Start in the current project.")));
+  const next = projectThread();
+  expect(next.modelSelection).toMatchObject({
+    instanceId: "claudeAgent",
+    model: "claude-sonnet-5",
+  });
+  next.modelSelection = { instanceId: "codex", model: "gpt-6-astra", options: [] };
+  await runtime.commands(conversation);
+  expect(fake.threads.size).toBe(2);
+  expect(next.messages).toEqual([]);
+  expect(old.modelSelection.model).toBe("claude-sonnet-5");
+  expect(fake.refreshes).toEqual([{ instanceId: "codex", cwd: resources }]);
+});
 
 it.each(["default", "code"])(
   "refuses %s native commands without creating a thread, then dispatches them in the current project's thread",
@@ -325,11 +277,11 @@ it("checks the watched snapshot before dispatch or activity even when the owners
   expect(runtime.activity("watched", conversation.interface_id)).toBeUndefined();
 });
 
-it("refuses thread records without a valid project before exposing their models", async () => {
+it("refuses thread records without a valid project before exposing their commands", async () => {
   const old = await seed();
   fake.threads.set(old.id, { ...old, projectId: "" });
   const received = fake.received.length;
-  await expect(runtime.modelState(conversation)).rejects.toMatchObject({
+  await expect(runtime.commands(conversation)).rejects.toMatchObject({
     status: 502,
     message: "T3 answered in a form this runtime does not understand.",
   });

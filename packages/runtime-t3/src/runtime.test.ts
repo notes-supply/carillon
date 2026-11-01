@@ -629,8 +629,8 @@ it("never follows T3's upload redirect to another origin", async () => {
 
 it("runs plain T3 Code on the instances T3 offers, with the person's text as written and T3's own title", async () => {
   const plainThread = derivedId("thread", "discord-private", "code", "conversation-1");
-  const code = { ...conversation, agent_id: "code" };
-  expect((await runtime.modelState(code)).available.map((model) => model.provider)).toEqual([
+  const { settings } = await runtime.settings({ subject: { kind: "agent", agent_id: "code" } });
+  expect(settings[0]?.choices.map((choice) => choice.group)).toEqual([
     "claudeAgent",
     "claudeAgent",
     "codex",
@@ -1876,8 +1876,7 @@ it("refuses a snapshot of another thread, whether read once or followed through 
   answer(await started("turn-1"), "Hello.");
   await reply;
   fake.snapshotThread = () => "another-thread";
-  // Another conversation's model and commands are never shown as this one's.
-  await expect(runtime.modelState(conversation)).rejects.toMatchObject({ status: 502 });
+  // Another conversation's commands are never shown as this one's.
   await expect(runtime.commands(conversation)).rejects.toMatchObject({ status: 502 });
   // A turn does not fold another thread's state as its own, nor send its
   // message on the strength of it.
@@ -1962,9 +1961,9 @@ it("leaves no snapshot deadline behind when a thread read cannot subscribe", asy
   );
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   try {
-    // The model read fails with the subscription's own failure, and nothing
+    // The thread read fails with the subscription's own failure, and nothing
     // of it is left to fire once the read's deadline has passed.
-    await expect(refusing.modelState(conversation)).rejects.toBe(failure);
+    await expect(refusing.commands(conversation)).rejects.toBe(failure);
     expect.soft(vi.getTimerCount()).toBe(0);
     expect.soft(() => vi.advanceTimersByTime(2_000)).not.toThrow();
   } finally {
@@ -1979,7 +1978,7 @@ it("still bounds a thread read whose snapshot never arrives", async () => {
   answer(await started("turn-1"), "Hello.");
   await reply;
   fake.holdSnapshot = true;
-  await expect(runtime.modelState(conversation)).rejects.toMatchObject({
+  await expect(runtime.commands(conversation)).rejects.toMatchObject({
     status: 502,
     message: "Lost contact with T3: T3 did not send the thread snapshot in time.",
   });

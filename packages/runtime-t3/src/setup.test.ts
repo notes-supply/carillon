@@ -1,11 +1,34 @@
 import { chmod, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Installation } from "@carillon/runtime/installation";
+import { SettingsLedger, type Catalogue } from "@carillon/runtime/settings";
 import { expect, it } from "vitest";
+import { FAKE_PROVIDERS } from "./fake/providers.ts";
+import { catalog } from "./models.ts";
 import { loadSettings } from "./settings.ts";
 import { configure, discover } from "./setup.ts";
 import { T3Failure } from "./t3.ts";
 import { cleanup, cli, fakeT3, installation, loaded } from "./setup-fixtures.ts";
+
+const offered: Catalogue = catalog({ providers: FAKE_PROVIDERS });
+
+/** The runtime's settings ledger, where it keeps each agent's model. */
+const ledgerOf = (runtime: Installation) =>
+  SettingsLedger.open(join(runtime.componentDirectory, "settings.json"));
+
+/** The agent's model lines in the ledger, each by its choice. */
+async function agentModel(runtime: Installation, agentId: string) {
+  const lines = await (
+    await ledgerOf(runtime)
+  ).settings(offered, {
+    kind: "agent",
+    agent_id: agentId,
+  });
+  return Object.fromEntries(
+    lines.map(({ id, value }) => [id, value?.kind === "one" ? value.id : null]),
+  );
+}
 
 it("discovers T3's projects and usable models", async () => {
   const fake = await fakeT3();
@@ -57,15 +80,19 @@ it("writes the runtime's files only for a project rooted at the agent's workspac
     await expect(configure(runtime, endpoint, choice)).rejects.toThrow(refusal);
     expect(await readdir(join(root, "credentials"))).toEqual([]);
     expect(await readdir(join(root, "providers"))).toEqual([]);
+    expect(await readdir(root)).not.toContain("state");
   }
 
   const project = await configure(runtime, endpoint, sonnet);
   expect(project.title).toBe("Agent");
   const settings = await loadSettings(runtime.providerFile, root);
   expect(settings.url).toBe(fake.url);
-  expect(settings.agents.get("code")).toEqual({
-    projectId: "agent",
-    selection: { instanceId: "claudeAgent", model: "claude-sonnet-5", options: [] },
+  expect(settings.agents.get("code")).toEqual({ projectId: "agent" });
+  expect(await readFile(runtime.providerFile, "utf8")).not.toMatch(/model/u);
+  expect(await agentModel(runtime, "code")).toEqual({
+    model: "claudeAgent/claude-sonnet-5",
+    "model.effort": "high",
+    "model.fastMode": "off",
   });
   expect((await readFile(settings.tokenFile, "utf8")).trim()).toBe(fake.token);
   for (const file of [settings.tokenFile, runtime.providerFile])
@@ -83,7 +110,6 @@ it("keeps the other agents' settings on a rerun, and the model's options while t
     instanceId: "claudeAgent",
     model: "claude-sonnet-5",
   };
-  // Settings the operator tuned as documented, with another agent's.
   await writeFile(
     runtime.providerFile,
     [
@@ -91,52 +117,45 @@ it("keeps the other agents' settings on a rerun, and the model's options while t
       'token_file = "credentials/t3.token"',
       "[agents.code]",
       'project_id = "agent"',
-      "[agents.code.model]",
-      'instance_id = "claudeAgent"',
-      'model = "claude-sonnet-5"',
-      "[agents.code.model.options]",
-      'effort = "high"',
-      "thinking = true",
       "[agents.notes]",
       'project_id = "other"',
-      "[agents.notes.model]",
-      'instance_id = "codex"',
-      'model = "gpt-6-astra"',
     ].join("\n"),
   );
 
-  // Another server with a new token, the same model: everything tuned stays.
+  // Another server with a new token: the other agent's settings stay.
   const moved = await fakeT3("rotated-token");
   moved.projects = [{ id: "agent", title: "Agent", workspaceRoot: workspace }];
-  await configure(runtime, { url: moved.url, token: moved.token }, sonnet);
+  const endpoint = { url: moved.url, token: moved.token };
+  await configure(runtime, endpoint, sonnet);
   let settings = await loadSettings(runtime.providerFile, runtime.root);
   expect(settings.url).toBe(moved.url);
-  expect(settings.agents.get("code")?.selection).toEqual({
-    instanceId: "claudeAgent",
-    model: "claude-sonnet-5",
-    options: [
-      { id: "effort", value: "high" },
-      { id: "thinking", value: true },
-    ],
-  });
   expect(settings.agents.get("notes")?.projectId).toBe("other");
   expect((await readFile(settings.tokenFile, "utf8")).trim()).toBe("rotated-token");
+
+  // An option tuned with `carillon settings --agent` stays while the model does.
+  const ledger = await ledgerOf(runtime);
+  const subject = { kind: "agent", agent_id: "code" } as const;
+  const effort = (await ledger.settings(offered, subject)).find(({ id }) => id === "model.effort");
+  if (effort === undefined) throw new Error("no effort line");
+  await ledger.change(offered, subject, {
+    setting: "model.effort",
+    value: { kind: "one", id: "low" },
+    expected: effort.revision,
+  });
+  await configure(runtime, endpoint, sonnet);
+  expect(await agentModel(runtime, "code")).toEqual({
+    model: "claudeAgent/claude-sonnet-5",
+    "model.effort": "low",
+    "model.fastMode": "off",
+  });
 
   // Another model starts from its own defaults; the token's file stays, the
   // token being the same.
   const tokenFile = settings.tokenFile;
-  await configure(
-    runtime,
-    { url: moved.url, token: moved.token },
-    { ...sonnet, model: "claude-haiku-4-5" },
-  );
+  await configure(runtime, endpoint, { ...sonnet, model: "claude-haiku-4-5" });
   settings = await loadSettings(runtime.providerFile, runtime.root);
   expect(settings.tokenFile).toBe(tokenFile);
-  expect(settings.agents.get("code")?.selection).toEqual({
-    instanceId: "claudeAgent",
-    model: "claude-haiku-4-5",
-    options: [],
-  });
+  expect(await agentModel(runtime, "code")).toEqual({ model: "claudeAgent/claude-haiku-4-5" });
 });
 
 it("drops an agent carillon.toml no longer gives the runtime, so the runtime still starts", async () => {
@@ -179,16 +198,14 @@ it("refuses settings that do not read as valid before writing anything", async (
     'token_file = "credentials/t3.token"',
     "[agents.code]",
     'project_id = "agent"',
-    "[agents.code.model]",
-    'instance_id = "claudeAgent"',
-    'model = "claude-sonnet-5"',
   ];
   for (const malformed of [
     // Not TOML, the line before holding something that must not be repeated.
     'note = "secret-in-file"\ntitle =\n',
     // TOML, but not the runtime's settings.
     ['title = ""', ...valid].join("\n"),
-    [...valid, "[agents.code.model.options]", "effort = 3"].join("\n"),
+    // An earlier release's, naming the agent's model.
+    [...valid, "[agents.code.model]", 'instance_id = "claudeAgent"', 'model = "m"'].join("\n"),
   ]) {
     await writeFile(runtime.providerFile, malformed);
     await expect(
@@ -214,6 +231,7 @@ it("refuses settings that do not read as valid before writing anything", async (
     );
     expect(await readFile(runtime.providerFile, "utf8")).toBe(malformed);
     expect(await readdir(join(root, "credentials"))).toEqual([]);
+    expect(await readdir(root)).not.toContain("state");
   }
 });
 
@@ -291,18 +309,12 @@ it("checks the saved settings and T3 token as startup reads them, reaching no T3
   const providerFile = join(root, "providers", "runtime-t3.toml");
   const tokenFile = join(root, "credentials", "t3.token");
   // Nothing listens at this address: the check reads files only.
-  const agent = (id: string, instance: string) => [
-    `[agents.${id}]`,
-    'project_id = "agent"',
-    `[agents.${id}.model]`,
-    `instance_id = "${instance}"`,
-    'model = "m"',
-  ];
+  const agent = (id: string) => [`[agents.${id}]`, 'project_id = "agent"'];
   const settings = (token: string, ...agents: string[][]) =>
     ['url = "http://127.0.0.1:1"', `token_file = "credentials/${token}"`, ...agents.flat()].join(
       "\n",
     );
-  const usable = settings("t3.token", agent("notes", "codex"), agent("code", "claudeAgent"));
+  const usable = settings("t3.token", agent("notes"), agent("code"));
   await writeFile(tokenFile, "saved-token\n");
   await writeFile(providerFile, usable);
   const passed = await cli(["check", "--config", config], "");
@@ -373,11 +385,7 @@ it("checks the saved settings and T3 token as startup reads them, reaching no T3
   for (const [unusable, reason] of [
     [() => writeFile(tokenFile, "\n"), /t3\.token: the T3 token file is empty/u],
     [
-      () =>
-        writeFile(
-          providerFile,
-          settings("missing.token", agent("notes", "codex"), agent("code", "claudeAgent")),
-        ),
+      () => writeFile(providerFile, settings("missing.token", agent("notes"), agent("code"))),
       /missing\.token/u,
     ],
     [
@@ -427,7 +435,7 @@ it("takes the token on standard input, says the settings are saved for a start, 
   expect(saved.status, saved.stderr).toBe(0);
   // The files are startup settings: nothing claims a running runtime took them.
   expect(saved.stdout).toBe(
-    `Saved runtime-t3's settings for code: project Agent (${workspace}) on ${fake.url}, with claudeAgent/claude-sonnet-5. It reads them when it starts, so a running Carillon needs \`carillon restart\`.\n`,
+    `Saved runtime-t3's settings for code: project Agent (${workspace}) on ${fake.url}, which it reads when it starts, so a running Carillon needs \`carillon restart\`. code's model is claudeAgent/claude-sonnet-5.\n`,
   );
 
   const registry = await readFile(config, "utf8");

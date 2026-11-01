@@ -37,7 +37,6 @@ import {
   ContextTransferSchema,
   DelegatedNotificationSchema,
   MessageSchema,
-  NativeSelectionSchema,
   ProviderSessionDetachedSchema,
   ProviderSessionSchema,
   ProviderThreadSchema,
@@ -51,8 +50,6 @@ import {
   type BackgroundTask,
   type ContextTransfer,
   type Message,
-  type NativeSelection,
-  type Projection,
   type ProviderSession,
   type ProviderThread,
   type Run,
@@ -127,8 +124,6 @@ export interface TurnWatch {
    * still listed.
    */
   sessionShared(): boolean;
-  /** The thread's own model selection, as last seen: the one its next run uses unless a dispatch names another. */
-  selection(): NativeSelection | undefined;
   outcome(): Outcome | undefined;
   /**
    * Nothing of the turn still executes: no active run, no background work, and
@@ -245,22 +240,6 @@ function settledRun(status: RunStatus | undefined): boolean {
   return status !== undefined && !ACTIVE.has(status);
 }
 
-/**
- * Whether anything on the thread still runs or is owed, whoever started it:
- * an active run, background work a provider thread lists, or a child agent
- * still working or with a result T3 has yet to deliver.
- */
-export function threadWorking(projection: Projection): boolean {
-  return (
-    projection.runs.some(isActive) ||
-    projection.providerThreads.some((thread) => (thread.pendingBackgroundTasks ?? []).length > 0) ||
-    projection.subagents.some(
-      (task) =>
-        ACTIVE_TASK.has(task.status) || OWED_DELIVERY.has(task.completionDelivery?.state ?? ""),
-    )
-  );
-}
-
 export interface WatchOptions {
   /**
    * An earlier turn on this thread ended with a stop T3 did not confirm.
@@ -285,7 +264,6 @@ export function watchTurn(
 ): TurnWatch {
   let seen = false;
   let lastSequence: number | undefined;
-  let threadSelection: NativeSelection | undefined;
   /** The turn's run as last seen: its identity, kept through snapshots and reconnections. */
   let anchor: Run | undefined;
   /** Runs from the turn's onward, by ID, with the greatest ordinal tracked. */
@@ -1403,7 +1381,6 @@ export function watchTurn(
           // Nothing of another thread is folded as this turn's.
           if (projection.thread.id !== threadId)
             throw new T3Failure("malformed", "T3 sent the snapshot of another thread");
-          threadSelection = projection.thread.modelSelection;
           for (const run of projection.runs) ofThread(run);
           // A snapshot lists the thread's runs whole: one that omits a run
           // this turn already observed, its own or a follow-up's parent, is
@@ -1607,13 +1584,6 @@ export function watchTurn(
             case "turn-item.updated":
               foldItem(payload);
               break;
-            case "thread.model-selection-updated":
-            case "thread.provider-switched": {
-              const selection = isRecord(payload) ? payload["modelSelection"] : undefined;
-              if (Check(NativeSelectionSchema, selection)) threadSelection = selection;
-              lastSequence = sequence;
-              return;
-            }
             default:
               lastSequence = sequence;
               return;
@@ -1649,7 +1619,6 @@ export function watchTurn(
     latestRun: () => last,
     busy,
     sessionShared: () => busy() || otherTasks.size > 0,
-    selection: () => threadSelection,
     quiet,
     providerSession() {
       if (last?.providerThreadId == null) return undefined;

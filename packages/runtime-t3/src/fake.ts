@@ -877,16 +877,6 @@ export async function startFakeT3(token = "fake-t3-token"): Promise<FakeT3> {
         receipts.set(command.commandId, thread.sequence);
         return thread.sequence;
       }
-      case "thread.model-selection.set": {
-        const thread = threadOf(command.threadId);
-        thread.modelSelection = selectionOf(command);
-        emit(thread, "thread.model-selection-updated", {
-          id: thread.id,
-          modelSelection: thread.modelSelection,
-        });
-        receipts.set(command.commandId, thread.sequence);
-        return thread.sequence;
-      }
       case "run.interrupt": {
         const thread = threadOf(command.threadId);
         const runId = String(command["runId"]);
