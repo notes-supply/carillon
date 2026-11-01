@@ -279,11 +279,15 @@ fn an_unknown_key_or_value_lists_what_the_line_accepts() {
          model           Model\n\
          model.thinking  Thinking"
     );
+    let choices = "openai-codex/gpt-6.1-sol   GPT-6.1 Sol\n\
+                   openai-codex/gpt-6.1-mini  GPT-6.1 Mini";
     assert_eq!(
         refusal(change(&page, &set("model", "x"))),
-        "x is not a choice of Model. Its choices are:\n\
-         openai-codex/gpt-6.1-sol   GPT-6.1 Sol\n\
-         openai-codex/gpt-6.1-mini  GPT-6.1 Mini"
+        format!("x is not a choice of Model. Its choices are:\n{choices}")
+    );
+    assert_eq!(
+        refusal(change(&page, &set("model", ""))),
+        format!("Model needs a value. Its choices are:\n{choices}")
     );
     // A name two choices share names neither.
     let mut shared = home(0);

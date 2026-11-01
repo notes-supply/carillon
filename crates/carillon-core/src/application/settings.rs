@@ -160,9 +160,13 @@ fn choice<'a>(setting: &'a Setting, value: &str) -> Result<&'a Choice> {
             )
         })
         .ok_or_else(|| {
+            let refused = if value.is_empty() {
+                format!("{} needs a value", setting.name)
+            } else {
+                format!("{value} is not a choice of {}", setting.name)
+            };
             anyhow!(
-                "{value} is not a choice of {}. Its choices are:\n{}",
-                setting.name,
+                "{refused}. Its choices are:\n{}",
                 listed(
                     setting
                         .choices
